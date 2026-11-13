@@ -793,3 +793,142 @@ fn merge_boxes(boxes: Vec<(Point3, Point3)>) -> Option<(Point3, Point3)> {
     }
     Some((min, max))
 }
+
+// ------------------------------------------------------------ occurrences
+
+/// What `hew.doc.export` and `hew.view.line_drawing` draw when given a
+/// `selection`: a placement and its subtree, or a definition at identity.
+/// Defined beside [`kernel::Occurrence`] so the export and render crates,
+/// which stay clear of this one, can take it.
+pub use kernel::RenderRoot;
+
+/// `unknown_occurrence`: a path that leads nowhere.
+pub fn unknown_occurrence() -> CmdError {
+    CmdError::Refusal(Refusal::api(
+        "unknown_occurrence",
+        "That path does not lead to a placed entity; hew.query.occurrences lists the current paths.",
+    ))
+}
+
+/// `unknown_occurrence` for a bare id that names a definition member: it is
+/// placed only through instances, so it needs a path.
+fn member_needs_a_path(id: &str) -> CmdError {
+    CmdError::Refusal(
+        Refusal::api(
+            "unknown_occurrence",
+            "That entity is placed only through instances; hew.query.occurrences lists its paths.",
+        )
+        .with_detail(serde_json::json!({ "id": id })),
+    )
+}
+
+/// A public id naming an object, group, or instance.
+fn node_of(ctx: &Ctx, id: &str) -> Result<kernel::NodeId, CmdError> {
+    match ctx.resolver().resolve(id) {
+        Some(EntityRef::Object(o)) => Ok(kernel::NodeId::Object(o)),
+        Some(EntityRef::Group(g)) => Ok(kernel::NodeId::Group(g)),
+        Some(EntityRef::Instance(i)) => Ok(kernel::NodeId::Instance(i)),
+        _ => Err(unknown_entity(id)),
+    }
+}
+
+/// Whether a node is live anywhere (world or definition).
+fn node_is_live(doc: &kernel::Document, node: kernel::NodeId) -> bool {
+    match node {
+        kernel::NodeId::Object(o) => doc.object(o).is_some(),
+        kernel::NodeId::Group(g) => doc.group_members(g).is_some(),
+        kernel::NodeId::Instance(i) => doc.instance_def(i).is_some(),
+    }
+}
+
+/// A bare node id as a world placement.
+pub fn resolve_world_node(ctx: &Ctx, id: &str) -> Result<kernel::Occurrence, CmdError> {
+    let node = node_of(ctx, id)?;
+    match ctx.doc.occurrence_at(&[], node) {
+        Some(o) => Ok(o),
+        None if node_is_live(ctx.doc, node) => Err(member_needs_a_path(id)),
+        None => Err(unknown_entity(id)),
+    }
+}
+
+/// An occurrence path, `[instance, …, leaf]` (docs/agents/HEW_API.md §5.2):
+/// every element but the last an instance, the last any node.
+pub fn resolve_occurrence_path(ctx: &Ctx, ids: &[String]) -> Result<kernel::Occurrence, CmdError> {
+    let Some((leaf, instances)) = ids.split_last() else {
+        return Err(CmdError::Params(
+            "an occurrence path names at least one entity".into(),
+        ));
+    };
+    let mut path = Vec::with_capacity(instances.len());
+    for id in instances {
+        match node_of(ctx, id)? {
+            kernel::NodeId::Instance(i) => path.push(i),
+            _ => return Err(unknown_occurrence()),
+        }
+    }
+    let node = node_of(ctx, leaf)?;
+    ctx.doc
+        .occurrence_at(&path, node)
+        .ok_or_else(unknown_occurrence)
+}
+
+/// `{ "path": [ids] }`, the occurrence locator.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PathLocator {
+    path: Vec<String>,
+}
+
+/// One placement locator: a node's public id (a world node) or
+/// `{ "path": [...] }`.
+pub fn resolve_occurrence_locator(
+    ctx: &Ctx,
+    v: &serde_json::Value,
+) -> Result<kernel::Occurrence, CmdError> {
+    if let Some(id) = v.as_str() {
+        return resolve_world_node(ctx, id);
+    }
+    let p: PathLocator = serde_json::from_value(v.clone()).map_err(|_| {
+        CmdError::Params("expected an entity id or an occurrence locator {\"path\": [...]}".into())
+    })?;
+    resolve_occurrence_path(ctx, &p.path)
+}
+
+/// A `selection` list for export and line drawings: placements, plus
+/// `cmp_` ids for a definition at the identity pose.
+pub fn resolve_render_roots(
+    ctx: &Ctx,
+    selection: &[serde_json::Value],
+) -> Result<Vec<RenderRoot>, CmdError> {
+    if selection.is_empty() {
+        return Err(CmdError::Params(
+            "selection must name at least one entity".into(),
+        ));
+    }
+    let mut out = Vec::with_capacity(selection.len());
+    for v in selection {
+        if let Some(id) = v.as_str()
+            && let Some(EntityRef::Component(c)) = ctx.resolver().resolve(id)
+        {
+            if ctx.doc.def_member_nodes(c).is_none() {
+                return Err(unknown_entity(id));
+            }
+            out.push(RenderRoot::Definition(c));
+            continue;
+        }
+        // A sketch or material id names nothing placed: a params error,
+        // not an unknown entity.
+        if let Some(id) = v.as_str()
+            && matches!(
+                ctx.resolver().resolve(id),
+                Some(EntityRef::Sketch(_) | EntityRef::Material(_))
+            )
+        {
+            return Err(CmdError::Params(
+                "selection takes object, group, instance, or component ids and occurrence paths, not a sketch or material".into(),
+            ));
+        }
+        out.push(RenderRoot::Occurrence(resolve_occurrence_locator(ctx, v)?));
+    }
+    Ok(out)
+}

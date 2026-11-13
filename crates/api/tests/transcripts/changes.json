@@ -1,0 +1,207 @@
+{
+  "profile": "core",
+  "frames": [
+    {
+      "note": "the handshake",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "result": {
+          "protocol": 1,
+          "app": {
+            "name": "hew",
+            "version": "1.4.0"
+          },
+          "profile": "core",
+          "encoding": "json",
+          "documents": []
+        }
+      }
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {}
+      }
+    },
+    {
+      "note": "a rectangle on the ground, as one transaction (two pushes: the gesture and the entry, so generation 2)",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "hew.doc.transact",
+        "params": {
+          "label": "Profile",
+          "commands": [
+            {
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "plane": {
+                  "ground": true
+                },
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  0.5,
+                  0.3,
+                  0.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "compare": "/result/label",
+      "response": "Profile"
+    },
+    {
+      "note": "everything since generation 0: the new sketch",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "hew.query.changes_since",
+        "params": {
+          "generation": 0
+        }
+      },
+      "compare": "/result/changes",
+      "response": {
+        "added": [
+          "skt_0"
+        ],
+        "removed": [],
+        "modified": [],
+        "attrs": [],
+        "document": false,
+        "full": false
+      }
+    },
+    {
+      "note": "the clock and the generation asked about ride along",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "hew.query.changes_since",
+        "params": {
+          "generation": 2
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "result": {
+          "from": 2,
+          "changes": {
+            "added": [],
+            "removed": [],
+            "modified": [],
+            "attrs": [],
+            "document": false,
+            "full": false
+          },
+          "generation": 2,
+          "epoch": 2
+        }
+      }
+    },
+    {
+      "note": "undo the rectangle",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "hew.history.undo",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "result": {}
+      }
+    },
+    {
+      "note": "since the commit: the undo removed the sketch",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "hew.query.changes_since",
+        "params": {
+          "generation": 2
+        }
+      },
+      "compare": "/result/changes",
+      "response": {
+        "added": [],
+        "removed": [
+          "skt_0"
+        ],
+        "modified": [],
+        "attrs": [],
+        "document": false,
+        "full": false
+      }
+    },
+    {
+      "note": "since generation 0: the union names the sketch as added by the commit and removed by the undo",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "hew.query.changes_since",
+        "params": {
+          "generation": 0
+        }
+      },
+      "compare": "/result/changes",
+      "response": {
+        "added": [
+          "skt_0"
+        ],
+        "removed": [
+          "skt_0"
+        ],
+        "modified": [],
+        "attrs": [],
+        "document": false,
+        "full": false
+      }
+    },
+    {
+      "note": "a generation the history never had is not covered: full",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "hew.query.changes_since",
+        "params": {
+          "generation": 999
+        }
+      },
+      "compare": "/result/changes",
+      "response": {
+        "added": [],
+        "removed": [],
+        "modified": [],
+        "attrs": [],
+        "document": false,
+        "full": true
+      }
+    }
+  ]
+}

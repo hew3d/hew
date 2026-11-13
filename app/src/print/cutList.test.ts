@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { cutListRows } from './cutList'
-import { objectBoundsFromMesh } from '../test/meshBounds'
+import { objectBoundsFromMesh, partFrameFromMesh } from '../test/meshBounds'
 
 /** A mesh stand-in (objectBounds.test.ts's `makeMesh`). */
 function makeMesh(positions: Float32Array) {
@@ -28,8 +28,18 @@ function makeScene(o: {
   /** instance id → { def, pose (row-major 3×4), member object ids } */
   instances?: Record<string, { def: bigint; pose: number[]; members: bigint[] }>
   component_name?: Record<string, string>
+  /** Overrides the box-scene `part_frame_json` for one object id. */
+  part_frame?: Record<string, number[]>
 }): WasmScene {
   const inst = (id: bigint) => o.instances?.[String(id)]
+  const boxFrame = partFrameFromMesh(
+    () => makeMesh(BOX),
+    (id) => o.group_members?.[String(id)] ?? [],
+    (id) => {
+      const i = inst(id)
+      return i === undefined ? undefined : { local: [1, 2, 3] as const, pose: i.pose }
+    },
+  )
   return {
     object_ids: () => o.object_ids ?? [],
     group_ids: () => o.group_ids ?? [],
@@ -48,6 +58,10 @@ function makeScene(o: {
     object_mesh: () => makeMesh(BOX),
     object_bounds: objectBoundsFromMesh(() => makeMesh(BOX)),
     tag_meta_paths: () => o.tag_meta_paths ?? [],
+    part_frame_json: (kind: number, id: bigint) => {
+      const pinned = o.part_frame?.[String(id)]
+      return pinned === undefined ? boxFrame(kind, id) : JSON.stringify({ extents: pinned, source: 'face' })
+    },
   } as unknown as WasmScene
 }
 
@@ -71,9 +85,10 @@ describe('cutListRows', () => {
       ['Vertical Leg', 4],
       ['Top', 1],
     ])
-    // Cells carry their unit; there is no separate "lengths in" line to need.
-    expect(rows[0].l).toBe('1000 mm')
-    expect(rows[0].h).toBe('3000 mm')
+    // Cells carry their unit; there is no separate "lengths in" line to
+    // need. A part reads along its own frame: longest first, thickness
+    // last.
+    expect([rows[0].l, rows[0].w, rows[0].h]).toEqual(['3000 mm', '2000 mm', '1000 mm'])
   })
 
   it('folds every instance of one component definition however it is turned in the world, with the definition\'s own L × W × H', () => {
@@ -109,5 +124,20 @@ describe('cutListRows', () => {
       [1, '1000 mm', '2000 mm', '3000 mm'],
       [1, '2000 mm', '2000 mm', '3000 mm'],
     ])
+  })
+
+  it('lists a rotated board at its true size, not its world-aligned box', () => {
+    // A 400 × 200 × 18 mm board turned 30° about z then 15° about x: its
+    // world box is far larger, but the part frame (the kernel's
+    // largest-face measurement, pinned by crates/api's part_frame tests)
+    // reads 0.4 × 0.2 × 0.018 m.
+    const scene = makeScene({
+      object_ids: [1n],
+      top_level_nodes: [{ kind: 'object', id: 1n }],
+      object_name: { '1': 'Shelf' },
+      part_frame: { '1': [0.4, 0.2, 0.018] },
+    })
+    const rows = cutListRows(scene, 'mm')
+    expect(rows.map((r) => [r.label, r.qty, r.l, r.w, r.h])).toEqual([['Shelf', 1, '400 mm', '200 mm', '18 mm']])
   })
 })

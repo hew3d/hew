@@ -250,8 +250,13 @@ fn list(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     #[serde(deny_unknown_fields)]
     struct P {}
     let P {} = parse(params)?;
-    let scenes: Vec<Value> = ctx.doc.scenes().iter().map(scene_to_json).collect();
-    Ok(json!({ "scenes": scenes }))
+    Ok(json!({ "scenes": scene_entries_json(ctx.doc) }))
+}
+
+/// `hew.scenes.list`'s entries, in order. Shared with the
+/// `scenes_changed` event so the two shapes cannot drift.
+pub(crate) fn scene_entries_json(doc: &kernel::Document) -> Value {
+    Value::Array(doc.scenes().iter().map(scene_to_json).collect())
 }
 
 // -------------------------------------------------------------- hew.scenes.add
@@ -477,6 +482,9 @@ mod tests {
     use crate::commands::FaceTokens;
     use crate::host::NoHost;
 
+    static GRANT: std::sync::LazyLock<crate::grant::Grant> =
+        std::sync::LazyLock::new(crate::grant::Grant::core);
+
     fn ctx<'a>(
         doc: &'a mut kernel::Document,
         host: &'a mut NoHost,
@@ -487,6 +495,7 @@ mod tests {
             host,
             face_tokens: tokens,
             current_label: None,
+            grant: &GRANT,
         }
     }
 

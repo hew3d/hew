@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { buildPartsSheetSections, totalPartCount, visiblePartCount } from './partsSheetModel'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { objectBoundsFromMesh } from '../test/meshBounds'
+import { objectBoundsFromMesh, partFrameFromMesh } from '../test/meshBounds'
 import { nodeKey } from '../panels/treeModel'
 import { tagPathKey } from '../panels/tagModel'
 
@@ -50,6 +50,14 @@ function makeScene(overrides: Partial<{
       return makeMesh(positions)
     }),
     tag_meta_paths: () => overrides.tag_meta_paths ?? [],
+    part_frame_json: partFrameFromMesh(
+      (id: bigint) => {
+        const positions = overrides.object_mesh?.[String(id)]
+        if (positions === undefined) throw new Error('UnknownObject')
+        return makeMesh(positions)
+      },
+      (id: bigint) => overrides.group_members?.[String(id)] ?? [],
+    ),
   } as unknown as WasmScene
 }
 
@@ -72,7 +80,7 @@ describe('buildPartsSheetSections — untagged document', () => {
     expect(sections).toHaveLength(1)
     expect(sections[0]).toMatchObject({ key: '__parts-sheet-unfiled__', label: 'Parts', path: null, hidden: false })
     expect(sections[0].rows).toEqual([
-      { node: { kind: 'object', id: 1n }, label: 'Object 1', depth: 0, extentsM: [1, 2, 3], hidden: false },
+      { node: { kind: 'object', id: 1n }, label: 'Object 1', depth: 0, extentsM: [3, 2, 1], hidden: false },
     ])
   })
 

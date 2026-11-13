@@ -101,6 +101,9 @@ crates/image-import/  PNG/JPEG -> a placed picture (one painted face in a
                       component, the .skp image shape); reads only the size
 crates/hlr/           hidden-line removal: visible line work of a view as 2D
                       segments (+ SVG), for vector Line-art printing and export
+crates/headless-render/ the renderers behind hew.view.snapshot and
+                      hew.view.line_drawing, shared by hew-cli and the app's
+                      live host (over softrender and hlr)
 crates/pdfwrite/      hand-written PDF 1.4 writer for Save PDF… and the
                       headless hew.print.pdf
 crates/wasm-api/      wasm-bindgen surface exposing the kernel to the UI
@@ -109,6 +112,8 @@ crates/hew-relay/     self-hostable "Open on Phone" relay binary (axum;
 crates/library/       the Hew Library's on-disk layout (folder resolution,
                       item naming, atomic list/read/write/remove), shared
                       by hew-cli's hew.library.* and the desktop shell
+crates/plugin-manifest/ the plugin manifest (hew-plugin.json) parser and
+                      validator; pure, shared by every host and crates/api
 crates/vendor/        vendored third-party code (dae-parser)
 app/                  TypeScript UI (viewport, tools, panels, E2E suite)
 shells/tauri/         desktop shell

@@ -1346,9 +1346,10 @@ pub(crate) struct DefSegment {
 
 /// A definition-space snap face (one member face; see [`DefPoint`]). The
 /// plane is carried in definition space and mapped per placement via
-/// [`Transform::apply_plane`] — the same inverse-transpose-safe path
-/// registration-time baking used, so mirrored and non-uniformly scaled
-/// placements keep exact parity with the old per-placement storage.
+/// [`Transform::apply_plane_keeping_side`] — the same inverse-transpose-safe
+/// path registration-time baking uses, so mirrored and non-uniformly scaled
+/// placements keep exact parity with the old per-placement storage, and a
+/// placed face's normal stays on its outward side under a mirror.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DefFace {
     pub(crate) plane: Plane,
@@ -1570,7 +1571,10 @@ impl DefGeometry {
     /// skip, so both storage schemes emit the same candidate set.
     fn face_at(&self, li: usize, pl: &Placement) -> Option<SceneFace> {
         let f = &self.faces[li];
-        let plane = pl.pose.apply_plane(&f.plane).ok()?;
+        // Side-keeping: the placed face's normal is its outward side (what
+        // a push/pull direction or a face-side test reads), not the
+        // winding-following refit, which a mirrored pose turns inward.
+        let plane = pl.pose.apply_plane_keeping_side(&f.plane).ok()?;
         Some(SceneFace {
             plane,
             boundary: f.boundary.iter().map(|&p| pl.pose.apply_point(p)).collect(),
@@ -1999,7 +2003,7 @@ impl InferenceScene {
             {
                 p += m.points.len();
                 s += m.segments.len();
-                // Placed faces resolve through `apply_plane`, which refuses
+                // Placed faces resolve through the plane map, which refuses
                 // singular poses (`face_at` → None) — mirror its determinant
                 // gate so a degenerate placement's faces aren't counted as
                 // visible.
@@ -2242,9 +2246,11 @@ impl InferenceScene {
 
         // --- Faces -> SceneFace (plane + outer-loop boundary) ---
         for (fid, face) in object.faces() {
-            // Apply placement to the plane via apply_plane (handles normals
-            // under non-uniform scale via inverse-transpose — KERNEL_GUIDE trap).
-            let world_plane = match placement.apply_plane(&face.plane) {
+            // Apply placement to the plane via the side-keeping plane map
+            // (handles normals under non-uniform scale via inverse-transpose
+            // — KERNEL_GUIDE trap — and keeps the outward side under a
+            // mirrored placement).
+            let world_plane = match placement.apply_plane_keeping_side(&face.plane) {
                 Ok(p) => p,
                 Err(_) => continue, // singular placement: skip this face
             };
@@ -2742,8 +2748,9 @@ impl InferenceScene {
         // takes everything. World candidates are indices into the baked
         // Vecs; placed candidates are (placement, member-local) pairs
         // materialized into world space below — with the identical
-        // `apply_point`/`apply_plane` per-placement baking used to run at
-        // registration, so both storage schemes produce bit-equal positions.
+        // `apply_point`/`apply_plane_keeping_side` per-placement baking
+        // registration runs, so both storage schemes produce bit-equal
+        // positions.
         let (point_ids, segment_ids, face_ids) = match index {
             Some(ix) => (
                 ix.points_in_cone(origin, dir, prune_tolerance),
@@ -8121,6 +8128,43 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    /// Under a MIRRORED placement every placed face's plane normal is the
+    /// mapped normal (`Transform::apply_normal`'s direction) — the face's
+    /// outward side — on both paths: a world object registered with a
+    /// placement and a definition member materialized per placement.
+    #[test]
+    fn placed_faces_keep_their_outward_normal_under_a_mirror() {
+        let cube = unit_cube();
+        let pose = Transform::scale(Vec3::new(-1.0, 1.0, 1.0))
+            .then(&Transform::translation(Vec3::new(3.0, 0.0, 0.0)));
+        let outward = |local: Vec3| pose.apply_normal(local).normalized().unwrap();
+        let center = pose.apply_point(Point3::new(0.5, 0.5, 0.5));
+
+        let mut scene = InferenceScene::new();
+        scene.add_object(ObjectId::default(), &cube, &pose);
+        assert_eq!(scene.faces.len(), 6);
+        for (sf, (_, f)) in scene.faces.iter().zip(cube.faces()) {
+            let n = sf.plane.normal();
+            assert!((n - outward(f.plane.normal())).length() < 1e-12);
+            assert!(
+                sf.plane.signed_distance(center) < 0.0,
+                "the placed solid lies behind its face"
+            );
+        }
+
+        let geometry = DefGeometry::extract(&cube);
+        let placement = Placement {
+            instance: InstanceId::default(),
+            member: ObjectId::default(),
+            pose,
+        };
+        for (li, f) in geometry.faces.iter().enumerate() {
+            let sf = geometry.face_at(li, &placement).expect("invertible pose");
+            assert!((sf.plane.normal() - outward(f.plane.normal())).length() < 1e-12);
+            assert!(sf.plane.signed_distance(center) < 0.0);
+        }
     }
 
     #[test]

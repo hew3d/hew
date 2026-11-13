@@ -9,9 +9,11 @@
 //! canonical §4.4 shape with the failing index.
 
 use crate::commands::{self, CmdError, Ctx, FaceTokens};
+use crate::grant::Grant;
 use crate::host::Host;
 use crate::refusal::Refusal;
-use crate::registry::{CommandClass, Profile, Registry};
+use crate::registry::{CommandClass, Registry, Served};
+use crate::rehearsal::RehearsalHost;
 use kernel::{CompoundMeta, HistoryOrigin};
 
 /// One command inside a `hew.doc.transact` envelope.
@@ -30,6 +32,39 @@ pub struct TxParams {
     #[serde(default)]
     pub label: Option<String>,
     pub commands: Vec<TxCommand>,
+    /// Compare-and-swap (docs/agents/HEW_API.md §6.5): refuse
+    /// `generation_moved` unless the document's history generation is this
+    /// value when the envelope is dispatched.
+    #[serde(default)]
+    pub expect_generation: Option<u64>,
+    /// Coalescing key (§6.5): the commit extends the top undo entry when a
+    /// connection with this one's identity (the history origin) committed
+    /// it under the same key.
+    #[serde(default)]
+    pub coalesce: Option<String>,
+    /// Rehearse (docs/agents/HEW_API.md §6.6): run the envelope on a clone
+    /// of the document and answer what a commit would, changing nothing.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// The commands that replace the document, which a compound abort cannot
+/// restore: refused `document_busy` while a compound is open
+/// (docs/agents/PLUGINS.md "Compounds").
+pub const DOCUMENT_REPLACING: &[&str] = &[
+    "hew.doc.open",
+    "hew.doc.new",
+    "hew.doc.revert",
+    "hew.doc.close",
+];
+
+/// The `document_busy` refusal: a document-replacing command while a
+/// plugin command holds the document.
+pub fn document_busy() -> Refusal {
+    Refusal::api(
+        "document_busy",
+        "A plugin command is running on this document. Wait for it to finish, or cancel it, then try again.",
+    )
 }
 
 /// How a whole transaction failed.
@@ -37,8 +72,17 @@ pub struct TxParams {
 pub enum TxError {
     /// Static envelope defect (`-32602`), before anything ran.
     Invalid(String),
-    /// A command outside the granted profile (`-32001`), with its index.
+    /// A command outside the grant (`-32001`), with its index.
     NotPermitted(usize),
+    /// A restricted grant set a path parameter (`-32001`
+    /// `path_not_granted`), with the command's index and the pointer.
+    PathNotGranted { index: usize, pointer: &'static str },
+    /// A restricted grant without `documents.other` named a document in a
+    /// command's `document` parameter (`-32001` `document_not_granted`).
+    DocumentNotGranted {
+        index: usize,
+        document: serde_json::Value,
+    },
     /// A command refused at execution — the bracket was aborted, the
     /// document is untouched.
     Refused {
@@ -46,25 +90,36 @@ pub enum TxError {
         method: String,
         refusal: Refusal,
     },
+    /// A plugin command shares the envelope with another command
+    /// (`-32000` `plugin_command_in_transaction`), with its index. A plugin
+    /// command runs only as its own envelope (docs/agents/HEW_API.md §6.4).
+    PluginCommandInTransaction(usize),
     /// A kernel invariant failed (`-32003`).
     Internal(String),
 }
 
-/// Runs one transaction envelope. `identity` becomes the history origin.
+/// Runs one transaction envelope under `grant`. `identity` becomes the
+/// history origin.
 pub fn run(
     doc: &mut kernel::Document,
     host: &mut dyn Host,
     registry: &Registry,
-    profile: Profile,
+    grant: &Grant,
     identity: &str,
     params: &serde_json::Value,
 ) -> Result<serde_json::Value, TxError> {
     let parsed: TxParams = serde_json::from_value(params.clone())
         .map_err(|e| TxError::Invalid(format!("malformed transact params: {e}")))?;
+    // Before anything else runs, the solitary path and the static pass
+    // included.
+    precheck(doc, &parsed)?;
     if parsed.commands.is_empty() {
         return Err(TxError::Invalid(
             "a transaction needs at least one command".into(),
         ));
+    }
+    if parsed.dry_run {
+        return rehearse(doc, &*host, registry, grant, &parsed);
     }
 
     // §6.4: a solitary command IS reachable as the sole command of its
@@ -74,12 +129,23 @@ pub fn run(
     // opens and no undo entry is added.
     if parsed.commands.len() == 1 {
         let cmd = &parsed.commands[0];
+        // A plugin command is never executed here (the dispatcher forwards
+        // a sole one); it falls through to the static pass, which refuses.
         if let Some(decl) = registry.get(&cmd.method)
             && decl.class == CommandClass::Solitary
+            && !decl.is_plugin()
         {
-            if !profile.grants(decl) {
+            if doc.compound_open() && DOCUMENT_REPLACING.contains(&cmd.method.as_str()) {
+                return Err(TxError::Refused {
+                    index: 0,
+                    method: cmd.method.clone(),
+                    refusal: document_busy(),
+                });
+            }
+            if !grant.grants(decl) {
                 return Err(TxError::NotPermitted(0));
             }
+            path_check(grant, &cmd.method, &cmd.params, 0)?;
             check_refs(&cmd.params, &[], 0)?;
             let Some(handler) = commands::handler(&cmd.method) else {
                 return Err(TxError::Refused {
@@ -100,6 +166,7 @@ pub fn run(
                 host,
                 face_tokens: &mut face_tokens,
                 current_label: cmd.label.clone(),
+                grant,
             };
             let params = cmd.params.clone().unwrap_or(serde_json::json!({}));
             let label = parsed.label.clone().unwrap_or_else(|| cmd.method.clone());
@@ -116,7 +183,76 @@ pub fn run(
         }
     }
 
-    // ── Static pass (§6.2, §6.3, §6.4, §10) — nothing runs on failure ──
+    static_pass(registry, grant, &parsed, false)?;
+
+    // ── Execute under the kernel bracket ───────────────────────────────
+    let bracket = doc.begin_transaction();
+    let results = match execute(doc, host, grant, &parsed) {
+        Ok(results) => results,
+        Err(e) => {
+            doc.abort_transaction(bracket);
+            return Err(e);
+        }
+    };
+
+    let label = envelope_label(&parsed);
+    doc.commit_transaction(
+        bracket,
+        CompoundMeta {
+            label: label.clone(),
+            origin: HistoryOrigin::Connection(identity.to_string()),
+            coalesce: parsed.coalesce.clone(),
+        },
+    )
+    .map_err(|e| TxError::Internal(format!("commit failed after balanced execution: {e}")))?;
+
+    Ok(serde_json::json!({ "results": results, "label": label }))
+}
+
+/// [`run`] for an envelope known to be a dry run, against a document it
+/// only reads: the same parse, compare-and-swap, and empty-envelope checks,
+/// then the rehearsal. An envelope without `dry_run: true` is `-32602` here.
+pub fn run_dry(
+    doc: &kernel::Document,
+    host: &dyn Host,
+    registry: &Registry,
+    grant: &Grant,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, TxError> {
+    let parsed: TxParams = serde_json::from_value(params.clone())
+        .map_err(|e| TxError::Invalid(format!("malformed transact params: {e}")))?;
+    if !parsed.dry_run {
+        return Err(TxError::Invalid("not a dry run".into()));
+    }
+    precheck(doc, &parsed)?;
+    if parsed.commands.is_empty() {
+        return Err(TxError::Invalid(
+            "a transaction needs at least one command".into(),
+        ));
+    }
+    rehearse(doc, host, registry, grant, &parsed)
+}
+
+/// The envelope's label: the given one, else the first command's method.
+fn envelope_label(parsed: &TxParams) -> String {
+    parsed
+        .label
+        .clone()
+        .or_else(|| parsed.commands.first().map(|c| c.method.clone()))
+        .unwrap_or_else(|| "transaction".to_string())
+}
+
+/// The static pass (§6.2, §6.3, §6.4, §10): nothing runs on failure. A
+/// rehearsal (`dry_run`) checks permission with
+/// [`Grant::grants_for_dry_run`] and refuses what it cannot rehearse: a
+/// plugin or Host-served command `dry_run_host_command`, a Kernel-served
+/// solitary one `-32602`.
+fn static_pass(
+    registry: &Registry,
+    grant: &Grant,
+    parsed: &TxParams,
+    dry_run: bool,
+) -> Result<(), TxError> {
     let mut labels: Vec<&str> = Vec::new();
     let mut context_depth: i64 = 0;
     for (i, cmd) in parsed.commands.iter().enumerate() {
@@ -126,10 +262,32 @@ pub fn run(
                 cmd.method
             )));
         };
-        if !profile.grants(decl) {
+        let granted = if dry_run {
+            grant.grants_for_dry_run(decl)
+        } else {
+            grant.grants(decl)
+        };
+        if !granted {
             return Err(TxError::NotPermitted(i));
         }
+        path_check(grant, &cmd.method, &cmd.params, i)?;
+        if dry_run && (decl.is_plugin() || decl.served == Served::Host) {
+            return Err(TxError::Refused {
+                index: i,
+                method: cmd.method.clone(),
+                refusal: crate::rehearsal::dry_run_host_command(&cmd.method),
+            });
+        }
+        if decl.is_plugin() {
+            return Err(TxError::PluginCommandInTransaction(i));
+        }
         if decl.class == CommandClass::Solitary {
+            if dry_run {
+                return Err(TxError::Invalid(format!(
+                    "command {i}: {} is solitary — a solitary command cannot be rehearsed",
+                    cmd.method
+                )));
+            }
             return Err(TxError::Invalid(format!(
                 "command {i}: {} is solitary — it must be the sole command of its own envelope",
                 cmd.method
@@ -165,32 +323,36 @@ pub fn run(
             "unbalanced context: {context_depth} enter(s) never exited in this envelope"
         )));
     }
+    Ok(())
+}
 
-    // ── Execute under the kernel bracket ───────────────────────────────
-    let bracket = doc.begin_transaction();
+/// Runs an envelope's commands in order against `doc`, substituting `$ref`s
+/// from earlier results, and answers every result or the first failure.
+/// The commit and the rehearsal share it, so the two cannot drift; the
+/// caller owns the bracket (or the clone) around it.
+fn execute(
+    doc: &mut kernel::Document,
+    host: &mut dyn Host,
+    grant: &Grant,
+    parsed: &TxParams,
+) -> Result<Vec<serde_json::Value>, TxError> {
     let mut face_tokens: FaceTokens = FaceTokens::new();
     let mut results: Vec<serde_json::Value> = Vec::new();
     let mut result_of: std::collections::BTreeMap<String, usize> = Default::default();
 
     for (i, cmd) in parsed.commands.iter().enumerate() {
         // Substitute $refs against earlier results (dispatch-time — §6.2).
-        let params = match substitute_refs(
+        let params = substitute_refs(
             cmd.params.clone().unwrap_or(serde_json::json!({})),
             &result_of,
             &results,
-        ) {
-            Ok(p) => p,
-            Err(refusal) => {
-                doc.abort_transaction(bracket);
-                return Err(TxError::Refused {
-                    index: i,
-                    method: cmd.method.clone(),
-                    refusal,
-                });
-            }
-        };
+        )
+        .map_err(|refusal| TxError::Refused {
+            index: i,
+            method: cmd.method.clone(),
+            refusal,
+        })?;
         let Some(handler) = commands::handler(&cmd.method) else {
-            doc.abort_transaction(bracket);
             return Err(TxError::Refused {
                 index: i,
                 method: cmd.method.clone(),
@@ -208,6 +370,7 @@ pub fn run(
             host,
             face_tokens: &mut face_tokens,
             current_label: cmd.label.clone(),
+            grant,
         };
         match handler(&mut ctx, &params) {
             Ok(result) => {
@@ -217,7 +380,6 @@ pub fn run(
                 results.push(result);
             }
             Err(CmdError::Refusal(refusal)) => {
-                doc.abort_transaction(bracket);
                 return Err(TxError::Refused {
                     index: i,
                     method: cmd.method.clone(),
@@ -225,31 +387,128 @@ pub fn run(
                 });
             }
             Err(CmdError::Params(msg)) => {
-                doc.abort_transaction(bracket);
                 return Err(TxError::Invalid(format!("command {i}: {msg}")));
             }
-            Err(CmdError::Internal(msg)) => {
-                doc.abort_transaction(bracket);
-                return Err(TxError::Internal(msg));
-            }
+            Err(CmdError::Internal(msg)) => return Err(TxError::Internal(msg)),
         }
     }
+    Ok(results)
+}
 
-    let label = parsed
-        .label
-        .clone()
-        .or_else(|| parsed.commands.first().map(|c| c.method.clone()))
-        .unwrap_or_else(|| "transaction".to_string());
-    doc.commit_transaction(
-        bracket,
-        CompoundMeta {
-            label: label.clone(),
-            origin: HistoryOrigin::Connection(identity.to_string()),
+/// A dry run (docs/agents/HEW_API.md §6.6): the envelope runs on ONE clone of
+/// `doc` with a [`RehearsalHost`] over the live host (its reads, none of
+/// its writes), and the answer is exactly what a commit
+/// would answer (the same results, ids included, or the same failure,
+/// index and refusal included) with `dry_run: true` beside them. The live
+/// document is never bracketed, so its history generation, epoch, undo
+/// stack, and change ring do not move, and no event can derive from it.
+/// The clone is dropped, a refused one included: the untouched `doc` is the
+/// snapshot a bracket would have taken
+/// ([`kernel::Document::rehearsal_disturbance`]).
+fn rehearse(
+    doc: &kernel::Document,
+    live: &dyn Host,
+    registry: &Registry,
+    grant: &Grant,
+    parsed: &TxParams,
+) -> Result<serde_json::Value, TxError> {
+    if parsed.coalesce.is_some() {
+        return Err(TxError::Invalid(
+            "coalesce does not apply to a dry run; nothing is committed".into(),
+        ));
+    }
+    static_pass(registry, grant, parsed, true)?;
+    let mut scratch = doc.clone();
+    let mut host = RehearsalHost::new(live);
+    let results = execute(&mut scratch, &mut host, grant, parsed).map_err(|e| match e {
+        // A view or selection effect a Kernel-served command asked of the
+        // host: one name for "this cannot be rehearsed".
+        TxError::Refused {
+            index,
+            method,
+            refusal,
+        } if refusal.name == "host_capability_missing" => TxError::Refused {
+            index,
+            refusal: crate::rehearsal::dry_run_host_command(&method),
+            method,
         },
-    )
-    .map_err(|e| TxError::Internal(format!("commit failed after balanced execution: {e}")))?;
+        other => other,
+    })?;
+    if let Some(e) = scratch.rehearsal_disturbance(doc) {
+        return Err(TxError::Internal(format!(
+            "commit failed after balanced execution: {e}"
+        )));
+    }
+    Ok(serde_json::json!({
+        "results": results,
+        "label": envelope_label(parsed),
+        "dry_run": true,
+    }))
+}
 
-    Ok(serde_json::json!({ "results": results, "label": label }))
+/// The envelope-level checks every `hew.doc.transact` gets first, a sole
+/// plugin command's included (docs/agents/HEW_API.md §6.5): compare-and-swap
+/// (`generation_moved` unless the history generation is `expect_generation`),
+/// then the `coalesce` key's length.
+pub fn precheck(doc: &kernel::Document, tx: &TxParams) -> Result<(), TxError> {
+    if let Some(expected) = tx.expect_generation
+        && doc.history_generation() != expected
+    {
+        let actual = doc.history_generation();
+        return Err(TxError::Refused {
+            index: 0,
+            method: "hew.doc.transact".into(),
+            refusal: Refusal::api(
+                "generation_moved",
+                "The document changed since this envelope was computed. Read it again and resend.",
+            )
+            .with_detail(serde_json::json!({ "expected": expected, "actual": actual })),
+        });
+    }
+    if let Some(key) = &tx.coalesce
+        && (key.is_empty() || key.len() > 64)
+    {
+        return Err(TxError::Invalid("coalesce must be 1..=64 bytes".into()));
+    }
+    Ok(())
+}
+
+/// The static checks a sole command of an envelope gets before it runs
+/// (or, for a plugin command, before it is forwarded): the path and
+/// document parameter rules, and `$ref`/`$face` references, of which a
+/// sole command can have none that resolve.
+pub(crate) fn static_checks(
+    grant: &Grant,
+    method: &str,
+    params: &Option<serde_json::Value>,
+    index: usize,
+) -> Result<(), TxError> {
+    path_check(grant, method, params, index)?;
+    check_refs(params, &[], index)
+}
+
+/// A restricted grant may not set a path parameter (docs/agents/HEW_API.md
+/// §10), checked statically per command so nothing runs on failure. A
+/// `$ref` that would fill a path member counts as setting it.
+fn path_check(
+    grant: &Grant,
+    method: &str,
+    params: &Option<serde_json::Value>,
+    index: usize,
+) -> Result<(), TxError> {
+    if !grant.is_restricted() {
+        return Ok(());
+    }
+    let params = params.as_ref().unwrap_or(&serde_json::Value::Null);
+    if let Some(pointer) = crate::paths::path_param_set(method, params) {
+        return Err(TxError::PathNotGranted { index, pointer });
+    }
+    if !grant.may_address_other_documents()
+        && let Some(document) = crate::paths::document_param_set(method, params)
+    {
+        return Err(TxError::DocumentNotGranted { index, document });
+    }
+    Ok(())
 }
 
 /// Static `$ref`/`$face` label checks: every reference names an earlier

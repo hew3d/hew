@@ -1,7 +1,7 @@
-//! Minimal PNG encoder (RGBA8, RGB8, gray8, gray16): stored (uncompressed) zlib deflate
-//! blocks, CRC32 + Adler32 hand-rolled — deterministic bytes, zero
-//! dependencies. The point is not compression (snapshots travel base64
-//! over a local pipe); it is a spec-correct file every viewer opens.
+//! Minimal PNG encoder (RGBA8, RGB8, gray8, gray16): deflate-compressed at a
+//! fixed level (`miniz_oxide`, zlib framing), PNG filter "none", chunk
+//! framing and CRC32 hand-rolled. Deterministic for a given encoder
+//! version; a spec-correct file every viewer opens.
 
 /// Encodes an RGBA8 buffer (row-major, top row first) as a PNG.
 pub fn encode(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
@@ -59,23 +59,8 @@ fn write_png(
         raw.extend_from_slice(row);
     }
 
-    // zlib stream: header + stored deflate blocks + adler32.
-    let mut idat = vec![0x78, 0x01];
-    let mut rest = raw.as_slice();
-    loop {
-        let take = rest.len().min(65_535);
-        let (block, tail) = rest.split_at(take);
-        let last = tail.is_empty();
-        idat.push(if last { 1 } else { 0 });
-        idat.extend_from_slice(&(take as u16).to_le_bytes());
-        idat.extend_from_slice(&(!(take as u16)).to_le_bytes());
-        idat.extend_from_slice(block);
-        if last {
-            break;
-        }
-        rest = tail;
-    }
-    idat.extend_from_slice(&adler32(&raw).to_be_bytes());
+    // zlib stream at deflate level 6 (the encoder's default).
+    let idat = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6);
     chunk(&mut out, b"IDAT", &idat);
     chunk(&mut out, b"IEND", &[]);
     out
@@ -100,15 +85,6 @@ fn crc32(data: &[u8]) -> u32 {
         }
     }
     !crc
-}
-
-fn adler32(data: &[u8]) -> u32 {
-    let (mut a, mut b) = (1u32, 0u32);
-    for &byte in data {
-        a = (a + byte as u32) % 65_521;
-        b = (b + a) % 65_521;
-    }
-    (b << 16) | a
 }
 
 #[cfg(test)]
@@ -150,7 +126,43 @@ mod tests {
     fn known_crc_vector() {
         // CRC-32 of "123456789" is 0xcbf43926 (the classic check value).
         assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
-        // Adler-32 of "Wikipedia" is 0x11e60398.
-        assert_eq!(adler32(b"Wikipedia"), 0x11e6_0398);
+    }
+
+    /// The IDAT payload of `png` (the single data chunk the writer emits).
+    fn idat_of(png: &[u8]) -> &[u8] {
+        let at = png.windows(4).position(|w| w == b"IDAT").expect("IDAT");
+        let len = u32::from_be_bytes(png[at - 4..at].try_into().unwrap()) as usize;
+        &png[at + 4..at + 4 + len]
+    }
+
+    #[test]
+    fn a_flat_128_square_compresses_below_4_kib() {
+        let rgba: Vec<u8> = [30u8, 60, 90, 255].repeat(128 * 128);
+        let png = encode(&rgba, 128, 128);
+        assert!(
+            png.len() < 4096,
+            "flat 128 x 128 PNG is {} bytes",
+            png.len()
+        );
+    }
+
+    #[test]
+    fn the_idat_stream_inflates_to_the_scanlines() {
+        let (w, h) = (37usize, 11usize);
+        let rgba: Vec<u8> = (0..w * h * 4).map(|i| (i * 7 % 251) as u8).collect();
+        let png = encode(&rgba, w as u32, h as u32);
+        let raw = miniz_oxide::inflate::decompress_to_vec_zlib(idat_of(&png)).expect("inflates");
+        let mut expected = Vec::new();
+        for row in rgba.chunks_exact(w * 4) {
+            expected.push(0);
+            expected.extend_from_slice(row);
+        }
+        assert_eq!(raw, expected);
+    }
+
+    #[test]
+    fn the_encoder_is_deterministic() {
+        let rgba: Vec<u8> = (0..64 * 64 * 4).map(|i| (i * 13 % 255) as u8).collect();
+        assert_eq!(encode(&rgba, 64, 64), encode(&rgba, 64, 64));
     }
 }

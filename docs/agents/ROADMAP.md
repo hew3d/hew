@@ -352,7 +352,8 @@ below.
   graph stays acyclic and bounded — a component cannot contain itself,
   and nesting past 64 levels or a million rendered parts is refused
 - Make Unique (detach an instance into its own copy, named "<definition>
-  Copy" — or after the instance's own name if it has one) and Explode
+  Copy" — or after the instance's own name if it has one; the copied
+  members keep their names, tags, and attributes) and Explode
   (bake an instance back into ordinary geometry; a nested member
   surfaces as an ordinary instance, its geometry still shared)
 - Copy/Cut/Paste and Paste In Place of component instances stay linked
@@ -423,8 +424,8 @@ below.
   8 corner grips scale uniformly, and 12 edge-midpoint grips scale two axes
   — about a chosen anchor (the grabbed grip's opposite by default, the box
   center with a durable Ctrl toggle), with typed exact factors or target
-  dimensions. Dragging a grip past its anchor clamps rather than reflects
-  (mirroring is a separate future tool). The grip under the cursor lights
+  dimensions. Dragging a grip past its anchor mirrors the selection,
+  as SketchUp's does; a mirrored solid stays right side out. The grip under the cursor lights
   together with the point it scales about (its opposite, or the center
   with Ctrl), joined by a dashed line, and the pair stays through the drag.
   Move (base point to destination) and Rotate (center to the first point)
@@ -529,9 +530,9 @@ below.
   entry paths — viewport drill-down and Outliner double-click — produce
   the same breadcrumb, with every level on it marked as editing. A
   component session requires the instance's pose to be a similarity
-  (uniform scale, no mirror); a group-nested placement now opens through
-  its group's session, and a non-uniformly-scaled or mirrored placement,
-  or one entered directly inside a group, falls back to the previous
+  (uniform scale; a mirror is allowed); a group-nested placement now opens through
+  its group's session, and a non-uniformly-scaled placement, or one entered
+  directly inside a group, falls back to the previous
   in-context editing model (the component-edit-parity machinery, still
   fully supported for those cases). Session open/close are ordinary undo
   steps, and saving — autosave included — works transparently mid-session
@@ -1110,7 +1111,8 @@ below.
   ("Needs mending") preview it exactly, counts and "N gaps will stay open"
   included, by running the Mend on a copy; hovering shows the points
   merged (red) and split (blue) and the gaps filled (green). A row whose
-  every opening is warped offers Mend, not Close. Make Solid also takes
+  every opening is warped offers Mend, not Close.
+- Make Solid also takes
   selected **sketches**: it runs the close pass over every line of the
   selection, then the closed-faces search (see Drawing) seeded by every
   face of the selection and every face the pass made, which covers files
@@ -1304,7 +1306,11 @@ below.
   Scene's own camera, hidden set, and section plane, with page numbers
   running across the whole job; a Cut list page appends every part once
   with its quantity and L × W × H, every placement of a component folded
-  onto its definition
+  onto its definition. Each part is measured along its own axes (its
+  largest face for an object or group, its definition's axes for an
+  instance), so a board turned at an angle lists its true size rather
+  than its world-aligned box; Shop Mode's parts sheet reads the same
+  numbers
 - Shop Mode gets its own Print Layout sheet from the document menu, with
   Save PDF… as the primary action (the iOS share sheet, or a download
   elsewhere) since AirPrint on iOS ignores the paper size Hew composed for
@@ -1486,7 +1492,107 @@ below.
   AI agents over MCP — including the Library (`hew.library.*`, §8.1),
   which round-trips a saved item's geometry through the same kernel
   entry points the UI's own Library browser uses; the plugin system adds
-  sandboxed transports and scoped profiles on top of the same bus
+  sandboxed transports on top of the same bus. In place today: every
+  connection carries a grant (a ceiling plus permissions) instead of a
+  profile, every command declares the permission it needs, and the
+  dispatcher enforces restricted grants (document binding, path
+  parameters, attribute namespaces) at its existing check sites, inside
+  transactions too (HEW_API.md §10); the manifest parser lives in
+  `crates/plugin-manifest` (docs/agents/PLUGINS.md). A plugin's manifest
+  commands register on the one shared registry as `<plugin-id>.<local>`;
+  the dispatcher checks their params against a small JSON Schema subset
+  and hands them back as forwards instead of executing them, then
+  validates and shapes the plugin's reply (HEW_API.md §10.2). Until the
+  realm lands the app answers every forward "unavailable", and MCP labels
+  plugin results with their `provider`. A mutating plugin command runs in
+  a kernel compound (one undo entry, the UI and every other client held
+  off meanwhile, abort restoring the whole document, a busy notice with
+  Cancel), recorded and replayed as one `plugin_compound` call; envelopes
+  can coalesce into one undo step (`coalesce`) and refuse a stale model
+  (`expect_generation`), and reads carry the history generation and the
+  document epoch (HEW_API.md §6.1, §6.5, §7). A connection subscribes to
+  events (`hew.event.subscribe`) and receives them as notification frames
+  between its replies: `document_changed` with a change set by public id
+  after every entry, undo, redo, abort, and replacement, plus context,
+  Scene, units, and document lifecycle events; `hew.query.changes_since`
+  catches a reader up, the desktop socket and the Windows named pipe
+  write events between replies, `hew-cli events --live` prints them,
+  and MCP follows `plugin_state`
+  (HEW_API.md §4.5). A connection holding `view` reads and sets the
+  app's selection (replace, add, subtract, toggle), hides and shows
+  nodes, isolates, and frames entities, all view state that rides a
+  transaction without an undo entry, and hears `selection_changed` and
+  `tool_changed`; the desktop app mirrors its selection, isolation, and
+  active tool into the kernel so the bus answers from there
+  (HEW_API.md §7.3). A reader lists every placement with its path and
+  world pose (`hew.query.occurrences`, nested components expanded, from
+  roots such as the selection), measures a part along its own axes
+  (`hew.query.part_frame`, honoring a `hew.part` frame override), reads
+  a placement's mesh and an object's topology, and exports or draws only
+  a selection (HEW_API.md §7.4). A ray reports the placed part it hit
+  through any depth of nesting, with its occurrence path, leaf, and a
+  face locator, and can list every crossing (`hew.query.raycast`'s `all`,
+  `max_distance`, `exclude`, `include_hidden`); `hew.query.measure` by
+  id or path gives a part's volume, area, and bounding box, summing the
+  members of groups and instances (HEW_API.md §7.4). A file's bytes
+  become one unplaced component definition
+  (`hew.component.import_definition`: `.hew`, `.skp`, glTF/GLB, STL,
+  COLLADA), and importing the same bytes again returns that definition
+  instead of making another, so a hardware or cabinet-module library is
+  one definition per model (HEW_API.md §7, document commands). The app itself
+  renders `hew.view.snapshot` (of a selection, or a definition's `cmp_` id,
+  on a transparent background) and `hew.view.line_drawing` through the
+  shared `crates/headless-render`, byte for byte what `hew-cli` produces
+  (HEW_API.md §7.2). A writer gives a definition new axes
+  while every placement stays put (`hew.component.rebase`), mirrors one
+  placement (`hew.component.flip_instance`), sets or clears a part's
+  frame override (`hew.entity.set_frame`), and copies a selection into a
+  grid of up to three axes in one undo step (`hew.entity.move`'s
+  `copy.grid`). The kernel forks one placement at any depth by its
+  occurrence path and reports every id the fork created
+  (`Document::make_unique_by_path`: with the cascade, only that placement
+  diverges; `deep` forks the nested definitions too; one undo entry),
+  exported to the app as `make_unique_by_path_json`; its bus command
+  (`hew.component.make_unique` by path) is still to come. `hew-cli --version` and `hew-relay --version` report the release
+  tag's version on a tag build; the `core` ceiling grants `hew.view.hide`,
+  `show`, `show_all`, and `hidden` without a window; `hew_query` admits every
+  command that does not change the document; `hew.entity.rotate`'s angle is
+  documented in radians; headless PNGs are deflate-compressed; and `hew-cli
+  --live` writes a snapshot or line drawing client-side from one render. A boolean's
+  result keeps its first operand's name, tags, and attributes. A plugin
+  checks before it commits: `hew.doc.transact` with `dry_run: true`
+  rehearses a whole envelope on a copy of the document and answers what
+  the commit would, needing only read permissions (HEW_API.md §6.6), and
+  `hew.compute.boolean`, `slice`, `shells`, `measure`, `outline`, and
+  `offset` answer geometry questions on transient solids (an object, a
+  re-posed object, or a prism or box described inline) without touching
+  the document, one at a time per connection and capped at 2,000,000
+  triangles (HEW_API.md §7.6). `hew.solid.subtract` cuts a part through
+  its path with such a prism or box, no cutter object created.
+  `hew.compute.project` and `hew.compute.stretch` are declared and wait
+  for the flat-drawing projection and section stretch in core. The snap
+  service can lock to any direction through an
+  anchor, for plugin tools to use. A component placement carries its own
+  material (manifest v27), shown on member faces nobody painted, the
+  nearest painted placement winning; `hew.material.paint` sets it or a
+  whole definition's, occurrence rows and path-located faces report
+  `material_effective`, and the Paint tool paints the placement under
+  the pointer at the top level (HEW_API.md §7.5). A solid's faces and
+  edges carry attribute dictionaries of their own (geometry buffer v9),
+  addressed by locator through `hew.attr.*`, reported by
+  `hew.query.faces` and `hew.query.topology`, and carried through edits
+  by per-site rules; edge dictionaries do not yet survive booleans,
+  slices, thickening, or splitting a solid into pieces (HEW_API.md §8).
+  A saved document carries a persistent id (manifest v29 `document_id`),
+  minted on its first save and kept through Save As and copies, which
+  `hew.meta.documents` and the open and save events report for
+  per-document plugin state to key on (docs/agents/PLUGINS.md). The SketchUp
+  writers do not yet write instance materials or face and edge
+  dictionaries. Still to come: these effects in the browser and
+  Shop Mode, the sandboxed realm, install and consent, and the workbench
+  contribution points.
+  Stage P0 (realm probe): in progress; the engine record is in
+  docs/agents/PLUGINS.md and its macOS and Windows cells are still unfilled.
 - **SketchUp (`.skp`) writing — the remaining gaps.** Dimensions and
   leader text are written with point anchors, so in SketchUp they do not
   follow the geometry they measure (a radius dimension hangs on an edge of

@@ -1,0 +1,516 @@
+{
+  "frames": [
+    {
+      "compare": "/result/profile",
+      "note": "the handshake",
+      "request": {
+        "id": 0,
+        "jsonrpc": "2.0",
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "response": "core"
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {}
+      }
+    },
+    {
+      "compare": "/result/label",
+      "note": "a board, to become a component",
+      "request": {
+        "id": 2,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  0.4,
+                  0.2,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 0.018,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "board"
+        }
+      },
+      "response": "board"
+    },
+    {
+      "note": "a component from the board",
+      "request": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "method": "hew.component.create",
+        "params": {
+          "members": [
+            "obj_1"
+          ]
+        }
+      },
+      "response": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.create",
+          "results": [
+            {
+              "component": "cmp_2",
+              "instance": "ins_3"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "note": "a second placement, turned a quarter about z and moved",
+      "request": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "method": "hew.component.place",
+        "params": {
+          "component": "cmp_2",
+          "pose": [
+            0.0,
+            -1.0,
+            0.0,
+            2.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      },
+      "response": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.place",
+          "results": [
+            {
+              "instance": "ins_4"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "compare": "/result/occurrences/0/world_pose",
+      "note": "the second placement's world pose before the rebase",
+      "request": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "method": "hew.query.occurrences",
+        "params": {
+          "roots": [
+            "ins_4"
+          ]
+        }
+      },
+      "response": [
+        0.0,
+        -1.0,
+        0.0,
+        2.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "compare": "/result/bbox",
+      "note": "its world box before the rebase",
+      "request": {
+        "id": 6,
+        "jsonrpc": "2.0",
+        "method": "hew.query.entity",
+        "params": {
+          "id": "ins_4"
+        }
+      },
+      "response": {
+        "max": [
+          2.0,
+          0.4,
+          0.018
+        ],
+        "min": [
+          1.8,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "compare": "/result/results/0/instances_updated",
+      "note": "rebase: the new x is the old y; both placements are compensated",
+      "request": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "method": "hew.component.rebase",
+        "params": {
+          "id": "cmp_2",
+          "origin": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "x": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "y": [
+            -1.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "response": 2
+    },
+    {
+      "compare": "/result/occurrences/0/world_pose",
+      "note": "the placement's pose took the frame: its world pose after the rebase",
+      "request": {
+        "id": 8,
+        "jsonrpc": "2.0",
+        "method": "hew.query.occurrences",
+        "params": {
+          "roots": [
+            "ins_4"
+          ]
+        }
+      },
+      "response": [
+        -1.0,
+        0.0,
+        0.0,
+        2.0,
+        0.0,
+        -1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "compare": "/result/bbox",
+      "note": "…and its world box is where it was",
+      "request": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "method": "hew.query.entity",
+        "params": {
+          "id": "ins_4"
+        }
+      },
+      "response": {
+        "max": [
+          2.0,
+          0.4,
+          0.018
+        ],
+        "min": [
+          1.8,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "compare": "/error/data/refusal",
+      "note": "a rebase by instance id means its definition; a non-unit frame refuses",
+      "request": {
+        "id": 10,
+        "jsonrpc": "2.0",
+        "method": "hew.component.rebase",
+        "params": {
+          "id": "ins_4",
+          "origin": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "x": [
+            2.0,
+            0.0,
+            0.0
+          ],
+          "y": [
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      },
+      "response": "invalid_frame"
+    },
+    {
+      "compare": "/result/results/0/mirrored",
+      "note": "mirror the second placement across its local x",
+      "request": {
+        "id": 11,
+        "jsonrpc": "2.0",
+        "method": "hew.component.flip_instance",
+        "params": {
+          "axis": "x",
+          "instance": "ins_4"
+        }
+      },
+      "response": true
+    },
+    {
+      "compare": "/result/results/1/object_id",
+      "note": "a box for grid copies",
+      "request": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  5.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  5.5,
+                  0.5,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 0.5,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "grid"
+        }
+      },
+      "response": "obj_6"
+    },
+    {
+      "compare": "/result/results/0/ids",
+      "note": "a 2 × 3 grid: five copies, every slot but the original's, in index order",
+      "request": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.move",
+        "params": {
+          "copy": {
+            "grid": [
+              {
+                "count": 2,
+                "step": [
+                  1.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "count": 3,
+                "step": [
+                  0.0,
+                  1.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          "ids": [
+            "obj_6"
+          ]
+        }
+      },
+      "response": [
+        "obj_7",
+        "obj_8",
+        "obj_9",
+        "obj_a",
+        "obj_b"
+      ]
+    },
+    {
+      "compare": "/error/code",
+      "note": "a grid with a translation is a params error",
+      "request": {
+        "id": 14,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.move",
+        "params": {
+          "copy": {
+            "grid": [
+              {
+                "count": 2,
+                "step": [
+                  1.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          "ids": [
+            "obj_6"
+          ],
+          "translation": [
+            1.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "response": -32602
+    },
+    {
+      "compare": "/result/results/0",
+      "note": "set the box's part frame: grain across its width",
+      "request": {
+        "id": 15,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.set_frame",
+        "params": {
+          "id": "obj_6",
+          "origin": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "x": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "y": [
+            1.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "response": {
+        "id": "obj_6",
+        "source": "attribute"
+      }
+    },
+    {
+      "compare": "/result/source",
+      "note": "part_frame reads the override",
+      "request": {
+        "id": 16,
+        "jsonrpc": "2.0",
+        "method": "hew.query.part_frame",
+        "params": {
+          "id": "obj_6"
+        }
+      },
+      "response": "attribute"
+    },
+    {
+      "compare": "/error/data/refusal",
+      "note": "an instance takes no part frame",
+      "request": {
+        "id": 17,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.set_frame",
+        "params": {
+          "clear": true,
+          "id": "ins_4"
+        }
+      },
+      "response": "not_a_part"
+    },
+    {
+      "compare": "/result/results/0",
+      "note": "clear the override",
+      "request": {
+        "id": 18,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.set_frame",
+        "params": {
+          "clear": true,
+          "id": "obj_6"
+        }
+      },
+      "response": {
+        "id": "obj_6",
+        "source": "face"
+      }
+    },
+    {
+      "compare": "/result/source",
+      "note": "part_frame is back to the face frame",
+      "request": {
+        "id": 19,
+        "jsonrpc": "2.0",
+        "method": "hew.query.part_frame",
+        "params": {
+          "id": "obj_6"
+        }
+      },
+      "response": "face"
+    }
+  ],
+  "profile": "core"
+}

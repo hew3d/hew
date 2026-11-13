@@ -1,0 +1,520 @@
+{
+  "profile": "plugin",
+  "grant": {
+    "ceiling": "core",
+    "permissions": [
+      "model.read"
+    ],
+    "plugin": "com.example.caller",
+    "app": null,
+    "document": "doc_1"
+  },
+  "plugins": [
+    {
+      "id": "com.example.lib",
+      "commands": [
+        {
+          "id": "sum",
+          "class": "read_only",
+          "summary": "Adds.",
+          "params": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number"
+              },
+              "b": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ],
+            "additionalProperties": false
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "sum": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "sum"
+            ],
+            "additionalProperties": false
+          },
+          "refusals": [
+            "too_big"
+          ]
+        },
+        {
+          "id": "mut",
+          "class": "mutating",
+          "summary": "Mutates.",
+          "label": "Add box",
+          "permission": "model.write"
+        }
+      ]
+    }
+  ],
+  "frames": [
+    {
+      "note": "a plugin hello reports profile plugin and echoes the grant",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "result": {
+          "protocol": 1,
+          "app": {
+            "name": "hew",
+            "version": "1.4.0"
+          },
+          "profile": "plugin",
+          "grant": {
+            "ceiling": "core",
+            "permissions": [
+              "model.read"
+            ],
+            "plugin": "com.example.caller",
+            "app": null,
+            "document": "doc_1"
+          },
+          "encoding": "json",
+          "documents": []
+        }
+      }
+    },
+    {
+      "note": "a bare attach binds to the grant's document",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {}
+      }
+    },
+    {
+      "note": "a plugin command forwards with its validated params, and the plugin's result is the answer",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "com.example.lib.sum",
+        "params": {
+          "a": 1,
+          "b": 2
+        }
+      },
+      "forward": {
+        "expect": {
+          "plugin": "com.example.lib",
+          "local": "sum",
+          "params": {
+            "a": 1,
+            "b": 2
+          },
+          "mutating": false
+        },
+        "reply": {
+          "ok": {
+            "sum": 3
+          }
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+          "sum": 3
+        }
+      }
+    },
+    {
+      "note": "params that do not match the declared schema are -32602 and never forwarded",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "com.example.lib.sum",
+        "params": {
+          "a": "x",
+          "b": 2
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "error": {
+          "code": -32602,
+          "message": "params do not match com.example.lib.sum's declared schema: /a: expected number, found string"
+        }
+      }
+    },
+    {
+      "note": "a result that does not match the declared schema is plugin_bad_result, with the raw reply",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "com.example.lib.sum",
+        "params": {
+          "a": 1,
+          "b": 2
+        }
+      },
+      "forward": {
+        "expect": {
+          "plugin": "com.example.lib",
+          "local": "sum",
+          "params": {
+            "a": 1,
+            "b": 2
+          },
+          "mutating": false
+        },
+        "reply": {
+          "ok": {
+            "sum": "three"
+          }
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "error": {
+          "code": -32003,
+          "message": "plugin returned a result that does not match its declared schema",
+          "data": {
+            "refusal": "plugin_bad_result",
+            "plugin": "com.example.lib",
+            "method": "com.example.lib.sum",
+            "why": "/sum: expected number, found string",
+            "raw": {
+              "sum": "three"
+            }
+          }
+        }
+      }
+    },
+    {
+      "note": "a plugin's refusal is named under the plugin id, in the canonical five-field shape",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "com.example.lib.sum",
+        "params": {
+          "a": 1,
+          "b": 2
+        }
+      },
+      "forward": {
+        "expect": {
+          "plugin": "com.example.lib",
+          "local": "sum",
+          "params": {
+            "a": 1,
+            "b": 2
+          },
+          "mutating": false
+        },
+        "reply": {
+          "refusal": {
+            "name": "too_big",
+            "explanation": "Too big.",
+            "detail": {
+              "limit": 10
+            }
+          }
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "error": {
+          "code": -32000,
+          "message": "refused",
+          "data": {
+            "refusal": "com.example.lib.too_big",
+            "failed_index": 0,
+            "failed_method": "com.example.lib.sum",
+            "detail": {
+              "limit": 10
+            },
+            "explanation": "Too big."
+          }
+        }
+      }
+    },
+    {
+      "note": "a plugin command needs the permission it declares, like any command",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "com.example.lib.mut",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 6,
+        "error": {
+          "code": -32001,
+          "message": "method not in the granted profile"
+        }
+      }
+    },
+    {
+      "note": "a sole-command transaction unwraps to the same forward and answers in the transaction shape",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "method": "com.example.lib.sum",
+              "params": {
+                "a": 2,
+                "b": 2
+              }
+            }
+          ]
+        }
+      },
+      "forward": {
+        "expect": {
+          "plugin": "com.example.lib",
+          "local": "sum",
+          "params": {
+            "a": 2,
+            "b": 2
+          },
+          "mutating": false
+        },
+        "reply": {
+          "ok": {
+            "sum": 4
+          }
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": {
+          "results": [
+            {
+              "sum": 4
+            }
+          ],
+          "label": "com.example.lib.sum"
+        }
+      }
+    },
+    {
+      "note": "a plugin command sharing a transaction is refused by the static pass",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "method": "com.example.lib.sum",
+              "params": {
+                "a": 1,
+                "b": 1
+              }
+            },
+            {
+              "method": "hew.attr.get",
+              "params": {
+                "target": "document"
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "error": {
+          "code": -32000,
+          "message": "refused",
+          "data": {
+            "refusal": "plugin_command_in_transaction",
+            "failed_index": 0,
+            "failed_method": "com.example.lib.sum",
+            "detail": {},
+            "explanation": "A plugin command runs as its own envelope; it cannot share a transaction with other commands or with another plugin command."
+          }
+        }
+      }
+    },
+    {
+      "note": "a plugin that does not answer in time",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "com.example.lib.sum",
+        "params": {
+          "a": 1,
+          "b": 2
+        }
+      },
+      "forward": {
+        "expect": {
+          "plugin": "com.example.lib",
+          "local": "sum",
+          "params": {
+            "a": 1,
+            "b": 2
+          },
+          "mutating": false
+        },
+        "reply": {
+          "failed": "timeout"
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "error": {
+          "code": -32003,
+          "message": "the plugin did not answer in time",
+          "data": {
+            "plugin": "com.example.lib",
+            "method": "com.example.lib.sum",
+            "reason": "timeout"
+          }
+        }
+      }
+    },
+    {
+      "note": "a plugin that is installed but not running",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "com.example.lib.sum",
+        "params": {
+          "a": 1,
+          "b": 2
+        }
+      },
+      "forward": {
+        "expect": {
+          "plugin": "com.example.lib",
+          "local": "sum",
+          "params": {
+            "a": 1,
+            "b": 2
+          },
+          "mutating": false
+        },
+        "reply": {
+          "failed": "unavailable"
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 10,
+        "error": {
+          "code": -32000,
+          "message": "refused",
+          "data": {
+            "refusal": "plugin_unavailable",
+            "failed_index": 0,
+            "failed_method": "com.example.lib.sum",
+            "detail": {
+              "plugin": "com.example.lib"
+            },
+            "explanation": "This plugin is installed but not running. Enable it in Settings ▸ Plugins, or reload it."
+          }
+        }
+      }
+    },
+    {
+      "note": "a name under the plugin that it never declared is an unknown method",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "com.example.lib.nope",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 11,
+        "error": {
+          "code": -32601,
+          "message": "unknown method"
+        }
+      }
+    },
+    {
+      "note": "capabilities list the plugin command with its provider and forwarding members (it sorts first)",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 12,
+        "method": "hew.meta.capabilities",
+        "params": {}
+      },
+      "compare": "/result/commands/0",
+      "response": {
+        "name": "com.example.lib.sum",
+        "version": 1,
+        "summary": "Adds.",
+        "class": "read_only",
+        "params": {
+          "type": "object",
+          "properties": {
+            "a": {
+              "type": "number"
+            },
+            "b": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "a",
+            "b"
+          ],
+          "additionalProperties": false
+        },
+        "result": {
+          "type": "object",
+          "properties": {
+            "sum": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "sum"
+          ],
+          "additionalProperties": false
+        },
+        "refusals": [
+          "too_big"
+        ],
+        "implemented": true,
+        "provider": {
+          "plugin": "com.example.lib"
+        },
+        "permission": "model.read",
+        "transactable": false,
+        "label": null,
+        "timeout_ms": 50000,
+        "concurrency": "parallel"
+      }
+    }
+  ]
+}

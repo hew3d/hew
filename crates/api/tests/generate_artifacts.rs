@@ -17,7 +17,7 @@
 //!
 //!   REGENERATE_API_ARTIFACTS=1 cargo test -p api --test generate_artifacts
 
-use api::codegen::{generate_api_reference, generate_ts_sdk};
+use api::codegen::{generate_api_reference, generate_plugin_sdk_types, generate_ts_sdk};
 use api::registry::Registry;
 use std::path::{Path, PathBuf};
 
@@ -70,4 +70,69 @@ fn api_reference_regenerates_byte_identically() {
     let registry = Registry::protocol_1();
     let fresh = generate_api_reference(&registry);
     check_or_write(&repo_root().join("docs/API_REFERENCE.gen.md"), &fresh);
+}
+
+/// Three plugin commands covering a plain object, the defaulted empty
+/// schemas, and a dotted local id.
+fn plugin_types_fixture() -> Vec<plugin_manifest::CommandContribution> {
+    serde_json::from_value(serde_json::json!([
+        {
+            "id": "sum",
+            "class": "read_only",
+            "summary": "Adds.",
+            "params": {
+                "type": "object",
+                "properties": { "a": { "type": "number" }, "b": { "type": "number" } },
+                "required": ["a", "b"],
+                "additionalProperties": false
+            },
+            "result": {
+                "type": "object",
+                "properties": { "sum": { "type": "number" } },
+                "required": ["sum"],
+                "additionalProperties": false
+            }
+        },
+        { "id": "mut", "class": "mutating", "summary": "Mutates." },
+        {
+            "id": "cutlist.generate",
+            "class": "mutating",
+            "summary": "Generates a cut list.",
+            "params": {
+                "type": "object",
+                "properties": {
+                    "parts": { "type": "array", "items": { "type": "string" } },
+                    "grain": { "enum": ["long", "cross"] }
+                },
+                "required": ["parts"],
+                "additionalProperties": false
+            }
+        }
+    ]))
+    .expect("fixture parses")
+}
+
+#[test]
+fn plugin_sdk_types_golden() {
+    let fresh = generate_plugin_sdk_types("com.example.lib", &plugin_types_fixture());
+    check_or_write(
+        &repo_root().join("crates/api/tests/golden/plugin_types.d.ts"),
+        &fresh,
+    );
+}
+
+/// Committed artifacts never contain plugin commands: a registry with a
+/// plugin registered generates exactly what protocol 1 alone does.
+#[test]
+fn committed_artifacts_ignore_plugin_commands() {
+    let mut with_plugin = Registry::protocol_1();
+    with_plugin
+        .register_plugin("com.example.lib", &plugin_types_fixture())
+        .expect("fixture registers");
+    let bare = Registry::protocol_1();
+    assert_eq!(generate_ts_sdk(&with_plugin), generate_ts_sdk(&bare));
+    assert_eq!(
+        generate_api_reference(&with_plugin),
+        generate_api_reference(&bare)
+    );
 }

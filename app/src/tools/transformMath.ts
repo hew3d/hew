@@ -267,9 +267,9 @@ export function signedAngleAboutAxis(
  *
  * A factor of 1 on an axis leaves it untouched, so a single-axis (face) grip
  * passes 1 for the two axes it doesn't drive, and a two-axis (edge) grip
- * passes 1 for the one it doesn't. Each factor must be > 0 (callers are
- * responsible for clamping — the kernel refuses a zero/negative factor as
- * singular/reflecting).
+ * passes 1 for the one it doesn't. A negative factor mirrors
+ * (the kernel bakes the reflection); a zero factor is singular and the
+ * kernel refuses it, so callers must keep every factor nonzero.
  */
 export function nonUniformScaleAboutPivot(
   sx: number,

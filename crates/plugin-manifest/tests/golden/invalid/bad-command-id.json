@@ -1,0 +1,17 @@
+{
+  "manifest": 1,
+  "id": "com.example.minimal",
+  "name": "Minimal",
+  "version": "1.0.0",
+  "api": 1,
+  "main": "main.js",
+  "contributes": {
+    "commands": [
+      {
+        "id": "Run-It",
+        "class": "read_only",
+        "summary": "Runs."
+      }
+    ]
+  }
+}

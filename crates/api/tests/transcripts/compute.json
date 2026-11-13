@@ -1,0 +1,394 @@
+{
+  "profile": "core",
+  "frames": [
+    {
+      "note": "the handshake",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "response": {
+        "id": 0,
+        "jsonrpc": "2.0",
+        "result": {
+          "app": {
+            "name": "hew",
+            "version": "1.4.0"
+          },
+          "documents": [],
+          "encoding": "json",
+          "profile": "core",
+          "protocol": 1
+        }
+      }
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {}
+      }
+    },
+    {
+      "note": "measure of a unit box: volume 1",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "hew.compute.measure",
+        "params": {
+          "solid": {
+            "box": {
+              "max": [
+                1.0,
+                1.0,
+                1.0
+              ],
+              "min": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            }
+          }
+        }
+      },
+      "compare": "/result/volume",
+      "response": 1.0
+    },
+    {
+      "note": "subtract of two boxes, nothing created: the measure of the notched box",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "hew.compute.boolean",
+        "params": {
+          "a": {
+            "box": {
+              "max": [
+                1.0,
+                1.0,
+                1.0
+              ],
+              "min": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            }
+          },
+          "b": {
+            "box": {
+              "max": [
+                1.5,
+                0.75,
+                1.5
+              ],
+              "min": [
+                0.5,
+                0.25,
+                0.5
+              ]
+            }
+          },
+          "op": "subtract"
+        }
+      },
+      "compare": "/result/measure/volume",
+      "response": 0.875
+    },
+    {
+      "note": "slice at x = 0.25: the positive piece is the side the normal points to",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "hew.compute.slice",
+        "params": {
+          "plane": {
+            "normal": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "origin": [
+              0.25,
+              0.0,
+              0.0
+            ]
+          },
+          "solid": {
+            "box": {
+              "max": [
+                1.0,
+                1.0,
+                1.0
+              ],
+              "min": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            }
+          }
+        }
+      },
+      "compare": "/result/positive/measure/volume",
+      "response": 0.75
+    },
+    {
+      "note": "a slab through a box leaves two shells",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "hew.compute.boolean",
+        "params": {
+          "a": {
+            "box": {
+              "max": [
+                1.0,
+                1.0,
+                1.0
+              ],
+              "min": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            }
+          },
+          "b": {
+            "box": {
+              "max": [
+                0.6,
+                1.5,
+                1.5
+              ],
+              "min": [
+                0.4,
+                -0.5,
+                -0.5
+              ]
+            }
+          },
+          "op": "subtract",
+          "want": [
+            "shells"
+          ]
+        }
+      },
+      "compare": "/result/shells",
+      "response": 2
+    },
+    {
+      "note": "shells of a box: one",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "hew.compute.shells",
+        "params": {
+          "solid": {
+            "box": {
+              "max": [
+                1.0,
+                1.0,
+                1.0
+              ],
+              "min": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            }
+          }
+        }
+      },
+      "compare": "/result/count",
+      "response": 1
+    },
+    {
+      "note": "offset of a unit square by 0.1: its first edge",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "hew.compute.offset",
+        "params": {
+          "distance": 0.1,
+          "loops": [
+            [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                1.0
+              ],
+              [
+                0.0,
+                1.0
+              ]
+            ]
+          ]
+        }
+      },
+      "compare": "/result/loops/0/edges/0",
+      "response": {
+        "a": [
+          -0.1,
+          -0.10000000000000009
+        ],
+        "b": [
+          1.1,
+          -0.1
+        ],
+        "kind": "line"
+      }
+    },
+    {
+      "note": "hew.compute.project is declared and not implemented (core C6)",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "hew.compute.project",
+        "params": {}
+      },
+      "response": {
+        "error": {
+          "code": -32000,
+          "data": {
+            "detail": {},
+            "explanation": "hew.compute.project is declared but not implemented yet in this build.",
+            "failed_index": 0,
+            "failed_method": "hew.compute.project",
+            "refusal": "unimplemented"
+          },
+          "message": "refused"
+        },
+        "id": 8,
+        "jsonrpc": "2.0"
+      }
+    },
+    {
+      "note": "hew.compute.stretch is declared and not implemented (core C7)",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "hew.compute.stretch",
+        "params": {}
+      },
+      "response": {
+        "error": {
+          "code": -32000,
+          "data": {
+            "detail": {},
+            "explanation": "hew.compute.stretch is declared but not implemented yet in this build.",
+            "failed_index": 0,
+            "failed_method": "hew.compute.stretch",
+            "refusal": "unimplemented"
+          },
+          "message": "refused"
+        },
+        "id": 9,
+        "jsonrpc": "2.0"
+      }
+    },
+    {
+      "note": "two boxes meeting only along an edge refuse degenerate_contact by name",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "hew.compute.boolean",
+        "params": {
+          "a": {
+            "box": {
+              "max": [
+                1.0,
+                1.0,
+                1.0
+              ],
+              "min": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            }
+          },
+          "b": {
+            "box": {
+              "max": [
+                2.0,
+                2.0,
+                1.0
+              ],
+              "min": [
+                1.0,
+                1.0,
+                0.0
+              ]
+            }
+          },
+          "op": "union"
+        }
+      },
+      "response": {
+        "error": {
+          "code": -32000,
+          "data": {
+            "detail": {},
+            "explanation": "The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.",
+            "failed_index": 0,
+            "failed_method": "hew.compute.boolean",
+            "refusal": "degenerate_contact"
+          },
+          "message": "refused"
+        },
+        "id": 10,
+        "jsonrpc": "2.0"
+      }
+    },
+    {
+      "note": "an id that names nothing refuses unknown_entity",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "hew.compute.measure",
+        "params": {
+          "solid": {
+            "id": "obj_99"
+          }
+        }
+      },
+      "response": {
+        "error": {
+          "code": -32000,
+          "data": {
+            "detail": {
+              "id": "obj_99"
+            },
+            "explanation": "'obj_99' does not name a live entity of the required kind in this document.",
+            "failed_index": 0,
+            "failed_method": "hew.compute.measure",
+            "refusal": "unknown_entity"
+          },
+          "message": "refused"
+        },
+        "id": 11,
+        "jsonrpc": "2.0"
+      }
+    }
+  ]
+}

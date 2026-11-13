@@ -466,6 +466,7 @@ impl Scene {
         nz: f64,
         active: bool,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.doc
             .set_section_plane(SectionPlaneState {
                 origin: Point3::new(ox, oy, oz),
@@ -482,9 +483,11 @@ impl Scene {
     }
 
     /// Removes the section plane.
-    pub fn clear_section_plane(&mut self) {
+    pub fn clear_section_plane(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.doc.clear_section_plane();
         recording::record(recording::RecordedCall::ClearSectionPlane);
+        Ok(())
     }
 
     // ----------------------------------------------------------- view style
@@ -504,6 +507,7 @@ impl Scene {
     /// returns, or clears it (`undefined`/`null`) for Hew's own look. View
     /// state, not undoable, like `set_camera_state`.
     pub fn set_view_style_json(&mut self, json: Option<String>) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let style = json.as_deref().map(view_style_from_json).transpose()?;
         self.doc.set_view_style(style);
         recording::record(recording::RecordedCall::SetViewStyle { json });
@@ -514,7 +518,8 @@ impl Scene {
     /// style, when it has one (View ▸ Axes on a document opened from a
     /// `.skp`, so a save back writes the choice); a document shown Hew's
     /// own way keeps none. Not undoable.
-    pub fn set_view_style_axes(&mut self, axes: bool) {
+    pub fn set_view_style_axes(&mut self, axes: bool) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         if let Some(mut v) = self.doc.view_style()
             && v.axes != axes
         {
@@ -524,6 +529,7 @@ impl Scene {
                 json: Some(view_style_to_json(&v).to_string()),
             });
         }
+        Ok(())
     }
 
     // --------------------------------------------------------------- scenes
@@ -559,6 +565,7 @@ impl Scene {
         display_json: Option<String>,
         after: Option<u64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let camera = opt_camera(camera_json.clone())?;
         let display = opt_display(display_json.clone())?;
         let sid = self
@@ -584,6 +591,7 @@ impl Scene {
         camera_json: Option<String>,
         display_json: Option<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let camera = opt_camera(camera_json.clone())?;
         let display = opt_display(display_json.clone())?;
         self.doc
@@ -607,6 +615,7 @@ impl Scene {
         camera_json: Option<String>,
         display_json: Option<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let camera = opt_camera(camera_json.clone())?;
         let display = opt_display(display_json.clone())?;
         self.doc
@@ -624,12 +633,14 @@ impl Scene {
     /// Renames a Scene (`DuplicateSceneName` / `EmptySceneName` are typed
     /// refusals surfaced as `ApiError`).
     pub fn rename_scene(&mut self, sid: u64, name: String) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.doc.rename_scene(sid, name.clone()).map_err(doc_err)?;
         recording::record(recording::RecordedCall::RenameScene { sid, name });
         Ok(())
     }
 
     pub fn set_scene_description(&mut self, sid: u64, text: String) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.doc
             .set_scene_description(sid, text.clone())
             .map_err(doc_err)?;
@@ -641,6 +652,7 @@ impl Scene {
     /// negative); `undefined` returns it to the document's own. Not
     /// undoable, like the Scene's other fields.
     pub fn set_scene_transition(&mut self, sid: u64, seconds: Option<f64>) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.doc
             .set_scene_transition(sid, seconds)
             .map_err(doc_err)?;
@@ -650,6 +662,7 @@ impl Scene {
 
     /// Sets a Scene's own delay in seconds; as [`Scene::set_scene_transition`].
     pub fn set_scene_delay(&mut self, sid: u64, seconds: Option<f64>) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.doc.set_scene_delay(sid, seconds).map_err(doc_err)?;
         recording::record(recording::RecordedCall::SetSceneDelay { sid, seconds });
         Ok(())
@@ -657,6 +670,7 @@ impl Scene {
 
     /// Moves a Scene to `index` in tab order (clamped).
     pub fn move_scene(&mut self, sid: u64, index: u32) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.doc.move_scene(sid, index as usize).map_err(doc_err)?;
         recording::record(recording::RecordedCall::MoveScene { sid, index });
         Ok(())
@@ -664,6 +678,7 @@ impl Scene {
 
     /// Deletes a Scene (not undoable — the UI confirms first).
     pub fn remove_scene(&mut self, sid: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.doc.remove_scene(sid).map_err(doc_err)?;
         recording::record(recording::RecordedCall::RemoveScene { sid });
         Ok(())
@@ -682,7 +697,10 @@ impl Scene {
     /// dirtying change. The app pushes the returned leaf ids into
     /// [`Scene::set_hidden`] itself, exactly as its hide toggles do.
     pub fn apply_scene(&mut self, sid: u64) -> Result<ResolvedSceneJs, ApiError> {
+        self.ensure_not_busy()?;
         let inner = self.doc.apply_scene(sid).map_err(doc_err)?;
+        // The next event drain reports it as the active Scene.
+        self.last_active_scene = Some(sid);
         // A Scene sets tag visibility: a guide hidden or shown by its
         // tags snaps accordingly at once.
         self.reregister_guides();

@@ -82,6 +82,7 @@ const SIMPLE: Record<string, MessageDescriptor> = {
   'finish-editing-group': msg`Finish editing group`,
   'paint-face': msg`Paint face`,
   'paint-object': msg`Paint object`,
+  'paint-instance': msg`Paint instance`,
   'position-texture': msg`Position texture`,
   'material-opacity': msg`Change material opacity`,
   'material-surface': msg`Change material surface`,
@@ -218,6 +219,8 @@ export function historyKindLabel(k: HistoryKind): string | null {
     }
     case 'make-component':
       return withName(t`Make component`, name)
+    case 'change-component-axes':
+      return withName(t`Change component axes`, name)
     case 'copy-array': {
       const n = count(k, 'count')
       return t`Copy ×${n}`

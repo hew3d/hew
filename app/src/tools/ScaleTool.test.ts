@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
-import { ScaleTool } from './ScaleTool'
+import { ScaleTool, floorScaleFactor } from './ScaleTool'
 import { DragCommitGate } from '../viewport/dragCommit'
 import type { Snap } from './types'
 import type { Ray } from '../viewport/math'
@@ -275,16 +275,59 @@ describe('ScaleTool — grip gizmo', () => {
     expect(tool.capturingInput()).toBe(false) // committed by the release, back to idle
   })
 
-  it('dragging a grip past its anchor clamps to MIN_SCALE, never reflects', () => {
+  it('dragging a grip through its anchor to the far side gives a NEGATIVE factor (mirror)', () => {
     const { tool, wasmScene } = makeBoxTool()
 
     tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1])) // grab +Z face, anchor z=0
-    tool.onPointerMove(makeSnap({ x: 1, y: 1, z: -3 }), rayAt([1, 1, -3])) // past the anchor
-    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: -3 }), rayAt([1, 1, -3])) // commit
+    tool.onPointerMove(makeSnap({ x: 1, y: 1, z: -1.25 }), rayAt([1, 1, -1.25])) // past the anchor
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: -1.25 }), rayAt([1, 1, -1.25])) // commit
 
     const affine = lastAffine(wasmScene)
-    expect(affine[10]).toBeCloseTo(0.01) // MIN_SCALE, never negative/zero
-    expect(affine[10]).toBeGreaterThan(0)
+    expect(affine[10]).toBeCloseTo(-1.25)
+    expect(affine[10]).toBeLessThan(0)
+  })
+
+  it('a negative factor below the magnitude floor keeps its sign at MIN_SCALE', () => {
+    expect(floorScaleFactor(-0.001)).toBeCloseTo(-0.01)
+    expect(floorScaleFactor(0.001)).toBeCloseTo(0.01)
+    expect(floorScaleFactor(-2)).toBe(-2)
+  })
+
+  it('a factor of exactly zero is skipped: floor returns null, the click on the anchor is ignored, nothing reaches the kernel', () => {
+    expect(floorScaleFactor(0)).toBeNull()
+    const { tool, wasmScene } = makeBoxTool()
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1])) // grab +Z face, anchor z=0
+    tool.onPointerMove(makeSnap({ x: 1, y: 1, z: 0 }), rayAt([1, 1, 0])) // exactly ON the anchor
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), rayAt([1, 1, 0])) // click: ignored
+    expect(wasmScene.transform_selection).not.toHaveBeenCalled()
+    expect(tool.capturingInput()).toBe(true) // still dragging
+
+    // The drag continues and can still commit a real factor afterwards.
+    tool.onPointerMove(makeSnap({ x: 1, y: 1, z: -1 }), rayAt([1, 1, -1]))
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: -1 }), rayAt([1, 1, -1]))
+    expect(lastAffine(wasmScene)[10]).toBeCloseTo(-1)
+  })
+
+  it("typed '-1' mirrors (factor -1 reaches the kernel)", () => {
+    const { tool, wasmScene } = makeBoxTool()
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1])) // grab +Z face
+    for (const ch of '-1') tool.onKey({ key: ch } as KeyboardEvent)
+    tool.onKey({ key: 'Enter' } as KeyboardEvent)
+
+    expect(wasmScene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(lastAffine(wasmScene)[10]).toBeCloseTo(-1)
+  })
+
+  it("typed '0' is a no-op: Enter is ignored and nothing reaches the kernel", () => {
+    const { tool, wasmScene } = makeBoxTool()
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1])) // grab +Z face
+    for (const ch of '0') tool.onKey({ key: ch } as KeyboardEvent)
+    tool.onKey({ key: 'Enter' } as KeyboardEvent)
+
+    expect(wasmScene.transform_selection).not.toHaveBeenCalled()
   })
 
   it('a corner grip stays uniform: all three axes scale by the same factor', () => {

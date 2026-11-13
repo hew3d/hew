@@ -21,7 +21,7 @@ on:
   # Also on any change that could alter what we depend on, so a bad dependency
   # is caught in review rather than the next morning.
   push:
-    branches: [main]
+    branches: [main, feature/plugin-system]
     paths:
       - '**/Cargo.lock'
       - '**/Cargo.toml'

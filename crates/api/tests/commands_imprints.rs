@@ -14,9 +14,13 @@
 //! (`not_in_plane`) and a locator that names neither kind of imprint
 //! (`not_an_imprint`).
 
-use api::{Connection, DispatchOutcome, NoHost, Profile, Request, RequestId, Response, codes};
+use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, Response, codes};
 use kernel::Document;
 use serde_json::{Value, json};
+
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
 
 // ----------------------------------------------------------------- fixtures
 // (mirrors commands_face_imprint.rs's fixture set — each integration test
@@ -36,6 +40,7 @@ fn req(id: i64, method: &str, params: Value) -> Request {
 
 fn hello(conn: &mut Connection, doc: &mut Document) {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(0, "hew.meta.hello", json!({ "protocol": 1 })),
@@ -47,9 +52,12 @@ fn hello(conn: &mut Connection, doc: &mut Document) {
 
 fn hello_attach(conn: &mut Connection, doc: &mut Document) {
     hello(conn, doc);
-    let DispatchOutcome::Reply(r) =
-        conn.dispatch(doc, &mut NoHost, req(1, "hew.doc.attach", json!({})))
-    else {
+    let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
+        doc,
+        &mut NoHost,
+        req(1, "hew.doc.attach", json!({})),
+    ) else {
         panic!("attach replies")
     };
     assert!(r.error.is_none(), "attach failed: {:?}", r.error);
@@ -62,7 +70,9 @@ fn call(
     method: &str,
     params: Value,
 ) -> Response {
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, &mut NoHost, req(id, method, params)) else {
+    let DispatchOutcome::Reply(r) =
+        conn.dispatch(&REGISTRY, doc, &mut NoHost, req(id, method, params))
+    else {
         panic!("{method} replies")
     };
     r
@@ -204,7 +214,7 @@ fn approx_point(v: &Value, expected: [f64; 3], tol: f64) {
 
 #[test]
 fn sub_face_imprint_is_listed_moved_rotated_scaled_and_deleted() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -339,11 +349,99 @@ fn sub_face_imprint_is_listed_moved_rotated_scaled_and_deleted() {
     );
 }
 
+/// A negative factor is accepted: the shape turns 180 degrees about the
+/// anchor and scales by |factor|, as one undo step; a zero factor is still
+/// refused as a bad parameter.
+#[test]
+fn scale_imprint_by_a_negative_factor_turns_it_about_the_anchor() {
+    let mut conn = Connection::new(Grant::core(), "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    let object_id = build_box(
+        &mut conn,
+        &mut doc,
+        2,
+        [0.0, 0.0, 0.0],
+        [0.4, 0.4, 0.0],
+        0.2,
+    );
+    // A 0.1x0.05 rect off the anchor, so the half turn shows.
+    call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.sketch.draw_rect",
+        json!({
+            "plane": { "face": face_at(&object_id, [0.2, 0.2, 0.2]) },
+            "corner_a": [0.1, 0.1, 0.2],
+            "corner_b": [0.2, 0.15, 0.2]
+        }),
+    );
+    let about = [0.2, 0.2, 0.2];
+
+    let zero = call(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.solid.scale_imprint",
+        json!({
+            "imprint": imprint_at(&object_id, [0.15, 0.125, 0.2]),
+            "factor": 0.0,
+            "about": about
+        }),
+    );
+    let err = zero.error.expect("a zero factor is refused");
+    assert!(err.message.contains("nonzero"), "{}", err.message);
+
+    let scaled = call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.solid.scale_imprint",
+        json!({
+            "imprint": imprint_at(&object_id, [0.15, 0.125, 0.2]),
+            "factor": -1.5,
+            "about": about
+        }),
+    );
+    assert_eq!(result_object_id(&scaled), object_id);
+
+    // Each corner p lands at about - 1.5 (p - about).
+    let listed = call_ok(
+        &mut conn,
+        &mut doc,
+        6,
+        "hew.solid.imprints",
+        json!({ "object": object_id }),
+    );
+    let imprints = listed["imprints"].as_array().unwrap();
+    assert_eq!(imprints.len(), 1);
+    let loop_pts = imprints[0]["loop"].as_array().unwrap();
+    assert_eq!(loop_pts.len(), 4);
+    for want in [
+        [0.2, 0.275, 0.2],
+        [0.35, 0.275, 0.2],
+        [0.35, 0.35, 0.2],
+        [0.2, 0.35, 0.2],
+    ] {
+        assert!(
+            loop_pts.iter().any(|p| {
+                p.as_array()
+                    .unwrap()
+                    .iter()
+                    .zip(want)
+                    .all(|(c, w)| (c.as_f64().unwrap() - w).abs() < 1e-9)
+            }),
+            "corner {want:?} in {loop_pts:?}"
+        );
+    }
+}
+
 // =================================================================== chord
 
 #[test]
 fn chord_imprint_is_listed_moved_along_its_edge_and_deleted() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -449,7 +547,7 @@ fn chord_imprint_is_listed_moved_along_its_edge_and_deleted() {
 
 #[test]
 fn move_imprint_off_the_faces_plane_refuses_not_in_plane() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -495,7 +593,7 @@ fn move_imprint_off_the_faces_plane_refuses_not_in_plane() {
 
 #[test]
 fn move_imprint_on_a_plain_face_point_refuses_not_an_imprint() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     // A plain box, nothing drawn on any of its faces.
@@ -537,7 +635,7 @@ fn imprints_lists_a_circle_cut_apart_by_a_rectangle_as_one_curve_unit() {
     // A circle drawn across the rectangle's right side lands as two runs,
     // each listed as a chord; `curve_units` names them as the one circle,
     // each run with the `at` locator its chord entry carries.
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -614,7 +712,7 @@ fn imprints_lists_a_circle_cut_apart_by_a_rectangle_as_one_curve_unit() {
 /// locator names that circle: passing it to move_imprint moves the circle.
 #[test]
 fn a_whole_circles_run_locator_moves_it() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(

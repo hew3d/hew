@@ -22,7 +22,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/plugin-system]
   pull_request:
 
 # A new push to a PR supersedes the old one. Pushes to main are never

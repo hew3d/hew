@@ -1,0 +1,1225 @@
+{
+  "frames": [
+    {
+      "compare": "/result/profile",
+      "note": "the handshake",
+      "request": {
+        "id": 0,
+        "jsonrpc": "2.0",
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "response": "core"
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {}
+      }
+    },
+    {
+      "compare": "/result/label",
+      "note": "a world box",
+      "request": {
+        "id": 2,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  1.0,
+                  1.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 1.0,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "a"
+        }
+      },
+      "response": "a"
+    },
+    {
+      "compare": "/result/label",
+      "note": "box b",
+      "request": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  2.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  3.0,
+                  1.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 1.0,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "b"
+        }
+      },
+      "response": "b"
+    },
+    {
+      "compare": "/result/label",
+      "note": "box c",
+      "request": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  4.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  5.0,
+                  1.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 1.0,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "c"
+        }
+      },
+      "response": "c"
+    },
+    {
+      "note": "group b and c",
+      "request": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "method": "hew.group.create",
+        "params": {
+          "members": [
+            "obj_3",
+            "obj_5"
+          ]
+        }
+      },
+      "response": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.group.create",
+          "results": [
+            {
+              "group": "grp_6"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "compare": "/result/label",
+      "note": "a 400 × 200 × 18 mm board",
+      "request": {
+        "id": 6,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.0,
+                  3.0,
+                  0.0
+                ],
+                "corner_b": [
+                  0.4,
+                  3.2,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 0.018,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "board"
+        }
+      },
+      "response": "board"
+    },
+    {
+      "compare": "/result/label",
+      "note": "turn the board 30° about z",
+      "request": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.rotate",
+        "params": {
+          "angle": 0.5235987755982988,
+          "axis": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "ids": [
+            "obj_8"
+          ],
+          "pivot": [
+            0.0,
+            3.0,
+            0.0
+          ]
+        }
+      },
+      "response": "hew.entity.rotate"
+    },
+    {
+      "compare": "/result/label",
+      "note": "box d, to become the inner component",
+      "request": {
+        "id": 8,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  6.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  7.0,
+                  2.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 0.5,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "d"
+        }
+      },
+      "response": "d"
+    },
+    {
+      "note": "inner component from d",
+      "request": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "method": "hew.component.create",
+        "params": {
+          "members": [
+            "obj_a"
+          ]
+        }
+      },
+      "response": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.create",
+          "results": [
+            {
+              "component": "cmp_b",
+              "instance": "ins_c"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "compare": "/result/label",
+      "note": "name the inner definition",
+      "request": {
+        "id": 10,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.rename",
+        "params": {
+          "id": "cmp_b",
+          "name": "Drawer"
+        }
+      },
+      "response": "hew.entity.rename"
+    },
+    {
+      "compare": "/result/label",
+      "note": "box e, for a nested group",
+      "request": {
+        "id": 11,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  8.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  9.0,
+                  1.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 1.0,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "e"
+        }
+      },
+      "response": "e"
+    },
+    {
+      "note": "group e",
+      "request": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "method": "hew.group.create",
+        "params": {
+          "members": [
+            "obj_e"
+          ]
+        }
+      },
+      "response": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.group.create",
+          "results": [
+            {
+              "group": "grp_f"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "note": "outer component holding the inner instance and the nested group",
+      "request": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "method": "hew.component.create",
+        "params": {
+          "members": [
+            "ins_c",
+            "grp_f"
+          ]
+        }
+      },
+      "response": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.create",
+          "results": [
+            {
+              "component": "cmp_10",
+              "instance": "ins_11"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "compare": "/result/label",
+      "note": "name the outer definition",
+      "request": {
+        "id": 14,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.rename",
+        "params": {
+          "id": "cmp_10",
+          "name": "Cabinet"
+        }
+      },
+      "response": "hew.entity.rename"
+    },
+    {
+      "compare": "/result/label",
+      "note": "the first placement gets its own name",
+      "request": {
+        "id": 15,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.rename",
+        "params": {
+          "id": "ins_11",
+          "name": "Left cabinet"
+        }
+      },
+      "response": "hew.entity.rename"
+    },
+    {
+      "compare": "/result/label",
+      "note": "a mirrored placement of the outer definition",
+      "request": {
+        "id": 16,
+        "jsonrpc": "2.0",
+        "method": "hew.component.place",
+        "params": {
+          "component": "cmp_10",
+          "pose": [
+            -1.0,
+            0.0,
+            0.0,
+            20.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      },
+      "response": "hew.component.place"
+    },
+    {
+      "compare": "/result/occurrences",
+      "note": "every placement, depth-first, with paths and composed poses",
+      "request": {
+        "id": 17,
+        "jsonrpc": "2.0",
+        "method": "hew.query.occurrences",
+        "params": {}
+      },
+      "response": [
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "obj_1",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "obj_8",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "grp_6",
+          "kind": "group",
+          "material": null,
+          "material_effective": null,
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "obj_3",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "mirrored": false,
+          "name": null,
+          "parent": "grp_6",
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "obj_5",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "mirrored": false,
+          "name": null,
+          "parent": "grp_6",
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": "cmp_10",
+          "definition_name": "Cabinet",
+          "depth": 0,
+          "hidden": false,
+          "id": "ins_11",
+          "kind": "instance",
+          "material": null,
+          "material_effective": null,
+          "mirrored": false,
+          "name": "Left cabinet",
+          "parent": null,
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": "cmp_b",
+          "definition_name": "Drawer",
+          "depth": 1,
+          "hidden": false,
+          "id": "ins_c",
+          "kind": "instance",
+          "material": null,
+          "material_effective": null,
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [
+            "ins_11"
+          ],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 2,
+          "hidden": false,
+          "id": "obj_a",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [
+            "ins_11",
+            "ins_c"
+          ],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 1,
+          "hidden": false,
+          "id": "grp_f",
+          "kind": "group",
+          "material": null,
+          "material_effective": null,
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [
+            "ins_11"
+          ],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 1,
+          "hidden": false,
+          "id": "obj_e",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "mirrored": false,
+          "name": null,
+          "parent": "grp_f",
+          "path": [
+            "ins_11"
+          ],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": "cmp_10",
+          "definition_name": "Cabinet",
+          "depth": 0,
+          "hidden": false,
+          "id": "ins_12",
+          "kind": "instance",
+          "material": null,
+          "material_effective": null,
+          "mirrored": true,
+          "name": null,
+          "parent": null,
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            -1.0,
+            0.0,
+            0.0,
+            20.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": "cmp_b",
+          "definition_name": "Drawer",
+          "depth": 1,
+          "hidden": false,
+          "id": "ins_c",
+          "kind": "instance",
+          "material": null,
+          "material_effective": null,
+          "mirrored": true,
+          "name": null,
+          "parent": null,
+          "path": [
+            "ins_12"
+          ],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            -1.0,
+            0.0,
+            0.0,
+            20.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 2,
+          "hidden": false,
+          "id": "obj_a",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "mirrored": true,
+          "name": null,
+          "parent": null,
+          "path": [
+            "ins_12",
+            "ins_c"
+          ],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            -1.0,
+            0.0,
+            0.0,
+            20.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 1,
+          "hidden": false,
+          "id": "grp_f",
+          "kind": "group",
+          "material": null,
+          "material_effective": null,
+          "mirrored": true,
+          "name": null,
+          "parent": null,
+          "path": [
+            "ins_12"
+          ],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            -1.0,
+            0.0,
+            0.0,
+            20.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 1,
+          "hidden": false,
+          "id": "obj_e",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "mirrored": true,
+          "name": null,
+          "parent": "grp_f",
+          "path": [
+            "ins_12"
+          ],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            -1.0,
+            0.0,
+            0.0,
+            20.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      ]
+    },
+    {
+      "compare": "/result/occurrences",
+      "note": "roots: the group, then one world box — rows in root order",
+      "request": {
+        "id": 18,
+        "jsonrpc": "2.0",
+        "method": "hew.query.occurrences",
+        "params": {
+          "roots": [
+            "grp_6",
+            "obj_1"
+          ]
+        }
+      },
+      "response": [
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "grp_6",
+          "kind": "group",
+          "material": null,
+          "material_effective": null,
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "obj_3",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "mirrored": false,
+          "name": null,
+          "parent": "grp_6",
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "obj_5",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "mirrored": false,
+          "name": null,
+          "parent": "grp_6",
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "obj_1",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      ]
+    },
+    {
+      "compare": "/error/code",
+      "note": "roots: an empty list is a params error",
+      "request": {
+        "id": 19,
+        "jsonrpc": "2.0",
+        "method": "hew.query.occurrences",
+        "params": {
+          "roots": []
+        }
+      },
+      "response": -32602
+    },
+    {
+      "compare": "/result/extents",
+      "note": "the rotated board measures its true size along its own axes",
+      "request": {
+        "id": 20,
+        "jsonrpc": "2.0",
+        "method": "hew.query.part_frame",
+        "params": {
+          "id": "obj_8"
+        }
+      },
+      "response": [
+        0.40000000000000036,
+        0.20000000000000062,
+        0.018
+      ]
+    },
+    {
+      "compare": "/result/source",
+      "note": "…from its largest face",
+      "request": {
+        "id": 21,
+        "jsonrpc": "2.0",
+        "method": "hew.query.part_frame",
+        "params": {
+          "id": "obj_8"
+        }
+      },
+      "response": "face"
+    },
+    {
+      "compare": "/result/occurrence/id",
+      "note": "an occurrence locator resolves to its row",
+      "request": {
+        "id": 22,
+        "jsonrpc": "2.0",
+        "method": "hew.query.resolve",
+        "params": {
+          "occurrence": {
+            "path": [
+              "ins_11",
+              "ins_c",
+              "obj_a"
+            ]
+          }
+        }
+      },
+      "response": "obj_a"
+    },
+    {
+      "compare": "/result/faces/0/outer",
+      "note": "topology: the box's first face's outer loop",
+      "request": {
+        "id": 23,
+        "jsonrpc": "2.0",
+        "method": "hew.query.topology",
+        "params": {
+          "id": "obj_1"
+        }
+      },
+      "response": [
+        3,
+        2,
+        1,
+        0
+      ]
+    },
+    {
+      "compare": "/result/edges/11/index",
+      "note": "topology: twelve edges",
+      "request": {
+        "id": 24,
+        "jsonrpc": "2.0",
+        "method": "hew.query.topology",
+        "params": {
+          "id": "obj_1"
+        }
+      },
+      "response": 11
+    },
+    {
+      "compare": "/result/triangle_count",
+      "note": "mesh: a box is twelve triangles",
+      "request": {
+        "id": 25,
+        "jsonrpc": "2.0",
+        "method": "hew.query.mesh",
+        "params": {
+          "id": "obj_1"
+        }
+      },
+      "response": 12
+    },
+    {
+      "compare": "/error/data/refusal",
+      "note": "a definition member by bare id needs a path",
+      "request": {
+        "id": 26,
+        "jsonrpc": "2.0",
+        "method": "hew.query.part_frame",
+        "params": {
+          "id": "obj_a"
+        }
+      },
+      "response": "unknown_occurrence"
+    }
+  ],
+  "profile": "core"
+}

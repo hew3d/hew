@@ -11,7 +11,7 @@
 use super::camera::{RawCamera, parse_camera_or_view};
 use super::{CmdError, Ctx, Handler};
 use crate::Refusal;
-use crate::host::{DocFormat, ImportImage, ImportOptions, SaveOutcome, SnapshotParams};
+use crate::host::{DocFormat, Host, ImportImage, ImportOptions, SaveOutcome, SnapshotParams};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -26,6 +26,7 @@ pub fn handler(name: &str) -> Option<Handler> {
         "hew.doc.revert" => Some(revert_doc),
         "hew.doc.export" => Some(export_doc),
         "hew.doc.import" => Some(import_doc),
+        "hew.component.import_definition" => Some(import_definition),
         "hew.view.snapshot" => Some(snapshot),
         _ => None,
     }
@@ -59,8 +60,24 @@ enum WindowFocus {
 
 fn new_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let NewParams { .. } = parse(params)?;
-    ctx.host.new_document(ctx.doc).map_err(CmdError::Refusal)?;
+    replace_document(ctx, |host, doc| host.new_document(doc))?;
     Ok(document_result(ctx))
+}
+
+/// Runs a host's document replacement (`new`, `open`, `revert`) and starts
+/// the new document's epoch above the old one's, whatever the host, so a
+/// reader keyed on `epoch` never sees it go back (docs/agents/HEW_API.md
+/// §7).
+fn replace_document(
+    ctx: &mut Ctx,
+    replace: impl FnOnce(&mut dyn Host, &mut kernel::Document) -> Result<(), Refusal>,
+) -> Result<(), CmdError> {
+    let epoch = ctx.doc.document_epoch();
+    replace(ctx.host, ctx.doc).map_err(CmdError::Refusal)?;
+    ctx.doc.raise_document_epoch_to(epoch + 1);
+    // One `reset` record: everything since any generation is `full`.
+    ctx.doc.record_reset();
+    Ok(())
 }
 
 /// `{document: <the host's only/working document>}` — what a
@@ -88,9 +105,7 @@ struct OpenParams {
 
 fn open_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let OpenParams { path, .. } = parse(params)?;
-    ctx.host
-        .open_document(ctx.doc, &path)
-        .map_err(CmdError::Refusal)?;
+    replace_document(ctx, |host, doc| host.open_document(doc, &path))?;
     Ok(document_result(ctx))
 }
 
@@ -205,17 +220,27 @@ fn save_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             "`compat` applies to the 2021-and-later SketchUp container (format \"skp\")".into(),
         ));
     }
-    if return_bytes {
-        if path.is_some()
+    if return_bytes
+        && (path.is_some()
             || copy
             || format.is_some_and(DocFormat::is_skp)
             || units.is_some()
-            || compat
-        {
-            return Err(CmdError::Params(
-                "`return_bytes` hands back .hew bytes and takes no `path`, `copy`, SketchUp `format`, `units` or `compat`".into(),
-            ));
-        }
+            || compat)
+    {
+        return Err(CmdError::Params(
+            "`return_bytes` hands back .hew bytes and takes no `path`, `copy`, SketchUp `format`, `units` or `compat`".into(),
+        ));
+    }
+    // Every save mints the document id first, if the document has none
+    // (docs/dev/HEW_FILE_FORMAT.md §2 `document_id`): a `.hew` write
+    // carries it, and a SketchUp write, which has no slot for it, leaves
+    // it on the document so the next `.hew` save keeps the same id. A
+    // copy carries it too. An id never changes once minted, and a save the
+    // host refuses or fails keeps no freshly minted one (an errored
+    // envelope leaves the document untouched).
+    let random = ctx.host.random_16();
+    if return_bytes {
+        ctx.doc.ensure_document_id(random);
         return Ok(serde_json::json!({
             "bytes_base64": encode_base64(&ctx.doc.save_for_persistence()),
             "format": "hew",
@@ -225,15 +250,21 @@ fn save_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         let Some(path) = path else {
             return Err(CmdError::Params("`copy` needs a `path`".into()));
         };
+        let host = &mut *ctx.host;
         let outcome = ctx
-            .host
-            .save_copy(ctx.doc, &path, format, units.as_deref(), compat)
+            .doc
+            .with_document_id_for_save(random, |doc| {
+                host.save_copy(doc, &path, format, units.as_deref(), compat)
+            })
             .map_err(CmdError::Refusal)?;
         return Ok(outcome_fields(&outcome));
     }
+    let host = &mut *ctx.host;
     let outcome = ctx
-        .host
-        .save_document(ctx.doc, path.as_deref(), format, units.as_deref(), compat)
+        .doc
+        .with_document_id_for_save(random, |doc| {
+            host.save_document(doc, path.as_deref(), format, units.as_deref(), compat)
+        })
         .map_err(CmdError::Refusal)?;
     let mut out = outcome_fields(&outcome);
     // A host that wrote the file itself (`CliHost`) returns no bytes — the
@@ -281,9 +312,7 @@ fn revert_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     if ctx.doc.at_saved_mark() {
         return Err(nothing("the document has no changes since the last save"));
     }
-    ctx.host
-        .open_document(ctx.doc, &path)
-        .map_err(CmdError::Refusal)?;
+    replace_document(ctx, |host, doc| host.open_document(doc, &path))?;
     Ok(serde_json::json!({}))
 }
 
@@ -300,6 +329,9 @@ struct ExportParams {
     /// The display units a SketchUp file opens in; absent, the host's.
     #[serde(default)]
     units: Option<String>,
+    /// Export only these placements (or definitions at identity).
+    #[serde(default)]
+    selection: Option<Vec<Value>>,
     /// For `format: "skp"`: write revision 17 of the container (see
     /// `hew.doc.save`).
     #[serde(default)]
@@ -312,6 +344,7 @@ fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         path,
         segments_per_turn,
         units,
+        selection,
         compat,
     } = parse(params)?;
     if compat && format != "skp" {
@@ -327,6 +360,18 @@ fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             )));
         }
     }
+    validate_selection(&selection)?;
+    let selection = match &selection {
+        Some(list) => {
+            if DocFormat::skp_from_name(&format).is_some() {
+                return Err(CmdError::Params(
+                    "selection applies to the mesh formats (stl, 3mf, glb, gltf, usdz); a SketchUp export writes the whole document".into(),
+                ));
+            }
+            Some(crate::locate::resolve_render_roots(ctx, list)?)
+        }
+        None => None,
+    };
     let bytes = ctx
         .host
         .export_document(
@@ -335,6 +380,7 @@ fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             path.as_deref(),
             segments_per_turn.unwrap_or(0),
             units.as_deref(),
+            selection.as_deref(),
             compat,
         )
         .map_err(CmdError::Refusal)?;
@@ -433,6 +479,184 @@ fn import_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     Ok(serde_json::json!({ "report": report }))
 }
 
+// ------------------------------------------- hew.component.import_definition
+
+/// The most `hew.component.import_definition` accepts: the file's bytes
+/// plus every image's bytes. The live app records the whole command frame
+/// for replay, and its recording embeds no import over this size.
+const MAX_IMPORT_DEFINITION_BYTES: usize = 64 << 20;
+
+/// The longest definition name, in bytes.
+const MAX_DEFINITION_NAME_BYTES: usize = 128;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportDefinitionParams {
+    bytes_base64: String,
+    format: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    units: Option<String>,
+    #[serde(default)]
+    images: Option<std::collections::BTreeMap<String, ImportImageParam>>,
+}
+
+/// The exact decoded length a base64 string of `encoded_len` characters can
+/// reach (padding only lowers it), so the cap is checked before decoding.
+fn max_decoded_len(encoded_len: usize) -> usize {
+    encoded_len / 4 * 3
+}
+
+/// The reuse key of an imported definition: SHA-256 hex over everything
+/// that shapes the result: the format name, the units (an STL's scale), the
+/// file's bytes, and every image (uri, format, bytes) in uri order. Each
+/// field is length-prefixed so no two inputs share a stream. Different
+/// units or images are therefore a different definition; the same bytes
+/// read as another format never collide. Computed here so every host lands
+/// on one key.
+fn definition_content_hash(
+    format: &str,
+    units: Option<&str>,
+    bytes: &[u8],
+    images: &std::collections::BTreeMap<String, ImportImage>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    fn field(h: &mut Sha256, data: &[u8]) {
+        h.update((data.len() as u64).to_be_bytes());
+        h.update(data);
+    }
+    let mut h = Sha256::new();
+    field(&mut h, format.as_bytes());
+    field(&mut h, units.unwrap_or("").as_bytes());
+    field(&mut h, bytes);
+    h.update((images.len() as u64).to_be_bytes());
+    for (uri, image) in images {
+        field(&mut h, uri.as_bytes());
+        field(&mut h, image.format.as_deref().unwrap_or("").as_bytes());
+        field(&mut h, &image.bytes);
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn import_too_large(total: usize) -> CmdError {
+    CmdError::Refusal(Refusal::api(
+        "import_too_large",
+        &format!(
+            "That import is {total} bytes (file plus images); a definition import takes at most {MAX_IMPORT_DEFINITION_BYTES}."
+        ),
+    ))
+}
+
+fn import_definition(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let ImportDefinitionParams {
+        bytes_base64,
+        format,
+        name,
+        units,
+        images,
+    } = parse(params)?;
+    let format = format.to_ascii_lowercase();
+    match format.as_str() {
+        "hew" | "skp" | "glb" | "gltf" | "stl" | "dae" => {}
+        "png" | "jpg" | "jpeg" => {
+            return Err(CmdError::Refusal(Refusal::api(
+                "unsupported_for_definition",
+                "A picture is placed with hew.doc.import; it cannot become a component definition here.",
+            )));
+        }
+        other => {
+            return Err(CmdError::Params(format!(
+                "format must be one of hew, skp, glb, gltf, stl, dae; got \"{other}\""
+            )));
+        }
+    }
+    let name = match name {
+        Some(n) => {
+            let n = n.trim().to_string();
+            if n.len() > MAX_DEFINITION_NAME_BYTES || n.chars().any(char::is_control) {
+                return Err(CmdError::Params(format!(
+                    "name must be at most {MAX_DEFINITION_NAME_BYTES} bytes with no control characters"
+                )));
+            }
+            n
+        }
+        None => String::new(),
+    };
+    // The cap, on the encoded lengths, before any decode allocates.
+    let images = images.unwrap_or_default();
+    let encoded_total = images
+        .values()
+        .map(|i| i.bytes_base64.trim().len())
+        .fold(bytes_base64.trim().len(), usize::saturating_add);
+    if max_decoded_len(encoded_total) > MAX_IMPORT_DEFINITION_BYTES {
+        return Err(import_too_large(max_decoded_len(encoded_total)));
+    }
+    let bytes = decode_base64(&bytes_base64)
+        .ok_or_else(|| CmdError::Params("bytes_base64 is not valid base64".into()))?;
+    let mut decoded_images = std::collections::BTreeMap::new();
+    for (uri, image) in images {
+        let image_bytes = decode_base64(&image.bytes_base64).ok_or_else(|| {
+            CmdError::Params(format!("images[{uri}].bytes_base64 is not valid base64"))
+        })?;
+        decoded_images.insert(
+            uri,
+            ImportImage {
+                bytes: image_bytes,
+                format: image.format,
+            },
+        );
+    }
+    let total = decoded_images
+        .values()
+        .map(|i| i.bytes.len())
+        .fold(bytes.len(), usize::saturating_add);
+    if total > MAX_IMPORT_DEFINITION_BYTES {
+        return Err(import_too_large(total));
+    }
+    let hash = definition_content_hash(&format, units.as_deref(), &bytes, &decoded_images);
+    let provenance = kernel::LibraryProvenance {
+        source_id: format!("import:{hash}"),
+        content_hash: hash,
+    };
+    let item = if format == "hew" {
+        kernel::Document::load(&bytes).map_err(|e| {
+            CmdError::Refusal(Refusal::api(
+                "load_failed",
+                &format!("the bytes are not a valid .hew document: {e:?}"),
+            ))
+        })?
+    } else {
+        let options = ImportOptions {
+            units,
+            record: false,
+            images: decoded_images,
+            bytes: Some(bytes),
+            ..ImportOptions::default()
+        };
+        let mut scratch = kernel::Document::new();
+        ctx.host
+            .import_document(&mut scratch, &format!("import.{format}"), &options)
+            .map_err(CmdError::Refusal)?;
+        scratch
+    };
+    let name = if name.is_empty() { "Imported" } else { &name };
+    let (cid, reused, _) = ctx
+        .doc
+        .insert_as_definition(&item, Some(name), provenance)?;
+    let resolver = ctx.resolver();
+    let definition = resolver
+        .public_of(ctx.doc, &kernel::EntityRef::Component(cid))
+        .expect("just created or found");
+    let objects = ctx.doc.def_members(cid).map_or(0, |m| m.len());
+    let members = ctx.doc.def_member_nodes(cid).map_or(0, |m| m.len());
+    Ok(serde_json::json!({
+        "definition": definition,
+        "reused": reused,
+        "report": { "objects": objects, "members": members },
+    }))
+}
+
 // --------------------------------------------------------- hew.view.snapshot
 
 /// The wire shape of `hew.view.snapshot`'s params, before the validation
@@ -465,6 +689,10 @@ struct RawSnapshotParams {
     include_normals: Option<bool>,
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    selection: Option<Vec<Value>>,
+    #[serde(default)]
+    background: Option<String>,
 }
 
 /// `hew.view.snapshot`'s default and clamped size bounds
@@ -475,6 +703,48 @@ const SNAPSHOT_DEFAULT_SIZE: u32 = 512;
 const SNAPSHOT_MIN_SIZE: u32 = 16;
 const SNAPSHOT_MAX_SIZE: u32 = 2048;
 
+/// The fill of a snapshot's untouched pixels when `background` is absent
+/// (the software rasterizer's own backdrop).
+pub const DEFAULT_SNAPSHOT_BACKGROUND: [u8; 4] = [245, 246, 248, 255];
+
+/// The `selection` rule shared by `hew.doc.export`, `hew.view.snapshot`,
+/// and `hew.view.line_drawing`: when present, it names at least one
+/// entity. (What each entry resolves to is
+/// [`crate::locate::resolve_render_roots`].)
+pub(crate) fn validate_selection(selection: &Option<Vec<Value>>) -> Result<(), CmdError> {
+    match selection {
+        Some(list) if list.is_empty() => Err(CmdError::Params(
+            "selection must name at least one entity".to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// `background`: `"transparent"`, `#rrggbb`, or `#rrggbbaa` (hex digits in
+/// either case). Anything else, `#rgb` and color names included, is
+/// refused.
+pub(crate) fn parse_background(text: &str) -> Result<[u8; 4], CmdError> {
+    let bad = || {
+        CmdError::Params(
+            "background is \"transparent\" or a #rrggbb or #rrggbbaa color".to_string(),
+        )
+    };
+    if text == "transparent" {
+        return Ok([0, 0, 0, 0]);
+    }
+    let hex = text.strip_prefix('#').ok_or_else(bad)?;
+    if !matches!(hex.len(), 6 | 8) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(bad());
+    }
+    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| bad());
+    Ok([
+        byte(0)?,
+        byte(2)?,
+        byte(4)?,
+        if hex.len() == 8 { byte(6)? } else { 255 },
+    ])
+}
+
 fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let raw: RawSnapshotParams = parse(params)?;
     if raw.scene.is_some() && (raw.camera.is_some() || raw.view.is_some()) {
@@ -482,11 +752,26 @@ fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             "scene is mutually exclusive with camera and view".to_string(),
         ));
     }
+    if raw.selection.is_some() && raw.scene.is_some() {
+        return Err(CmdError::Params(
+            "selection is mutually exclusive with scene".to_string(),
+        ));
+    }
+    validate_selection(&raw.selection)?;
+    let background = match raw.background.as_deref() {
+        None => DEFAULT_SNAPSHOT_BACKGROUND,
+        Some(text) => parse_background(text)?,
+    };
     let (camera, view) = parse_camera_or_view(raw.camera, raw.view)?;
     let scene = raw
         .scene
         .as_deref()
         .map(super::scenes::resolve_scene_id)
+        .transpose()?;
+    let selection = raw
+        .selection
+        .as_deref()
+        .map(|list| crate::locate::resolve_render_roots(ctx, list))
         .transpose()?;
     let width = raw
         .width
@@ -524,6 +809,8 @@ fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         depth_bits,
         include_normals: raw.include_normals.unwrap_or(false),
         path: raw.path,
+        selection,
+        background,
     };
     let result = ctx
         .host
@@ -675,6 +962,24 @@ pub fn decode_base64(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_parses_transparent_and_hex_in_either_case() {
+        assert_eq!(parse_background("transparent").unwrap(), [0, 0, 0, 0]);
+        assert_eq!(
+            parse_background("#1A2B3C").unwrap(),
+            [0x1a, 0x2b, 0x3c, 255]
+        );
+        assert_eq!(
+            parse_background("#1a2b3c80").unwrap(),
+            [0x1a, 0x2b, 0x3c, 0x80]
+        );
+        for bad in [
+            "", "#", "#fff", "#12345", "#1234567", "#gg0000", "red", "1a2b3c",
+        ] {
+            assert!(parse_background(bad).is_err(), "{bad:?}");
+        }
+    }
 
     /// RFC 4648 §10's own test vectors.
     #[test]

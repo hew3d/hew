@@ -105,15 +105,16 @@ export default defineConfig(({ command }) => ({
         // Precache the app shell (js, css, html), icons, the Rust kernel WASM,
         // and the bundled sample models (.hew — the welcome screen fetches
         // them, so they must work offline too).
-        // The WASM chunk is typically ~700KB today; raise the ceiling to 10 MB so
-        // a future kernel growth never silently drops the WASM from the precache.
+        // The optimized WASM kernel is a little under 11 MB; the ceiling sits at
+        // 16 MB so kernel growth fails the build here rather than silently
+        // dropping the WASM from the precache.
         globPatterns: ['**/*.{js,css,html,wasm,png,svg,ico,hew}'],
         // Test lanes build against an unoptimized (--no-opt) kernel of ~18 MB
         // (the harness-enabled desktop build, VITE_HEW_TEST=1, or a lane that
         // sets HEW_UNOPTIMIZED_WASM=1) and are never shipped, so they get a
-        // larger ceiling; every shipped build keeps the 10 MB guard.
+        // larger ceiling; every shipped build keeps the 16 MB guard.
         maximumFileSizeToCacheInBytes:
-          (process.env.VITE_HEW_TEST === '1' || process.env.HEW_UNOPTIMIZED_WASM === '1' ? 64 : 10) * 1024 * 1024,
+          (process.env.VITE_HEW_TEST === '1' || process.env.HEW_UNOPTIMIZED_WASM === '1' ? 64 : 16) * 1024 * 1024,
         // The "Open on Phone" relay lives at <origin>/relay/ on the SAME
         // origin as this app (app/src/io/shareRelay.ts). Nothing there is
         // ever cacheable — a GET consumes the drop, a HEAD is a live poll —

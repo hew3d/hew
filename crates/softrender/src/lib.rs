@@ -376,6 +376,19 @@ pub fn render(
     width: u32,
     height: u32,
 ) -> Result<Rendered, RenderError> {
+    render_with_background(items, camera, width, height, BACKGROUND)
+}
+
+/// [`render`] with a chosen fill for untouched pixels. Only the color
+/// buffer sees `background`; the id buffer (0 = background), depth, and
+/// normals passes are unchanged.
+pub fn render_with_background(
+    items: &[RenderItem],
+    camera: &Camera,
+    width: u32,
+    height: u32,
+    background: [u8; 4],
+) -> Result<Rendered, RenderError> {
     if items.len() > u16::MAX as usize {
         // One past this and `palette.len() as u16` would wrap to the
         // background sentinel — refuse typed instead.
@@ -384,7 +397,7 @@ pub fn render(
     let n = (width as usize) * (height as usize);
     let mut rgba = Vec::with_capacity(n * 4);
     for _ in 0..n {
-        rgba.extend_from_slice(&BACKGROUND);
+        rgba.extend_from_slice(&background);
     }
     let mut depth = vec![f32::INFINITY; n];
     let mut surface_depth = vec![f32::INFINITY; n];
@@ -721,8 +734,16 @@ pub fn document_items_hiding(doc: &kernel::Document, hidden: &HiddenLeaves) -> V
         // Nested definitions expand recursively: every leaf placement
         // composes its def-local pose with this instance's own — still
         // tagged with the OUTERMOST instance's sid.
+        // Each leaf also carries the material its placements pass down
+        // (an unpainted member face shows the nearest painted placement).
         let shown = doc.expanded_def_placements_shown(def);
-        for ((member, local), shown) in doc.expanded_def_placements(def).into_iter().zip(shown) {
+        let inherited = doc.instance_expanded_inherited(instance);
+        for (((member, local), shown), inherited) in doc
+            .expanded_def_placements(def)
+            .into_iter()
+            .zip(shown)
+            .zip(inherited)
+        {
             // A user-hidden definition member is hidden in every instance
             // (the per-node flag's documented semantics), and so is one
             // under a hidden member or tag.
@@ -732,7 +753,7 @@ pub fn document_items_hiding(doc: &kernel::Document, hidden: &HiddenLeaves) -> V
             let Some(obj) = doc.object(member) else {
                 continue;
             };
-            let Ok(mesh) = tessellate::tessellate(obj, doc.materials()) else {
+            let Ok(mesh) = tessellate::tessellate_with(obj, doc.materials(), inherited) else {
                 continue;
             };
             items.push(DocumentItem {
@@ -743,6 +764,95 @@ pub fn document_items_hiding(doc: &kernel::Document, hidden: &HiddenLeaves) -> V
         }
     }
     items
+}
+
+/// The items a `selection` draws (`hew.view.line_drawing`'s `selection`):
+/// each root's visible leaf placements at their world poses — a
+/// definition root at the identity pose — minus anything `hidden` holds.
+/// A definition root ignores `hidden` (tags, instance visibility) and
+/// honors only its members' own user-hidden flags, as
+/// [`kernel::Document::definition_preview`] does.
+/// Segments report the outermost placement, as [`document_items_hiding`]'s
+/// do: the world instance a leaf sits under, else the leaf object itself,
+/// or the definition for a definition root. A leaf placement two roots
+/// reach (a group and one of its members, an id named twice) is drawn once.
+///
+/// # Errors
+/// [`kernel::DocumentError::TooManyOccurrences`] — a root holds more leaf
+/// placements than one occurrence walk lists.
+pub fn selection_items_hiding(
+    doc: &kernel::Document,
+    roots: &[kernel::RenderRoot],
+    hidden: &HiddenLeaves,
+) -> Result<Vec<DocumentItem>, kernel::DocumentError> {
+    let mut items = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for root in roots {
+        let marker = match root {
+            kernel::RenderRoot::Definition(def) => Some(*def),
+            kernel::RenderRoot::Occurrence(_) => None,
+        };
+        // A definition root shows what `Document::definition_preview`
+        // shows: tags and instance visibility are ignored, a member's own
+        // user-hidden flag (and its groups' and nested instances') is
+        // honored. An occurrence root follows `hidden`.
+        for (object, pose, path) in doc.render_root_leaves(root, marker.is_some())? {
+            if !seen.insert((marker, path.clone(), object)) {
+                continue;
+            }
+            let skipped = if marker.is_some() {
+                node_or_ancestor_hidden(doc, kernel::NodeId::Object(object))
+                    || path
+                        .iter()
+                        .any(|&i| doc.node_user_hidden(kernel::NodeId::Instance(i)))
+            } else {
+                hidden.objects.contains(&object)
+                    || path.first().is_some_and(|i| hidden.instances.contains(i))
+            };
+            if skipped {
+                continue;
+            }
+            let owner = match (root, path.first()) {
+                (kernel::RenderRoot::Definition(def), _) => kernel::EntityRef::Component(*def),
+                (_, Some(&i)) => kernel::EntityRef::Instance(i),
+                (_, None) => kernel::EntityRef::Object(object),
+            };
+            let Some(sid) = doc.sid_of(&owner) else {
+                continue;
+            };
+            let Some(obj) = doc.object(object) else {
+                continue;
+            };
+            let inherited = doc.inherited_material(&path);
+            let Ok(mesh) = tessellate::tessellate_with(obj, doc.materials(), inherited) else {
+                continue;
+            };
+            items.push(DocumentItem { mesh, pose, sid });
+        }
+    }
+    Ok(items)
+}
+
+/// The world-space bounds of `items`' vertices, or `None` when empty.
+pub fn items_bbox(items: &[DocumentItem]) -> Option<(Point3, Point3)> {
+    let mut acc: Option<(Point3, Point3)> = None;
+    for it in items {
+        for v in it.mesh.positions.chunks_exact(3) {
+            let p = it.pose.apply_point(Point3::new(
+                f64::from(v[0]),
+                f64::from(v[1]),
+                f64::from(v[2]),
+            ));
+            acc = Some(match acc {
+                None => (p, p),
+                Some((min, max)) => (
+                    Point3::new(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z)),
+                    Point3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z)),
+                ),
+            });
+        }
+    }
+    acc
 }
 
 /// The axis-aligned bounds of everything [`document_items`] would render
@@ -1004,7 +1114,7 @@ mod tests {
         assert_eq!(wide_pixels[j], 65_535);
     }
 
-    /// Decodes a gray PNG this crate's encoder wrote (stored deflate,
+    /// Decodes a gray PNG this crate's encoder wrote (deflate,
     /// filter 0) back into samples — enough to test what a viewer would see.
     fn decode_gray(png: &[u8], width: u32, height: u32, bits: u8) -> Vec<u16> {
         let mut i = 8;
@@ -1016,17 +1126,7 @@ mod tests {
             }
             i += 12 + len;
         }
-        let mut raw = Vec::new();
-        let mut z = &idat[2..]; // past the zlib header
-        loop {
-            let last = z[0] & 1 == 1;
-            let n = u16::from_le_bytes([z[1], z[2]]) as usize;
-            raw.extend_from_slice(&z[5..5 + n]);
-            z = &z[5 + n..];
-            if last {
-                break;
-            }
-        }
+        let raw = miniz_oxide::inflate::decompress_to_vec_zlib(&idat).expect("inflates");
         let bytes = if bits == 16 { 2 } else { 1 };
         let stride = width as usize * bytes;
         let mut out = Vec::new();
@@ -1272,6 +1372,46 @@ mod tests {
                 .any(|px| px == [EDGE_COLOR[0], EDGE_COLOR[1], EDGE_COLOR[2], 255]),
             "hard edges drawn"
         );
+    }
+
+    #[test]
+    fn a_transparent_background_leaves_the_shading_alone() {
+        let (mesh, _) = box_mesh();
+        let camera = Camera::standard_view(
+            StandardView::Iso,
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 1.0, 1.0)),
+        );
+        let item = RenderItem {
+            mesh: &mesh,
+            pose: Transform::IDENTITY,
+            sid: 42,
+        };
+        let opaque = render(&[item], &camera, 128, 128).expect("renders");
+        let item = RenderItem {
+            mesh: &mesh,
+            pose: Transform::IDENTITY,
+            sid: 42,
+        };
+        let clear =
+            render_with_background(&[item], &camera, 128, 128, [0, 0, 0, 0]).expect("renders");
+        assert_eq!(&clear.rgba[0..4], &[0, 0, 0, 0], "corner is transparent");
+        assert_eq!(clear.ids[0], 0, "the id buffer still reads background");
+        let c = (64 * 128 + 64) * 4;
+        assert_eq!(&clear.rgba[c..c + 4], &opaque.rgba[c..c + 4]);
+        assert_eq!(clear.ids, opaque.ids);
+        assert_eq!(clear.depth_image(8).png, opaque.depth_image(8).png);
+        assert_eq!(clear.normals_png(), opaque.normals_png());
+        // Every pixel the box touches is opaque; none is half-covered.
+        for (px, id) in clear.rgba.chunks_exact(4).zip(&clear.ids) {
+            assert_eq!(
+                px[3],
+                if *id == 0 && px == [0, 0, 0, 0] {
+                    0
+                } else {
+                    255
+                }
+            );
+        }
     }
 
     #[test]

@@ -76,6 +76,7 @@ fn imprint(doc: &mut Document, obj_sel: usize, face_sel: usize, shrink: f64) {
             loop_path,
             restore: None,
             curves: Vec::new(),
+            edge_attrs: Vec::new(),
         },
     );
 }

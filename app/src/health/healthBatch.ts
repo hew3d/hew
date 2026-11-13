@@ -16,6 +16,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { canCloseRow, type HealthFamilyGroup, type HealthGroup, type HealthRow } from './healthReport'
 import { SPLIT_PIECE_LEFT, batchToast, rowWarning, UNDO_LABEL, type KindKey } from './healthCopy'
 import { describedErrorCodes, kernelErrorMessage } from '../kernelErrors'
+import { parseDispatch } from '../api/dispatchResult'
 
 /** One repair: an API command on one object. */
 export interface BatchOp {
@@ -76,9 +77,11 @@ export function refusalReason(data: { explanation?: string; refusal?: string } |
 }
 
 function send(scene: WasmScene, conn: number, method: string, params: unknown): Reply {
-  const raw = scene.api_dispatch(conn, JSON.stringify({ jsonrpc: '2.0', id: ++frameId, method, params }))
-  if (raw === undefined) throw new Error(`${method} gave no reply`)
-  return JSON.parse(raw) as Reply
+  const result = parseDispatch(scene.api_dispatch(conn, JSON.stringify({ jsonrpc: '2.0', id: ++frameId, method, params })))
+  if (result.kind === 'none') throw new Error(`${method} gave no reply`)
+  // A health batch calls first-party commands only, which never forward.
+  if (result.kind === 'pending') throw new Error(`${method} was forwarded to a plugin`)
+  return JSON.parse(result.frame) as Reply
 }
 
 /**

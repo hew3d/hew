@@ -23,6 +23,7 @@ pub mod annotation;
 pub mod attr;
 pub mod axes;
 pub mod camera;
+pub mod changes;
 pub mod document;
 pub mod error;
 pub mod geo;
@@ -49,13 +50,17 @@ pub use annotation::{Anchor, Annotation, CapturedCurve, RadialKind};
 pub use attr::{AttrDict, AttrValue, AttrValueError};
 pub use axes::{AxesFrame, AxesFrameError};
 pub use camera::{CameraProjection, CameraState};
+pub use changes::{
+    AttrChange, AttrScope, CHANGE_RING_CAP, ChangeKind, ChangeRecord, ChangeRef, ChangeSet,
+};
 pub use document::{
-    AttrTarget, CellDecline, CellDeclineReason, CellOutcome, CellScope, CellSeed, ClosingEdge,
-    CompoundMeta, DocChange, DocTransaction, Document, DocumentError, DraftCurveRun, DraftEdge,
-    DraftRegion, DraftRegionWhy, DraftReport, DraftStore, DraftUnit, EntityRef, FollowMePath,
-    HistoryArg, HistoryEntries, HistoryEntryInfo, HistoryKind, HistoryOrigin, IngestJob,
-    IngestProgress, InsertOptions, InsertReport, LibraryProvenance, MAX_COMPONENT_DEPTH,
-    MaterialScope, NodeId, OpenEdges, PendingActionKind, PlaneListing, PlaneUnits, PurgeReport,
+    AttrTarget, Axis, CellDecline, CellDeclineReason, CellOutcome, CellScope, CellSeed,
+    ClosingEdge, CompoundMeta, CompoundOutcome, CompoundToken, DocChange, DocTransaction, Document,
+    DocumentError, DraftCurveRun, DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore,
+    DraftUnit, EntityRef, FollowMePath, HistoryArg, HistoryEntries, HistoryEntryInfo, HistoryKind,
+    HistoryOrigin, IngestJob, IngestProgress, InsertOptions, InsertReport, LibraryProvenance,
+    MAX_COMPONENT_DEPTH, MAX_OCCURRENCES, MaterialScope, NodeId, Occurrence, OpenEdges,
+    PendingActionKind, PlaneListing, PlaneUnits, PurgeReport, Remap, RenderRoot, WRAPPED_DEF_SID,
 };
 pub use error::TopologyError;
 pub use geo::{GeoReference, GeoReferenceError};
@@ -99,6 +104,6 @@ pub use sketch::{
     VertexMoved,
 };
 pub use style::{SectionLook, ViewStyle};
-pub use topo::{AnalyticRim, FaceAttrs, Object, SurfaceRef, WatertightState};
+pub use topo::{AnalyticRim, AttrSlot, FaceAttrs, Object, SurfaceRef, WatertightState};
 pub use transform::{Transform, TransformError};
 pub use unit_key::{SketchUnitKeys, chain_key, curve_key, edge_key, region_key};

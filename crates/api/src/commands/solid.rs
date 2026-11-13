@@ -247,8 +247,75 @@ pub(super) fn push_pull(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
         distance: f64,
     }
     let p: P = parse_params(params)?;
-    let face_ref = locate::resolve_face(ctx, &p.face)?;
+    let face = face_through_path(ctx, &p.face)?;
+    let face_ref = locate::resolve_face(ctx, &face)?;
     push_pull_face(ctx, face_ref, p.distance)
+}
+
+/// A face locator whose `object` is an occurrence locator
+/// `{ "path": [instance, …, object] }` (docs/agents/HEW_API.md §7,
+/// `hew.solid.push_pull`): the path names the member object, which the
+/// locator then addresses by its own id (`at` and `ray` stay in the
+/// object's own frame, as `hew.query.raycast` reports them). Refuses
+/// `explode_session_scope` while a definition on the path is open for
+/// editing. Any other locator passes through unchanged.
+fn face_through_path(ctx: &Ctx, face: &Value) -> Result<Value, CmdError> {
+    let Some(object) = face.get("object").filter(|o| o.is_object()) else {
+        return Ok(face.clone());
+    };
+    let occ = locate::resolve_occurrence_locator(ctx, object)?;
+    let NodeId::Object(id) = occ.node else {
+        return Err(CmdError::Params(
+            "a face locator's path must end at an object".into(),
+        ));
+    };
+    refuse_path_on_loan(ctx, &occ.path)?;
+    let mut out = face.clone();
+    out["object"] = Value::String(public_id_of(ctx, EntityRef::Object(id)));
+    Ok(out)
+}
+
+/// The on-loan refusal every path form makes before any kernel call: a
+/// definition on the path is open for editing, so its members are world
+/// nodes and the caller edits those instead.
+fn refuse_path_on_loan(ctx: &Ctx, path: &[kernel::InstanceId]) -> Result<(), CmdError> {
+    if ctx.doc.path_on_loan(path) {
+        return Err(DocumentError::ExplodeSessionScope.into());
+    }
+    Ok(())
+}
+
+/// One boolean or slice operand: a world node, or a definition member
+/// reached through a placement.
+enum Operand {
+    World(NodeId),
+    Member {
+        path: Vec<kernel::InstanceId>,
+        node: NodeId,
+    },
+}
+
+/// `id | { "path": [instance, …, node] }`. A path with no instance before
+/// its leaf is the leaf's world id.
+fn resolve_operand(ctx: &Ctx, v: &Value) -> Result<Operand, CmdError> {
+    if let Some(id) = v.as_str() {
+        return Ok(Operand::World(resolve_node(ctx, id)?));
+    }
+    let occ = locate::resolve_occurrence_locator(ctx, v)?;
+    Ok(if occ.owner_def.is_some() && !occ.path.is_empty() {
+        Operand::Member {
+            path: occ.path,
+            node: occ.node,
+        }
+    } else {
+        Operand::World(occ.node)
+    })
+}
+
+fn path_operand_rule() -> CmdError {
+    CmdError::Params(
+        "with a reached by a path, b must be a world object or a member of the same definition reached by the same path; a world a takes a world b".into(),
+    )
 }
 
 fn push_pull_face(
@@ -319,24 +386,45 @@ fn boolean_op(ctx: &mut Ctx, params: &Value, op: kernel::BooleanOp) -> Result<Va
     #[serde(deny_unknown_fields)]
     struct P {
         #[serde(default)]
-        a: Option<String>,
+        a: Option<Value>,
         #[serde(default)]
-        b: Option<String>,
+        b: Option<Value>,
         /// Every operand in order, two or more; replaces `a` and `b`.
         #[serde(default)]
-        operands: Vec<String>,
+        operands: Vec<Value>,
     }
     let p: P = parse_params(params)?;
-    let names: Vec<String> = if !p.operands.is_empty() {
+    let (pa, pb) = if !p.operands.is_empty() {
         if p.a.is_some() || p.b.is_some() {
             return Err(CmdError::Params(
                 "give either operands or a and b, not both".to_string(),
             ));
         }
-        p.operands
+        if p.operands.len() == 2 {
+            // Two operands are the two-operand call, with every rule it has.
+            let mut it = p.operands.into_iter();
+            (it.next().expect("two"), it.next().expect("two"))
+        } else {
+            // Three or more (or one, which the kernel refuses by name):
+            // world nodes only. A path operand is a rule of the two-operand
+            // call, and a placement among these refuses by the kernel's
+            // own name.
+            let nodes: Vec<NodeId> = p
+                .operands
+                .iter()
+                .map(|v| match v.as_str() {
+                    Some(id) => resolve_node(ctx, id),
+                    None => Err(CmdError::Params(
+                        "operands of three or more are world node ids; a path operand takes a and b".to_string(),
+                    )),
+                })
+                .collect::<Result<_, _>>()?;
+            let (result, _change) = ctx.doc.boolean_nodes_many(op, &nodes)?;
+            return Ok(serde_json::json!({ "result": public_id_of(ctx, node_entity(result)) }));
+        }
     } else {
         match (p.a, p.b) {
-            (Some(a), Some(b)) => vec![a, b],
+            (Some(a), Some(b)) => (a, b),
             _ => {
                 return Err(CmdError::Params(
                     "give a and b, or operands with two or more node ids".to_string(),
@@ -344,17 +432,121 @@ fn boolean_op(ctx: &mut Ctx, params: &Value, op: kernel::BooleanOp) -> Result<Va
             }
         }
     };
-    let nodes: Vec<NodeId> = names
-        .iter()
-        .map(|n| resolve_node(ctx, n))
-        .collect::<Result<_, _>>()?;
-    let (result, _change) = ctx.doc.boolean_nodes_many(op, &nodes)?;
-    let entity = match result {
+    // A transient cutter (Addendum B6): `b` as a `SolidSpec` prism or box,
+    // so a machining through a placement is one call with no temporary
+    // object.
+    if pb.get("prism").is_some() || pb.get("box").is_some() {
+        return subtract_transient(ctx, op, &pa, &pb);
+    }
+    let (a, b) = match (resolve_operand(ctx, &pa)?, resolve_operand(ctx, &pb)?) {
+        (Operand::World(a), Operand::World(b)) => (a, b),
+        (Operand::World(_), Operand::Member { .. }) => return Err(path_operand_rule()),
+        (Operand::Member { path, node, .. }, b) => {
+            return boolean_through_path(ctx, op, path, node, b);
+        }
+    };
+    let (result, _change) = ctx.doc.boolean_nodes(op, a, b)?;
+    Ok(serde_json::json!({ "result": public_id_of(ctx, node_entity(result)) }))
+}
+
+fn node_entity(node: NodeId) -> EntityRef {
+    match node {
         NodeId::Object(id) => EntityRef::Object(id),
         NodeId::Group(id) => EntityRef::Group(id),
         NodeId::Instance(id) => EntityRef::Instance(id),
+    }
+}
+
+/// A boolean whose `a` is a definition member reached by `path`
+/// (docs/agents/HEW_API.md §7): with `b` a member of the same definition by
+/// the same path, the boolean runs between the two members
+/// ([`kernel::Document::boolean_members_through_placement`]); with `b` a world object
+/// and `op` Subtract, the cutter maps into the definition through the
+/// path's pose and is consumed ([`kernel::Document::boolean_through_placement`]).
+/// Either way every placement shows the result. A union or intersect with
+/// a world `b` would move world material into a shared definition, which
+/// unlinking is for, so it refuses `-32602`.
+fn boolean_through_path(
+    ctx: &mut Ctx,
+    op: kernel::BooleanOp,
+    path: Vec<kernel::InstanceId>,
+    a: NodeId,
+    b: Operand,
+) -> Result<Value, CmdError> {
+    let NodeId::Object(host) = a else {
+        return Err(CmdError::Params(
+            "a reached by a path must be an object".into(),
+        ));
     };
-    Ok(serde_json::json!({ "result": public_id_of(ctx, entity) }))
+    refuse_path_on_loan(ctx, &path)?;
+    let result = match b {
+        Operand::Member {
+            path: b_path, node, ..
+        } => {
+            if b_path != path {
+                return Err(path_operand_rule());
+            }
+            let NodeId::Object(other) = node else {
+                return Err(CmdError::Params(
+                    "b reached by a path must be an object".into(),
+                ));
+            };
+            ctx.doc
+                .boolean_members_through_placement(&path, host, other, op)?
+                .0
+        }
+        Operand::World(NodeId::Object(tool)) => {
+            if op != kernel::BooleanOp::Subtract {
+                return Err(CmdError::Params(
+                    "through a path, a world b can only be subtracted; union and intersect take b as a member reached by the same path".into(),
+                ));
+            }
+            ctx.doc.boolean_through_placement(&path, host, tool, op)?.0
+        }
+        Operand::World(NodeId::Instance(_)) => {
+            return Err(DocumentError::BooleanOperandHasInstance.into());
+        }
+        Operand::World(NodeId::Group(_)) => {
+            return Err(CmdError::Params(
+                "with a reached by a path, a world b must be an object".into(),
+            ));
+        }
+    };
+    Ok(serde_json::json!({ "result": public_id_of(ctx, EntityRef::Object(result)) }))
+}
+
+/// `hew.solid.subtract` with `a` a definition member reached by a path and
+/// `b` a `SolidSpec` prism or box in world coordinates: the cutter is never
+/// a record, it maps into the definition through the path's pose, and every
+/// placement shows the cut ([`kernel::Document::subtract_solid_through_placement`]).
+/// A world `a`, or a union or intersect, refuses `-32602`.
+fn subtract_transient(
+    ctx: &mut Ctx,
+    op: kernel::BooleanOp,
+    a: &Value,
+    b: &Value,
+) -> Result<Value, CmdError> {
+    if op != kernel::BooleanOp::Subtract {
+        return Err(CmdError::Params(
+            "a prism or box b can only be subtracted".into(),
+        ));
+    }
+    let Operand::Member {
+        path,
+        node: NodeId::Object(host),
+    } = resolve_operand(ctx, a)?
+    else {
+        return Err(CmdError::Params(
+            "a prism or box b cuts a member reached by a path ending at an object; for a world a, extrude the cutter or use hew.compute.boolean".into(),
+        ));
+    };
+    refuse_path_on_loan(ctx, &path)?;
+    let cutter = crate::solid_spec::resolve_solid(ctx, b)?;
+    crate::solid_spec::check_compute_size(&[&cutter])?;
+    let (result, _change) = ctx
+        .doc
+        .subtract_solid_through_placement(&path, host, &cutter)?;
+    Ok(serde_json::json!({ "result": public_id_of(ctx, EntityRef::Object(result)) }))
 }
 
 pub(super) fn union(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -379,19 +571,40 @@ pub(super) fn slice(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct P {
-        object: String,
+        object: Value,
         plane: PlaneSpec,
     }
     let p: P = parse_params(params)?;
-    let Some(EntityRef::Object(object)) = ctx.resolver().resolve(&p.object) else {
-        return Err(unknown_entity(&p.object));
+    let target = match p.object.as_str() {
+        Some(id) => match ctx.resolver().resolve(id) {
+            Some(EntityRef::Object(object)) => Operand::World(NodeId::Object(object)),
+            _ => return Err(unknown_entity(id)),
+        },
+        None => resolve_operand(ctx, &p.object)?,
     };
     let origin = locate::resolve_point(ctx, &p.plane.origin)?;
     let normal = locate::parse_dir(&p.plane.normal)?;
     let plane = kernel::Plane::from_point_normal(origin, normal)
         .map_err(|_| CmdError::Params("degenerate plane normal".into()))?;
 
-    let ((positive, negative), _change) = ctx.doc.slice_node(object, &plane)?;
+    let ((positive, negative), _change) = match target {
+        Operand::World(NodeId::Object(object)) => ctx.doc.slice_node(object, &plane)?,
+        Operand::Member {
+            path,
+            node: NodeId::Object(object),
+            ..
+        } => {
+            // The plane is world space; the kernel maps it through the
+            // path's pose, and both pieces stay in the definition.
+            refuse_path_on_loan(ctx, &path)?;
+            ctx.doc.slice_through_placement(&path, object, &plane)?
+        }
+        _ => {
+            return Err(CmdError::Params(
+                "slice takes an object, by id or by a path ending at one".into(),
+            ));
+        }
+    };
     Ok(serde_json::json!({
         "positive": public_id_of(ctx, EntityRef::Object(positive)),
         "negative": public_id_of(ctx, EntityRef::Object(negative)),
@@ -1352,15 +1565,18 @@ pub(super) fn scale_imprint(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdE
         about: Value,
     }
     let p: P = parse_params(params)?;
-    if !p.factor.is_finite() || p.factor <= 0.0 {
+    if !p.factor.is_finite() || p.factor == 0.0 {
         return Err(CmdError::Params(
-            "scale factor must be finite and positive".into(),
+            "scale factor must be finite and nonzero".into(),
         ));
     }
     let about = locate::resolve_point(ctx, &p.about)?;
     let target = resolve_imprint(ctx, &p.imprint)?;
     // Uniform scale about `about`; the draft refuses `not_in_plane` when
-    // `about` is off the drawing plane (the result would leave it).
+    // `about` is off the drawing plane (the result would leave it). A
+    // negative factor is the point reflection through `about` scaled by
+    // |factor|, which in the plane is a half turn: the drawing is replayed
+    // where it lands, so its regions re-derive as drawn there.
     let s = Transform::scale(Vec3::new(p.factor, p.factor, p.factor));
     apply_transform(ctx, target, "Scale", about_point(about, &s))
 }

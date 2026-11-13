@@ -51,6 +51,7 @@ interface OpenStepProgress {
 import { TagsPanel } from './panels/TagsPanel'
 import { ComponentsPanel, PurgeUnusedButton } from './panels/ComponentsPanel'
 import { ConfirmDialog } from './panels/ConfirmDialog'
+import { BusyNotice } from './panels/BusyNotice'
 import { ScenesPanel, ScenesAddButton, useSceneRenameState } from './panels/ScenesPanel'
 import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
@@ -75,7 +76,9 @@ import { tagPathKey } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { installTestHarness, type PrintRecorder } from './test/harness'
-import { installLiveBridge, type LiveOpOutcome, type LiveOpRunner } from './api/liveBridge'
+import { installLiveBridge, type LiveBridgeDeps, type LiveOpOutcome, type LiveOpRunner } from './api/liveBridge'
+import { uiContextJson, uiIsolationJson, uiSelectionJson } from './api/viewMirror'
+import { pumpEvents } from './api/eventPump'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
 import { EDIT_CONTEXT_HINT_CODE } from './tools/faceDraw'
@@ -296,6 +299,8 @@ const OPEN_FILE_LABELS = {
 interface LoadedFile {
   name: string
   label: string
+  /** The file's path on the desktop, which `document_opened` reports. */
+  path?: string
 }
 
 /** Kernel memory this close to the 4 GiB a wasm32 kernel can address, when
@@ -583,7 +588,7 @@ export default function App() {
    *  Empty = nothing pushed past the session stack (or top level, if no
    *  session is open either). A group NodeRef is never pushed here anymore
    *  — a group entry always opens a session instead (`sessionStack` below). */
-  const [activeContext, setActiveContext] = useState<NodeRef[]>([])
+  const [activeContext, setActiveContextState] = useState<NodeRef[]>([])
   /** The open kernel session stack, outermost first — mirrors the
    *  viewport's own belief (`ViewportApi.sessionStack`), pushed up via
    *  `onSessionChange` on open, close, and every undo/redo resync. Each
@@ -979,6 +984,20 @@ export default function App() {
 
   // Stable ref to the Scene for undo/redo button state queries
   const sceneRef = useRef<Scene | null>(null)
+  /** The in-context entries, always current: `activeContext` above is the
+   *  render copy. Every change goes through `setActiveContext`, which keeps
+   *  this and the Scene's mirror (`Scene.set_ui_context`) in step in the
+   *  same synchronous call — so a bus-driven entry (`hew.view.enter`) whose
+   *  session opens and fallback push both land in one call stack reports
+   *  them in ONE `context_changed`, not a stack event now and a fallback
+   *  event a render later. */
+  const activeContextRef = useRef<NodeRef[]>([])
+  const setActiveContext = useCallback((next: NodeRef[] | ((prev: NodeRef[]) => NodeRef[])) => {
+    const value = typeof next === 'function' ? next(activeContextRef.current) : next
+    activeContextRef.current = value
+    setActiveContextState(value)
+    sceneRef.current?.set_ui_context(uiContextJson(value))
+  }, [])
   // Bytes of a fresh blank scene, captured once after kernel load, used for New.
   const blankBytesRef = useRef<Uint8Array | null>(null)
   // Stable file host instance.
@@ -1221,6 +1240,12 @@ export default function App() {
     const scene = sceneRef.current
     const session = docSessionRef.current
     if (scene === null || !session.dirty || !dirtySinceAutosaveRef.current) return
+    // A plugin command holds the document: snapshot it once the command
+    // has ended (or been cancelled), not halfway through.
+    if (scene.busy()) {
+      armAutosaveTick()
+      return
+    }
     // `Scene.save()` is transparent to an open explode session (it
     // serializes as-if-closed), so autosave needs no special-casing here.
     // Crash-recovered documents should reopen at the last view too —
@@ -1374,6 +1399,30 @@ export default function App() {
       invoke('set_document_dirty', { dirty: docSession.dirty }).catch(() => { /* older shell — ignore */ })
     }).catch(() => { /* ignore */ })
   }, [docSession.dirty])
+
+  // Tell the shell this document's persistent id (`document_id`, minted
+  // by the first save) — the live API's `hew.meta.documents`
+  // `document_id`. A save awaits it once the file has landed, before the
+  // save reports success, so a client that saves and then lists documents
+  // sees the id; it is also re-read after every session change (open,
+  // New, close) and right after a copy or a phone share mints one. Only a
+  // change is reported.
+  const lastReportedDocumentIdRef = useRef<string | null | undefined>(undefined)
+  const reportDocumentId = useCallback(async (): Promise<void> => {
+    if (!isTauri) return
+    const scene = sceneRef.current
+    if (scene === null) return
+    const id = scene.document_id() ?? null
+    if (lastReportedDocumentIdRef.current === id) return
+    lastReportedDocumentIdRef.current = id
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('set_document_id', { id })
+    } catch { /* older shell — ignore */ }
+  }, [])
+  useEffect(() => {
+    void reportDocumentId()
+  }, [docSession, reportDocumentId])
 
   // Warn before unload when there are unsaved changes. (The "also clear
   // the recovery snapshot on a CLEAN unload" half of this lives further
@@ -1538,6 +1587,14 @@ export default function App() {
     },
     [syncKernelHidden, handleWizardOverlay],
   )
+  /** The viewport's isolation targets changed: mirror them into the Scene,
+   *  where the bus's `hew.view.hidden` reads them. */
+  const handleIsolationTargetsChange = useCallback((targets: IsolationTarget[] | null) => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    scene.set_ui_isolation(uiIsolationJson(targets))
+    pumpEvents(scene)
+  }, [])
   const handleIsolate = useCallback(
     (targets: IsolationTarget[], opts?: { frame?: boolean }) => {
       panelOwnsIsolationRef.current = false
@@ -1546,6 +1603,8 @@ export default function App() {
     },
     [syncKernelHidden],
   )
+  const handleIsolateRef = useRef(handleIsolate)
+  handleIsolateRef.current = handleIsolate
   /** Model Health isolates its own row: the wizard's overlay and selection
    *  give way, and the panel's overlay draws. */
   const handlePanelIsolate = useCallback(
@@ -1606,6 +1665,16 @@ export default function App() {
     setSelectedGuide(null)
     if (id !== null) setSelectedIds([])
   }, [])
+  // The live bridge (installed once) reaches the selection handlers through
+  // refs, like the Outliner eye's `handleToggleHiddenRef`.
+  const handleSelectManyRef = useRef(handleSelectMany)
+  handleSelectManyRef.current = handleSelectMany
+  const handleSelectGuideRef = useRef(handleSelectGuide)
+  handleSelectGuideRef.current = handleSelectGuide
+  const handleSelectAnnotationRef = useRef(handleSelectAnnotation)
+  handleSelectAnnotationRef.current = handleSelectAnnotation
+  const handleSelectNoneRef = useRef(handleSelectNone)
+  handleSelectNoneRef.current = handleSelectNone
 
   /** The in-viewport annotation text editor's pending target — either an
    * existing annotation being edited (`id` set, double-click) or a
@@ -1757,7 +1826,7 @@ export default function App() {
    * non-contiguous breadcrumbs like "Model → Object 1" for a nested object
    * with no Group shown.
    */
-  const enterNode = useCallback((target: NodeRef) => {
+  const enterNode = useCallback((target: NodeRef, opts?: { keepFallback?: boolean }) => {
     const scene = sceneRef.current
     const api = viewportApi.current
     if (scene === null || api === null) return
@@ -1820,7 +1889,12 @@ export default function App() {
       nodeEq(openStack[common], framesChain[common])
     ) common++
 
-    setActiveContext([])
+    // A later step of a bus path keeps the fallback entries the earlier
+    // steps pushed: the path's instances that could not take a session stay
+    // in the chain, so the window ends inside the leaf with them beneath it.
+    // Only when the frames above them stay open, though; closing a session
+    // drops the context tail that sat inside it.
+    if (opts?.keepFallback !== true || openStack.length > common) setActiveContext([])
     for (let i = openStack.length; i > common; i--) {
       api.runCloseInnermostSession()
     }
@@ -1860,7 +1934,9 @@ export default function App() {
     // mid-gesture could re-home geometry the gesture still holds stale
     // handles into. Silently ignore, no toast.
     if (api?.hasArmedGesture()) return
-    const stackLen = sessionStack.length
+    // The synchronous ref, not the render copy: bus frames can land before
+    // the render that follows a session change.
+    const stackLen = prevSessionStackRef.current.length
     if (depth < stackLen) {
       setActiveContext([])
       setSelectedIds([])
@@ -1869,7 +1945,14 @@ export default function App() {
       setActiveContext((prev) => prev.slice(0, depth - stackLen))
       setSelectedIds([])
     }
-  }, [sessionStack])
+  }, [])
+
+  // The live bridge (installed once) reaches the entry convergence and the
+  // breadcrumb truncation through refs, like the selection handlers.
+  const enterNodeRef = useRef(enterNode)
+  enterNodeRef.current = enterNode
+  const setPathDepthRef = useRef(handleSetPathDepth)
+  setPathDepthRef.current = handleSetPathDepth
 
   /** The root "Model" breadcrumb crumb: exit everything — every open
    *  session frame, innermost-first, plus the object-context tail. */
@@ -1880,8 +1963,8 @@ export default function App() {
     if (api?.hasArmedGesture()) return
     setActiveContext([])
     setSelectedIds([])
-    for (let i = sessionStack.length; i > 0; i--) api?.runCloseInnermostSession()
-  }, [sessionStack])
+    for (let i = prevSessionStackRef.current.length; i > 0; i--) api?.runCloseInnermostSession()
+  }, [])
 
   // ---------------------------------------------------------------- scenes
   // The Scenes controller (docs/design/scenes.md §5): entries, active Scene,
@@ -1905,6 +1988,9 @@ export default function App() {
     // so this is a non-undoable-dirty reason, not a plain `afterMutation`.
     setDocSession((s) => markNonUndoableDirty(s, NON_UNDOABLE_REASON.scenesEdited, Date.now()))
     armAutosaveTick()
+    // A Scene edit records no history entry; `scenes_changed` is how a
+    // subscriber hears of it.
+    if (sceneRef.current !== null) pumpEvents(sceneRef.current)
   }, [armAutosaveTick])
   const scenesToast = useCallback((message: string) => handleToastRef.current?.(message), [])
   // A Scene's view style lands in the viewport the way a loaded
@@ -2012,6 +2098,9 @@ export default function App() {
       setDocSession((s) => afterMutation(s, Date.now(), atSavedMark))
       armAutosaveTick()
     }
+    // Every commit, undo, and redo reconciles here: subscribers hear of it
+    // (docs/agents/HEW_API.md §4.5).
+    if (sceneRef.current !== null) pumpEvents(sceneRef.current)
   }, [activeContext, trimContextPath, armAutosaveTick])
 
   /** Re-tessellate + re-render after a kernel mutation committed OUTSIDE a
@@ -2084,14 +2173,68 @@ export default function App() {
   // same way selectedIdsRef is.
   const hiddenKeysRef = useRef(hiddenKeys)
   hiddenKeysRef.current = hiddenKeys
+  // The hidden tag paths, read the same way. Both refs are also written the
+  // moment the hidden state is re-read from the document
+  // (`reseedHiddenStateFromScene`), so a reconcile in the same tick — a bus
+  // hide's re-seed then reconcile — works from the fresh sets, never the
+  // last render's.
+  const hiddenTagPathsRef = useRef(hiddenTagPaths)
+  hiddenTagPathsRef.current = hiddenTagPaths
   const handleToggleHiddenRef = useRef<(node: NodeRef) => void>(() => {})
   // applyLoadedBytes is defined further down (it depends on later state setters);
   // the harness installs once on mount, so reach it through a ref (kept current
   // below, beside that definition) like reconcileRef.
   const applyLoadedBytesRef = useRef<((bytes: Uint8Array, file?: LoadedFile) => boolean) | null>(null)
+  // The desktop half of `--live` (docs/agents/HEW_API.md §11.2) and the test
+  // harness's `apiDispatch` apply a dispatch through the same deps.
+  const liveOpRef = useRef<LiveOpRunner | null>(null)
+  // `pushCameraStateToScene` is defined further up the component; the
+  // bridge (installed once) reaches it through this ref.
+  const pushCameraStateRef = useRef<(scene: Scene) => void>(() => {})
+  const liveBridgeDepsRef = useRef<LiveBridgeDeps | null>(null)
+  liveBridgeDepsRef.current ??= {
+    pushCameraState: (scene) => pushCameraStateRef.current(scene),
+    runOp: (op, args) =>
+      liveOpRef.current !== null
+        ? liveOpRef.current(op, args)
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English (developer surface)
+        : Promise.resolve({ ok: false, refusal: 'window_not_ready', message: 'the window is still starting' }),
+    getScene: () => sceneRef.current,
+    getViewportApi: () => viewportApi.current,
+    reconcile: () => reconcileRef.current(),
+    // A live `hew.scenes.apply` drives the SAME activation path the Scenes
+    // tray uses (docs/design/scenes.md §7): the kernel state is already
+    // written by the time the directive arrives; this syncs panels, the
+    // renderer, and the camera exactly as a row click would.
+    activateScene: (sid) => scenesRef.current.activate(sid),
+    reconcileVisibility: () => reconcileVisibilityRef.current(),
+    // A live `hew.library.insert` of a material item: dirty for the same
+    // reason as the Library's own "Add to palette".
+    markLibraryMaterialsDirty: () =>
+      setDocSession((s) => markNonUndoableDirty(s, NON_UNDOABLE_REASON.libraryMaterials, Date.now())),
+    reseedViewState: () => {
+      const scene = sceneRef.current
+      if (scene !== null) reseedHiddenStateRef.current(scene)
+    },
+    // A bus `hew.selection.set`/`clear`: the merged selection, applied
+    // through the app's own selection handlers.
+    selectMany: (nodes, mode) => handleSelectManyRef.current(nodes, mode),
+    selectGuide: (id) => handleSelectGuideRef.current(id),
+    selectAnnotation: (id) => handleSelectAnnotationRef.current(id),
+    selectNone: () => handleSelectNoneRef.current(),
+    // A bus isolation is nobody's panel's: Model Health closing must not
+    // end it (`handleIsolate` hands ownership back to the app).
+    isolate: (targets, opts) => handleIsolateRef.current(targets, opts),
+    // A bus `hew.view.enter`/`exit`/`exit_all` drives the Outliner's own
+    // entry convergence and the breadcrumb's own truncation.
+    enterNode: (node, opts) => enterNodeRef.current(node, opts),
+    setPathDepth: (depth) => setPathDepthRef.current(depth),
+    contextDepth: () => prevSessionStackRef.current.length + activeContextRef.current.length,
+  }
   useEffect(() => {
     if (!(import.meta.env.DEV || import.meta.env.VITE_HEW_TEST === '1')) return
     return installTestHarness({
+      liveBridge: liveBridgeDepsRef.current ?? undefined,
       getScene: () => sceneRef.current,
       getViewportApi: () => viewportApi.current,
       isolate: (targets) => {
@@ -2119,6 +2262,10 @@ export default function App() {
       setPrintRecorder: (r) => {
         printRecorderRef.current = r
       },
+      reseedViewState: () => {
+        const scene = sceneRef.current
+        if (scene !== null) reseedHiddenStateRef.current(scene)
+      },
     })
   }, [])
 
@@ -2126,36 +2273,43 @@ export default function App() {
   // shell's local-socket JSON-RPC frames to this document's own live
   // Scene, exactly like installTestHarness above — a no-op outside Tauri
   // (isTauri gate lives inside installLiveBridge itself).
-  const liveOpRef = useRef<LiveOpRunner | null>(null)
-  // `pushCameraStateToScene` is defined further up the component; the
-  // bridge (installed once) reaches it through this ref.
-  const pushCameraStateRef = useRef<(scene: Scene) => void>(() => {})
   useEffect(() => {
     pushCameraStateRef.current = pushCameraStateToScene
   }, [pushCameraStateToScene])
   useEffect(() => {
-    return installLiveBridge({
-      pushCameraState: (scene) => pushCameraStateRef.current(scene),
-      runOp: (op, args) =>
-        liveOpRef.current !== null
-          ? liveOpRef.current(op, args)
-          // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English (developer surface)
-          : Promise.resolve({ ok: false, refusal: 'window_not_ready', message: 'the window is still starting' }),
-      getScene: () => sceneRef.current,
-      getViewportApi: () => viewportApi.current,
-      reconcile: () => reconcileRef.current(),
-      // A live `hew.scenes.apply` drives the SAME activation path the Scenes
-      // tray uses (docs/design/scenes.md §7): the kernel state is already
-      // written by the time the directive arrives; this syncs panels, the
-      // renderer, and the camera exactly as a row click would.
-      activateScene: (sid) => scenesRef.current.activate(sid),
-      reconcileVisibility: () => reconcileVisibilityRef.current(),
-      // A live `hew.library.insert` of a material item: dirty for the same
-      // reason as the Library's own "Add to palette".
-      markLibraryMaterialsDirty: () =>
-        setDocSession((s) => markNonUndoableDirty(s, NON_UNDOABLE_REASON.libraryMaterials, Date.now())),
-    })
+    const deps = liveBridgeDepsRef.current
+    if (deps === null) return
+    return installLiveBridge(deps)
   }, [])
+
+  // The bus reads the selection and the active tool from the Scene
+  // (docs/agents/HEW_API.md §7, "Selection and view state"): mirror both
+  // whenever they change, and pump, so `selection_changed` and
+  // `tool_changed` reach subscribers.
+  useEffect(() => {
+    const scene = state?.scene
+    if (scene === undefined) return
+    scene.set_ui_selection(uiSelectionJson(selectedIds, selectedGuide, selectedAnnotation))
+    pumpEvents(scene)
+  }, [state?.scene, selectedIds, selectedGuide, selectedAnnotation])
+  // The in-context entries: `setActiveContext` already mirrors every change
+  // into the Scene; this re-seeds a replaced Scene and pumps, so
+  // `context_changed` reaches subscribers when the user's own clicks (not a
+  // bus entry, which the bridge pumps) moved the entries.
+  useEffect(() => {
+    const scene = state?.scene
+    if (scene === undefined) return
+    // From the ref: a bus entry that landed after this render committed
+    // must not be overwritten by the render copy.
+    scene.set_ui_context(uiContextJson(activeContextRef.current))
+    pumpEvents(scene)
+  }, [state?.scene, activeContext])
+  useEffect(() => {
+    const scene = state?.scene
+    if (scene === undefined) return
+    scene.note_tool_changed(activeTool)
+    pumpEvents(scene)
+  }, [state?.scene, activeTool])
 
   const handleToast = useCallback((message: string, code?: string) => {
     // Severity lives beside the copy table in kernelErrors.ts (one source; a
@@ -2687,9 +2841,70 @@ export default function App() {
     }
   }, [showTray])
 
+  // ---------------------------------------------------------------- document lifecycle events
+  // Tells the Scene a lifecycle step for its next event drain
+  // (docs/agents/HEW_API.md §4.5): `document_will_save`, `_saved`,
+  // `_opened`, `_closed`. The path is the file's on the desktop (a web
+  // file handle has none to give); the caller pumps.
+  const noteDocumentEvent = useCallback(
+    (kind: 'will_save' | 'saved' | 'opened' | 'closed', title: string, ref: FileRef | null, format?: string) => {
+      const scene = sceneRef.current
+      if (scene === null) return
+      const path = typeof ref?.handle === 'string' ? ref.handle : undefined
+      scene.note_document_event(kind, title, path, format)
+    },
+    [],
+  )
+
+  // The display units live in Settings, not the document: mirror them into
+  // the Scene (what a live `.skp` export opens in, and `units_changed`).
+  useEffect(() => {
+    const scene = state?.scene
+    if (scene === undefined) return
+    const mirror = (): void => {
+      scene.set_display_units(getLengthUnit())
+      pumpEvents(scene)
+    }
+    mirror()
+    return subscribeLengthUnit(mirror)
+  }, [state?.scene])
+
+  // The page going away closes its document, for anyone still listening.
+  useEffect(() => {
+    const onPageHide = (): void => {
+      const scene = sceneRef.current
+      if (scene === null) return
+      noteDocumentEvent('closed', documentName(docSessionRef.current), docSessionRef.current.currentRef)
+      pumpEvents(scene)
+    }
+    window.addEventListener('pagehide', onPageHide)
+    return () => window.removeEventListener('pagehide', onPageHide)
+  }, [noteDocumentEvent])
+
   // ---------------------------------------------------------------- shared reset helper
   // Used by New, Open — loads bytes into the scene and resets all UI state.
-  const applyLoadedBytes = useCallback((bytes: Uint8Array, file?: LoadedFile, opts?: { keepCamera?: boolean }): boolean => {
+  // Seeds the app's hidden-state mirrors (hidden nodes, hidden tag paths)
+  // from the document's own registries, and with `push` sends them to the
+  // renderer and the kernel's pick/snap exclusion. What a load does, and
+  // what an aborted plugin command needs: its abort restores the whole
+  // document, view state included (docs/agents/PLUGINS.md "Compounds").
+  const reseedHiddenStateFromScene = useCallback(
+    (scene: Scene, push = true): { keys: Set<string>; tagPaths: Set<string> } => {
+      const keys = seedHiddenKeysFromRegistry(scene)
+      setHiddenKeys(keys)
+      hiddenKeysRef.current = keys
+      const tagPaths = seedHiddenTagPathsFromRegistry(scene)
+      setHiddenTagPaths(tagPaths)
+      hiddenTagPathsRef.current = tagPaths
+      if (push) pushUnionHiddenRef.current(keys, tagPaths)
+      return { keys, tagPaths }
+    },
+    [],
+  )
+  const reseedHiddenStateRef = useRef(reseedHiddenStateFromScene)
+  reseedHiddenStateRef.current = reseedHiddenStateFromScene
+
+  const applyLoadedBytes = useCallback((bytes: Uint8Array, file?: LoadedFile, opts?: { keepCamera?: boolean; announce?: boolean }): boolean => {
     const scene = sceneRef.current
     if (scene === null) return false
     // Revert to Saved reloads the document under the person's feet: the view
@@ -2710,6 +2925,18 @@ export default function App() {
     // the other ordering: a load that lands while the startup-handoff effect
     // is still awaiting its recovery check must also veto the offer it makes
     // at the end (the state setters alone can't — the later one wins).
+    // A document replaced in place: subscribers hear the old one closed
+    // and the new one opened (the reset follows in the same drain).
+    if (documentLoadedRef.current) noteDocumentEvent('closed', documentName(docSessionRef.current), docSessionRef.current.currentRef)
+    // A `.skp` open loads a blank first and announces the real document
+    // itself once the import finishes (`announce: false`).
+    if (opts?.announce !== false) {
+      noteDocumentEvent(
+        'opened',
+        file?.name ?? documentName(afterOpen(null, 0)),
+        file?.path === undefined ? null : { name: file.name, format: 'hew', handle: file.path },
+      )
+    }
     documentLoadedRef.current = true
     if (file !== undefined) clearOpenAttempt()
     else forgetSettledFailure()
@@ -2736,10 +2963,7 @@ export default function App() {
     // hidden .skp layers/nodes (or a re-opened .hew with tags/nodes previously
     // hidden via the eye toggle) must come up hidden on first render, not
     // visible.
-    const seededHiddenKeys = seedHiddenKeysFromRegistry(scene)
-    setHiddenKeys(seededHiddenKeys)
-    const seededHiddenTagPaths = seedHiddenTagPathsFromRegistry(scene)
-    setHiddenTagPaths(seededHiddenTagPaths)
+    const { keys: seededHiddenKeys, tagPaths: seededHiddenTagPaths } = reseedHiddenStateFromScene(scene, false)
     // Also clear the renderer's hidden set: it keys by dense ids that the new
     // document reuses, so stale ids would silently hide (and un-pick) unrelated
     // objects after a load. (No-op if the viewport isn't mounted yet.)
@@ -2826,8 +3050,9 @@ export default function App() {
         /* best-effort — placeholders are fine */
       }
     })()
+    pumpEvents(scene)
     return true
-  }, [handleToast])
+  }, [handleToast, reseedHiddenStateFromScene, noteDocumentEvent])
   // Keep the harness's Open path ( __hew_test.load) pointed at the latest
   // applyLoadedBytes closure.
   applyLoadedBytesRef.current = applyLoadedBytes
@@ -3135,11 +3360,7 @@ export default function App() {
     // document, so hidden-by-default tags/nodes (e.g. a hidden .skp layer or
     // hidden group/component) only show up now that scene.import_* has
     // registered them.
-    const seededHiddenKeys = seedHiddenKeysFromRegistry(scene)
-    setHiddenKeys(seededHiddenKeys)
-    const seededHiddenTagPaths = seedHiddenTagPathsFromRegistry(scene)
-    setHiddenTagPaths(seededHiddenTagPaths)
-    pushUnionHiddenRef.current(seededHiddenKeys, seededHiddenTagPaths)
+    reseedHiddenStateFromScene(scene)
 
     // Commit the session state.
     //
@@ -3155,7 +3376,7 @@ export default function App() {
       pick.kind === 'gltf' ? 'glTF' : pick.kind === 'skp' ? 'SKP' : pick.kind === 'stl' ? 'STL' : 'DAE'
     LogStore.log.info('app', `Imported ${fmt}: ${report.objects_created} objects (${importLogSplit(report.health.solids, report.health.flat_sheets + report.health.bent_sheets + report.health.cappable + report.health.holes + report.health.mixed + report.health.non_manifold)})`)
     requestAnimationFrame(() => { viewportApi.current?.zoomExtents() })
-  }, [handleToast, applyLoadedBytes, clearRecoverySnapshot, promptStlUnits])
+  }, [handleToast, applyLoadedBytes, clearRecoverySnapshot, promptStlUnits, reseedHiddenStateFromScene])
 
   // The ONE open-skp path: every route that opens a `.skp` as the document's
   // OWN file (File ▸ Open, Open Recent, drag-drop, argv / single-instance /
@@ -3223,7 +3444,7 @@ export default function App() {
     let report: ImportReport & { container: string; compat?: boolean }
     try {
       const discardsUnsaved = docSessionRef.current.dirty
-      if (!applyLoadedBytes(blank, undefined, { keepCamera: opts?.keepCamera })) {
+      if (!applyLoadedBytes(blank, undefined, { keepCamera: opts?.keepCamera, announce: false })) {
         clearOpenAttempt()
         settle()
         return false
@@ -3252,6 +3473,8 @@ export default function App() {
       // untitled document so the next Save can never write to a stale file
       // (same reasoning as runImportPick's catch).
       setDocSession(afterOpen(null, Date.now()))
+      noteDocumentEvent('opened', documentName(afterOpen(null, 0)), null)
+      pumpEvents(scene)
       settle()
       return false
     }
@@ -3266,15 +3489,14 @@ export default function App() {
       suppressDirtyRef.current = false
       settle()
     }
-    const seededHiddenKeys = seedHiddenKeysFromRegistry(scene)
-    setHiddenKeys(seededHiddenKeys)
-    const seededHiddenTagPaths = seedHiddenTagPathsFromRegistry(scene)
-    setHiddenTagPaths(seededHiddenTagPaths)
-    pushUnionHiddenRef.current(seededHiddenKeys, seededHiddenTagPaths)
+    reseedHiddenStateFromScene(scene)
 
     const format = normalizeDocFormat(report.container)
     skpCompatRef.current = report.compat === true
     setDocSession(afterOpen({ name: pick.name, format, handle: pick.handle ?? null }, Date.now()))
+    // The import is done: announce the real document, not the blank.
+    noteDocumentEvent('opened', pick.name, { name: pick.name, format, handle: pick.handle ?? null })
+    pumpEvents(scene)
     if (opts?.silentReport !== true) setImportReport(report)
     const kernelMemory = kernelMemoryBytes()
     LogStore.log.info('app', `Opened SKP: ${report.objects_created} objects (${importLogSplit(report.health.solids, report.health.flat_sheets + report.health.bent_sheets + report.health.cappable + report.health.holes + report.health.mixed + report.health.non_manifold)})${kernelMemory === null ? '' : `; kernel memory ${formatBytes(kernelMemory)}`}`)
@@ -3294,7 +3516,7 @@ export default function App() {
       void recordRecent(pick.bytes, pick.name, 'open', undefined, undefined, undefined, format)
     }
     return true
-  }, [handleToast, applyLoadedBytes, clearRecoverySnapshot])
+  }, [handleToast, applyLoadedBytes, clearRecoverySnapshot, reseedHiddenStateFromScene, noteDocumentEvent])
 
   // The unified Open dialog: ONE picker accepting `.hew` plus every import
   // format, dispatching on the extension the user picked (see
@@ -3361,7 +3583,11 @@ export default function App() {
 
       if (pick.kind === 'hew') {
         const discardsUnsaved = docSessionRef.current.dirty
-        const ok = applyLoadedBytes(pick.bytes, { name: pick.name, label: OPEN_FILE_LABELS.hew })
+        const ok = applyLoadedBytes(pick.bytes, {
+          name: pick.name,
+          label: OPEN_FILE_LABELS.hew,
+          path: typeof pick.handle === 'string' ? pick.handle : undefined,
+        })
         if (!ok) return
         setDocSession(afterOpen({ name: pick.name, format: 'hew', handle: pick.handle }, Date.now()))
         if (discardsUnsaved) void clearRecoverySnapshot()
@@ -3576,7 +3802,12 @@ export default function App() {
       // serializes as-if-closed, so saving mid-session needs no special
       // handling here (the session, and its dimming/scoping, is untouched).
       pushCameraStateToScene(scene)
+      // The first save mints the document's persistent id (a `.skp` save
+      // inside `save_skp`); a canceled save leaves it on the document.
+      scene.ensure_document_id()
       const undoDepthAtSave = scene.undo_depth()
+      noteDocumentEvent('will_save', documentName(docSessionRef.current), ref, ref.format)
+      pumpEvents(scene)
       try {
         // A `.skp` file saves in its own container — NEVER the `.hew` bytes
         // (they would corrupt the file). `save_skp` builds on the file the
@@ -3611,6 +3842,9 @@ export default function App() {
         // above were grabbed.
         const atSavedMark = markSavedIfUnmoved(scene, undoDepthAtSave)
         setDocSession(afterSave(newRef, Date.now(), atSavedMark))
+        await reportDocumentId()
+        noteDocumentEvent('saved', newRef.name, newRef, newRef.format)
+        pumpEvents(scene)
         LogStore.log.info('app', `Saved: ${newRef.name}`)
         // The work is now safely on disk — drop the autosave snapshot.
         void clearRecoverySnapshot()
@@ -3628,7 +3862,7 @@ export default function App() {
         return false
       }
     },
-    [handleToast, clearRecoverySnapshot, pushCameraStateToScene, noteSkpSimplified],
+    [handleToast, clearRecoverySnapshot, pushCameraStateToScene, noteSkpSimplified, noteDocumentEvent, reportDocumentId],
   )
 
   const saveDocument = useCallback(
@@ -3682,12 +3916,15 @@ export default function App() {
       compat = takesCompat(chosen.format) && chosen.compat
     }
     pushCameraStateToScene(scene)
+    scene.ensure_document_id()
     const undoDepthAtSave = scene.undo_depth()
     // When saving an imported model (currentRef=null, importedName set), suggest
     // the imported filename so the user sees a sensible default in the Save As
     // dialog — its known extension (.skp/.dae/…) swapped for the chosen
     // format's, never stacked (`Model.skp` suggests `Model.hew`).
     const suggestedName = nameForFormat(documentName(docSessionRef.current), format)
+    noteDocumentEvent('will_save', documentName(docSessionRef.current), null, format)
+    pumpEvents(scene)
     try {
       // `save_skp` builds on the document's source (if any) and stages the
       // written file as the next source; a canceled picker or failed write
@@ -3717,6 +3954,9 @@ export default function App() {
       skpSourceGenRef.current += 1
       const atSavedMark = markSavedIfUnmoved(scene, undoDepthAtSave)
       setDocSession(afterSave(newRef, Date.now(), atSavedMark))
+      await reportDocumentId()
+      noteDocumentEvent('saved', newRef.name, newRef, newRef.format)
+      pumpEvents(scene)
       LogStore.log.info('app', `Saved as: ${newRef.name}`)
       // The work is now safely on disk — drop the autosave snapshot.
       void clearRecoverySnapshot()
@@ -3733,7 +3973,7 @@ export default function App() {
       handleToast(t`Save As failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return false
     }
-  }, [docSession.currentRef, handleToast, clearRecoverySnapshot, pushCameraStateToScene, promptSaveFormat, noteSkpSimplified])
+  }, [docSession.currentRef, handleToast, clearRecoverySnapshot, pushCameraStateToScene, promptSaveFormat, noteSkpSimplified, noteDocumentEvent, reportDocumentId])
 
   // The loss notice's "Save a .hew copy": write the document as `.hew`
   // through the Save As picker WITHOUT rebinding — `currentRef` (and the
@@ -3742,6 +3982,8 @@ export default function App() {
     const scene = sceneRef.current
     if (scene === null) return
     pushCameraStateToScene(scene)
+    scene.ensure_document_id()
+    void reportDocumentId()
     const bytes = new Uint8Array(scene.save())
     const suggestedName = nameForFormat(documentName(docSessionRef.current), 'hew')
     try {
@@ -3754,7 +3996,7 @@ export default function App() {
     } catch (err: unknown) {
       handleToast(t`Save a .hew copy failed: ${ph({ reason: friendlyErrorText(err) })}`)
     }
-  }, [handleToast, pushCameraStateToScene])
+  }, [handleToast, pushCameraStateToScene, reportDocumentId])
 
   // ---------------------------------------------------------------- open by path (Tauri only)
   // Reads the file at `path` and applies it to the CURRENT window
@@ -3784,7 +4026,7 @@ export default function App() {
         const buf = await invoke<ArrayBuffer>('read_file', { path })
         const bytes = new Uint8Array(buf)
         const discardsUnsaved = docSessionRef.current.dirty
-        if (applyLoadedBytes(bytes, { name: basenameOf(path), label: OPEN_FILE_LABELS.hew })) {
+        if (applyLoadedBytes(bytes, { name: basenameOf(path), label: OPEN_FILE_LABELS.hew, path })) {
           landed = true
           setDocSession(afterOpen({ name: basenameOf(path), format: 'hew', handle: path }, Date.now()))
           if (discardsUnsaved) void clearRecoverySnapshot()
@@ -3891,7 +4133,11 @@ export default function App() {
       }
       landed = await runOpenSkp(scene, { name: ref.name, bytes, handle: ref.handle }, { keepCamera: true, silentReport: true })
     } else {
-      landed = applyLoadedBytes(bytes, { name: ref.name, label: OPEN_FILE_LABELS.hew }, { keepCamera: true })
+      landed = applyLoadedBytes(
+        bytes,
+        { name: ref.name, label: OPEN_FILE_LABELS.hew, path: typeof ref.handle === 'string' ? ref.handle : undefined },
+        { keepCamera: true },
+      )
       if (landed) setDocSession(afterOpen(ref, Date.now()))
     }
     if (!landed) return { ok: false, message: t`The saved file could not be loaded.`, shown: true }
@@ -4375,11 +4621,15 @@ export default function App() {
     const scene = sceneRef.current
     if (scene === null) return null
     pushCameraStateToScene(scene)
+    // A shared document carries its id, so Shop Mode's per-document state
+    // keys on the same identity as this one.
+    scene.ensure_document_id()
+    void reportDocumentId()
     const bytes = new Uint8Array(scene.save())
     // Always `.hew` bytes (a `.skp` document included), named `<base>.hew`.
     const name = nameForFormat(documentName(docSessionRef.current), 'hew')
     return { bytes, name }
-  }, [pushCameraStateToScene])
+  }, [pushCameraStateToScene, reportDocumentId])
 
   // File ▸ Open on Phone… is disabled on an empty document (nothing worth
   // sharing) — re-derived on every `docRev` bump (the same "something in
@@ -4713,6 +4963,7 @@ export default function App() {
             if (writeThrough) {
               // Camera-state parity with every other save path.
               pushCameraStateToScene(scene)
+              scene.ensure_document_id()
               const docBytes = new Uint8Array(scene.save())
               const newRef = await fileHostRef.current.save(docBytes, ref)
               if (newRef !== null) {
@@ -5150,6 +5401,12 @@ export default function App() {
   /* oxlint-disable lingui/no-unlocalized-strings -- live-API refusal messages are a developer surface, English */
   useEffect(() => {
     liveOpRef.current = async (op, args): Promise<LiveOpOutcome> => {
+      // A plugin command holds the document: saving would write it half
+      // done, and open, revert, and close would replace it under the
+      // command (docs/agents/PLUGINS.md "Compounds").
+      if ((op === 'save' || op === 'open' || op === 'revert' || op === 'close') && sceneRef.current?.busy()) {
+        return { ok: false, refusal: 'document_busy', message: 'a plugin command is running on this document' }
+      }
       if (op === 'save') {
         // `hew.doc.save`: a named path saves (and rebinds) there; none
         // re-saves in place (the shell only asks when the document has a file).
@@ -5194,9 +5451,13 @@ export default function App() {
           if (scene === null) return { ok: false, refusal: 'save_failed', message: 'not ready' }
           pushCameraStateToScene(scene)
           try {
+            // A copy carries the document's id (minted here if this is the
+            // first write; `save_skp` mints its own).
+            if (!isSkpFormat(ref.format)) scene.ensure_document_id()
             const bytes = isSkpFormat(ref.format)
               ? (scene.save_skp(skpTarget(ref.format), units ?? getLengthUnit(), units !== undefined, takesCompat(ref.format) && (args.compat === true || (args.format === undefined && skpCompatRef.current))) as SkpWrite).bytes
               : new Uint8Array(scene.save())
+            void reportDocumentId()
             await fileHostRef.current.save(bytes, ref)
             return { ok: true }
           } catch (err) {
@@ -5263,7 +5524,7 @@ export default function App() {
       }
       return { ok: false, refusal: 'host_capability_missing', message: `unknown operation ${op}` }
     }
-  }, [openPathInPlace, clearRecoverySnapshot, saveToRef, docSession.currentRef, pushCameraStateToScene, revertToSaved])
+  }, [openPathInPlace, clearRecoverySnapshot, saveToRef, docSession.currentRef, pushCameraStateToScene, revertToSaved, reportDocumentId])
   /* oxlint-enable lingui/no-unlocalized-strings */
 
   // ---------------------------------------------------------------- native menu-action dispatch
@@ -5477,6 +5738,20 @@ export default function App() {
 
   const menuActionRef = useRef<(payload: string) => void>(() => {})
   menuActionRef.current = (payload: string) => {
+    // A plugin command holds the document (docs/agents/PLUGINS.md
+    // "Compounds"): only window focus, settings, updates, and help run.
+    // The palette's actions come through here too.
+    if (
+      sceneRef.current?.busy() &&
+      !(
+        payload.startsWith('win-focus:') ||
+        payload === 'app-settings' ||
+        payload === 'app-check-updates' ||
+        payload.startsWith('help-')
+      )
+    ) {
+      return
+    }
     // Palette "jump" entries (dynamic Model group) carry their target in the
     // id. Nodes: select + reveal in the Outliner/Object Info (the tree
     // scrolls its primary selection into view). Tags: reveal + flash in the
@@ -6230,6 +6505,11 @@ export default function App() {
     isMac,
     nativeMenu: isTauri && isMac,
     run: (id) => {
+      // A plugin command holds the document (docs/agents/PLUGINS.md
+      // "Compounds"): no shortcut acts on it, a tool's key included. The
+      // chord was already swallowed, so the browser does not act on it
+      // either.
+      if (sceneRef.current?.busy()) return
       // A tool's key restarts the tool even when it is already active
       // (SketchUp's habit): it drops a sticky idle plane lock or a half-made
       // gesture. A tool mid-measurement keeps its letters through
@@ -6247,8 +6527,14 @@ export default function App() {
   useEffect(() => {
     viewportApi.current?.setAxesVisible(showAxes)
     // A document with a view style records the choice (a save back to its
-    // `.skp` writes it); one without keeps none.
-    sceneRef.current?.set_view_style_axes(showAxes)
+    // `.skp` writes it); one without keeps none. While a plugin command
+    // holds the document the kernel refuses the write (DocumentBusy); the
+    // viewport still follows the toggle.
+    try {
+      sceneRef.current?.set_view_style_axes(showAxes)
+    } catch (err) {
+      if (!String(err).startsWith('DocumentBusy')) throw err
+    }
   }, [showAxes])
   useEffect(() => { viewportApi.current?.setGridVisible(showGrid) }, [showGrid])
   useEffect(() => { viewportApi.current?.setRenderMode(renderMode) }, [renderMode])
@@ -6585,13 +6871,18 @@ export default function App() {
   const reconcileVisibility = useCallback(() => {
     const scene = sceneRef.current
     if (scene === null) return
+    // The latest sets, not this render's: a re-seed earlier in the same tick
+    // (a bus hide) has already replaced them.
+    const keys = hiddenKeysRef.current
+    const tagPaths = hiddenTagPathsRef.current
     const seeded = seedHiddenTagPathsFromRegistry(scene)
-    if (seeded.size === 0 && hiddenTagPaths.size === 0 && hiddenKeys.size === 0) return
-    if (seeded.size !== hiddenTagPaths.size || [...seeded].some((p) => !hiddenTagPaths.has(p))) {
+    if (seeded.size === 0 && tagPaths.size === 0 && keys.size === 0) return
+    if (seeded.size !== tagPaths.size || [...seeded].some((p) => !tagPaths.has(p))) {
       setHiddenTagPaths(seeded)
+      hiddenTagPathsRef.current = seeded
     }
-    pushUnionHidden(hiddenKeys, seeded, { onlyIfChanged: true })
-  }, [hiddenKeys, hiddenTagPaths, pushUnionHidden])
+    pushUnionHidden(keys, seeded, { onlyIfChanged: true })
+  }, [pushUnionHidden])
   reconcileVisibilityRef.current = reconcileVisibility
 
   const handleObjectInfoTagsChanged = useCallback(() => {
@@ -7066,7 +7357,12 @@ export default function App() {
         showAxes={showAxes}
         showGrid={showGrid}
         showGuides={showGuides}
-        onToggleAxes={() => setShowAxes((v) => !v)}
+        onToggleAxes={() => {
+          // The axes flag is recorded in the document's view style, which a
+          // running plugin command holds (docs/agents/PLUGINS.md "Compounds").
+          if (sceneRef.current?.busy()) return
+          setShowAxes((v) => !v)
+        }}
         onResetAxes={() => menuActionRef.current('reset-axes')}
         onToggleGrid={() => setShowGrid((v) => !v)}
         xray={xrayOn}
@@ -7234,6 +7530,7 @@ export default function App() {
             onEnterContext={handleEnterContext}
             onExitContext={handleExitContext}
             onIsolationChange={handleIsolationChange}
+            onIsolationTargetsChange={handleIsolationTargetsChange}
             onExitAllContexts={handleExitAllContexts}
             onSessionChange={handleSessionChange}
             onDocumentChanged={handleDocumentChanged}
@@ -7466,6 +7763,9 @@ export default function App() {
             />
           </div>
           )}
+
+          {/* A plugin command's progress notice, with Cancel. */}
+          <BusyNotice />
 
           {/* Toast stack — positioned inside the viewport container. */}
           <div

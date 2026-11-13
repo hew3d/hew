@@ -41,6 +41,20 @@ const menubar = () => within(screen.getByTestId('menu-bar'))
 // A minimal mock Scene sufficient for App to start and render its full UI.
 // Shared across all tests in this file; vi.clearAllMocks() resets call counts.
 const mockScene = {
+  // Events (docs/agents/HEW_API.md §4.5): the units mirror and the
+  // document lifecycle notes.
+  set_display_units: vi.fn(),
+  // Selection and view state (docs/agents/HEW_API.md §7): the mirrors the
+  // bus reads.
+  set_ui_selection: vi.fn(),
+  set_ui_isolation: vi.fn(),
+  set_ui_context: vi.fn(),
+  set_ui_gesture_armed: vi.fn(),
+  note_tool_changed: vi.fn(),
+  note_document_event: vi.fn(),
+  document_id: vi.fn(() => undefined),
+  ensure_document_id: vi.fn(() => '00000000-0000-4000-8000-000000000000'),
+  busy: () => false,
   object_ids: () => new BigUint64Array(),
   group_ids: () => new BigUint64Array(),
   instance_ids: () => new BigUint64Array(),
@@ -91,7 +105,7 @@ const mockScene = {
   set_camera_state: vi.fn(),
   view_style_json: () => undefined,
   set_view_style_axes: vi.fn(),
-  node_parent: () => undefined as bigint | undefined,
+  node_parent: (_kind: number, _id: bigint) => undefined as bigint | undefined,
   material_ids: () => new BigUint64Array(),
   material_info: () => undefined,
   material_texture_bytes: () => undefined,
@@ -116,6 +130,7 @@ const mockScene = {
   // Object Info's Materials row: nothing painted by default.
   object_materials: () => new BigUint64Array(),
   instance_expanded_members: () => new BigUint64Array(),
+  instance_expanded_inherited: () => new BigUint64Array(),
   set_hidden: vi.fn(),
   group_members: () => [] as { kind: string; id: bigint }[],
   component_name: () => undefined as string | undefined,
@@ -201,6 +216,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: tauriCore.invoke }))
 // runner App hands it, so a test can drive a live `revert` the way the shell does.
 const liveBridge = vi.hoisted(() => ({
   runOp: null as null | ((op: string, args: Record<string, unknown>) => Promise<{ ok: boolean; refusal?: string; message?: string }>),
+  deps: null as unknown,
 }))
 vi.mock('./api/liveBridge', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api/liveBridge')>()
@@ -208,6 +224,7 @@ vi.mock('./api/liveBridge', async (importOriginal) => {
     ...actual,
     installLiveBridge: vi.fn((deps: { runOp?: typeof liveBridge.runOp }) => {
       liveBridge.runOp = deps.runOp ?? null
+      liveBridge.deps = deps
       return () => {}
     }),
   }
@@ -318,6 +335,93 @@ async function renderAndLoad() {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe('App — the bus view mirrors', () => {
+  it('selection effect mirrors into the scene', async () => {
+    vi.clearAllMocks()
+    await renderAndLoad()
+    // Mount mirrors the empty selection and the active tool.
+    expect(mockScene.set_ui_selection).toHaveBeenLastCalledWith('[]')
+    expect(mockScene.note_tool_changed).toHaveBeenLastCalledWith('Select')
+    const props = (): {
+      onSelectMany: (nodes: { kind: string; id: bigint }[], mode: string) => void
+    } => {
+      const calls = vi.mocked(Viewport).mock.calls
+      return calls[calls.length - 1][0] as never
+    }
+    act(() => {
+      props().onSelectMany(
+        [
+          { kind: 'object', id: 4n },
+          { kind: 'instance', id: 9007199254740993n },
+        ],
+        'replace',
+      )
+    })
+    await waitFor(() =>
+      expect(mockScene.set_ui_selection).toHaveBeenLastCalledWith(
+        '[{"kind":"object","id":"4"},{"kind":"instance","id":"9007199254740993"}]',
+      ),
+    )
+    // Clearing the selection mirrors an empty one.
+    act(() => {
+      props().onSelectMany([], 'replace')
+    })
+    await waitFor(() => expect(mockScene.set_ui_selection).toHaveBeenLastCalledWith('[]'))
+  })
+})
+
+describe('App — a bus hide re-reads the hidden state', () => {
+  afterEach(() => {
+    vi.mocked(Viewport).mockImplementation((() => null) as never)
+    mockScene.user_hidden_kinds = () => new Uint8Array()
+    mockScene.user_hidden_ids = () => new BigUint64Array()
+  })
+
+  it('hidden_changed with something already hidden pushes the fresh set, not the last render\'s', async () => {
+    vi.clearAllMocks()
+    // A viewport that remembers what it was told to hide.
+    let hidden: { objects: bigint[]; instances: bigint[] } = { objects: [], instances: [] }
+    const setHidden = vi.fn((objects: bigint[], instances: bigint[]) => {
+      hidden = { objects: [...objects], instances: [...instances] }
+    })
+    const api: Record<string, unknown> = {
+      setHidden,
+      getHiddenIds: () => hidden,
+      getEffectiveHiddenIds: () => hidden,
+    }
+    const proxy = new Proxy(api, {
+      get: (t, k) => {
+        if (typeof k === 'string' && !(k in t)) t[k] = vi.fn()
+        return t[k as string]
+      },
+    })
+    vi.mocked(Viewport).mockImplementation(((props: { apiRef?: { current: unknown } }) => {
+      if (props.apiRef !== undefined) props.apiRef.current = proxy
+      return null
+    }) as never)
+    await renderAndLoad()
+    const { applyPendingViewDirectives, directiveTargets } = await import('./api/liveBridge')
+    const deps = liveBridge.deps as Parameters<typeof directiveTargets>[0]
+    const busHide = (ids: bigint[]) => {
+      mockScene.user_hidden_kinds = () => new Uint8Array(ids.length)
+      mockScene.user_hidden_ids = () => BigUint64Array.from(ids)
+      // The bridge's `hidden_changed` arm: re-seed, then reconcile, in one tick.
+      act(() => {
+        applyPendingViewDirectives('[{"kind":"hidden_changed"}]', directiveTargets(deps))
+      })
+    }
+    // obj 1 is hidden already (say through the Outliner), then a bus hide
+    // adds obj 2: both stay hidden.
+    busHide([1n])
+    expect(hidden.objects).toEqual([1n])
+    busHide([1n, 2n])
+    expect([...hidden.objects].sort()).toEqual([1n, 2n])
+    // A bus show of obj 1: only obj 2 stays hidden.
+    busHide([2n])
+    expect(hidden.objects).toEqual([2n])
+  })
+})
 
 describe('App — loading state', () => {
   it('shows "Loading kernel…" before the kernel resolves', () => {
@@ -2360,6 +2464,23 @@ describe('App — unified Open dialog', () => {
         expect(screen.queryByRole('dialog', { name: 'Open report' })).not.toBeInTheDocument()
       })
 
+      it('announces the opened .skp once, with its name and path, not the blank placeholder', async () => {
+        vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
+          kind: 'skp',
+          name: 'house.skp',
+          bytes: new Uint8Array([8, 8]),
+          handle: '/tmp/house.skp',
+        })
+        await renderAndLoad()
+        vi.mocked(mockScene.note_document_event).mockClear()
+        triggerOpen()
+        await screen.findByRole('dialog', { name: 'Open report' })
+        const opened = vi
+          .mocked(mockScene.note_document_event)
+          .mock.calls.filter(([kind]) => kind === 'opened')
+        expect(opened).toEqual([['opened', 'house.skp', '/tmp/house.skp', undefined]])
+      })
+
       it('refuses with a toast while another .skp open is still stepping', async () => {
         vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
           kind: 'skp',
@@ -2595,6 +2716,14 @@ describe('App — unified Open dialog', () => {
           expect(tauriCore.invoke).toHaveBeenCalledWith('push_recent', { path: '/tmp/my-house.hew' }),
         )
         expect(recoveryState.clear).toHaveBeenCalled()
+        // The replacement is announced with the file's path, like the
+        // `document_closed` before it.
+        expect(mockScene.note_document_event).toHaveBeenCalledWith(
+          'opened',
+          'my-house.hew',
+          '/tmp/my-house.hew',
+          undefined,
+        )
       })
     })
 
@@ -4228,6 +4357,8 @@ describe('App — the native save panel chooses the format', () => {
     expect(savePanel.pickSaveTarget).toHaveBeenCalledWith('Save As', expect.any(String), savePanel.savePanelFormats('hew', false), 'hew')
     expect((mockScene as Record<string, unknown>).save_skp).toHaveBeenCalledWith('skp2017', expect.any(String), undefined, false)
     expect(fakeFileHost.writeTo).toHaveBeenCalledWith('/tmp/m.skp', written, 'skp2017')
+    // A save mints the document's persistent id before writing.
+    expect(mockScene.ensure_document_id).toHaveBeenCalled()
     // No in-app format step, no second picker.
     expect(screen.queryByRole('dialog', { name: /^save as$/i })).not.toBeInTheDocument()
     expect(fakeFileHost.saveAs).not.toHaveBeenCalled()
@@ -4399,5 +4530,273 @@ describe('App — revealInTray (Object Info tag chips and Materials row)', () =>
     // Selecting here does not switch tools the way picking in the palette does.
     expect(screen.getByTitle('Rectangle (R)')).toBeInTheDocument()
     expect(vi.mocked(Viewport).mock.calls.at(-1)?.[0]).toMatchObject({ activeTool: 'Select' })
+  })
+})
+
+describe('App — the bus enters and leaves the user context (hew.view.enter / exit / exit_all)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    Element.prototype.scrollIntoView = vi.fn()
+  })
+
+  function latestViewportProps(): {
+    onSessionChange?: (frames: { node: { kind: string; id: bigint }; label: string }[]) => void
+    onEnterContext?: (node: { kind: string; id: bigint }) => void
+    apiRef?: { current: Record<string, unknown> | null }
+  } {
+    const calls = vi.mocked(Viewport).mock.calls
+    return calls[calls.length - 1][0] as never
+  }
+
+  /** Applies directives the way the live bridge does after a dispatch. */
+  async function applyDirectives(json: string): Promise<void> {
+    const { applyPendingViewDirectives, directiveTargets } = await import('./api/liveBridge')
+    const deps = liveBridge.deps as Parameters<typeof directiveTargets>[0]
+    act(() => {
+      applyPendingViewDirectives(json, directiveTargets(deps))
+    })
+  }
+
+  /** Applies several directive batches back to back in ONE act(), so no
+   *  render runs between them: the bridge does not flush React between two
+   *  websocket frames either. */
+  async function applyDirectivesUnflushed(jsons: string[]): Promise<void> {
+    const { applyPendingViewDirectives, directiveTargets } = await import('./api/liveBridge')
+    const deps = liveBridge.deps as Parameters<typeof directiveTargets>[0]
+    act(() => {
+      for (const json of jsons) applyPendingViewDirectives(json, directiveTargets(deps))
+    })
+  }
+
+  /** A viewport API whose sessions are real enough to follow: `open` and
+   *  `close` keep a stack the way the kernel's would and report it through
+   *  `onSessionChange`, as the real Viewport does. */
+  function sessionViewport(opts: { armed?: boolean } = {}) {
+    let armed = opts.armed === true
+    let stack: { kind: string; id: bigint }[] = []
+    const report = () => {
+      latestViewportProps().onSessionChange?.(
+        stack.map((node) => ({ node, label: `${node.kind} ${node.id}` })),
+      )
+    }
+    const runOpenGroupSession = vi.fn((id: bigint) => {
+      stack = [...stack, { kind: 'group', id }]
+      report()
+      return true
+    })
+    const runCloseInnermostSession = vi.fn(() => {
+      stack = stack.slice(0, -1)
+      report()
+      return true
+    })
+    // An instance a session cannot take (unevenly scaled, or placed in a
+    // group elsewhere): the fallback pushes it as an in-context entry through
+    // the viewport's own callback.
+    const runOpenExplodeSessionOrFallback = vi.fn((_id: bigint, frame: { kind: string; id: bigint }) => {
+      latestViewportProps().onEnterContext?.(frame)
+    })
+    const api = {
+      sessionStack: () => [...stack],
+      sessionMembers: () => null,
+      hasArmedGesture: () => armed,
+      runOpenGroupSession,
+      runCloseInnermostSession,
+      runOpenExplodeSessionOrFallback,
+    }
+    act(() => {
+      const ref = latestViewportProps().apiRef
+      if (ref !== undefined) ref.current = api
+    })
+    return {
+      runOpenGroupSession,
+      runCloseInnermostSession,
+      runOpenExplodeSessionOrFallback,
+      setArmed: (next: boolean) => {
+        armed = next
+      },
+    }
+  }
+
+  /** Group 50 holds the mirrored instance 60. */
+  async function withNestedInstance(run: () => Promise<void>): Promise<void> {
+    const prior = mockScene.node_parent
+    mockScene.node_parent = vi.fn((kind: number, id: bigint) =>
+      kind === 2 && id === 60n ? 50n : undefined,
+    )
+    try {
+      await run()
+    } finally {
+      mockScene.node_parent = prior
+    }
+  }
+
+  const enterMirrored = '[{"kind":"enter_context","path":[],"leaf":{"kind":"instance","id":"60"}}]'
+
+  it('enter_context for a mirrored instance inside a group opens the group, then the instance with itself as the fallback, and selects it', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runOpenGroupSession, runOpenExplodeSessionOrFallback } = sessionViewport()
+      await applyDirectives(enterMirrored)
+      expect(runOpenGroupSession).toHaveBeenCalledWith(50n)
+      expect(runOpenExplodeSessionOrFallback).toHaveBeenCalledWith(60n, { kind: 'instance', id: 60n })
+      expect(runOpenGroupSession.mock.invocationCallOrder[0]).toBeLessThan(
+        runOpenExplodeSessionOrFallback.mock.invocationCallOrder[0],
+      )
+      expect(window.__hew_test!.getSelection()).toEqual([{ kind: 'instance', id: '60' }])
+      // The Scene hears the fallback entry in the same call stack.
+      expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[{"kind":"instance","id":"60"}]')
+    })
+  })
+
+  it('exit_context with one fallback entry pops it and closes no session', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runCloseInnermostSession } = sessionViewport()
+      await applyDirectives(enterMirrored)
+      runCloseInnermostSession.mockClear()
+      await applyDirectives('[{"kind":"exit_context"}]')
+      expect(runCloseInnermostSession).not.toHaveBeenCalled()
+      expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[]')
+      // The next exit steps out of the group.
+      await applyDirectives('[{"kind":"exit_context"}]')
+      expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('exit_context with one session and no fallback closes the innermost session', async () => {
+    await renderAndLoad()
+    const { runCloseInnermostSession } = sessionViewport()
+    act(() => {
+      latestViewportProps().onSessionChange?.([{ node: { kind: 'group', id: 50n }, label: 'Group 50' }])
+    })
+    await applyDirectives('[{"kind":"exit_context"}]')
+    expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('exit_context at the top level does nothing', async () => {
+    await renderAndLoad()
+    const { runCloseInnermostSession } = sessionViewport()
+    await applyDirectives('[{"kind":"exit_context"}]')
+    expect(runCloseInnermostSession).not.toHaveBeenCalled()
+  })
+
+  it('exit_all_contexts closes every session and clears the fallback', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runCloseInnermostSession } = sessionViewport()
+      await applyDirectives(enterMirrored)
+      await applyDirectives('[{"kind":"exit_all_contexts"}]')
+      expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+      expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[]')
+    })
+  })
+
+  it('exit_all_contexts closes a group and a component session, innermost first', async () => {
+    const prior = mockScene.node_parent
+    // Instance 61 sits in group 50 too, but is not mirrored here: the
+    // viewport opens a session for it (stubbed as a second open frame).
+    mockScene.node_parent = vi.fn((kind: number, id: bigint) =>
+      kind === 1 && id === 51n ? 50n : undefined,
+    )
+    try {
+      await renderAndLoad()
+      const { runOpenGroupSession, runCloseInnermostSession } = sessionViewport()
+      await applyDirectives('[{"kind":"enter_context","path":[],"leaf":{"kind":"group","id":"51"}}]')
+      expect(runOpenGroupSession.mock.calls).toEqual([[50n], [51n]])
+      await applyDirectives('[{"kind":"exit_all_contexts"}]')
+      expect(runCloseInnermostSession).toHaveBeenCalledTimes(2)
+    } finally {
+      mockScene.node_parent = prior
+    }
+  })
+
+  it('an exit_all right behind an enter, before any render, still closes the session', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runCloseInnermostSession } = sessionViewport()
+      await applyDirectivesUnflushed([enterMirrored, '[{"kind":"exit_all_contexts"}]'])
+      expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+      expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[]')
+    })
+  })
+
+  it('an exit_context right behind an enter, before any render, pops the fallback entry first and then the session', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runCloseInnermostSession } = sessionViewport()
+      await applyDirectivesUnflushed([
+        enterMirrored,
+        '[{"kind":"exit_context"}]',
+        '[{"kind":"exit_context"}]',
+      ])
+      expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('an armed gesture leaves the viewport untouched (the Outliner\'s own guard)', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runOpenGroupSession, runOpenExplodeSessionOrFallback, runCloseInnermostSession } = sessionViewport({
+        armed: true,
+      })
+      await applyDirectives(enterMirrored)
+      await applyDirectives('[{"kind":"exit_all_contexts"}]')
+      expect(runOpenGroupSession).not.toHaveBeenCalled()
+      expect(runOpenExplodeSessionOrFallback).not.toHaveBeenCalled()
+      expect(runCloseInnermostSession).not.toHaveBeenCalled()
+    })
+  })
+
+  it('an armed gesture refuses exit and exit_all while a session and a fallback entry are open', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runCloseInnermostSession, setArmed } = sessionViewport()
+      await applyDirectives(enterMirrored)
+      setArmed(true)
+      mockScene.set_ui_context.mockClear()
+      await applyDirectives('[{"kind":"exit_context"}]')
+      await applyDirectives('[{"kind":"exit_all_contexts"}]')
+      expect(runCloseInnermostSession).not.toHaveBeenCalled()
+      // The fallback entry is still there.
+      expect(mockScene.set_ui_context).not.toHaveBeenCalledWith('[]')
+      // Once the gesture ends the same call works.
+      setArmed(false)
+      await applyDirectives('[{"kind":"exit_all_contexts"}]')
+      expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('the person\'s own context changes reach the Scene mirror too (undo reconcile, double-click)', async () => {
+    await renderAndLoad()
+    sessionViewport()
+    act(() => {
+      latestViewportProps().onEnterContext?.({ kind: 'instance', id: 60n })
+    })
+    expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[{"kind":"instance","id":"60"}]')
+    act(() => {
+      ;(latestViewportProps() as { onExitAllContexts?: () => void }).onExitAllContexts?.()
+    })
+    expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[]')
+  })
+
+  it('a path keeps a fallback instance beneath the leaf', async () => {
+    await renderAndLoad()
+    sessionViewport()
+    await applyDirectives(
+      '[{"kind":"enter_context","path":[{"kind":"instance","id":"7"}],"leaf":{"kind":"object","id":"3"}}]',
+    )
+    expect(mockScene.set_ui_context).toHaveBeenLastCalledWith(
+      '[{"kind":"instance","id":"7"},{"kind":"object","id":"3"}]',
+    )
+  })
+
+  it('a path enters each instance outermost first, then the leaf', async () => {
+    await renderAndLoad()
+    const { runOpenExplodeSessionOrFallback } = sessionViewport()
+    await applyDirectives(
+      '[{"kind":"enter_context","path":[{"kind":"instance","id":"7"}],"leaf":{"kind":"object","id":"3"}}]',
+    )
+    expect(runOpenExplodeSessionOrFallback).toHaveBeenCalledWith(7n, { kind: 'instance', id: 7n })
+    expect(window.__hew_test!.getSelection()).toEqual([{ kind: 'object', id: '3' }])
   })
 })

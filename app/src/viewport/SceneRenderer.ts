@@ -96,6 +96,9 @@ export const EDGE_COLOR_SEE_THROUGH_DARK = 0xc4c9d0
  *  selection-highlight semantics (FollowMeTool's picked-path highlight) reuse
  *  this one color rather than drifting a second copy of it. */
 export const EDGE_COLOR_SELECTED = 0xffaa00
+/** Edge color of the placement the Paint tool would paint (hover). */
+export const EDGE_COLOR_HOVER = 0xffd08a
+
 /** The draw color language (fallbacks; the live values are the
  *  `--draw-*` theme tokens, read by `_readDrawColors`): drawing that belongs
  *  to no solid is blue ("free"), drawing that is part of a solid's face is
@@ -595,7 +598,16 @@ interface Placement {
    * hidden placement keeps its batch slot, suppressed like a hidden
    * instance's. Re-read on every `setHidden`. */
   shown: boolean
+  /** The material this placement's member inherits from the placements
+   * above it (kernel `instance_expanded_inherited`; `NO_INHERITED` for
+   * none): faces with neither their own paint nor an Object base show it.
+   * Part of the member's geometry and batch keys, since the tessellator
+   * bakes it into the vertex colors and material groups. */
+  inherited: bigint
 }
+
+/** `u64::MAX`, the kernel's "no inherited material" sentinel. */
+const NO_INHERITED = 0xffff_ffff_ffff_ffffn
 
 /** Renderer-side book-keeping for one placement, batched or materialized. */
 interface InstanceRecord {
@@ -734,23 +746,28 @@ export class SceneRenderer {
   private instanceGroups: Map<bigint, InstanceMeshGroup> = new Map()
   /** Every rendered placement, batched or materialized, keyed by instance id. */
   private instanceRecords: Map<bigint, InstanceRecord> = new Map()
-  /** Instanced batches, keyed `${memberId}|${BucketTag}`. Batch geometry and
+  /** Instanced batches, keyed `${memberId}|${BucketTag}|${inherited}`. Batch geometry and
    * materials are owned per batch and disposed on rebuild/removal. */
   private batches: Map<string, MemberBatch> = new Map()
   /** Instances materialized on demand by `getInstanceGroup` (transform
    * preview). Cleared on the next refresh/refreshTouched — the commit that
    * follows a preview — so they restore to their batch. */
   private previewMaterialized: Set<bigint> = new Set()
+  /** The Paint tool's hovered placement (`setHoveredInstance`), or null. */
+  private hoveredInstance: bigint | null = null
   /**
    * Shared typed-array cache for definition member objects.
-   * Keyed by member object id; the raw arrays are shared across every consumer
+   * Keyed by member object id, then by the material the placement passes
+   * down (`Placement.inherited` — the same member drawn under a painted
+   * placement is a different mesh); dropping a member id drops every
+   * inherited variant at once. The raw arrays are shared across every consumer
    * (batches, materialized groups), but each consumer creates its own
    * BufferAttribute wrappers (so that geometry.dispose() on one does not delete
    * GPU buffers shared with another — three.js ties GPU buffer lifetime to the
    * BufferAttribute, not to the underlying TypedArray).
    * Invalidated when a component definition is edited (refreshInstances re-builds it).
    */
-  private memberGeometryCache: Map<bigint, MemberGeometry> = new Map()
+  private memberGeometryCache: Map<bigint, Map<bigint, MemberGeometry>> = new Map()
 
   /**
    * THREE.Texture cache, keyed by material id (as string). Built once per id
@@ -1405,6 +1422,9 @@ export class SceneRenderer {
     const expandedMembers = this.wasmScene.instance_expanded_members(instanceId)
     const expandedLocalPoses = this.wasmScene.instance_expanded_local_poses(instanceId)
     const shown = this._placementsShown(instanceId, expandedMembers.length)
+    // The material each placement inherits (the instance's own, else a
+    // nested placement's on the way in), parallel to the members.
+    const inherited = this.wasmScene.instance_expanded_inherited(instanceId)
     const placements: Placement[] = []
     for (let i = 0; i < expandedMembers.length; i++) {
       const base = i * 12
@@ -1427,6 +1447,7 @@ export class SceneRenderer {
         reflected: this._poseDet(composed) < 0,
         orthogonal: this._poseHasOrthogonalColumns(composed),
         shown: shown[i],
+        inherited: inherited[i] ?? NO_INHERITED,
       })
     }
     const memberIds = [...new Set(placements.map((p) => p.memberId))]
@@ -1441,12 +1462,22 @@ export class SceneRenderer {
     return rec
   }
 
-  /** Fetch (and cache) one member's typed arrays — raw data only, not
-   * BufferAttributes, to avoid GPU buffer aliasing on dispose. */
-  private _getMemberGeometry(memberId: bigint): MemberGeometry {
-    let cached = this.memberGeometryCache.get(memberId)
+  /** Fetch (and cache) one member's typed arrays as drawn under an
+   * inherited material — raw data only, not BufferAttributes, to avoid GPU
+   * buffer aliasing on dispose. With nothing inherited the member draws
+   * exactly its own object mesh, so that common case keeps `object_mesh`. */
+  private _getMemberGeometry(memberId: bigint, inherited: bigint): MemberGeometry {
+    let variants = this.memberGeometryCache.get(memberId)
+    if (variants === undefined) {
+      variants = new Map()
+      this.memberGeometryCache.set(memberId, variants)
+    }
+    let cached = variants.get(inherited)
     if (cached === undefined) {
-      const mesh = this.wasmScene.object_mesh(memberId)
+      const mesh =
+        inherited === NO_INHERITED
+          ? this.wasmScene.object_mesh(memberId)
+          : this.wasmScene.member_mesh(memberId, inherited)
       try {
         cached = {
           positions: mesh.positions(),
@@ -1464,7 +1495,7 @@ export class SceneRenderer {
           edgePositions: mesh.edge_positions(),
           watertight: mesh.watertight(),
         }
-        this.memberGeometryCache.set(memberId, cached)
+        variants.set(inherited, cached)
       } finally {
         mesh.free()
       }
@@ -1493,9 +1524,9 @@ export class SceneRenderer {
    * pose — see `Placement`), not of the owning instance as a whole: a
    * repeated member can straddle two different buckets under one instance. */
   private _batchKeyFor(memberId: bigint, placement: Placement): string | undefined {
-    const cached = this.memberGeometryCache.get(memberId)
+    const cached = this.memberGeometryCache.get(memberId)?.get(placement.inherited)
     if (cached === undefined) return undefined
-    return `${memberId}|${this._bucketTag(cached.watertight, placement.reflected, placement.orthogonal, hasBackPaint(cached))}`
+    return `${memberId}|${this._bucketTag(cached.watertight, placement.reflected, placement.orthogonal, hasBackPaint(cached))}|${placement.inherited}`
   }
 
   /** Dispose and rebuild every batch of one definition member from the current
@@ -1516,17 +1547,32 @@ export class SceneRenderer {
     }
     if (entries.length === 0) return
 
-    const cached = this._getMemberGeometry(memberId)
-    const byTag = new Map<BucketTag, { rec: InstanceRecord; placementIndex: number }[]>()
+    // One batch per (bucket, inherited material): placements of the member
+    // under differently painted instances draw different meshes.
+    const byKey = new Map<
+      string,
+      { tag: BucketTag; inherited: bigint; cached: MemberGeometry; es: { rec: InstanceRecord; placementIndex: number }[] }
+    >()
     for (const e of entries) {
       const placement = e.rec.placements[e.placementIndex]
+      const cached = this._getMemberGeometry(memberId, placement.inherited)
       const tag = this._bucketTag(cached.watertight, placement.reflected, placement.orthogonal, hasBackPaint(cached))
-      const list = byTag.get(tag)
-      if (list === undefined) byTag.set(tag, [e])
-      else list.push(e)
+      const key = `${tag}|${placement.inherited}`
+      const group = byKey.get(key)
+      if (group === undefined) byKey.set(key, { tag, inherited: placement.inherited, cached, es: [e] })
+      else group.es.push(e)
     }
-    for (const [tag, es] of byTag) {
-      this._buildBatch(memberId, tag, es, cached)
+    // Drop cached variants no placement draws any more (a placement
+    // repainted away from them).
+    const variants = this.memberGeometryCache.get(memberId)
+    if (variants !== undefined) {
+      const used = new Set([...byKey.values()].map((g) => g.inherited))
+      for (const inh of [...variants.keys()]) {
+        if (!used.has(inh)) variants.delete(inh)
+      }
+    }
+    for (const { tag, inherited, cached, es } of byKey.values()) {
+      this._buildBatch(memberId, tag, inherited, es, cached)
     }
   }
 
@@ -1536,6 +1582,7 @@ export class SceneRenderer {
   private _buildBatch(
     memberId: bigint,
     tag: BucketTag,
+    inherited: bigint,
     entries: { rec: InstanceRecord; placementIndex: number }[],
     cached: MemberGeometry,
   ): void {
@@ -1567,7 +1614,7 @@ export class SceneRenderer {
       tag === 'R' ? THREE.BackSide : undefined,
     )
     const mesh = new THREE.InstancedMesh(faceGeo, materials, entries.length)
-    mesh.name = `InstanceBatch_${memberId}_${tag}`
+    mesh.name = `InstanceBatch_${memberId}_${tag}_${inherited}`
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
 
     const edgeGeo = new THREE.InstancedBufferGeometry()
@@ -1583,7 +1630,7 @@ export class SceneRenderer {
     edgeGeo.setAttribute('imRow1', edgeRows[1])
     edgeGeo.setAttribute('imRow2', edgeRows[2])
     const edges = new THREE.LineSegments(edgeGeo, this._makeInstancedEdgeMaterial())
-    edges.name = `InstanceBatchEdges_${memberId}_${tag}`
+    edges.name = `InstanceBatchEdges_${memberId}_${tag}_${inherited}`
     // The base geometry's bounding sphere ignores the per-instance transforms
     // applied in the shader, so frustum culling would drop visible edges.
     edges.frustumCulled = false
@@ -1665,7 +1712,7 @@ export class SceneRenderer {
 
     this.instancesGroup.add(mesh)
     this.instancesGroup.add(edges)
-    this.batches.set(`${memberId}|${tag}`, batch)
+    this.batches.set(`${memberId}|${tag}|${inherited}`, batch)
   }
 
   /**
@@ -1792,6 +1839,11 @@ export class SceneRenderer {
       if (this.instanceRecords.has(id)) desired.add(id)
       else this.previewMaterialized.delete(id)
     }
+    // The Paint tool's hovered placement is outlined, which needs its own
+    // edge materials.
+    if (this.hoveredInstance !== null && this.instanceRecords.has(this.hoveredInstance)) {
+      desired.add(this.hoveredInstance)
+    }
     // Isolation's faded context needs per-instance opacity too.
     if (this.isolationFade !== null) {
       for (const id of this.isolationFade.instances.keys()) {
@@ -1843,7 +1895,7 @@ export class SceneRenderer {
     const placementMemberIds: bigint[] = []
     rec.placements.forEach((placement, pi) => {
       const memberId = placement.memberId
-      const cached = this._getMemberGeometry(memberId)
+      const cached = this._getMemberGeometry(memberId, placement.inherited)
       // Open (non-watertight) shells have inward-wound faces on some
       // triangles, so a single-sided material renders them invisible from the
       // "wrong" side; render those double-sided.
@@ -1915,6 +1967,8 @@ export class SceneRenderer {
     // Re-apply the per-instance state that forced materialization.
     if (this.selectedInstanceIds.includes(instanceId)) {
       this._applyInstanceColors(instanceId, true)
+    } else if (this.hoveredInstance === instanceId) {
+      this._applyInstanceColors(instanceId, false)
     }
     if (this.selectedMemberInstance === instanceId) {
       this._applyInstanceMemberColors(instanceId)
@@ -3861,7 +3915,7 @@ export class SceneRenderer {
         const world = new THREE.Matrix4()
           .multiplyMatrices(this.instancesGroup.matrixWorld, rec.matrix)
           .multiply(placement.localMatrix)
-        addEdges(this._getMemberGeometry(placement.memberId).edgePositions, world)
+        addEdges(this._getMemberGeometry(placement.memberId, placement.inherited).edgePositions, world)
       }
     }
     for (const id of hover.instances) addPlacements(id, null)
@@ -5696,8 +5750,13 @@ export class SceneRenderer {
   private _applyInstanceColors(instanceId: bigint, selected: boolean): void {
     const g = this.instanceGroups.get(instanceId)
     if (g === undefined) return
-    // Face fill is owned by material color — only edge color changes for selection.
-    const edgeColor = selected ? EDGE_COLOR_SELECTED : this._edgeColor()
+    // Face fill is owned by material color — only edge color changes for
+    // selection (and for the Paint tool's hovered placement).
+    const edgeColor = selected
+      ? EDGE_COLOR_SELECTED
+      : instanceId === this.hoveredInstance
+        ? EDGE_COLOR_HOVER
+        : this._edgeColor()
     for (const lines of g.edgesLines) {
       ;(lines.material as THREE.LineBasicMaterial).color.setHex(edgeColor)
     }
@@ -5720,6 +5779,34 @@ export class SceneRenderer {
 
   clearSketchRegion(): void {
     this._clearSketchRegions()
+  }
+
+  /**
+   * Outline the placement the Paint tool would paint (`null` clears it):
+   * the placement draws out of its batch with hover-colored edges, the
+   * same per-instance path a selection uses.
+   */
+  setHoveredInstance(instanceId: bigint | null): void {
+    if (instanceId === this.hoveredInstance) return
+    const prev = this.hoveredInstance
+    this.hoveredInstance = instanceId
+    this._syncMaterialized()
+    if (prev !== null) this._applyInstanceColors(prev, this.selectedInstanceIds.includes(prev))
+    if (instanceId !== null) {
+      this._applyInstanceColors(instanceId, this.selectedInstanceIds.includes(instanceId))
+    }
+  }
+
+  /** The material each placement of `instanceId` inherits, as rendered
+   * (`NO_INHERITED` for none), or null when it is not rendered. Test/E2E. */
+  debugInstanceInherited(instanceId: bigint): bigint[] | null {
+    const rec = this.instanceRecords.get(instanceId)
+    return rec === undefined ? null : rec.placements.map((p) => p.inherited)
+  }
+
+  /** The placement `setHoveredInstance` outlines, or null. Test/E2E. */
+  getHoveredInstance(): bigint | null {
+    return this.hoveredInstance
   }
 
   /**
@@ -5758,7 +5845,7 @@ export class SceneRenderer {
     const parts: { positions: Float32Array; indices: Uint32Array; matrixWorld: THREE.Matrix4 }[] = []
     for (const placement of rec.placements) {
       if (!placement.shown) continue
-      const cached = this._getMemberGeometry(placement.memberId)
+      const cached = this._getMemberGeometry(placement.memberId, placement.inherited)
       parts.push({
         positions: cached.positions,
         indices: cached.indices,
@@ -5818,9 +5905,12 @@ export class SceneRenderer {
     // slot AND every materialized instance's face geometry with the SAME
     // underlying Float32Array, so one write covers them all — only the
     // THREE.BufferAttribute wrapper objects need their `needsUpdate` flagged.
-    const cached = this.memberGeometryCache.get(objectId)
-    if (cached === undefined) return
-    writeFrameUvs(cached.positions, base, count, frame, cached.uvs)
+    const variants = this.memberGeometryCache.get(objectId)
+    if (variants === undefined) return
+    // Every inherited variant has its own arrays; the positions are the same.
+    for (const cached of variants.values()) {
+      writeFrameUvs(cached.positions, base, count, frame, cached.uvs)
+    }
     for (const batch of this.batches.values()) {
       if (batch.memberId !== objectId) continue
       const attr = batch.mesh.geometry.getAttribute('uv') as THREE.BufferAttribute | undefined

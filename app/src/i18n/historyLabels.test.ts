@@ -37,6 +37,9 @@ describe('historyLabel (English must match the kernel renderer)', () => {
     expect(historyLabel(k('delete-node', { node: 'object' }), 'x')).toBe('Delete object')
     expect(historyLabel(k('make-component', { name: 'Leg' }), 'x')).toBe("Make component 'Leg'")
     expect(historyLabel(k('make-component'), 'x')).toBe('Make component')
+    expect(historyLabel(k('change-component-axes', { name: 'Leg' }), 'x')).toBe(
+      "Change component axes 'Leg'",
+    )
     expect(historyLabel(k('rename', { from: 'Box', to: 'Base' }), 'x')).toBe("Rename 'Box' → 'Base'")
     expect(historyLabel(k('rename', { to: 'Base' }), 'x')).toBe("Rename to 'Base'")
     expect(historyLabel(k('rename'), 'x')).toBe('Rename')

@@ -2,12 +2,16 @@
 //! `sides` once wedged a live window for good (and hung headless), so the
 //! API caps it where the Polygon tool does.
 
-use api::{Connection, DispatchOutcome, NoHost, Profile, Request, RequestId, codes};
+use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, codes};
 use kernel::Document;
 use serde_json::json;
 
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
+
 fn call(method: &str, params: serde_json::Value) -> api::Response {
-    let mut conn = Connection::new(Profile::Core, "t");
+    let mut conn = Connection::new(Grant::core(), "t");
     let mut doc = Document::new();
     let mut host = NoHost;
     for (id, m, p) in [
@@ -22,7 +26,7 @@ fn call(method: &str, params: serde_json::Value) -> api::Response {
             params: Some(p),
             document: None,
         };
-        let DispatchOutcome::Reply(resp) = conn.dispatch(&mut doc, &mut host, r) else {
+        let DispatchOutcome::Reply(resp) = conn.dispatch(&REGISTRY, &mut doc, &mut host, r) else {
             panic!("answered");
         };
         if id == 2 {

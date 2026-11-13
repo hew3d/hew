@@ -95,6 +95,11 @@ Well-known `fields` keys:
   serialization of the document, so on one of more than 50,000 faces the
   record carries `state_hash_skipped_faces` instead; the recording's
   `golden_hash` at stop still checks the whole replay.
+  The serialization hashed carries a fixed `app_version` and a fixed
+  manifest `format_version` (22), not the writer's own, so neither a
+  release nor a format bump that adds an optional field moves the digest
+  of a document that does not use the field; hashes frozen into replay
+  fixtures and recordings stay valid.
 - `message` — free-text, when present.
 - `winner`, `candidates` — inference/snapping diagnostics.
 
@@ -134,6 +139,18 @@ may be a whole transaction whose grouping into a single undo entry is part
 of what a faithful reproducer has to preserve. Read-only API traffic — an
 agent polling the scene — is not recorded.
 
+A forwarded plugin command (docs/agents/PLUGINS.md "Compounds") records
+differently, because no plugin runs at replay time. The forwarded call
+itself is never recorded. While its compound is open, every call that
+would be recorded (the plugin's own envelopes, and anything that records
+itself, such as an import) is held in a buffer instead; when the compound
+ends, the buffered calls are recorded as one `plugin_compound` entry, and
+when it aborts they are dropped, so an aborted command leaves no trace. A
+plugin command that calls another nests: the inner command's
+`plugin_compound` is one of the outer's buffered calls. A crash while a
+compound is open still reproduces: the crash snapshot carries the
+buffered calls after the recorded ones.
+
 Adding this entry did not bump the format version, following the same
 rule every other added call follows: a recording that never used the new
 entry replays on an older build unchanged, and one that does fails to
@@ -169,7 +186,11 @@ A recording is one JSON object.
       "affine": [1,0,0,0.5, 0,1,0,0, 0,0,1,0] },
     { "method": "delete_node", "kind": 0, "id": 4 },
     { "method": "api_dispatch",
-      "frame": "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"hew.solid.extrude\",\"params\":{}}" }
+      "frame": "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"hew.solid.extrude\",\"params\":{}}" },
+    { "method": "plugin_compound", "plugin": "com.example.parts",
+      "label": "Cut list", "grant": { "ceiling": "core", "permissions": ["model.write"],
+        "plugin": "com.example.parts", "app": null, "document": null },
+      "calls": [ { "method": "api_dispatch", "frame": "…" } ] }
   ],
   "golden_hash": 5678,       // u64. Document state digest after the last
                              //   call — the replay oracle.
@@ -188,29 +209,50 @@ longer replay.
 | `method` | Arguments | Effect |
 |---|---|---|
 | `api_dispatch` | `frame` | re-dispatch one document-mutating live-API request, verbatim (HEW_API.md §11.2) |
+| `plugin_compound` | `plugin`, `label`, `grant`, `calls[]` | one forwarded plugin command's compound: open a connection holding `grant` (identity `plugin:<plugin>`), open a compound labeled `label` with that origin, replay `calls` in order (their `api_dispatch` frames on that connection; a nested `plugin_compound` the same way, recursively), end the compound, and close the connection. Lands as one undo entry, as it did live. A call refused inside it fails the replay |
 | `begin_ground_sketch` | — | begin a ground-plane sketch |
 | `begin_sketch_on_plane` | `px`,`py`,`pz`,`nx`,`ny`,`nz` | begin a sketch on an arbitrary plane (point + normal, normalized) — the idle plane lock's first-click mint (sketches-on-any-plane design §5) |
+| `begin_sketch_on_plane_in_instance` | `instance`, `px`, `py`, `pz`, `nx`, `ny`, `nz` | begin a sketch on a plane inside a component instance (point and normal) |
 | `sketch_begin_gesture` / `sketch_end_gesture` | `sketch` | bracket one multi-segment commit as a single undo step |
 | `sketch_cancel_gesture` | — | abandon an open gesture bracket |
 | `sketch_begin_curve` / `sketch_end_curve` | `sketch` | bracket the segments of one drawn arc/circle as a curve chain |
 | `sketch_begin_curve_with` | `sketch`, `center[3]`, `radius` | curve bracket carrying the chain's analytic circle |
+| `sketch_begin_polygon_with` | `sketch`, `center[3]`, `radius` | curve bracket whose circle is a regular polygon's circumcircle, so the polygon's corners are exact rather than facet-approximated |
 | `sketch_add_segment` | `sketch`, `a[3]`, `b[3]` | add a segment to a sketch |
 | `sketch_remove_edge` | `sketch`, `edge` | remove one sketch edge (the eraser's commit) |
+| `sketch_refacet_curve` | `sketch`, `curve`, `segments` | rebuild a drawn circle's facets at a new segment count, in place |
+| `sketch_offset_region` | `sketch`, `region`, `distance` | offset a region's whole boundary by a uniform distance and insert it as new sketch geometry |
 | `sketch_begin_gesture` / `sketch_end_gesture` | `sketch` | bracket one drawing gesture (one undo step) |
-| `sketch_cancel_gesture` | — | drop the open gesture without recording |
 | `sketch_begin_curve` / `sketch_end_curve` | `sketch` | bracket segments into one curve chain |
-| `sketch_begin_curve_with` | `sketch`, `center[3]`, `radius` | curve bracket carrying the chain's analytic circle |
 | `extrude_region` | `sketch`, `region`, `distance` | extrude a closed profile into an Object |
+| `extrude_region_in_instance` | `instance`, `sketch`, `region`, `distance` | extrude a closed profile inside a component instance into an Object |
 | `follow_me_along_edges` | `sketch`, `region`, `path_sketch`, `path_edges[]` | sweep a closed profile along a chain of sketch edges into an Object |
 | `follow_me_around_face` | `sketch`, `region`, `path_object`, `path_face` | sweep a closed profile around a solid face's outer boundary into an Object |
+| `follow_me_around_instance_face` | `sketch`, `region`, `instance`, `path_object`, `path_face`, `stop_len` | sweep a closed profile around a face loop reached through a component instance |
+| `follow_me_merged_around_face` | `sketch`, `region`, `path_object`, `path_face`, `stop_len` | the merged molding gesture: sweep a closed profile around a face loop |
+| `follow_me_face_along_edges` | `profile_object`, `profile_face`, `path_sketch`, `path_edges[]`, `stop_len` | sweep a solid face as the profile along a chain of sketch edges |
+| `follow_me_face_around_face` | `profile_object`, `profile_face`, `path_object`, `path_face`, `stop_len` | sweep a solid face as the profile around a face loop |
+| `follow_me_along_edges_in_instance` | `instance`, `sketch`, `region`, `path_sketch`, `path_edges[]`, `stop_len` | follow-me along sketch edges, inside a component instance |
+| `follow_me_around_face_in_instance` | `instance`, `sketch`, `region`, `path_object`, `path_face`, `stop_len` | follow-me around a face loop, inside a component instance |
+| `follow_me_merged_around_face_in_instance` | `instance`, `sketch`, `region`, `path_object`, `path_face`, `stop_len` | the merged molding gesture, inside a component instance |
+| `follow_me_face_along_edges_in_instance` | `instance`, `profile_object`, `profile_face`, `path_sketch`, `path_edges[]`, `stop_len` | a solid face as the profile along sketch edges, inside a component instance |
+| `follow_me_face_around_face_in_instance` | `instance`, `profile_object`, `profile_face`, `path_object`, `path_face`, `stop_len` | a solid face as the profile around a face loop, inside a component instance |
 | `boolean` | `op` (0=union, 1=subtract, 2=intersect), `a`, `b` | combine two Objects |
 | `boolean_nodes` | `op` (as `boolean`), `a_kind`/`a`, `b_kind`/`b` (kind 0=object, 1=group) | combine two tree nodes — plain solids or whole groups; the route a UI boolean of exactly two takes |
 | `boolean_nodes_many` | `op`, `kinds[]`/`ids[]` (parallel node lists) | combine two or more tree nodes as one step: a union of all, the first minus the union of the rest, the intersection of all; the route a UI boolean of more than two takes |
 | `boolean_in_component_many` | `component`, `op`, `ids[]` | the same over members of one component definition |
+| `boolean_through_placement` | `path[]` (instances, outermost first), `host` (omitted: the definition's only part), `tool`, `op` (as `boolean`; only 1=subtract runs, union and intersect refuse `BooleanOperandHasInstance`) | subtract a world tool Object from a definition member seen through a placement; every placement shows the result |
+| `cap_rims` | `object`, `rims[]` (optional) | Model Health's cap: close the object's open rims with faces; without `rims`, every rim that can take a face is closed |
+| `delete_faces` | `object`, `faces[]` | Model Health's face removal: delete the listed faces from an object |
+| `set_accepted_surface` | `object`, `accepted` | Model Health's mark: set whether an object's surface is accepted |
+| `thicken_sheet` | `object`, `start`, `end` | Model Health's thicken: pull a flat sheet into a solid by sweeping each island along its normal from offset `start` to offset `end` |
+| `thicken_sheet_in_instance` | `instance`, `object`, `distance` | Push/Pull on a flat surface member picked through a component instance |
 | `group_nodes` | `kinds[]`/`ids[]` (parallel node lists, kind as `delete_node`) | form a merge group |
 | `duplicate_node` | `kind`, `id`, `affine[12]` (row-major 3×4) | deep-copy a node (Move+Alt) at the affine offset |
 | `slice_object` | `object`, `plane[6]` (`[px,py,pz,nx,ny,nz]`) | slice an Object by a plane |
 | `draft_begin_plane` / `draft_begin_face` / `draft_begin_sketch` / `draft_begin_ctx` | `draft` (the handle replay re-mints), the plane (`px..nz`), `object`/`face`, `sketch`, or `ctx` (JSON), `label` | open a drafting gesture on a plane (draw on the ground or on a face); `_in_instance` forms also carry `instance` and take world coordinates |
+| `draft_begin_plane_in_instance` | `draft`, `instance`, `px`, `py`, `pz`, `nx`, `ny`, `nz`, `label` | open a drafting gesture on a plane inside a component instance; points are world coordinates |
+| `draft_begin_face_in_instance` | `draft`, `instance`, `object`, `face`, `label` | open a drafting gesture on a face inside a component instance |
 | `draft_begin_detached` | `draft`, `ctx` (JSON: a `plane` or `face` context), `label` | open a drafting gesture that draws one new detached shape (it joins nothing on the plane) |
 | `draft_add_segment` | `draft`, `a[3]`, `b[3]` | add a segment to the open draft's drawing |
 | `draft_begin_curve` / `draft_begin_curve_with` / `draft_begin_polygon_with` / `draft_end_curve` | `draft`, plus `center[3]`, `radius` for the `_with` forms | bracket segments into one curve chain (a plain run such as a flat arc), circle, or regular polygon |
@@ -219,45 +261,103 @@ longer replay.
 | `draft_end` / `draft_cancel` | `draft` | lower the draft as one undo step / drop it |
 | `history_bracket_open` / `history_bracket_commit` / `history_bracket_abort` | `label` (commit) | bracket a multi-edit gesture (a selection transform that moves objects and drawing) into one undo step, or restore the document as it was at open |
 | `push_pull` | `object`, `face`, `distance` | push/pull a solid face; the kernel re-derives the routing (translate, whole-wall radial offset, boss/recess, or through-cut) on replay |
+| `extrude_face_as_new_object` | `object`, `face`, `distance` | straight-extrude a solid face's boundary into a new top-level Object and leave the source untouched |
 | `transform_object` | `object`, `affine[12]` (row-major 3×4) | apply an affine transform |
 | `transform_selection` | `kinds[]`/`ids[]` (parallel node lists), `sketches[]`, `affine[12]` | transform a whole multi-selection as one undo step |
+| `rescale_document` | `factor` | scale the whole document uniformly about the world origin, as one undo step |
 | `delete_node` | `kind` (0=object, 1=group, 2=instance), `id` | delete a node |
+| `delete_selection` | `kinds[]`, `ids[]` | delete several nodes as one undo step (the Delete and Cut batch delete) |
+| `reparent_nodes` | `kinds[]`, `ids[]`, `group` (or null) | move several nodes into a group, or to the top level when `group` is null, as one undo step |
 | `duplicate_node` | `kind`, `id`, `affine[12]` | Move+copy of one node: a deep clone placed at the offset |
 | `duplicate_selection_array` | `kinds[]`/`ids[]` (parallel node lists), `affine[12]`, `count` (1–1000; an out-of-range count fails the replay typed rather than hanging) | array copy: every listed node cloned `count` times along the step, one undo step |
 | `scene_undo` / `scene_redo` | — | document-level undo/redo (recorded only when it succeeded) |
 | `transform_sketch` | `sketch`, `affine[12]` | bake an affine into a free-standing sketch |
 | `transform_sketch_island` | `sketch`, `island`, `affine[12]` | rigidly move one sketch island |
 | `copy_sketch_islands` | `sketch`, `islands[]`, `affine[12]` | copy a sketch's islands onto one new sketch off-plane (Move+Alt off the plane), one undo step |
+| `transform_sketch_islands` | `sketch`, `islands[]`, `affine[12]` | move several sketch islands together by an affine transform |
 | `move_sketch_vertex` | `sketch`, `vertex`, `p[3]` | drag one sketch vertex |
 | `delete_sketch` | `sketch` | delete (hide) one free-standing sketch |
-| `duplicate_node` | `kind`, `id`, `affine[12]` | deep-clone a node at an offset (Move+Option copy) |
-| `group_nodes` | `kinds[]`, `ids[]` | group sibling nodes into a merge group |
 | `ungroup` | `group` | dissolve a group |
+| `open_group_session` | `group` | open a group session on a group |
+| `close_group_session` | — | close the group session |
+| `rescale_session` | `factor`, `anchor[3]` | resize the innermost open session frame about a measured anchor point |
 | `transform_group` | `group`, `affine[12]` | bake an affine into a group's leaves |
 | `make_component` | `kinds[]`, `ids[]` | fold a selection into a shared definition + instance |
 | `place_instance` | `component`, `affine[12]` | stamp another instance of a definition |
 | `transform_instance` | `instance`, `affine[12]` | compose an affine into an instance's pose |
 | `explode_instance` | `instance` | bake an instance into independent world objects |
+| `open_explode_session` | `instance` | open an explode session on an instance |
+| `close_explode_session` | — | close the explode session |
 | `make_unique` | `instance` | detach an instance onto a private definition copy |
+| `make_unique_by_path` | `path[]`, `cascade`, `deep` | fork the placement at the end of an instance path (outermost first) onto a private definition copy; `cascade` forks every definition on the path so only that placement diverges, `deep` also forks the definitions nested inside the leaf's. One undo entry |
+| `delete_definition` | `component` | delete a component definition and every instance that places it |
+| `purge_unused` | — | delete every unused definition and material in one undo step; recorded only when something was purged |
 | `push_pull_in_component` | `component`, `object`, `face`, `distance` | push/pull a face inside a component definition |
+| `boolean_in_component` | `component`, `op` (as `boolean`), `a`, `b` | combine two members of a component definition |
+| `slice_def_member` | `instance`, `object`, `plane[6]` | slice a member object of a component definition by a plane |
+| `transform_def_member` | `instance`, `object`, `affine[12]` | apply an affine transform to a member object of a component definition |
+| `transform_def_sketch` | `instance`, `sketch`, `affine[12]` | apply an affine transform to a sketch inside a component definition |
+| `transform_def_sketch_island` | `instance`, `sketch`, `island`, `affine[12]` | move one sketch island inside a component definition |
+| `transform_def_selection` | `instance`, `objects[]`, `sketches[]`, `island_sketches[]`, `islands[]`, `affine[12]` | transform a mixed selection inside a component definition |
+| `delete_def_member` | `component`, `object` | delete one member object from a component definition |
 | `set_node_name` | `kind`, `id`, `name` (string or null) | rename a node / clear its name |
 | `add_node_tag` / `remove_node_tag` | `kind`, `id`, `path[]` (segments) | assign / unassign a tag path on a node |
+| `add_node_tag_many` | `kinds[]`, `ids[]`, `path[]` | assign a tag path to several nodes as one labeled compound (one undo step) |
+| `remove_node_tag_many` | `kinds[]`, `ids[]`, `path[]` | unassign a tag path from several nodes as one labeled compound (one undo step) |
 | `set_tag_hidden` | `path` (`/`-joined), `hidden` | set a tag's hidden-by-default flag (persisted view state) |
 | `delete_tag` | `path` (`/`-joined) | delete a tag — and its sub-tags — everywhere |
+| `rename_tag` | `path`, `new_path` | rename a tag path and every tag nested under it, keeping each tag's identity (undoable) |
 | `set_node_user_hidden` | `kind`, `id`, `hidden` | set a node's persisted user-hidden flag |
+| `set_camera_state` | `projection`, `fov_deg`, `parallel_height`, `eye[3]`, `target[3]`, `up[3]` | set the camera's working view (persisted with the document, not undoable) |
+| `set_section_plane` | `origin[3]`, `normal[3]`, `active` | set the document's section plane (persisted view state) |
+| `clear_section_plane` | — | clear the document's section plane |
+| `set_view_style` | `json` (string or null) | set the document's view style; null clears it |
+| `add_scene` | `name`, `props`, `camera_json`, `display_json`, `after` | add a Scene that captures the current view for the properties in the `props` bitmask; `after` is the scene to insert after, and null appends |
+| `update_scene` | `sid`, `props`, `camera_json`, `display_json` | re-capture the properties in the `props` bitmask into a Scene; unflagged properties keep their data |
+| `set_scene_props` | `sid`, `props`, `camera_json`, `display_json` | set which properties a Scene captures: newly-on properties are captured now, newly-off ones drop their data |
+| `rename_scene` | `sid`, `name` | rename a Scene |
+| `set_scene_description` | `sid`, `text` | set a Scene's description |
+| `set_scene_transition` | `sid`, `seconds` (or null) | set a Scene's transition time |
+| `set_scene_delay` | `sid`, `seconds` (or null) | set a Scene's delay |
+| `move_scene` | `sid`, `index` | move a Scene to a new position in the list |
+| `remove_scene` | `sid` | remove a Scene |
+| `apply_scene` | `sid` | apply a Scene: write its tag visibility, user-hidden nodes, and section plane |
 | `add_material` | `name`, `r`, `g`, `b`, `a` | add a solid-color palette material |
 | `add_texture_material` | `name`, `r`, `g`, `b`, `a`, `image[]`, `format` (0=PNG, 1=JPEG), `world_w`, `world_h` | add a textured material (embeds the encoded image bytes) |
 | `set_material_alpha` | `material`, `alpha` | set a palette material's opacity |
+| `set_material_pbr` | `material`, `metallic`, `roughness` | set a palette material's metallic and roughness |
+| `set_material_name` | `material`, `name` | rename a palette material |
+| `delete_material` | `material` | delete a palette material |
+| `replace_material` | `document_wide`, `scope_object`, `from`, `to` | replace one material with another across the document, or only on `scope_object` when `document_wide` is false; `u64::MAX` means unpainted |
 | `paint_face` | `object`, `face`, `material` (`u64::MAX` = unpaint) | paint one face |
+| `set_face_uv_frame` | `object`, `face`, `frame` (or null) | set a face's texture frame; null resets it to the planar projection default |
 | `set_object_material` | `object`, `material` (`u64::MAX` = clear) | set an object's base material |
+| `set_instance_material` | `instance`, `material` (`u64::MAX` = clear) | set a component placement's own material |
+| `set_definition_material` | `component`, `material` (`u64::MAX` = clear) | set the base material of every object a definition owns, as one undo entry |
 | `add_guide_line` | `origin[3]`, `dir[3]` | add a construction line |
 | `add_guide_point` | `p[3]` | add a construction point |
 | `delete_guide` | `guide` | delete one construction guide |
 | `delete_all_guides` | — | delete every visible guide in one undo step |
+| `transform_guide` | `guide`, `affine[12]` | move a construction guide |
+| `duplicate_guide_array` | `guide`, `affine[12]`, `count` | copy a construction guide `count` times along the affine step |
+| `set_axes` | `origin[3]`, `x[3]`, `y[3]` | set the axes origin and X and Y directions; Z is derived as X × Y |
+| `add_linear_dimension` | `a_node_kind`, `a_node_id`, `a_point[3]`, `b_node_kind`, `b_node_id`, `b_point[3]`, `offset[3]`, `plane[6]`, `text_override` | add a linear dimension between two anchored points |
+| `add_radial_dimension` | `anchor_node_kind`, `anchor_node_id`, `anchor_point[3]`, `kind`, `curve_center[3]`, `curve_radius`, `curve_plane[6]`, `leader_dir[3]`, `text_override` | add a radial dimension of a curve |
+| `add_leader_text` | `anchor_node_kind`, `anchor_node_id`, `anchor_point[3]`, `offset[3]`, `text` | add a leader text annotation pointing at an anchor |
+| `update_linear_dimension` | `id`, plus the `add_linear_dimension` fields | change an existing linear dimension |
+| `update_radial_dimension` | `id`, plus the `add_radial_dimension` fields | change an existing radial dimension |
+| `update_leader_text` | `id`, plus the `add_leader_text` fields | change an existing leader text annotation |
+| `delete_annotation` | `id` | delete one annotation |
 | `import_dae` | `bytes[]`, `images[]` (`{uri, bytes[], format}` objects) | additive COLLADA import (embeds the file + images) |
 | `import_gltf` | `bytes[]` | additive glTF/GLB import (embeds the file) |
 | `import_skp` | `bytes[]` | additive `.skp` import (embeds the file) |
 | `import_stl` | `bytes[]`, `unit_scale`, `name` (string or null) | additive STL import (embeds the file); `unit_scale` is meters-per-STL-unit since STL carries no units of its own, and `name` is the file stem the Objects are named from (STL carries no names) — both embedded so replay reproduces the same geometry size and Object names |
+| `import_omitted` | `of`, `len` | placeholder for an import whose source file was too large to embed; replay fails with an error at this step |
+| `place_text` | `sketch`, `regions[]`, `distance`, `name`, `group` | extrude the fill regions, fold them into one component, and place one instance; the glyph-injection gesture before it joins the same undo step |
+| `place_image` | `image[]`, `format`, `name`, `origin[3]`, `u[3]`, `v[3]`, `width` | place a PNG or JPEG picture as a new image component, sized by `width` on the frame `origin`, `u`, `v` |
+| `insert_item` | `bytes[]`, `affine[12]`, `source_id`, `content_hash`, `origin` | place a library item or paste: embeds the item file, the placement pose, and the provenance that drives definition reuse |
+| `insert_item_palette` | `bytes[]` | add a material library item to the palette, embedding the item file |
+| `stamp_library_source` | `kinds[]`, `ids[]`, `source_id`, `content_hash`, `def_sid` | mark a saved item's source selection (changes the attribute dictionaries) |
 | `load` | `bytes[]` | replace the whole document — a mid-session File ▸ Open/New (embeds the `.hew` bytes) |
 | `set_pick_scope` / `clear_pick_scope` | `objects[]`, `instances[]`, `frame_sketches` (set only; empty lists are a scope, only `clear_pick_scope` clears; a recording without `frame_sketches` replays as before it existed: both lists empty clear, otherwise the session frame's drawing is in scope) | set or clear the editing scope the Shaded and X-ray picks favor (session-only view state, recorded so a replayed session ends with the same scope as the original; changes nothing the state hash covers, and the recording stores no pick results) |
 

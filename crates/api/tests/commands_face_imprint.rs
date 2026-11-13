@@ -24,10 +24,14 @@
 //! mutating envelope checks the one-envelope-one-undo /
 //! byte-identical-undo property via `call_ok_one_undo`.
 
-use api::{Connection, DispatchOutcome, NoHost, Profile, Request, RequestId, Response, codes};
+use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, Response, codes};
 use kernel::Document;
 use serde_json::{Value, json};
 use std::f64::consts::TAU;
+
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
 
 // ----------------------------------------------------------------- fixtures
 // (mirrors commands_sketch_solid.rs's fixture set — each integration test
@@ -47,6 +51,7 @@ fn req(id: i64, method: &str, params: Value) -> Request {
 
 fn hello(conn: &mut Connection, doc: &mut Document) {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(0, "hew.meta.hello", json!({ "protocol": 1 })),
@@ -58,9 +63,12 @@ fn hello(conn: &mut Connection, doc: &mut Document) {
 
 fn hello_attach(conn: &mut Connection, doc: &mut Document) {
     hello(conn, doc);
-    let DispatchOutcome::Reply(r) =
-        conn.dispatch(doc, &mut NoHost, req(1, "hew.doc.attach", json!({})))
-    else {
+    let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
+        doc,
+        &mut NoHost,
+        req(1, "hew.doc.attach", json!({})),
+    ) else {
         panic!("attach replies")
     };
     assert!(r.error.is_none(), "attach failed: {:?}", r.error);
@@ -73,7 +81,9 @@ fn call(
     method: &str,
     params: Value,
 ) -> Response {
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, &mut NoHost, req(id, method, params)) else {
+    let DispatchOutcome::Reply(r) =
+        conn.dispatch(&REGISTRY, doc, &mut NoHost, req(id, method, params))
+    else {
         panic!("{method} replies")
     };
     r
@@ -191,7 +201,7 @@ fn draw_rect_on_a_face_imprints_a_sub_face_that_push_pull_extrudes() {
     // The full agent story: draw a rectangle on a box's top face, then
     // push the imprinted sub-face up to boss it — the on-face analog of
     // the plane-mode §6.1 example.
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -232,7 +242,7 @@ fn draw_rect_on_a_face_imprints_a_sub_face_that_push_pull_extrudes() {
 
 #[test]
 fn draw_circle_on_a_face_imprints_with_its_curve_claim_and_push_pull_extrudes() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -269,7 +279,7 @@ fn draw_circle_on_a_face_imprints_with_its_curve_claim_and_push_pull_extrudes() 
 
 #[test]
 fn draw_polygon_on_a_face_imprints_a_sub_face() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -307,7 +317,7 @@ fn draw_polygon_on_a_face_imprints_a_sub_face() {
 
 #[test]
 fn draw_line_on_a_face_splits_it_and_both_halves_are_addressable() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -345,7 +355,7 @@ fn draw_line_on_a_face_splits_it_and_both_halves_are_addressable() {
 
 #[test]
 fn draw_arc_full_turn_on_a_face_closes_into_a_loop_like_a_circle() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -389,7 +399,7 @@ fn draw_arc_pie_on_a_face_mints_face_and_parent_tokens_and_push_pull_extrudes_th
     // `SplitFaceInner` path as `draw_circle`/`draw_rect` — minting
     // "face"/"parent" tokens (not the open arc's "a"/"b") — and the minted
     // sub-face push/pulls like any other imprinted wedge.
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -433,7 +443,7 @@ fn draw_arc_pie_on_a_face_mints_face_and_parent_tokens_and_push_pull_extrudes_th
 
 #[test]
 fn draw_arc_segment_on_a_face_imprints_a_closed_sub_face() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -473,7 +483,7 @@ fn draw_arc_segment_on_a_face_imprints_a_closed_sub_face() {
 
 #[test]
 fn draw_arc_full_turn_with_close_pie_refuses_static_param_conflict() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -516,7 +526,7 @@ fn draw_arc_open_sweep_on_a_face_cuts_boundary_to_boundary_like_a_line() {
     // (y = center.y + radius) stays well clear of every other edge. Not a
     // full turn, so this exercises the OPEN-chain branch (`SplitFace`),
     // not the closed-loop one.
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -555,7 +565,7 @@ fn draw_arc_open_sweep_on_a_face_cuts_boundary_to_boundary_like_a_line() {
 
 #[test]
 fn draw_line_on_a_face_with_interior_endpoints_is_kept_as_loose_drawing() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -589,7 +599,7 @@ fn draw_line_on_a_face_with_interior_endpoints_is_kept_as_loose_drawing() {
 
 #[test]
 fn draw_rect_off_the_faces_plane_refuses_point_not_on_face() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -639,7 +649,7 @@ fn component_face_imprint_and_push_pull_update_every_instance() {
     // names "member X as seen through instance Y", so there is no
     // world→def-local remap for the API to perform here at all. Adding
     // such a locator is additive future work, not a behavior change.
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -794,7 +804,7 @@ fn push_pull_on_a_component_members_plain_face_uses_the_shared_definition_path()
     // member's face (even one with no imprint at all, the plain
     // `KernelOp::PushPull` branch) misbehaved. This exercises that
     // branch directly against a member's untouched top face.
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -850,7 +860,7 @@ fn push_pull_on_a_component_members_plain_face_uses_the_shared_definition_path()
 /// by adversarial review.
 #[test]
 fn follow_me_on_a_definition_members_face_refuses_typed() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -925,7 +935,7 @@ fn follow_me_on_a_definition_members_face_refuses_typed() {
 /// refusal.
 #[test]
 fn draw_arc_pie_on_a_tilted_face_with_center_on_the_boundary_is_accepted_as_one_undo_step() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
 
@@ -1030,7 +1040,7 @@ fn draw_arc_pie_on_a_tilted_face_with_center_on_the_boundary_is_accepted_as_one_
 /// face-mode arc tests use.
 #[test]
 fn draw_arc_segment_past_a_half_turn_on_a_face_still_imprints_a_simple_sub_face() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -1110,7 +1120,7 @@ fn draw_line_on_a_face_across_a_drawn_rectangle_splits_every_face_it_crosses() {
     // From the top face's edge across the rectangle to the far edge, as
     // the Line tool does: the face and the rectangle both split, one undo
     // entry, and the rectangle is no longer one sub-face.
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = box_with_rect_on_top(&mut conn, &mut doc);
@@ -1134,7 +1144,7 @@ fn draw_line_on_a_face_from_its_edge_to_a_drawn_rectangle_is_kept_as_one_undo_st
     // A line from the face's edge that only reaches the rectangle used to
     // refuse (`loop_not_strictly_inside`, it would leave a slit); under
     // unified drafting it is kept and the draw is one undo step.
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = box_with_rect_on_top(&mut conn, &mut doc);
@@ -1156,7 +1166,7 @@ fn draw_arc_open_on_a_face_across_a_drawn_rectangle_splits_both_keeping_its_circ
     // A half circle standing on the top face's edge, arching over the
     // rectangle's sides: every face it crosses splits, and its facets keep
     // the circle.
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = box_with_rect_on_top(&mut conn, &mut doc);

@@ -1764,6 +1764,10 @@ fn build(
         if let Some(plane) = f.plane {
             obj.faces[*id].plane = plane;
         }
+        // A face keeps the attributes of the face it came from.
+        if let Some(dict) = f.src.and_then(|s| source.face_attrs(s)).cloned() {
+            obj.set_face_attrs(*id, dict);
+        }
     }
     apply_edge_claims(&mut obj, claims);
     obj.default_material = source.default_material;
@@ -2114,15 +2118,23 @@ fn branch_points(soup: &Soup) -> BTreeSet<[u64; 3]> {
 /// An edge's endpoints as exact position bits, order-free.
 type ClaimKey = ([u64; 3], [u64; 3]);
 
-/// Marked edges by endpoints: curve claim, polygon claim, soft.
+/// Marked edges by endpoints: curve claim, polygon claim, soft, and the
+/// edge's attribute dictionary.
 type EdgeClaims = BTreeMap<
     ClaimKey,
     (
         Option<crate::sketch::CurveGeom>,
         Option<crate::sketch::CurveGeom>,
         bool,
+        Option<crate::attr::AttrDict>,
     ),
 >;
+
+/// Whether an edge carries anything a rebuild has to give back.
+fn edge_is_marked(obj: &Object, id: crate::ids::EdgeId) -> bool {
+    let e = &obj.edges[id];
+    e.curve.is_some() || e.polygon.is_some() || e.soft || obj.edge_attrs(id).is_some()
+}
 
 fn claim_key(a: Point3, b: Point3) -> ClaimKey {
     let k = |p: Point3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
@@ -2138,8 +2150,17 @@ fn edge_claims(obj: &Object) -> EdgeClaims {
         .filter_map(|e| {
             let (a, b) = obj.edge_endpoints(e)?;
             let edge = &obj.edges[e];
-            (edge.curve.is_some() || edge.polygon.is_some() || edge.soft)
-                .then(|| (claim_key(a, b), (edge.curve, edge.polygon, edge.soft)))
+            edge_is_marked(obj, e).then(|| {
+                (
+                    claim_key(a, b),
+                    (
+                        edge.curve,
+                        edge.polygon,
+                        edge.soft,
+                        obj.edge_attrs(e).cloned(),
+                    ),
+                )
+            })
         })
         .collect()
 }
@@ -2155,11 +2176,14 @@ fn apply_edge_claims(obj: &mut Object, claims: &EdgeClaims) {
         let Some((a, b)) = obj.edge_endpoints(e) else {
             continue;
         };
-        if let Some(&(curve, polygon, soft)) = claims.get(&claim_key(a, b)) {
+        if let Some((curve, polygon, soft, attrs)) = claims.get(&claim_key(a, b)) {
             let edge = &mut obj.edges[e];
-            edge.curve = curve;
-            edge.polygon = polygon;
-            edge.soft = soft && edge.twin_half_edge.is_some();
+            edge.curve = *curve;
+            edge.polygon = *polygon;
+            edge.soft = *soft && edge.twin_half_edge.is_some();
+            if let Some(dict) = attrs {
+                obj.set_edge_attrs(e, dict.clone());
+            }
         }
     }
 }
@@ -2179,12 +2203,17 @@ fn remapped_claims(
     let at = |v: VertexId| pos[root[index[v]]];
     obj.edges
         .iter()
-        .filter(|(_, e)| e.curve.is_some() || e.polygon.is_some() || e.soft)
-        .filter_map(|(_, e)| {
+        .filter(|&(id, _)| edge_is_marked(obj, id))
+        .filter_map(|(id, e)| {
             let h = &obj.half_edges[e.half_edge];
             let (a, b) = (h.origin, obj.half_edges[h.next].origin);
             let (pa, pb) = (at(a), at(b));
-            (pa != pb).then(|| (claim_key(pa, pb), (e.curve, e.polygon, e.soft)))
+            (pa != pb).then(|| {
+                (
+                    claim_key(pa, pb),
+                    (e.curve, e.polygon, e.soft, obj.edge_attrs(id).cloned()),
+                )
+            })
         })
         .collect()
 }

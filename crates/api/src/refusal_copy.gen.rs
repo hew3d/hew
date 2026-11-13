@@ -267,9 +267,6 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "DegenerateAxis" => {
             "The rotation axis needs two distinct points. Pick a second point further from the first."
         }
-        "Reflection" => {
-            "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
-        }
         "DegenerateTextureFrame" => {
             "That would stretch a picture or texture on the object so far it couldn't stay on its face, so it was refused. Try a smaller stretch."
         }
@@ -293,9 +290,6 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "ComponentExpansionExceeded" => {
             "That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again."
         }
-        "CannotExplodeReflected" => {
-            "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
-        }
         "CannotExplodeNonUniformScale" => {
             "This instance has an unfinished sketch inside it, and its scale isn't even across all three axes, so the sketch's circles and arcs can't be baked exactly. Even out the instance's scale first, or finish (extrude) the sketch before exploding."
         }
@@ -306,12 +300,22 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "GroupCycle" => {
             "A group can't be moved into itself or into one of its own members. Pick a different group, or move it out to the top level."
         }
+        "TooManyOccurrences" => "This model has more placed parts than Hew can list at once.",
+        "InvalidFrame" => {
+            "That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions."
+        }
+        "RebaseDuringSession" => "Finish editing the component before changing its axes.",
+        "NotPlaced" => "That part is no longer in the model. Pick it again.",
+        "NoPartFrame" => "That part has no faces to measure.",
         "BooleanNeedsTwo" => "Select at least two objects to combine.",
         "GroupedOperand" => {
             "This operation can't target an object inside a group. Ungroup it, or leave the group context, first."
         }
         "BooleanOperandHasInstance" => {
             "Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first."
+        }
+        "AmbiguousHost" => {
+            "This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again."
         }
         "BooleanOperandNotSolid" => {
             "Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…"
@@ -363,7 +367,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "ExplodeSessionNotOpen" => "No component is currently open for editing.",
         "ExplodeSessionPoseUnsupported" => {
-            "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first."
+            "This instance is scaled unevenly, so it can't be opened for direct editing. Even out its scale first."
         }
         "ExplodeSessionScope" => {
             "That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again."
@@ -375,7 +379,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "This group is nested inside another one, so it can't be opened for editing directly. Enter its enclosing group first, then drill down to this one."
         }
         "NestedComponentInContext" => {
-            "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
+            "This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts."
         }
         "NothingToUndo" => "Nothing to undo.",
         "NothingToRedo" => "Nothing to redo.",
@@ -396,6 +400,12 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "TransactionGestureUnbalanced" => {
             "A connected tool left a drawing step unfinished at the end of its batch, so the whole batch was discarded and the model was left unchanged."
+        }
+        "CompoundTokenMismatch" => {
+            "Hew lost track of a plugin's work in progress. Nothing was changed; if this keeps happening, use Report Bug."
+        }
+        "DocumentBusy" => {
+            "A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window."
         }
         "UnknownTag" => "That tag doesn't exist in this model. Check the tag name and try again.",
         "InvalidAttrName" => {
@@ -516,6 +526,24 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "ImageTooBig" => {
             "That picture would be too big to place: each side can be at most 1,000,000 m. Drag it out smaller or type a smaller width."
+        }
+        "GRANT" => {
+            "A plugin could not connect because its permissions were unreadable. Reinstall the plugin, or use Report Bug if this keeps happening."
+        }
+        "REGISTER" => {
+            "A plugin's commands could not be added: its manifest declares a command Hew cannot accept. Update or reinstall the plugin."
+        }
+        "FORWARD" => {
+            "A plugin command's answer could not be delivered. If this keeps happening, use Report Bug."
+        }
+        "SELECTION" => {
+            "The selection could not be shared with a connected program. If this keeps happening, use Report Bug."
+        }
+        "ISOLATION" => {
+            "What is isolated could not be shared with a connected program. If this keeps happening, use Report Bug."
+        }
+        "CONTEXT" => {
+            "What is open for editing could not be shared with a connected program. If this keeps happening, use Report Bug."
         }
         "BadRenderMode" => {
             "The view mode must be shaded, xray or wireframe. If this keeps happening, use Report Bug."

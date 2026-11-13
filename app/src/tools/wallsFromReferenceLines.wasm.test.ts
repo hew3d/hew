@@ -73,7 +73,7 @@ function pointer(tool: RectangleTool, svc: SnapService, cam: THREE.PerspectiveCa
   const ray = rayAtPixel(cam, at[0], at[1])
   const c = tool.snapConstraint(ray)
   const { snap } = svc.resolve(
-    ray, H, BASIS, c?.anchor, c?.lockAxis, c?.constraintPlane, c?.offPlanePoints,
+    ray, H, BASIS, c?.anchor, c?.lockAxis, c?.lockDirection, c?.constraintPlane, c?.offPlanePoints,
     undefined, c?.facesOnly, false, c?.seeThroughPoints, c?.fallbackPlane,
   )
   tool.onPointerMove(snap, ray)

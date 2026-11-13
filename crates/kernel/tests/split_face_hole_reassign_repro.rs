@@ -170,6 +170,7 @@ fn a_loop_inside_a_diagonal_wall_splits_it() {
             loop_path,
             restore: None,
             curves: Vec::new(),
+            edge_attrs: Vec::new(),
         },
     )
     .expect("the loop splits the wall");

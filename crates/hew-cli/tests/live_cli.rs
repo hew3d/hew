@@ -368,8 +368,13 @@ fn discovery_and_dispatch_live_work_through_hew_runtime_dir_end_to_end() {
         .expect("the mcp fake instance thread completes cleanly");
     assert_eq!(
         mcp_seen,
-        vec!["hew.doc.attach", "hew.query.scene"],
-        "mcp --live must attach at construction, before any forwarded tool call"
+        vec![
+            "hew.doc.attach",
+            "hew.meta.capabilities",
+            "hew.event.subscribe",
+            "hew.query.scene"
+        ],
+        "mcp --live must attach, read the plugin commands from capabilities, and subscribe to plugin_state, at construction, before any forwarded tool call"
     );
 
     // 6. An attach refusal (the app has no document open at all) fails the

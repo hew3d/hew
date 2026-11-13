@@ -1,0 +1,14 @@
+[package]
+name = "plugin-manifest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The plugin manifest (`hew-plugin.json`) parser and validator
+# (docs/agents/PLUGINS.md "Manifest"): pure, no I/O. Shared by `crates/api`
+# (grants read permission names from it), `hew-cli`, the desktop shell, and
+# `crates/wasm-api` (the web build's install path).
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+semver = { workspace = true }

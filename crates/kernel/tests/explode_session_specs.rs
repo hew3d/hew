@@ -8,7 +8,7 @@
 //!   definition-owned sketches into WORLD-owned geometry at the instance's
 //!   pose (SAME `ObjectId`/`SketchId`s — a move, not `explode_instance`'s
 //!   copy), and hides every live instance of that definition; refuses typed
-//!   on a non-similarity or mirrored pose, or a second session.
+//!   on a non-similarity pose (mirrors are fine), or a second session.
 //! - the user edits the (now plain world) members with the ordinary tool
 //!   set; `close_explode_session` folds them back — unbaking a touched
 //!   member, restoring an untouched one from its pristine snapshot
@@ -344,12 +344,99 @@ fn drift_measurement_over_100_open_close_cycles() {
 // --------------------------------------------------------------- spec 4
 
 /// **Pose gate**: a non-uniformly-scaled pose refuses typed; a mirrored
-/// pose refuses typed; a uniform-scaled + rotated pose (a similarity with
-/// positive determinant) opens.
+/// pose opens (a reflection is a similarity with a free sign) and a member
+/// edit folds back at the mirror of the edit; a uniform-scaled + rotated pose
+/// opens.
+/// Opens a session on a mirrored instance, shifts `member_a` by +3 in y and
+/// closes.
+fn mirrored_session_edit(doc: &mut Document, instance: kernel::InstanceId, member_a: ObjectId) {
+    doc.transform_instance(instance, &Transform::scale(Vec3::new(-1.0, 1.0, 1.0)))
+        .expect("mirror the instance");
+    doc.open_explode_session(instance).expect("open mirrored");
+    doc.transform_object(member_a, &Transform::translation(Vec3::new(0.0, 3.0, 0.0)))
+        .expect("edit a member");
+    doc.close_explode_session().expect("close");
+}
+
 #[test]
-fn pose_gate_refuses_non_similarity_and_mirror_but_opens_a_similarity() {
+fn mirrored_session_edit_lands_in_the_shared_definition() {
     let mut doc = Document::new();
-    let (_component, instance, _a, _b) = two_member_component(&mut doc);
+    let (component, instance, member_a, _member_b) = two_member_component(&mut doc);
+    let before: Vec<Point3> = doc
+        .object(member_a)
+        .unwrap()
+        .vertices()
+        .values()
+        .map(|v| v.position)
+        .collect();
+    let (plain, _) = doc
+        .place_instance(component, Transform::translation(Vec3::new(10.0, 0.0, 0.0)))
+        .expect("a plain second placement");
+    mirrored_session_edit(&mut doc, instance, member_a);
+    // The definition itself moved by +3 in y (the mirror leaves y alone).
+    // Every placement shares that geometry, so the plain placement shows the
+    // same edit un-mirrored: its pose is untouched and its world geometry is
+    // the definition's own.
+    let after = doc.object(member_a).unwrap();
+    let mut want: Vec<Point3> = before
+        .iter()
+        .map(|p| *p + Vec3::new(0.0, 3.0, 0.0))
+        .collect();
+    let mut got: Vec<Point3> = after.vertices().values().map(|v| v.position).collect();
+    let key = |p: &Point3| (p.x, p.y, p.z);
+    want.sort_by(|a, b| key(a).partial_cmp(&key(b)).unwrap());
+    got.sort_by(|a, b| key(a).partial_cmp(&key(b)).unwrap());
+    for (g, w) in got.iter().zip(&want) {
+        assert!(g.approx_eq(*w, 1e-9), "{g:?} vs {w:?}");
+    }
+    let plain_pose = doc
+        .instance_pose(plain)
+        .expect("plain placement still live");
+    assert!(
+        plain_pose.determinant() > 0.0,
+        "the plain placement stays unmirrored"
+    );
+    let plain_world: Vec<Point3> = got.iter().map(|p| plain_pose.apply_point(*p)).collect();
+    let min = |f: fn(&Point3) -> f64| plain_world.iter().map(f).fold(f64::MAX, f64::min);
+    let max = |f: fn(&Point3) -> f64| plain_world.iter().map(f).fold(f64::MIN, f64::max);
+    // Member A started at x 0..2, y 0..2; the edit moved it to y 3..5, and
+    // the plain placement (shifted +10 in x) shows it there, unmirrored.
+    assert!((min(|p| p.y) - 3.0).abs() < 1e-9 && (max(|p| p.y) - 5.0).abs() < 1e-9);
+    assert!((min(|p| p.x) - 10.0).abs() < 1e-9 && (max(|p| p.x) - 12.0).abs() < 1e-9);
+    assert!(after.signed_volume() > 0.0);
+}
+
+#[test]
+fn mirrored_session_survives_undo_redo_and_reopen() {
+    let mut doc = Document::new();
+    let (_component, instance, member_a, _member_b) = two_member_component(&mut doc);
+    let start = doc.save();
+    let depth0 = doc.undo_depth();
+    mirrored_session_edit(&mut doc, instance, member_a);
+    let end = doc.save();
+    let steps = doc.undo_depth() - depth0;
+    assert!(steps >= 3, "mirror, open+edit, close are separate steps");
+    for _ in 0..steps {
+        doc.undo().expect("undo");
+    }
+    assert_eq!(doc.save(), start, "undo restores the exact bytes");
+    for _ in 0..steps {
+        doc.redo().expect("redo");
+    }
+    assert_eq!(doc.save(), end, "redo re-applies the exact bytes");
+    let back = Document::load(&end).expect("reopen");
+    assert_eq!(back.save(), end);
+    for oid in back.visible_object_ids() {
+        let o = back.object(oid).unwrap();
+        o.validate().expect("valid after reopen");
+        assert!(o.signed_volume() > 0.0);
+    }
+}
+
+#[test]
+fn pose_gate_refuses_non_similarity_and_opens_mirrors() {
+    let mut doc = Document::new();
+    let (_component, instance, member_a, member_b) = two_member_component(&mut doc);
 
     // Non-uniform scale: refused typed.
     doc.transform_instance(instance, &Transform::scale(Vec3::new(1.0, 2.0, 1.0)))
@@ -362,13 +449,67 @@ fn pose_gate_refuses_non_similarity_and_mirror_but_opens_a_similarity() {
     doc.transform_instance(instance, &Transform::scale(Vec3::new(1.0, 0.5, 1.0)))
         .expect("undo the non-uniform scale");
 
-    // Mirror: refused typed.
-    doc.transform_instance(instance, &Transform::scale(Vec3::new(-1.0, 1.0, 1.0)))
+    // Mirror: opens. Members become plain world objects at their mirrored
+    // positions; an edit then folds back so the posed instance shows the
+    // mirror of the edit.
+    let mirror = Transform::scale(Vec3::new(-1.0, 1.0, 1.0));
+    doc.transform_instance(instance, &mirror)
         .expect("compose a mirror");
-    assert_eq!(
-        doc.open_explode_session(instance).unwrap_err(),
-        DocumentError::ExplodeSessionPoseUnsupported
-    );
+    doc.open_explode_session(instance)
+        .expect("a mirrored pose opens a session");
+    assert_eq!(doc.explode_session_instance(), Some(instance));
+    for m in [member_a, member_b] {
+        let o = doc.object(m).expect("member live in the session");
+        assert!(o.validate().is_ok());
+        assert_eq!(o.watertight(), kernel::WatertightState::Watertight);
+        assert!(o.signed_volume() > 0.0, "session member is outward-facing");
+    }
+    let local_before = {
+        // Definition-frame positions are the mirror of the session's world ones.
+        let w = doc.object(member_a).unwrap();
+        w.vertices()
+            .values()
+            .map(|v| mirror.apply_point(v.position))
+            .collect::<Vec<_>>()
+    };
+    let shift = Vec3::new(0.0, 3.0, 0.0);
+    doc.transform_object(member_a, &Transform::translation(shift))
+        .expect("edit a member inside the session");
+    let world_after = doc.object(member_a).unwrap().clone();
+    doc.close_explode_session().expect("close mirrored session");
+    assert_eq!(doc.explode_session_instance(), None);
+    // The instance shows the mirror of the edit: pose * folded-back local
+    // position equals the edited world position, to 1e-9.
+    let pose = doc.instance_pose(instance).expect("instance is back");
+    let folded = doc
+        .object(member_a)
+        .expect("member is a definition member again");
+    assert!(folded.validate().is_ok());
+    assert_eq!(folded.watertight(), kernel::WatertightState::Watertight);
+    assert!(folded.signed_volume() > 0.0);
+    for (vid, v) in world_after.vertices().iter() {
+        let local = folded
+            .vertices()
+            .get(vid)
+            .expect("vertex id survives")
+            .position;
+        let shown = pose.apply_point(local);
+        assert!(
+            shown.approx_eq(v.position, 1e-9),
+            "shown {shown:?} vs edited world {:?}",
+            v.position
+        );
+    }
+    // And the definition-frame geometry moved by the mirror of the edit
+    // (mirror leaves y alone, so +3 in y).
+    let mut want: Vec<_> = local_before.iter().map(|p| *p + shift).collect();
+    let mut got: Vec<_> = folded.vertices().values().map(|v| v.position).collect();
+    let key = |p: &Point3| (p.x, p.y, p.z);
+    want.sort_by(|a, b| key(a).partial_cmp(&key(b)).unwrap());
+    got.sort_by(|a, b| key(a).partial_cmp(&key(b)).unwrap());
+    for (g, w) in got.iter().zip(&want) {
+        assert!(g.approx_eq(*w, 1e-9), "{g:?} vs {w:?}");
+    }
     // A pure axis mirror is its own inverse.
     doc.transform_instance(instance, &Transform::scale(Vec3::new(-1.0, 1.0, 1.0)))
         .expect("undo the mirror");

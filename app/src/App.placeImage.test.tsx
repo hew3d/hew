@@ -15,6 +15,18 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 const menubar = () => within(screen.getByTestId('menu-bar'))
 
 const mockScene = {
+  // Events (docs/agents/HEW_API.md §4.5): the units mirror and the
+  // document lifecycle notes.
+  set_display_units: vi.fn(),
+  set_ui_context: vi.fn(),
+  // Selection and view state (docs/agents/HEW_API.md §7): the mirrors the
+  // bus reads.
+  set_ui_selection: vi.fn(),
+  set_ui_isolation: vi.fn(),
+  note_tool_changed: vi.fn(),
+  note_document_event: vi.fn(),
+  document_id: vi.fn(() => undefined),
+  ensure_document_id: vi.fn(() => '00000000-0000-4000-8000-000000000000'),
   object_ids: () => new BigUint64Array(),
   group_ids: () => new BigUint64Array(),
   instance_ids: () => new BigUint64Array(),

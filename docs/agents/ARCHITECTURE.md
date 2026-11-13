@@ -346,7 +346,10 @@ degenerate ("zero-thickness") solid Object, for two reasons:
 
 A Sketch has one of three owners: the world (a **free** sketch, drawn over
 no face), a component definition (in definition-local coordinates, reaching
-the scene through its instances), or an **Object** (an *owned* sketch, kept
+the scene through its instances; its plane is the drawing instance's
+pose-inverse applied to the world plane keeping its side, so through that
+instance, mirrored or not, the sketch faces the user's up and a positive
+extrusion goes where they pointed), or an **Object** (an *owned* sketch, kept
 in `object_sketches`). An owned sketch holds exactly the drawing over the
 owner's faces that cannot be face topology (loose chains, sliver regions); it is expressed in the owner's frame and is in exactly one of the
 three states, never two. Its liveness is derived from the owner, so every
@@ -483,6 +486,11 @@ directly into vertex and plane data. This keeps the kernel's core geometry
 representation pose-free everywhere except Component instances, which is the
 one place a persistent pose earns its complexity.
 
+A placement can be forked by occurrence path (`make_unique_by_path`): with
+the cascade on, every definition on the path is forked so only that
+placement diverges; the call returns the ids it created (the remap). A
+forked definition keeps its attributes and sheds its Library provenance.
+
 Editing a definition's members is covered separately in 2.11: because a
 definition's members are already ordinary Objects (just owned by a
 `ComponentId` rather than the world), editing one in place is a matter of
@@ -492,12 +500,35 @@ temporarily changing what owns them, not a distinct editing mode.
 
 Materials are a document-level palette; each face carries an optional
 material reference, and each Object carries an optional default material
-that unmarked faces fall back to. A material is a name, a color, and an
+that unmarked faces fall back to. Each component instance carries an
+optional material of its own as well: a member face with neither its own
+material nor an Object default shows the material of the nearest instance
+above it that has one, so one definition can show a different color per
+placement while painted faces keep theirs (SketchUp's rule). The kernel
+resolves that chain (`Document::inherited_material`) and the tessellator
+takes the inherited material as an input, so a member's render mesh is
+keyed by member and inherited material. A material is a name, a color, and an
 optional texture. Textures are stored as opaque, already-encoded image bytes
 — the kernel never decodes an image, keeping image codecs out of a crate
 that must stay dependency-light and pure — mapped onto a face by an affine
 UV frame precise enough to reproduce an imported model's original texture
 scale and orientation, not just a generic planar projection.
+
+Attribute dictionaries (client data the kernel stores and never
+interprets, docs/agents/HEW_API.md §8) live on the document and its
+entities in one document-level table, and on a solid's faces and edges
+inside the Object itself: the Object holds an append-only table of
+interned dictionaries, and each face and edge carries a small `Copy` slot
+into it (none by default). A write interns a new dictionary and repoints
+the element, never editing a slot in place, so elements may share one and
+an undo snapshot can record a slot by value; slots are never renumbered
+while the Object lives, and a dictionary nothing references any more is
+simply not written on save. Each operation assigns slots at the place it
+builds an element (a face built from another takes its slot, a fresh wall
+none, a merge keeps the survivor's); whole-Object rebuilds (booleans,
+slices, thickening, component splits) carry face dictionaries by value
+into the new Object and rebuild edges without any. History replay restores
+dictionaries with the rest of the recorded state (§5.7).
 
 Tags (Hew's analog of SketchUp Layers) are first-class document metadata used
 to group and show/hide Objects, Groups, and Instances independently of the
@@ -692,26 +723,48 @@ definition's top level, and they are listed as direct members of the
 definition at close. Every placement of the definition then shows the
 result.
 
-This works only when the instance's pose is a **similarity with a positive
-determinant** — uniform scale, no mirror (`Transform::similarity_scale`).
+This works only when the instance's pose is a **similarity** — a rotation,
+uniform scale, and optionally a mirror (`Transform::similarity_scale`).
 Similarities are exactly the transforms that keep a circle a circle, which
 is what lets analytic curve and surface metadata (2.6) survive the
-bake/unbake round trip intact; baking a mirrored pose directly would invert
-winding and produce an inside-out solid. Group nesting gates a session the
-same way for the ENTERED instance: the bake produces top-level world
-objects, which a group-nested placement cannot survive coherently
-(splicing baked members into a containing group is not modeled). A
-sibling nested in some other group does not trip it: nothing hides a
-sibling, so its group keeps listing a live member. Session nesting
-dissolves the common case of the gate: an instance inside a Group is
-genuinely top-level while its group's frame is open, so drilling in
-through the group opens its explode session normally. An instance that
-fails either gate — a non-uniform scale, a mirror, or a placement entered
-directly inside a group — falls back to the previous in-context editing
-model instead: the tool set operates on the definition's members
-directly, through the pose, without baking or retargeting anything. That
-model remains fully supported for exactly these cases; the session stack
-is the default path, not a replacement for it.
+bake/unbake round trip intact. A mirrored pose bakes like any other: the
+geometry is mirrored and every face is turned over, so the solid stays
+right side out. Group nesting gates a session the same way for the
+ENTERED instance: the bake produces top-level world objects, which a
+group-nested placement cannot survive coherently (splicing baked members
+into a containing group is not modeled). A sibling nested in some other
+group does not trip it: nothing hides a sibling, so its group keeps
+listing a live member. Session nesting dissolves the common case of the
+gate: an instance inside a Group is genuinely top-level while its group's
+frame is open, so drilling in through the group opens its explode session
+normally. An instance that fails either gate — a non-uniform scale, or a
+placement entered directly inside a group — falls back to the previous
+in-context editing model instead: the tool set operates on the
+definition's members directly, through the pose, without baking or
+retargeting anything. That model remains fully supported for exactly
+these cases; the session stack is the default path, not a replacement for
+it.
+
+The bus can drive the same entry convergence the Outliner uses
+(`hew.view.enter`, `exit`, and `exit_all`, HEW_API.md §6.3): the app opens
+the same session frames level by level, falls back to the in-context entry
+for the same instances, and reports the result as `context_changed` with
+`stack` and `fallback`.
+
+The API's path forms use the same through-the-pose model with no session
+at all: a move, turn, scale, copy, boolean, or slice addressed to a
+member by an occurrence path (`Document::transform_def_members`,
+`duplicate_def_members_array`, `boolean_through_placement`,
+`boolean_members_through_placement`, `slice_through_placement`) is conjugated, or mapped, through the path's
+composed pose (`Document::path_pose`) and applied to the definition in
+its own frame, so every placement follows in one undo entry; a
+definition on loan to an open session refuses them, because its members
+are world nodes for the session's duration. The ones that make new
+members (copy, boolean, slice) refuse while any session is open, since a
+session close folds every node made since its open into the open
+container. `boolean_through_placement` runs only a subtract: a union or
+intersect with a world tool would move world material into every
+placement, which unlinking is for (Addendum D §5).
 
 The stack also gives in-context resize a natural target: the Tape
 Measure's measure-then-type-a-length gesture, which resizes the whole
@@ -737,6 +790,38 @@ only: it is never part of what `.hew` serializes, and saving (autosave
 included) while a session is open transparently writes the document as if
 the session had already been closed, without interrupting the edit.
 
+**The change ring.** Every history change the `Document` makes leaves one
+session-only record in a bounded ring (256 records, `crates/kernel/src/
+changes.rs`): a pushed entry, an undo, a redo, an aborted transaction or
+compound, a document replacement. Each record carries the history clock,
+the entry's label and origin, and a change set classified from the entry's
+`DocAction`s (`document/change_sets.rs`, an exhaustive match: created
+entities are added, deleted or consumed ones removed, everything else
+touched modified; an import or a rescale is `full`). A bracket that drains
+its children into one entry (a transaction, a compound, a definition
+delete, 3D Text) replaces their records with its own, so the ring holds
+one record per visible entry; while such a bracket is open the ring does
+not trim, so its children never push older history out. An abort drops
+its children's records and adds one `full` record. The ring is never serialized and is not part of the file format.
+The API builds `document_changed` events and `hew.query.changes_since`
+from it (HEW_API.md §4.5).
+
+**Rehearsals.** An API dry run (HEW_API.md §6.6) runs an envelope's
+commands on one clone of the `Document` with no bracket open, against a
+host that refuses every view or selection effect, and drops the clone.
+The untouched original stands in for the bracket's snapshot:
+`Document::rehearsal_disturbance` makes the same three refusals a commit
+would (history disturbed, session or gesture unbalanced) by comparing the
+clone with it, so a rehearsal answers exactly what the commit would at
+the cost of one clone, and the live document's history, epoch, and change
+ring never move. The pure computations (`hew.compute.*`, §7.6) copy only
+their operands and run the kernel's pure functions on them
+(`Object::boolean_product`, the same product a committed boolean
+records). A cut through a placement can take such a transient solid as
+its cutter (`Document::subtract_solid_through_placement`): its
+`DocAction::Boolean` carries no `b`, so undo has only the host to bring
+back.
+
 ## 3. Crate and Module Topology
 
 | Crate / module | Responsibility | Depends on |
@@ -754,8 +839,10 @@ the session had already been closed, without interrupting the edit.
 | `crates/image-import` | PNG/JPEG → a placed picture: one face painted with it in a component, placed once (the `.skp` image shape); reads only the pixel size from the header | `kernel` |
 | `crates/softrender` | Headless render device: a pure software rasterizer over `tessellate`'s buffers, for `hew.view.snapshot` off-screen | `kernel`, `tessellate` |
 | `crates/hlr` | Hidden-line removal: projects tessellated solids onto a view plane and returns visible line work — hard edges, curved-wall silhouettes, section-cut outlines — as 2D segments, plus an SVG writer, for vector Line art printing and SVG export | `kernel`, `tessellate` |
+| `crates/headless-render` | The renderers behind `hew.view.snapshot` and `hew.view.line_drawing` (selection, background, fitted cameras, view helpers shared with `hew.print.pdf`), pure over `&Document` and shared by `hew-cli`'s `CliHost` and the app's `LiveHost` | `api`, `kernel`, `softrender`, `hlr` |
 | `crates/pdfwrite` | Small hand-written PDF 1.4 writer (pages of images, stroked paths, text) for Save PDF… and headless `hew.print.pdf` | nothing in-tree (`miniz_oxide` for DEFLATE) |
-| `crates/wasm-api` | `wasm-bindgen` surface exposing the kernel (plus inference, tessellate, hlr, pdfwrite, softrender, the api, and the importers/exporters) to the UI | `kernel`, `inference`, `tessellate`, `hlr`, `pdfwrite`, `softrender`, `api`, `mesh-export`, `dae-import`, `gltf-import`, `skp-import`, `skp-export`, `stl-import`, `image-import` |
+| `crates/wasm-api` | `wasm-bindgen` surface exposing the kernel (plus inference, tessellate, hlr, pdfwrite, softrender, headless-render, the api, and the importers/exporters) to the UI | `kernel`, `inference`, `tessellate`, `hlr`, `pdfwrite`, `softrender`, `headless-render`, `api`, `mesh-export`, `dae-import`, `gltf-import`, `skp-import`, `skp-export`, `stl-import`, `image-import` |
+| `crates/plugin-manifest` | The plugin manifest (`hew-plugin.json`) parser and validator, pure and shared by every host; `crates/api` reads permission names from it (docs/agents/PLUGINS.md) | `serde`, `semver` only |
 | `crates/library` | The Hew Library's on-disk layout: folder resolution, item naming, atomic list/read/write/remove, content hashing — one implementation behind `hew-cli`'s `hew.library.*` and the desktop shell's `library_*` commands | `kernel` |
 | `app/` | TypeScript/React UI: viewport, tools, panels | `wasm-api` (via the compiled WASM package) |
 | `shells/tauri` | Desktop shell | `app/`, `library` |

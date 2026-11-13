@@ -1,7 +1,8 @@
 //! Structure-and-session fuzz harness (DEVELOPMENT.md rule 3): random
 //! sequences of the tree-shaping ops — make component, group, ungroup,
-//! reparent, explode, place, make unique, duplicate, delete, delete
-//! definition — interleaved with component and group EDITING SESSIONS
+//! reparent, explode, place, make unique (one instance, and by occurrence
+//! path), duplicate, delete, delete definition, transform and copy
+//! definition members in place — interleaved with component and group EDITING SESSIONS
 //! (opened, stacked, closed innermost-first) and undo/redo, over a document
 //! of plain boxes.
 //!
@@ -17,7 +18,10 @@
 //!   do not fire;
 //! - `load(save_for_persistence())` succeeds — the autosave path, which
 //!   serializes as if every open session were closed;
-//! - with no session open, `load(save())` succeeds too.
+//! - with no session open, `load(save())` succeeds too;
+//! - a make-unique-by-path fork keeps the occurrence walk's instance row
+//!   count, and undo then redo of it reproduces the state hash both ways
+//!   (a refused one leaves the document unchanged).
 //!
 //! Drawing joins in too (wireframe faces §11): lines in 3D between lattice
 //! points (the boxes' corners and points above them), each drafted on a
@@ -33,7 +37,9 @@
 //! cases with `PROPTEST_CASES=20000 cargo test -p kernel --test
 //! session_fuzz`.
 
-use kernel::{Document, NodeId, ObjectId, Plane, Point3, Transform, Vec3};
+use kernel::{
+    Document, InstanceId, LibraryProvenance, NodeId, ObjectId, Plane, Point3, Transform, Vec3,
+};
 use proptest::prelude::*;
 
 /// Abstract op; selectors resolve against live ids at apply time, so a
@@ -67,6 +73,12 @@ enum Op {
     MakeUnique {
         sel: usize,
     },
+    /// Fork one placement by its occurrence path (any depth).
+    MakeUniqueByPath {
+        sel: usize,
+        cascade: bool,
+        deep: bool,
+    },
     Duplicate {
         sel: usize,
     },
@@ -85,9 +97,28 @@ enum Op {
     OpenGroupSession {
         sel: usize,
     },
+    /// Move a member of a definition in the definition's frame
+    /// (`transform_def_members`).
+    TransformDefMember {
+        comp: usize,
+        sel: usize,
+    },
+    /// Copy a member of a definition into the same definition, twice
+    /// (`duplicate_def_members_array`).
+    DuplicateDefMembers {
+        comp: usize,
+        sel: usize,
+    },
     /// Delete every object inside the open component session, so the close
     /// empties the definition (the grouped-sibling emptied-close defect).
     DeleteSessionMembers,
+    /// Wrap a copy of a node's content as an unplaced definition
+    /// (`insert_as_definition`); `key` picks one of three provenances so
+    /// repeats reuse.
+    InsertAsDefinition {
+        sel: usize,
+        key: u8,
+    },
     CloseSession,
     Undo,
     Redo,
@@ -142,13 +173,18 @@ fn arb_op() -> impl Strategy<Value = Op> {
         1 => sel().prop_map(|sel| Op::Explode { sel }),
         2 => sel().prop_map(|comp| Op::Place { comp }),
         1 => sel().prop_map(|sel| Op::MakeUnique { sel }),
+        2 => (sel(), any::<bool>(), any::<bool>())
+            .prop_map(|(sel, cascade, deep)| Op::MakeUniqueByPath { sel, cascade, deep }),
         1 => sel().prop_map(|sel| Op::Duplicate { sel }),
         2 => sel().prop_map(|sel| Op::Delete { sel }),
         1 => sel().prop_map(|sel| Op::DeleteSelection { sel }),
         1 => sel().prop_map(|comp| Op::DeleteDefinition { comp }),
+        2 => (sel(), sel()).prop_map(|(comp, sel)| Op::TransformDefMember { comp, sel }),
+        1 => (sel(), sel()).prop_map(|(comp, sel)| Op::DuplicateDefMembers { comp, sel }),
         3 => sel().prop_map(|sel| Op::OpenComponentSession { sel }),
         3 => sel().prop_map(|sel| Op::OpenGroupSession { sel }),
         2 => Just(Op::DeleteSessionMembers),
+        2 => (sel(), 0u8..3).prop_map(|(sel, key)| Op::InsertAsDefinition { sel, key }),
         3 => Just(Op::CloseSession),
         2 => Just(Op::Undo),
         2 => Just(Op::Redo),
@@ -250,6 +286,88 @@ fn pick<T: Copy>(items: &[T], sel: usize) -> Option<T> {
     (!items.is_empty()).then(|| items[sel % items.len()])
 }
 
+/// Every visible instance placement as its occurrence path (instance ids
+/// from the world down, the placement itself last).
+fn instance_paths(doc: &Document) -> Vec<Vec<InstanceId>> {
+    doc.occurrences(None, false)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|o| match o.node {
+            NodeId::Instance(i) => {
+                let mut path = o.path;
+                path.push(i);
+                Some(path)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn instance_rows(doc: &Document) -> usize {
+    doc.occurrences(None, true)
+        .unwrap_or_default()
+        .iter()
+        .filter(|o| matches!(o.node, NodeId::Instance(_)))
+        .count()
+}
+
+/// `make_unique_by_path` on the path `sel` picks. A refusal is legal; a
+/// fork must keep the placement count and undo then redo exactly.
+fn make_unique_by_path(
+    doc: &mut Document,
+    sel: usize,
+    cascade: bool,
+    deep: bool,
+) -> Result<(), String> {
+    let paths = instance_paths(doc);
+    let Some(path) = (!paths.is_empty()).then(|| paths[sel % paths.len()].clone()) else {
+        return Ok(());
+    };
+    let rows = instance_rows(doc);
+    let before = doc.state_hash();
+    if doc.make_unique_by_path(&path, cascade, deep).is_err() {
+        if doc.state_hash() != before {
+            return Err("a refused fork changed the document".to_string());
+        }
+        return Ok(());
+    }
+    if instance_rows(doc) != rows {
+        return Err(format!(
+            "the fork changed the placement count from {rows} to {}",
+            instance_rows(doc)
+        ));
+    }
+    let after = doc.state_hash();
+    doc.undo()
+        .map_err(|e| format!("undo of the fork refused: {e}"))?;
+    if doc.state_hash() != before {
+        return Err("undo of the fork did not restore the document".to_string());
+    }
+    doc.redo()
+        .map_err(|e| format!("redo of the fork refused: {e}"))?;
+    if doc.state_hash() != after {
+        return Err("redo of the fork did not reproduce it".to_string());
+    }
+    Ok(())
+}
+
+/// Undo then redo of the op just committed must land on `before` and then
+/// `after` exactly.
+fn undo_redo_exact(doc: &mut Document, before: u64, what: &str) -> Result<(), String> {
+    let after = doc.state_hash();
+    doc.undo()
+        .map_err(|e| format!("undo of the {what} refused: {e}"))?;
+    if doc.state_hash() != before {
+        return Err(format!("undo of the {what} did not restore the document"));
+    }
+    doc.redo()
+        .map_err(|e| format!("redo of the {what} refused: {e}"))?;
+    if doc.state_hash() != after {
+        return Err(format!("redo of the {what} did not reproduce it"));
+    }
+    Ok(())
+}
+
 thread_local! {
     /// The state hash before the last undo step an op recorded, when the
     /// op records several (a [`Op::FaceBox`] drafts one face at a time).
@@ -260,7 +378,7 @@ thread_local! {
 /// Applies one op. A typed refusal is a legal answer and is ignored; what
 /// must never happen is a panic or a document that no longer reopens, both
 /// checked by the caller.
-fn apply(doc: &mut Document, op: &Op) {
+fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
     // Drawing waits until every editing session is closed: a loose line
     // drawn on a member's face inside a component session leaves an owned
     // sketch that the autosave does not fold with its owner, so the bytes
@@ -277,7 +395,7 @@ fn apply(doc: &mut Document, op: &Op) {
             | Op::FaceBox { .. }
     ) && !doc.session_stack().is_empty()
     {
-        return;
+        return Ok(());
     }
     let nodes = live_nodes(doc);
     let instances = doc.instance_ids();
@@ -327,6 +445,9 @@ fn apply(doc: &mut Document, op: &Op) {
                 let _ = doc.make_unique(i);
             }
         }
+        Op::MakeUniqueByPath { sel, cascade, deep } => {
+            return make_unique_by_path(doc, sel, cascade, deep);
+        }
         Op::Duplicate { sel } => {
             if let Some(n) = pick(&nodes, sel) {
                 let _ = doc.duplicate_node(n, &Transform::translation(Vec3::new(0.5, 0.5, 0.0)));
@@ -347,6 +468,25 @@ fn apply(doc: &mut Document, op: &Op) {
                 let _ = doc.delete_definition(c);
             }
         }
+        Op::TransformDefMember { comp, sel } => {
+            if let Some(c) = pick(&comps, comp)
+                && let Some(n) = pick(&doc.def_member_nodes(c).unwrap_or_default(), sel)
+            {
+                let t = Transform::rotation(Vec3::new(0.0, 0.0, 1.0), 0.25)
+                    .expect("rotation")
+                    .then(&Transform::translation(Vec3::new(0.3, -0.2, 0.1)));
+                let _ = doc.transform_def_members(c, &[n], &t);
+            }
+        }
+        Op::DuplicateDefMembers { comp, sel } => {
+            if let Some(c) = pick(&comps, comp)
+                && let Some(n) = pick(&doc.def_member_nodes(c).unwrap_or_default(), sel)
+            {
+                let step = Transform::translation(Vec3::new(0.0, 1.5, 0.0));
+                let count = std::num::NonZeroU32::new(2).expect("nonzero");
+                let _ = doc.duplicate_def_members_array(c, &[n], &step, count);
+            }
+        }
         Op::OpenComponentSession { sel } => {
             if let Some(i) = pick(&instances, sel) {
                 let _ = doc.open_explode_session(i);
@@ -360,6 +500,30 @@ fn apply(doc: &mut Document, op: &Op) {
         Op::DeleteSessionMembers => {
             for o in doc.explode_session_objects().unwrap_or_default() {
                 let _ = doc.delete_node(NodeId::Object(o));
+            }
+        }
+        Op::InsertAsDefinition { sel, key } => {
+            let Some(n) = pick(&nodes, sel) else {
+                return Ok(());
+            };
+            let Ok(item) = doc.extract_item(&[n], false) else {
+                return Ok(());
+            };
+            let prov = LibraryProvenance {
+                source_id: "import:fuzz".to_string(),
+                content_hash: key.to_string(),
+            };
+            let before = doc.state_hash();
+            match doc.insert_as_definition(&item, Some("Wrapped"), prov) {
+                Err(_) if doc.state_hash() != before => {
+                    return Err("a refused insert_as_definition changed the document".to_string());
+                }
+                Err(_) => {}
+                Ok((_, true, _)) if doc.state_hash() != before => {
+                    return Err("a reused definition changed the document".to_string());
+                }
+                Ok((_, true, _)) => {}
+                Ok((_, false, _)) => return undo_redo_exact(doc, before, "definition insert"),
             }
         }
         Op::CloseSession => {
@@ -380,10 +544,10 @@ fn apply(doc: &mut Document, op: &Op) {
             let pts = lattice();
             let (a, b) = (pts[a % pts.len()], pts[b % pts.len()]);
             if a == b {
-                return;
+                return Ok(());
             }
             let Some(h) = home_plane(a, b, tilt) else {
-                return;
+                return Ok(());
             };
             let edit = |w: &mut kernel::Sketch| w.add_segment(a, b).map(|_| ());
             let _ = if detached {
@@ -404,7 +568,7 @@ fn apply(doc: &mut Document, op: &Op) {
             let d = b - a;
             let flat = [d.x, d.y, d.z].iter().filter(|c| c.abs() < 1e-12).count();
             if flat != 1 {
-                return;
+                return Ok(());
             }
             let n = if d.x.abs() < 1e-12 {
                 Vec3::new(1.0, 0.0, 0.0)
@@ -415,7 +579,7 @@ fn apply(doc: &mut Document, op: &Op) {
             };
             let n = if flip { n * -1.0 } else { n };
             let Ok(h) = Plane::from_point_normal(a, n) else {
-                return;
+                return Ok(());
             };
             // The other two corners: each varies one of the two free axes.
             let (c, e) = if d.x.abs() < 1e-12 {
@@ -460,7 +624,7 @@ fn apply(doc: &mut Document, op: &Op) {
             faces.rotate_left(k);
             for (n, q) in faces {
                 let Ok(h) = Plane::from_point_normal(q[0], n) else {
-                    return;
+                    return Ok(());
                 };
                 LAST_STEP_BEFORE.set(Some((doc.state_hash(), doc.history_generation())));
                 let edit = |w: &mut kernel::Sketch| {
@@ -505,6 +669,7 @@ fn apply(doc: &mut Document, op: &Op) {
             }
         }
     }
+    Ok(())
 }
 
 /// For a drawing op that recorded a step (lens 2 of the design's review):
@@ -713,7 +878,8 @@ fn run_case(boxes: usize, ops: Vec<Op>) -> Result<(), TestCaseError> {
     for (step, op) in ops.iter().enumerate() {
         let mut before = (doc.state_hash(), doc.history_generation());
         LAST_STEP_BEFORE.set(None);
-        apply(&mut doc, op);
+        apply(&mut doc, op)
+            .map_err(|e| TestCaseError::fail(format!("step {step} ({op:?}): {e}")))?;
         if let Some(last) = LAST_STEP_BEFORE.take() {
             before = last;
         }

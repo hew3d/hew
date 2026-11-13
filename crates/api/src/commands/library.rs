@@ -540,7 +540,9 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             (extracted, "component", nodes)
         }
         None => {
-            let bytes = ctx.doc.save_for_persistence();
+            // Without the document id: the item is a new document, and
+            // a document opened from it must not share this one's identity.
+            let bytes = ctx.doc.save_for_persistence_without_document_id();
             let whole = Document::load(&bytes).map_err(load_failed)?;
             (whole, "model", Vec::new())
         }

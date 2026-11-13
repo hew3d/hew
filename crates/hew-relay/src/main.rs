@@ -62,10 +62,26 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long graceful shutdown waits for in-flight requests before exiting.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
+/// The version this binary reports: the release tag's version when the
+/// release workflow stamped one at compile time (`HEW_RELEASE_VERSION`),
+/// else the crate's own.
+const VERSION: &str = version_from(
+    option_env!("HEW_RELEASE_VERSION"),
+    env!("CARGO_PKG_VERSION"),
+);
+
+/// An empty stamp counts as unset.
+const fn version_from(stamp: Option<&'static str>, package: &'static str) -> &'static str {
+    match stamp {
+        Some(v) if !v.is_empty() => v,
+        _ => package,
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "hew-relay",
-    version,
+    version = VERSION,
     about = "Self-hostable Open on Phone relay for Hew (one-shot ciphertext dead-drop)"
 )]
 struct Config {
@@ -289,6 +305,13 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_version_prefers_the_stamp() {
+        assert_eq!(version_from(Some("1.5.0-pre.x"), "1.3.1"), "1.5.0-pre.x");
+        assert_eq!(version_from(None, "1.3.1"), "1.3.1");
+        assert_eq!(version_from(Some(""), "1.3.1"), "1.3.1", "empty is unset");
+    }
 
     #[test]
     fn defaults_match_the_worker_contract() {

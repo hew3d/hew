@@ -249,6 +249,7 @@ fn attr_writes_ride_transactions() {
         kernel::CompoundMeta {
             label: "annotate".to_string(),
             origin: kernel::HistoryOrigin::Connection("test".to_string()),
+            coalesce: None,
         },
     )
     .expect("commit");

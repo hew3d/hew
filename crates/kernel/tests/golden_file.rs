@@ -444,3 +444,236 @@ fn golden_file_save_load_and_determinism() {
     // No undo history in loaded doc.
     assert!(!loaded.can_undo(), "loaded doc has empty undo stack");
 }
+
+fn instance_material_golden_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/instance_material.hew")
+}
+
+/// A component placed twice, both placements painted; the first then
+/// folds into an outer component whose own placement is painted too
+/// (manifest v27's `instances[].material`, world and definition-owned).
+fn build_instance_material_doc() -> Document {
+    let mut doc = Document::new();
+    let plane = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let s = doc.add_sketch(plane);
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        for (a, b) in [
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)),
+            (Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)),
+            (Point3::new(1.0, 1.0, 0.0), Point3::new(0.0, 1.0, 0.0)),
+            (Point3::new(0.0, 1.0, 0.0), Point3::new(0.0, 0.0, 0.0)),
+        ] {
+            sk.add_segment(a, b).unwrap();
+        }
+    }
+    let r = doc.extrudable_regions(s).unwrap()[0];
+    let (obj, _) = doc.extrude_region(s, r, 1.0).unwrap();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 50, 40)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 60, 200)));
+    let (comp, first, _) = doc.make_component(&[NodeId::Object(obj)]).unwrap();
+    let (second, _) = doc
+        .place_instance(comp, Transform::translation(Vec3::new(3.0, 0.0, 0.0)))
+        .unwrap();
+    doc.set_instance_material(second, Some(red)).unwrap();
+    doc.set_instance_material(first, Some(red)).unwrap();
+    let (_outer, outer_inst, _) = doc.make_component(&[NodeId::Instance(first)]).unwrap();
+    doc.set_instance_material(outer_inst, Some(blue)).unwrap();
+    doc
+}
+
+#[test]
+fn golden_instance_material_file() {
+    let doc = build_instance_material_doc();
+    let bytes = doc.save();
+    let golden = instance_material_golden_path();
+    if std::env::var("REGENERATE_GOLDEN").is_ok() || !golden.exists() {
+        std::fs::write(&golden, &bytes).expect("failed to write golden file");
+    } else {
+        let expected = std::fs::read(&golden).expect("failed to read golden file");
+        assert_eq!(
+            entries_without_app_version(&bytes),
+            entries_without_app_version(&expected),
+            "output differs from golden file — run with REGENERATE_GOLDEN=1 to update"
+        );
+    }
+    let loaded = Document::load(&bytes).expect("load must succeed");
+    assert_eq!(loaded.state_hash(), doc.state_hash());
+    let mut names: Vec<String> = loaded
+        .instance_ids()
+        .into_iter()
+        .filter_map(|i| loaded.instance_material(i).flatten())
+        .map(|m| loaded.material(m).unwrap().name.clone())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["Blue".to_string(), "Red".to_string()]);
+}
+
+fn face_edge_attrs_golden_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/face_edge_attrs.hew")
+}
+
+/// A box whose top face, one side face, and two edges carry attribute
+/// dictionaries (geometry buffer v9), one shared by two faces, plus a
+/// nested value.
+fn build_face_edge_attrs_doc() -> Document {
+    use kernel::AttrValue;
+    let mut doc = Document::new();
+    let plane = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let s = doc.add_sketch(plane);
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        for (a, b) in [
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)),
+            (Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)),
+            (Point3::new(1.0, 1.0, 0.0), Point3::new(0.0, 1.0, 0.0)),
+            (Point3::new(0.0, 1.0, 0.0), Point3::new(0.0, 0.0, 0.0)),
+        ] {
+            sk.add_segment(a, b).unwrap();
+        }
+    }
+    let r = doc.extrudable_regions(s).unwrap()[0];
+    let (id, _) = doc.extrude_region(s, r, 1.0).unwrap();
+    let o = doc.object(id).unwrap();
+    let face = |n: Vec3| {
+        o.faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().approx_eq(n, 1e-9))
+            .map(|(f, _)| f)
+            .unwrap()
+    };
+    let (top, bottom, front) = (
+        face(Vec3::new(0.0, 0.0, 1.0)),
+        face(Vec3::new(0.0, 0.0, -1.0)),
+        face(Vec3::new(0.0, -1.0, 0.0)),
+    );
+    let edge = |a: Point3, b: Point3| {
+        o.edges()
+            .keys()
+            .find(|&e| {
+                let (p, q) = o.edge_endpoints(e).unwrap();
+                (p.approx_eq(a, 1e-9) && q.approx_eq(b, 1e-9))
+                    || (p.approx_eq(b, 1e-9) && q.approx_eq(a, 1e-9))
+            })
+            .unwrap()
+    };
+    let rim = edge(Point3::new(0.0, 0.0, 1.0), Point3::new(1.0, 0.0, 1.0));
+    let post = edge(Point3::new(1.0, 1.0, 0.0), Point3::new(1.0, 1.0, 1.0));
+    let nested = AttrValue::from_json(&serde_json::json!({
+        "part": "Shelf", "grain": [1, 0.5, null, true]
+    }))
+    .unwrap();
+    doc.face_attr_set(
+        id,
+        top,
+        "com.example.cutlist",
+        "part",
+        AttrValue::Text("Top".into()),
+    )
+    .unwrap();
+    doc.face_attr_set(
+        id,
+        bottom,
+        "com.example.cutlist",
+        "part",
+        AttrValue::Text("Top".into()),
+    )
+    .unwrap();
+    doc.face_attr_set(id, front, "org.example.finish", "spec", nested)
+        .unwrap();
+    doc.edge_attr_set(
+        id,
+        rim,
+        "com.example.cutlist",
+        "band",
+        AttrValue::Float(0.5),
+    )
+    .unwrap();
+    doc.edge_attr_set(id, post, "com.example.cutlist", "band", AttrValue::Int(2))
+        .unwrap();
+    doc
+}
+
+#[test]
+fn golden_face_edge_attrs_file() {
+    let doc = build_face_edge_attrs_doc();
+    let bytes = doc.save();
+    let golden = face_edge_attrs_golden_path();
+    if std::env::var("REGENERATE_GOLDEN").is_ok() || !golden.exists() {
+        std::fs::write(&golden, &bytes).expect("failed to write golden file");
+    } else {
+        let expected = std::fs::read(&golden).expect("failed to read golden file");
+        assert_eq!(
+            entries_without_app_version(&bytes),
+            entries_without_app_version(&expected),
+            "output differs from golden file — run with REGENERATE_GOLDEN=1 to update"
+        );
+    }
+    let loaded = Document::load(&bytes).expect("load must succeed");
+    assert_eq!(loaded.state_hash(), doc.state_hash());
+    let o = loaded.object(loaded.visible_object_ids()[0]).unwrap();
+    let faces = o
+        .faces()
+        .keys()
+        .filter(|&f| o.face_attrs(f).is_some())
+        .count();
+    let edges = o
+        .edges()
+        .keys()
+        .filter(|&e| o.edge_attrs(e).is_some())
+        .count();
+    assert_eq!((faces, edges), (3, 2));
+}
+
+fn document_id_golden_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/document_id.hew")
+}
+
+/// The face-and-edge-attributes box with a document id minted from fixed
+/// randomness (manifest v29's `document_id`).
+fn build_document_id_doc() -> Document {
+    let mut doc = build_face_edge_attrs_doc();
+    doc.ensure_document_id([
+        0x3f, 0x2c, 0x91, 0x07, 0x5e, 0xd4, 0x00, 0xa8, 0x00, 0x6b, 0x1e, 0xc2, 0x97, 0x40, 0x5d,
+        0x83,
+    ]);
+    doc
+}
+
+#[test]
+fn golden_document_id_file() {
+    let doc = build_document_id_doc();
+    let bytes = doc.save();
+    let golden = document_id_golden_path();
+    if std::env::var("REGENERATE_GOLDEN").is_ok() || !golden.exists() {
+        std::fs::write(&golden, &bytes).expect("failed to write golden file");
+    } else {
+        let expected = std::fs::read(&golden).expect("failed to read golden file");
+        assert_eq!(
+            entries_without_app_version(&bytes),
+            entries_without_app_version(&expected),
+            "output differs from golden file — run with REGENERATE_GOLDEN=1 to update"
+        );
+    }
+    let loaded = Document::load(&bytes).expect("load must succeed");
+    assert_eq!(
+        loaded.document_id().as_deref(),
+        Some("3f2c9107-5ed4-40a8-806b-1ec297405d83")
+    );
+    // The id is file identity, not state: the hash matches the same
+    // document without one.
+    assert_eq!(
+        loaded.state_hash(),
+        build_face_edge_attrs_doc().state_hash()
+    );
+}

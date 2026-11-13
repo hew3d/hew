@@ -59,7 +59,7 @@ import { t } from '@lingui/core/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { unionHiddenLeafIds } from '../io/documentLoad'
 import { isolateHiddenFor } from './isolate'
-import { boundsExtents, worldBoundsForSelection, type Vec3 } from '../panels/objectBounds'
+import type { Vec3 } from '../panels/objectBounds'
 import {
   buildTreeIndexMap,
   collectLeafIds,
@@ -79,9 +79,10 @@ export interface PartsSheetRow {
    *  (or, for the catch-all section, top-level untagged) node; deeper for
    *  a group's nested members. */
   depth: number
-  /** Overall world-space dimensions (`objectBounds`'s formatter, same as
-   *  `InspectCard`) — `null` for a node that resolves to no mesh (an empty
-   *  group, or a stale handle). */
+  /** The part's size along its own axes (`partFrameExtents`): length,
+   *  width, thickness for an object or group; the definition's own axis
+   *  order for an instance — `null` for a node with nothing to measure (an
+   *  empty group, or a stale handle). */
   extentsM: Vec3 | null
   hidden: boolean
 }
@@ -114,6 +115,23 @@ function isWholePart(node: NodeRef): boolean {
   return node.kind === 'object' || node.kind === 'group' || node.kind === 'instance'
 }
 
+/** A world node's size along its own part frame (`Scene::part_frame_json`,
+ *  the measurement `hew.query.part_frame` serves): an object or group is
+ *  measured along its largest face, `[length, width, thickness]`, so a
+ *  rotated board reads its true size; an instance reads its definition's
+ *  own axes, scaled by the placement. `null` when there is nothing to
+ *  measure. */
+export function partFrameExtents(scene: WasmScene, node: NodeRef): Vec3 | null {
+  const kind = nodeKindToNumber(node.kind)
+  if (kind < 0) return null
+  try {
+    const frame = JSON.parse(scene.part_frame_json(kind, node.id)) as { extents: [number, number, number] }
+    return frame.extents
+  } catch {
+    return null
+  }
+}
+
 /** Append `node` (depth-first, parent before children) to `out` — the row
  *  list one section entry expands to. See the module doc for the
  *  group-recurses/instance-is-a-leaf rule. */
@@ -140,8 +158,6 @@ function walkNode(
     label = resolveLabel(scene.object_name(node.id), undefined, 'object', idx)
   }
 
-  const bounds = worldBoundsForSelection(scene, [node])
-
   let hidden: boolean
   if (node.kind === 'object') {
     hidden = hiddenObjectIds.has(node.id)
@@ -157,7 +173,7 @@ function walkNode(
       instanceIds.every((id) => hiddenInstanceIds.has(id))
   }
 
-  out.push({ node, label, depth, extentsM: bounds === null ? null : boundsExtents(bounds), hidden })
+  out.push({ node, label, depth, extentsM: partFrameExtents(scene, node), hidden })
 
   if (node.kind === 'group') {
     for (const child of getGroupMembers(node.id)) {

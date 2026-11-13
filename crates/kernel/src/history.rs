@@ -127,6 +127,11 @@ pub enum KernelOp {
         /// Empty for straight loops. The undo of a dissolve carries the
         /// dissolved loop's claims here.
         curves: Vec<Option<CurveGeom>>,
+        /// Per loop edge, in `curves` order, the attribute dictionary to
+        /// give it back (applied after `curves`). Empty gives every new
+        /// edge none: the forward imprint. The undo of a dissolve carries
+        /// the dissolved loop's dictionaries here.
+        edge_attrs: Vec<crate::attr::AttrDict>,
     },
     /// `Object::merge_inner_face(sub_face)` — dissolve an imprinted sub-face.
     MergeInnerFace {
@@ -145,14 +150,16 @@ pub enum KernelOp {
         /// The raised sub-face to flatten.
         sub_face: FaceId,
     },
-    /// `Object::transform_sub_face(sub_face, xf)` — slide, turn, or scale
-    /// an imprint on its face in place. Its own inverse with the inverse
-    /// transform, pinning whatever the forward move adopted; no heuristic
-    /// guards.
+    /// `Object::transform_sub_face(sub_face, xf)` — slide, turn, scale, or
+    /// mirror an imprint on its face in place. Its own inverse with the
+    /// inverse transform, pinning whatever the forward move adopted; no
+    /// heuristic guards.
     TransformSubFace {
         /// The imprint sub-face to move (handle-stable across the op).
         sub_face: FaceId,
-        /// An in-plane similarity of the parent face.
+        /// A similarity that maps the parent face's plane onto itself: an
+        /// in-plane move, turn, scale, or mirror, with the normal kept or
+        /// turned over.
         xf: Transform,
         /// Rings (vertex positions) of holes inside the shape that stay put
         /// and are re-homed afterwards — the shapes, bosses, or holes a
@@ -564,6 +571,9 @@ struct EdgeClaimProof {
     curve: Option<CurveGeom>,
     soft: bool,
     polygon: Option<CurveGeom>,
+    /// The edge's attribute dictionary (empty = none), by value: the
+    /// candidate a proof aligns may intern it at a different slot.
+    attrs: crate::attr::AttrDict,
 }
 
 /// An undirected edge's exact endpoint bits, ordered — the lookup key the
@@ -601,6 +611,12 @@ struct FaceProof {
     material: crate::material::FaceMaterial,
     back_material: crate::material::FaceMaterial,
     uv_frame: Option<crate::material::UvFrame>,
+    /// The face's attribute dictionary (empty = none), restored on
+    /// alignment like the paint. Not part of the match: two faces of equal
+    /// geometry and different dictionaries match greedily by order, so a
+    /// replay could hand them each other's dictionary (the same limit
+    /// paint has).
+    attrs: crate::attr::AttrDict,
 }
 
 /// The cyclic shift under which `a[i]` matches `b[(i + shift) % n]` within
@@ -635,6 +651,7 @@ impl StateProof {
                     material: face.material,
                     back_material: face.back_material,
                     uv_frame: face.uv_frame,
+                    attrs: object.attr_dict(face.attrs).cloned().unwrap_or_default(),
                 })
                 .collect(),
             edges: object
@@ -642,7 +659,11 @@ impl StateProof {
                 .keys()
                 .filter_map(|e| {
                     let edge = &object.edges()[e];
-                    if edge.curve.is_none() && !edge.soft && edge.polygon.is_none() {
+                    if edge.curve.is_none()
+                        && !edge.soft
+                        && edge.polygon.is_none()
+                        && edge.attrs.is_none()
+                    {
                         return None;
                     }
                     let (a, b) = object.edge_endpoints(e)?;
@@ -652,6 +673,7 @@ impl StateProof {
                         curve: edge.curve,
                         soft: edge.soft,
                         polygon: edge.polygon,
+                        attrs: object.attr_dict(edge.attrs).cloned().unwrap_or_default(),
                     })
                 })
                 .collect(),
@@ -819,43 +841,59 @@ impl StateProof {
             candidate.faces[f].material = rec.material;
             candidate.faces[f].back_material = rec.back_material;
             candidate.faces[f].uv_frame = rec.uv_frame;
+            candidate.set_face_attrs(f, rec.attrs.clone());
         }
         // Fast path: neither the recorded state nor the candidate carries a
-        // single claimed or soft edge (the common case for objects with no
-        // drawn circles or sweeps), so there is nothing to restore or clear.
+        // single claimed, soft, or dictionary-carrying edge (the common case
+        // for objects with no drawn circles, sweeps, or edge dictionaries),
+        // so there is nothing to restore or clear.
         let candidate_has_claims = candidate
             .edges()
             .values()
-            .any(|e| e.curve.is_some() || e.soft || e.polygon.is_some());
+            .any(|e| e.curve.is_some() || e.soft || e.polygon.is_some() || !e.attrs.is_none());
         if !self.edges.is_empty() || candidate_has_claims {
-            // Restore every edge's circle claim and soft flag to the recorded
-            // state (see `StateProof::edges`): claimed edges get their claim back,
+            // Restore every edge's circle claim, soft flag, and dictionary to
+            // the recorded state (see `StateProof::edges`): claimed edges get
+            // their claim back,
             // every other edge carries none. A recorded claim with no matching
             // edge means the replay did not reproduce the recorded edges — a kernel
             // bug by definition, refused rather than guessed.
-            type Recorded = (Option<CurveGeom>, bool, Option<CurveGeom>, bool);
+            type Recorded<'a> = (
+                Option<CurveGeom>,
+                bool,
+                Option<CurveGeom>,
+                &'a crate::attr::AttrDict,
+                bool,
+            );
+            let no_attrs = crate::attr::AttrDict::new();
             let mut recorded: std::collections::BTreeMap<[u64; 6], Recorded> = self
                 .edges
                 .iter()
-                .map(|e| (edge_bits_key(e.a, e.b), (e.curve, e.soft, e.polygon, false)))
+                .map(|e| {
+                    (
+                        edge_bits_key(e.a, e.b),
+                        (e.curve, e.soft, e.polygon, &e.attrs, false),
+                    )
+                })
                 .collect();
             let edge_ids: Vec<EdgeId> = candidate.edges().keys().collect();
             for e in edge_ids {
                 let Some((a, b)) = candidate.edge_endpoints(e) else {
                     continue;
                 };
-                let (curve, soft, polygon) = match recorded.get_mut(&edge_bits_key(a, b)) {
+                let (curve, soft, polygon, attrs) = match recorded.get_mut(&edge_bits_key(a, b)) {
                     Some(entry) => {
-                        entry.3 = true;
-                        (entry.0, entry.1, entry.2)
+                        entry.4 = true;
+                        (entry.0, entry.1, entry.2, entry.3)
                     }
-                    None => (None, false, None),
+                    None => (None, false, None, &no_attrs),
                 };
                 candidate.edges[e].curve = curve;
                 candidate.edges[e].soft = soft;
                 candidate.edges[e].polygon = polygon;
+                candidate.set_edge_attrs(e, attrs.clone());
             }
-            if recorded.values().any(|entry| !entry.3) {
+            if recorded.values().any(|entry| !entry.4) {
                 return false;
             }
         }
@@ -968,7 +1006,7 @@ fn same_position_set(a: &[Point3], b: &[Point3]) -> bool {
 }
 
 /// Finds the live edge matching a [`Anchor::Edge`] fingerprint.
-fn resolve_edge(object: &Object, a: Point3, b: Point3) -> Option<EdgeId> {
+pub(crate) fn resolve_edge(object: &Object, a: Point3, b: Point3) -> Option<EdgeId> {
     object.edges().keys().find(|&eid| {
         let (p, q) = object.edge_endpoints(eid).expect("iterating live edge ids");
         ((p - a).length() <= tol::POINT_MERGE && (q - b).length() <= tol::POINT_MERGE)
@@ -1019,12 +1057,14 @@ fn re_anchor(object: &Object, op: &KernelOp, anchor: &Anchor) -> Result<KernelOp
             loop_path,
             restore,
             curves,
+            edge_attrs,
             ..
         } => Ok(KernelOp::SplitFaceInner {
             face: face(unknown_face_sticky)?,
             loop_path: loop_path.clone(),
             restore: *restore,
             curves: curves.clone(),
+            edge_attrs: edge_attrs.clone(),
         }),
         KernelOp::MergeInnerFace { .. } => Ok(KernelOp::MergeInnerFace {
             sub_face: face(unknown_face_sticky)?,
@@ -1121,8 +1161,9 @@ fn dispatch(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport, Kernel
             loop_path,
             restore,
             curves,
+            edge_attrs,
         } => object
-            .split_face_inner_impl(*face, loop_path, *restore, curves)
+            .split_face_inner_impl(*face, loop_path, *restore, curves, edge_attrs)
             .map(KernelOpReport::FaceSplitInner)
             .map_err(KernelOpError::Sticky),
         KernelOp::MergeInnerFace { sub_face } => object
@@ -1249,6 +1290,8 @@ fn derive_inverse(
                 // the merge report, so a deleted drawn circle or arc comes
                 // back as one.
                 curves: r.curves.clone(),
+                // ...and their attribute dictionaries.
+                edge_attrs: r.edge_attrs.clone(),
             }
         }
         (KernelOp::ExtrudeSubFace { .. }, KernelOpReport::ExtrudeSubFace(r)) => {
@@ -1870,6 +1913,7 @@ mod tests {
                     loop_path: rect,
                     restore: None,
                     curves: Vec::new(),
+                    edge_attrs: Vec::new(),
                 },
             )
             .unwrap();
@@ -1911,6 +1955,7 @@ mod tests {
                     loop_path: rect,
                     restore: None,
                     curves: Vec::new(),
+                    edge_attrs: Vec::new(),
                 },
             )
             .unwrap();

@@ -1123,12 +1123,19 @@ impl<'d> Author<'d> {
         let def = self.doc.instance_def(id)?;
         let pose = self.doc.instance_pose(id)?;
         let map = self.component(def)?;
-        // A reused file definition's placements pass its paint down.
-        let paint = self
-            .reuse
-            .as_ref()
-            .and_then(|r| r.def_paint.get(&def).copied())
-            .unwrap_or(0);
+        // The placement's own material, else (for a reused file
+        // definition) the paint the definition passes down.
+        let own = self
+            .doc
+            .instance_material(id)
+            .flatten()
+            .and_then(|m| self.mat(Some(m)));
+        let paint = own.unwrap_or_else(|| {
+            self.reuse
+                .as_ref()
+                .and_then(|r| r.def_paint.get(&def).copied())
+                .unwrap_or(0)
+        });
         let name = self.doc.instance_name(id).map(str::to_string);
         Some(self.placement(
             NodeId::Instance(id),

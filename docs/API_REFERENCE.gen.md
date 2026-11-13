@@ -24,6 +24,7 @@ entries assume (transactions, `$ref`, face locators, refusals).
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** attributes.write
 
 Delete one attribute key or a whole namespace.
 
@@ -40,7 +41,36 @@ Delete one attribute key or a whole namespace.
       "type": "string"
     },
     "target": {
-      "type": "string"
+      "oneOf": [
+        {
+          "description": "an entity's public id, or \"document\"",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "face": {
+              "description": "a face locator: {object, at}, {object, ray}, or {\"$face\": \"label#key\"}"
+            }
+          },
+          "required": [
+            "face"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "edge": {
+              "description": "a solid edge locator: {object, at}"
+            }
+          },
+          "required": [
+            "edge"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "required": [
@@ -64,8 +94,16 @@ Delete one attribute key or a whole namespace.
 **Refusals:**
 
 - `unknown_entity`
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_edge` — That edge is no longer there — the model changed since it was picked. Click it again.
+- `not_a_solid_edge`
+- `locator_missed`
+- `ambiguous_locator`
+- `face_token_unknown`
+- `face_token_stale`
 - `invalid_attr_name` — Attribute names need both a namespace and a key. Give the attribute a non-empty name and try again.
 - `reserved_attr_namespace`
+- `attr_namespace_not_granted`
 - `unknown_attr` — That attribute doesn't exist on this item, so there was nothing to remove.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
@@ -82,6 +120,7 @@ Delete one attribute key or a whole namespace.
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 Read a target's attribute dictionaries.
 
@@ -95,7 +134,36 @@ Read a target's attribute dictionaries.
       "type": "string"
     },
     "target": {
-      "type": "string"
+      "oneOf": [
+        {
+          "description": "an entity's public id, or \"document\"",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "face": {
+              "description": "a face locator: {object, at}, {object, ray}, or {\"$face\": \"label#key\"}"
+            }
+          },
+          "required": [
+            "face"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "edge": {
+              "description": "a solid edge locator: {object, at}"
+            }
+          },
+          "required": [
+            "edge"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "required": [
@@ -116,6 +184,13 @@ Read a target's attribute dictionaries.
 **Refusals:**
 
 - `unknown_entity`
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_edge` — That edge is no longer there — the model changed since it was picked. Click it again.
+- `not_a_solid_edge`
+- `locator_missed`
+- `ambiguous_locator`
+- `face_token_unknown`
+- `face_token_stale`
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
@@ -131,6 +206,7 @@ Read a target's attribute dictionaries.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** attributes.write
 
 Write one attribute key.
 
@@ -147,7 +223,36 @@ Write one attribute key.
       "type": "string"
     },
     "target": {
-      "type": "string"
+      "oneOf": [
+        {
+          "description": "an entity's public id, or \"document\"",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "face": {
+              "description": "a face locator: {object, at}, {object, ray}, or {\"$face\": \"label#key\"}"
+            }
+          },
+          "required": [
+            "face"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "edge": {
+              "description": "a solid edge locator: {object, at}"
+            }
+          },
+          "required": [
+            "edge"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "value": {}
   },
@@ -174,8 +279,16 @@ Write one attribute key.
 **Refusals:**
 
 - `unknown_entity`
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_edge` — That edge is no longer there — the model changed since it was picked. Click it again.
+- `not_a_solid_edge`
+- `locator_missed`
+- `ambiguous_locator`
+- `face_token_unknown`
+- `face_token_stale`
 - `invalid_attr_name` — Attribute names need both a namespace and a key. Give the attribute a non-empty name and try again.
 - `reserved_attr_namespace`
+- `attr_namespace_not_granted`
 - `non_finite_attr_value` — Attribute numbers can't be NaN or infinity. Use a finite number and try again.
 - `attr_value_too_deep` — This attribute value is nested too deeply to store. Flatten it and try again.
 - `unrepresentable_attr_value`
@@ -196,6 +309,7 @@ Write one attribute key.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Fold a selection into a definition plus one instance.
 
@@ -255,6 +369,7 @@ Fold a selection into a definition plus one instance.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Bake an instance into world geometry.
 
@@ -298,7 +413,195 @@ Bake an instance into world geometry.
 
 - `unknown_entity`
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
-- `cannot_explode_reflected` — A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead.
+- `cannot_explode_reflected`
+
+### `hew.component.flip_instance`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Mirror one world instance across one of its definition's local axes.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "axis": {
+      "description": "the definition-local axis to mirror across (the plane normal to it, through the local origin)",
+      "enum": [
+        "x",
+        "y",
+        "z"
+      ],
+      "type": "string"
+    },
+    "instance": {
+      "description": "a world instance (\"ins_…\")",
+      "type": "string"
+    }
+  },
+  "required": [
+    "instance",
+    "axis"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "instance": {
+      "type": "string"
+    },
+    "mirrored": {
+      "description": "whether the new pose's determinant is negative",
+      "type": "boolean"
+    },
+    "pose": {
+      "description": "the new pose, row-major 3×4",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 12,
+      "minItems": 12,
+      "type": "array"
+    }
+  },
+  "required": [
+    "instance",
+    "pose",
+    "mirrored"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+
+### `hew.component.import_definition`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** model.write
+
+Turn a file's bytes (hew, skp, glb, gltf, stl, dae) into one unplaced component definition, reusing the definition an earlier import of the same bytes made. Place it with hew.component.place.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "bytes_base64": {
+      "description": "the file's bytes; at most 64 MiB together with all images",
+      "type": "string"
+    },
+    "format": {
+      "description": "the file's format; a picture format is refused",
+      "enum": [
+        "hew",
+        "skp",
+        "glb",
+        "gltf",
+        "stl",
+        "dae"
+      ],
+      "type": "string"
+    },
+    "images": {
+      "additionalProperties": {
+        "type": "object"
+      },
+      "description": "COLLADA texture images by the uri the file uses: {bytes_base64, format: png|jpeg}",
+      "type": "object"
+    },
+    "name": {
+      "description": "the definition's name when this import creates it (a later import of the same bytes keeps the first name); at most 128 bytes, no control characters; default \"Imported\"",
+      "type": "string"
+    },
+    "units": {
+      "description": "meters-per-source-unit hint; STL requires it, other formats ignore it",
+      "enum": [
+        "m",
+        "mm",
+        "cm",
+        "in"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "bytes_base64",
+    "format"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "definition": {
+      "description": "the definition's cmp_ id, ready for hew.component.place",
+      "type": "string"
+    },
+    "report": {
+      "properties": {
+        "members": {
+          "description": "all direct members: objects, groups, and nested instances",
+          "type": "integer"
+        },
+        "objects": {
+          "description": "the definition's direct member objects",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "objects",
+        "members"
+      ],
+      "type": "object"
+    },
+    "reused": {
+      "description": "true when an earlier import of the same bytes already made it; nothing changed",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "definition",
+    "reused",
+    "report"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `units_required`
+- `load_failed`
+- `unsupported_format`
+- `unsupported_for_definition`
+- `import_too_large`
+- `empty_group` — Select at least one object to group.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
 
 ### `hew.component.make_unique`
 
@@ -306,6 +609,7 @@ Bake an instance into world geometry.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Deep-copy an instance's definition into a private one.
 
@@ -354,6 +658,7 @@ Deep-copy an instance's definition into a private one.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Place an instance of a definition at a pose.
 
@@ -397,6 +702,2859 @@ Place an instance of a definition at a pose.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `singular` — That transform would scale the object down to nothing, so it was refused.
 
+### `hew.component.rebase`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Re-express a definition in a new frame; every placement is compensated, so nothing moves on screen.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "a definition (\"cmp_…\"), or an instance (\"ins_…\") meaning its definition",
+      "type": "string"
+    },
+    "origin": {
+      "description": "the new origin, in the definition's current local coordinates",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "x": {
+      "description": "the new x axis, unit length, in the definition's current local coordinates",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "y": {
+      "description": "the new y axis, unit length and perpendicular to x; z is x × y",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    }
+  },
+  "required": [
+    "id",
+    "origin",
+    "x",
+    "y"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "component": {
+      "type": "string"
+    },
+    "instances_updated": {
+      "description": "how many instances place the definition, world or nested in another definition; each pose was compensated",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "component",
+    "instances_updated"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `invalid_frame` — That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions.
+- `rebase_during_session` — Finish editing the component before changing its axes.
+
+## hew.compute
+
+### `hew.compute.boolean`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Union, subtract, or intersect two solids without touching the document; answers the result's measure, mesh, topology, or shell count.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "a": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "b": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "op": {
+      "enum": [
+        "union",
+        "subtract",
+        "intersect"
+      ],
+      "type": "string"
+    },
+    "want": {
+      "description": "the result blocks to answer; defaults to [\"measure\"]",
+      "items": {
+        "enum": [
+          "mesh",
+          "topology",
+          "measure",
+          "shells"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "op",
+    "a",
+    "b"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "measure": {
+      "properties": {
+        "area": {
+          "description": "square meters, holes subtracted",
+          "type": "number"
+        },
+        "bbox": {
+          "properties": {
+            "max": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "min": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "volume": {
+          "description": "cubic meters; null for an object that is not watertight",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "volume",
+        "area",
+        "bbox"
+      ],
+      "type": "object"
+    },
+    "mesh": {
+      "additionalProperties": false,
+      "properties": {
+        "face_indices_base64": {
+          "description": "u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base",
+          "type": "string"
+        },
+        "indices_base64": {
+          "description": "u32 little-endian, three per triangle, counter-clockwise from outside",
+          "type": "string"
+        },
+        "normals_base64": {
+          "description": "f32 little-endian xyz per vertex, unit length",
+          "type": "string"
+        },
+        "parts": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "face_index_base": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "id": {
+                "description": "null on a computed mesh",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "index_base": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "index_count": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "face_index_base",
+              "index_base",
+              "index_count"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "positions_base64": {
+          "description": "f32 little-endian xyz per vertex",
+          "type": "string"
+        },
+        "triangle_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "vertex_count": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "vertex_count",
+        "triangle_count",
+        "positions_base64",
+        "normals_base64",
+        "indices_base64",
+        "face_indices_base64",
+        "parts"
+      ],
+      "type": "object"
+    },
+    "shells": {
+      "description": "connected pieces in the result",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "solid": {
+      "description": "false when nothing is left (no other block then)",
+      "type": "boolean"
+    },
+    "topology": {
+      "additionalProperties": false,
+      "properties": {
+        "edges": {
+          "items": {
+            "description": "{index, a, b (vertex indices), faces: [face indices, 1 or 2], curve: {kind: \"circle\", center, axis, radius} | null, attrs: the edge's attribute dictionary, {} for none}",
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "faces": {
+          "items": {
+            "description": "{index, plane: {point, normal}, outer: [vertex indices], holes: [[...]], material, back_material, surface: {kind: \"cylinder\", axis_point, axis, radius} | null, area, attrs: the face's attribute dictionary, {} for none}",
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "object": {
+          "description": "null on a computed solid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vertices": {
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "object",
+        "vertices",
+        "faces",
+        "edges"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "solid"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
+- `mirrored_pose`
+- `compute_busy`
+- `compute_too_large`
+- `mesh_too_large`
+- `operand_not_solid` — Combining needs a solid on both sides. To make it solid, select it and choose Object ▸ Make Solid…
+- `degenerate_contact` — The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.
+- `nothing_removed` — Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting.
+- `singular_transform` — One object's placement is scaled down to nothing, so the operation can't run.
+
+### `hew.compute.measure`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Volume, surface area, bounding box, and centroid of a solid.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "solid": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "required": [
+    "solid"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "area": {
+      "description": "square meters, holes subtracted",
+      "type": "number"
+    },
+    "bbox": {
+      "properties": {
+        "max": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "min": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "min",
+        "max"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "centroid": {
+      "description": "the volume centroid; null for an object that is not watertight",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "volume": {
+      "description": "cubic meters; null for an object that is not watertight",
+      "type": [
+        "number",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "volume",
+    "area",
+    "bbox",
+    "centroid"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
+- `mirrored_pose`
+- `compute_busy`
+- `compute_too_large`
+
+### `hew.compute.offset`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Offset closed 2D loops outward or inward by a distance.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "distance": {
+      "description": "positive grows the material, negative shrinks it",
+      "type": "number"
+    },
+    "join": {
+      "description": "miter (the default); round is reserved and not available yet",
+      "enum": [
+        "miter",
+        "round"
+      ],
+      "type": "string"
+    },
+    "loops": {
+      "description": "closed 2D loops, the first the outer boundary, the rest holes, in either winding",
+      "items": {
+        "items": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "minItems": 3,
+        "type": "array"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "loops",
+    "distance"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "loops": {
+      "items": {
+        "properties": {
+          "edges": {
+            "items": {
+              "oneOf": [
+                {
+                  "properties": {
+                    "a": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "b": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "line"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "a",
+                    "b"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "ccw": {
+                      "type": "boolean"
+                    },
+                    "center": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "end": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "arc"
+                    },
+                    "radius": {
+                      "type": "number"
+                    },
+                    "start": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "center",
+                    "radius",
+                    "start",
+                    "end",
+                    "ccw"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "center": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "circle"
+                    },
+                    "radius": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "center",
+                    "radius"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "outer": {
+            "description": "an outer boundary (counter-clockwise), else a hole (clockwise)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "outer",
+          "edges"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "loops"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `offset_too_small` — That offset distance is too small to make a new boundary. Drag further, or type an exact distance.
+- `offset_collapsed` — The shape can't absorb that offset — its boundary would collapse, cross itself, or spike out of a sharp corner. Try a smaller distance, or soften the sharpest corner.
+- `compute_busy`
+
+### `hew.compute.outline`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+A part's outline in a frame's xy plane: its largest face, or its silhouette, with arcs and circles kept analytic.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "frame": {
+      "description": "\"part\" (the default: hew.query.part_frame's frame) or {origin, x, y, z}, orthonormal and right-handed",
+      "oneOf": [
+        {
+          "enum": [
+            "part"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "origin": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "x": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "y": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "z": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            }
+          },
+          "required": [
+            "origin",
+            "x",
+            "y",
+            "z"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "id": {
+      "description": "a world node's public id",
+      "type": "string"
+    },
+    "path": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "which": {
+      "description": "largest_face: the loops of the part's largest face; projection: the silhouette seen along the frame's z",
+      "enum": [
+        "largest_face",
+        "projection"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "which"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "loops": {
+      "items": {
+        "properties": {
+          "edges": {
+            "items": {
+              "oneOf": [
+                {
+                  "properties": {
+                    "a": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "b": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "line"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "a",
+                    "b"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "ccw": {
+                      "type": "boolean"
+                    },
+                    "center": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "end": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "arc"
+                    },
+                    "radius": {
+                      "type": "number"
+                    },
+                    "start": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "center",
+                    "radius",
+                    "start",
+                    "end",
+                    "ccw"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "center": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "circle"
+                    },
+                    "radius": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "center",
+                    "radius"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "outer": {
+            "description": "an outer boundary (counter-clockwise), else a hole (clockwise)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "outer",
+          "edges"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "loops"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `invalid_frame` — That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions.
+- `no_part_frame` — That part has no faces to measure.
+- `compute_busy`
+- `compute_too_large`
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
+
+### `hew.compute.project`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+A single part's flat drawing on a plane, its faces grouped by depth into layers (not available yet).
+
+> **Not yet implemented.** Every call answers the `unimplemented` refusal (docs/agents/HEW_API.md §14's burn-down posture).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "plane": {
+      "additionalProperties": false,
+      "description": "world coordinates",
+      "properties": {
+        "normal": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "origin": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin",
+        "normal"
+      ],
+      "type": "object"
+    },
+    "solid": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "want": {
+      "items": {
+        "enum": [
+          "outline",
+          "layers"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "solid",
+    "plane"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "layers": {
+      "items": {
+        "properties": {
+          "depth": {
+            "type": "number"
+          },
+          "loops": {
+            "items": {
+              "properties": {
+                "edges": {
+                  "items": {
+                    "properties": {
+                      "a": {
+                        "items": {
+                          "type": "number"
+                        },
+                        "maxItems": 2,
+                        "minItems": 2,
+                        "type": "array"
+                      },
+                      "b": {
+                        "items": {
+                          "type": "number"
+                        },
+                        "maxItems": 2,
+                        "minItems": 2,
+                        "type": "array"
+                      },
+                      "kind": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "outer": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "outer",
+                "edges"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "depth",
+          "loops"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "outline": {
+      "items": {
+        "properties": {
+          "edges": {
+            "items": {
+              "properties": {
+                "a": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                "b": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                "kind": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "outer": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "outer",
+          "edges"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unimplemented`
+
+### `hew.compute.shells`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Split a solid into its connected pieces without touching the document.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "solid": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "want_mesh": {
+      "description": "answer each piece's mesh too; defaults to false",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "solid"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "shells": {
+      "items": {
+        "properties": {
+          "measure": {
+            "properties": {
+              "area": {
+                "description": "square meters, holes subtracted",
+                "type": "number"
+              },
+              "bbox": {
+                "properties": {
+                  "max": {
+                    "items": {
+                      "type": "number"
+                    },
+                    "maxItems": 3,
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "min": {
+                    "items": {
+                      "type": "number"
+                    },
+                    "maxItems": 3,
+                    "minItems": 3,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "min",
+                  "max"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "volume": {
+                "description": "cubic meters; null for an object that is not watertight",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "volume",
+              "area",
+              "bbox"
+            ],
+            "type": "object"
+          },
+          "mesh": {
+            "additionalProperties": false,
+            "properties": {
+              "face_indices_base64": {
+                "description": "u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base",
+                "type": "string"
+              },
+              "indices_base64": {
+                "description": "u32 little-endian, three per triangle, counter-clockwise from outside",
+                "type": "string"
+              },
+              "normals_base64": {
+                "description": "f32 little-endian xyz per vertex, unit length",
+                "type": "string"
+              },
+              "parts": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "face_index_base": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "id": {
+                      "description": "null on a computed mesh",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "index_base": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "index_count": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "face_index_base",
+                    "index_base",
+                    "index_count"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "positions_base64": {
+                "description": "f32 little-endian xyz per vertex",
+                "type": "string"
+              },
+              "triangle_count": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "vertex_count": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "vertex_count",
+              "triangle_count",
+              "positions_base64",
+              "normals_base64",
+              "indices_base64",
+              "face_indices_base64",
+              "parts"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "measure"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "count",
+    "shells"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
+- `mirrored_pose`
+- `compute_busy`
+- `compute_too_large`
+- `mesh_too_large`
+
+### `hew.compute.slice`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Cut a solid by a plane without touching the document; answers both pieces.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "plane": {
+      "additionalProperties": false,
+      "description": "world coordinates",
+      "properties": {
+        "normal": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "origin": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin",
+        "normal"
+      ],
+      "type": "object"
+    },
+    "solid": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "want": {
+      "description": "the result blocks to answer; defaults to [\"measure\"]",
+      "items": {
+        "enum": [
+          "mesh",
+          "topology",
+          "measure",
+          "shells"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "solid",
+    "plane"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "positive is the piece on the side the plane normal points to",
+  "properties": {
+    "negative": {
+      "properties": {
+        "measure": {
+          "properties": {
+            "area": {
+              "description": "square meters, holes subtracted",
+              "type": "number"
+            },
+            "bbox": {
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "volume": {
+              "description": "cubic meters; null for an object that is not watertight",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "volume",
+            "area",
+            "bbox"
+          ],
+          "type": "object"
+        },
+        "mesh": {
+          "additionalProperties": false,
+          "properties": {
+            "face_indices_base64": {
+              "description": "u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base",
+              "type": "string"
+            },
+            "indices_base64": {
+              "description": "u32 little-endian, three per triangle, counter-clockwise from outside",
+              "type": "string"
+            },
+            "normals_base64": {
+              "description": "f32 little-endian xyz per vertex, unit length",
+              "type": "string"
+            },
+            "parts": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "face_index_base": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "id": {
+                    "description": "null on a computed mesh",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "index_base": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "index_count": {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id",
+                  "face_index_base",
+                  "index_base",
+                  "index_count"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "positions_base64": {
+              "description": "f32 little-endian xyz per vertex",
+              "type": "string"
+            },
+            "triangle_count": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "vertex_count": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "vertex_count",
+            "triangle_count",
+            "positions_base64",
+            "normals_base64",
+            "indices_base64",
+            "face_indices_base64",
+            "parts"
+          ],
+          "type": "object"
+        },
+        "shells": {
+          "description": "connected pieces in the result",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "topology": {
+          "additionalProperties": false,
+          "properties": {
+            "edges": {
+              "items": {
+                "description": "{index, a, b (vertex indices), faces: [face indices, 1 or 2], curve: {kind: \"circle\", center, axis, radius} | null, attrs: the edge's attribute dictionary, {} for none}",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "faces": {
+              "items": {
+                "description": "{index, plane: {point, normal}, outer: [vertex indices], holes: [[...]], material, back_material, surface: {kind: \"cylinder\", axis_point, axis, radius} | null, area, attrs: the face's attribute dictionary, {} for none}",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "object": {
+              "description": "null on a computed solid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "vertices": {
+              "items": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "object",
+            "vertices",
+            "faces",
+            "edges"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "positive": {
+      "properties": {
+        "measure": {
+          "properties": {
+            "area": {
+              "description": "square meters, holes subtracted",
+              "type": "number"
+            },
+            "bbox": {
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "volume": {
+              "description": "cubic meters; null for an object that is not watertight",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "volume",
+            "area",
+            "bbox"
+          ],
+          "type": "object"
+        },
+        "mesh": {
+          "additionalProperties": false,
+          "properties": {
+            "face_indices_base64": {
+              "description": "u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base",
+              "type": "string"
+            },
+            "indices_base64": {
+              "description": "u32 little-endian, three per triangle, counter-clockwise from outside",
+              "type": "string"
+            },
+            "normals_base64": {
+              "description": "f32 little-endian xyz per vertex, unit length",
+              "type": "string"
+            },
+            "parts": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "face_index_base": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "id": {
+                    "description": "null on a computed mesh",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "index_base": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "index_count": {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id",
+                  "face_index_base",
+                  "index_base",
+                  "index_count"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "positions_base64": {
+              "description": "f32 little-endian xyz per vertex",
+              "type": "string"
+            },
+            "triangle_count": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "vertex_count": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "vertex_count",
+            "triangle_count",
+            "positions_base64",
+            "normals_base64",
+            "indices_base64",
+            "face_indices_base64",
+            "parts"
+          ],
+          "type": "object"
+        },
+        "shells": {
+          "description": "connected pieces in the result",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "topology": {
+          "additionalProperties": false,
+          "properties": {
+            "edges": {
+              "items": {
+                "description": "{index, a, b (vertex indices), faces: [face indices, 1 or 2], curve: {kind: \"circle\", center, axis, radius} | null, attrs: the edge's attribute dictionary, {} for none}",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "faces": {
+              "items": {
+                "description": "{index, plane: {point, normal}, outer: [vertex indices], holes: [[...]], material, back_material, surface: {kind: \"cylinder\", axis_point, axis, radius} | null, area, attrs: the face's attribute dictionary, {} for none}",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "object": {
+              "description": "null on a computed solid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "vertices": {
+              "items": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "object",
+            "vertices",
+            "faces",
+            "edges"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [],
+      "type": "object"
+    }
+  },
+  "required": [
+    "positive",
+    "negative"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
+- `mirrored_pose`
+- `compute_busy`
+- `compute_too_large`
+- `mesh_too_large`
+- `not_solid` — Only a solid can be sliced. To make it solid, select it and choose Object ▸ Make Solid…
+- `plane_misses_solid` — The slicing plane doesn't pass through the object. Position the cut so it goes through the solid.
+- `degenerate` — The cut lines up exactly with an existing face or edge, so it wouldn't create two pieces. Move the cut slightly.
+
+### `hew.compute.stretch`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Preview a section stretch of parts along one axis of a frame (not available yet).
+
+> **Not yet implemented.** Every call answers the `unimplemented` refusal (docs/agents/HEW_API.md §14's burn-down posture).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "axis": {
+      "enum": [
+        0,
+        1,
+        2
+      ],
+      "type": "integer"
+    },
+    "cutters": {
+      "oneOf": [
+        {
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "positions": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "positions"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "dimension": {
+      "type": "number"
+    },
+    "distance": {
+      "type": "number"
+    },
+    "frame": {
+      "oneOf": [
+        {
+          "enum": [
+            "active",
+            "context",
+            "entity"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "origin": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "x": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "y": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "z": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            }
+          },
+          "required": [
+            "origin",
+            "x",
+            "y",
+            "z"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "mode": {
+      "oneOf": [
+        {
+          "enum": [
+            "end",
+            "centered"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "interior": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "interior"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "paths": {
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "paths",
+    "axis"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "applied": {
+      "type": "number"
+    },
+    "cutters": {
+      "items": {
+        "type": "number"
+      },
+      "type": "array"
+    },
+    "max_compression": {
+      "type": "number"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unimplemented`
+
 ## hew.context
 
 ### `hew.context.enter`
@@ -405,6 +3563,7 @@ Place an instance of a definition at a pose.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Open a group/component editing frame (transaction-balanced only).
 
@@ -440,7 +3599,7 @@ Open a group/component editing frame (transaction-balanced only).
 - `unknown_entity`
 - `explode_session_open` — This component is already open for editing further out. Step back out to it (Escape) instead of opening it again — and close the editor before saving.
 - `explode_session_nested_group` — This group is nested inside another one, so it can't be opened for editing directly. Enter its enclosing group first, then drill down to this one.
-- `explode_session_pose_unsupported` — This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first.
+- `explode_session_pose_unsupported` — This instance is scaled unevenly, so it can't be opened for direct editing. Even out its scale first.
 - `explode_session_grouped_instance` — This instance sits inside a group, so it opens in the in-context editing mode instead.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
@@ -451,6 +3610,7 @@ Open a group/component editing frame (transaction-balanced only).
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Close the innermost frame this envelope opened.
 
@@ -486,6 +3646,7 @@ Close the innermost frame this envelope opened.
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** kernel
+- **Permission:** always
 
 Bind this connection to one open document, named by `document` (id, path, label, or title; see hew.meta.documents). With no `document`, the connection's current document.
 
@@ -518,6 +3679,13 @@ Bind this connection to one open document, named by `document` (id, path, label,
         "dirty": {
           "type": "boolean"
         },
+        "document_id": {
+          "description": "the persistent UUID the document's file carries (lowercase, hyphenated); null until the document is first saved",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "front": {
           "description": "this is the user's front-most document window",
           "type": "boolean"
@@ -545,7 +3713,8 @@ Bind this connection to one open document, named by `document` (id, path, label,
         "id",
         "title",
         "path",
-        "dirty"
+        "dirty",
+        "document_id"
       ],
       "type": "object"
     }
@@ -558,6 +3727,7 @@ Bind this connection to one open document, named by `document` (id, path, label,
 
 - `unknown_document`
 - `ambiguous_document`
+- `document_not_granted`
 
 ### `hew.doc.close`
 
@@ -565,6 +3735,7 @@ Bind this connection to one open document, named by `document` (id, path, label,
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.discard
 
 Close an open document window (the attached one, or the named `document`). Refuses unsaved changes unless `discard` is set.
 
@@ -600,6 +3771,13 @@ Close an open document window (the attached one, or the named `document`). Refus
         "dirty": {
           "type": "boolean"
         },
+        "document_id": {
+          "description": "the persistent UUID the document's file carries (lowercase, hyphenated); null until the document is first saved",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "front": {
           "description": "this is the user's front-most document window",
           "type": "boolean"
@@ -627,7 +3805,8 @@ Close an open document window (the attached one, or the named `document`). Refus
         "id",
         "title",
         "path",
-        "dirty"
+        "dirty",
+        "document_id"
       ],
       "type": "object"
     }
@@ -643,6 +3822,7 @@ Close an open document window (the attached one, or the named `document`). Refus
 - `ambiguous_document`
 - `unsaved_changes`
 - `last_document`
+- `document_busy` — A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window.
 
 ### `hew.doc.export`
 
@@ -650,6 +3830,7 @@ Close an open document window (the attached one, or the named `document`). Refus
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.save
 
 Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp ("skp", the 2021-and-later container; "skp3" to "skp8", "skp2013" to "skp2020") — bytes base64, or a path on hosts with filesystem access.
 
@@ -697,6 +3878,34 @@ Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a Sk
       "minimum": 8,
       "type": "integer"
     },
+    "selection": {
+      "description": "draw only these: node ids, occurrence locators {path}, or a definition's cmp_ id (its leaves at the identity pose)",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "minItems": 1,
+      "type": "array"
+    },
     "units": {
       "description": "SketchUp formats only: the display units the file opens in (hew.view.units's formats). Absent: the host's display units (the app's preference live; meters headless).",
       "enum": [
@@ -742,6 +3951,9 @@ Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a Sk
 - `host_capability_missing`
 - `nothing_to_export`
 - `save_failed`
+- `unknown_entity`
+- `unknown_occurrence`
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
 
 ### `hew.doc.focus`
 
@@ -749,6 +3961,7 @@ Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a Sk
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.other
 
 Raise a document's window to the front. Every other command leaves the user's focus alone; this is the explicit opt-in.
 
@@ -780,6 +3993,13 @@ Raise a document's window to the front. Every other command leaves the user's fo
         "dirty": {
           "type": "boolean"
         },
+        "document_id": {
+          "description": "the persistent UUID the document's file carries (lowercase, hyphenated); null until the document is first saved",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "front": {
           "description": "this is the user's front-most document window",
           "type": "boolean"
@@ -807,7 +4027,8 @@ Raise a document's window to the front. Every other command leaves the user's fo
         "id",
         "title",
         "path",
-        "dirty"
+        "dirty",
+        "document_id"
       ],
       "type": "object"
     }
@@ -828,6 +4049,7 @@ Raise a document's window to the front. Every other command leaves the user's fo
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 Model health: every open object (world or component member) with its verdict, open rims and seam family, and counts by kind.
 
@@ -1039,6 +4261,7 @@ Model health: every open object (world or component member) with its verdict, op
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.save
 
 Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached document through the shared healing pipeline, or place a PNG/JPEG picture (a component holding one face painted with it, at origin/u/v, width meters wide). Additive: existing geometry is untouched.
 
@@ -1140,6 +4363,7 @@ Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.other
 
 Create a fresh document. The desktop app opens it in a new window — behind the user's current one unless `focus` says otherwise — and attaches the connection to it; headless hosts replace the working document.
 
@@ -1180,6 +4404,13 @@ Create a fresh document. The desktop app opens it in a new window — behind the
         "dirty": {
           "type": "boolean"
         },
+        "document_id": {
+          "description": "the persistent UUID the document's file carries (lowercase, hyphenated); null until the document is first saved",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "front": {
           "description": "this is the user's front-most document window",
           "type": "boolean"
@@ -1207,7 +4438,8 @@ Create a fresh document. The desktop app opens it in a new window — behind the
         "id",
         "title",
         "path",
-        "dirty"
+        "dirty",
+        "document_id"
       ],
       "type": "object"
     }
@@ -1220,6 +4452,7 @@ Create a fresh document. The desktop app opens it in a new window — behind the
 
 - `host_capability_missing`
 - `window_not_ready`
+- `document_busy` — A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window.
 
 ### `hew.doc.open`
 
@@ -1227,6 +4460,7 @@ Create a fresh document. The desktop app opens it in a new window — behind the
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.other
 
 Open a .hew or SketchUp .skp document. The desktop app opens it in a new window (or attaches to the window that already has that file open), behind the user's current window unless `focus` says otherwise; headless hosts replace the working document.
 
@@ -1278,6 +4512,13 @@ Open a .hew or SketchUp .skp document. The desktop app opens it in a new window 
         "dirty": {
           "type": "boolean"
         },
+        "document_id": {
+          "description": "the persistent UUID the document's file carries (lowercase, hyphenated); null until the document is first saved",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "front": {
           "description": "this is the user's front-most document window",
           "type": "boolean"
@@ -1305,7 +4546,8 @@ Open a .hew or SketchUp .skp document. The desktop app opens it in a new window 
         "id",
         "title",
         "path",
-        "dirty"
+        "dirty",
+        "document_id"
       ],
       "type": "object"
     }
@@ -1319,6 +4561,7 @@ Open a .hew or SketchUp .skp document. The desktop app opens it in a new window 
 - `host_capability_missing`
 - `load_failed`
 - `window_not_ready`
+- `document_busy` — A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window.
 
 ### `hew.doc.purge_unused`
 
@@ -1326,6 +4569,7 @@ Open a .hew or SketchUp .skp document. The desktop app opens it in a new window 
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Delete every unused material and component definition, as one undo entry.
 
@@ -1368,6 +4612,7 @@ Delete every unused material and component definition, as one undo entry.
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.discard
 
 Revert to Saved: re-read the document's saved file in place, discarding every change since the last save. The undo and redo history is cleared and the document reads clean. Refuses `nothing_to_revert` when the document has no saved file or has no changes since the last save. There is no confirmation step: the caller is deliberate.
 
@@ -1402,6 +4647,7 @@ Revert to Saved: re-read the document's saved file in place, discarding every ch
 - `nothing_to_revert`
 - `unknown_document`
 - `ambiguous_document`
+- `document_busy` — A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window.
 
 ### `hew.doc.save`
 
@@ -1409,6 +4655,7 @@ Revert to Saved: re-read the document's saved file in place, discarding every ch
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.save
 
 Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file is written, the unsaved mark cleared, and the document bound to it. `copy` writes a copy without any of that. With no `path` it re-saves in place; a document with no file yet, in a host that cannot ask where, hands the bytes back instead.
 
@@ -1536,6 +4783,7 @@ Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file i
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** always
 
 Execute commands in order, atomically, as one labeled undo entry.
 
@@ -1544,6 +4792,12 @@ Execute commands in order, atomically, as one labeled undo entry.
 ```json
 {
   "properties": {
+    "coalesce": {
+      "description": "merge into the top undo entry when it was committed under the same key by a connection with this connection's identity (docs/agents/HEW_API.md §6.5)",
+      "maxLength": 64,
+      "minLength": 1,
+      "type": "string"
+    },
     "commands": {
       "items": {
         "properties": {
@@ -1565,6 +4819,15 @@ Execute commands in order, atomically, as one labeled undo entry.
       "minItems": 1,
       "type": "array"
     },
+    "dry_run": {
+      "description": "rehearse: run the envelope on a copy of the document and answer what a commit would, changing nothing (docs/agents/HEW_API.md §6.6); needs only read permissions; no coalesce",
+      "type": "boolean"
+    },
+    "expect_generation": {
+      "description": "refuse with generation_moved, before any command runs, unless the document's history generation is this value (docs/agents/HEW_API.md §6.5)",
+      "minimum": 0,
+      "type": "integer"
+    },
     "label": {
       "type": "string"
     }
@@ -1581,6 +4844,10 @@ Execute commands in order, atomically, as one labeled undo entry.
 ```json
 {
   "properties": {
+    "dry_run": {
+      "description": "true on a rehearsal's answer",
+      "type": "boolean"
+    },
     "label": {
       "type": "string"
     },
@@ -1599,6 +4866,9 @@ Execute commands in order, atomically, as one labeled undo entry.
 **Refusals:**
 
 - `ref_resolution_failed`
+- `generation_moved`
+- `dry_run_host_command`
+- `compute_busy`
 
 ## hew.entity
 
@@ -1608,6 +4878,7 @@ Execute commands in order, atomically, as one labeled undo entry.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Delete an entity.
 
@@ -1659,8 +4930,9 @@ Delete an entity.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Translate (with copy/array forms) by vector or from→to points.
+Translate (with copy/array forms) by vector or from→to points; ids may be paths to members of one definition, moved in world terms with every placement following.
 
 **Params schema:**
 
@@ -1672,17 +4944,67 @@ Translate (with copy/array forms) by vector or from→to points.
       "additionalProperties": false,
       "properties": {
         "count": {
+          "description": "copies at step, 2·step, …, count·step along the translation",
           "maximum": 1000,
           "minimum": 1,
           "type": "integer"
+        },
+        "grid": {
+          "description": "a grid copy: one entry per axis; count is the number of slots along it, the original's included, so [{count: 4, step}] makes three copies. Takes the place of translation/from/to and of copy.count; the product of counts is at most 1000",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "count": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "step": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "count",
+              "step"
+            ],
+            "type": "object"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "type": "array"
         }
       },
       "type": "object"
     },
     "from": {},
     "ids": {
+      "description": "world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602",
       "items": {
-        "type": "string"
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "minItems": 1,
       "type": "array"
@@ -1710,6 +5032,7 @@ Translate (with copy/array forms) by vector or from→to points.
 {
   "properties": {
     "ids": {
+      "description": "the copies, placement-major, each placement's block in ids order",
       "items": {
         "type": "string"
       },
@@ -1732,6 +5055,10 @@ Translate (with copy/array forms) by vector or from→to points.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
 
 ### `hew.entity.rename`
 
@@ -1739,6 +5066,7 @@ Translate (with copy/array forms) by vector or from→to points.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Rename an entity.
 
@@ -1791,8 +5119,9 @@ Rename an entity.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Rotate about a pivot and axis by an angle.
+Rotate about a pivot and axis by an angle; ids may be paths to members of one definition, turned in world terms with every placement following.
 
 **Params schema:**
 
@@ -1801,6 +5130,7 @@ Rotate about a pivot and axis by an angle.
   "additionalProperties": false,
   "properties": {
     "angle": {
+      "description": "radians, right-handed about axis",
       "type": "number"
     },
     "axis": {
@@ -1823,8 +5153,29 @@ Rotate about a pivot and axis by an angle.
       "type": "object"
     },
     "ids": {
+      "description": "world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602",
       "items": {
-        "type": "string"
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "minItems": 1,
       "type": "array"
@@ -1869,6 +5220,10 @@ Rotate about a pivot and axis by an angle.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
 
 ### `hew.entity.scale`
 
@@ -1876,8 +5231,9 @@ Rotate about a pivot and axis by an angle.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Scale about an anchor with per-axis factors.
+Scale about an anchor with per-axis factors; a negative factor mirrors. ids may be paths to members of one definition, scaled in world terms with every placement following.
 
 **Params schema:**
 
@@ -1895,8 +5251,29 @@ Scale about an anchor with per-axis factors.
       "type": "array"
     },
     "ids": {
+      "description": "world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602",
       "items": {
-        "type": "string"
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "minItems": 1,
       "type": "array"
@@ -1930,6 +5307,258 @@ Scale about an anchor with per-axis factors.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+
+### `hew.entity.set_frame`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Set or clear the part frame override (hew.part / frame) of an object or group.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "description": "origin, x, and y are coordinates in the face frame hew.query.part_frame reports for the part without an override (after its [length, width, thickness] swap): origin an offset along that frame's axes, x and y unit, perpendicular directions in it. Give all three, or clear: true.",
+  "properties": {
+    "clear": {
+      "description": "true removes the override; give it alone",
+      "type": "boolean"
+    },
+    "id": {
+      "description": "an object (\"obj_…\") or group (\"grp_…\")",
+      "type": "string"
+    },
+    "origin": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "x": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "y": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "source": {
+      "description": "where hew.query.part_frame now takes the frame from",
+      "enum": [
+        "attribute",
+        "face"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "source"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `not_a_part`
+- `invalid_frame` — That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions.
+
+## hew.event
+
+### `hew.event.subscribe`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** always
+
+Receive the named events on this connection as notification frames. Names the grant may not receive come back in `denied`.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "events": {
+      "items": {
+        "enum": [
+          "document_changed",
+          "selection_changed",
+          "context_changed",
+          "document_will_save",
+          "document_saved",
+          "document_opened",
+          "document_closed",
+          "units_changed",
+          "scenes_changed",
+          "tool_changed",
+          "plugin_state",
+          "slot_changed",
+          "settings_changed",
+          "ui_cancel",
+          "window_closed",
+          "surface_closed"
+        ],
+        "type": "string"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "events"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "denied": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "subscribed": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "subscribed",
+    "denied"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:** none.
+
+### `hew.event.unsubscribe`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** always
+
+Stop receiving the named events on this connection.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "events": {
+      "items": {
+        "enum": [
+          "document_changed",
+          "selection_changed",
+          "context_changed",
+          "document_will_save",
+          "document_saved",
+          "document_opened",
+          "document_closed",
+          "units_changed",
+          "scenes_changed",
+          "tool_changed",
+          "plugin_state",
+          "slot_changed",
+          "settings_changed",
+          "ui_cancel",
+          "window_closed",
+          "surface_closed"
+        ],
+        "type": "string"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "events"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "denied": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "subscribed": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "subscribed",
+    "denied"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:** none.
 
 ## hew.geo
 
@@ -1939,6 +5568,7 @@ Scale about an anchor with per-axis factors.
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 The document's geo-reference (coordinate reference system), or null when it has none.
 
@@ -2042,6 +5672,7 @@ The document's geo-reference (coordinate reference system), or null when it has 
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Set the document's geo-reference to the given record, or clear it with null. One undo step.
 
@@ -2149,6 +5780,7 @@ Set the document's geo-reference to the given record, or clear it with null. One
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Group sibling nodes non-destructively.
 
@@ -2204,6 +5836,7 @@ Group sibling nodes non-destructively.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Dissolve a group, re-homing its members.
 
@@ -2245,6 +5878,7 @@ Dissolve a group, re-homing its members.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Move live nodes into a group, or out to the top level, without touching their geometry.
 
@@ -2302,6 +5936,7 @@ Move live nodes into a group, or out to the top level, without touching their ge
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Add an angular construction guide.
 
@@ -2373,6 +6008,7 @@ Add an angular construction guide.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Delete all guides.
 
@@ -2404,6 +6040,7 @@ Delete all guides.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Add an infinite construction guide line.
 
@@ -2454,6 +6091,7 @@ Add an infinite construction guide line.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Add a construction guide point.
 
@@ -2504,6 +6142,7 @@ Add a construction guide point.
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** kernel
+- **Permission:** model.write
 
 Redo the most recently undone entry.
 
@@ -2539,6 +6178,7 @@ Redo the most recently undone entry.
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** kernel
+- **Permission:** model.read
 
 History depth, the top entry's label and origin, the saved depth, and every undo/redo entry's label and origin.
 
@@ -2606,6 +6246,14 @@ History depth, the top entry's label and origin, the saved depth, and every undo
       ],
       "type": "object"
     },
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
     "redo_depth": {
       "type": "integer"
     },
@@ -2620,7 +6268,9 @@ History depth, the top entry's label and origin, the saved depth, and every undo
     "redo_depth",
     "top",
     "saved_depth",
-    "entries"
+    "entries",
+    "generation",
+    "epoch"
   ],
   "type": "object"
 }
@@ -2634,6 +6284,7 @@ History depth, the top entry's label and origin, the saved depth, and every undo
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** kernel
+- **Permission:** model.write
 
 Undo the top history entry (optionally guarded by expected_label).
 
@@ -2676,6 +6327,7 @@ Undo the top history entry (optionally guarded by expected_label).
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** host
+- **Permission:** model.read
 
 One library item's full metadata, manifest summary, and document attributes.
 
@@ -2774,6 +6426,7 @@ One library item's full metadata, manifest summary, and document attributes.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** library
 
 Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement; a material item goes into the palette instead, recording no undo entry (§6.4).
 
@@ -2885,7 +6538,6 @@ Insert a library item into the attached document, wired for idempotent re-insert
 - `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
 - `singular` — That transform would scale the object down to nothing, so it was refused.
 - `degenerate_axis` — The rotation axis needs two distinct points. Pick a second point further from the first.
-- `reflection` — This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ### `hew.library.list`
@@ -2894,6 +6546,7 @@ Insert a library item into the attached document, wired for idempotent re-insert
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** host
+- **Permission:** model.read
 
 List items in the Hew Library, optionally filtered by category, collection, or a text query.
 
@@ -3010,6 +6663,7 @@ List items in the Hew Library, optionally filtered by category, collection, or a
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** host
+- **Permission:** library
 
 Delete a library item.
 
@@ -3058,6 +6712,7 @@ Delete a library item.
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** library
 
 Save a selection, one material, or the whole document to the library. Records no undo entry (§6.4).
 
@@ -3157,6 +6812,7 @@ Save a selection, one material, or the whole document to the library. Records no
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** host
+- **Permission:** library
 
 Edit a library item's name, keywords, or collection in place.
 
@@ -3245,6 +6901,7 @@ Edit a library item's name, keywords, or collection in place.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Add a color or texture material to the palette. Registry-state: records no undo entry (§6.4).
 
@@ -3331,6 +6988,7 @@ Add a color or texture material to the palette. Registry-state: records no undo 
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Paint a face or entity.
 
@@ -3342,6 +7000,7 @@ Paint a face or entity.
   "properties": {
     "face": {},
     "id": {
+      "description": "an object (its base material), an instance (the placement's own material), or a definition (every object it owns)",
       "type": "string"
     },
     "material": {
@@ -3349,6 +7008,14 @@ Paint a face or entity.
         "string",
         "null"
       ]
+    },
+    "scope": {
+      "description": "for an instance id: the placement (default) or its definition; a definition id takes only \"definition\"",
+      "enum": [
+        "instance",
+        "definition"
+      ],
+      "type": "string"
     }
   },
   "required": [
@@ -3372,6 +7039,8 @@ Paint a face or entity.
 
 - `unknown_entity`
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
 - `unknown_material` — That material is no longer in the palette. Pick another swatch.
 - `locator_missed`
@@ -3383,6 +7052,7 @@ Paint a face or entity.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Position a face's texture by three tile-corner pins, or reset it to the default projection.
 
@@ -3470,6 +7140,7 @@ Position a face's texture by three tile-corner pins, or reset it to the default 
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Replace one material with another everywhere it is painted, or within one object.
 
@@ -3487,7 +7158,7 @@ Replace one material with another everywhere it is painted, or within one object
       ]
     },
     "object": {
-      "description": "only within this object; omitted: the whole document",
+      "description": "only within this object; omitted: the whole document, instance materials included",
       "type": "string"
     },
     "to": {
@@ -3527,6 +7198,7 @@ Replace one material with another everywhere it is painted, or within one object
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Set an object's default material.
 
@@ -3576,6 +7248,7 @@ Set an object's default material.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Set a material's opacity.
 
@@ -3623,6 +7296,7 @@ Set a material's opacity.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Set a material's metallic and roughness factors (0 to 1); its maps and strengths are kept.
 
@@ -3680,6 +7354,7 @@ Set a material's metallic and roughness factors (0 to 1); its maps and strengths
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** always
 
 The registry as data: every granted command's schemas, summary, and refusal inventory.
 
@@ -3764,6 +7439,7 @@ The registry as data: every granted command's schemas, summary, and refusal inve
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** host
+- **Permission:** model.read
 
 The host's open documents: id, title, path, dirty, and — in the desktop app — label, front, and attached.
 
@@ -3792,6 +7468,13 @@ The host's open documents: id, title, path, dirty, and — in the desktop app �
           "dirty": {
             "type": "boolean"
           },
+          "document_id": {
+            "description": "the persistent UUID the document's file carries (lowercase, hyphenated); null until the document is first saved",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "front": {
             "description": "this is the user's front-most document window",
             "type": "boolean"
@@ -3819,7 +7502,8 @@ The host's open documents: id, title, path, dirty, and — in the desktop app �
           "id",
           "title",
           "path",
-          "dirty"
+          "dirty",
+          "document_id"
         ],
         "type": "object"
       },
@@ -3841,6 +7525,7 @@ The host's open documents: id, title, path, dirty, and — in the desktop app �
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** always
 
 Open the connection: negotiate protocol and encoding, learn the granted profile and open documents.
 
@@ -3910,6 +7595,13 @@ Open the connection: negotiate protocol and encoding, learn the granted profile 
           "dirty": {
             "type": "boolean"
           },
+          "document_id": {
+            "description": "the persistent UUID the document's file carries (lowercase, hyphenated); null until the document is first saved",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "front": {
             "description": "this is the user's front-most document window",
             "type": "boolean"
@@ -3937,7 +7629,8 @@ Open the connection: negotiate protocol and encoding, learn the granted profile 
           "id",
           "title",
           "path",
-          "dirty"
+          "dirty",
+          "document_id"
         ],
         "type": "object"
       },
@@ -3946,10 +7639,14 @@ Open the connection: negotiate protocol and encoding, learn the granted profile 
     "encoding": {
       "type": "string"
     },
+    "grant": {
+      "type": "object"
+    },
     "profile": {
       "enum": [
         "core",
-        "app"
+        "app",
+        "plugin"
       ],
       "type": "string"
     },
@@ -3978,6 +7675,7 @@ Open the connection: negotiate protocol and encoding, learn the granted profile 
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** model.read
 
 Print the document to a PDF the way File ▸ Print… does: standard (one page, the view as-is) or scaled (parallel projection at an exact drawing scale, tiled across pages with overlap bands, crop/trim marks, a scale bar, and a title block). Line art is vector (hidden lines removed); shaded is a software-rasterized bitmap per page. Bytes base64 inline, or written to path.
 
@@ -4148,14 +7846,136 @@ Print the document to a PDF the way File ▸ Print… does: standard (one page, 
 
 ## hew.query
 
+### `hew.query.changes_since`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+What changed since a history generation: the union of the change sets since then, or `full` when the history no longer reaches back that far.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "generation"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "changes": {
+      "additionalProperties": false,
+      "properties": {
+        "added": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "attrs": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "ns": {
+                "type": "string"
+              },
+              "scope": {
+                "enum": [
+                  "entity",
+                  "face",
+                  "edge"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "ns",
+              "scope"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "document": {
+          "type": "boolean"
+        },
+        "full": {
+          "type": "boolean"
+        },
+        "modified": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "removed": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "added",
+        "removed",
+        "modified",
+        "attrs",
+        "document",
+        "full"
+      ],
+      "type": "object"
+    },
+    "epoch": {
+      "type": "integer"
+    },
+    "from": {
+      "type": "integer"
+    },
+    "generation": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "generation",
+    "epoch",
+    "from",
+    "changes"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:** none.
+
 ### `hew.query.context`
 
 - **Version:** 1
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
-The open editing-context frame stack.
+The open editing-context frame stack, with the app's fallback entries and whether a gesture is armed.
 
 **Params schema:**
 
@@ -4172,13 +7992,53 @@ The open editing-context frame stack.
 ```json
 {
   "properties": {
+    "armed": {
+      "description": "a tool gesture is armed in the user's window; false headless",
+      "type": "boolean"
+    },
     "direct_members": {},
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "fallback": {
+      "description": "the app's in-context entries inside the innermost open frame, outermost first; empty headless",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "object",
+              "instance"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
     "stack": {
       "type": "array"
     }
   },
   "required": [
-    "stack"
+    "stack",
+    "fallback",
+    "armed",
+    "generation",
+    "epoch"
   ],
   "type": "object"
 }
@@ -4192,6 +8052,7 @@ The open editing-context frame stack.
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 One entity's details.
 
@@ -4218,6 +8079,14 @@ One entity's details.
 ```json
 {
   "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
     "id": {
       "type": "string"
     },
@@ -4227,7 +8096,9 @@ One entity's details.
   },
   "required": [
     "kind",
-    "id"
+    "id",
+    "generation",
+    "epoch"
   ],
   "type": "object"
 }
@@ -4243,6 +8114,7 @@ One entity's details.
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 A solid's faces: planes, areas, centroids, boundary loops.
 
@@ -4253,12 +8125,18 @@ A solid's faces: planes, areas, centroids, boundary loops.
   "additionalProperties": false,
   "properties": {
     "object": {
+      "description": "an object id; give this or path",
       "type": "string"
+    },
+    "path": {
+      "description": "an occurrence path ending at an object ([...instances, object]); each face then also reports material_effective through it",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
     }
   },
-  "required": [
-    "object"
-  ],
   "type": "object"
 }
 ```
@@ -4268,8 +8146,17 @@ A solid's faces: planes, areas, centroids, boundary loops.
 ```json
 {
   "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
     "faces": {
+      "description": "per face: object, plane, area, centroid, outer, holes, material, surface, texture_pins, attrs (the face's attribute dictionary, namespace -> key -> value, {} for none), and material_effective when asked through a path",
       "type": "array"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
     },
     "object": {
       "type": "string"
@@ -4277,7 +8164,9 @@ A solid's faces: planes, areas, centroids, boundary loops.
   },
   "required": [
     "object",
-    "faces"
+    "faces",
+    "generation",
+    "epoch"
   ],
   "type": "object"
 }
@@ -4286,6 +8175,7 @@ A solid's faces: planes, areas, centroids, boundary loops.
 **Refusals:**
 
 - `unknown_entity`
+- `unknown_occurrence`
 
 ### `hew.query.measure`
 
@@ -4293,21 +8183,57 @@ A solid's faces: planes, areas, centroids, boundary loops.
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
-Distances and angles between points, edges, and faces.
+Distances between points, edges, and faces; or the volume, area, and bounding box of a part, group, or instance.
 
 **Params schema:**
 
 ```json
 {
-  "additionalProperties": false,
-  "properties": {
-    "from": {},
-    "to": {}
-  },
-  "required": [
-    "from",
-    "to"
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "from": {},
+        "to": {}
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "a world object, group, or instance; a definition member needs path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "an occurrence path [...instances, node]",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
   ],
   "type": "object"
 }
@@ -4317,17 +8243,89 @@ Distances and angles between points, edges, and faces.
 
 ```json
 {
-  "properties": {
-    "delta": {
-      "type": "array"
+  "oneOf": [
+    {
+      "properties": {
+        "delta": {
+          "type": "array"
+        },
+        "distance": {
+          "type": "number"
+        },
+        "epoch": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "distance",
+        "delta",
+        "generation",
+        "epoch"
+      ],
+      "type": "object"
     },
-    "distance": {
-      "type": "number"
+    {
+      "description": "meters, square meters, cubic meters; groups and instances sum their parts. extents are the sizes of the world-axis-aligned bbox (part-frame extents are hew.query.part_frame's). volume is null when no part is watertight; open parts add nothing to it and are counted in open_leaves",
+      "properties": {
+        "area": {
+          "type": "number"
+        },
+        "bbox": {
+          "properties": {
+            "max": {
+              "type": "array"
+            },
+            "min": {
+              "type": "array"
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ],
+          "type": "object"
+        },
+        "epoch": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "extents": {
+          "type": "array"
+        },
+        "generation": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "leaf_count": {
+          "type": "integer"
+        },
+        "open_leaves": {
+          "type": "integer"
+        },
+        "volume": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "volume",
+        "area",
+        "bbox",
+        "extents",
+        "leaf_count",
+        "open_leaves",
+        "generation",
+        "epoch"
+      ],
+      "type": "object"
     }
-  },
-  "required": [
-    "distance",
-    "delta"
   ],
   "type": "object"
 }
@@ -4336,18 +8334,21 @@ Distances and angles between points, edges, and faces.
 **Refusals:**
 
 - `unknown_entity`
+- `unknown_occurrence`
 - `locator_missed`
 - `ambiguous_locator`
 - `no_such_point`
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
 
-### `hew.query.raycast`
+### `hew.query.mesh`
 
 - **Version:** 1
-- **Tier:** Required
+- **Tier:** Standard
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
-First hit along a ray — the programmatic form of clicking.
+One placement's triangle mesh: positions, normals, indices, and per-triangle face indices, base64.
 
 **Params schema:**
 
@@ -4355,6 +8356,473 @@ First hit along a ray — the programmatic form of clicking.
 {
   "additionalProperties": false,
   "properties": {
+    "id": {
+      "description": "a world node's public id",
+      "type": "string"
+    },
+    "path": {
+      "description": "an occurrence path, instances first and the node last",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "space": {
+      "description": "defaults to world; local is the node's own frame (an instance's definition coordinates)",
+      "enum": [
+        "world",
+        "local"
+      ],
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "face_indices_base64": {
+      "description": "u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base",
+      "type": "string"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "indices_base64": {
+      "description": "u32 little-endian, three per triangle, counter-clockwise from outside",
+      "type": "string"
+    },
+    "normals_base64": {
+      "description": "f32 little-endian xyz per vertex, unit length",
+      "type": "string"
+    },
+    "parts": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "face_index_base": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "index_base": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index_count": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "face_index_base",
+          "index_base",
+          "index_count"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "positions_base64": {
+      "description": "f32 little-endian xyz per vertex",
+      "type": "string"
+    },
+    "triangle_count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "vertex_count": {
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "vertex_count",
+    "triangle_count",
+    "positions_base64",
+    "normals_base64",
+    "indices_base64",
+    "face_indices_base64",
+    "parts",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `mesh_too_large`
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
+
+### `hew.query.occurrences`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Every placement in the model with its path and world pose: objects, groups, and instances, nested definitions expanded through each instance.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "include_hidden": {
+      "description": "defaults to false: hidden placements are skipped and hidden instances are not descended",
+      "type": "boolean"
+    },
+    "kinds": {
+      "description": "which rows to return (never what is traversed); defaults to all three",
+      "items": {
+        "enum": [
+          "object",
+          "group",
+          "instance"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "roots": {
+      "description": "where to start: node ids (world nodes) or occurrence locators {path}; absent is the whole world. Rows come in root order, each root's subtree depth-first, a placement listed once even when two roots reach it",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "occurrences": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "definition": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "definition_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "depth": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "hidden": {
+            "description": "effective: the node's own flag and tags, its groups', and every instance on the path",
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "object",
+              "group",
+              "instance"
+            ],
+            "type": "string"
+          },
+          "material": {
+            "description": "an object's base material, an instance's own; null for a group",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "material_effective": {
+            "description": "what the node's unpainted faces show: an object's base, else the nearest painted instance on the path; an instance's own, else the nearest painted instance above it; null for a group",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mirrored": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "the instances above this node, outermost first; {path: [...path, id]} locates it",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tags": {
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "user_hidden": {
+            "type": "boolean"
+          },
+          "world_pose": {
+            "description": "row-major 3×4",
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 12,
+            "minItems": 12,
+            "type": "array"
+          }
+        },
+        "required": [
+          "path",
+          "id",
+          "kind",
+          "definition",
+          "parent",
+          "world_pose",
+          "mirrored",
+          "hidden",
+          "user_hidden",
+          "material",
+          "material_effective",
+          "tags",
+          "name",
+          "definition_name",
+          "depth"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "occurrences",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
+
+### `hew.query.part_frame`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+A part measured along its own axes: origin, axes, and extents of one placement.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "a world node's public id",
+      "type": "string"
+    },
+    "path": {
+      "description": "an occurrence path, instances first and the node last",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "extents": {
+      "description": "along x, y, z: [length, width, thickness] for a face frame; the definition's own axis order for an instance",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "mirrored": {
+      "type": "boolean"
+    },
+    "origin": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "source": {
+      "enum": [
+        "attribute",
+        "definition",
+        "face"
+      ],
+      "type": "string"
+    },
+    "x": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "y": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "z": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    }
+  },
+  "required": [
+    "origin",
+    "x",
+    "y",
+    "z",
+    "extents",
+    "source",
+    "mirrored",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `no_part_frame` — That part has no faces to measure.
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
+
+### `hew.query.raycast`
+
+- **Version:** 1
+- **Tier:** Required
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+First hit along a ray, or every crossing, through any depth of nesting — the programmatic form of clicking.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "all": {
+      "description": "list every face crossing along the ray, nearest first (front and back faces both), instead of only the nearest; an empty list is a success",
+      "type": "boolean"
+    },
     "dir": {
       "items": {
         "type": "number"
@@ -4362,6 +8830,43 @@ First hit along a ray — the programmatic form of clicking.
       "maxItems": 3,
       "minItems": 3,
       "type": "array"
+    },
+    "exclude": {
+      "description": "world node ids or occurrence locators {path}; each entry and everything under it is ignored by the ray",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "include_hidden": {
+      "description": "let the ray hit parts that are effectively hidden (user-hidden or on a hidden tag); each hit reports hidden. Default false: hidden parts fall through, as rendering does",
+      "type": "boolean"
+    },
+    "max_distance": {
+      "description": "meters along the ray; farther crossings are dropped",
+      "exclusiveMinimum": 0,
+      "type": "number"
     },
     "origin": {
       "items": {
@@ -4384,34 +8889,153 @@ First hit along a ray — the programmatic form of clicking.
 
 ```json
 {
-  "properties": {
-    "distance": {
-      "type": "number"
-    },
-    "kind": {
-      "enum": [
+  "oneOf": [
+    {
+      "properties": {
+        "distance": {
+          "type": "number"
+        },
+        "epoch": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "face": {
+          "description": "a face locator {object, at} with at in the leaf Object's own frame; feed it to hew.query.resolve, hew.material.paint, or hew.solid.push_pull",
+          "type": "object"
+        },
+        "generation": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hidden": {
+          "description": "effective visibility including tags; false unless include_hidden",
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": [
+            "object",
+            "instance"
+          ],
+          "type": "string"
+        },
+        "leaf": {
+          "description": "the hit Object's public id",
+          "type": "string"
+        },
+        "normal": {
+          "type": "array"
+        },
+        "object": {
+          "description": "the world object's or, for a hit inside an instance, the outermost instance's public id",
+          "type": "string"
+        },
+        "path": {
+          "description": "the hit part's occurrence path without the part itself (the form hew.query.occurrences uses); [] for a world object",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "point": {
+          "type": "array"
+        }
+      },
+      "required": [
         "object",
-        "instance"
+        "kind",
+        "point",
+        "distance",
+        "normal",
+        "path",
+        "leaf",
+        "face",
+        "hidden",
+        "generation",
+        "epoch"
       ],
-      "type": "string"
+      "type": "object"
     },
-    "normal": {
-      "type": "array"
-    },
-    "object": {
-      "description": "the world object's or, for an instance hit, the instance's public id",
-      "type": "string"
-    },
-    "point": {
-      "type": "array"
+    {
+      "properties": {
+        "epoch": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hits": {
+          "items": {
+            "properties": {
+              "distance": {
+                "type": "number"
+              },
+              "face": {
+                "description": "a face locator {object, at} with at in the leaf Object's own frame; feed it to hew.query.resolve, hew.material.paint, or hew.solid.push_pull",
+                "type": "object"
+              },
+              "hidden": {
+                "description": "effective visibility including tags; false unless include_hidden",
+                "type": "boolean"
+              },
+              "kind": {
+                "enum": [
+                  "object",
+                  "instance"
+                ],
+                "type": "string"
+              },
+              "leaf": {
+                "description": "the hit Object's public id",
+                "type": "string"
+              },
+              "normal": {
+                "type": "array"
+              },
+              "object": {
+                "description": "the world object's or, for a hit inside an instance, the outermost instance's public id",
+                "type": "string"
+              },
+              "path": {
+                "description": "the hit part's occurrence path without the part itself (the form hew.query.occurrences uses); [] for a world object",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "point": {
+                "type": "array"
+              }
+            },
+            "required": [
+              "object",
+              "kind",
+              "point",
+              "distance",
+              "normal",
+              "path",
+              "leaf",
+              "face",
+              "hidden"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
+        "raycast_hits_capped": {
+          "description": "present and true when more than 1,000 crossings were found and the farthest were dropped",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "hits",
+        "generation",
+        "epoch"
+      ],
+      "type": "object"
     }
-  },
-  "required": [
-    "object",
-    "kind",
-    "point",
-    "distance",
-    "normal"
   ],
   "type": "object"
 }
@@ -4421,6 +9045,9 @@ First hit along a ray — the programmatic form of clicking.
 
 - `locator_missed`
 - `ambiguous_locator`
+- `unknown_entity`
+- `unknown_occurrence`
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
 
 ### `hew.query.resolve`
 
@@ -4428,6 +9055,7 @@ First hit along a ray — the programmatic form of clicking.
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 Resolve any locator (point, face, edge) to its concrete value without mutating.
 
@@ -4441,6 +9069,10 @@ Resolve any locator (point, face, edge) to its concrete value without mutating.
       "description": "HEW_API.md §5.2's edge locator: a solid edge by {object,at}, a sketch edge's own public id (\"edg_…\") as a bare string, or a sketch edge by {sketch,at} / {sketch,from,to}"
     },
     "face": {},
+    "occurrence": {
+      "description": "an occurrence locator {path: [instance, …, leaf]}; answers {occurrence: OccurrenceJson}",
+      "type": "object"
+    },
     "point": {}
   },
   "type": "object"
@@ -4452,6 +9084,20 @@ Resolve any locator (point, face, edge) to its concrete value without mutating.
 ```json
 {
   "description": "a resolved \"edge\" carries \"kind\": \"solid\" ({object,from,to}) or \"sketch\" ({id,sketch,from,to,curve})",
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "generation",
+    "epoch"
+  ],
   "type": "object"
 }
 ```
@@ -4464,6 +9110,7 @@ Resolve any locator (point, face, edge) to its concrete value without mutating.
 - `no_such_point`
 - `face_token_unknown`
 - `face_token_stale`
+- `unknown_occurrence`
 
 ### `hew.query.scene`
 
@@ -4471,6 +9118,7 @@ Resolve any locator (point, face, edge) to its concrete value without mutating.
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 The document tree with per-entity summaries.
 
@@ -4494,6 +9142,14 @@ The document tree with per-entity summaries.
     },
     "document": {
       "type": "object"
+    },
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
     },
     "guides": {
       "type": "array"
@@ -4519,13 +9175,117 @@ The document tree with per-entity summaries.
     "guides",
     "materials",
     "tags",
-    "components"
+    "components",
+    "generation",
+    "epoch"
   ],
   "type": "object"
 }
 ```
 
 **Refusals:** none.
+
+### `hew.query.topology`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+One object's vertices, faces, and edges with their adjacency, planes, and analytic curves.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "a world node's public id",
+      "type": "string"
+    },
+    "path": {
+      "description": "an occurrence path, instances first and the node last",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "space": {
+      "description": "defaults to world; local is the node's own frame (an instance's definition coordinates)",
+      "enum": [
+        "world",
+        "local"
+      ],
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "edges": {
+      "items": {
+        "description": "{index, a, b (vertex indices), faces: [face indices, 1 or 2], curve: {kind: \"circle\", center, axis, radius} | null, attrs: the edge's attribute dictionary, {} for none}",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "faces": {
+      "items": {
+        "description": "{index, plane: {point, normal}, outer: [vertex indices], holes: [[...]], material, back_material, surface: {kind: \"cylinder\", axis_point, axis, radius} | null, area, attrs: the face's attribute dictionary, {} for none}",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "object": {
+      "type": "string"
+    },
+    "vertices": {
+      "items": {
+        "items": {
+          "type": "number"
+        },
+        "maxItems": 3,
+        "minItems": 3,
+        "type": "array"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "object",
+    "vertices",
+    "faces",
+    "edges",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
 
 ## hew.scenes
 
@@ -4535,6 +9295,7 @@ The document tree with per-entity summaries.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Add a Scene capturing the document's current view state. Records no undo entry (§6.4).
 
@@ -4689,6 +9450,7 @@ Add a Scene capturing the document's current view state. Records no undo entry (
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Apply a Scene: write its captured camera/hidden-set/section state into the document. Records no undo entry (§6.4).
 
@@ -4830,6 +9592,7 @@ Apply a Scene: write its captured camera/hidden-set/section state into the docum
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.read
 
 Set a Scene's free-text description. Records no undo entry (§6.4).
 
@@ -4874,6 +9637,7 @@ Set a Scene's free-text description. Records no undo entry (§6.4).
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 Every Scene, in tab order.
 
@@ -5139,6 +9903,7 @@ Every Scene, in tab order.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Delete a Scene. Records no undo entry (§6.4).
 
@@ -5179,6 +9944,7 @@ Delete a Scene. Records no undo entry (§6.4).
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Rename a Scene. Records no undo entry (§6.4).
 
@@ -5225,6 +9991,7 @@ Rename a Scene. Records no undo entry (§6.4).
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Move a Scene to a new position in tab order. Records no undo entry (§6.4).
 
@@ -5271,6 +10038,7 @@ Move a Scene to a new position in tab order. Records no undo entry (§6.4).
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Re-capture a Scene's properties from the document's current state, and/or set its own transition and delay times. Records no undo entry (§6.4).
 
@@ -5415,6 +10183,219 @@ Re-capture a Scene's properties from the document's current state, and/or set it
 
 - `unknown_scene` — That Scene no longer exists — it may have been deleted.
 
+## hew.selection
+
+### `hew.selection.clear`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+- **Permission:** view
+
+Clear the app's selection.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "ids": {
+      "description": "public ids in pick order; index 0 is the primary",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "primary": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "ids",
+    "primary",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+
+### `hew.selection.get`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+- **Permission:** view
+
+The app's selection: public ids in pick order, the primary first. A drafting selection reads as empty.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "ids": {
+      "description": "public ids in pick order; index 0 is the primary",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "primary": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "ids",
+    "primary",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+
+### `hew.selection.set`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+- **Permission:** view
+
+Change the app's selection: replace it (the default), or add, subtract, or toggle the named entities. Nodes and sketches mix; a guide or an annotation is selected alone. Hidden entities refuse.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "ids": {
+      "description": "objects, groups, instances, and sketches; or exactly one guide; or exactly one annotation",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 10000,
+      "type": "array"
+    },
+    "mode": {
+      "description": "defaults to replace",
+      "enum": [
+        "replace",
+        "add",
+        "subtract",
+        "toggle"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "ids"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "ids": {
+      "description": "public ids in pick order; index 0 is the primary",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "primary": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "ids",
+    "primary",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `selection_target_not_visible`
+- `selection_mixed_kinds`
+- `host_capability_missing`
+
 ## hew.sketch
 
 ### `hew.sketch.copy`
@@ -5423,6 +10404,7 @@ Re-capture a Scene's properties from the document's current state, and/or set it
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Copy drawing units on a plane by an offset.
 
@@ -5561,6 +10543,7 @@ Copy drawing units on a plane by an offset.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Delete drawing units from a plane.
 
@@ -5667,6 +10650,7 @@ Delete drawing units from a plane.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Draw an arc on a plane spec.
 
@@ -5900,6 +10884,7 @@ Draw an arc on a plane spec.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Draw a circle on a plane spec.
 
@@ -6115,6 +11100,7 @@ Draw a circle on a plane spec.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Draw a line (chain) on a plane spec.
 
@@ -6321,6 +11307,7 @@ Draw a line (chain) on a plane spec.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Draw a regular N-gon on a plane spec.
 
@@ -6536,6 +11523,7 @@ Draw a regular N-gon on a plane spec.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Draw an axis-aligned rectangle on a plane spec.
 
@@ -6755,6 +11743,7 @@ Draw an axis-aligned rectangle on a plane spec.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Move drawing units (islands, edges, circles, regions) on a plane by an offset.
 
@@ -6894,6 +11883,7 @@ Move drawing units (islands, edges, circles, regions) on a plane by an offset.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Offset a region boundary within its sketch, or a face or plane region by its unit key.
 
@@ -7033,6 +12023,7 @@ Offset a region boundary within its sketch, or a face or plane region by its uni
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Rotate drawing units on a plane about the plane normal through a point.
 
@@ -7184,6 +12175,7 @@ Rotate drawing units on a plane about the plane normal through a point.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Scale drawing units on a plane about a center, uniformly or per axis.
 
@@ -7343,6 +12335,7 @@ Scale drawing units on a plane about a center, uniformly or per axis.
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 List a plane's drawing as units: islands of edges (with where each is stored) and regions.
 
@@ -7536,6 +12529,7 @@ List a plane's drawing as units: islands of edges (with where each is stored) an
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Close an open object's flat openings with faces; an object closed all round becomes a solid.
 
@@ -7616,6 +12610,7 @@ Close an open object's flat openings with faces; an object closed all round beco
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Remove faces from an open object; islands cut loose become objects of their own. Solids refuse.
 
@@ -7694,6 +12689,7 @@ Remove faces from an open object; islands cut loose become objects of their own.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Kept for compatibility: delete a drawn shape (sub-face or chord island) back into its face; hew.sketch.delete is the general form.
 
@@ -7748,6 +12744,7 @@ Kept for compatibility: delete a drawn shape (sub-face or chord island) back int
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Extrude a region into a new Object, consuming the profile.
 
@@ -7814,6 +12811,7 @@ Extrude a region into a new Object, consuming the profile.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Sweep a profile along an edge-chain path, as the tool does.
 
@@ -7936,6 +12934,7 @@ Sweep a profile along an edge-chain path, as the tool does.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Make a solid from drawn faces that enclose a space (Make Solid on sketches), first filling the faces the named sketches' lines can close; a shape closed against a solid grows it.
 
@@ -7997,6 +12996,7 @@ Make a solid from drawn faces that enclose a space (Make Solid on sketches), fir
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 Kept for compatibility: list an object's drawn shapes (sub-faces and chords) per drawing plane; hew.sketch.units is the general form.
 
@@ -8142,6 +13142,7 @@ Kept for compatibility: list an object's drawn shapes (sub-faces and chords) per
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Boolean intersection of two or more solids: the material in all of them.
 
@@ -8151,15 +13152,55 @@ Boolean intersection of two or more solids: the material in all of them.
 {
   "properties": {
     "a": {
-      "description": "the first node: obj_/grp_/ins_ (with b; or give operands)",
-      "type": "string"
+      "description": "a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "b": {
-      "description": "the second node (with a; or give operands)",
-      "type": "string"
+      "description": "a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "operands": {
-      "description": "every node in order, two or more, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step",
+      "description": "every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand and a transient cutter take a and b",
       "items": {
         "type": "string"
       },
@@ -8199,6 +13240,9 @@ Boolean intersection of two or more solids: the material in all of them.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ### `hew.solid.mark_surface`
 
@@ -8206,6 +13250,7 @@ Boolean intersection of two or more solids: the material in all of them.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Mark an open object as a surface on purpose (or clear the mark); hew.doc.health keeps listing it, flagged accepted.
 
@@ -8262,6 +13307,7 @@ Mark an open object as a surface on purpose (or clear the mark); hew.doc.health 
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Mend an open object: merge nearby points, remove zero-width folds, separate pinched parts and fill small gaps, as one undo step.
 
@@ -8459,6 +13505,7 @@ Mend an open object: merge nearby points, remove zero-width folds, separate pinc
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Kept for compatibility: slide a drawn shape (sub-face or chord island) in its plane; hew.sketch.move is the general form.
 
@@ -8522,6 +13569,7 @@ Kept for compatibility: slide a drawn shape (sub-face or chord island) in its pl
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Push/pull a face of a solid with the tool's full semantics.
 
@@ -8534,7 +13582,7 @@ Push/pull a face of a solid with the tool's full semantics.
       "type": "number"
     },
     "face": {
-      "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}",
+      "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}; object may be {path: [instance, …, object]} to reach a definition member through a placement (at and ray stay in the object's own frame)",
       "type": "object"
     }
   },
@@ -8586,6 +13634,8 @@ Push/pull a face of a solid with the tool's full semantics.
 - `ambiguous_locator`
 - `face_token_unknown`
 - `face_token_stale`
+- `unknown_occurrence`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ### `hew.solid.rotate_imprint`
 
@@ -8593,6 +13643,7 @@ Push/pull a face of a solid with the tool's full semantics.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Kept for compatibility: turn a drawn shape about its plane's normal through a pivot; hew.sketch.rotate is the general form.
 
@@ -8670,8 +13721,9 @@ Kept for compatibility: turn a drawn shape about its plane's normal through a pi
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Kept for compatibility: uniformly scale a drawn shape about an anchor in its plane; hew.sketch.scale is the general form.
+Kept for compatibility: uniformly scale a drawn shape about an anchor in its plane (a negative factor turns it 180 degrees about the anchor and scales it by |factor|); hew.sketch.scale is the general form, and a mirror about a world axis of an axis-aligned drawing plane is hew.sketch.scale with a negative per-axis factor.
 
 **Params schema:**
 
@@ -8695,8 +13747,7 @@ Kept for compatibility: uniformly scale a drawn shape about an anchor in its pla
       ]
     },
     "factor": {
-      "description": "uniform scale factor",
-      "exclusiveMinimum": 0,
+      "description": "uniform scale factor, finite and nonzero; a negative factor turns the shape 180 degrees about `about` and scales it by |factor| (a mirror about a world axis of an axis-aligned drawing plane is hew.sketch.scale with a negative per-axis factor)",
       "type": "number"
     },
     "imprint": {
@@ -8748,8 +13799,9 @@ Kept for compatibility: uniformly scale a drawn shape about an anchor in its pla
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Slice a solid by a plane into two solids.
+Slice a solid by a plane into two solids; the object may be a path to a definition member, sliced in the definition.
 
 **Params schema:**
 
@@ -8757,9 +13809,31 @@ Slice a solid by a plane into two solids.
 {
   "properties": {
     "object": {
-      "type": "string"
+      "description": "a world object id, or {path: [instance, …, object]}: a definition member through one placement; the pieces stay in the definition and every placement follows",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "plane": {
+      "description": "world coordinates, also through a path",
       "properties": {
         "normal": {
           "oneOf": [
@@ -8836,6 +13910,11 @@ Slice a solid by a plane into two solids.
 - `degenerate` — The cut lines up exactly with an existing face or edge, so it wouldn't create two pieces. Move the cut slightly.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `unknown_occurrence`
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `grouped_operand` — This operation can't target an object inside a group. Ungroup it, or leave the group context, first.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ### `hew.solid.subtract`
 
@@ -8843,8 +13922,9 @@ Slice a solid by a plane into two solids.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Boolean subtraction: the first solid minus every other one.
+Boolean subtraction: the first solid minus every other one; a may be a path to a definition member, cut through that placement so every placement shows the cut, by a world object or a transient prism or box.
 
 **Params schema:**
 
@@ -8852,15 +13932,81 @@ Boolean subtraction: the first solid minus every other one.
 {
   "properties": {
     "a": {
-      "description": "the first node: obj_/grp_/ins_ (with b; or give operands)",
-      "type": "string"
+      "description": "a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "b": {
-      "description": "the second node (with a; or give operands)",
-      "type": "string"
+      "description": "a world node id; with a by path, a world object (consumed), {path} to a member of the same definition by the same path, or a transient cutter {prism} | {box} in world coordinates (no object is created)",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "description": "{plane: {origin, normal}, loops: [[[x,y,z], ...], ...], distance}: the first loop outer, the rest holes",
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "description": "{min, max, pose?}",
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "operands": {
-      "description": "every node in order, two or more, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step",
+      "description": "every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand and a transient cutter take a and b",
       "items": {
         "type": "string"
       },
@@ -8900,7 +14046,12 @@ Boolean subtraction: the first solid minus every other one.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `nothing_removed` — Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting.
+- `mirrored_pose`
+- `compute_too_large`
 
 ### `hew.solid.thicken`
 
@@ -8908,6 +14059,7 @@ Boolean subtraction: the first solid minus every other one.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Pull a flat surface into a solid of the given thickness.
 
@@ -8979,6 +14131,7 @@ Pull a flat surface into a solid of the given thickness.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Boolean union of two or more solids: the material in any of them.
 
@@ -8988,15 +14141,55 @@ Boolean union of two or more solids: the material in any of them.
 {
   "properties": {
     "a": {
-      "description": "the first node: obj_/grp_/ins_ (with b; or give operands)",
-      "type": "string"
+      "description": "a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "b": {
-      "description": "the second node (with a; or give operands)",
-      "type": "string"
+      "description": "a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "operands": {
-      "description": "every node in order, two or more, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step",
+      "description": "every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand and a transient cutter take a and b",
       "items": {
         "type": "string"
       },
@@ -9036,6 +14229,9 @@ Boolean union of two or more solids: the material in any of them.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ## hew.tag
 
@@ -9045,6 +14241,7 @@ Boolean union of two or more solids: the material in any of them.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Assign a tag to nodes.
 
@@ -9099,6 +14296,7 @@ Assign a tag to nodes.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Register a tag path. Registry-state: records no undo entry (§6.4).
 
@@ -9150,6 +14348,7 @@ Register a tag path. Registry-state: records no undo entry (§6.4).
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Delete a tag path, unassigning it everywhere.
 
@@ -9194,6 +14393,7 @@ Delete a tag path, unassigning it everywhere.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Rename a tag path (and every tag nested under it), keeping its identity.
 
@@ -9248,6 +14448,7 @@ Rename a tag path (and every tag nested under it), keeping its identity.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Toggle a tag's visibility. Registry-state: records no undo entry (§6.4).
 
@@ -9296,6 +14497,7 @@ Toggle a tag's visibility. Registry-state: records no undo entry (§6.4).
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** view
 
 Set the live desktop viewport's camera. A host effect on the view, not a document edit (mutates_document = false: never recorded, never resyncs the document). Headless clients pass a camera per hew.view.snapshot call instead.
 
@@ -9388,14 +14590,415 @@ Set the live desktop viewport's camera. A host effect on the view, not a documen
 
 - `host_capability_missing`
 
+### `hew.view.clear_isolation`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+- **Permission:** view
+
+End the live viewport's isolation; a no-op when nothing is isolated.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+
+### `hew.view.enter`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** view
+
+Converge the user's window onto a node, opening group and component sessions level by level and falling back to the in-context entry for an instance a session cannot take (unevenly scaled, or placed in a group elsewhere; a mirrored instance opens a session like any other), then select it. Give exactly one of id (an object, group, or instance in the world) or path (instances outermost first, ending at the leaf). The result is empty; the outcome arrives as context_changed, and hew.query.context reports the stack and fallback afterward. Acts on the user's window, so it is refused inside a transaction; distinct from hew.context.enter, which scopes a plugin's own edits.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "a world object, group, or instance",
+      "type": "string"
+    },
+    "path": {
+      "description": "an occurrence path: instances outermost first, the last element the node to enter",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `gesture_in_progress`
+- `host_capability_missing`
+
+### `hew.view.exit`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** view
+
+Pop the user's innermost editing context, a fallback entry or a session frame. The outcome arrives as context_changed.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `gesture_in_progress`
+- `nothing_to_exit`
+- `host_capability_missing`
+
+### `hew.view.exit_all`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** view
+
+Close every editing context in the user's window, back to the top level. The outcome arrives as context_changed.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `gesture_in_progress`
+- `host_capability_missing`
+
+### `hew.view.hidden`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** view
+
+What is hidden: the hidden objects, groups, and instances, the hidden tags, and the live viewport's isolation (null when nothing is isolated or the host has no viewport).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "hidden": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "isolated": {
+      "oneOf": [
+        {
+          "items": {
+            "oneOf": [
+              {
+                "description": "an object, group, or instance id",
+                "type": "string"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "instance": {
+                    "description": "an instance that places it",
+                    "type": "string"
+                  },
+                  "object": {
+                    "description": "a definition member object",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "object",
+                  "instance"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tags_hidden": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "hidden",
+    "tags_hidden",
+    "isolated"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:** none.
+
+### `hew.view.hide`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** view
+
+Hide objects, groups, and component instances. View state: saved with the document, never undoable. Tags hide through hew.tag.set_visible.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "ids"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "hidden": {
+      "description": "every hidden object, group, and instance",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "hidden"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `not_a_node`
+
+### `hew.view.isolate`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+- **Permission:** view
+
+Show only the named objects, groups, instances, or definition members (each with an instance that places it) in the live viewport, and frame them. View-only: nothing in the document changes.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "ids": {
+      "items": {
+        "oneOf": [
+          {
+            "description": "an object, group, or instance id",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "instance": {
+                "description": "an instance that places it",
+                "type": "string"
+              },
+              "object": {
+                "description": "a definition member object",
+                "type": "string"
+              }
+            },
+            "required": [
+              "object",
+              "instance"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "maxItems": 10000,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "ids"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "isolated": {
+      "items": {
+        "oneOf": [
+          {
+            "description": "an object, group, or instance id",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "instance": {
+                "description": "an instance that places it",
+                "type": "string"
+              },
+              "object": {
+                "description": "a definition member object",
+                "type": "string"
+              }
+            },
+            "required": [
+              "object",
+              "instance"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "isolated"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `host_capability_missing`
+
 ### `hew.view.line_drawing`
 
 - **Version:** 1
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** model.read
 
-Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane meters.
+Hidden-line drawing of the visible document, or of a selection, from a camera (crates/hlr), served identically in the app and in hew-cli: hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane meters.
 
 **Params schema:**
 
@@ -9434,6 +15037,34 @@ Hidden-line drawing of the visible document from a camera (crates/hlr): hard edg
     "scene": {
       "description": "a Scene's id: its camera and hidden sets, as hew.view.snapshot",
       "type": "string"
+    },
+    "selection": {
+      "description": "draw only these: node ids, occurrence locators {path}, or a definition's cmp_ id (its leaves at the identity pose)",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "minItems": 1,
+      "type": "array"
     },
     "view": {
       "description": "a named standard view (parallel projection); mutually exclusive with camera and scene",
@@ -9525,15 +15156,19 @@ Hidden-line drawing of the visible document from a camera (crates/hlr): hard edg
 - `too_complex`
 - `save_failed`
 - `unknown_scene` — That Scene no longer exists — it may have been deleted.
+- `unknown_entity`
+- `unknown_occurrence`
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
 
-### `hew.view.snapshot`
+### `hew.view.show`
 
 - **Version:** 1
 - **Tier:** Standard
-- **Class:** solitary
-- **Served:** host
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** view
 
-Render the attached document to PNG, headless-rendered via a software rasterizer (a live host may render through its viewport instead) — bytes base64 by default, or a path on hosts with filesystem access.
+Show hidden objects, groups, and component instances again.
 
 **Params schema:**
 
@@ -9541,6 +15176,109 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
 {
   "additionalProperties": false,
   "properties": {
+    "ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "ids"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "hidden": {
+      "description": "every hidden object, group, and instance",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "hidden"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `not_a_node`
+
+### `hew.view.show_all`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** view
+
+Show every hidden object, group, and component instance. Hidden tags stay hidden.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "hidden": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 0,
+      "type": "array"
+    }
+  },
+  "required": [
+    "hidden"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:** none.
+
+### `hew.view.snapshot`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** model.read
+
+Render the attached document to PNG, rendered by the host's software rasterizer, identically in the app and in hew-cli, optionally of a selection on a transparent background — bytes base64 by default, or a path on hosts with filesystem access.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "background": {
+      "description": "\"transparent\", #rrggbb, or #rrggbbaa; the fill of pixels no surface touches (defaults to the rasterizer's light gray). The id, depth, and normals passes are unaffected.",
+      "type": "string"
+    },
     "camera": {
       "additionalProperties": false,
       "description": "mutually exclusive with view",
@@ -9624,6 +15362,34 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
     "scene": {
       "description": "a Scene's id: renders through its resolved camera and hidden sets (Document::resolve_scene) instead of the document's own — falls back to the usual cameraless resolution when the Scene captures no camera. Mutually exclusive with camera and view. The Scene's section plane, if any, is NOT rendered headlessly at 1.0.",
       "type": "string"
+    },
+    "selection": {
+      "description": "render only these: node ids, occurrence locators {path}, or a definition's cmp_ id (its members at the identity pose, one picture however many times it is placed). With no camera or view the camera is a fitted isometric over the selection, never the document's saved camera; view fits that standard view to the selection. Mutually exclusive with scene.",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "minItems": 1,
+      "type": "array"
     },
     "view": {
       "description": "a named standard view fitted to the scene bounding box; mutually exclusive with camera and scene",
@@ -9726,7 +15492,10 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
 - `host_capability_missing`
 - `nothing_to_render`
 - `save_failed`
+- `unknown_entity`
+- `unknown_occurrence`
 - `unknown_scene` — That Scene no longer exists — it may have been deleted.
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
 
 ### `hew.view.units`
 
@@ -9734,6 +15503,7 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** view
 
 Set the app's displayed length-unit format (app/src/settings/units.ts's LengthFormat) — an app-level display PREFERENCE, never document state or file-format data.
 
@@ -9783,6 +15553,7 @@ Set the app's displayed length-unit format (app/src/settings/units.ts's LengthFo
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** view
 
 Frame all visible geometry in the live viewport (View > Zoom Extents). A view effect, not a document edit (mutates_document = false).
 
@@ -9808,5 +15579,78 @@ Frame all visible geometry in the live viewport (View > Zoom Extents). A view ef
 
 **Refusals:**
 
+- `host_capability_missing`
+
+### `hew.view.zoom_to`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+- **Permission:** view
+
+Frame the named entities in the live viewport. padding widens the box on every side by that fraction of its largest extent (default 0.1). Answers the box before padding.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "padding": {
+      "description": "defaults to 0.1",
+      "maximum": 2,
+      "minimum": 0,
+      "type": "number"
+    }
+  },
+  "required": [
+    "ids"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "max": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "min": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    }
+  },
+  "required": [
+    "min",
+    "max"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `nothing_to_frame`
 - `host_capability_missing`
 

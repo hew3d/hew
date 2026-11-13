@@ -91,6 +91,7 @@
 
 use slotmap::SecondaryMap;
 
+use crate::attr::AttrDict;
 use crate::geom2d::{plane_axes, point_inside_polygon};
 use crate::ids::FaceId;
 use crate::material::{FaceMaterial, UvFrame};
@@ -112,6 +113,9 @@ struct FacePoly {
     back_material: FaceMaterial,
     uv_frame: Option<UvFrame>,
     surface: Option<SurfaceRef>,
+    /// The operand face's attribute dictionary (empty = none), carried by
+    /// value: the result is a new Object with its own slot table.
+    attrs: AttrDict,
 }
 
 /// A sub-face produced by the arrangement: oriented loops in the face's plane.
@@ -130,6 +134,8 @@ struct OrientedFace {
     back_material: FaceMaterial,
     uv_frame: Option<UvFrame>,
     surface: Option<SurfaceRef>,
+    /// The source face's attribute dictionary (empty = none).
+    attrs: AttrDict,
 }
 
 /// Which operand a batch of faces comes from (selection rules differ for
@@ -197,10 +203,10 @@ pub(crate) fn execute(
 /// A copy of `obj` with `t` baked into every vertex position and face plane.
 ///
 /// Connectivity is unchanged, so the result is structurally valid whenever the
-/// input is. A singular or orientation-flipping `t` is refused as
-/// [`BooleanError::SingularTransform`] (operands must map by a proper frame
-/// change); boolean callers pass a rigid `b_to_a`, so this never fires in
-/// practice.
+/// input is. A singular `t` is refused as
+/// [`BooleanError::SingularTransform`]; boolean callers pass a rigid
+/// `b_to_a`, so this never fires in practice. A reflecting `t` would bake a
+/// mirrored operand (every face turned over), still right side out.
 fn transformed_object(obj: &Object, t: &Transform) -> Result<Object, BooleanError> {
     let mut out = obj.clone();
     out.apply_transform(t)
@@ -224,6 +230,7 @@ fn face_polys(obj: &Object) -> Vec<FacePoly> {
             back_material: f.back_material,
             uv_frame: f.uv_frame,
             surface: f.surface,
+            attrs: obj.attr_dict(f.attrs).cloned().unwrap_or_default(),
         })
         .collect()
 }
@@ -398,6 +405,7 @@ fn collect_faces(
                     (fp.material, fp.back_material),
                     fp.uv_frame,
                     fp.surface,
+                    &fp.attrs,
                 )?;
                 // A coincident shared patch is produced by both operands (e.g.
                 // a shared ground for union, or A's top vs B's flipped bottom for
@@ -583,6 +591,7 @@ impl OrientedFace {
         (material, back_material): (FaceMaterial, FaceMaterial),
         uv_frame: Option<UvFrame>,
         surface: Option<SurfaceRef>,
+        attrs: &AttrDict,
     ) -> Result<OrientedFace, BooleanError> {
         if !flip {
             return Ok(OrientedFace {
@@ -593,6 +602,7 @@ impl OrientedFace {
                 back_material,
                 uv_frame,
                 surface,
+                attrs: attrs.clone(),
             });
         }
         // Reverse every loop and refit the plane so its normal matches the new
@@ -620,6 +630,8 @@ impl OrientedFace {
             // orientation-free).
             uv_frame,
             surface,
+            // The face's dictionary rides with it, like its paint.
+            attrs: attrs.clone(),
         })
     }
 }
@@ -953,8 +965,9 @@ fn assemble(mut faces: Vec<OrientedFace>, planarity_tol: f64) -> Result<Object, 
         let materials: Vec<FaceMaterial> = faces.iter().map(|f| f.material).collect();
         let uv_frames: Vec<Option<UvFrame>> = faces.iter().map(|f| f.uv_frame).collect();
         let surfaces: Vec<Option<SurfaceRef>> = faces.iter().map(|f| f.surface).collect();
+        let attrs: Vec<AttrDict> = faces.iter().map(|f| f.attrs.clone()).collect();
         Object::from_polygons_with_materials_and_frames(
-            &positions, &polys, &materials, &uv_frames, &surfaces,
+            &positions, &polys, &materials, &uv_frames, &surfaces, &attrs,
         )
         .map_err(|_| BooleanError::DegenerateContact)?
     } else {
@@ -967,7 +980,15 @@ fn assemble(mut faces: Vec<OrientedFace>, planarity_tol: f64) -> Result<Object, 
                     .iter()
                     .map(|h| h.iter().map(|&p| intern(p, &mut positions)).collect())
                     .collect();
-                (outer, holes, f.plane, f.material, f.uv_frame, f.surface)
+                (
+                    outer,
+                    holes,
+                    f.plane,
+                    f.material,
+                    f.uv_frame,
+                    f.surface,
+                    f.attrs.clone(),
+                )
             })
             .collect();
         Object::from_faces_with_holes(&positions, &with_holes)

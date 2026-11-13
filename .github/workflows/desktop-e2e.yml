@@ -18,7 +18,7 @@ name: Desktop E2E
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, feature/plugin-system]
 
 env:
   # renovate: datasource=crates-io depName=tauri-driver
@@ -137,3 +137,21 @@ jobs:
       # tauri-driver needs a display even headless; wrap the run in Xvfb.
       - name: Desktop E2E (tauri-driver, under Xvfb)
         run: xvfb-run -a pnpm --dir shells/tauri e2e
+
+      # Plugin realm probe: rebuilds the same debug binary with the proposed
+      # parent CSP (src-tauri/probe.conf.json), then
+      # records how the webview treats the sandboxed realm. The JSON is the
+      # input to docs/agents/PLUGINS.md.
+      - name: Build desktop binary (plugin realm probe)
+        run: pnpm --dir shells/tauri e2e:build:probe
+
+      - name: Plugin realm probe (tauri-driver, under Xvfb)
+        run: xvfb-run -a pnpm --dir shells/tauri e2e:probe
+
+      - name: Upload plugin realm probe results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plugin-realm-probe
+          path: shells/tauri/e2e/probe/results/*.json
+          if-no-files-found: warn

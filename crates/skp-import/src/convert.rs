@@ -1772,29 +1772,20 @@ impl Converter {
                 let (frame, chain) = frame_of(d.def_index)?;
                 let a = anchor_in(&frame, &d.start)?;
                 let b = anchor_in(&frame, &d.end)?;
-                let n = frame.apply_vector(v3(d.normal)).normalized().ok()?;
-                let x = frame.apply_vector(v3(d.x_axis)).normalized().ok()?;
-                // What each frame measures, and where its line sits, as the
-                // dimensions SketchUp draws show: 1 along x, offset along
-                // n × x; 2 along n × x, offset along -x; 0 the distance in
-                // the dimension's plane, offset across it (n × the measured
-                // direction).
-                let (along, off) = match d.variant {
-                    1 => (x, n.cross(x)),
-                    2 => (n.cross(x), x * -1.0),
-                    0 => {
-                        let v = b - a;
-                        let u = (v - n * v.dot(n)).normalized().ok()?;
-                        (u, n.cross(u))
-                    }
-                    _ => return None,
-                };
+                let (along, offset, n) = dimension_geometry(
+                    &frame,
+                    d.variant,
+                    v3(d.normal),
+                    v3(d.x_axis),
+                    b - a,
+                    d.offset_m,
+                )?;
                 let b = a + along * (b - a).dot(along);
                 Some((
                     kernel::Annotation::LinearDimension {
                         a: free(a),
                         b: free(b),
-                        offset: off * d.offset_m,
+                        offset,
                         plane: Plane::from_point_normal(a, n).ok()?,
                         text_override: dimension_override(&d.text_override),
                     },
@@ -3318,10 +3309,12 @@ fn section_planes_world(
             // The normal goes through the plane transform (inverse
             // transpose), not the vector one: a non-uniformly scaled
             // placement would otherwise tilt it off the transformed plane.
+            // It names the side the cut keeps, so it maps keeping that
+            // side: a mirrored placement must not swap the kept half.
             let Ok(local_plane) = Plane::from_point_normal(p_local, n_local) else {
                 continue;
             };
-            let Ok(world_plane) = pose.apply_plane(&local_plane) else {
+            let Ok(world_plane) = pose.apply_plane_keeping_side(&local_plane) else {
                 continue;
             };
             out.insert(
@@ -3337,6 +3330,47 @@ fn section_planes_world(
     out
 }
 
+/// A linear dimension's world geometry from its record, given in the
+/// frame `frame` places it by: the unit direction it measures along, its
+/// offset vector, and its plane's normal. `normal` and `x_axis` are the
+/// record's own (local) axes and `span` the WORLD vector between its two
+/// anchors (variant 0 measures that span within the plane).
+///
+/// What each variant measures, and where its line sits, as the dimensions
+/// SketchUp draws show: 1 along x, offset along n × x; 2 along n × x,
+/// offset along -x; 0 the span's direction in the dimension's plane,
+/// offset across it (n × that direction). Every one of these is a
+/// direction in the LOCAL frame; the dimension line is the image of the
+/// local one, so the offset maps as a plain vector (scaled by the frame,
+/// on the same side of the measured line under a mirror) rather than being
+/// rebuilt as a cross product of mapped axes, which a mirror would turn to
+/// the other side. The plane normal maps as a normal, so it stays
+/// perpendicular to the dimension's plane under any invertible frame.
+fn dimension_geometry(
+    frame: &Transform,
+    variant: u32,
+    normal: Vec3,
+    x_axis: Vec3,
+    span: Vec3,
+    offset_m: f64,
+) -> Option<(Vec3, Vec3, Vec3)> {
+    let n0 = normal.normalized().ok()?;
+    let x0 = x_axis.normalized().ok()?;
+    let (along0, off0) = match variant {
+        1 => (x0, n0.cross(x0)),
+        2 => (n0.cross(x0), x0 * -1.0),
+        0 => {
+            let v = frame.inverse().ok()?.apply_vector(span);
+            let u0 = (v - n0 * v.dot(n0)).normalized().ok()?;
+            (u0, n0.cross(u0))
+        }
+        _ => return None,
+    };
+    let along = frame.apply_vector(along0).normalized().ok()?;
+    let n = frame.apply_normal(n0).normalized().ok()?;
+    Some((along, frame.apply_vector(off0) * offset_m, n))
+}
+
 /// A dimension record's text as a Hew override: none when empty, and a
 /// leading `~` (Hew's mark for a rounded readout) dropped, so a file that
 /// carries one never shows it as text the person typed.
@@ -3347,6 +3381,87 @@ fn dimension_override(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// The pre-mirror-fix construction (axes mapped as vectors, then
+    /// crossed), kept to pin that an identity frame gives bit-identical
+    /// results.
+    fn dimension_geometry_old(
+        frame: &Transform,
+        variant: u32,
+        normal: Vec3,
+        x_axis: Vec3,
+        span: Vec3,
+        offset_m: f64,
+    ) -> (Vec3, Vec3, Vec3) {
+        let n = frame.apply_vector(normal).normalized().unwrap();
+        let x = frame.apply_vector(x_axis).normalized().unwrap();
+        let (along, off) = match variant {
+            1 => (x, n.cross(x)),
+            2 => (n.cross(x), x * -1.0),
+            _ => {
+                let u = (span - n * span.dot(n)).normalized().unwrap();
+                (u, n.cross(u))
+            }
+        };
+        (along, off * offset_m, n)
+    }
+
+    #[test]
+    fn dimension_offset_maps_as_a_vector_under_any_frame() {
+        let n0 = Vec3::new(0.0, 0.0, 1.0);
+        let x0 = Vec3::new(1.0, 0.0, 0.0);
+        let span0 = Vec3::new(2.0, 0.5, 0.0);
+        let off_m = 0.25;
+        let close = |a: Vec3, b: Vec3| (a - b).length() < 1e-12;
+
+        // Identity: bit-identical to the old construction.
+        for variant in [0, 1, 2] {
+            let new =
+                dimension_geometry(&Transform::IDENTITY, variant, n0, x0, span0, off_m).unwrap();
+            let old = dimension_geometry_old(&Transform::IDENTITY, variant, n0, x0, span0, off_m);
+            assert_eq!(new, old, "variant {variant}");
+        }
+
+        // A mirrored group placement (and a rotated, unmirrored control):
+        // the offset is the image of the local offset, L(n x x) * offset.
+        let rot = Transform::rotation(Vec3::new(0.2, 1.0, 0.4), 0.9).unwrap();
+        let mirror = Transform::scale(Vec3::new(-1.0, 1.0, 1.0))
+            .then(&Transform::translation(Vec3::new(3.0, 0.0, 0.0)));
+        // A non-orthogonal frame: a shear and a mirror.
+        let sheared = Transform::from_affine(&[
+            -1.0, 0.4, 0.0, 0.0, //
+            0.0, 2.0, 0.3, 0.0, //
+            0.0, 0.0, 1.5, 0.0,
+        ]);
+        for frame in [rot, mirror, sheared] {
+            let span = frame.apply_vector(span0);
+            for (variant, want) in [
+                (1, n0.cross(x0)),
+                (2, x0 * -1.0),
+                (0, n0.cross(Vec3::new(1.0, 0.25, 0.0).normalized().unwrap())),
+            ] {
+                let (along, off, n) =
+                    dimension_geometry(&frame, variant, n0, x0, span, off_m).unwrap();
+                assert!(
+                    close(off, frame.apply_vector(want) * off_m),
+                    "variant {variant}"
+                );
+                // The plane normal is perpendicular to the dimension's plane.
+                assert!(n.dot(along).abs() < 1e-12 && n.dot(off).abs() < 1e-12);
+            }
+            if frame.determinant() > 0.0 {
+                // The unmirrored rigid control agrees with the old
+                // construction (up to rounding).
+                for variant in [0, 1, 2] {
+                    let (a1, o1, n1) =
+                        dimension_geometry(&frame, variant, n0, x0, span, off_m).unwrap();
+                    let (a2, o2, n2) = dimension_geometry_old(&frame, variant, n0, x0, span, off_m);
+                    assert!(close(o1, o2) && close(n1, n2));
+                    assert!(close(a1, a2) || close(a1, a2 * -1.0));
+                }
+            }
+        }
+    }
+
     #[test]
     fn kept_unshown_note_counts_the_lone_kept_kinds() {
         let mut f = skpwright::Features::default();

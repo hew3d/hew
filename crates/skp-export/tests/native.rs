@@ -574,6 +574,29 @@ fn every_definition_hew_wrote_says_so_in_one_dictionary() {
     }
 }
 
+/// A placement's own material is written on the placement: repainting a
+/// component instance changes the written file, and clearing the paint
+/// restores it byte for byte.
+#[test]
+fn a_repainted_placement_writes_its_own_material() {
+    let env = WriteEnv {
+        unix_time: 1_800_000_000,
+        seed: 1,
+    };
+    let plain = export(&native(), Target::Skp2026, env).unwrap().bytes;
+
+    let mut doc = native();
+    let instance = *doc.instance_ids().first().expect("a placed component");
+    let (material, _) = doc.materials().iter().next().expect("a palette material");
+    doc.set_instance_material(instance, Some(material)).unwrap();
+    let painted = export(&doc, Target::Skp2026, env).unwrap().bytes;
+    assert_ne!(plain, painted, "the placement's paint reaches the file");
+
+    doc.set_instance_material(instance, None).unwrap();
+    let cleared = export(&doc, Target::Skp2026, env).unwrap().bytes;
+    assert_eq!(plain, cleared, "clearing it restores the file");
+}
+
 /// Each stream target writes its own release, and `target_of` names it
 /// back from the written bytes, for every release `skpwright` lists.
 #[test]

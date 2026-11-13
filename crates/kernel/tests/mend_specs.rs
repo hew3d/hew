@@ -1773,3 +1773,90 @@ fn the_census_counts_a_refused_fill_as_left_open() {
         assert_census_is_the_report(&obj, &plan);
     }
 }
+
+// ──────────────────────────────────────────────── attributes through Mend
+
+/// A rebuilt object keeps what was written on its faces and edges: a face
+/// the Mend did not change keeps its attributes, and so does an edge whose
+/// endpoints stayed where they were.
+#[test]
+fn mend_keeps_face_and_edge_attributes() {
+    use kernel::AttrValue;
+    let pos = vec![
+        p(0.0, 0.0, 0.0),
+        p(1.0, 0.0, 0.0),
+        p(1.0, 1.0, 0.0),
+        p(0.0, 1.0, 0.0),
+        p(1.0, 2.0, 1.0),
+        p(0.0, 2.0, 1.0),
+    ];
+    let faces = vec![vec![0, 1, 2, 3], vec![3, 2, 4, 5]];
+    let holes = vec![Vec::new(); 2];
+    let mut doc = import_doc(
+        vec![recipe("Sheet", pos, faces, holes)],
+        Vec::new(),
+        Vec::new(),
+    );
+    let id = only(&doc);
+    let (face, edge) = {
+        let o = doc.object(id).unwrap();
+        (
+            o.faces().keys().next().unwrap(),
+            o.edges().keys().next().unwrap(),
+        )
+    };
+    doc.face_attr_set(id, face, "test", "k", AttrValue::Int(7))
+        .unwrap();
+    doc.edge_attr_set(id, edge, "test", "k", AttrValue::Int(9))
+        .unwrap();
+
+    let (report, _, _) = doc
+        .mend(id, &plan(None, true, Some(FillScope::Rims(vec![0]))))
+        .unwrap();
+    assert_eq!(report.filled_rims, 1);
+
+    let o = doc.object(id).unwrap();
+    let faces_with: Vec<_> = o.faces().keys().filter_map(|f| o.face_attrs(f)).collect();
+    let edges_with: Vec<_> = o.edges().keys().filter_map(|e| o.edge_attrs(e)).collect();
+    assert_eq!(faces_with.len(), 1, "the face keeps its attributes");
+    assert_eq!(faces_with[0]["test"]["k"], AttrValue::Int(7));
+    assert_eq!(edges_with.len(), 1, "the edge keeps its attributes");
+    assert_eq!(edges_with[0]["test"]["k"], AttrValue::Int(9));
+}
+
+/// A part Mend splits off is still that object: it takes the attributes
+/// along with the name and tags.
+#[test]
+fn a_part_mend_splits_off_keeps_the_objects_attributes() {
+    use kernel::{AttrTarget, AttrValue, EntityRef};
+    let (pos, faces) = cones(2, 12);
+    let holes = vec![Vec::new(); faces.len()];
+    let mut doc = import_doc(
+        vec![recipe("Cones", pos, faces, holes)],
+        Vec::new(),
+        Vec::new(),
+    );
+    let id = only(&doc);
+    doc.attr_set(
+        AttrTarget::Entity(EntityRef::Object(id)),
+        "test",
+        "k",
+        AttrValue::Int(3),
+    )
+    .unwrap();
+
+    let before = doc.state_hash();
+    let (_, pieces, _) = doc.mend(id, &plan(None, true, None)).unwrap();
+    assert_eq!(pieces.len(), 1);
+    for o in [id, pieces[0]] {
+        let dict = doc
+            .attr_get(&AttrTarget::Entity(EntityRef::Object(o)))
+            .unwrap()
+            .expect("the attributes are there");
+        assert_eq!(dict["test"]["k"], AttrValue::Int(3));
+    }
+    // Undo takes the split-off part and its attributes away again.
+    doc.undo().unwrap();
+    assert_eq!(doc.live_object_ids(), vec![id]);
+    assert_eq!(doc.state_hash(), before);
+}

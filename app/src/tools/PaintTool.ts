@@ -24,6 +24,17 @@
  * MaterialPalette panel. Sentinel `BigInt(0xFFFFFFFFFFFFFFFF)` = default/unpaint.
  *
  * Face picking reuses the existing pick_face() path (same as PushPullTool).
+ *
+ * Component placements (docs/agents/PLUGINS.md "Materials"): at the top of
+ * the editing context, a click on geometry reached through an instance
+ * paints THAT PLACEMENT (`set_instance_material`) — its unpainted faces
+ * show the color, painted faces and painted bases keep theirs. Plain click
+ * and ⌘/Ctrl-click do the same (an instance has one knob). Inside the
+ * instance's own editing context the faces are the definition's, painted
+ * one by one as above. Alt on a placement samples the material the clicked
+ * member inherits (the nearest painted placement on its path, the same
+ * nearest-wins rule the renderer draws with) when there is one, else the
+ * face's own or base material. Shift replace is unchanged.
  */
 
 import { t } from '@lingui/core/macro'
@@ -31,6 +42,7 @@ import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
+import type { NodeRef } from '../panels/treeModel'
 
 export type OnPaintCommit = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
@@ -47,6 +59,23 @@ export type OnSampleMaterial = (id: bigint) => void
  *  `objectId` is the clicked object (meaningless, and ignored, for
  *  `'document'`). */
 export type OnReplaceCommit = (scope: 'document' | 'object', objectId: bigint) => void
+
+/** Fired after a placement is painted with the world instances whose
+ *  drawing changed (the painted one, or every world placement drawing a
+ *  nested one) — the caller refreshes them. */
+export type OnInstancePaintCommit = (instanceIds: bigint[]) => void
+
+/** Fired when the hovered placement changes (`null`: no placement under the
+ *  pointer, or the tool went idle) — the caller outlines it. */
+export type OnHoverInstance = (instanceId: bigint | null) => void
+
+/** The first instance paint of a session explains itself once. */
+let instancePaintExplained = false
+
+/** Test hook: forget that the explanation was shown. */
+export function resetInstancePaintExplained(): void {
+  instancePaintExplained = false
+}
 
 /** `u64::MAX` as a BigInt — sentinel for "default / unpaint". */
 export const MATERIAL_SENTINEL: bigint = BigInt('18446744073709551615')
@@ -87,9 +116,16 @@ export class PaintTool implements Tool {
   /** The face currently hovered over (for highlight), or null. */
   hoveredObject: bigint | null = null
   hoveredFace: bigint | null = null
+  /** The placement a click would paint (an instance pick at the top of the
+   *  editing context), or null. */
+  hoveredInstance: bigint | null = null
 
   /** The snap last seen on hover (for cue rendering). */
   lastSnap: Snap | null = null
+
+  private getSessionStack: () => NodeRef[]
+  private onInstanceCommit: OnInstancePaintCommit
+  private onHoverInstance: OnHoverInstance
 
   constructor(
     wasmScene: WasmScene,
@@ -97,12 +133,48 @@ export class PaintTool implements Tool {
     onToast: OnToast,
     onSample: OnSampleMaterial,
     onReplace: OnReplaceCommit,
+    getSessionStack: () => NodeRef[] = () => [],
+    onInstanceCommit: OnInstancePaintCommit = () => {},
+    onHoverInstance: OnHoverInstance = () => {},
   ) {
     this.wasmScene = wasmScene
     this.onCommit = onCommit
     this.onToast = onToast
     this.onSample = onSample
     this.onReplace = onReplace
+    this.getSessionStack = getSessionStack
+    this.onInstanceCommit = onInstanceCommit
+    this.onHoverInstance = onHoverInstance
+  }
+
+  /** The placement a pick paints, or undefined: the pick's instance, unless
+   *  it is the frame being edited (or one enclosing it) — inside its own
+   *  editing context a placement's faces are painted one by one. */
+  private _paintableInstance(pick: { instance(): bigint | undefined }): bigint | undefined {
+    const instance = pick.instance()
+    if (instance === undefined) return undefined
+    const inFrame = this.getSessionStack().some((f) => f.kind === 'instance' && f.id === instance)
+    return inFrame ? undefined : instance
+  }
+
+  /** The material `member` inherits as drawn by `instance`: the nearest
+   *  painted placement on its path (`instance_expanded_inherited`, parallel
+   *  to `instance_expanded_members`; a member placed more than once reads
+   *  its first placement, as a pick names the member, not the placement),
+   *  or the sentinel. */
+  private _inheritedAt(instance: bigint, member: bigint): bigint {
+    const members = this.wasmScene.instance_expanded_members(instance)
+    const inherited = this.wasmScene.instance_expanded_inherited(instance)
+    for (let i = 0; i < members.length; i++) {
+      if (members[i] === member) return inherited[i] ?? MATERIAL_SENTINEL
+    }
+    return MATERIAL_SENTINEL
+  }
+
+  private _setHoveredInstance(id: bigint | null): void {
+    if (id === this.hoveredInstance) return
+    this.hoveredInstance = id
+    this.onHoverInstance(id)
   }
 
   /** Set the active material id. `MATERIAL_SENTINEL` = unpaint. */
@@ -156,12 +228,14 @@ export class PaintTool implements Tool {
       try {
         this.hoveredObject = pick.object()
         this.hoveredFace = pick.face()
+        this._setHoveredInstance(this._paintableInstance(pick) ?? null)
       } finally {
         pick.free()
       }
     } else {
       this.hoveredObject = null
       this.hoveredFace = null
+      this._setHoveredInstance(null)
     }
   }
 
@@ -182,13 +256,24 @@ export class PaintTool implements Tool {
     try {
       const objectHandle = pick.object()
       const faceHandle = pick.face()
+      const instance = this._paintableInstance(pick)
       // Alt (eyedropper) takes priority over every other modifier — SketchUp
       // parity, and it keeps the gesture unambiguous (Alt+Shift held together
       // samples, it never also replaces).
       if (this.eyedropper) {
-        this._sample(objectHandle, faceHandle)
+        const inherited =
+          pick.instance() !== undefined ? this._inheritedAt(pick.instance() as bigint, objectHandle) : MATERIAL_SENTINEL
+        if (inherited !== MATERIAL_SENTINEL) {
+          this.currentMaterialId = inherited
+          this.onSample(inherited)
+        } else {
+          this._sample(objectHandle, faceHandle)
+        }
       } else if (replaceScope !== null) {
         this._commitReplace(objectHandle, faceHandle, replaceScope)
+      } else if (instance !== undefined) {
+        // Plain click and ⌘/Ctrl-click alike: a placement has one knob.
+        this._commitInstance(instance)
       } else if (wholeObject) {
         this._commitObject(objectHandle)
       } else {
@@ -209,6 +294,24 @@ export class PaintTool implements Tool {
     this.hoveredObject = null
     this.hoveredFace = null
     this.lastSnap = null
+    this._setHoveredInstance(null)
+  }
+
+  /** Paint one placement (its own material), explaining the first time per
+   *  session that its faces are the component's to paint inside it. */
+  private _commitInstance(instance: bigint): void {
+    try {
+      const touched = this.wasmScene.set_instance_material(instance, this.currentMaterialId)
+      this.onInstanceCommit(touched.length > 0 ? [...touched] : [instance])
+      if (!instancePaintExplained) {
+        instancePaintExplained = true
+        this.onToast(
+          t`Painting a component colors this placement. Edit the component to paint its faces.`,
+        )
+      }
+    } catch (err) {
+      this._handleError(err)
+    }
   }
 
   private _commit(objectHandle: bigint, faceHandle: bigint): void {

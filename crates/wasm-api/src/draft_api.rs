@@ -246,7 +246,13 @@ impl Scene {
         let (plane, frame, pose) = match instance {
             Some(i) => {
                 let (def, pose) = self.draft_instance_pose(i)?;
-                let local = pose.inv.apply_plane(&plane).map_err(|e| api_err(&e, &e))?;
+                // Side-keeping, as `begin_sketch_on_plane_in_instance`
+                // maps it: the local plane's normal is the pose-inverse
+                // image of the user's up, under a mirrored pose too.
+                let local = pose
+                    .inv
+                    .apply_plane_keeping_side(&plane)
+                    .map_err(|e| api_err(&e, &e))?;
                 (local, Some(def), Some(pose))
             }
             None => (plane, None, None),
@@ -536,6 +542,7 @@ impl Scene {
         nz: f64,
         label: &str,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let ctx = self.ctx_plane([px, py, pz, nx, ny, nz], None)?;
         let handle = self.draft_open(ctx, label)?;
         recording::record(recording::RecordedCall::DraftBeginPlane {
@@ -567,6 +574,7 @@ impl Scene {
         nz: f64,
         label: &str,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let ctx = self.ctx_plane([px, py, pz, nx, ny, nz], Some(instance))?;
         let handle = self.draft_open(ctx, label)?;
         recording::record(recording::RecordedCall::DraftBeginPlaneInInstance {
@@ -591,6 +599,7 @@ impl Scene {
         face: u64,
         label: &str,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let ctx = self.ctx_face(object, face, None)?;
         let handle = self.draft_open(ctx, label)?;
         recording::record(recording::RecordedCall::DraftBeginFace {
@@ -611,6 +620,7 @@ impl Scene {
         face: u64,
         label: &str,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let ctx = self.ctx_face(object, face, Some(instance))?;
         let handle = self.draft_open(ctx, label)?;
         recording::record(recording::RecordedCall::DraftBeginFaceInInstance {
@@ -628,6 +638,7 @@ impl Scene {
     /// takes part, and everything lowers back into it (a Line chain
     /// continues in the sketch its first segment created).
     pub fn draft_begin_sketch(&mut self, sketch: u64, label: &str) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let ctx = self.ctx_sketch(sketch, None)?;
         let handle = self.draft_open(ctx, label)?;
         recording::record(recording::RecordedCall::DraftBeginSketch {
@@ -646,6 +657,7 @@ impl Scene {
     /// `{"sketch":id}` context on a detached sketch opens that sketch's own
     /// context, as [`Scene::draft_begin_sketch`] does.
     pub fn draft_begin_ctx(&mut self, ctx_json: &str, label: &str) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let ctx = self.ctx_from_json(ctx_json)?;
         let handle = self.draft_open(ctx, label)?;
         recording::record(recording::RecordedCall::DraftBeginCtx {
@@ -672,6 +684,7 @@ impl Scene {
     /// the object-scoped `{"plane":[..],"object":id}` form; otherwise as
     /// [`Scene::draft_begin_ctx`].
     pub fn draft_begin_detached(&mut self, ctx_json: &str, label: &str) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         // The form is checked before anything resolves, so a wrong form is
         // refused as one whatever it names.
         let v = parse_ctx(ctx_json)?;
@@ -715,6 +728,7 @@ impl Scene {
     /// faces lie over each other along, wireframe faces §16 R22).
     /// A refusal leaves the draft open.
     pub fn draft_end(&mut self, draft: u64) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
         let pose = self.draft_check(draft)?;
         let (report, change) = self.doc.end_draft().map_err(doc_err)?;
         self.open_draft = None;
@@ -725,14 +739,15 @@ impl Scene {
 
     /// Abandons the draft; the document is untouched. `false` for a stale
     /// handle.
-    pub fn draft_cancel(&mut self, draft: u64) -> bool {
+    pub fn draft_cancel(&mut self, draft: u64) -> Result<bool, ApiError> {
+        self.ensure_not_busy()?;
         if self.draft_check(draft).is_err() {
-            return false;
+            return Ok(false);
         }
         self.doc.cancel_draft();
         self.open_draft = None;
         recording::record(recording::RecordedCall::DraftCancel { draft });
-        true
+        Ok(true)
     }
 
     // ------------------------------------------------------ history bracket
@@ -744,6 +759,7 @@ impl Scene {
     /// [`Scene::history_bracket_abort`] restores the document exactly as it
     /// was at open. One bracket at a time; it does not nest.
     pub fn history_bracket_open(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         if self.open_bracket.is_some() {
             return Err(stale("HistoryBracketOpen", "history bracket"));
         }
@@ -758,12 +774,14 @@ impl Scene {
     /// or drafting gesture left open) refuses and restores the document as
     /// it was at open.
     pub fn history_bracket_commit(&mut self, label: &str) -> Result<bool, ApiError> {
+        self.ensure_not_busy()?;
         let Some(txn) = self.open_bracket.take() else {
             return Err(stale("NoHistoryBracket", "history bracket"));
         };
         let meta = kernel::CompoundMeta {
             label: label.to_string(),
             origin: kernel::HistoryOrigin::User,
+            coalesce: None,
         };
         match self.doc.commit_transaction(txn, meta) {
             Ok(committed) => {
@@ -786,14 +804,16 @@ impl Scene {
     /// Discards everything since [`Scene::history_bracket_open`]: the
     /// document, its undo and redo stacks included, is exactly as it was.
     /// A no-op without an open bracket.
-    pub fn history_bracket_abort(&mut self) {
+    pub fn history_bracket_abort(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let Some(txn) = self.open_bracket.take() else {
-            return;
+            return Ok(());
         };
         recording::record(recording::RecordedCall::HistoryBracketAbort);
         self.doc.abort_transaction(txn);
         self.open_draft = None;
         self.full_resync();
+        Ok(())
     }
 
     // ------------------------------------------------------------ edits
@@ -811,6 +831,7 @@ impl Scene {
         by: f64,
         bz: f64,
     ) -> Result<SegmentAddedJs, ApiError> {
+        self.ensure_not_busy()?;
         let report = self.draft_edit(draft, false, |sk, pose| {
             let (a, b) = (Point3::new(ax, ay, az), Point3::new(bx, by, bz));
             let (a, b) = pose.map_or((a, b), |p| (p.to_local(a), p.to_local(b)));
@@ -851,6 +872,7 @@ impl Scene {
         center: &[f64],
         radius: f64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.draft_curve_with(draft, center, radius, kernel::SketchCurveKind::Circle)?;
         recording::record(recording::RecordedCall::DraftBeginCurveWith {
             draft,
@@ -868,6 +890,7 @@ impl Scene {
         center: &[f64],
         radius: f64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.draft_curve_with(draft, center, radius, kernel::SketchCurveKind::Polygon)?;
         recording::record(recording::RecordedCall::DraftBeginPolygonWith {
             draft,
@@ -881,6 +904,7 @@ impl Scene {
     /// `draft_end_curve` are one curve chain that selects and erases as one
     /// (an arc too flat to have a circle, drawn as its chord).
     pub fn draft_begin_curve(&mut self, draft: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.draft_edit(draft, false, |sk, _| {
             sk.begin_curve();
             Ok(())
@@ -892,6 +916,7 @@ impl Scene {
     /// Closes the curve chain opened by `draft_begin_curve`,
     /// `draft_begin_curve_with`, or `draft_begin_polygon_with`.
     pub fn draft_end_curve(&mut self, draft: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.draft_edit(draft, false, |sk, _| {
             sk.end_curve();
             Ok(())
@@ -904,6 +929,7 @@ impl Scene {
     /// `plane_units_json`). Unknown keys refuse; a solid's own edges are
     /// not drawing edges and cannot be named.
     pub fn draft_remove_edges(&mut self, draft: u64, keys: &[u64]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.draft_check(draft)?;
         let edges = self.draft_edges(keys)?;
         self.draft_edit(draft, true, |sk, _| {
@@ -930,6 +956,7 @@ impl Scene {
         keys: &[u64],
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let pose = self.draft_check(draft)?;
         let (rows, t) = Self::draft_world_transform(pose, affine)?;
         let edges = self.draft_edges(keys)?;
@@ -953,6 +980,7 @@ impl Scene {
         keys: &[u64],
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let pose = self.draft_check(draft)?;
         let (rows, t) = Self::draft_world_transform(pose, affine)?;
         let edges = self.draft_edges(keys)?;
@@ -981,6 +1009,7 @@ impl Scene {
         ty: f64,
         tz: f64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let pose = self.draft_check(draft)?;
         let at = pose.map_or(Point3::new(x, y, z), |p| p.to_local(Point3::new(x, y, z)));
         let to = pose.map_or(Point3::new(tx, ty, tz), |p| {
@@ -1015,6 +1044,7 @@ impl Scene {
         region_key: u64,
         distance: f64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.draft_check(draft)?;
         let region = self.doc.draft_region_by_key(region_key).ok_or_else(|| {
             ApiError(format!(
@@ -1046,6 +1076,7 @@ impl Scene {
         curve_key: u64,
         segments: u32,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.draft_check(draft)?;
         let curves = self.doc.draft_curves_by_key(curve_key);
         if curves.is_empty() {
@@ -1745,6 +1776,7 @@ impl Scene {
     /// # Errors
     /// `UnknownSketch` for a stale or deleted sketch; nothing changes.
     pub fn make_solid_from_sketches(&mut self, sketches: Vec<u64>) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
         let sids: Vec<SketchId> = sketches.iter().map(|&h| sketch_id(h)).collect();
         let (outcomes, change) = self.doc.make_solid_from_sketches(&sids).map_err(doc_err)?;
         self.reconcile(&change);
@@ -1996,7 +2028,7 @@ mod tests {
             draft_holds(&scene, e.0, e.1),
             "a missed drag keeps the lift"
         );
-        scene.draft_cancel(d);
+        scene.draft_cancel(d).unwrap();
         assert_eq!(scene.doc.state_hash(), before);
 
         // The drag that moves: E dropped, G's end moves alone.
@@ -2076,7 +2108,7 @@ mod tests {
             let k = u64::from_str_radix(&key, 16).unwrap();
             let d = scene.draft_begin_ctx(&ctx, "Erase").unwrap();
             scene.draft_remove_edges(d, &[k]).unwrap();
-            assert!(scene.draft_cancel(d));
+            assert!(scene.draft_cancel(d).unwrap());
         }
     }
 
@@ -2240,7 +2272,7 @@ mod tests {
         );
         draw(&mut scene, 2.0);
         draw(&mut scene, 4.0);
-        scene.history_bracket_abort();
+        scene.history_bracket_abort().unwrap();
         assert_eq!(scene.save(), before, "abort restores the document");
         assert_eq!(scene.undo_depth(), depth);
 
@@ -2520,9 +2552,12 @@ mod tests {
             .draft_begin_plane(0.0, 0.0, 1.0, 0.0, 0.0, 1.0, "R")
             .unwrap();
         rect(&mut scene, d, 0.5, 0.5, 1.5, 1.5, 1.0);
-        assert!(scene.draft_cancel(d));
+        assert!(scene.draft_cancel(d).unwrap());
         assert_eq!(scene.save(), before);
-        assert!(!scene.draft_cancel(d), "a second cancel is a stale handle");
+        assert!(
+            !scene.draft_cancel(d).unwrap(),
+            "a second cancel is a stale handle"
+        );
     }
 
     #[test]
@@ -2621,7 +2656,7 @@ mod tests {
         scene
             .draft_add_segment(d, 10.2, 0.2, 1.0, 10.4, 0.3, 1.0)
             .unwrap();
-        scene.draft_cancel(d);
+        scene.draft_cancel(d).unwrap();
         // A stale instance refuses.
         assert!(
             scene
@@ -3074,6 +3109,32 @@ mod tests {
         assert_eq!(fresh.replay(&rec).unwrap(), hash);
     }
 
+    /// A plane draft opened through a MIRRORED instance on the world plane
+    /// of a member's top face lands on that face: the context plane maps
+    /// into the definition keeping its side, so it matches the face's
+    /// outward normal and the face takes part in the draft.
+    #[test]
+    fn a_plane_draft_through_a_mirrored_instance_lands_on_the_member_face() {
+        let mut scene = Scene::new();
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let inst = scene.make_component(&[0], &[b]).unwrap();
+        let def = scene.instance_def(inst).unwrap();
+        // Mirror x, then shift: the box covers x in [3, 5].
+        let mirror = [-1.0, 0.0, 0.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        scene.transform_instance(inst, &mirror).unwrap();
+        let member = scene.component_member_objects(def)[0];
+        let d = scene
+            .draft_begin_plane_in_instance(inst, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, "Rectangle")
+            .unwrap();
+        rect(&mut scene, d, 3.5, 0.5, 4.5, 1.5, 1.0);
+        let report = json(&scene.draft_end(d).unwrap());
+        assert_eq!(
+            report["objects"],
+            serde_json::json!([member]),
+            "the member's top face took the drawing: {report}"
+        );
+    }
+
     #[test]
     fn drafting_recording_round_trips() {
         recording::reset();
@@ -3118,7 +3179,7 @@ mod tests {
         scene
             .draft_add_segment(d, 0.0, 0.0, 5.0, 1.0, 0.0, 5.0)
             .unwrap();
-        scene.draft_cancel(d);
+        scene.draft_cancel(d).unwrap();
         let hash = scene.doc.state_hash();
         let rec = scene.take_recording();
         let mut fresh = Scene::new();

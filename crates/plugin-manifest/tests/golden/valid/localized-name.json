@@ -1,0 +1,14 @@
+{
+  "manifest": 1,
+  "id": "com.example.localized",
+  "name": {
+    "en": "Cut List",
+    "ja": "\u30ab\u30c3\u30c8\u30ea\u30b9\u30c8"
+  },
+  "version": "1.0.0",
+  "api": 1,
+  "main": "main.js",
+  "description": {
+    "$t": "plugin.description"
+  }
+}

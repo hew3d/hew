@@ -66,7 +66,27 @@ use crate::transform::Transform;
 /// the dense material id (`u32`). A face without back paint grows by the
 /// one flag byte. Absent in
 /// v1-v7 buffers → all `Face::back_material = None`.
-pub const GEOMETRY_FORMAT_VERSION: u32 = 8;
+/// v8 → v9: per-face and per-edge attribute dictionaries
+/// ([`crate::topo::Face::attrs`], [`crate::topo::Edge::attrs`]), appended
+/// AFTER each face's back-paint block: a `u8` flag and, when 1, a `u32`
+/// byte length and the face's dictionary as UTF-8 JSON (namespace → key →
+/// value, the manifest `attrs` shape); then a `u8` "any" flag for the
+/// face's edges and, when 1, one (flag + optional length + JSON) entry per
+/// outer edge then per hole edge. A face without dictionaries grows by the
+/// two flag bytes. Absent in v1-v8 buffers → no dictionaries.
+pub const GEOMETRY_FORMAT_VERSION: u32 = 9;
+
+/// The geometry buffer version [`Document::state_hash`](crate::Document::state_hash)
+/// encodes an Object with when that Object carries no face or edge
+/// dictionary (and the manifest's `geometry_version` it hashes): the
+/// [`HASHED_FORMAT_VERSION`] rule applied to the geometry buffer, so the
+/// v9 bump moves only the hashes of documents whose solids carry
+/// dictionaries. An Object that carries one hashes as v9.
+pub(crate) const HASHED_GEOMETRY_VERSION: u32 = 8;
+
+/// The geometry buffer version at which face and edge attribute
+/// dictionaries were introduced.
+pub(crate) const ELEMENT_ATTRS_GEOMETRY_VERSION: u32 = 9;
 
 /// Version of the `.hew` container / `manifest.json` shape (independent of the
 /// geometry buffer version). Bump on any manifest-shape change and extend
@@ -280,7 +300,24 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 8;
 /// Optional and omitted for a plain material, so a document without one
 /// writes the same manifest as v25 apart from the version. Gated by
 /// [`PBR_MIN_VERSION`]. Geometry buffer unchanged.
-pub const MANIFEST_FORMAT_VERSION: u32 = 26;
+/// **v27**: `instances[].material` — a placement's own material (dense
+/// `materials[]` id), which a member face shows when neither the face nor
+/// its Object's base is painted, the nearest painted placement winning
+/// (HEW_FILE_FORMAT.md §4.4). Optional and omitted when absent, so a
+/// document with no painted placement writes the same manifest as v26
+/// apart from the version. Gated by [`INSTANCE_MATERIAL_MIN_VERSION`].
+/// Geometry buffer unchanged.
+/// **v28**: geometry buffer v9 (per-face and per-edge attribute
+/// dictionaries, HEW_FILE_FORMAT.md §3). The manifest shape is unchanged
+/// apart from `format_version` and `geometry_version`.
+/// **v29**: `document_id` — a UUID (lowercase, hyphenated) that identifies
+/// the document across saves, minted from host randomness on the first
+/// save and never changed after (HEW_FILE_FORMAT.md §2). Optional and
+/// omitted when absent, so a document that was never given one writes the
+/// same manifest as v28 apart from the version. Gated by
+/// [`DOCUMENT_ID_MIN_VERSION`]; `Document::state_hash` never writes it.
+/// Geometry buffer unchanged.
+pub const MANIFEST_FORMAT_VERSION: u32 = 29;
 
 /// The manifest version at which `materials[].pbr` was introduced. A file
 /// declaring an older version that carries one is rejected
@@ -312,6 +349,76 @@ pub(crate) const GUIDE_DASH_MIN_VERSION: u32 = 24;
 /// file declaring an older version that sets it is malformed for its own
 /// declared version and rejected (reject-not-repair).
 pub(crate) const DETACHED_SKETCH_MIN_VERSION: u32 = 23;
+
+/// The `format_version` `Document::state_hash` encodes with, whatever the
+/// writer's own version: the hash is a digest of the document's state,
+/// frozen into replay fixtures and bug-report recordings, so a format bump
+/// that adds an optional field changes the hash only of a document that
+/// uses the field. Pinned at the version current when this rule began. The
+/// pin moves only on a non-additive change to an existing field, and then
+/// the replay fixtures are regenerated deliberately in a commit that says
+/// so; an additive optional field never moves it, so the hashed bytes may
+/// claim v22 while carrying a later field, which is harmless (they are
+/// hashed, never loaded).
+pub(crate) const HASHED_FORMAT_VERSION: u32 = 22;
+
+/// The manifest version at which the top-level `document_id` was
+/// introduced. A file declaring an older version that carries one is
+/// malformed for its own declared version and rejected (reject-not-repair).
+pub(crate) const DOCUMENT_ID_MIN_VERSION: u32 = 29;
+
+/// Deserializes a member that is present in the JSON, `null` included, as
+/// `Some(..)`; with `#[serde(default)]` an absent member stays `None`.
+fn deserialize_present<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+/// A document id as manifest text: lowercase hyphenated `8-4-4-4-12` hex.
+pub(crate) fn document_id_text(id: &[u8; 16]) -> String {
+    let mut s = String::with_capacity(36);
+    for (i, b) in id.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            s.push('-');
+        }
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Parses manifest `document_id` text: exactly 36 characters, `8-4-4-4-12`
+/// lowercase hex. Anything else is `None` (the caller rejects the file).
+pub(crate) fn parse_document_id(text: &str) -> Option<[u8; 16]> {
+    let b = text.as_bytes();
+    if b.len() != 36 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    let mut nibbles = 0usize;
+    for (i, &c) in b.iter().enumerate() {
+        if matches!(i, 8 | 13 | 18 | 23) {
+            if c != b'-' {
+                return None;
+            }
+            continue;
+        }
+        let v = match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            _ => return None,
+        };
+        out[nibbles / 2] |= if nibbles.is_multiple_of(2) { v << 4 } else { v };
+        nibbles += 1;
+    }
+    Some(out)
+}
+
+/// The manifest version at which `instances[].material` was introduced. A
+/// file declaring an older version that carries one is malformed for its
+/// own declared version and rejected (reject-not-repair).
+pub(crate) const INSTANCE_MATERIAL_MIN_VERSION: u32 = 27;
 
 /// The manifest version at which `sketches[].tags` was introduced. A file
 /// declaring an older version that carries one is malformed for its own
@@ -482,6 +589,63 @@ fn attrs_from_dto(dto: &AttrsDto, what: &str) -> Result<crate::attr::AttrDict, L
         }
     }
     Ok(dict)
+}
+
+/// A face or edge dictionary's v9 geometry-buffer bytes: the manifest
+/// `attrs` JSON shape, compact. Deterministic (`BTreeMap` order end to
+/// end), so equal dictionaries always write equal bytes.
+fn attr_dict_json(dict: &crate::attr::AttrDict) -> Vec<u8> {
+    serde_json::to_vec(&attrs_to_dto(dict)).expect("a validated dictionary serializes")
+}
+
+/// Reads one v9 dictionary entry (`u8` flag, then `u32` length and UTF-8
+/// JSON when the flag is 1). Validated as strictly as a live write: every
+/// namespace and key non-empty, every namespace holding a key, every value
+/// representable ([`crate::attr::AttrValue::from_json`]). A present entry
+/// with no namespace is malformed (the writer never emits one).
+fn read_attr_dict(r: &mut ByteReader<'_>) -> Result<Option<crate::attr::AttrDict>, DecodeError> {
+    match r.read_u8()? {
+        0 => return Ok(None),
+        1 => {}
+        _ => {
+            return Err(DecodeError::Corrupt {
+                offset: r.pos - 1,
+                what: "attribute dictionary flag must be 0 or 1",
+            });
+        }
+    }
+    let len = r.read_u32()? as usize;
+    let start = r.pos;
+    let bytes = r.read_slice(len)?;
+    let corrupt = |what: &'static str| DecodeError::Corrupt {
+        offset: start,
+        what,
+    };
+    let dto: AttrsDto = serde_json::from_slice(bytes)
+        .map_err(|_| corrupt("attribute dictionary is not valid JSON"))?;
+    if dto.is_empty() {
+        return Err(corrupt("attribute dictionary is empty"));
+    }
+    let mut dict = crate::attr::AttrDict::new();
+    for (ns, entries) in dto {
+        if ns.is_empty() {
+            return Err(corrupt("attribute dictionary has an empty namespace"));
+        }
+        if entries.is_empty() {
+            return Err(corrupt("attribute namespace holds no key"));
+        }
+        let mut out = BTreeMap::new();
+        for (key, value) in entries {
+            if key.is_empty() {
+                return Err(corrupt("attribute dictionary has an empty key"));
+            }
+            let parsed = crate::attr::AttrValue::from_json(&value)
+                .map_err(|_| corrupt("attribute value is not representable"))?;
+            out.insert(key, parsed);
+        }
+        dict.insert(ns, out);
+    }
+    Ok(Some(dict))
 }
 
 /// Sentinel `u32` standing in for `None` wherever a material id is written in a
@@ -709,11 +873,29 @@ impl Object {
     /// (the same id space the manifest uses). For a material-free object the
     /// closure is never invoked. `None` materials are written as [`NO_MATERIAL`].
     pub fn encode(&self, material_dense: &impl Fn(MaterialId) -> u32) -> Vec<u8> {
+        self.encode_version(material_dense, GEOMETRY_FORMAT_VERSION)
+    }
+
+    /// [`Object::encode`] at a given buffer `version`: the current one for a
+    /// save, or [`HASHED_GEOMETRY_VERSION`] for a `state_hash` of an Object
+    /// without dictionaries (the v8 layout is the v9 layout without the
+    /// dictionary blocks). An Object that carries a dictionary is always
+    /// written at v9 or later, so nothing is ever dropped.
+    pub(crate) fn encode_version(
+        &self,
+        material_dense: &impl Fn(MaterialId) -> u32,
+        version: u32,
+    ) -> Vec<u8> {
+        let version = if self.has_element_attrs() {
+            version.max(ELEMENT_ATTRS_GEOMETRY_VERSION)
+        } else {
+            version
+        };
         let mut buf = Vec::new();
 
         // --- header ---
         buf.extend_from_slice(GEOMETRY_MAGIC);
-        buf.extend_from_slice(&GEOMETRY_FORMAT_VERSION.to_le_bytes());
+        buf.extend_from_slice(&version.to_le_bytes());
 
         // watertight byte
         let wt_byte: u8 = match self.watertight {
@@ -796,6 +978,14 @@ impl Object {
             outer_soft: Vec<bool>,
             /// Per-hole-edge SOFT flags (v6), paired like `hole_curves`.
             hole_soft: Vec<Vec<bool>>,
+            /// The face's attribute dictionary as its emitted JSON bytes
+            /// (v9), `None` for none. Participates in the sort key.
+            attrs: Option<Vec<u8>>,
+            /// Per-outer-edge dictionaries (v9) as emitted JSON, canonical
+            /// order as `outer_curves`. Participates in the sort key.
+            outer_attrs: Vec<Option<Vec<u8>>>,
+            /// Per-hole-edge dictionaries (v9), paired like `hole_curves`.
+            hole_attrs: Vec<Vec<Option<Vec<u8>>>>,
             /// Ordinal of the owning connected component (derived from twin
             /// adjacency, NOT the stored shell list, which may lump
             /// disconnected components together); replaced by the
@@ -912,6 +1102,12 @@ impl Object {
                     }
                     std::cmp::Ordering::Equal
                 })
+                // Dictionaries (v9): the face's bytes, then its edges'
+                // byte sequences (absent sorts before present, present
+                // compares lexicographically).
+                .then_with(|| a.attrs.cmp(&b.attrs))
+                .then_with(|| a.outer_attrs.cmp(&b.outer_attrs))
+                .then_with(|| a.hole_attrs.cmp(&b.hole_attrs))
         }
 
         // Connected components over faces, via twin adjacency (union-find).
@@ -997,6 +1193,18 @@ impl Object {
                 })
                 .collect()
         };
+        let loop_edge_attrs =
+            |loop_id: crate::ids::LoopId, verts: &[crate::ids::VertexId]| -> Vec<Option<Vec<u8>>> {
+                verts
+                    .iter()
+                    .map(|&v| {
+                        self.loop_half_edges(loop_id)
+                            .find(|&h| self.half_edges[h].origin == v)
+                            .and_then(|h| self.attr_dict(self.edges[self.half_edges[h].edge].attrs))
+                            .map(attr_dict_json)
+                    })
+                    .collect()
+            };
         let loop_edge_soft =
             |loop_id: crate::ids::LoopId, verts: &[crate::ids::VertexId]| -> Vec<bool> {
                 verts
@@ -1017,6 +1225,7 @@ impl Object {
                 let outer_curves = loop_edge_curves(face.outer_loop, &outer_verts);
                 let outer_soft = loop_edge_soft(face.outer_loop, &outer_verts);
                 let outer_polys = loop_edge_polys(face.outer_loop, &outer_verts);
+                let outer_attrs = loop_edge_attrs(face.outer_loop, &outer_verts);
                 // Build each hole with its edge-curves, then sort the whole
                 // triple by ring so the curves stay paired with their hole.
                 type HoleFull = (
@@ -1025,6 +1234,7 @@ impl Object {
                     Vec<Option<crate::sketch::CurveGeom>>,
                     Vec<bool>,
                     Vec<Option<crate::sketch::CurveGeom>>,
+                    Vec<Option<Vec<u8>>>,
                 );
                 let mut holes_full: Vec<HoleFull> = face
                     .inner_loops
@@ -1034,21 +1244,26 @@ impl Object {
                         let hc = loop_edge_curves(il, &hv);
                         let hs = loop_edge_soft(il, &hv);
                         let hp = loop_edge_polys(il, &hv);
-                        (hv, hr, hc, hs, hp)
+                        let ha = loop_edge_attrs(il, &hv);
+                        (hv, hr, hc, hs, hp, ha)
                     })
                     .collect();
                 holes_full.sort_by(|a, b| ring_cmp(&a.1, &b.1));
                 let holes: Vec<(Vec<crate::ids::VertexId>, Vec<Point3>)> = holes_full
                     .iter()
-                    .map(|(v, r, _, _, _)| (v.clone(), r.clone()))
+                    .map(|(v, r, ..)| (v.clone(), r.clone()))
                     .collect();
                 let hole_curves: Vec<Vec<Option<crate::sketch::CurveGeom>>> =
-                    holes_full.iter().map(|(_, _, c, _, _)| c.clone()).collect();
-                let hole_polys: Vec<Vec<Option<crate::sketch::CurveGeom>>> =
-                    holes_full.iter().map(|(_, _, _, _, p)| p.clone()).collect();
+                    holes_full.iter().map(|(_, _, c, ..)| c.clone()).collect();
+                let hole_polys: Vec<Vec<Option<crate::sketch::CurveGeom>>> = holes_full
+                    .iter()
+                    .map(|(_, _, _, _, p, _)| p.clone())
+                    .collect();
+                let hole_attrs: Vec<Vec<Option<Vec<u8>>>> =
+                    holes_full.iter().map(|(.., a)| a.clone()).collect();
                 let hole_soft: Vec<Vec<bool>> = holes_full
                     .into_iter()
-                    .map(|(_, _, _, sflags, _)| sflags)
+                    .map(|(_, _, _, sflags, _, _)| sflags)
                     .collect();
                 CanonicalFace {
                     outer_verts,
@@ -1070,6 +1285,9 @@ impl Object {
                     hole_polys,
                     outer_soft,
                     hole_soft,
+                    attrs: self.attr_dict(face.attrs).map(attr_dict_json),
+                    outer_attrs,
+                    hole_attrs,
                     shell: component_ordinal[fid],
                 }
             })
@@ -1323,6 +1541,37 @@ impl Object {
                 buf.push(1u8);
                 buf.extend_from_slice(&cf.back_mat_id.to_le_bytes());
             }
+
+            if version < ELEMENT_ATTRS_GEOMETRY_VERSION {
+                continue;
+            }
+            // per-face attribute dictionary (v9): u8 flag + u32 length +
+            // UTF-8 JSON, after the back paint.
+            let write_dict = |buf: &mut Vec<u8>, d: &Option<Vec<u8>>| match d {
+                None => buf.push(0u8),
+                Some(bytes) => {
+                    buf.push(1u8);
+                    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(bytes);
+                }
+            };
+            write_dict(&mut buf, &cf.attrs);
+            // per-edge dictionaries (v9): a u8 "any" flag; when 1, one
+            // dictionary entry per outer edge then per hole edge, in the
+            // canonical order the other per-edge blocks use.
+            let any_attrs = cf
+                .outer_attrs
+                .iter()
+                .chain(cf.hole_attrs.iter().flatten())
+                .any(Option::is_some);
+            if !any_attrs {
+                buf.push(0u8);
+            } else {
+                buf.push(1u8);
+                for d in cf.outer_attrs.iter().chain(cf.hole_attrs.iter().flatten()) {
+                    write_dict(&mut buf, d);
+                }
+            }
         }
 
         buf
@@ -1408,16 +1657,16 @@ impl Object {
         }
 
         // --- faces ---
-        type FaceSpec = (
-            Vec<usize>,
-            Vec<Vec<usize>>,
-            Plane,
-            crate::material::FaceMaterial,
-            Option<UvFrame>,
-            Option<crate::topo::SurfaceRef>,
-        );
+        use crate::build::FaceSpec;
         let face_count = r.read_u32()? as usize;
         let mut face_specs: Vec<FaceSpec> = Vec::with_capacity(face_count);
+        // v9 per-edge dictionaries, parallel to `face_specs`: `(outer,
+        // per-hole)`, empty lists when the face's edges carry none.
+        type FaceDicts = (
+            Vec<Option<crate::attr::AttrDict>>,
+            Vec<Vec<Option<crate::attr::AttrDict>>>,
+        );
+        let mut edge_dicts: Vec<FaceDicts> = Vec::with_capacity(face_count);
         // v5 per-face edge-curve claims, parallel to `face_specs` (in the same
         // face order `from_faces_with_holes` rebuilds them, so a positional zip
         // stamps them back after the build). `(outer_edge_curves, per-hole
@@ -1697,7 +1946,49 @@ impl Object {
             };
             backs.push(back);
 
-            face_specs.push((outer, holes, plane, face_material, uv_frame, surface));
+            // v9: the face's dictionary, then its edges'.
+            let (face_dict, dicts) = if version >= ELEMENT_ATTRS_GEOMETRY_VERSION {
+                let face_dict = read_attr_dict(&mut r)?;
+                let any = r.read_u8()?;
+                let dicts: FaceDicts = match any {
+                    0 => (Vec::new(), Vec::new()),
+                    1 => {
+                        let mut oa = Vec::with_capacity(outer.len());
+                        for _ in 0..outer.len() {
+                            oa.push(read_attr_dict(&mut r)?);
+                        }
+                        let mut ha = Vec::with_capacity(holes.len());
+                        for hole in &holes {
+                            let mut this = Vec::with_capacity(hole.len());
+                            for _ in 0..hole.len() {
+                                this.push(read_attr_dict(&mut r)?);
+                            }
+                            ha.push(this);
+                        }
+                        (oa, ha)
+                    }
+                    _ => {
+                        return Err(DecodeError::Corrupt {
+                            offset: r.pos - 1,
+                            what: "edge dictionaries flag must be 0 or 1",
+                        });
+                    }
+                };
+                (face_dict.unwrap_or_default(), dicts)
+            } else {
+                (crate::attr::AttrDict::new(), (Vec::new(), Vec::new()))
+            };
+            edge_dicts.push(dicts);
+
+            face_specs.push((
+                outer,
+                holes,
+                plane,
+                face_material,
+                uv_frame,
+                surface,
+                face_dict,
+            ));
         }
 
         // Rebuild topology via the existing builder path.
@@ -1795,6 +2086,46 @@ impl Object {
             }
         }
 
+        // Restore per-edge dictionaries (v9), positionally like the claims
+        // above. Every loop edge is written by each face it bounds, so a
+        // shared edge is read twice and the two entries must agree exactly
+        // (both absent, or equal dictionaries); anything else is a tampered
+        // file, rejected rather than resolved by write order.
+        if version >= ELEMENT_ATTRS_GEOMETRY_VERSION {
+            let mut seen: SecondaryMap<crate::ids::EdgeId, Option<crate::attr::AttrDict>> =
+                SecondaryMap::new();
+            for (fid, (outer_dicts, hole_dicts)) in face_ids.iter().copied().zip(&edge_dicts) {
+                let outer_loop = obj.faces[fid].outer_loop;
+                let inner_loops = obj.faces[fid].inner_loops.clone();
+                let loops = std::iter::once((outer_loop, outer_dicts))
+                    .chain(inner_loops.iter().copied().zip(hole_dicts.iter()));
+                for (loop_id, dicts) in loops {
+                    let hes: Vec<_> = obj.loop_half_edges(loop_id).collect();
+                    for (k, h) in hes.into_iter().enumerate() {
+                        let d = dicts.get(k).cloned().flatten();
+                        let e = obj.half_edges[h].edge;
+                        match seen.get(e) {
+                            Some(prior) if *prior != d => {
+                                return Err(DecodeError::Corrupt {
+                                    offset: r.pos,
+                                    what: "shared edge has disagreeing attribute dictionaries",
+                                });
+                            }
+                            Some(_) => {}
+                            None => {
+                                seen.insert(e, d);
+                            }
+                        }
+                    }
+                }
+            }
+            for (e, d) in seen {
+                if let Some(d) = d {
+                    obj.set_edge_attrs(e, d);
+                }
+            }
+        }
+
         // Validate the rebuilt topology (rule 4: validate, never repair).
         obj.validate().map_err(DecodeError::InvalidTopology)?;
 
@@ -1822,6 +2153,17 @@ pub(crate) struct Manifest {
     pub geometry_version: u32,
     pub app: String,
     pub app_version: String,
+    /// A UUID (lowercase, hyphenated) that identifies this document across
+    /// saves (manifest v29+). Absent (outer `None`) → the document has no id
+    /// yet (every pre-v29 file). A member that is present but `null`
+    /// (`Some(None)`) is kept distinct from an absent one so decode rejects
+    /// it: only a valid id may appear.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub document_id: Option<Option<String>>,
     pub materials: Vec<MaterialDto>,
     pub objects: Vec<ObjectDto>,
     pub groups: Vec<GroupDto>,
@@ -2583,6 +2925,11 @@ pub(crate) struct InstanceDto {
     /// smuggled field and rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<u32>,
+    /// The placement's own material (manifest v27+): a dense material id.
+    /// Absent → none. Presence in a pre-v27 file is a smuggled field and
+    /// rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<u32>,
 }
 
 /// A first-class sketch.
@@ -2806,7 +3153,8 @@ pub(crate) type GroupSaveRow = (
 );
 
 /// Serialization row for an instance:
-/// (id, def, pose, name, tags, owner definition — v15 nested components).
+/// (id, def, pose, name, tags, owner definition — v15 nested components,
+/// own material — v27).
 pub(crate) type InstanceSaveRow = (
     InstanceId,
     ComponentId,
@@ -2814,6 +3162,7 @@ pub(crate) type InstanceSaveRow = (
     Option<String>,
     Vec<Vec<String>>,
     Option<ComponentId>,
+    Option<MaterialId>,
 );
 
 /// Data that document.rs extracts from its private fields and hands off to
@@ -2822,6 +3171,18 @@ pub(crate) struct DocSaveData {
     /// The manifest's `app_version`: the writing release for a real save, a
     /// fixed placeholder for `Document::state_hash`.
     pub app_version: &'static str,
+    /// The manifest's `format_version`: [`MANIFEST_FORMAT_VERSION`] for a
+    /// real save, a fixed placeholder for `Document::state_hash`
+    /// ([`HASHED_FORMAT_VERSION`]).
+    pub format_version: u32,
+    /// The geometry buffer version: [`GEOMETRY_FORMAT_VERSION`] for a real
+    /// save, [`HASHED_GEOMETRY_VERSION`] for `Document::state_hash` (each
+    /// Object with dictionaries still encodes at the version that carries
+    /// them, [`Object::encode_version`]).
+    pub geometry_version: u32,
+    /// The manifest's `document_id` (manifest v29+): the document's id for
+    /// a real save, always `None` for `Document::state_hash`.
+    pub document_id: Option<[u8; 16]>,
     pub materials: Vec<(MaterialId, Material)>,
     pub world_objects: Vec<(ObjectId, Object)>,
     pub def_objects: Vec<(ObjectId, Object, ComponentId)>,
@@ -2972,7 +3333,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
     // One buffer per object (world + def), in ascending dense id order.
     let mut geometry_buffers: Vec<Vec<u8>> = Vec::with_capacity(all_objects.len());
     for (_, obj) in &all_objects {
-        geometry_buffers.push(obj.encode(&material_dense));
+        geometry_buffers.push(obj.encode_version(&material_dense, data.geometry_version));
     }
 
     // ── 3. Collect texture assets ─────────────────────────────────────────
@@ -3078,17 +3439,20 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .instances
         .iter()
         .enumerate()
-        .map(|(i, (iid, def, pose, name, tags, owner_def))| InstanceDto {
-            id: i as u32,
-            sid: sid_for(crate::document::EntityRef::Instance(*iid)),
-            attrs: attrs_for(crate::document::EntityRef::Instance(*iid)),
-            def: comp_to_dense[def],
-            pose: pose.to_affine(),
-            name: name.clone(),
-            tags: tags.clone(),
-            hidden: data.instance_hidden.contains(iid),
-            owner: owner_def.as_ref().map(|cid| comp_to_dense[cid]),
-        })
+        .map(
+            |(i, (iid, def, pose, name, tags, owner_def, material))| InstanceDto {
+                id: i as u32,
+                sid: sid_for(crate::document::EntityRef::Instance(*iid)),
+                attrs: attrs_for(crate::document::EntityRef::Instance(*iid)),
+                def: comp_to_dense[def],
+                pose: pose.to_affine(),
+                name: name.clone(),
+                tags: tags.clone(),
+                hidden: data.instance_hidden.contains(iid),
+                owner: owner_def.as_ref().map(|cid| comp_to_dense[cid]),
+                material: material.map(material_dense),
+            },
+        )
         .collect();
 
     let sketch_dtos: Vec<SketchDto> = data
@@ -3227,11 +3591,15 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
     let root_dtos: Vec<NodeRefDto> = data.roots.iter().map(&node_to_dto).collect();
 
     let manifest = Manifest {
-        format_version: MANIFEST_FORMAT_VERSION,
+        format_version: data.format_version,
         consumed: Vec::new(),
-        geometry_version: GEOMETRY_FORMAT_VERSION,
+        geometry_version: data.geometry_version,
         app: "hew".to_string(),
         app_version: data.app_version.to_string(),
+        document_id: data
+            .document_id
+            .as_ref()
+            .map(|id| Some(document_id_text(id))),
         materials: mat_dtos,
         objects: obj_dtos,
         groups: group_dtos,
@@ -3529,6 +3897,9 @@ pub(crate) struct DocLoadRaw {
     /// The manifest's declared `format_version` — gates version-specific
     /// load behavior (the pre-v11 retroactive consumption).
     pub format_version: u32,
+    /// The document's id (manifest v29+; `None` for older files or a
+    /// document never given one). Shape-validated by decode.
+    pub document_id: Option<[u8; 16]>,
     pub materials: Vec<Material>,
     pub geom_buffers: Vec<Vec<u8>>,
     /// base_material dense id for each object (None = no base material).
@@ -3582,6 +3953,9 @@ pub(crate) struct DocLoadRaw {
     pub group_names: Vec<Option<String>>,
     pub component_names: Vec<Option<String>>,
     pub instance_names: Vec<Option<String>>,
+    /// Each instance's own material (manifest v27+), a dense material id,
+    /// in dense order; `None` for none (and for every older file).
+    pub instance_materials: Vec<Option<u32>>,
     /// Tag lists per object/group/instance, in dense order (manifest v3+; empty
     /// for v1/v2 files — `#[serde(default)]` fills them in).
     pub obj_tags: Vec<Vec<Vec<String>>>,
@@ -3671,6 +4045,33 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
             found: manifest.format_version,
         });
     }
+
+    // The document id (manifest v29+): a smuggled one below its version is
+    // rejected like every other gated field, and a present one must be
+    // UUID text exactly as the writer emits it.
+    let document_id = match &manifest.document_id {
+        None => None,
+        Some(_) if manifest.format_version < DOCUMENT_ID_MIN_VERSION => {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "a v{} manifest must not carry document_id (introduced at v{})",
+                    manifest.format_version, DOCUMENT_ID_MIN_VERSION
+                ),
+            });
+        }
+        Some(None) => {
+            return Err(LoadError::MalformedManifest {
+                what: "document_id is not a UUID".to_string(),
+            });
+        }
+        Some(Some(text)) => {
+            Some(
+                parse_document_id(text).ok_or_else(|| LoadError::MalformedManifest {
+                    what: "document_id is not a UUID".to_string(),
+                })?,
+            )
+        }
+    };
 
     let obj_count = manifest.objects.len();
     let mat_count = materials_count_validate(&manifest)?;
@@ -3951,6 +4352,18 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     let group_names = manifest.groups.iter().map(|g| g.name.clone()).collect();
     let component_names = manifest.components.iter().map(|c| c.name.clone()).collect();
     let instance_names = manifest.instances.iter().map(|i| i.name.clone()).collect();
+    // Instance materials (v27+): gated like every sibling field.
+    if manifest.format_version < INSTANCE_MATERIAL_MIN_VERSION
+        && let Some(i) = manifest.instances.iter().find(|i| i.material.is_some())
+    {
+        return Err(LoadError::MalformedManifest {
+            what: format!(
+                "instance {} carries a material but declares format v{} (introduced at v{INSTANCE_MATERIAL_MIN_VERSION})",
+                i.id, manifest.format_version
+            ),
+        });
+    }
+    let instance_materials = manifest.instances.iter().map(|i| i.material).collect();
     let obj_tags: Vec<Vec<Vec<String>>> = manifest.objects.iter().map(|o| o.tags.clone()).collect();
     let group_tags: Vec<Vec<Vec<String>>> =
         manifest.groups.iter().map(|g| g.tags.clone()).collect();
@@ -4134,6 +4547,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
 
     Ok(DocLoadRaw {
         format_version: manifest.format_version,
+        document_id,
         materials,
         geom_buffers,
         obj_base_materials,
@@ -4161,6 +4575,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         group_names,
         component_names,
         instance_names,
+        instance_materials,
         obj_tags,
         group_tags,
         instance_tags,
@@ -5169,6 +5584,7 @@ mod camera_manifest_tests {
             geometry_version: GEOMETRY_FORMAT_VERSION,
             app: "hew".to_string(),
             app_version: "0.1.0".to_string(),
+            document_id: None,
             materials: Vec::new(),
             objects: Vec::new(),
             groups: Vec::new(),
@@ -5484,6 +5900,16 @@ impl<'a> ByteReader<'a> {
         let v = self.data[self.pos];
         self.pos += 1;
         Ok(v)
+    }
+
+    fn read_slice(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
+        let end = self.pos.checked_add(len).ok_or(DecodeError::Truncated)?;
+        if end > self.data.len() {
+            return Err(DecodeError::Truncated);
+        }
+        let out = &self.data[self.pos..end];
+        self.pos = end;
+        Ok(out)
     }
 
     fn read_u32(&mut self) -> Result<u32, DecodeError> {

@@ -183,6 +183,7 @@ fn a_transaction_counts_as_one_step_for_the_mark() {
         CompoundMeta {
             label: "Box".to_string(),
             origin: HistoryOrigin::Connection("test".to_string()),
+            coalesce: None,
         },
     )
     .expect("commit");
@@ -227,6 +228,10 @@ fn entries_are_labeled_from_their_actions_oldest_first() {
     .expect("rotate");
     doc.transform_object(a, &Transform::uniform_scale(2.0))
         .expect("scale");
+    // A unit-length mirror is isometric but not a rotation: it is a flip,
+    // labeled like any other scale.
+    doc.transform_object(a, &Transform::scale(Vec3::new(-1.0, 1.0, 1.0)))
+        .expect("mirror");
     doc.set_node_name(NodeId::Object(a), Some("Base".to_string()))
         .expect("rename");
     doc.set_node_name(NodeId::Object(a), Some("Plinth".to_string()))
@@ -241,6 +246,7 @@ fn entries_are_labeled_from_their_actions_oldest_first() {
             "Push/Pull",
             "Move 1 object",
             "Rotate 1 object",
+            "Scale 1 object",
             "Scale 1 object",
             "Rename to 'Base'",
             "Rename 'Base' → 'Plinth'",
@@ -306,6 +312,7 @@ fn a_transactions_own_label_and_origin_win() {
         CompoundMeta {
             label: "Table leg".to_string(),
             origin: HistoryOrigin::Connection("hew-cli:7".to_string()),
+            coalesce: None,
         },
     )
     .expect("commit");

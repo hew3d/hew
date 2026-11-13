@@ -170,6 +170,11 @@ struct PaintParams {
     #[serde(default)]
     id: Option<String>,
     material: Option<String>,
+    /// For an instance id: paint the placement (`instance`, the default)
+    /// or its definition's geometry (`definition`). A definition id takes
+    /// only `definition`; nothing else takes a scope.
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 fn resolve_optional_material(
@@ -187,14 +192,42 @@ fn material_paint(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
     let material = resolve_optional_material(ctx, &p.material)?;
     match (&p.face, &p.id) {
+        (Some(_), None) if p.scope.is_some() => {
+            return Err(CmdError::Params(
+                "scope applies to an instance or definition id, not a face".into(),
+            ));
+        }
         (Some(face), None) => {
             let face = locate::resolve_face(ctx, face)?;
             ctx.doc.paint_face(face.object, face.face, material)?;
         }
-        (None, Some(id)) => {
-            let object = resolve_object(ctx, id)?;
-            ctx.doc.set_object_material(object, material)?;
-        }
+        (None, Some(id)) => match (ctx.resolver().resolve(id), p.scope.as_deref()) {
+            (Some(EntityRef::Object(object)), None) => {
+                ctx.doc.set_object_material(object, material)?;
+            }
+            (Some(EntityRef::Instance(instance)), None | Some("instance")) => {
+                ctx.doc.set_instance_material(instance, material)?;
+            }
+            (Some(EntityRef::Instance(instance)), Some("definition")) => {
+                let def = ctx
+                    .doc
+                    .instance_def(instance)
+                    .ok_or_else(|| unknown_entity(id))?;
+                ctx.doc.set_definition_material(def, material)?;
+            }
+            (Some(EntityRef::Component(def)), None | Some("definition")) => {
+                ctx.doc.set_definition_material(def, material)?;
+            }
+            (
+                Some(EntityRef::Object(_) | EntityRef::Instance(_) | EntityRef::Component(_)),
+                Some(scope),
+            ) => {
+                return Err(CmdError::Params(format!(
+                    "scope \"{scope}\" does not apply to {id}: an instance takes \"instance\" or \"definition\", a definition only \"definition\", an object none"
+                )));
+            }
+            _ => return Err(unknown_entity(id)),
+        },
         _ => {
             return Err(CmdError::Params(
                 "material.paint needs exactly one of \"face\" or \"id\"".into(),

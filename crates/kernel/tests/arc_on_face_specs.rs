@@ -418,6 +418,7 @@ fn dissolving_a_segment_and_undoing_restores_its_arc() {
             loop_path: pts,
             restore: None,
             curves,
+            edge_attrs: Vec::new(),
         },
     )
     .unwrap();

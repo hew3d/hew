@@ -4,9 +4,13 @@
 //! success and a failure path per command, one undo entry per repair, and
 //! one for a batch run as a transaction.
 
-use api::{Connection, DispatchOutcome, NoHost, Profile, Request, RequestId, Response, codes};
+use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, Response, codes};
 use kernel::{DefRecipe, Document, ImportNode, ImportScene, MeshRecipe, Point3, Transform};
 use serde_json::{Value, json};
+
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
 
 fn req(id: i64, method: &str, params: Value) -> Request {
     Request {
@@ -19,7 +23,9 @@ fn req(id: i64, method: &str, params: Value) -> Request {
 }
 
 fn call(conn: &mut Connection, doc: &mut Document, method: &str, params: Value) -> Response {
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, &mut NoHost, req(9, method, params)) else {
+    let DispatchOutcome::Reply(r) =
+        conn.dispatch(&REGISTRY, doc, &mut NoHost, req(9, method, params))
+    else {
         panic!("{method} replies")
     };
     r
@@ -50,7 +56,7 @@ fn refusal(conn: &mut Connection, doc: &mut Document, method: &str, params: Valu
 }
 
 fn attach(doc: &mut Document) -> Connection {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     ok(&mut conn, doc, "hew.meta.hello", json!({ "protocol": 1 }));
     ok(&mut conn, doc, "hew.doc.attach", json!({}));
     conn

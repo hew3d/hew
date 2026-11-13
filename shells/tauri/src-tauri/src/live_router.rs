@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::live::{ConnPayload, FramePayload, LiveApi, REPLY_TIMEOUT};
+use crate::live::{ConnPayload, FramePayload, LiveApi, ReplyEvent, REPLY_TIMEOUT};
 
 // `crates/api/src/envelope.rs`'s `codes`, mirrored (this crate is its own
 // workspace and has no `api` dependency, only raw JSON-RPC text).
@@ -82,11 +82,15 @@ pub(crate) struct DocState {
     /// window label → unsaved changes, as last reported by the webview
     /// (`set_document_dirty`).
     dirty: HashMap<String, bool>,
+    /// window label → the document's persistent id (`document_id`,
+    /// HEW_FILE_FORMAT.md §2), as last reported by the webview
+    /// (`set_document_id`) after an open or a save; absent = none yet.
+    document_ids: HashMap<String, String>,
 }
 
 impl DocState {
     /// The id for `label`, minted on first sight.
-    fn id_for(&mut self, label: &str) -> String {
+    pub(crate) fn id_for(&mut self, label: &str) -> String {
         if let Some(id) = self.ids.get(label) {
             return id.clone();
         }
@@ -99,6 +103,38 @@ impl DocState {
     pub(crate) fn set_dirty(&mut self, label: &str, dirty: bool) {
         self.dirty.insert(label.to_string(), dirty);
     }
+
+    /// Records (or, with `None`, clears) the persistent id of window
+    /// `label`'s document.
+    pub(crate) fn set_document_id(&mut self, label: &str, id: Option<String>) {
+        match id {
+            Some(id) => {
+                self.document_ids.insert(label.to_string(), id);
+            }
+            None => {
+                self.document_ids.remove(label);
+            }
+        }
+    }
+}
+
+/// `hew://document-id`'s payload: the id this shell gave a window's
+/// document, which every event that window emits names
+/// (docs/agents/HEW_API.md §4.5).
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct DocumentIdPayload {
+    pub(crate) id: String,
+}
+
+/// Tells document window `label` its document's id (minting it if this is
+/// the first time anything asked). The window calls `frontend_ready` once
+/// its listeners are up, which is when this runs.
+pub(crate) fn emit_document_id(app: &AppHandle, label: &str) {
+    let Some(state) = app.try_state::<LiveApi>() else {
+        return;
+    };
+    let id = state.docs.lock().expect("docs mutex").id_for(label);
+    let _ = app.emit_to(label, "hew://document-id", DocumentIdPayload { id });
 }
 
 /// One window as the pure document-list builder sees it.
@@ -125,6 +161,7 @@ pub(crate) fn build_documents(
                 "title": w.title,
                 "path": w.path,
                 "dirty": state.dirty.get(&w.label).copied().unwrap_or(false),
+                "document_id": state.document_ids.get(&w.label),
                 "front": front == Some(w.label.as_str()),
                 "attached": attached == Some(w.label.as_str()),
             });
@@ -474,7 +511,7 @@ fn send_and_await(
     line: &str,
     timeout: Duration,
 ) -> Result<String, SendError> {
-    let (tx, rx) = mpsc::channel::<String>();
+    let (tx, rx) = mpsc::channel::<ReplyEvent>();
     let state = app.state::<LiveApi>();
     state
         .pending_replies
@@ -500,14 +537,17 @@ fn send_and_await(
         return Err(SendError::WindowGone);
     }
     // Wait in slices so a window destroyed mid-request is noticed within a
-    // moment rather than after the full timeout: nothing else wakes us.
-    let deadline = Instant::now() + timeout;
+    // moment rather than after the full timeout: nothing else wakes us. A
+    // frame the window queued behind a plugin command restarts the clock
+    // when it is finally dispatched (`ReplyEvent::Started`).
+    let mut deadline = Instant::now() + timeout;
     let outcome = loop {
         let slice = deadline
             .saturating_duration_since(Instant::now())
             .min(Duration::from_millis(250));
         match rx.recv_timeout(slice) {
-            Ok(reply) => break Ok(reply),
+            Ok(ReplyEvent::Started) => deadline = Instant::now() + timeout,
+            Ok(ReplyEvent::Reply(reply)) => break Ok(reply),
             Err(mpsc::RecvTimeoutError::Disconnected) => break Err(SendError::WindowGone),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if app.get_webview_window(label).is_none() {
@@ -577,6 +617,7 @@ fn ensure_session(app: &AppHandle, conn: &mut ConnRoute, label: &str) -> Result<
                 conn_id: conn.conn_id,
             },
         );
+        crate::live::clear_window_subscriptions(app, conn.conn_id, label);
     }
     result
 }
@@ -671,10 +712,28 @@ fn attach_session(app: &AppHandle, conn: &mut ConnRoute, label: &str) -> Result<
             "window_not_ready",
             format!("The window refused the attach: {reply}"),
         )),
-        Err(_) => Err(Refused::new(
-            "window_not_ready",
-            "The window did not accept the attach.",
-        )),
+        Err(e) => {
+            if matches!(e, SendError::Timeout) {
+                // The attach may still be waiting in the window (queued
+                // behind a plugin command): end this connection's session
+                // there, so the webview drops it and its late reply can
+                // never answer a later request. The next use opens a fresh
+                // session.
+                let _ = app.emit_to(
+                    label,
+                    "hew://api-connection-close",
+                    ConnPayload {
+                        conn_id: conn.conn_id,
+                    },
+                );
+                conn.opened.remove(label);
+                crate::live::clear_window_subscriptions(app, conn.conn_id, label);
+            }
+            Err(Refused::new(
+                "window_not_ready",
+                "The window did not accept the attach.",
+            ))
+        }
     }
 }
 
@@ -1009,6 +1068,10 @@ fn cmd_open_inner(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Resu
         destroy_window(app, &label);
         return Err(e);
     }
+    // The window answered a probe, so its bridge is listening: tell it its
+    // document's id before the load, whose `document_opened` names it (the
+    // window's own `frontend_ready` report can land after the load).
+    emit_document_id(app, &label);
     if let Err(e) = run_op(app, &label, "open", json!({ "path": path })) {
         destroy_window(app, &label);
         return Err(Refused::new(
@@ -1412,6 +1475,41 @@ fn run_host_command(
     }
 }
 
+/// An unsubscribe answered by window `label`'s session applies to the
+/// connection, not to that one session: pass it to the connection's other
+/// attached sessions, so an old window stops sending what was unsubscribed.
+/// Best effort; a session that does not answer is left as it is.
+fn unsubscribe_elsewhere(app: &AppHandle, conn: &ConnRoute, label: &str, line: &str, reply: &str) {
+    let Ok(request) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    if request.get("method").and_then(Value::as_str) != Some("hew.event.unsubscribe")
+        || error_code(reply).is_some()
+    {
+        return;
+    }
+    let others: Vec<String> = conn
+        .opened
+        .iter()
+        .filter(|(other, attached)| {
+            **attached && other.as_str() != label && app.get_webview_window(other).is_some()
+        })
+        .map(|(other, _)| other.clone())
+        .collect();
+    for (n, other) in others.into_iter().enumerate() {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": format!("hew-unsub-{n}"),
+            "method": "hew.event.unsubscribe",
+            "params": request.get("params").cloned().unwrap_or_else(|| json!({})),
+        })
+        .to_string();
+        if let Ok(other_reply) = send_and_await(app, &other, conn.conn_id, &frame, PROBE_TIMEOUT) {
+            crate::live::note_subscriptions(app, conn.conn_id, &other, &frame, &other_reply);
+        }
+    }
+}
+
 // ------------------------------------------------------------------ entry point
 
 /// Handles one sanitized client frame for `conn` and says what the
@@ -1533,10 +1631,22 @@ pub(crate) fn handle_frame(app: &AppHandle, conn: &mut ConnRoute, line: &str) ->
                         let docs = documents_for(app, conn);
                         Outcome::Reply(patch_hello_documents(&reply, &docs))
                     } else {
+                        crate::live::note_subscriptions(app, conn.conn_id, &label, &line, &reply);
+                        unsubscribe_elsewhere(app, conn, &label, &line, &reply);
                         Outcome::Reply(reply)
                     }
                 }
                 Err(SendError::Timeout) => {
+                    // The connection closes: abort whatever compound the
+                    // window holds for its forward, so the document is
+                    // not left held.
+                    let _ = app.emit_to(
+                        label.as_str(),
+                        "hew://api-abort",
+                        ConnPayload {
+                            conn_id: conn.conn_id,
+                        },
+                    );
                     Outcome::ReplyThenClose(crate::live::synthesize_timeout_reply(&line))
                 }
                 Err(SendError::WindowGone) => {
@@ -1547,6 +1657,7 @@ pub(crate) fn handle_frame(app: &AppHandle, conn: &mut ConnRoute, line: &str) ->
                         .lock()
                         .expect("conn_window mutex")
                         .remove(&conn.conn_id);
+                    crate::live::clear_window_subscriptions(app, conn.conn_id, &label);
                     Outcome::Reply(error_reply(
                         &id,
                         NO_DOCUMENT,
@@ -1627,6 +1738,22 @@ mod tests {
         assert_eq!(docs[0]["dirty"], true);
         assert_eq!(docs[0]["path"], "/m/house.hew");
         assert_eq!(docs[0]["label"], "scratch-a");
+    }
+
+    #[test]
+    fn documents_carry_the_reported_document_id() {
+        let mut state = DocState::default();
+        let windows = [facts("main", "House", None), facts("main-2", "B", None)];
+        let docs = build_documents(&mut state, &windows, None, None);
+        assert_eq!(docs[0]["document_id"], Value::Null, "none reported yet");
+        let id = "3f2c9107-5ed4-40a8-806b-1ec297405d83";
+        state.set_document_id("main", Some(id.into()));
+        let docs = build_documents(&mut state, &windows, None, None);
+        assert_eq!(docs[0]["document_id"], id);
+        assert_eq!(docs[1]["document_id"], Value::Null);
+        state.set_document_id("main", None);
+        let docs = build_documents(&mut state, &windows, None, None);
+        assert_eq!(docs[0]["document_id"], Value::Null);
     }
 
     #[test]

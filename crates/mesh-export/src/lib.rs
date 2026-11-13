@@ -80,7 +80,9 @@
 //! does — a live export must see what a live save sees (docs/agents/HEW_API.md:
 //! "the same command produces the same file headless or live").
 
-use kernel::{Document, FaceId, MaterialId, MaterialPalette, Object, Point3, Rgba8};
+use kernel::{
+    Document, FaceId, MaterialId, MaterialPalette, Object, Point3, RenderRoot, Rgba8, Transform,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
@@ -103,6 +105,9 @@ pub enum ExportError {
     /// [`export`]'s format dispatch saw a `format` none of the writers
     /// recognize.
     UnsupportedFormat(String),
+    /// A selection root holds more leaf placements than one occurrence
+    /// walk lists (`Document::occurrences`'s cap).
+    TooManyOccurrences,
 }
 
 impl ExportError {
@@ -115,6 +120,7 @@ impl ExportError {
             ExportError::Failed(_) => "export_failed",
             ExportError::StlIntegrity(_) => "export_failed",
             ExportError::UnsupportedFormat(_) => "host_capability_missing",
+            ExportError::TooManyOccurrences => "too_many_occurrences",
         }
     }
 
@@ -131,6 +137,9 @@ impl ExportError {
             ),
             ExportError::UnsupportedFormat(format) => {
                 format!("Unrecognized export format \"{format}\".")
+            }
+            ExportError::TooManyOccurrences => {
+                "That selection holds more placed parts than one export can list. Select fewer parts.".to_string()
             }
         }
     }
@@ -154,13 +163,168 @@ pub fn export(
     segments_per_turn: u32,
     solids_only: bool,
 ) -> Result<Vec<u8>, ExportError> {
+    // Session normalization (module doc, "Session normalization"): a live
+    // export must see what a live save sees.
+    let normalized = doc.session_closed();
+    let roots = world_roots(&normalized);
+    export_roots(
+        &normalized,
+        &roots,
+        format,
+        segments_per_turn,
+        solids_only,
+        true,
+    )
+}
+
+/// Exports only `roots` (`hew.doc.export`'s `selection`, docs/agents/HEW_API.md
+/// §7): a group root gathers its leaves, an instance root its definition's
+/// leaves through its world pose, an object itself, and a definition root
+/// its leaves at the identity pose. The roots are read against `doc` as
+/// given — they were resolved against it — so, unlike [`export`], an open
+/// session is not closed first. [`export`] is this with every world root of
+/// the session-closed document.
+pub fn export_occurrences(
+    doc: &Document,
+    roots: &[RenderRoot],
+    format: &str,
+    segments_per_turn: u32,
+    solids_only: bool,
+) -> Result<Vec<u8>, ExportError> {
+    export_roots(doc, roots, format, segments_per_turn, solids_only, false)
+}
+
+/// The shared body of [`export`] and [`export_occurrences`]. `whole`:
+/// the roots are every world root of `doc` (they never overlap), so each
+/// instance takes the render walk's own expansion; otherwise every root is
+/// walked as an occurrence and a leaf placement two roots reach (a group
+/// and one of its members, an id named twice) is exported once.
+fn export_roots(
+    doc: &Document,
+    roots: &[RenderRoot],
+    format: &str,
+    segments_per_turn: u32,
+    solids_only: bool,
+    whole: bool,
+) -> Result<Vec<u8>, ExportError> {
     match format {
-        "stl" => export_stl(doc, segments_per_turn, solids_only),
-        "3mf" => export_3mf(doc, segments_per_turn, solids_only),
-        "glb" | "gltf" => export_glb(doc, segments_per_turn, solids_only),
-        "usdz" => export_usdz(doc, segments_per_turn, solids_only),
+        "stl" => stl_from_roots(doc, roots, segments_per_turn, solids_only, whole),
+        "3mf" => {
+            let solids = collect_export_solids(doc, roots, segments_per_turn, solids_only, whole)?;
+            write_3mf(&solids).ok_or(ExportError::NothingToExport)
+        }
+        "glb" | "gltf" => {
+            let solids = collect_export_solids(doc, roots, segments_per_turn, solids_only, whole)?;
+            write_glb(&solids, doc.materials()).ok_or(ExportError::NothingToExport)
+        }
+        "usdz" => {
+            let solids = collect_export_solids(doc, roots, segments_per_turn, solids_only, whole)?;
+            write_usdz(&solids).ok_or(ExportError::NothingToExport)
+        }
         other => Err(ExportError::UnsupportedFormat(other.to_string())),
     }
+}
+
+/// Every world root of `doc` in the whole-document traversal's order: each
+/// live world object (grouped ones included, flat), then each world
+/// instance.
+fn world_roots(doc: &Document) -> Vec<RenderRoot> {
+    let objects = doc
+        .visible_object_ids()
+        .into_iter()
+        .map(kernel::NodeId::Object);
+    let instances = doc.instance_ids().into_iter().map(kernel::NodeId::Instance);
+    objects
+        .chain(instances)
+        .filter_map(|n| doc.occurrence_at(&[], n))
+        .map(RenderRoot::Occurrence)
+        .collect()
+}
+
+/// What one root exports: its leaf objects, each with the pose that maps it
+/// to world space (`None` for a world object, whose geometry already is),
+/// and the instance-style display name its parts take, if any.
+struct RootLeaves {
+    /// Each leaf with its pose and the material it inherits from the
+    /// placements above it (`Document::inherited_material`).
+    leaves: Vec<(kernel::ObjectId, Option<Transform>, Option<MaterialId>)>,
+    /// `Some` for an instance or definition root: parts are named after it
+    /// the way an instance's members always were.
+    instance_name: Option<Option<String>>,
+}
+
+/// Identifies one leaf placement across roots: the definition a
+/// definition root draws at identity (`None` for a placement), the
+/// instances above the leaf, and the leaf object.
+type LeafKey = (
+    Option<kernel::ComponentId>,
+    Vec<kernel::InstanceId>,
+    kernel::ObjectId,
+);
+
+/// One root's leaves. With `seen` (a selection), every root is walked as
+/// an occurrence and a leaf placement already exported under an earlier
+/// root is skipped; without it (the whole document, whose roots never
+/// overlap), a world object exports as stored and an instance takes the
+/// render walk's own expansion, exactly as the whole-document export
+/// always has.
+fn root_leaves(
+    doc: &Document,
+    root: &RenderRoot,
+    seen: Option<&mut BTreeSet<LeafKey>>,
+) -> Result<RootLeaves, ExportError> {
+    let instance_name = match root {
+        RenderRoot::Definition(def) => Some(doc.component_name(*def).map(str::to_string)),
+        RenderRoot::Occurrence(occ) => match occ.node {
+            kernel::NodeId::Instance(i) => Some(doc.instance_name(i).map(str::to_string)),
+            _ => None,
+        },
+    };
+    if let Some(seen) = seen {
+        let marker = match root {
+            RenderRoot::Definition(def) => Some(*def),
+            RenderRoot::Occurrence(_) => None,
+        };
+        let leaves = doc
+            .render_root_leaves(root, true)
+            .map_err(|e| match e {
+                kernel::DocumentError::TooManyOccurrences => ExportError::TooManyOccurrences,
+                _ => ExportError::NothingToExport,
+            })?
+            .into_iter()
+            .filter(|(o, _, path)| seen.insert((marker, path.clone(), *o)))
+            .map(|(o, t, path)| (o, Some(t), doc.inherited_material(&path)))
+            .collect();
+        return Ok(RootLeaves {
+            leaves,
+            instance_name,
+        });
+    }
+    let leaves = match root {
+        RenderRoot::Definition(def) => doc
+            .expanded_def_placements(*def)
+            .into_iter()
+            .zip(doc.expanded_def_placements_inherited(*def, None))
+            .map(|((o, t), m)| (o, Some(t), m))
+            .collect(),
+        RenderRoot::Occurrence(occ) => match occ.node {
+            kernel::NodeId::Object(o) => vec![(o, None, None)],
+            kernel::NodeId::Instance(i) => match (doc.instance_def(i), doc.instance_pose(i)) {
+                (Some(def), Some(pose)) => doc
+                    .expanded_def_placements(def)
+                    .into_iter()
+                    .zip(doc.instance_expanded_inherited(i))
+                    .map(|((o, local), m)| (o, Some(local.then(&pose)), m))
+                    .collect(),
+                _ => Vec::new(),
+            },
+            kernel::NodeId::Group(_) => Vec::new(),
+        },
+    };
+    Ok(RootLeaves {
+        leaves,
+        instance_name,
+    })
 }
 
 // -------------------------------------------------------- shared collection
@@ -181,10 +345,18 @@ pub(crate) struct ExportSolid {
 }
 
 /// A face's effective material: its own, else its object's default
-/// (`Object::default_material`) — the same fallback `tessellate()` uses for
-/// the live viewport (crates/tessellate/src/lib.rs).
-fn resolve_face_material(object: &Object, fid: FaceId) -> Option<MaterialId> {
-    object.faces()[fid].material.or(object.default_material())
+/// (`Object::default_material`), else what its placement passes down
+/// (`inherited`) — the same fallback `tessellate_with()` uses for the live
+/// viewport (crates/tessellate/src/lib.rs).
+fn resolve_face_material(
+    object: &Object,
+    fid: FaceId,
+    inherited: Option<MaterialId>,
+) -> Option<MaterialId> {
+    object.faces()[fid]
+        .material
+        .or(object.default_material())
+        .or(inherited)
 }
 
 /// A material's resolved display color, falling back to
@@ -242,13 +414,14 @@ fn resolve_triangle_materials(
     raw: &[f64],
     face_ids: &[FaceId],
     vertex_order: [usize; 3],
+    inherited: Option<MaterialId>,
 ) -> (Vec<Rgba8>, Vec<Option<MaterialId>>, Vec<[f32; 2]>) {
     let tri_count = face_ids.len();
     let mut colors = Vec::with_capacity(tri_count);
     let mut materials = Vec::with_capacity(tri_count);
     let mut uvs = Vec::with_capacity(tri_count * 3);
     for (t, &fid) in face_ids.iter().enumerate() {
-        let mat_id = resolve_face_material(object, fid);
+        let mat_id = resolve_face_material(object, fid, inherited);
         colors.push(resolve_color(mat_id, palette));
         materials.push(mat_id);
         let o = t * 9;
@@ -264,109 +437,79 @@ fn resolve_triangle_materials(
     (colors, materials, uvs)
 }
 
-/// Walks `doc`'s solids exactly as [`export_stl`] does, but keeps one
-/// named [`ExportSolid`] per top-level object and per placed instance
-/// member rather than flattening everything into one soup. Display names
-/// prefer the document's own object/instance names (`hew.query`'s own
-/// source, `Document::object_name`/`instance_name`), falling back to a
-/// stable `Object N` counter — deliberately a plain export-local ordinal
-/// rather than the kernel's internal handle, which is not a meaningful
-/// label to a human opening the file in another tool.
+/// Walks the roots' solids exactly as [`export_stl`] does, but keeps one
+/// named [`ExportSolid`] per world object and per placed instance member
+/// rather than flattening everything into one soup. Display names prefer
+/// the document's own object/instance names (`hew.query`'s own source,
+/// `Document::object_name`/`instance_name`), falling back to a stable
+/// `Object N` counter — deliberately a plain export-local ordinal rather
+/// than the kernel's internal handle, which is not a meaningful label to a
+/// human opening the file in another tool.
 pub(crate) fn collect_export_solids(
     doc: &Document,
+    roots: &[RenderRoot],
     segments_per_turn: u32,
     solids_only: bool,
+    whole: bool,
 ) -> Result<Vec<ExportSolid>, ExportError> {
-    // Session normalization (module doc, "Session normalization"): a live
-    // export must see what a live save sees.
-    let normalized = doc.session_closed();
-    let doc: &Document = &normalized;
-
     let mut solids: Vec<ExportSolid> = Vec::new();
     let palette = doc.materials();
+    let mut seen = BTreeSet::new();
 
-    for id in doc.visible_object_ids() {
-        if solids_only && !doc.object_solid(id) {
-            continue;
-        }
-        let Some(obj) = doc.object(id) else {
-            continue;
-        };
-        let (triangles, face_ids) = tessellate::export_triangles_with_faces(obj, segments_per_turn)
-            .map_err(ExportError::Failed)?;
-        if triangles.is_empty() {
-            continue;
-        }
-        let (colors, materials, uvs) =
-            resolve_triangle_materials(obj, palette, &triangles, &face_ids, [0, 1, 2]);
-        let name = doc
-            .object_name(id)
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("Object {}", solids.len() + 1));
-        solids.push(ExportSolid {
-            name,
-            triangles,
-            colors,
-            materials,
-            uvs,
-        });
-    }
-
-    for instance in doc.instance_ids() {
-        let Some(def) = doc.instance_def(instance) else {
-            continue;
-        };
-        let Some(pose) = doc.instance_pose(instance) else {
-            continue;
-        };
-        // Nested definitions expand recursively: one export part per leaf
-        // placement, each at its fully composed pose.
-        let placements = doc.expanded_def_placements(def);
-        let inst_name = doc.instance_name(instance).map(str::to_string);
-        let multi_member = placements.len() > 1;
-
-        for (member, local) in placements {
-            let pose = local.then(&pose);
-            let flip = pose.determinant() < 0.0;
-            let vertex_order: [usize; 3] = if flip { [0, 2, 1] } else { [0, 1, 2] };
+    for root in roots {
+        let RootLeaves {
+            leaves,
+            instance_name,
+        } = root_leaves(doc, root, (!whole).then_some(&mut seen))?;
+        let multi_member = leaves.len() > 1;
+        for (member, pose, inherited) in leaves {
             if solids_only && !doc.object_solid(member) {
                 continue;
             }
             let Some(obj) = doc.object(member) else {
                 continue;
             };
+            let flip = pose.is_some_and(|p| p.determinant() < 0.0);
+            let vertex_order: [usize; 3] = if flip { [0, 2, 1] } else { [0, 1, 2] };
             let (raw, face_ids) = tessellate::export_triangles_with_faces(obj, segments_per_turn)
                 .map_err(ExportError::Failed)?;
             if raw.is_empty() {
                 continue;
             }
             let (colors, materials, uvs) =
-                resolve_triangle_materials(obj, palette, &raw, &face_ids, vertex_order);
-            let mut triangles = Vec::with_capacity(raw.len());
-            for tri in raw.chunks(9) {
-                let verts = [
-                    Point3::new(tri[0], tri[1], tri[2]),
-                    Point3::new(tri[3], tri[4], tri[5]),
-                    Point3::new(tri[6], tri[7], tri[8]),
-                ];
-                for &i in &vertex_order {
-                    let p = pose.apply_point(verts[i]);
-                    triangles.push(p.x);
-                    triangles.push(p.y);
-                    triangles.push(p.z);
+                resolve_triangle_materials(obj, palette, &raw, &face_ids, vertex_order, inherited);
+            let triangles = match pose {
+                None => raw,
+                Some(pose) => {
+                    let mut triangles = Vec::with_capacity(raw.len());
+                    for tri in raw.chunks(9) {
+                        let verts = [
+                            Point3::new(tri[0], tri[1], tri[2]),
+                            Point3::new(tri[3], tri[4], tri[5]),
+                            Point3::new(tri[6], tri[7], tri[8]),
+                        ];
+                        for &i in &vertex_order {
+                            let p = pose.apply_point(verts[i]);
+                            triangles.push(p.x);
+                            triangles.push(p.y);
+                            triangles.push(p.z);
+                        }
+                    }
+                    triangles
                 }
-            }
+            };
             let member_name = doc.object_name(member).map(str::to_string);
             // Mirrors threeMfExport.ts's `collectExportParts` naming table:
             // a single-member instance is named after the instance alone; a
             // multi-member one qualifies with the member's own name (or a
-            // stable ordinal if the member itself is unnamed).
-            let name = match (&inst_name, &member_name) {
-                (Some(inst), _) if !multi_member => inst.clone(),
-                (Some(inst), Some(member_n)) => format!("{inst} · {member_n}"),
-                (Some(inst), None) => format!("{inst} · Object {}", solids.len() + 1),
-                (None, Some(member_n)) => member_n.clone(),
-                (None, None) => format!("Object {}", solids.len() + 1),
+            // stable ordinal if the member itself is unnamed). Anything else
+            // is named after the object itself.
+            let name = match (&instance_name, &member_name) {
+                (Some(Some(inst)), _) if !multi_member => inst.clone(),
+                (Some(Some(inst)), Some(member_n)) => format!("{inst} · {member_n}"),
+                (Some(Some(inst)), None) => format!("{inst} · Object {}", solids.len() + 1),
+                (_, Some(member_n)) => member_n.clone(),
+                (_, None) => format!("Object {}", solids.len() + 1),
             };
             solids.push(ExportSolid {
                 name,
@@ -409,48 +552,25 @@ pub fn export_stl(
     // Session normalization (module doc, "Session normalization"): a live
     // export must see what a live save sees.
     let normalized = doc.session_closed();
-    let doc: &Document = &normalized;
+    let roots = world_roots(&normalized);
+    stl_from_roots(&normalized, &roots, segments_per_turn, solids_only, true)
+}
 
+fn stl_from_roots(
+    doc: &Document,
+    roots: &[RenderRoot],
+    segments_per_turn: u32,
+    solids_only: bool,
+    whole: bool,
+) -> Result<Vec<u8>, ExportError> {
     let mut soup: Vec<f64> = Vec::new();
     // Validate each claimed solid independently: STL flattens the scene,
     // and independent objects/placements may legitimately share coordinates.
-    let mut closed_ranges = Vec::new();
-
-    let export_object = |soup: &mut Vec<f64>,
-                         closed_ranges: &mut Vec<std::ops::Range<usize>>,
-                         id: kernel::ObjectId|
-     -> Result<bool, ExportError> {
-        if solids_only && !doc.object_solid(id) {
-            return Ok(false);
-        }
-        let Some(obj) = doc.object(id) else {
-            return Ok(false);
-        };
-        let triangles =
-            tessellate::export_triangles(obj, segments_per_turn).map_err(ExportError::Failed)?;
-        let start = soup.len() / 9;
-        soup.extend(triangles);
-        if doc.object_solid(id) {
-            closed_ranges.push(start..soup.len() / 9);
-        }
-        Ok(true)
-    };
-
+    let mut closed_ranges: Vec<std::ops::Range<usize>> = Vec::new();
     let mut any_solid = false;
-    for id in doc.visible_object_ids() {
-        any_solid |= export_object(&mut soup, &mut closed_ranges, id)?;
-    }
-
-    for instance in doc.instance_ids() {
-        let Some(def) = doc.instance_def(instance) else {
-            continue;
-        };
-        let Some(pose) = doc.instance_pose(instance) else {
-            continue;
-        };
-        for (member, local) in doc.expanded_def_placements(def) {
-            let pose = local.then(&pose);
-            let flip = pose.determinant() < 0.0;
+    let mut seen = BTreeSet::new();
+    for root in roots {
+        for (member, pose, _) in root_leaves(doc, root, (!whole).then_some(&mut seen))?.leaves {
             if solids_only && !doc.object_solid(member) {
                 continue;
             }
@@ -461,19 +581,24 @@ pub fn export_stl(
                 .map_err(ExportError::Failed)?;
             any_solid = true;
             let start = soup.len() / 9;
-            for tri in triangles.chunks(9) {
-                let verts = [
-                    Point3::new(tri[0], tri[1], tri[2]),
-                    Point3::new(tri[3], tri[4], tri[5]),
-                    Point3::new(tri[6], tri[7], tri[8]),
-                ];
-                let order: [usize; 3] = if flip { [0, 2, 1] } else { [0, 1, 2] };
-                for &i in &order {
-                    let p = pose.apply_point(verts[i]);
-                    soup.push(p.x);
-                    soup.push(p.y);
-                    soup.push(p.z);
+            if let Some(pose) = pose {
+                let flip = pose.determinant() < 0.0;
+                for tri in triangles.chunks(9) {
+                    let verts = [
+                        Point3::new(tri[0], tri[1], tri[2]),
+                        Point3::new(tri[3], tri[4], tri[5]),
+                        Point3::new(tri[6], tri[7], tri[8]),
+                    ];
+                    let order: [usize; 3] = if flip { [0, 2, 1] } else { [0, 1, 2] };
+                    for &i in &order {
+                        let p = pose.apply_point(verts[i]);
+                        soup.push(p.x);
+                        soup.push(p.y);
+                        soup.push(p.z);
+                    }
                 }
+            } else {
+                soup.extend(triangles);
             }
             if doc.object_solid(member) {
                 closed_ranges.push(start..soup.len() / 9);
@@ -774,7 +899,10 @@ pub fn export_3mf(
     segments_per_turn: u32,
     solids_only: bool,
 ) -> Result<Vec<u8>, ExportError> {
-    let solids = collect_export_solids(doc, segments_per_turn, solids_only)?;
+    let normalized = doc.session_closed();
+    let doc: &Document = &normalized;
+    let solids =
+        collect_export_solids(doc, &world_roots(doc), segments_per_turn, solids_only, true)?;
     write_3mf(&solids).ok_or(ExportError::NothingToExport)
 }
 
@@ -1078,7 +1206,10 @@ pub fn export_glb(
     segments_per_turn: u32,
     solids_only: bool,
 ) -> Result<Vec<u8>, ExportError> {
-    let solids = collect_export_solids(doc, segments_per_turn, solids_only)?;
+    let normalized = doc.session_closed();
+    let doc: &Document = &normalized;
+    let solids =
+        collect_export_solids(doc, &world_roots(doc), segments_per_turn, solids_only, true)?;
     write_glb(&solids, doc.materials()).ok_or(ExportError::NothingToExport)
 }
 
@@ -1524,7 +1655,10 @@ pub fn export_usdz(
     segments_per_turn: u32,
     solids_only: bool,
 ) -> Result<Vec<u8>, ExportError> {
-    let solids = collect_export_solids(doc, segments_per_turn, solids_only)?;
+    let normalized = doc.session_closed();
+    let doc: &Document = &normalized;
+    let solids =
+        collect_export_solids(doc, &world_roots(doc), segments_per_turn, solids_only, true)?;
     write_usdz(&solids).ok_or(ExportError::NothingToExport)
 }
 
@@ -2472,6 +2606,47 @@ mod tests {
         let stl = export_stl(&doc, 0, true).expect("the whole scene exports to stl too");
         let count = u32::from_le_bytes(stl[80..84].try_into().unwrap());
         assert_eq!(count, 48, "4 boxes, 12 triangles each");
+    }
+
+    /// A painted placement exports in its own material: an unpainted member
+    /// face resolves through the instance (docs/dev/HEW_FILE_FORMAT.md
+    /// §4.4), whole-document and selection exports alike.
+    #[test]
+    fn a_painted_instance_exports_its_material_on_unpainted_member_faces() {
+        let mut doc = box_document();
+        let src = doc.visible_object_ids()[0];
+        let (component, first, _) = doc
+            .make_component(&[kernel::NodeId::Object(src)])
+            .expect("make a component from the box");
+        let (second, _) = doc
+            .place_instance(
+                component,
+                kernel::Transform::translation(kernel::Vec3::new(4.0, 0.0, 0.0)),
+            )
+            .expect("place a second instance");
+        let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(0x00, 0x00, 0xff)));
+        doc.set_instance_material(second, Some(blue)).unwrap();
+
+        let solids = collect_export_solids(&doc, &world_roots(&doc), 0, true, true).unwrap();
+        assert_eq!(solids.len(), 2);
+        let blue_parts = solids
+            .iter()
+            .filter(|s| s.materials.iter().all(|&m| m == Some(blue)))
+            .count();
+        assert_eq!(blue_parts, 1, "only the painted placement is blue");
+
+        let only_first = vec![RenderRoot::Occurrence(
+            doc.occurrence_at(&[], kernel::NodeId::Instance(first))
+                .unwrap(),
+        )];
+        let solids = collect_export_solids(&doc, &only_first, 0, true, false).unwrap();
+        assert!(solids[0].materials.iter().all(|&m| m.is_none()));
+        let only_second = vec![RenderRoot::Occurrence(
+            doc.occurrence_at(&[], kernel::NodeId::Instance(second))
+                .unwrap(),
+        )];
+        let solids = collect_export_solids(&doc, &only_second, 0, true, false).unwrap();
+        assert!(solids[0].materials.iter().all(|&m| m == Some(blue)));
     }
 
     // ------------------------------------------------------------- dispatch

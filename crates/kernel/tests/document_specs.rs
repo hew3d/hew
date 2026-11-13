@@ -525,25 +525,39 @@ fn non_uniform_scale_refits_oblique_face_through_transform_object() {
     );
 }
 
-/// Orientation-flipping (negative scale) and singular transforms are refused
-/// without mutating the object.
+/// Singular transforms are refused without mutating the object; an
+/// orientation-flipping (negative scale) transform is baked: the mirrored
+/// solid stays valid, watertight, and outward-facing.
 #[test]
-fn reflection_and_singular_transforms_are_refused() {
+fn reflection_is_baked_and_singular_transforms_are_refused() {
     let mut doc = Document::new();
     let id = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
     let c0 = centroid(doc.object(id).unwrap());
 
-    assert_eq!(
-        doc.transform_object(id, &Transform::uniform_scale(-1.0)),
-        Err(DocumentError::Transform(TransformError::Reflection))
-    );
     assert_eq!(
         doc.transform_object(id, &Transform::uniform_scale(0.0)),
         Err(DocumentError::Transform(TransformError::Singular))
     );
     assert!(
         approx_pt(centroid(doc.object(id).unwrap()), c0),
-        "object untouched after refused transforms"
+        "object untouched after the refused singular transform"
+    );
+
+    let vol0 = doc.object(id).unwrap().signed_volume();
+    let mirror = Transform::uniform_scale(-1.0);
+    doc.transform_object(id, &mirror)
+        .expect("a reflection is baked, not refused");
+    let obj = doc.object(id).unwrap();
+    assert!(obj.validate().is_ok(), "mirrored object validates");
+    assert_eq!(obj.watertight(), WatertightState::Watertight);
+    assert!(obj.signed_volume() > 0.0, "faces turned over: outward");
+    assert!(
+        (obj.signed_volume() - vol0).abs() < 1e-9,
+        "mirroring preserves volume"
+    );
+    assert!(
+        approx_pt(centroid(obj), mirror.apply_point(c0)),
+        "positions are the mirror image"
     );
 }
 
@@ -658,26 +672,35 @@ fn transform_sketch_scales_extent() {
     ));
 }
 
-/// Orientation-flipping (negative scale) and singular transforms are refused
-/// without mutating the sketch — the same transactional guarantee as objects.
+/// A singular transform is refused without mutating the sketch (the same
+/// transactional guarantee as objects); a reflection is baked.
 #[test]
-fn transform_sketch_reflection_and_singular_refused() {
+fn transform_sketch_reflection_baked_and_singular_refused() {
     let mut doc = Document::new();
     let s = doc.add_sketch(ground());
     draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
     let c0 = sketch_centroid(&doc, s);
 
     assert_eq!(
-        doc.transform_sketch(s, &Transform::uniform_scale(-1.0)),
-        Err(DocumentError::Transform(TransformError::Reflection))
-    );
-    assert_eq!(
         doc.transform_sketch(s, &Transform::uniform_scale(0.0)),
         Err(DocumentError::Transform(TransformError::Singular))
     );
     assert!(
         approx_pt(sketch_centroid(&doc, s), c0),
-        "sketch untouched after refused transforms"
+        "sketch untouched after the refused singular transform"
+    );
+
+    let mirror = Transform::uniform_scale(-1.0);
+    doc.transform_sketch(s, &mirror)
+        .expect("a reflection is baked, not refused");
+    assert!(
+        approx_pt(sketch_centroid(&doc, s), mirror.apply_point(c0)),
+        "sketch vertices are the mirror image"
+    );
+    assert_eq!(
+        doc.sketch(s).unwrap().regions().len(),
+        1,
+        "the mirrored rectangle still bounds exactly one region"
     );
 }
 
@@ -1346,20 +1369,24 @@ fn transform_selection_refuses_empty_stale_and_degenerate() {
         doc.transform_selection(&[], &[SketchId::default()], &t),
         Err(DocumentError::UnknownSketch)
     );
-    // Reflection is refused for a selection with baked targets; the object is
-    // untouched afterwards.
-    assert_eq!(
-        doc.transform_selection(&[NodeId::Object(a)], &[], &Transform::uniform_scale(-1.0)),
-        Err(DocumentError::Transform(TransformError::Reflection))
-    );
+    // A singular transform is refused; the object is untouched afterwards.
     assert_eq!(
         doc.transform_selection(&[NodeId::Object(a)], &[], &Transform::uniform_scale(0.0)),
         Err(DocumentError::Transform(TransformError::Singular))
     );
     assert!(
         approx_pt(centroid(doc.object(a).unwrap()), ca),
-        "object untouched after refused transforms"
+        "object untouched after the refused transform"
     );
+    // A reflection of a baked selection is applied.
+    let mirror = Transform::uniform_scale(-1.0);
+    doc.transform_selection(&[NodeId::Object(a)], &[], &mirror)
+        .expect("a reflection is baked, not refused");
+    let obj = doc.object(a).unwrap();
+    assert!(obj.validate().is_ok());
+    assert_eq!(obj.watertight(), WatertightState::Watertight);
+    assert!(obj.signed_volume() > 0.0);
+    assert!(approx_pt(centroid(obj), mirror.apply_point(ca)));
 }
 
 // ------------------------------------------------------- rescale_document
@@ -2396,9 +2423,10 @@ fn transform_instance_composes_pose_and_undo_is_exact() {
 
 /// Explode bakes an orientation-preserving pose into independent world objects
 /// (equal to the posed instance), leaving the definition intact; a mirrored
-/// instance refuses (baking a reflection would invert winding).
+/// instance explodes too (the reflection is baked and the faces turned over,
+/// so the result stays watertight and outward-facing).
 #[test]
-fn explode_bakes_pose_into_world_objects_and_refuses_mirror() {
+fn explode_bakes_pose_into_world_objects_including_mirrors() {
     let mut doc = Document::new();
     let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
     let (comp, inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
@@ -2429,15 +2457,28 @@ fn explode_bakes_pose_into_world_objects_and_refuses_mirror() {
         "the definition (and its member) is untouched by explode"
     );
 
-    // A mirrored instance refuses to explode.
+    // A mirrored instance explodes too: the pose (reflection included) is
+    // baked into a watertight, outward-facing world object.
     let m = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
     let (_c2, inst2, _) = doc.make_component(&[NodeId::Object(m)]).unwrap();
-    doc.transform_instance(inst2, &Transform::scale(Vec3::new(-1.0, 1.0, 1.0)))
-        .unwrap();
-    assert_eq!(
-        doc.explode_instance(inst2),
-        Err(DocumentError::CannotExplodeReflected)
-    );
+    let mirror = Transform::scale(Vec3::new(-1.0, 1.0, 1.0));
+    doc.transform_instance(inst2, &mirror).unwrap();
+    let (created2, _) = doc
+        .explode_instance(inst2)
+        .expect("a mirrored pose explodes");
+    assert_eq!(created2.len(), 1);
+    let mo = doc.object(created2[0]).expect("exploded mirror live");
+    assert!(mo.validate().is_ok());
+    assert_eq!(mo.watertight(), WatertightState::Watertight);
+    assert!(mo.signed_volume() > 0.0, "mirrored explode is outward");
+    for v in mo.vertices().values() {
+        assert!(
+            v.position.x <= 1e-9 && v.position.x >= -1.0 - 1e-9,
+            "box [0,1] mirrored in x lands in [-1,0], got x={}",
+            v.position.x
+        );
+    }
+    assert!(doc.instance_pose(inst2).is_none(), "the instance is gone");
 }
 
 /// Non-uniformly scaling ONE component instance leaves its siblings and the
@@ -4419,8 +4460,8 @@ fn copy_island_out_of_plane_keeps_curve_identity() {
 }
 
 /// [`Document::copy_sketch_islands`] keeps the strong exception guarantee: a
-/// reflection (determinant < 0) is refused typed with nothing created and
-/// the source untouched, and a stale island id likewise touches nothing.
+/// stale island id is refused typed with nothing created and the source
+/// untouched (a reflection is baked into the copy, not refused).
 #[test]
 fn copy_island_refusal_leaves_document_untouched() {
     let mut doc = Document::new();
@@ -4434,17 +4475,17 @@ fn copy_island_refusal_leaves_document_untouched() {
         .next()
         .unwrap();
 
-    // A reflection is refused; no sketch is minted.
+    // A reflection is baked into the copy: a mirrored sketch is minted.
     let reflect = Transform::from_affine(&[
         -1.0, 0.0, 0.0, 0.0, //
         0.0, 1.0, 0.0, 0.0, //
         0.0, 0.0, 1.0, 0.2, //
     ]);
-    assert!(matches!(
-        doc.copy_sketch_islands(s, &[island], &reflect),
-        Err(DocumentError::Transform(TransformError::Reflection))
-    ));
-    assert_eq!(doc.sketch_ids(), vec![s], "no copy sketch created");
+    doc.copy_sketch_islands(s, &[island], &reflect)
+        .expect("a mirrored island copy is legal");
+    assert_eq!(doc.sketch_ids().len(), 2, "the mirrored copy sketch exists");
+    doc.undo().expect("undo the mirrored copy");
+    assert_eq!(doc.sketch_ids(), vec![s], "undo removes the copy sketch");
 
     // A stale island id anywhere in the set is refused typed, touching nothing.
     let bogus = kernel::SketchIslandId::default();
@@ -5722,6 +5763,7 @@ fn replacing_ops_refuse_a_grouped_leaf_and_leave_the_document_untouched() {
                 ],
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .expect("imprint sub-face")
@@ -5801,6 +5843,7 @@ fn push_through_sub_face_punches_hole_and_round_trips() {
                 ],
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .expect("imprint sub-face")
@@ -5978,8 +6021,9 @@ fn duplicate_instance_shares_the_definition_at_offset_pose() {
     );
 }
 
-/// A singular or reflecting placement, and a stale source, are refused — the
-/// document is left exactly as it was (a partial clone is rolled back).
+/// A singular placement and a stale source are refused — the document is
+/// left exactly as it was (a partial clone is rolled back). A reflecting
+/// placement is accepted and baked as a mirrored copy.
 #[test]
 fn duplicate_refuses_bad_placement_and_stale_node() {
     let mut doc = Document::new();
@@ -5991,15 +6035,23 @@ fn duplicate_refuses_bad_placement_and_stale_node() {
         Err(DocumentError::Transform(TransformError::Singular))
     );
     assert_eq!(
-        doc.duplicate_node(NodeId::Object(a), &Transform::uniform_scale(-1.0))
-            .map(|_| ()),
-        Err(DocumentError::Transform(TransformError::Reflection))
-    );
-    assert_eq!(
         doc.visible_object_ids(),
         vec![a],
         "a refused duplicate leaves the document untouched"
     );
+    // A mirrored duplicate is a legal placement: it bakes a mirrored copy.
+    let (copy, _) = doc
+        .duplicate_node(NodeId::Object(a), &Transform::uniform_scale(-1.0))
+        .expect("a reflecting duplicate bakes");
+    let copy_id = match copy {
+        NodeId::Object(o) => o,
+        other => panic!("expected an object copy, got {other:?}"),
+    };
+    let co = doc.object(copy_id).unwrap();
+    assert!(co.validate().is_ok());
+    assert_eq!(co.watertight(), WatertightState::Watertight);
+    assert!(co.signed_volume() > 0.0);
+    doc.undo().expect("undo the mirrored duplicate");
     let bogus = ObjectId::default();
     assert_eq!(
         doc.duplicate_node(NodeId::Object(bogus), &Transform::IDENTITY)
@@ -6204,15 +6256,16 @@ fn array_copy_rejects_bad_input_without_touching_the_document() {
         Err(DocumentError::Transform(TransformError::Singular))
     );
     assert_eq!(
-        doc.duplicate_nodes_array(&[NodeId::Object(a)], &Transform::uniform_scale(-1.0), one)
-            .map(|_| ()),
-        Err(DocumentError::Transform(TransformError::Reflection))
-    );
-    assert_eq!(
         doc.visible_object_ids(),
         vec![a],
         "refused arrays leave the document untouched"
     );
+    // A reflecting array step bakes mirrored copies.
+    let made = doc
+        .duplicate_nodes_array(&[NodeId::Object(a)], &Transform::uniform_scale(-1.0), one)
+        .expect("a reflecting array bakes");
+    assert!(!made.0.is_empty());
+    doc.undo().expect("undo the mirrored array");
 
     // No refused call left a stray action behind.
     doc.undo().expect("undo the extrude");
@@ -8491,7 +8544,7 @@ fn follow_me_sweeps_around_an_instanced_face_in_world_space() {
         );
     }
 
-    // A reflected pose refuses typed.
+    // A reflected pose sweeps too.
     let mirror = Transform::from_affine(&[
         -1.0, 0.0, 0.0, 20.0, //
         0.0, 1.0, 0.0, 0.0, //
@@ -8501,7 +8554,7 @@ fn follow_me_sweeps_around_an_instanced_face_in_world_space() {
     let ps2 = doc.add_sketch(profile_plane_x(18.0));
     draw_profile_rect(&mut doc, ps2, 18.0, -0.3, 1.0, 0.0, 1.3);
     let r2 = only_region(&doc, ps2);
-    let err = doc
+    let (mirrored_sweep, _) = doc
         .follow_me(
             ps2,
             r2,
@@ -8511,11 +8564,10 @@ fn follow_me_sweeps_around_an_instanced_face_in_world_space() {
                 face: top,
             },
         )
-        .unwrap_err();
-    assert!(matches!(
-        err,
-        DocumentError::Transform(kernel::TransformError::Reflection)
-    ));
+        .expect("a mirrored instance's face loop sweeps");
+    let ms = doc.object(mirrored_sweep).expect("mirrored molding live");
+    assert_eq!(ms.watertight(), WatertightState::Watertight);
+    assert!(ms.signed_volume() > 0.0, "mirrored sweep is outward");
 }
 
 #[test]
@@ -9591,9 +9643,10 @@ fn radial_dimension_non_similarity_detach_freezes_the_whole_record_coherently() 
 /// sibling anchor configuration rides the SAME `t` in the same step: `a2`
 /// on `obj_a` (touched), `b2` free-floating (never touched) — the
 /// one-anchor case, which 01e852e's unconditional carry gets wrong (it
-/// would still apply `t.apply_vector`/`t.apply_plane` to the OLD
-/// `offset2`/`plane2` even though only one endpoint moved, producing a
-/// placement no longer perpendicular to the new, partially-moved baseline).
+/// would still apply `t.apply_vector` and the plane map (then named
+/// `apply_plane`) to the OLD `offset2`/`plane2` even though only one
+/// endpoint moved, producing a placement no longer perpendicular to the
+/// new, partially-moved baseline).
 #[test]
 fn linear_dimension_rigid_both_anchor_case_is_exact() {
     let mut doc = Document::new();
@@ -9642,7 +9695,7 @@ fn linear_dimension_rigid_both_anchor_case_is_exact() {
     let expected_a = t.apply_point(a0);
     let expected_b = t.apply_point(b0);
     let expected_offset = t.apply_vector(offset0);
-    let expected_plane = t.apply_plane(&plane0).unwrap();
+    let expected_plane = t.apply_plane_keeping_side(&plane0).unwrap();
     match doc.annotation(id).unwrap() {
         Annotation::LinearDimension {
             a,

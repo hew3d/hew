@@ -14,7 +14,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { buildPartsSheetSections } from '../shop/partsSheetModel'
 import { formatLengthIn, type LengthFormat } from '../settings/units'
 import { nodeKey } from '../panels/treeModel'
-import { boundsExtents, instanceLocalBounds, instancePoseScale } from '../panels/objectBounds'
+import { instancePoseScale } from '../panels/objectBounds'
 import { INK, baseline, textItem, titleBlockItems, type FurnitureItem } from './furniture'
 import type { PrintLayout, TileSpec } from './layout'
 
@@ -30,10 +30,12 @@ export interface CutListRow {
 }
 
 /** Rows from the live scene: each leaf part once, in parts-sheet order,
- * identical parts folded into a Qty. Every instance of one component
- * definition is the same part however it is turned or placed — those fold
- * on the definition (and the instance's own scale, if it was rescaled),
- * with the part's own unrotated L × W × H. */
+ * identical parts folded into a Qty, each measured along its own part
+ * frame (`partFrameExtents`): an object reads length, width, thickness
+ * along its largest face, so a rotated board lists its true size. Every
+ * instance of one component definition is the same part however it is
+ * turned or placed — those fold on the definition (and the instance's own
+ * scale, if it was rescaled), with the definition's own L × W × H. */
 export function cutListRows(scene: WasmScene, format: LengthFormat): CutListRow[] {
   const sections = buildPartsSheetSections(scene, new Set(), new Set())
   const rows: CutListRow[] = []
@@ -46,12 +48,10 @@ export function cutListRows(scene: WasmScene, format: LengthFormat): CutListRow[
       const key = nodeKey(r.node)
       if (seen.has(key)) continue
       seen.add(key)
-      let extents = r.extentsM
+      const extents = r.extentsM
       let fold: string
       if (r.node.kind === 'instance') {
         const def = scene.instance_def(r.node.id)
-        const local = instanceLocalBounds(scene, r.node.id)
-        if (local !== null) extents = boundsExtents(local)
         // Same definition AND same own scale = the same part; a placement
         // rescaled on its own is a different part with its real size.
         const pose = scene.instance_pose(r.node.id)

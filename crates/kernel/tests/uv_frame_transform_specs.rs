@@ -190,21 +190,44 @@ fn a_sheared_object_keeps_each_corners_texture_coordinate() {
     assert_uvs_close(&corner_uvs(&obj), &CORNERS, 1e-12);
 }
 
-/// A mirror is refused (it would turn a solid inside out), and the refusal
-/// leaves the face's frame exactly as it was.
+/// A mirror is baked (faces turned over, so the solid stays outward), and the
+/// face's frame is mapped exactly: each corner keeps its texture coordinate at
+/// its mirrored position.
 #[test]
-fn a_reflection_is_refused_and_leaves_the_frame() {
+fn a_reflection_is_baked_and_mirrors_the_frame() {
     let mut doc = Document::new();
     doc.ingest(framed_quad_scene(Transform::IDENTITY), vec![])
         .unwrap();
     let mut obj = doc.object(the_member(&doc)).unwrap().clone();
     let before = obj.clone();
     let mirror = Transform::scale(Vec3::new(-1.0, 1.0, 1.0));
-    assert_eq!(
-        obj.apply_transform(&mirror),
-        Err(TransformError::Reflection)
-    );
-    assert_eq!(corner_uvs(&obj), corner_uvs(&before));
+    obj.apply_transform(&mirror)
+        .expect("a reflection is baked, not refused");
+    // The faces were turned over, so corner order differs; compare as sets.
+    let mut got = corner_uvs(&obj);
+    let mut want = corner_uvs(&before);
+    assert_eq!(got.len(), want.len());
+    let key = |a: &[f64; 2], b: &[f64; 2]| a.partial_cmp(b).unwrap();
+    got.sort_by(key);
+    want.sort_by(key);
+    assert_uvs_close(&got, &want, 1e-9);
+    // Each mirrored corner position carries the uv its source corner had.
+    for (_, f) in before.faces().iter() {
+        let Some(fr) = f.uv_frame else { continue };
+        for p in before.loop_positions(f.outer_loop) {
+            let m = mirror.apply_point(p);
+            let uv = fr.apply(p);
+            assert!(
+                obj.faces()
+                    .iter()
+                    .any(|(_, g)| g.uv_frame.is_some_and(|gf| {
+                        let u = gf.apply(m);
+                        (u[0] - uv[0]).abs() < 1e-9 && (u[1] - uv[1]).abs() < 1e-9
+                    })),
+                "uv at the mirrored corner is preserved"
+            );
+        }
+    }
 }
 
 /// A stretch so extreme that the face's texture frame would no longer be

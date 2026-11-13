@@ -122,6 +122,16 @@ pub struct SnapshotParams {
     /// bytes; it is [`Host::write_snapshot`] that a host lacking
     /// filesystem access refuses.
     pub path: Option<String>,
+    /// Render only these roots, with the camera fitted to them (the
+    /// command refuses an empty list, so a host sees `None` or at least
+    /// one root). `None` renders the whole visible document. With
+    /// neither `camera` nor `view`, the camera is a fitted isometric over
+    /// the selection, never the document's saved working camera.
+    pub selection: Option<Vec<crate::locate::RenderRoot>>,
+    /// RGBA fill for pixels no surface touches; `[0, 0, 0, 0]` is a
+    /// transparent snapshot. The id, depth, and normals passes are
+    /// unaffected.
+    pub background: [u8; 4],
 }
 
 /// What `hew.view.snapshot` returns (docs/design/headless-snapshot.md).
@@ -192,6 +202,9 @@ pub struct LineDrawingParams {
     pub scale: f64,
     /// When given (SVG only), the file is written here instead of inline.
     pub path: Option<String>,
+    /// Draw only these (`hew.view.line_drawing`'s `selection`), resolved
+    /// by the command; `None` draws the whole visible document.
+    pub selection: Option<Vec<crate::locate::RenderRoot>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -410,7 +423,7 @@ pub fn resolve_document<'a>(
 /// texture images a COLLADA file refers to — and sends them along, so the
 /// host imports from memory. A host with a filesystem uses `bytes` when
 /// given and otherwise reads `path` (and looks for textures beside it).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ImportOptions {
     /// Meters-per-source-unit hint name (`m`/`mm`/`cm`/`in`); required by
     /// formats that carry no units (STL).
@@ -430,6 +443,27 @@ pub struct ImportOptions {
     /// A picture's width in meters (default 1); its height follows from
     /// its proportions.
     pub width: Option<f64>,
+    /// Whether a host that records its own imports (the live app, for
+    /// replay) records this one. `true` by default; an import into a scratch
+    /// document (`hew.component.import_definition`) passes `false`, because
+    /// replaying it as a world merge would be wrong: the dispatcher records
+    /// the whole command frame instead.
+    pub record: bool,
+}
+
+impl Default for ImportOptions {
+    fn default() -> Self {
+        ImportOptions {
+            units: None,
+            bytes: None,
+            images: std::collections::BTreeMap::new(),
+            origin: None,
+            u: None,
+            v: None,
+            width: None,
+            record: true,
+        }
+    }
 }
 
 /// One texture image of an [`ImportOptions`].
@@ -581,6 +615,78 @@ impl SaveOutcome {
     }
 }
 
+// ------------------------------------------------- selection and view state
+
+/// One entry of the app's selection (docs/agents/HEW_API.md §7, "Selection
+/// and view state"): a tree node or sketch, or exactly one guide or one
+/// annotation. Equality is kind plus id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SelectionEntry {
+    Object(kernel::ObjectId),
+    Group(kernel::GroupId),
+    Instance(kernel::InstanceId),
+    Sketch(kernel::SketchId),
+    Guide(kernel::GuideId),
+    Annotation(kernel::AnnotationId),
+}
+
+impl SelectionEntry {
+    /// The document entity this entry names.
+    pub fn entity(self) -> kernel::EntityRef {
+        match self {
+            SelectionEntry::Object(id) => kernel::EntityRef::Object(id),
+            SelectionEntry::Group(id) => kernel::EntityRef::Group(id),
+            SelectionEntry::Instance(id) => kernel::EntityRef::Instance(id),
+            SelectionEntry::Sketch(id) => kernel::EntityRef::Sketch(id),
+            SelectionEntry::Guide(id) => kernel::EntityRef::Guide(id),
+            SelectionEntry::Annotation(id) => kernel::EntityRef::Annotation(id),
+        }
+    }
+
+    /// The entry naming `entity`, for the six selectable kinds.
+    pub fn from_entity(entity: &kernel::EntityRef) -> Option<SelectionEntry> {
+        Some(match entity {
+            kernel::EntityRef::Object(id) => SelectionEntry::Object(*id),
+            kernel::EntityRef::Group(id) => SelectionEntry::Group(*id),
+            kernel::EntityRef::Instance(id) => SelectionEntry::Instance(*id),
+            kernel::EntityRef::Sketch(id) => SelectionEntry::Sketch(*id),
+            kernel::EntityRef::Guide(id) => SelectionEntry::Guide(*id),
+            kernel::EntityRef::Annotation(id) => SelectionEntry::Annotation(*id),
+            kernel::EntityRef::Component(_)
+            | kernel::EntityRef::Material(_)
+            | kernel::EntityRef::Tag(_) => return None,
+        })
+    }
+}
+
+/// The app's selection, ordered: index 0 is the primary pick.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SelectionState {
+    pub entries: Vec<SelectionEntry>,
+}
+
+/// How a pick combines with the current selection — the app's
+/// `SelectMode` (`app/src/panels/treeModel.ts`); [`crate::selection::merge`]
+/// is the rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectMode {
+    Replace,
+    Add,
+    Subtract,
+    Toggle,
+}
+
+/// One isolation target: a node, or one definition member shown through
+/// one placing instance (the app's `IsolationTarget`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationEntry {
+    Node(kernel::NodeId),
+    Member {
+        object: kernel::ObjectId,
+        instance: kernel::InstanceId,
+    },
+}
+
 /// What a host can do for the dispatcher. Every method has a refusing
 /// default, so a host implements exactly what it supports and the
 /// dispatcher's contract never depends on which host is behind it.
@@ -667,6 +773,7 @@ pub trait Host {
     /// container only) writes revision 17, leaving out what only newer
     /// SketchUp versions open; a stream release and every other format
     /// ignore it.
+    #[allow(clippy::too_many_arguments)]
     fn export_document(
         &mut self,
         doc: &kernel::Document,
@@ -674,9 +781,18 @@ pub trait Host {
         path: Option<&str>,
         segments_per_turn: u32,
         units: Option<&str>,
+        selection: Option<&[crate::locate::RenderRoot]>,
         compat: bool,
     ) -> Result<Option<Vec<u8>>, Refusal> {
-        let _ = (doc, format, path, segments_per_turn, units, compat);
+        let _ = (
+            doc,
+            format,
+            path,
+            segments_per_turn,
+            units,
+            selection,
+            compat,
+        );
         Err(unsupported("export"))
     }
 
@@ -701,10 +817,10 @@ pub trait Host {
         Err(unsupported("import"))
     }
 
-    /// Render the document to PNG (`hew.view.snapshot`): a headless host
-    /// renders through a software rasterizer (`hew-cli` uses
-    /// `crates/softrender`); a live host may render through its actual
-    /// viewport instead. Either way `crates/api` has already validated
+    /// Render the document to PNG (`hew.view.snapshot`): every host that owns
+    /// a document renders through the same software rasterizer
+    /// (`crates/headless-render`, over `crates/softrender`), so `hew-cli`
+    /// and the app return the same bytes. `crates/api` has already validated
     /// `params` (width/height defaulted and clamped, `camera`/`view`
     /// mutually exclusive, an unknown view name rejected) — a host
     /// implementing this sees only a well-formed request and answers
@@ -761,12 +877,14 @@ pub trait Host {
     /// The host's open documents (`hew.meta.documents` and the `hello`
     /// response). A headless host has exactly its working document.
     ///
-    /// Each entry is an object `{id, title, path, dirty}` (docs/agents/HEW_API.md
-    /// §4.2): `id` is the host-lifetime-unique `doc_N` a client passes to
-    /// `hew.doc.attach`/`close`/`focus`, `path` is the file the document
-    /// was last opened from or saved to (`null` while unsaved), and `dirty`
-    /// is whether it has edits since its last save. A multi-window host
-    /// adds `label`, `front`, and `attached`.
+    /// Each entry is an object `{id, title, path, dirty, document_id}`
+    /// (docs/agents/HEW_API.md §4.2): `id` is the host-lifetime-unique
+    /// `doc_N` a client passes to `hew.doc.attach`/`close`/`focus`, `path`
+    /// is the file the document was last opened from or saved to (`null`
+    /// while unsaved), `dirty` is whether it has edits since its last save,
+    /// and `document_id` is the document's persistent UUID
+    /// (`kernel::Document::document_id`, `null` until the first save mints
+    /// one). A multi-window host adds `label`, `front`, and `attached`.
     fn documents(&self, doc: &kernel::Document) -> Vec<serde_json::Value> {
         let _ = doc;
         Vec::new()
@@ -817,6 +935,18 @@ pub trait Host {
         h.write_u32(std::process::id()); // wasm-guard: native default; LiveHost overrides
         h.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
         h.finish()
+    }
+
+    /// 16 random bytes for minting a document id
+    /// (`kernel::Document::ensure_document_id`), which `hew.doc.save` does
+    /// before its first write. Default: [`Host::random_u64`] twice. A host
+    /// with a real entropy source overrides it (`hew-cli` reads the OS's,
+    /// the live WASM host `crypto.getRandomValues`).
+    fn random_16(&self) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[..8].copy_from_slice(&self.random_u64().to_le_bytes());
+        out[8..].copy_from_slice(&self.random_u64().to_le_bytes());
+        out
     }
 
     /// The path the working document was last opened from or saved to, if
@@ -936,6 +1066,124 @@ pub trait Host {
         let _ = path;
         Err(unsupported("remove library items"))
     }
+
+    /// The app's selection (`hew.selection.get`). Only a host with a
+    /// selection to mirror has one; a headless host refuses.
+    fn selection(&self) -> Result<SelectionState, Refusal> {
+        Err(unsupported("read the selection"))
+    }
+
+    /// Combines `entries` with the selection by `mode`
+    /// ([`crate::selection::merge`]) and answers the result
+    /// (`hew.selection.set`/`clear`). `crates/api` has already validated
+    /// every entry: it resolves, the set is one kind family, and nothing in
+    /// it is hidden.
+    fn set_selection(
+        &mut self,
+        entries: Vec<SelectionEntry>,
+        mode: SelectMode,
+    ) -> Result<SelectionState, Refusal> {
+        let _ = (entries, mode);
+        Err(unsupported("change the selection"))
+    }
+
+    /// Notifies the host that the kernel's user-hidden flags changed
+    /// (`hew.view.hide`/`show`/`show_all`): the document already holds the
+    /// change, so this is a signal for a host that mirrors hidden state,
+    /// never a veto. A silent success by default, like
+    /// [`Host::scene_applied`].
+    fn hidden_changed(&mut self) -> Result<(), Refusal> {
+        Ok(())
+    }
+
+    /// The live viewport's isolation, `None` when nothing is isolated
+    /// (`hew.view.hidden`). Isolation is viewport-only view state.
+    fn isolation(&self) -> Result<Option<Vec<IsolationEntry>>, Refusal> {
+        Err(unsupported("read the isolation"))
+    }
+
+    /// Isolates `entries` in the live viewport and frames them
+    /// (`hew.view.isolate`), replacing any isolation already on.
+    fn isolate(&mut self, entries: Vec<IsolationEntry>) -> Result<(), Refusal> {
+        let _ = entries;
+        Err(unsupported("isolate"))
+    }
+
+    /// Ends the live viewport's isolation (`hew.view.clear_isolation`); a
+    /// no-op when nothing is isolated.
+    fn clear_isolation(&mut self) -> Result<(), Refusal> {
+        Err(unsupported("clear isolation"))
+    }
+
+    /// The app's in-context entries sitting logically inside the innermost
+    /// open session frame, outermost first: the editing model the app falls
+    /// back on for an instance a session cannot take (unevenly scaled, or
+    /// placed in a group elsewhere; a mirrored one opens a session). Empty
+    /// headless.
+    fn fallback_context(&self) -> Vec<ContextEntry> {
+        Vec::new()
+    }
+
+    /// Whether a tool gesture is armed in the user's window (a Move drag in
+    /// flight). `hew.view.enter`/`exit`/`exit_all` refuse
+    /// `gesture_in_progress` while it is, because the app's own entry
+    /// silently does nothing then.
+    fn gesture_armed(&self) -> bool {
+        false
+    }
+
+    /// `hew.view.enter`: converges the user's window onto `leaf` reached
+    /// through `path` (instances only, outermost first), the way a double
+    /// click on the node in the Outliner would. The host queues the effect;
+    /// the outcome is reported by `context_changed`.
+    fn enter_user_context(
+        &mut self,
+        path: &[kernel::InstanceId],
+        leaf: kernel::NodeId,
+    ) -> Result<(), Refusal> {
+        let _ = (path, leaf);
+        Err(unsupported("enter the user's context"))
+    }
+
+    /// `hew.view.exit`: pops the user's innermost entry, a fallback entry
+    /// or a session frame.
+    fn exit_user_context(&mut self) -> Result<(), Refusal> {
+        Err(unsupported("leave the user's context"))
+    }
+
+    /// `hew.view.exit_all`: back to the top level in the user's window.
+    fn exit_all_user_contexts(&mut self) -> Result<(), Refusal> {
+        Err(unsupported("leave the user's context"))
+    }
+
+    /// Frames the world box `min`..`max` in the live viewport
+    /// (`hew.view.zoom_to`). The box already carries `padding`, which is
+    /// passed along for information only.
+    fn zoom_to(
+        &mut self,
+        min: kernel::Point3,
+        max: kernel::Point3,
+        padding: f64,
+    ) -> Result<(), Refusal> {
+        let _ = (min, max, padding);
+        Err(unsupported("frame the viewport"))
+    }
+}
+
+/// What an in-context entry holds (`Host::fallback_context`): the kinds the
+/// app's fallback can hold. A group always opens a session, so it never
+/// appears here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextKind {
+    Object,
+    Instance,
+}
+
+/// One in-context entry the app keeps beside the kernel's session stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextEntry {
+    pub kind: ContextKind,
+    pub node: kernel::NodeId,
 }
 
 /// The capability-free host: pure in-process dispatch with no file

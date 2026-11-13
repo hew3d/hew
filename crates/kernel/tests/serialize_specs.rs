@@ -2048,9 +2048,9 @@ fn save_names_the_writing_release() {
 fn state_hash_does_not_follow_the_release_version() {
     // Pinned from before the manifest named its release: the hashes frozen
     // into replay fixtures and bug-report recordings must stay valid across
-    // release version bumps. The hash does cover the manifest's
-    // `format_version`, so a format bump moves it (v26: re-pinned).
-    assert_eq!(Document::new().state_hash(), 15_623_416_507_651_097_505);
+    // version bumps (the hashed bytes carry `HASHED_FORMAT_VERSION`, not the
+    // writer's own version).
+    assert_eq!(Document::new().state_hash(), 219_183_841_381_781_821);
 }
 
 #[test]
@@ -2720,7 +2720,7 @@ fn annotation_tags_are_gated_at_v18() {
         .ingest(scene(vec![vec![vec!["Notes".into()]]]), Vec::new())
         .unwrap();
     let bytes = tagged.save();
-    assert_eq!(version(&bytes), 26);
+    assert_eq!(version(&bytes), 29);
     assert!(Document::load(&bytes).is_ok());
     let smuggled = patch_manifest(&bytes, |m| m["format_version"] = serde_json::json!(17));
     assert!(Document::load(&smuggled).is_err());
@@ -2782,7 +2782,7 @@ fn sketch_tags_are_gated_at_v20() {
         .ingest(scene(vec![vec!["Site".into()]]), Vec::new())
         .unwrap();
     let bytes = tagged.save();
-    assert_eq!(version(&bytes), 26);
+    assert_eq!(version(&bytes), 29);
     let loaded = Document::load(&bytes).unwrap();
     let s = loaded.sketch_ids()[0];
     assert_eq!(loaded.sketch_tags(s), [vec!["Site".to_string()]]);
@@ -2993,7 +2993,7 @@ fn guide_stretches_round_trip_and_are_gated_at_v22() {
     assert_eq!(before.len(), 3);
     let bytes = doc.save();
     let m = manifest_json(&bytes);
-    assert_eq!(m["format_version"], 26);
+    assert_eq!(m["format_version"], 29);
     let written: Vec<(serde_json::Value, serde_json::Value)> = m["guides"]
         .as_array()
         .unwrap()
@@ -3434,12 +3434,12 @@ fn edit_manifest_text(bytes: &[u8], edit: impl FnOnce(String) -> String) -> Vec<
 /// detached with its drawing, still out of its plane's arrangement, and
 /// the save is a fixed point.
 #[test]
-fn detached_sketches_round_trip_at_v23() {
+fn detached_sketches_round_trip_at_v29() {
     let (doc, b, s) = detached_doc(true);
     let s = s.unwrap();
     let bytes = doc.save();
     let m = manifest_json(&bytes);
-    assert_eq!(m["format_version"], 26);
+    assert_eq!(m["format_version"], 29);
     let flagged: Vec<&serde_json::Value> = m["sketches"]
         .as_array()
         .unwrap()
@@ -3450,7 +3450,7 @@ fn detached_sketches_round_trip_at_v23() {
     assert_eq!(flagged[0]["detached"], true);
     assert!(flagged[0].get("owner_object").is_none());
 
-    let loaded = Document::load(&bytes).expect("v23 loads");
+    let loaded = Document::load(&bytes).expect("v29 loads");
     assert_eq!(
         loaded.save(),
         bytes,
@@ -3487,6 +3487,53 @@ fn detached_sketches_round_trip_at_v23() {
     let _ = b;
 }
 
+/// Both optional fields that the two sides added at different versions
+/// coexist: a detached sketch (v23) and an instance material (v27) in one
+/// document write the current manifest (v29) and load back; each field is
+/// rejected below its own minimum version (reject-not-repair).
+#[test]
+fn a_document_with_a_detached_sketch_and_an_instance_material_round_trips_at_v29() {
+    let (mut doc, b, s) = detached_doc(true);
+    assert!(s.is_some());
+    let (_, inst, _) = doc.make_component(&[NodeId::Object(b)]).unwrap();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 50, 40)));
+    doc.set_instance_material(inst, Some(red)).unwrap();
+    let bytes = doc.save();
+    let m = manifest_json(&bytes);
+    assert_eq!(m["format_version"], 29);
+    let loaded = Document::load(&bytes).expect("v29 loads");
+    assert_eq!(
+        loaded.save(),
+        bytes,
+        "save -> load -> save is a fixed point"
+    );
+    assert_eq!(loaded.instance_material(inst), Some(Some(red)));
+    assert!(
+        loaded
+            .sketch_ids()
+            .into_iter()
+            .any(|x| loaded.sketch(x).unwrap().detached())
+    );
+
+    // Declared v23: the detached sketch is accepted, the instance material
+    // (introduced at v27) is malformed.
+    let v23 = patch_manifest(&bytes, |m| m["format_version"] = serde_json::json!(23));
+    assert!(matches!(
+        Document::load(&v23),
+        Err(kernel::LoadError::MalformedManifest { .. })
+    ));
+    let (plain, _, _) = detached_doc(true);
+    let bytes = plain.save();
+    let v23 = patch_manifest(&bytes, |m| m["format_version"] = serde_json::json!(23));
+    assert!(Document::load(&v23).is_ok(), "detached is legal at v23");
+    // Declared v22 with a detached sketch: malformed.
+    let v22 = patch_manifest(&bytes, |m| m["format_version"] = serde_json::json!(22));
+    assert!(matches!(
+        Document::load(&v22),
+        Err(kernel::LoadError::MalformedManifest { .. })
+    ));
+}
+
 /// A document with no detached sketch writes exactly what a v22 writer
 /// wrote, apart from the version number: no `detached` key anywhere, and a
 /// copy declaring v22 loads and saves back to the same bytes.
@@ -3496,9 +3543,9 @@ fn a_document_without_detached_sketches_is_v22_content() {
     let bytes = doc.save();
     let text = manifest_text(&bytes);
     assert!(!text.contains("\"detached\""), "no detached key is written");
-    const V23: &str = "\"format_version\": 26,";
-    assert_eq!(text.matches(V23).count(), 1);
-    let v22 = edit_manifest_text(&bytes, |t| t.replacen(V23, "\"format_version\": 22,", 1));
+    const V29: &str = "\"format_version\": 29,";
+    assert_eq!(text.matches(V29).count(), 1);
+    let v22 = edit_manifest_text(&bytes, |t| t.replacen(V29, "\"format_version\": 22,", 1));
     let loaded = Document::load(&v22).expect("the same content declared v22 loads");
     assert_eq!(
         loaded.save(),
@@ -3578,7 +3625,7 @@ fn pbr_doc() -> (Document, Vec<u8>) {
 fn pbr_round_trips_with_its_maps_and_a_plain_material_writes_none() {
     let (doc, bytes) = pbr_doc();
     let m = manifest_json(&bytes);
-    assert_eq!(m["format_version"], 26);
+    assert_eq!(m["format_version"], 29);
     assert!(m["materials"][0]["pbr"].is_object());
     assert!(m["materials"][1].get("pbr").is_none(), "plain: omitted");
     let loaded = Document::load(&bytes).unwrap();

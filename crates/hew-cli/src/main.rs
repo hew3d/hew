@@ -15,10 +15,7 @@ use std::path::PathBuf;
 /// what it reads from the environment, and where to go next. Printed to
 /// stdout on request (a help page is output, not an error) and to stderr
 /// only when it accompanies a usage error.
-const USAGE: &str = concat!(
-    "hew-cli ",
-    env!("CARGO_PKG_VERSION"),
-    r#" — build and edit Hew models from a script, a shell, or an AI client.
+const USAGE_BODY: &str = r#" — build and edit Hew models from a script, a shell, or an AI client.
 
 USAGE
     hew-cli <command> [options]
@@ -27,6 +24,7 @@ COMMANDS
     run <script>          Run a file of JSON-RPC envelopes in order
     dispatch <method>     Send one command
     documents             List the app's open documents (--live)
+    events                Print the app's events as they happen (--live)
     mcp                   Serve MCP on stdio, for an AI client
 
 EXAMPLES
@@ -42,6 +40,9 @@ EXAMPLES
     # See every window the app has open, then work in one that is not in front.
     hew-cli documents --live
     hew-cli dispatch hew.query.scene --live --document doc_2
+
+    # Watch what changes in the app, one JSON line per event.
+    hew-cli events --live
 
     # Serve an AI client. Put this in the client's MCP config.
     hew-cli mcp
@@ -73,8 +74,14 @@ LEARN MORE
     hew-cli <command> --help    what each command takes, and an example
     docs/API_GUIDE.md           how to drive Hew, with worked examples
     docs/agents/HEW_API.md             the protocol itself
-"#
-);
+"#;
+
+/// The top-level help page, led by the name and version. The version is
+/// formatted at print time because [`hew_cli::VERSION`] is chosen at
+/// compile time from an environment variable.
+fn usage() -> String {
+    format!("hew-cli {}{USAGE_BODY}", hew_cli::VERSION)
+}
 
 /// `hew-cli run --help`.
 const USAGE_RUN: &str = r#"hew-cli run — run a file of JSON-RPC envelopes in order.
@@ -157,8 +164,10 @@ USAGE
 
 Prints one JSON object per open document, in window creation order:
 its id (doc_N — unique for the app's lifetime, never reused), title,
-path (null until saved), dirty (unsaved changes), front (the window the
-user is looking at), and label if one was given at hew.doc.new/open.
+path (null until saved), dirty (unsaved changes), document_id (the
+persistent id the file carries, null until first saved), front (the
+window the user is looking at), and label if one was given at
+hew.doc.new/open.
 
 Pass an id, path, label, or title to --document on run/dispatch/mcp to
 work in any of them, front or not. The same list is hew.meta.documents.
@@ -171,6 +180,39 @@ OPTIONS
                         hold yourself has nothing to list.
     --launch            Start the app first and wait for it.
     --instance <pid>    Pick one when several apps are running.
+"#;
+
+/// `hew-cli events --help`.
+const USAGE_EVENTS: &str = r#"hew-cli events — print the app's events as they happen.
+
+USAGE
+    hew-cli events --live [--launch] [--instance <pid>] [--document <ref>]
+                   [--filter <name,name,...>]
+
+Attaches to the app's front window (or --document), subscribes to its
+events, and prints each one to stdout as it arrives: one compact JSON
+line per notification, such as hew.event.document_changed with what
+the edit added, removed, or modified. The subscribe reply goes to
+stderr. Runs until the app closes the connection (exit 0) or something
+fails (exit 1); press Ctrl-C to stop.
+
+EXAMPLES
+    hew-cli events --live
+    hew-cli events --live --filter document_changed,scenes_changed
+
+OPTIONS
+    --live              Listen to the running app. Required.
+    --launch            Start the app first and wait for it.
+    --instance <pid>    Pick one when several apps are running.
+    --document <ref>    Listen to this open document (an id, path, label,
+                        or title) instead of the front window.
+    --filter <names>    Only these events, comma separated. Default: all
+                        of them: document_changed, selection_changed,
+                        context_changed, document_will_save,
+                        document_saved, document_opened, document_closed,
+                        units_changed, scenes_changed, tool_changed,
+                        plugin_state, slot_changed, settings_changed,
+                        ui_cancel, window_closed, surface_closed.
 "#;
 
 /// `hew-cli mcp --help`.
@@ -205,7 +247,7 @@ OPTIONS
 
 fn usage_error(message: &str) -> ! {
     eprintln!("{message}\n");
-    eprint!("{USAGE}");
+    eprint!("{}", usage());
     std::process::exit(2);
 }
 
@@ -213,7 +255,7 @@ fn usage_error(message: &str) -> ! {
 /// listing all of them: `hew-cil run` should say "did you mean run?".
 /// Distance 2 or less, so a genuinely different word suggests nothing.
 fn unknown_subcommand(typed: &str) -> String {
-    const COMMANDS: [&str; 4] = ["run", "dispatch", "documents", "mcp"];
+    const COMMANDS: [&str; 5] = ["run", "dispatch", "documents", "events", "mcp"];
     let nearest = COMMANDS
         .iter()
         .map(|c| (edit_distance(typed, c), *c))
@@ -339,15 +381,16 @@ fn main() {
         "dispatch" => dispatch_subcommand(&args[1..]),
         "mcp" => mcp_subcommand(&args[1..]),
         "documents" => documents_subcommand(&args[1..]),
+        "events" => events_subcommand(&args[1..]),
         // A help page is what the user asked for, so it goes to stdout
         // where it can be piped and paged. Only a usage ERROR prints it
         // to stderr, alongside what went wrong.
         "-h" | "--help" | "help" => {
-            print!("{USAGE}");
+            print!("{}", usage());
             0
         }
         "-V" | "--version" => {
-            println!("hew-cli {}", env!("CARGO_PKG_VERSION"));
+            println!("hew-cli {}", hew_cli::VERSION);
             0
         }
         other => usage_error(&unknown_subcommand(other)),
@@ -466,6 +509,42 @@ fn documents_subcommand(args: &[String]) -> i32 {
     hew_cli::run::list_documents_live(&opts).exit_code
 }
 
+fn events_subcommand(args: &[String]) -> i32 {
+    if help_requested(args, USAGE_EVENTS) {
+        return 0;
+    }
+    let mut live_flags = LiveFlags::default();
+    let mut filter: Option<Vec<String>> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if try_parse_live_flag(args, &mut i, &mut live_flags, "hew-cli events") {
+            continue;
+        }
+        match args[i].as_str() {
+            "--filter" => {
+                let Some(raw) = args.get(i + 1) else {
+                    usage_error("hew-cli events: --filter needs event names, comma separated");
+                };
+                filter = Some(
+                    raw.split(',')
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                );
+                i += 2;
+            }
+            other => usage_error(&format!(
+                "hew-cli events: unrecognized argument \"{other}\""
+            )),
+        }
+    }
+    let Some(opts) = live_flags.into_options("hew-cli events") else {
+        usage_error("hew-cli events: --live is required — events come from the running app");
+    };
+    hew_cli::run::events_live(&opts, filter)
+}
+
 fn mcp_subcommand(args: &[String]) -> i32 {
     if help_requested(args, USAGE_MCP) {
         return 0;
@@ -488,8 +567,8 @@ fn mcp_subcommand(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        USAGE, USAGE_DISPATCH, USAGE_DOCUMENTS, USAGE_MCP, USAGE_RUN, edit_distance,
-        unknown_subcommand,
+        USAGE_DISPATCH, USAGE_DOCUMENTS, USAGE_EVENTS, USAGE_MCP, USAGE_RUN, edit_distance,
+        unknown_subcommand, usage,
     };
 
     /// A mistyped command names the nearest real one. Silently accepting
@@ -501,6 +580,7 @@ mod tests {
         assert!(unknown_subcommand("runn").contains(r#"Did you mean "run""#));
         assert!(unknown_subcommand("dispatchh").contains(r#"Did you mean "dispatch""#));
         assert!(unknown_subcommand("mpc").contains(r#"Did you mean "mcp""#));
+        assert!(unknown_subcommand("event").contains(r#"Did you mean "events""#));
         // Nothing close enough: say so rather than guess wildly.
         let far = unknown_subcommand("frobnicate");
         assert!(far.contains("frobnicate"));
@@ -519,7 +599,8 @@ mod tests {
     /// what this is, how to start, and where to look next.
     #[test]
     fn the_help_page_says_what_it_is_how_to_start_and_where_to_go_next() {
-        assert!(USAGE.starts_with("hew-cli "), "leads with name and version");
+        let usage = usage();
+        assert!(usage.starts_with("hew-cli "), "leads with name and version");
         for section in [
             "USAGE",
             "COMMANDS",
@@ -528,18 +609,35 @@ mod tests {
             "ENVIRONMENT",
             "LEARN MORE",
         ] {
-            assert!(USAGE.contains(section), "top-level help needs {section}");
+            assert!(usage.contains(section), "top-level help needs {section}");
         }
         // The environment it reads is documented, not folded into prose.
-        assert!(USAGE.contains("HEW_APP") && USAGE.contains("HEW_RUNTIME_DIR"));
+        assert!(usage.contains("HEW_APP") && usage.contains("HEW_RUNTIME_DIR"));
         // And it points at per-command help rather than explaining
         // everything at the top level.
-        assert!(USAGE.contains("hew-cli <command> --help"));
+        assert!(usage.contains("hew-cli <command> --help"));
+    }
+
+    /// The banner line and `--version` print the same stamp.
+    #[test]
+    fn usage_banner_and_version_flag_agree() {
+        let banner = usage();
+        let first = banner.lines().next().unwrap();
+        assert!(
+            first.starts_with(&format!("hew-cli {} ", hew_cli::VERSION)),
+            "banner leads with the stamped version: {first}"
+        );
     }
 
     #[test]
     fn every_command_has_its_own_help_with_an_example() {
-        for page in [USAGE_RUN, USAGE_DISPATCH, USAGE_DOCUMENTS, USAGE_MCP] {
+        for page in [
+            USAGE_RUN,
+            USAGE_DISPATCH,
+            USAGE_DOCUMENTS,
+            USAGE_EVENTS,
+            USAGE_MCP,
+        ] {
             assert!(page.starts_with("hew-cli "));
             assert!(page.contains("USAGE"));
             assert!(

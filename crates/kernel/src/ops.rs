@@ -39,6 +39,7 @@
 //! strokes are tool-layer state (the UI buffers the polyline and commits when
 //! it closes). This keeps every committed state a valid solid.
 
+use crate::attr::AttrDict;
 use crate::geom2d::{
     boundaries_contact, boundaries_contact_away_from_shared, hole_leaves_outer,
     interior_point_of_loops, point_inside_polygon, point_near_segment, polygon_is_simple,
@@ -48,7 +49,9 @@ use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, MaterialId, VertexId};
 use crate::math::{Plane, Point3, Vec3};
 use crate::sketch::Profile;
 use crate::tol;
-use crate::topo::{Edge, Face, HalfEdge, Loop, LoopKind, Object, Vertex, WatertightState};
+use crate::topo::{
+    AttrSlot, Edge, Face, HalfEdge, Loop, LoopKind, Object, Vertex, WatertightState,
+};
 use crate::transform::{Transform, TransformError};
 
 /// The explicit combination modes (ARCHITECTURE.md: combining Objects is always a
@@ -232,10 +235,15 @@ pub struct FaceMergeInnerReport {
     /// or an arc-and-line shape and undoing gives the curve back, not a plain
     /// polygon that would boss into faceted walls.
     pub curves: Vec<Option<crate::sketch::CurveGeom>>,
+    /// The attribute dictionary each dissolved loop edge carried, in
+    /// `curves` order; empty when none carried one. Undo re-imprints with
+    /// them, so the loop's edges come back with their dictionaries.
+    pub edge_attrs: Vec<crate::attr::AttrDict>,
 }
 
-/// What `transform_sub_face` changed: an imprint slid, turned, or scaled on
-/// its face in place. (`xf` carries f64s, so `PartialEq` but not `Eq`.)
+/// What `transform_sub_face` changed: an imprint slid, turned, scaled, or
+/// mirrored on its face in place. (`xf` carries f64s, so `PartialEq` but
+/// not `Eq`.)
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransformSubFaceReport {
     /// The moved sub-face (handle unchanged).
@@ -500,10 +508,13 @@ pub enum StickyError {
     /// `merge_inner_face`: the face is not an imprinted sub-face (its boundary is
     /// not a single closed loop twinned entirely with one parent's hole loop).
     NotAnInnerFace,
-    /// `transform_sub_face`: the transform is not an in-plane similarity of
-    /// the parent face — it tilts the imprint off its face, mirrors it,
-    /// scales it non-uniformly, or is singular. An imprint only slides,
-    /// turns, and scales ON the face it was drawn on.
+    /// `transform_sub_face`: the transform does not map the parent face's
+    /// plane onto itself as a similarity — it tilts or lifts the imprint
+    /// off its face, scales or shears it non-uniformly, or is singular. A
+    /// map that turns the normal over but keeps the plane (a mirror across
+    /// the face's own plane, a point reflection through a point of it) is
+    /// accepted: an imprint slides, turns, scales, and mirrors ON the face
+    /// it was drawn on.
     NotInPlane,
     /// `transform_sub_face`: a hole of the imprint is not itself a flat
     /// nested imprint (a boss or recess was raised inside it), so the loop
@@ -798,7 +809,12 @@ impl std::fmt::Display for StickyError {
                 write!(f, "face is not an imprinted sub-face")
             }
             StickyError::NotInPlane => {
-                write!(f, "transform is not an in-plane similarity of the face")
+                write!(
+                    f,
+                    "transform is not a similarity that keeps the face's plane \
+                     (an in-plane move, turn, scale, or mirror, with the normal \
+                     kept or turned over)"
+                )
             }
             StickyError::NestedNotFlat => {
                 write!(
@@ -870,18 +886,25 @@ impl std::error::Error for BooleanError {}
 impl Object {
     /// Bakes an affine `transform` into this object's geometry: every vertex is
     /// moved by `transform` and every face plane is remapped (the
-    /// inverse-transpose rule via [`Transform::apply_plane`]), in place.
+    /// inverse-transpose rule via
+    /// [`Transform::apply_plane_following_winding`]), in place.
     ///
     /// Topology is untouched — no element is added or removed — so all handles
     /// stay valid and the watertightness state is preserved. This is what
     /// move/rotate/scale commit, and how a boolean brings an operand into a
     /// shared frame.
     ///
+    /// A reflection (determinant < 0, e.g. a negative scale) bakes like any
+    /// other map: the geometry is mirrored and then every face is turned
+    /// over (see [`Object::reverse_all_faces`]), because a reflection
+    /// reverses every loop's winding and mapping vertices alone would leave
+    /// an inside-out shell. Twin pairing, handles and per-face attributes
+    /// are kept, so the solid stays right side out.
+    ///
     /// Validated up front so the mutation is transactional (the strong
-    /// guarantee): a singular linear part is [`TransformError::Singular`] and an
-    /// orientation-flipping one (determinant < 0, e.g. a negative scale) is
-    /// [`TransformError::Reflection`] — both refused before any vertex moves, so
-    /// the object is never left half-transformed or inside-out. A shrink that
+    /// guarantee): a singular linear part is [`TransformError::Singular`],
+    /// refused before any vertex moves, so
+    /// the object is never left half-transformed. A shrink that
     /// would leave some face too small for a saved file to recompute its
     /// plane (twice its area under 1e-12 m²) is singular at this geometry's
     /// scale and refused [`TransformError::Singular`] the same way, as is an
@@ -912,8 +935,18 @@ impl Object {
             e.curve = map_curve(e.curve, transform, scale);
             e.polygon = map_curve(e.polygon, transform, scale);
         }
+        if transform.determinant() < 0.0 {
+            self.turn_faces_over_after_reflection();
+        }
         self.check_invariants();
         Ok(())
+    }
+
+    /// Turns every face over after a reflection mapped the vertices, so the
+    /// loops wind counter-clockwise seen from the outward normal again.
+    fn turn_faces_over_after_reflection(&mut self) {
+        let all: std::collections::BTreeSet<FaceId> = self.faces.keys().collect();
+        self.reverse_faces(&all);
     }
 
     /// Whether [`Object::apply_transform`] would accept `transform`, without
@@ -926,7 +959,7 @@ impl Object {
 
     /// The validation half of [`Object::apply_transform`]: every face's
     /// plane under `transform`, in face order, or the refusal. A singular
-    /// linear part, an orientation flip, a face ring too small afterwards
+    /// linear part, a face ring too small afterwards
     /// for a saved file to recompute its plane, a plane the map squashes
     /// to no direction (an invertible but extremely anisotropic scale), or
     /// a texture frame it squashes (checked with the ring, so a session's
@@ -941,12 +974,9 @@ impl Object {
         transform: &Transform,
         reopen_check: bool,
     ) -> Result<Vec<Plane>, TransformError> {
-        // `inverse()` fails iff the linear part is singular; a negative
-        // determinant would invert every face's winding.
+        // `inverse()` fails iff the linear part is singular. A negative
+        // determinant is accepted: `apply_transform` turns the faces over.
         transform.inverse()?;
-        if transform.determinant() < 0.0 {
-            return Err(TransformError::Reflection);
-        }
         let mut planes = Vec::with_capacity(self.faces.len());
         for face in self.faces.values() {
             if reopen_check {
@@ -968,7 +998,11 @@ impl Object {
                     return Err(TransformError::DegenerateTextureFrame);
                 }
             }
-            planes.push(transform.apply_plane(&face.plane)?);
+            // Winding-following on purpose: each plane is stored next to
+            // its mapped loop, and under a reflection `apply_transform`
+            // then turns face, plane and loop over together, which lands
+            // the plane on the outward side.
+            planes.push(transform.apply_plane_following_winding(&face.plane)?);
         }
         Ok(planes)
     }
@@ -982,14 +1016,15 @@ impl Object {
     /// run the full [`Object::check_transform`] first and refuse typed.
     ///
     /// A similarity with a non-singular determinant (at least 1e-12, so a
-    /// scale of at least 1e-4) maps every plane to one with a direction,
-    /// and keeps orientation, so this cannot fail for one; it panics on
+    /// scale of at least 1e-4) maps every plane to one with a direction, so
+    /// this cannot fail for one; a reflecting pose turns every face over as
+    /// [`Object::apply_transform`] does. It panics on
     /// anything else (a caller bug — the pose was validated a similarity
     /// when the session opened).
     pub(crate) fn apply_session_pose(&mut self, pose: &Transform) {
         let planes = self
             .transformed_planes_impl(pose, false)
-            .expect("a non-singular orientation-keeping similarity maps every plane");
+            .expect("a non-singular similarity maps every plane");
         for v in self.vertices.values_mut() {
             v.position = pose.apply_point(v.position);
         }
@@ -1002,6 +1037,9 @@ impl Object {
         for e in self.edges.values_mut() {
             e.curve = map_curve(e.curve, pose, scale);
             e.polygon = map_curve(e.polygon, pose, scale);
+        }
+        if pose.determinant() < 0.0 {
+            self.turn_faces_over_after_reflection();
         }
         self.check_invariants();
     }
@@ -1241,7 +1279,9 @@ impl Object {
         // Freshly extruded faces take the default material and no UV frame.
         let face_specs: Vec<_> = face_specs
             .into_iter()
-            .map(|(outer, inners, plane, surface)| (outer, inners, plane, None, None, surface))
+            .map(|(outer, inners, plane, surface)| {
+                (outer, inners, plane, None, None, surface, AttrDict::new())
+            })
             .collect();
         let obj = Object::from_faces_with_holes(&positions, &face_specs);
         // Note: extrusion stamps side-wall FACES with `SurfaceRef` (above) but
@@ -2541,7 +2581,7 @@ impl Object {
 
         let face_specs: Vec<_> = face_specs
             .into_iter()
-            .map(|(o, i, p, surf)| (o, i, p, None, None, surf))
+            .map(|(o, i, p, surf)| (o, i, p, None, None, surf, AttrDict::new()))
             .collect();
         let mut obj = Object::from_faces_with_holes(&positions, &face_specs);
         // Mark the collected soft transverse joints (design §7b) on the
@@ -3663,7 +3703,7 @@ impl Object {
         face: FaceId,
         loop_path: &[Point3],
     ) -> Result<FaceSplitInnerReport, StickyError> {
-        self.split_face_inner_impl(face, loop_path, None, &[])
+        self.split_face_inner_impl(face, loop_path, None, &[], &[])
     }
 
     /// [`Object::split_face_inner`] carrying the analytic circle the imprinted
@@ -3689,7 +3729,7 @@ impl Object {
         let curves = curve
             .map(|g| vec![Some(g); loop_path.len()])
             .unwrap_or_default();
-        self.split_face_inner_impl(face, loop_path, None, &curves)
+        self.split_face_inner_impl(face, loop_path, None, &curves, &[])
     }
 
     /// [`Object::split_face_inner`] with a per-edge analytic claim: `curves[k]`
@@ -3709,7 +3749,7 @@ impl Object {
         loop_path: &[Point3],
         curves: &[Option<crate::sketch::CurveGeom>],
     ) -> Result<FaceSplitInnerReport, StickyError> {
-        self.split_face_inner_impl(face, loop_path, None, curves)
+        self.split_face_inner_impl(face, loop_path, None, curves, &[])
     }
 
     /// [`Object::split_face_inner`] with explicit attributes for the created
@@ -3727,20 +3767,25 @@ impl Object {
         loop_path: &[Point3],
         restore: Option<crate::topo::FaceAttrs>,
     ) -> Result<FaceSplitInnerReport, StickyError> {
-        self.split_face_inner_impl(face, loop_path, restore, &[])
+        self.split_face_inner_impl(face, loop_path, restore, &[], &[])
     }
 
     /// Shared body of the [`Object::split_face_inner`] family. `restore` is
     /// the undo attribute snapshot (see [`Object::split_face_inner_with_attrs`]);
     /// `curve` stamps the imprinted loop's edges (see
-    /// [`Object::split_face_inner_with_curve`]). Crate-internal so history's
-    /// dispatch can supply both at once.
+    /// [`Object::split_face_inner_with_curve`]). `edge_attrs` gives each
+    /// loop edge back the attribute dictionary it carried when a
+    /// `merge_inner_face` dissolved it ([`FaceMergeInnerReport::edge_attrs`]),
+    /// in the same per-edge order as `curves`; empty gives every new edge
+    /// none (the forward/tool semantics). Crate-internal so history's
+    /// dispatch can supply them all at once.
     pub(crate) fn split_face_inner_impl(
         &mut self,
         face: FaceId,
         loop_path: &[Point3],
         restore: Option<crate::topo::FaceAttrs>,
         curves: &[Option<crate::sketch::CurveGeom>],
+        edge_attrs: &[crate::attr::AttrDict],
     ) -> Result<FaceSplitInnerReport, StickyError> {
         // ---- validation (no mutation) ----
         if !self.faces.contains_key(face) {
@@ -3751,6 +3796,9 @@ impl Object {
         }
         if !curves.is_empty() && curves.len() != loop_path.len() {
             return Err(StickyError::CurveClaimOffLoop);
+        }
+        if !edge_attrs.is_empty() && edge_attrs.len() != loop_path.len() {
+            return Err(StickyError::WouldCorrupt);
         }
         let face_plane = self.faces[face].plane;
         let normal = face_plane.normal();
@@ -3783,6 +3831,16 @@ impl Object {
             (0..n).map(|i| curves[(2 * n - 2 - i) % n]).collect()
         } else {
             curves.to_vec()
+        };
+        // Edge dictionaries follow the winding the same way.
+        let edge_attrs: Vec<crate::attr::AttrDict> = if edge_attrs.is_empty() {
+            vec![crate::attr::AttrDict::new(); n]
+        } else if reversed {
+            (0..n)
+                .map(|i| edge_attrs[(2 * n - 2 - i) % n].clone())
+                .collect()
+        } else {
+            edge_attrs.to_vec()
         };
 
         // The caller owns the analytic truth: a supplied circle claim must
@@ -3842,6 +3900,7 @@ impl Object {
             back_material: sub_attrs.back_material,
             uv_frame: sub_attrs.uv_frame,
             surface: sub_attrs.surface,
+            attrs: sub_attrs.attrs,
         });
         obj.loops[sub_loop].face = sub_face;
 
@@ -3891,7 +3950,9 @@ impl Object {
                 curve: curves[k],
                 soft: false,
                 polygon: None,
+                attrs: AttrSlot::NONE,
             });
+            obj.set_edge_attrs(edge, edge_attrs[k].clone());
             obj.half_edges[h_sub[k]].edge = edge;
             obj.half_edges[h_hole[k]].edge = edge;
             new_edges.push(edge);
@@ -3992,6 +4053,23 @@ impl Object {
             .iter()
             .map(|&h| self.edges[self.half_edges[h].edge].curve)
             .collect();
+        // ...and each loop edge's attribute dictionary (empty when no loop
+        // edge carries one, the common case).
+        let edge_attrs: Vec<crate::attr::AttrDict> = if h_sub
+            .iter()
+            .all(|&h| self.edges[self.half_edges[h].edge].attrs.is_none())
+        {
+            Vec::new()
+        } else {
+            h_sub
+                .iter()
+                .map(|&h| {
+                    self.edge_attrs(self.half_edges[h].edge)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect()
+        };
 
         // ---- removal surgery on a clone ----
         let mut obj = self.clone();
@@ -4029,6 +4107,7 @@ impl Object {
             loop_path,
             sub_face_attrs,
             curves,
+            edge_attrs,
         })
     }
 
@@ -4242,26 +4321,36 @@ impl Object {
         Ok(adopted)
     }
 
-    /// Slide, turn, or scale an imprint on its face, in place: every vertex
-    /// of `sub_face`'s outer loop — and, recursively, of every flat imprint
-    /// nested inside it — moves by `xf`; no handle changes, so a selection
-    /// of the sub-face survives the edit. `Edge::curve` claims on the moved
-    /// loops map with it (center as a point, radius by the scale), so a
-    /// moved circle still pushes through as a smooth cylinder.
+    /// Slide, turn, scale, or mirror an imprint on its face, in place: every
+    /// vertex of `sub_face`'s outer loop — and, recursively, of every flat
+    /// imprint nested inside it — moves by `xf`; no handle changes, so a
+    /// selection of the sub-face survives the edit. `Edge::curve` claims on
+    /// the moved loops map with it (center as a point, radius by the
+    /// scale), so a moved circle still pushes through as a smooth cylinder.
     ///
-    /// `xf` must be an in-plane similarity of the parent face — translation
-    /// in the plane, rotation about the normal, uniform positive scale, or
-    /// any composition — else [`StickyError::NotInPlane`]. The moved outer
-    /// loop must still sit strictly inside the parent and clear of its
-    /// boundary ([`StickyError::LoopNotStrictlyInside`]). Another shape,
-    /// boss, recess, or hole on the parent that the moved shape comes to
-    /// fully ENCLOSE is adopted — it becomes a hole of the innermost moved
-    /// shape around it, exactly as drawing around it would — while one it
-    /// would cross, touch, or land inside refuses
-    /// [`StickyError::LoopNotStrictlyInside`]. A hole of the imprint holding
-    /// anything but a flat nested imprint refuses [`StickyError::NestedNotFlat`]
-    /// (a shape holding a boss cannot slide). Not an imprint at all:
-    /// [`StickyError::NotAnInnerFace`].
+    /// `xf` must be a similarity that maps the parent face's plane onto
+    /// itself — translation in the plane, rotation about the normal,
+    /// uniform scale about a point of the plane, a mirror across a line in
+    /// the plane, and also a map that turns the normal over while keeping
+    /// the plane (a mirror across the face's own plane, a point reflection
+    /// through a point of it, a half turn about a line in it), or any
+    /// composition — else [`StickyError::NotInPlane`]. Only the loop's
+    /// orientation in the plane matters: when
+    /// `det(xf) · (moved normal · normal) < 0` (an in-plane mirror) the
+    /// moved loops are run the other way afterwards and stay
+    /// counter-clockwise about the parent's normal; otherwise (a point
+    /// reflection, a mirror across the face plane) nothing is reversed.
+    /// Handles are kept either way. The moved outer loop must still sit
+    /// strictly inside the parent and clear of its boundary
+    /// ([`StickyError::LoopNotStrictlyInside`]). Another shape, boss,
+    /// recess, or hole on the parent that the moved shape comes to fully
+    /// ENCLOSE is adopted — it becomes a hole of the innermost moved shape
+    /// around it, exactly as drawing around it would — while one it would
+    /// cross, touch, or land inside refuses
+    /// [`StickyError::LoopNotStrictlyInside`]. A hole of the imprint
+    /// holding anything but a flat nested imprint refuses
+    /// [`StickyError::NestedNotFlat`] (a shape holding a boss cannot
+    /// slide). Not an imprint at all: [`StickyError::NotAnInnerFace`].
     ///
     /// Reversed by the same op with [`TransformSubFaceReport::inverse`],
     /// pinning [`TransformSubFaceReport::adopted`].
@@ -4300,18 +4389,31 @@ impl Object {
             .imprint_parent(sub_face)
             .ok_or(StickyError::NotAnInnerFace)?;
         let scale = xf.similarity_scale().ok_or(StickyError::NotInPlane)?;
-        if xf.determinant() <= 0.0 {
-            return Err(StickyError::NotInPlane);
-        }
         let inverse = xf.inverse().map_err(|_| StickyError::NotInPlane)?;
         let plane = self.faces[parent].plane;
         let normal = plane.normal();
-        // The plane must map onto itself: normal preserved (up to the
-        // similarity's scale), and the moved loop still on it.
+        // The plane must map onto itself: the normal kept or turned over
+        // (up to the similarity's scale), and the moved loop still on it
+        // (checked below). Turning the normal over is no refusal: a map
+        // that keeps the plane — a mirror across the face's own plane, a
+        // point reflection through a point of it, a half turn about a line
+        // in it — acts on the loop as a move within the plane.
         let moved_normal = xf.apply_vector(normal) * (1.0 / scale);
-        if (moved_normal - normal).length() >= tol::NORMAL_DIRECTION {
+        if (moved_normal - normal).length() >= tol::NORMAL_DIRECTION
+            && (moved_normal + normal).length() >= tol::NORMAL_DIRECTION
+        {
             return Err(StickyError::NotInPlane);
         }
+        // What matters for the loop is its orientation IN the plane: seen
+        // from the normal, the moved loops' winding reverses exactly when
+        // the map's orientation and its action on the normal disagree
+        // (det(xf) · (moved_normal · normal) < 0) — an in-plane mirror, or
+        // a half turn about an in-plane line. A point reflection or a
+        // mirror across the face plane flips both and reverses nothing.
+        // Reversed loops are run the other way after the move so they stay
+        // counter-clockwise about the parent's normal; the face planes do
+        // not change.
+        let reverses = xf.determinant() * moved_normal.dot(normal) < 0.0;
         // Resolve each pinned ring to the hole loop it names. A ring that
         // names no live hole is a recorded-inverse mismatch — a kernel bug by
         // the history contract — refused typed rather than guessed.
@@ -4408,6 +4510,26 @@ impl Object {
         for &v in &verts {
             let p = obj.vertices[v].position;
             obj.vertices[v].position = xf.apply_point(p);
+        }
+        if reverses {
+            // Every loop whose vertices moved: each moved face's outer loop
+            // and the hole loop it is twinned with (the parent's own hole
+            // for the imprint, a moved face's hole for a nested one). The
+            // set is closed under twinning, and a pinned hole, which did
+            // not move, is not in it.
+            let mut flipped: Vec<LoopId> = Vec::with_capacity(loops.len() * 2);
+            for &l in &loops {
+                let first = obj
+                    .loop_half_edges(l)
+                    .next()
+                    .ok_or(StickyError::WouldCorrupt)?;
+                let twin = obj.half_edges[first]
+                    .twin
+                    .ok_or(StickyError::WouldCorrupt)?;
+                flipped.push(l);
+                flipped.push(obj.half_edges[twin].loop_id);
+            }
+            obj.reverse_loops(&flipped);
         }
         for &e in &edges {
             if let Some(g) = obj.edges[e].curve {
@@ -4698,6 +4820,7 @@ impl Object {
                     axis: normal,
                     radius: g.radius,
                 }),
+                attrs: AttrSlot::NONE,
             });
             obj.loops[wloop].face = wface;
             walls.push(wface);
@@ -4730,6 +4853,7 @@ impl Object {
                 curve: top_curve,
                 soft: false,
                 polygon: top_poly,
+                attrs: AttrSlot::NONE,
             });
             obj.half_edges[h_sub[k]].edge = e_top;
             obj.half_edges[wa[k]].edge = e_top;
@@ -4750,6 +4874,7 @@ impl Object {
                 curve: None,
                 soft: false,
                 polygon: None,
+                attrs: AttrSlot::NONE,
             });
             obj.half_edges[wb[k]].edge = e_vert;
             obj.half_edges[wd[prev]].edge = e_vert;
@@ -5680,6 +5805,7 @@ impl Object {
             || fa.back_material != fb.back_material
             || fa.uv_frame != fb.uv_frame
             || fa.surface != fb.surface
+            || !self.face_attrs_eq(face_a, face_b)
         {
             return None;
         }
@@ -5754,6 +5880,34 @@ impl Object {
         b_to_a: &Transform,
     ) -> Result<Object, BooleanError> {
         crate::boolean::execute(op, a, b, b_to_a)
+    }
+
+    /// [`Object::boolean`] as the document commits it: the coplanar seams
+    /// the boolean introduced are dissolved
+    /// ([`Object::merge_coplanar_faces`]) while the coplanar edges either
+    /// operand already had (drawn imprints, carried into `a`'s frame
+    /// through `b_to_a`) are kept. [`Document::boolean`](crate::Document::boolean)
+    /// and the boolean through a placement commit exactly this product, so
+    /// a pure computation of the same two solids (the API's
+    /// `hew.compute.boolean`) yields the same geometry the commit would.
+    ///
+    /// # Errors
+    /// As [`Object::boolean`].
+    pub fn boolean_product(
+        op: BooleanOp,
+        a: &Object,
+        b: &Object,
+        b_to_a: &Transform,
+    ) -> Result<Object, BooleanError> {
+        let mut result = Object::boolean(op, a, b, b_to_a)?;
+        let mut preserve = a.coplanar_edge_segments();
+        preserve.extend(
+            b.coplanar_edge_segments()
+                .into_iter()
+                .map(|(p, q)| (b_to_a.apply_point(p), b_to_a.apply_point(q))),
+        );
+        result.merge_coplanar_faces(&preserve);
+        Ok(result)
     }
 
     /// Partition this Object's faces into connected components by shared-edge
@@ -5995,14 +6149,7 @@ impl Object {
         let mut positions: Vec<Point3> = Vec::new();
         let mut local_index: std::collections::BTreeMap<VertexId, usize> =
             std::collections::BTreeMap::new();
-        let mut specs: Vec<(
-            Vec<usize>,
-            Vec<Vec<usize>>,
-            Plane,
-            crate::material::FaceMaterial,
-            Option<crate::material::UvFrame>,
-            Option<crate::topo::SurfaceRef>,
-        )> = Vec::with_capacity(faces.len());
+        let mut specs: Vec<crate::build::FaceSpec> = Vec::with_capacity(faces.len());
         for &fid in faces {
             let face = &self.faces[fid];
             let outer = loop_indices(self, face.outer_loop, &mut positions, &mut local_index);
@@ -6018,6 +6165,9 @@ impl Object {
                 face.material,
                 face.uv_frame,
                 face.surface,
+                // Each face keeps its own dictionary; edges are rebuilt
+                // fresh and carry none (like their curve claims).
+                self.face_attrs(fid).cloned().unwrap_or_default(),
             ));
         }
 
@@ -8627,6 +8777,7 @@ fn twin_half_edges(obj: &mut Object, a: HalfEdgeId, b: HalfEdgeId) {
         curve: None,
         soft: false,
         polygon: None,
+        attrs: AttrSlot::NONE,
     });
     obj.half_edges[a].twin = Some(b);
     obj.half_edges[a].edge = edge;
@@ -8857,6 +9008,7 @@ fn build_coplanar_wall(
         curve: None,
         soft: false,
         polygon: None,
+        attrs: AttrSlot::NONE,
     });
     obj.half_edges[h_sub].edge = e_top;
     obj.half_edges[wa].edge = e_top;
@@ -8891,6 +9043,7 @@ fn build_coplanar_wall(
         back_material: None,
         uv_frame: None,
         surface: None,
+        attrs: AttrSlot::NONE,
     });
     obj.loops[wloop].face = wface;
     Ok(wface)
@@ -9209,6 +9362,7 @@ fn do_split_face(
         back_material: obj.faces[face].back_material,
         uv_frame: obj.faces[face].uv_frame,
         surface: obj.faces[face].surface,
+        attrs: obj.faces[face].attrs,
     });
     obj.loops[loop_b_id].face = face_b_id;
 
@@ -9409,6 +9563,7 @@ fn do_split_face_hole(
         back_material: obj.faces[face].back_material,
         uv_frame: obj.faces[face].uv_frame,
         surface: obj.faces[face].surface,
+        attrs: obj.faces[face].attrs,
     });
     wire_loop_sequence(obj, &lune_seq, lune_loop, lune);
     // 8. The rerouted hole keeps its loop id (still Inner, still `face`'s).
@@ -9552,6 +9707,7 @@ pub(crate) fn build_cut_chains(
             curve: None,
             soft: false,
             polygon: None,
+            attrs: AttrSlot::NONE,
         });
         obj.half_edges[h_fwd].edge = edge_id;
         obj.half_edges[h_bwd].edge = edge_id;
@@ -9648,6 +9804,9 @@ pub(crate) fn split_boundary_edge(
     let was_soft = obj.edges[edge_id].soft;
     // A piece of a polygon's side is still that polygon's side.
     let was_polygon = obj.edges[edge_id].polygon;
+    // Both fragments keep the edge's attribute dictionary (same slot: the
+    // dictionary is a value, so sharing it is safe).
+    let was_attrs = obj.edges[edge_id].attrs;
 
     // Insert the new vertex.
     let new_v = obj.vertices.insert(Vertex {
@@ -9724,6 +9883,7 @@ pub(crate) fn split_boundary_edge(
             curve: None,
             soft: was_soft,
             polygon: was_polygon,
+            attrs: was_attrs,
         });
         edge_b_id = obj.edges.insert(Edge {
             half_edge: h_b,
@@ -9731,6 +9891,7 @@ pub(crate) fn split_boundary_edge(
             curve: None,
             soft: was_soft,
             polygon: was_polygon,
+            attrs: was_attrs,
         });
         obj.half_edges[h_a].edge = edge_a_id;
         obj.half_edges[t_b].edge = edge_a_id;
@@ -9768,6 +9929,7 @@ pub(crate) fn split_boundary_edge(
             curve: None,
             soft: was_soft,
             polygon: was_polygon,
+            attrs: was_attrs,
         });
         edge_b_id = obj.edges.insert(Edge {
             half_edge: h_b,
@@ -9775,6 +9937,7 @@ pub(crate) fn split_boundary_edge(
             curve: None,
             soft: was_soft,
             polygon: was_polygon,
+            attrs: was_attrs,
         });
         obj.half_edges[h_a].edge = edge_a_id;
         obj.half_edges[h_b].edge = edge_b_id;

@@ -11,8 +11,7 @@
 
 use kernel::{
     AttrTarget, CurveGeom, Document, DocumentError, EntityRef, InsertOptions, InsertReport,
-    LibraryProvenance, Material, NodeId, Plane, Point3, Rgba8, Transform, TransformError, Vec3,
-    WatertightState,
+    LibraryProvenance, Material, NodeId, Plane, Point3, Rgba8, Transform, Vec3, WatertightState,
 };
 use proptest::prelude::*;
 use std::collections::HashSet;
@@ -570,30 +569,56 @@ fn insert_is_one_undo_step_and_undone_state_saves() {
     assert_eq!(dst.component_ids().len(), 1);
 }
 
-/// A reflecting pose is refused up front, document untouched (the strong
-/// guarantee: reflections cannot bake into world objects).
+/// A reflecting pose bakes a mirrored copy (faces turned over, so the copy is
+/// valid, watertight, and outward-facing).
 #[test]
-fn insert_refuses_reflecting_pose_untouched() {
+fn insert_with_reflecting_pose_bakes_a_mirrored_copy() {
     let mut src = Document::new();
     let oid = extrude_box(&mut src, 0.0, 0.0, 1.0, 1.0, 1.0);
     let item = src.extract_item(&[NodeId::Object(oid)], false).unwrap();
 
     let mut dst = Document::new();
-    let before = dst.state_hash();
     let mirror = Transform::scale(Vec3::new(-1.0, 1.0, 1.0));
-    let result = dst.insert_document(
+    dst.insert_document(
         &item,
         &InsertOptions {
             pose: mirror,
             provenance: None,
             origin: None,
         },
-    );
-    assert!(matches!(
-        result,
-        Err(DocumentError::Transform(TransformError::Reflection))
-    ));
-    assert_eq!(dst.state_hash(), before);
+    )
+    .expect("a mirrored insert bakes a mirrored copy");
+    let ids = dst.visible_object_ids();
+    assert_eq!(ids.len(), 1, "one mirrored object lands");
+    let o = dst.object(ids[0]).unwrap();
+    assert!(o.validate().is_ok());
+    assert_eq!(o.watertight(), kernel::WatertightState::Watertight);
+    assert!(o.signed_volume() > 0.0, "mirrored copy is outward-facing");
+    // The item is re-origined to its bottom center on extract, so compare
+    // against an un-mirrored insert of the same item: every mirrored vertex
+    // is the x-mirror of a plain one.
+    let mut plain = Document::new();
+    plain
+        .insert_document(
+            &item,
+            &InsertOptions {
+                pose: Transform::IDENTITY,
+                provenance: None,
+                origin: None,
+            },
+        )
+        .unwrap();
+    let pid = plain.visible_object_ids()[0];
+    let p = plain.object(pid).unwrap();
+    assert_eq!(p.vertices().len(), o.vertices().len());
+    for v in p.vertices().values() {
+        let m = mirror.apply_point(v.position);
+        assert!(
+            o.vertices().values().any(|w| w.position.approx_eq(m, 1e-9)),
+            "mirror of {:?} present",
+            v.position
+        );
+    }
 }
 
 /// A plain (unwrapped) object item inserts as a world object at the pose.

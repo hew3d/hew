@@ -31,6 +31,16 @@ import { installStrandedPressFix } from './strandedPress'
 const isSettingsWindow = window.location.hash.startsWith('#settings')
 const isLibraryWindow = window.location.hash.startsWith('#library')
 
+// Dev-only realm probe root (plugin system stage P0): measures sandboxed-frame
+// behavior on the engine it runs in. Inert unless the hash asks for it AND the
+// build is a dev or VITE_HEW_TEST build; a production build never renders it.
+const isProbeBuild = import.meta.env.DEV || import.meta.env.VITE_HEW_TEST === '1'
+const isProbeWindow = isProbeBuild && window.location.hash.startsWith('#plugin-probe')
+// The ternary on a build-time constant lets a production build drop the import.
+const ProbeRoot = isProbeBuild
+  ? React.lazy(() => import('./plugins/probe/ProbeRoot.tsx').then((m) => ({ default: m.ProbeRoot })))
+  : null
+
 // Shop Mode (`ShopApp`, `shop/shellMode.ts`): a THIRD render root selected
 // the same hash-branch way as Settings/Library above, but — unlike those
 // two — it is a full, independently-navigable main-window experience (a
@@ -90,7 +100,7 @@ try {
 // windows), and offline availability at the workbench — no wifi, no
 // problem — is the entire point of it existing (`shop/ShopApp.tsx`'s doc
 // comment). Do not add `isShopWindow` to this condition.
-if (!isSettingsWindow && !isLibraryWindow && !isTauri && import.meta.env.PROD && 'serviceWorker' in navigator) {
+if (!isSettingsWindow && !isLibraryWindow && !isProbeWindow && !isTauri && import.meta.env.PROD && 'serviceWorker' in navigator) {
   import('virtual:pwa-register').then(({ registerSW }) =>
     registerSW({ immediate: true }),
   )
@@ -122,7 +132,11 @@ void startI18n().then(() => {
     <React.StrictMode>
       <I18nProvider i18n={i18n}>
         <ErrorBoundary>
-          {isSettingsWindow ? (
+          {isProbeWindow && ProbeRoot ? (
+            <React.Suspense fallback={null}>
+              <ProbeRoot />
+            </React.Suspense>
+          ) : isSettingsWindow ? (
             <SettingsWindow />
           ) : isLibraryWindow ? (
             <React.Suspense fallback={null}>

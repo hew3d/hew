@@ -8,11 +8,9 @@
 use api::{
     DocFormat, Host, LibraryItemEntry, LibraryListing, LibraryReadResult, LibraryWriteResult,
     LibraryWriteTarget, LineDrawingParams, LineDrawingResult, PrintPdfParams, PrintPdfResult,
-    Refusal, SaveOutcome, SnapshotCamera, SnapshotParams, SnapshotProjection, SnapshotResult,
-    StandardView,
+    Refusal, SaveOutcome, SnapshotParams, SnapshotResult,
 };
-use kernel::{Document, EntityRef, Point3};
-use std::collections::BTreeMap;
+use kernel::Document;
 use std::path::{Path, PathBuf};
 
 /// Headless host: real file I/O, plus `hew.view.snapshot` rendered through
@@ -208,6 +206,7 @@ impl Host for CliHost {
         path: Option<&str>,
         segments_per_turn: u32,
         units: Option<&str>,
+        selection: Option<&[api::locate::RenderRoot]>,
         compat: bool,
     ) -> Result<Option<Vec<u8>>, Refusal> {
         // `true`: a headless dispatch has no dialog of its own to warn about
@@ -227,9 +226,14 @@ impl Host for CliHost {
                 .map_err(|e| Refusal::api("export_failed", &e.to_string()))?
                 .bytes
             }
-            _ => {
-                mesh_export::export(doc, format, segments_per_turn, true).map_err(export_refusal)?
-            }
+            _ => match selection {
+                Some(roots) => {
+                    mesh_export::export_occurrences(doc, roots, format, segments_per_turn, true)
+                        .map_err(export_refusal)?
+                }
+                None => mesh_export::export(doc, format, segments_per_turn, true)
+                    .map_err(export_refusal)?,
+            },
         };
         match path {
             Some(p) => {
@@ -259,7 +263,7 @@ impl Host for CliHost {
         doc: &Document,
         params: &SnapshotParams,
     ) -> Result<SnapshotResult, Refusal> {
-        render_snapshot(doc, params)
+        headless_render::snapshot(doc, params)
     }
 
     fn write_snapshot(&mut self, path: &str, bytes: &[u8]) -> Result<(), Refusal> {
@@ -272,7 +276,7 @@ impl Host for CliHost {
         doc: &Document,
         params: &LineDrawingParams,
     ) -> Result<LineDrawingResult, Refusal> {
-        crate::print::line_drawing(doc, params)
+        headless_render::line_drawing(doc, params)
     }
 
     fn print_pdf(
@@ -361,8 +365,27 @@ impl Host for CliHost {
             "title": title,
             "path": path.and_then(Path::to_str),
             "dirty": !doc.at_saved_mark(),
+            "document_id": doc.document_id(),
         })]
     }
+
+    fn random_16(&self) -> [u8; 16] {
+        random_16()
+    }
+}
+
+/// 16 bytes from the operating system's random source, for minting a
+/// document id on save. Falls back to the trait's default mix (clock,
+/// pid, a counter, a seeded hasher) in the unlikely case the OS source
+/// fails, rather than failing the save.
+fn random_16() -> [u8; 16] {
+    let mut out = [0u8; 16];
+    if getrandom::fill(&mut out).is_err() {
+        struct Fallback;
+        impl Host for Fallback {}
+        out = Fallback.random_16();
+    }
+    out
 }
 
 /// Converts a `crates/library` listing row into the plain shape
@@ -397,220 +420,6 @@ fn listed_to_entry(item: library::ListedItem) -> LibraryItemEntry {
 /// 1), so this boundary-crossing step lives here instead.
 fn export_refusal(e: mesh_export::ExportError) -> Refusal {
     Refusal::api(e.name(), &e.message())
-}
-
-// --------------------------------------------------------------- snapshot
-
-/// Renders `doc` headlessly through `crates/softrender`
-/// (docs/design/headless-snapshot.md): the shared
-/// [`softrender::document_items`] traversal builds the scene (world objects
-/// at identity pose; instance members at the instance's own pose, tagged
-/// with the INSTANCE's stable id so pixels report the instance, not the
-/// shared definition; user-hidden nodes skipped; an object that fails to
-/// tessellate skipped, not fatal). If nothing renders at all, refuses
-/// typed rather than returning a background-only image.
-fn render_snapshot(doc: &Document, params: &SnapshotParams) -> Result<SnapshotResult, Refusal> {
-    // `scene` renders through the Scene's OWN resolved hidden set
-    // (docs/agents/HEW_API.md's Scenes section) instead of the document's live
-    // one — `crates/api/src/commands/scenes.rs::resolve_scene_id` already
-    // validated the public id shape; an sid that no longer names a live
-    // Scene answers the same `unknown_scene` refusal here, through
-    // `Document::resolve_scene`.
-    let scene = match params.scene {
-        Some(sid) => Some(
-            doc.resolve_scene(sid)
-                .map_err(|e| Refusal::from_document_error(&e))?,
-        ),
-        None => None,
-    };
-    // A Scene that captures neither hidden property resolves to `None` leaf
-    // sets — "leave the current hidden state alone" — so a camera-only
-    // Scene renders with the DOCUMENT's own hidden state, exactly as
-    // activating it in the app would show, never with everything visible.
-    let hidden = match &scene {
-        Some(resolved) => match (&resolved.hidden_object_ids, &resolved.hidden_instance_ids) {
-            (Some(objects), Some(instances)) => {
-                softrender::HiddenLeaves::from_lists(objects, instances)
-            }
-            _ => softrender::HiddenLeaves::of_document(doc),
-        },
-        None => softrender::HiddenLeaves::of_document(doc),
-    };
-    let items = softrender::document_items_hiding(doc, &hidden);
-
-    if items.is_empty() {
-        return Err(Refusal::api(
-            "nothing_to_render",
-            "This document has no visible solids to render. Check that something is unhidden and un-tagged-away.",
-        ));
-    }
-
-    let render_items: Vec<softrender::RenderItem> = items
-        .iter()
-        .map(|it| softrender::RenderItem {
-            mesh: &it.mesh,
-            pose: it.pose,
-            sid: it.sid,
-        })
-        .collect();
-
-    let camera = resolve_camera(doc, params, scene.as_ref(), &hidden);
-    let rendered = softrender::render(&render_items, &camera, params.width, params.height)
-        .map_err(|e| {
-            Refusal::api("too_many_objects", &e.to_string())
-                .with_detail(serde_json::json!({ "max_items": u16::MAX }))
-        })?;
-    let png = softrender::png::encode(&rendered.rgba, rendered.width, rendered.height);
-
-    let (id_buffer, id_palette) = if params.include_ids {
-        let by_sid: BTreeMap<u64, EntityRef> = doc.sids().map(|(e, s)| (s, e.clone())).collect();
-        let mut buffer = Vec::with_capacity(rendered.ids.len() * 2);
-        for id in &rendered.ids {
-            buffer.extend_from_slice(&id.to_le_bytes());
-        }
-        let palette = rendered
-            .id_palette_sids
-            .iter()
-            .map(|sid| match by_sid.get(sid) {
-                Some(entity) => api::ids::public_id(entity, *sid),
-                // A sid whose entity has since been retired (a tombstone)
-                // still needs a stable-shaped palette entry — this never
-                // happens for a sid this render just used, but stay
-                // typed rather than panic on a future edge case.
-                None => format!("sid_{sid:x}"),
-            })
-            .collect();
-        (Some(buffer), palette)
-    } else {
-        (None, Vec::new())
-    };
-
-    let depth = if params.include_depth {
-        let d = rendered.depth_image(params.depth_bits);
-        Some(api::DepthPass {
-            png: d.png,
-            bits: params.depth_bits,
-            near: d.near,
-            far: d.far,
-        })
-    } else {
-        None
-    };
-    let normals_png = params.include_normals.then(|| rendered.normals_png());
-
-    Ok(SnapshotResult {
-        png,
-        width: rendered.width,
-        height: rendered.height,
-        id_buffer,
-        id_palette,
-        depth,
-        normals_png,
-    })
-}
-
-/// The camera resolution `docs/design/headless-snapshot.md` calls for,
-/// extended with `scene` (docs/agents/HEW_API.md's Scenes section — mutually
-/// exclusive with `camera`/`view`, already enforced by
-/// `crates/api/src/commands/doc.rs` before this is ever called): an
-/// explicit `camera` param, a named `view` fitted to the scene bbox, a
-/// Scene's own captured camera when `scene` was given and it captured
-/// one, or — given none of those — the document's saved working camera,
-/// falling back to a fitted isometric view. `hidden`/`scene`'s bbox
-/// fitting always accounts for what is actually visible (the Scene's
-/// resolved hidden set when one applies, the document's live one
-/// otherwise) — `render_snapshot` already computed both, so this stays
-/// infallible.
-fn resolve_camera(
-    doc: &Document,
-    params: &SnapshotParams,
-    scene: Option<&kernel::ResolvedScene>,
-    hidden: &softrender::HiddenLeaves,
-) -> softrender::Camera {
-    if let Some(cam) = &params.camera {
-        return build_camera(cam);
-    }
-    if let Some(view) = params.view {
-        return softrender::Camera::standard_view(
-            to_softrender_view(view),
-            fitted_bbox(doc, hidden),
-        );
-    }
-    if let Some(resolved) = scene
-        && let Some(cam) = resolved.camera
-    {
-        return softrender::Camera::from_kernel(&cam);
-    }
-    match doc.camera_state() {
-        Some(state) => softrender::Camera::from_kernel(&state),
-        None => softrender::Camera::standard_view(
-            softrender::StandardView::Iso,
-            fitted_bbox(doc, hidden),
-        ),
-    }
-}
-
-/// An explicit `camera` param resolved to a `softrender::Camera`
-/// (docs/design/headless-snapshot.md): `up` defaults to +Z, `projection`
-/// to perspective, `fov_deg` to 35°; under `parallel`, the half-height is
-/// derived from the eye-target distance and that same fov, mirroring
-/// `softrender::Camera::from_kernel`'s own parallel derivation so a
-/// parallel snapshot frames the same way a parallel document camera would.
-fn build_camera(cam: &SnapshotCamera) -> softrender::Camera {
-    let eye = Point3::new(cam.eye[0], cam.eye[1], cam.eye[2]);
-    let target = Point3::new(cam.target[0], cam.target[1], cam.target[2]);
-    let up = cam.up.unwrap_or([0.0, 0.0, 1.0]);
-    let fov_deg = cam.fov_deg.unwrap_or(35.0);
-    let projection = match cam.projection.unwrap_or(SnapshotProjection::Perspective) {
-        SnapshotProjection::Perspective => {
-            softrender::Projection::Perspective { fov_y_deg: fov_deg }
-        }
-        // The height the view spans at the target when the camera says,
-        // else what the perspective view spans there.
-        SnapshotProjection::Parallel => {
-            let distance = (target - eye).length();
-            let height = cam
-                .parallel_height
-                .filter(|h| h.is_finite() && *h > 0.0)
-                .unwrap_or_else(|| 2.0 * distance * (fov_deg.to_radians() * 0.5).tan());
-            softrender::Projection::Parallel {
-                half_height: height * 0.5,
-            }
-        }
-    };
-    softrender::Camera {
-        eye,
-        target,
-        up: kernel::Vec3::new(up[0], up[1], up[2]),
-        projection,
-    }
-}
-
-fn to_softrender_view(view: StandardView) -> softrender::StandardView {
-    match view {
-        StandardView::Iso => softrender::StandardView::Iso,
-        StandardView::Front => softrender::StandardView::Front,
-        StandardView::Back => softrender::StandardView::Back,
-        StandardView::Left => softrender::StandardView::Left,
-        StandardView::Right => softrender::StandardView::Right,
-        StandardView::Top => softrender::StandardView::Top,
-        StandardView::Bottom => softrender::StandardView::Bottom,
-    }
-}
-
-/// The document's bounding box under `hidden`, world space, poses applied
-/// — every visible object's vertices plus every instance member's
-/// vertices transformed by its instance pose, skipping whatever `hidden`
-/// says isn't visible (the document's own live hidden set, or a Scene's
-/// resolved one — `render_snapshot` computes the right one and passes it
-/// through, so a Scene's fitted standard view frames what the SCENE
-/// shows, not the whole document). Falls back to a unit box centered on
-/// the origin so a standard-view camera always has something to fit even
-/// in the degenerate case (unreachable in practice: `render_snapshot`
-/// already refuses `nothing_to_render` before this is called with
-/// nothing visible).
-fn fitted_bbox(doc: &Document, hidden: &softrender::HiddenLeaves) -> (Point3, Point3) {
-    softrender::document_bbox_hiding(doc, hidden)
 }
 
 // -------------------------------------------------------- import unit scale
@@ -1174,7 +983,7 @@ mod tests {
             panic!("the definition holds the picture's mesh");
         };
         for p in &mut mesh.positions {
-            *p = Point3::new(p.x * 1e-7, p.y * 1e-7, 0.0);
+            *p = kernel::Point3::new(p.x * 1e-7, p.y * 1e-7, 0.0);
         }
         let Err(err) = ingest_picture(&mut doc, "/pics/speck.png", out.scene) else {
             panic!("a face the kernel would skip is refused");
@@ -1189,6 +998,189 @@ mod tests {
 
         doc.redo().unwrap();
         assert_eq!(doc.instance_ids().len(), 2, "the undone picture redoes");
+    }
+
+    /// `hew.doc.new`, `open`, and `revert` replace the document, and the
+    /// epoch every query reports keeps rising across each
+    /// (docs/agents/HEW_API.md §7).
+    #[test]
+    fn document_replacement_never_lowers_the_epoch() {
+        let dir = scratch("epoch");
+        let path = dir.join("doc.hew");
+        let mut host = CliHost::new();
+        let mut doc = Document::new();
+        let registry = api::Registry::protocol_1();
+        let mut conn = api::Connection::new(api::Grant::core(), "test");
+        let mut call = |doc: &mut Document,
+                        host: &mut CliHost,
+                        id: i64,
+                        method: &str,
+                        params: serde_json::Value| {
+            let request: api::Request = serde_json::from_value(serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "method": method, "params": params,
+            }))
+            .unwrap();
+            match conn.dispatch(&registry, doc, host, request) {
+                api::DispatchOutcome::Reply(r) => {
+                    assert!(r.error.is_none(), "{method}: {:?}", r.error);
+                    r.result.unwrap()
+                }
+                _ => panic!("{method} replies"),
+            }
+        };
+        let epoch = |doc: &mut Document,
+                     host: &mut CliHost,
+                     call: &mut dyn FnMut(
+            &mut Document,
+            &mut CliHost,
+            i64,
+            &str,
+            serde_json::Value,
+        ) -> serde_json::Value| {
+            call(doc, host, 90, "hew.query.context", serde_json::json!({}))["epoch"]
+                .as_u64()
+                .unwrap()
+        };
+        call(
+            &mut doc,
+            &mut host,
+            0,
+            "hew.meta.hello",
+            serde_json::json!({"protocol": 1}),
+        );
+        call(
+            &mut doc,
+            &mut host,
+            1,
+            "hew.doc.attach",
+            serde_json::json!({}),
+        );
+        let attr =
+            serde_json::json!({"target": "document", "ns": "com.example", "key": "k", "value": 1});
+        call(&mut doc, &mut host, 2, "hew.attr.set", attr.clone());
+        call(
+            &mut doc,
+            &mut host,
+            3,
+            "hew.doc.save",
+            serde_json::json!({"path": path.to_str().unwrap()}),
+        );
+        let mut last = epoch(&mut doc, &mut host, &mut call);
+        assert!(last > 0);
+        call(&mut doc, &mut host, 4, "hew.attr.set", attr);
+        last = last.max(epoch(&mut doc, &mut host, &mut call));
+        call(
+            &mut doc,
+            &mut host,
+            5,
+            "hew.doc.revert",
+            serde_json::json!({}),
+        );
+        let after_revert = epoch(&mut doc, &mut host, &mut call);
+        assert!(after_revert > last, "revert: {after_revert} after {last}");
+        call(
+            &mut doc,
+            &mut host,
+            6,
+            "hew.doc.open",
+            serde_json::json!({"path": path.to_str().unwrap()}),
+        );
+        let after_open = epoch(&mut doc, &mut host, &mut call);
+        assert!(
+            after_open > after_revert,
+            "open: {after_open} after {after_revert}"
+        );
+        call(&mut doc, &mut host, 7, "hew.doc.new", serde_json::json!({}));
+        let after_new = epoch(&mut doc, &mut host, &mut call);
+        assert!(
+            after_new > after_open,
+            "new: {after_new} after {after_open}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_first_save_mints_a_document_id_that_save_as_copies_and_documents_keep() {
+        let dir = scratch("document-id");
+        let (first, second, copy) = (dir.join("a.hew"), dir.join("b.hew"), dir.join("c.hew"));
+        let mut host = CliHost::new();
+        let mut doc = Document::new();
+        let registry = api::Registry::protocol_1();
+        let mut conn = api::Connection::new(api::Grant::core(), "test");
+        let mut call = |doc: &mut Document, host: &mut CliHost, method: &str, params| {
+            let request: api::Request = serde_json::from_value(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
+            }))
+            .unwrap();
+            match conn.dispatch(&registry, doc, host, request) {
+                api::DispatchOutcome::Reply(r) => {
+                    assert!(r.error.is_none(), "{method}: {:?}", r.error);
+                    r.result.unwrap()
+                }
+                _ => panic!("{method} replies"),
+            }
+        };
+        call(
+            &mut doc,
+            &mut host,
+            "hew.meta.hello",
+            serde_json::json!({"protocol": 1}),
+        );
+        call(&mut doc, &mut host, "hew.doc.attach", serde_json::json!({}));
+        let listed = |doc: &mut Document,
+                      host: &mut CliHost,
+                      call: &mut dyn FnMut(
+            &mut Document,
+            &mut CliHost,
+            &str,
+            serde_json::Value,
+        ) -> serde_json::Value| {
+            call(doc, host, "hew.meta.documents", serde_json::json!({}))["documents"][0]
+                ["document_id"]
+                .clone()
+        };
+        assert_eq!(
+            listed(&mut doc, &mut host, &mut call),
+            serde_json::Value::Null
+        );
+        let path = |p: &PathBuf| serde_json::json!(p.to_str().unwrap());
+        call(
+            &mut doc,
+            &mut host,
+            "hew.doc.save",
+            serde_json::json!({"path": path(&first)}),
+        );
+        let id = doc.document_id().expect("the first save mints an id");
+        assert_eq!(
+            listed(&mut doc, &mut host, &mut call),
+            serde_json::json!(id)
+        );
+        call(
+            &mut doc,
+            &mut host,
+            "hew.doc.save",
+            serde_json::json!({"path": path(&second)}),
+        );
+        call(
+            &mut doc,
+            &mut host,
+            "hew.doc.save",
+            serde_json::json!({"path": path(&copy), "copy": true}),
+        );
+        for file in [&first, &second, &copy] {
+            let loaded = Document::load(&std::fs::read(file).unwrap()).unwrap();
+            assert_eq!(
+                loaded.document_id().as_deref(),
+                Some(id.as_str()),
+                "{file:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn random_16_differs_call_to_call() {
+        assert_ne!(random_16(), random_16());
     }
 
     #[test]

@@ -6,9 +6,40 @@
 
 use slotmap::SlotMap;
 
+use crate::attr::AttrDict;
 use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, ShellId, VertexId};
 use crate::material::{FaceMaterial, UvFrame};
 use crate::math::{Plane, Point3, Vec3};
+
+/// An index into an [`Object`]'s interned attribute dictionaries
+/// (docs/agents/HEW_API.md §8, face and edge targets), or
+/// [`AttrSlot::NONE`] for an element that carries no dictionary.
+///
+/// Slots are values, never edited in place: a write interns a new
+/// dictionary and repoints the face or edge, so two elements may share a
+/// slot. A slot stays valid for the life of its Object in memory (nothing
+/// renumbers a live table), which is what lets undo snapshots
+/// ([`FaceAttrs::attrs`]) record one by value. Meaningful only against the
+/// Object it was read from; a slot crosses Objects only as the dictionary
+/// it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AttrSlot(pub(crate) u32);
+
+impl AttrSlot {
+    /// No dictionary.
+    pub const NONE: AttrSlot = AttrSlot(u32::MAX);
+
+    /// Whether this is [`AttrSlot::NONE`].
+    pub fn is_none(self) -> bool {
+        self == AttrSlot::NONE
+    }
+}
+
+impl Default for AttrSlot {
+    fn default() -> Self {
+        AttrSlot::NONE
+    }
+}
 
 /// A mesh vertex.
 #[derive(Debug, Clone, Copy)]
@@ -91,6 +122,13 @@ pub struct Edge {
     /// any other transform (a stretched polygon is no longer regular).
     /// Persisted in geometry buffer v7.
     pub polygon: Option<crate::sketch::CurveGeom>,
+    /// The edge's attribute dictionary ([`Object::edge_attrs`]), or
+    /// [`AttrSlot::NONE`]. Like `soft`, it rides the edge's identity: an
+    /// op that keeps the `EdgeId` keeps it, both fragments of a split edge
+    /// take it, and an edge built from positions (a builder, a boolean, a
+    /// component rebuild) starts without one. Persisted in geometry buffer
+    /// v9.
+    pub attrs: AttrSlot,
 }
 
 /// Whether a loop is a face's outer boundary or a hole.
@@ -187,6 +225,11 @@ pub struct FaceAttrs {
     pub uv_frame: Option<UvFrame>,
     /// The face's analytic surface reference (see [`Face::surface`]).
     pub surface: Option<SurfaceRef>,
+    /// The face's attribute dictionary slot (see [`Face::attrs`]). Valid
+    /// against the Object the snapshot was taken from, which is the only
+    /// Object a restore applies it to (slots are never renumbered on a
+    /// live Object).
+    pub attrs: AttrSlot,
 }
 
 /// A planar polygonal face; holes are represented as inner loops.
@@ -222,6 +265,13 @@ pub struct Face {
     /// extruded arc/circle side wall). See [`SurfaceRef`] for the
     /// propagation (map-or-drop) contract. Persisted in geometry buffer v4.
     pub surface: Option<SurfaceRef>,
+    /// The face's attribute dictionary ([`Object::face_attrs`]), or
+    /// [`AttrSlot::NONE`]. A face built from an existing one (a split
+    /// fragment, an imprint, a boolean result face, a thickened copy)
+    /// takes its source's; a face built with no source (extrusion and boss
+    /// walls, caps) has none. A merge keeps the survivor's. Persisted in
+    /// geometry buffer v9.
+    pub attrs: AttrSlot,
 }
 
 impl Face {
@@ -232,6 +282,7 @@ impl Face {
             back_material: self.back_material,
             uv_frame: self.uv_frame,
             surface: self.surface,
+            attrs: self.attrs,
         }
     }
 
@@ -242,6 +293,7 @@ impl Face {
         self.back_material = attrs.back_material;
         self.uv_frame = attrs.uv_frame;
         self.surface = attrs.surface;
+        self.attrs = attrs.attrs;
     }
 }
 
@@ -289,6 +341,13 @@ pub struct Object {
     /// read this, so native objects stay strict while imports are accepted as the
     /// planar polygons they represent. Persisted in geometry buffer v3.
     pub(crate) planarity_tol: f64, // crate::tol::PLANE_DIST by default
+    /// Interned attribute dictionaries that faces and edges point into
+    /// ([`Face::attrs`], [`Edge::attrs`]). Append-only while the Object
+    /// lives: a dictionary nothing references any more stays until the
+    /// Object is saved (the writer emits only referenced ones) or rebuilt,
+    /// so every recorded [`AttrSlot`] stays valid. Never holds an empty
+    /// dictionary (an empty one is [`AttrSlot::NONE`]).
+    pub(crate) attr_dicts: Vec<AttrDict>,
 }
 
 impl Object {
@@ -305,6 +364,7 @@ impl Object {
             watertight: WatertightState::Open,
             default_material: None,
             planarity_tol: crate::tol::PLANE_DIST,
+            attr_dicts: Vec::new(),
         }
     }
 
@@ -357,6 +417,70 @@ impl Object {
     /// own material resolves to. `None` = the renderer's neutral default.
     pub fn default_material(&self) -> FaceMaterial {
         self.default_material
+    }
+
+    /// The dictionary `slot` names in this Object's table, or `None` for
+    /// [`AttrSlot::NONE`] (or a slot this table does not hold).
+    pub(crate) fn attr_dict(&self, slot: AttrSlot) -> Option<&AttrDict> {
+        if slot.is_none() {
+            return None;
+        }
+        self.attr_dicts.get(slot.0 as usize)
+    }
+
+    /// The attribute dictionary of `face` (namespace → key → value), or
+    /// `None` when the face carries none or is not in this Object.
+    pub fn face_attrs(&self, face: FaceId) -> Option<&AttrDict> {
+        self.attr_dict(self.faces.get(face)?.attrs)
+    }
+
+    /// The attribute dictionary of `edge`, or `None` when the edge carries
+    /// none or is not in this Object.
+    pub fn edge_attrs(&self, edge: EdgeId) -> Option<&AttrDict> {
+        self.attr_dict(self.edges.get(edge)?.attrs)
+    }
+
+    /// Whether any live face or edge carries a dictionary.
+    pub(crate) fn has_element_attrs(&self) -> bool {
+        self.faces.values().any(|f| !f.attrs.is_none())
+            || self.edges.values().any(|e| !e.attrs.is_none())
+    }
+
+    /// Interns `dict`: the slot of an equal dictionary already in the
+    /// table, else a new slot. An empty dictionary is [`AttrSlot::NONE`].
+    /// Never edits or renumbers an existing slot.
+    pub(crate) fn intern_attrs(&mut self, dict: AttrDict) -> AttrSlot {
+        if dict.is_empty() {
+            return AttrSlot::NONE;
+        }
+        if let Some(i) = self.attr_dicts.iter().position(|d| *d == dict) {
+            return AttrSlot(i as u32);
+        }
+        self.attr_dicts.push(dict);
+        AttrSlot((self.attr_dicts.len() - 1) as u32)
+    }
+
+    /// Points `face` at `dict` (interned; empty = none) and returns the
+    /// slot it had. The caller guarantees `face` is live.
+    pub(crate) fn set_face_attrs(&mut self, face: FaceId, dict: AttrDict) -> AttrSlot {
+        let slot = self.intern_attrs(dict);
+        std::mem::replace(&mut self.faces[face].attrs, slot)
+    }
+
+    /// Points `edge` at `dict` (interned; empty = none) and returns the
+    /// slot it had. The caller guarantees `edge` is live.
+    pub(crate) fn set_edge_attrs(&mut self, edge: EdgeId, dict: AttrDict) -> AttrSlot {
+        let slot = self.intern_attrs(dict);
+        std::mem::replace(&mut self.edges[edge].attrs, slot)
+    }
+
+    /// Whether two faces of this Object carry equal dictionaries (both
+    /// none counts as equal). The seam-cleanup gate: faces with different
+    /// dictionaries keep the seam between them, as differently painted
+    /// faces do.
+    pub(crate) fn face_attrs_eq(&self, a: FaceId, b: FaceId) -> bool {
+        let (sa, sb) = (self.faces[a].attrs, self.faces[b].attrs);
+        sa == sb || self.attr_dict(sa) == self.attr_dict(sb)
     }
 
     /// The half-edges of `loop_id` in cycle order, starting at its

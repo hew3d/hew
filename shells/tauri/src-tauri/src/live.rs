@@ -7,27 +7,48 @@
 //! and shuttle newline-delimited JSON-RPC frames between the socket and
 //! the webview via Tauri events — `hew://api-frame` (Rust → JS),
 //! `hew://api-reply` (JS → Rust), `hew://api-connection-open`/`-close`
-//! (Rust → JS, connection lifecycle). `crates/wasm-api/src/live.rs`'s
+//! (Rust → JS, connection lifecycle), and `hew://api-event` (JS → Rust, a
+//! server-originated notification for one connection, docs/agents/HEW_API.md
+//! §4.5). Each connection, on either transport, has one writer thread fed
+//! by a channel (`LiveApi::outbound`): replies and events go through it,
+//! so a frame is never split and events interleave between replies. While
+//! a frame waits for its reply the connection's events are held
+//! (`EventGate`) and follow that reply, so an event never arrives ahead of
+//! the reply to the request that caused it. A write that stalls for
+//! `WRITE_TIMEOUT` (a peer that stopped reading) or fails ends the writer,
+//! which shuts the transport down so the connection's reader ends too.
+//! `serve_connection` is that whole per-connection life, written once
+//! against any `BufRead` and any writer; only accept, open, and teardown
+//! differ per transport. `crates/wasm-api/src/live.rs`'s
 //! module doc comment is the JS-facing half of this same contract.
 //!
 //! Unix domain sockets on macOS/Linux, a named pipe on Windows
-//! (`\\.\pipe\hew-<pid>`) — `crates/hew-cli/src/live.rs` (the client side
-//! of this same transport, owned by a different effort) now speaks both.
-//! The unix functions below are unchanged (verified against the real
-//! app); the Windows transport is new, self-contained in a `mod windows`
-//! at the bottom of this file, and shares the platform-independent middle
-//! that already existed for unix — the token gate (`check_and_sanitize_
-//! hello`, `strip_token`), the frame-forwarding Tauri-event shapes
-//! (`FramePayload`/`ConnPayload`/`ReplyPayload`), and `LiveApi`'s
-//! bookkeeping. Only accept/read/write are reimplemented per platform,
-//! since a `UnixListener` and a named pipe `HANDLE` have no common Rust
-//! trait worth abstracting over for two call sites.
+//! (`\\.\pipe\hew-<pid>`); `crates/hew-cli/src/live.rs` is the client side
+//! of both. The two transports share everything above the stream: the
+//! token gate (`check_and_sanitize_hello`, `strip_token`), the
+//! frame-forwarding Tauri-event shapes (`FramePayload`/`ConnPayload`/
+//! `ReplyPayload`), `LiveApi`'s bookkeeping, and the per-connection
+//! reader/writer loop (`serve_connection`, reached through `ConnHost` so
+//! its ordering and teardown are unit-tested against a fake app). Only
+//! accept, the stream itself, and teardown are written per platform, the
+//! Windows half in the `mod windows` at the bottom of this file, with
+//! `#[cfg(windows)]` tests of its own. These tests are the verification
+//! of record: no transport's current code has been driven against the
+//! real app yet.
 //!
-//! The accept loop and every per-connection reader run on plain
-//! `std::thread`s on both platforms — unix over `std::os::unix::net`;
-//! Windows over `windows-sys`'s raw `CreateNamedPipeW`/`ConnectNamedPipe`/
-//! `ReadFile`/`WriteFile` — mirroring `crates/hew-cli/src/live.rs`'s own
-//! client-side transport rather than reaching for the `tokio` already in
+//! The Windows pipe is overlapped: every instance is created with
+//! `FILE_FLAG_OVERLAPPED`, accepted with an overlapped `ConnectNamedPipe`,
+//! and read and written through two `windows::PipeIo` halves, each with
+//! its own `OVERLAPPED` and event, driven by `ReadFile`/`WriteFile`,
+//! `WaitForSingleObject`, `GetOverlappedResult`, and `CancelIoEx`. A
+//! synchronous handle serializes every I/O on it, so a writer's reply or
+//! event would wait behind the reader's `ReadFile`, which waits on the
+//! client's next frame; overlapped, the two run independently.
+//!
+//! The accept loop, every per-connection reader, and every writer run on
+//! plain `std::thread`s on both platforms (each overlapped operation is
+//! waited for on the thread that started it) rather than reaching for the
+//! `tokio` already in
 //! this crate's dependency graph (pulled in transitively by
 //! `tauri`/`reqwest`): one accepted connection is cheap enough as an OS
 //! thread that an async runtime bridge buys nothing here, on either
@@ -60,8 +81,9 @@
 //! property neither platform's transport tries to defeat.
 
 use std::collections::HashMap;
+use std::io::BufRead;
 #[cfg(unix)]
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Mutex};
@@ -70,13 +92,73 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Listener, Manager};
 
 /// How long a per-connection reader waits for the webview's
-/// `hew://api-reply` before giving up on that one frame and answering a
-/// synthesized internal-fault reply — matches
-/// `crates/hew-cli/src/live.rs`'s own `REPLY_TIMEOUT` so a client sees the
-/// same effective ceiling regardless of which side is slow. A timeout
-/// does not close the connection: the client's NEXT frame gets a fresh
-/// wait, so one slow dispatch cannot poison every request after it.
+/// `hew://api-reply` before giving up on that one frame: it answers a
+/// synthesized internal-fault reply and closes the connection (the
+/// dispatch may still be running in the webview, and replies are
+/// correlated by connection, so a late one must not be handed to the next
+/// request). The clock restarts whenever the webview reports
+/// `hew://api-started` for the connection: when a frame queued behind a
+/// plugin command is dispatched, and each time a plugin command ahead of it
+/// finishes (docs/agents/PLUGINS.md "Compounds"). So a client waiting its
+/// turn is timed out only by one command outlasting the clock, never by the
+/// length of the queue. On a timeout the
+/// window is told `hew://api-abort`, which aborts a compound held for the
+/// connection's forward, so a closed socket never leaves the document
+/// held. Above plugin commands' own 50 s ceiling, so a client sees a
+/// plugin's timeout before this one.
 pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// What the webview reports about a frame a connection is waiting on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReplyEvent {
+    /// `hew://api-started`: a queued frame was just dispatched; its reply
+    /// clock starts now.
+    Started,
+    /// `hew://api-reply`: the frame's reply.
+    Reply(String),
+}
+
+/// Reads one of the two reply-channel events (`hew://api-reply`,
+/// `hew://api-started`) into the connection it is for and what it says;
+/// `None` for another event or a payload that does not parse.
+pub(crate) fn route_reply_event(event: &str, payload: &str) -> Option<(u32, ReplyEvent)> {
+    match event {
+        "hew://api-reply" => {
+            let p = serde_json::from_str::<ReplyPayload>(payload).ok()?;
+            Some((p.conn_id, ReplyEvent::Reply(p.frame)))
+        }
+        "hew://api-started" => {
+            let p = serde_json::from_str::<ConnIdPayload>(payload).ok()?;
+            Some((p.conn_id, ReplyEvent::Started))
+        }
+        _ => None,
+    }
+}
+
+/// Registers the reply channel's listeners: the webview calls back into
+/// Rust with a plain `emit` (no Tauri command), and these are the only
+/// places that ever drain `pending_replies`. A reply takes the waiting
+/// slot; a start leaves it for the reply that follows.
+fn listen_for_replies(app: &AppHandle) {
+    for event in ["hew://api-reply", "hew://api-started"] {
+        let handle = app.clone();
+        app.listen_any(event, move |e| {
+            let Some((conn_id, reply)) = route_reply_event(event, e.payload()) else {
+                return;
+            };
+            let state = handle.state::<LiveApi>();
+            let mut pending = state.pending_replies.lock().expect("pending_replies mutex");
+            let tx = match reply {
+                ReplyEvent::Started => pending.get(&conn_id).cloned(),
+                ReplyEvent::Reply(_) => pending.remove(&conn_id),
+            };
+            drop(pending);
+            if let Some(tx) = tx {
+                let _ = tx.send(reply);
+            }
+        });
+    }
+}
 
 /// Live API dispatch bookkeeping, managed as Tauri state. Session-only:
 /// nothing here is persisted or fed into a document's canonical bytes.
@@ -93,7 +175,7 @@ pub(crate) struct LiveApi {
     /// One slot per frame currently awaiting its `hew://api-reply` — filled
     /// just before emitting `hew://api-frame`, drained by the global reply
     /// listener registered in `start`.
-    pub(crate) pending_replies: Mutex<HashMap<u32, mpsc::Sender<String>>>,
+    pub(crate) pending_replies: Mutex<HashMap<u32, mpsc::Sender<ReplyEvent>>>,
     /// The document registry (ids, client labels, dirty marks).
     pub(crate) docs: Mutex<crate::live_router::DocState>,
     pub(crate) next_op_id: AtomicU32,
@@ -103,6 +185,9 @@ pub(crate) struct LiveApi {
     /// Webview-side operations (`hew://api-op`) awaiting their
     /// `hew://api-op-reply`.
     pub(crate) pending_ops: Mutex<HashMap<u32, mpsc::Sender<serde_json::Value>>>,
+    /// Each connection's writer: every line sent here is written to the
+    /// connection whole, replies and events alike, in the order sent.
+    pub(crate) outbound: Mutex<HashMap<u32, EventGate>>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -123,6 +208,310 @@ pub(crate) struct ConnPayload {
 struct ReplyPayload {
     conn_id: u32,
     frame: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnIdPayload {
+    conn_id: u32,
+}
+
+/// `hew://api-event`'s payload: one notification frame for one connection.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EventPayload {
+    conn_id: u32,
+    frame: String,
+}
+
+/// Reads a `hew://api-event` payload into the connection it is for and
+/// the frame; `None` for a payload that does not parse.
+pub(crate) fn route_event_payload(payload: &str) -> Option<(u32, String)> {
+    let p = serde_json::from_str::<EventPayload>(payload).ok()?;
+    Some((p.conn_id, p.frame))
+}
+
+/// Registers the event listener: a notification the webview owes a
+/// connection goes onto that connection's writer, between its replies. A
+/// connection that has gone (or never had a writer) drops it.
+fn listen_for_events(app: &AppHandle) {
+    let handle = app.clone();
+    app.listen_any("hew://api-event", move |e| {
+        let Some((conn_id, frame)) = route_event_payload(e.payload()) else {
+            return;
+        };
+        let state = handle.state::<LiveApi>();
+        let mut outbound = state.outbound.lock().expect("outbound mutex");
+        if let Some(gate) = outbound.get_mut(&conn_id) {
+            gate.offer(frame);
+        }
+    });
+}
+
+/// The names a `hew.event.subscribe`/`unsubscribe` request left the
+/// connection subscribed to, from its reply; `None` when `line` is another
+/// method or the reply is a refusal.
+pub(crate) fn subscribed_after(line: &str, reply: &str) -> Option<Vec<String>> {
+    let request = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    match request.get("method")?.as_str()? {
+        "hew.event.subscribe" | "hew.event.unsubscribe" => {}
+        _ => return None,
+    }
+    let reply = serde_json::from_str::<serde_json::Value>(reply).ok()?;
+    let names = reply.get("result")?.get("subscribed")?.as_array()?;
+    Some(
+        names
+            .iter()
+            .filter_map(|n| n.as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
+/// Records what `conn_id`'s session in window `label` is now subscribed to,
+/// when `line`'s `reply` says.
+pub(crate) fn note_subscriptions(
+    app: &AppHandle,
+    conn_id: u32,
+    label: &str,
+    line: &str,
+    reply: &str,
+) {
+    let Some(names) = subscribed_after(line, reply) else {
+        return;
+    };
+    if let Some(gate) = app
+        .state::<LiveApi>()
+        .outbound
+        .lock()
+        .expect("outbound mutex")
+        .get_mut(&conn_id)
+    {
+        gate.set_window_subscriptions(label, names);
+    }
+}
+
+/// Window `label`'s session for `conn_id` ended: forget its subscriptions.
+pub(crate) fn clear_window_subscriptions(app: &AppHandle, conn_id: u32, label: &str) {
+    if let Some(gate) = app
+        .state::<LiveApi>()
+        .outbound
+        .lock()
+        .expect("outbound mutex")
+        .get_mut(&conn_id)
+    {
+        gate.clear_window(label);
+    }
+}
+
+/// `hew://api-broadcast`'s payload: a document lifecycle frame and the
+/// connections its window already sent it through their own sessions.
+#[derive(serde::Deserialize)]
+struct BroadcastPayload {
+    frame: String,
+    except: Vec<u32>,
+}
+
+/// Reads a `hew://api-broadcast` payload into the event's name and what
+/// to send; `None` for a payload that does not parse or a frame that is
+/// not a `hew.event.<name>` notification.
+pub(crate) fn route_broadcast_payload(payload: &str) -> Option<(String, String, Vec<u32>)> {
+    let p = serde_json::from_str::<BroadcastPayload>(payload).ok()?;
+    let method = serde_json::from_str::<serde_json::Value>(&p.frame)
+        .ok()?
+        .get("method")?
+        .as_str()?
+        .to_string();
+    let name = method.strip_prefix("hew.event.")?.to_string();
+    Some((name, p.frame, p.except))
+}
+
+/// Offers `frame` (event `name`) to every connection subscribed to it
+/// except `except`: the lifecycle of one window reaches a first-party
+/// listener whose session lives in another (docs/agents/HEW_API.md §4.5).
+/// Every socket connection is first-party, so its grant allows the frame
+/// as it is, `path` included.
+pub(crate) fn broadcast_lifecycle(
+    outbound: &mut HashMap<u32, EventGate>,
+    name: &str,
+    frame: &str,
+    except: &[u32],
+) {
+    for (conn_id, gate) in outbound.iter_mut() {
+        if !except.contains(conn_id) && gate.subscribed_to(name) {
+            gate.offer(frame.to_string());
+        }
+    }
+}
+
+fn listen_for_broadcasts(app: &AppHandle) {
+    let handle = app.clone();
+    app.listen_any("hew://api-broadcast", move |e| {
+        let Some((name, frame, except)) = route_broadcast_payload(e.payload()) else {
+            return;
+        };
+        let state = handle.state::<LiveApi>();
+        let mut outbound = state.outbound.lock().expect("outbound mutex");
+        for gate in outbound.values_mut() {
+            gate.retain_windows(|label| handle.get_webview_window(label).is_some());
+        }
+        broadcast_lifecycle(&mut outbound, &name, &frame, &except);
+    });
+}
+
+/// How long one write to a connection may stall before the writer gives
+/// up on the peer. Bounds how long a connection that stopped reading can
+/// hold its threads, its socket, and its queued frames.
+pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One connection's way out for events. The webview reports a frame's
+/// reply and the events that frame caused on separate channels, so the
+/// events could reach the writer first; while a frame awaits its reply
+/// (`hold` .. `release`) events are kept here, and `release`, called once
+/// the reply is queued, sends them after it.
+pub(crate) struct EventGate {
+    tx: mpsc::Sender<String>,
+    held: Option<Vec<String>>,
+    /// The event names the client has subscribed to, per window session, as
+    /// each session's last `hew.event.subscribe`/`unsubscribe` reply listed
+    /// them (a reply lists only its own session). A connection is
+    /// subscribed to the union. Document
+    /// lifecycle events of a window the connection holds no session in
+    /// reach it through this (see [`broadcast_lifecycle`]).
+    subscribed: HashMap<String, std::collections::HashSet<String>>,
+}
+
+impl EventGate {
+    pub(crate) fn new(tx: mpsc::Sender<String>) -> EventGate {
+        EventGate {
+            tx,
+            held: None,
+            subscribed: HashMap::new(),
+        }
+    }
+
+    /// Window `label`'s session now holds exactly `names`.
+    pub(crate) fn set_window_subscriptions(&mut self, label: &str, names: Vec<String>) {
+        self.subscribed
+            .insert(label.to_string(), names.into_iter().collect());
+    }
+
+    /// Window `label`'s session ended or detached: its subscriptions stop
+    /// counting.
+    pub(crate) fn clear_window(&mut self, label: &str) {
+        self.subscribed.remove(label);
+    }
+
+    /// Keeps only the windows `keep` accepts (closed windows drop out).
+    pub(crate) fn retain_windows(&mut self, keep: impl Fn(&str) -> bool) {
+        self.subscribed.retain(|label, _| keep(label));
+    }
+
+    /// Whether any of this connection's window sessions is subscribed to `name`.
+    pub(crate) fn subscribed_to(&self, name: &str) -> bool {
+        self.subscribed.values().any(|names| names.contains(name))
+    }
+
+    /// A frame went to the webview: hold events until its reply is queued.
+    pub(crate) fn hold(&mut self) {
+        self.held.get_or_insert_with(Vec::new);
+    }
+
+    /// An event for this connection: queued now, or held behind a reply.
+    pub(crate) fn offer(&mut self, frame: String) {
+        match &mut self.held {
+            Some(held) => held.push(frame),
+            None => {
+                let _ = self.tx.send(frame);
+            }
+        }
+    }
+
+    /// The reply is queued (or the frame needed none): what was held
+    /// follows it, in order, and events flow straight through again.
+    pub(crate) fn release(&mut self) {
+        for frame in self.held.take().unwrap_or_default() {
+            let _ = self.tx.send(frame);
+        }
+    }
+}
+
+/// A connection's writer: the channel every reply and event for it goes
+/// through, and the thread that writes them. The thread's result says
+/// whether it ended cleanly (every queued line written) or on a failed
+/// or stalled write.
+pub(crate) type Writer = (mpsc::Sender<String>, std::thread::JoinHandle<bool>);
+
+/// Spawns `stream`'s writer thread (see [`spawn_writer_on`]) with writes
+/// bounded by `timeout`. A write that fails or stalls shuts the socket
+/// down, so the connection's reader, blocked on the peer's next frame,
+/// ends too.
+#[cfg(unix)]
+pub(crate) fn spawn_writer(
+    stream: std::os::unix::net::UnixStream,
+    timeout: Duration,
+) -> std::io::Result<Writer> {
+    stream.set_write_timeout(Some(timeout))?;
+    let control = stream.try_clone()?;
+    Ok(spawn_writer_on(stream, move || {
+        let _ = control.shutdown(std::net::Shutdown::Both);
+    }))
+}
+
+/// Spawns the writer thread over any transport: [`write_lines`] on `out`,
+/// then `on_failure` when it stopped on a failed write rather than at the
+/// channel's close. `on_failure` is how a transport tears itself down
+/// for a peer that stopped reading: it must make the connection's
+/// pending read return.
+pub(crate) fn spawn_writer_on<W, F>(out: W, on_failure: F) -> Writer
+where
+    W: std::io::Write + Send + 'static,
+    F: FnOnce() + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel::<String>();
+    let writer = std::thread::spawn(move || {
+        let clean = write_lines(rx, out);
+        if !clean {
+            on_failure();
+        }
+        clean
+    });
+    (tx, writer)
+}
+
+/// A connection's writer thread: writes each line it receives, newline
+/// framed, until the channel closes (every sender dropped, once the queue
+/// is empty: `true`) or a write fails (`false`).
+pub(crate) fn write_lines(rx: mpsc::Receiver<String>, mut out: impl std::io::Write) -> bool {
+    for line in rx {
+        let mut framed = line;
+        framed.push('\n');
+        if out.write_all(framed.as_bytes()).is_err() || out.flush().is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// The next frame a connection sent: one line, trailing whitespace (a
+/// CRLF's `\r` included) trimmed, blank lines skipped, and any
+/// `params.token` stripped (see [`strip_token`]). `None` at the peer's
+/// close, on a read error (a transport torn down by its writer included),
+/// or on a line that is not UTF-8: each ends the connection.
+pub(crate) fn next_frame(reader: &mut impl BufRead) -> Option<String> {
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => return None,
+            Ok(_) => {}
+        }
+        let trimmed = line.trim_end();
+        if !trimmed.is_empty() {
+            // The token gate runs once, on the first frame, but a later
+            // frame (a second `hello`, or anything else) may still CARRY
+            // a token field, and the webview must never see the secret.
+            return Some(strip_token(trimmed));
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -339,7 +728,7 @@ fn write_discovery_file(dir: &Path, pid: u32, socket: &str, token: &str) -> std:
         socket,
         token,
         pid,
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::version::VERSION,
     };
     let json = serde_json::to_vec(&body).expect("DiscoveryFile serializes");
     std::fs::write(&path, &json)?;
@@ -429,25 +818,10 @@ pub fn start(app: &AppHandle) {
         return;
     }
 
-    // The reply channel: the webview calls back into Rust via a plain
-    // `emit("hew://api-reply", {connId, frame})` (no Tauri command/invoke
-    // needed — see crates/wasm-api/src/live.rs's module doc), and this is
-    // the one place that ever drains `pending_replies`.
-    let reply_handle = app.clone();
-    app.listen_any("hew://api-reply", move |event| {
-        let Ok(payload) = serde_json::from_str::<ReplyPayload>(event.payload()) else {
-            return;
-        };
-        let tx = reply_handle
-            .state::<LiveApi>()
-            .pending_replies
-            .lock()
-            .expect("pending_replies mutex")
-            .remove(&payload.conn_id);
-        if let Some(tx) = tx {
-            let _ = tx.send(payload.frame);
-        }
-    });
+    // The reply channel (see `listen_for_replies`).
+    listen_for_replies(app);
+    listen_for_events(app);
+    listen_for_broadcasts(app);
 
     let op_handle = app.clone();
     app.listen_any("hew://api-op-reply", move |event| {
@@ -505,58 +879,136 @@ fn spawn_accept_loop(app: AppHandle, listener: std::os::unix::net::UnixListener,
     });
 }
 
-/// One accepted connection's whole lifetime: the mandatory `hello`+token
-/// handshake (§11.2 — anything else on the first frame is dropped
-/// silently, no bytes written back), then the frame-at-a-time loop until
-/// the peer closes or a write fails. Routing — which window a frame goes
-/// to — is `live_router`'s; this only reads and writes the socket.
+/// One accepted unix connection: [`serve_connection`] over the socket,
+/// then shut it down.
 #[cfg(unix)]
 fn handle_connection(
     app: AppHandle,
-    mut stream: std::os::unix::net::UnixStream,
+    stream: std::os::unix::net::UnixStream,
     token: String,
     window_label: String,
 ) {
-    let mut reader = BufReader::new(match stream.try_clone() {
-        Ok(s) => s,
-        Err(_) => return,
-    });
+    let Ok(read_half) = stream.try_clone() else {
+        return;
+    };
+    let _ = serve_connection(
+        &app,
+        BufReader::new(read_half),
+        &token,
+        &window_label,
+        || spawn_writer(stream.try_clone()?, WRITE_TIMEOUT),
+    );
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
 
+/// One accepted connection's whole lifetime, on any transport: the
+/// mandatory `hello`+token handshake (§11.2 — anything else on the first
+/// frame is dropped silently, no bytes written back), then the
+/// frame-at-a-time loop until the peer closes, the reader fails, or a
+/// write fails. Routing — which window a frame goes to — is
+/// `live_router`'s; this only reads frames from `reader` and hands every
+/// outgoing line to the one writer `open_writer` starts, after the
+/// handshake passed.
+///
+/// Returns once both halves are done: the reader stopped and the writer
+/// thread was joined (it finishes what was queued, a timeout's
+/// synthesized reply included, within `WRITE_TIMEOUT` of a peer that
+/// stopped reading). `None` when the connection never got a writer (the
+/// handshake failed, or the writer could not start); otherwise whether the
+/// writer ended cleanly, every queued line written. The caller owns the
+/// transport's own teardown.
+fn serve_connection<H: ConnHost>(
+    host: &H,
+    mut reader: impl BufRead,
+    token: &str,
+    window_label: &str,
+    open_writer: impl FnOnce() -> std::io::Result<Writer>,
+) -> Option<bool> {
     let mut first_line = String::new();
     if reader.read_line(&mut first_line).unwrap_or(0) == 0 {
-        return; // closed before sending anything
+        return None; // closed before sending anything
     }
-    let Some(sanitized_hello) = check_and_sanitize_hello(&first_line, &token) else {
-        return; // wrong method, missing/wrong token, or malformed — drop silently
-    };
+    // Wrong method, missing/wrong token, or malformed — drop silently.
+    let sanitized_hello = check_and_sanitize_hello(&first_line, token)?;
 
-    let (conn_id, mut route) = register_connection(&app, &window_label);
-
-    let mut write = |out: &str| -> bool {
-        let mut framed = out.to_string();
-        framed.push('\n');
-        stream.write_all(framed.as_bytes()).is_ok() && stream.flush().is_ok()
+    // One writer per connection: replies and events go through the same
+    // channel, so a frame is never split and events land between replies.
+    // Opened before the connection is registered, so a transport that
+    // cannot start one (a failed socket clone) tells the webview nothing.
+    let (tx, writer) = open_writer().ok()?;
+    let (conn_id, mut route) = host.register(window_label);
+    host.gates().insert(conn_id, EventGate::new(tx.clone()));
+    let mut write = |out: &str| -> bool { tx.send(out.to_string()).is_ok() };
+    // Every frame holds this connection's events until its reply is queued.
+    let gate = |f: fn(&mut EventGate)| {
+        if let Some(g) = host.gates().get_mut(&conn_id) {
+            f(g);
+        }
     };
-    let mut ok = serve_frame(&app, &mut route, &sanitized_hello, &mut write);
+    gate(EventGate::hold);
+    let mut ok = host.serve(&mut route, &sanitized_hello, &mut write);
+    gate(EventGate::release);
     while ok {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => break, // peer closed / read error
-            Ok(_) => {}
-        }
-        let trimmed = line.trim_end();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // The token gate runs once, on the first frame — but a later frame
-        // (a second `hello`, or anything else) may still CARRY a token
-        // field, and the webview must never see the secret. Strip it from
-        // every frame, not just the handshake.
-        let sanitized = strip_token(trimmed);
-        ok = serve_frame(&app, &mut route, &sanitized, &mut write);
+        let Some(frame) = next_frame(&mut reader) else {
+            break; // peer closed / read error / transport torn down
+        };
+        gate(EventGate::hold);
+        ok = host.serve(&mut route, &frame, &mut write);
+        gate(EventGate::release);
     }
 
-    unregister_connection(&app, conn_id, &mut route);
+    // Unregistering drops the connection's gate, and with it the gate's
+    // sender; then the last sender goes and the writer finishes what was
+    // queued and exits.
+    host.unregister(conn_id, &mut route);
+    drop(tx);
+    drop(reader);
+    Some(writer.join().unwrap_or(false))
+}
+
+/// What [`serve_connection`] needs from the app: the app itself
+/// (`AppHandle`), or a fake in tests, so the connection loop's ordering
+/// and teardown are tested without a webview.
+trait ConnHost {
+    type Route;
+    /// Registers a connection bound to `window_label`.
+    fn register(&self, window_label: &str) -> (u32, Self::Route);
+    /// Every connection's event gate (`LiveApi::outbound`).
+    fn gates(&self) -> std::sync::MutexGuard<'_, HashMap<u32, EventGate>>;
+    /// Routes one frame; `false` ends the connection (see [`serve_frame`]).
+    fn serve(
+        &self,
+        route: &mut Self::Route,
+        frame: &str,
+        write: &mut dyn FnMut(&str) -> bool,
+    ) -> bool;
+    /// Forgets the connection, its gate included.
+    fn unregister(&self, conn_id: u32, route: &mut Self::Route);
+}
+
+impl ConnHost for AppHandle {
+    type Route = crate::live_router::ConnRoute;
+    fn register(&self, window_label: &str) -> (u32, Self::Route) {
+        register_connection(self, window_label)
+    }
+    fn gates(&self) -> std::sync::MutexGuard<'_, HashMap<u32, EventGate>> {
+        self.state::<LiveApi>()
+            .inner()
+            .outbound
+            .lock()
+            .expect("outbound mutex")
+    }
+    fn serve(
+        &self,
+        route: &mut Self::Route,
+        frame: &str,
+        write: &mut dyn FnMut(&str) -> bool,
+    ) -> bool {
+        serve_frame(self, route, frame, write)
+    }
+    fn unregister(&self, conn_id: u32, route: &mut Self::Route) {
+        unregister_connection(self, conn_id, route);
+    }
 }
 
 /// Registers a freshly accepted connection: binds it to `window_label` (the
@@ -593,6 +1045,11 @@ fn unregister_connection(app: &AppHandle, conn_id: u32, route: &mut crate::live_
         .pending_replies
         .lock()
         .expect("pending_replies mutex")
+        .remove(&conn_id);
+    state
+        .outbound
+        .lock()
+        .expect("outbound mutex")
         .remove(&conn_id);
     route.close_sessions(app);
 }
@@ -726,10 +1183,13 @@ mod windows {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_PIPE_CONNECTED, FALSE, HANDLE,
-        INVALID_HANDLE_VALUE, STILL_ACTIVE,
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_IO_PENDING,
+        ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED, FALSE, HANDLE, INVALID_HANDLE_VALUE,
+        STILL_ACTIVE, TRUE, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -740,15 +1200,18 @@ mod windows {
     use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows_sys::Win32::Storage::FileSystem::{
         FlushFileBuffers, GetFileAttributesW, ReadFile, WriteFile, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_FLAG_FIRST_PIPE_INSTANCE, INVALID_FILE_ATTRIBUTES, PIPE_ACCESS_DUPLEX,
+        FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, INVALID_FILE_ATTRIBUTES,
+        PIPE_ACCESS_DUPLEX,
     };
     use windows_sys::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
         PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        CreateEventW, GetExitCodeProcess, OpenProcess, WaitForSingleObject,
+        PROCESS_QUERY_LIMITED_INFORMATION,
     };
+    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
     fn wide(s: &str) -> Vec<u16> {
         OsStr::new(s)
@@ -765,9 +1228,7 @@ mod windows {
     /// its raw `.0` on the spot a closure captures it), so Rust 2021's
     /// disjoint-capture rule captures the whole newtype — and this `Send`
     /// impl — rather than reaching straight through to the un-`Send` raw
-    /// pointer. See the identical `RawHandle` in
-    /// `crates/hew-cli/src/live.rs`'s Windows transport for the client
-    /// side of the same trick.
+    /// pointer.
     #[derive(Clone, Copy)]
     struct SendableHandle(HANDLE);
     unsafe impl Send for SendableHandle {}
@@ -976,7 +1437,7 @@ mod windows {
             socket,
             token,
             pid,
-            version: env!("CARGO_PKG_VERSION"),
+            version: crate::version::VERSION,
         };
         let json = serde_json::to_vec(&body).expect("DiscoveryFile serializes");
         std::fs::write(&path, &json)
@@ -1063,9 +1524,12 @@ mod windows {
     /// would be wrong for the opposite reason: it would make each of
     /// THIS process's own later, legitimate instances fail the same way,
     /// since by then an instance already exists (created by us).
+    ///
+    /// Every instance is overlapped (`FILE_FLAG_OVERLAPPED`): see
+    /// [`PipeIo`] for why a synchronous handle cannot carry events.
     fn create_pipe_instance(name: &[u16], first: bool) -> std::io::Result<HANDLE> {
         let (sa, guard) = owner_only_security_attributes()?;
-        let mut open_mode = PIPE_ACCESS_DUPLEX;
+        let mut open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
         if first {
             open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
         }
@@ -1151,24 +1615,11 @@ mod windows {
             return;
         }
 
-        // The reply channel: identical to unix's — the webview calls back
-        // into Rust via a plain `emit("hew://api-reply", {connId, frame})`
-        // regardless of which transport is forwarding frames.
-        let reply_handle = app.clone();
-        app.listen_any("hew://api-reply", move |event| {
-            let Ok(payload) = serde_json::from_str::<ReplyPayload>(event.payload()) else {
-                return;
-            };
-            let tx = reply_handle
-                .state::<LiveApi>()
-                .pending_replies
-                .lock()
-                .expect("pending_replies mutex")
-                .remove(&payload.conn_id);
-            if let Some(tx) = tx {
-                let _ = tx.send(payload.frame);
-            }
-        });
+        // The reply channel: identical to unix's, whichever transport is
+        // forwarding frames.
+        super::listen_for_replies(app);
+        super::listen_for_events(app);
+        super::listen_for_broadcasts(app);
         let op_handle = app.clone();
         app.listen_any("hew://api-op-reply", move |event| {
             deliver_op_reply(&op_handle, event.payload());
@@ -1186,53 +1637,87 @@ mod windows {
     /// frames route to is resolved once, at accept time, exactly as unix
     /// does (see unix's `spawn_accept_loop` doc comment for why).
     ///
-    /// The NEXT instance is created before this one is handed off or
-    /// even connected — not after, the way an earlier version of this
-    /// loop ordered it. That ordering left a real gap: a pipe instance is
-    /// connectable to a client from the moment `CreateNamedPipeW` returns
-    /// it, whether or not the server has called `ConnectNamedPipe` on it
-    /// yet, so pre-creating the next instance up front means at least one
-    /// instance is ALWAYS live for the whole time the current one is in
-    /// use. Creating it only after handing the current one off left a
-    /// window — between that instance's own thread finishing and closing
-    /// its handle, and this loop's next `CreateNamedPipeW` call
-    /// completing — where the pipe name could momentarily have ZERO live
-    /// instances, turning a racing client's `CreateFileW` from the
-    /// expected `ERROR_PIPE_BUSY` (which it retries via `WaitNamedPipeW`)
-    /// into `ERROR_FILE_NOT_FOUND` (which, correctly, it does NOT retry —
-    /// see `crates/hew-cli/src/live.rs`'s `RawConn::connect`).
+    /// The NEXT instance is created before this one is connected, so an
+    /// unconnected instance is waiting for the whole time the current one
+    /// is in use: a pipe instance is connectable from the moment
+    /// `CreateNamedPipeW` returns it, and a name with zero waiting
+    /// instances turns a racing client's `CreateFileW` from
+    /// `ERROR_PIPE_BUSY` (which it retries via `WaitNamedPipeW`) into
+    /// `ERROR_FILE_NOT_FOUND` (which, correctly, it does NOT retry — see
+    /// `crates/hew-cli/src/live.rs`'s `RawConn::connect`).
+    ///
+    /// Creating an instance can fail transiently (resource exhaustion).
+    /// The loop never gives up on that — the discovery file keeps
+    /// advertising this pipe, so stopping would strand every later
+    /// client: a failed pre-create is tried again right after the current
+    /// instance connects, before it is handed off, and a failed create of
+    /// the current instance is retried with a backoff up to
+    /// `ACCEPT_RETRY_MAX`. Only while those retries keep failing does the
+    /// name have no waiting instance.
     fn spawn_accept_loop(
         app: AppHandle,
         name: String,
         token: String,
         first_handle: SendableHandle,
     ) {
+        const ACCEPT_RETRY_MIN: Duration = Duration::from_millis(100);
+        const ACCEPT_RETRY_MAX: Duration = Duration::from_secs(5);
         std::thread::spawn(move || {
             let name_w = wide(&name);
-            let mut handle = first_handle;
+            let mut backoff = ACCEPT_RETRY_MIN;
+            // The accept loop's own event for its overlapped
+            // `ConnectNamedPipe`; lives as long as the loop. The first
+            // instance already exists, so clients queue on it meanwhile.
+            let accept_event = loop {
+                match Event::new() {
+                    Ok(e) => break e,
+                    Err(e) => {
+                        eprintln!(
+                            "hew: live API accept loop — could not create an event (retrying in {backoff:?}): {e}"
+                        );
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(ACCEPT_RETRY_MAX);
+                    }
+                }
+            };
+            backoff = ACCEPT_RETRY_MIN;
+            let mut waiting = Some(first_handle);
             loop {
-                let next_handle = match create_pipe_instance(&name_w, false) {
+                let handle = match waiting.take() {
+                    Some(h) => h,
+                    None => match create_pipe_instance(&name_w, false) {
+                        Ok(h) => SendableHandle(h),
+                        Err(e) => {
+                            eprintln!(
+                                "hew: live API accept loop — could not create a pipe instance (retrying in {backoff:?}): {e}"
+                            );
+                            std::thread::sleep(backoff);
+                            backoff = (backoff * 2).min(ACCEPT_RETRY_MAX);
+                            continue;
+                        }
+                    },
+                };
+                backoff = ACCEPT_RETRY_MIN;
+
+                let pre_create = || match create_pipe_instance(&name_w, false) {
                     Ok(h) => Some(SendableHandle(h)),
                     Err(e) => {
                         eprintln!(
-                            "hew: live API accept loop — could not pre-create the next pipe instance (will retry next iteration): {e}"
+                            "hew: live API accept loop — could not pre-create the next pipe instance (retrying): {e}"
                         );
                         None
                     }
                 };
+                let mut next_handle = pre_create();
+                let connected = connect_client(handle, &accept_event);
+                if next_handle.is_none() {
+                    // The current instance is about to stop waiting: try
+                    // again now, so no client meets a name with no
+                    // instance while the next one could exist.
+                    next_handle = pre_create();
+                }
 
-                let connected = unsafe { ConnectNamedPipe(handle.0, ptr::null_mut()) };
-                // `connected == 0` with `GetLastError() == ERROR_PIPE_CONNECTED`
-                // means a client connected in the window between this
-                // instance's `CreateNamedPipeW` and this `ConnectNamedPipe`
-                // call — a benign, documented Win32 race where the
-                // connection IS already established, not a failure; it is
-                // handled identically to `connected != 0` below (verified
-                // against Win32 docs — adversarial review flagged this
-                // path as unverified, not as wrong).
-                let usable = connected != 0 || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
-
-                if usable {
+                if connected {
                     if let Some(window) = crate::active_document_window(&app) {
                         let app = app.clone();
                         let token = token.clone();
@@ -1255,158 +1740,295 @@ mod windows {
                     unsafe { CloseHandle(handle.0) };
                 }
 
-                handle = match next_handle {
-                    Some(h) => h,
-                    None => match create_pipe_instance(&name_w, false) {
-                        Ok(h) => SendableHandle(h),
-                        Err(e) => {
-                            eprintln!(
-                                "hew: live API accept loop stopping — could not create a pipe instance: {e}"
-                            );
-                            return;
-                        }
-                    },
-                };
+                waiting = next_handle;
             }
         });
     }
 
-    /// One accepted connection's whole lifetime — the Windows analogue of
-    /// unix's `handle_connection`: the mandatory `hello`+token handshake,
-    /// then the frame-at-a-time forward loop until the peer closes or a
-    /// write fails, sharing `check_and_sanitize_hello`/`strip_token` with
-    /// the unix path verbatim.
+    /// Waits for a client on `handle`, an overlapped instance: an
+    /// overlapped `ConnectNamedPipe` waited on with `event`. `true` when a
+    /// client is connected, `ERROR_PIPE_CONNECTED` included: a client that
+    /// connected between this instance's `CreateNamedPipeW` and this call is
+    /// a benign, documented Win32 race, not a failure.
+    fn connect_client(handle: SendableHandle, event: &Event) -> bool {
+        // SAFETY: OVERLAPPED is plain data; all-zero is its documented
+        // initial state.
+        let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
+        ov.hEvent = event.0;
+        if unsafe { ConnectNamedPipe(handle.0, &mut ov) } != 0 {
+            return true;
+        }
+        match unsafe { GetLastError() } {
+            ERROR_PIPE_CONNECTED => true,
+            ERROR_IO_PENDING => {
+                // Wait for the client: `ov` and the event must outlive the
+                // pending operation, and this does.
+                let mut n: u32 = 0;
+                unsafe { GetOverlappedResult(handle.0, &ov, &mut n, TRUE) != 0 }
+            }
+            _ => false,
+        }
+    }
+
+    /// One accepted connection: [`serve_connection`] over the pipe, read
+    /// and written through two [`PipeIo`] halves, then the pipe's own
+    /// teardown.
     fn handle_connection(
         app: AppHandle,
         handle: SendableHandle,
         token: String,
         window_label: String,
     ) {
-        let mut leftover: Vec<u8> = Vec::new();
-        let Some(first_line) = read_line(handle, &mut leftover) else {
-            unsafe {
-                DisconnectNamedPipe(handle.0);
-                CloseHandle(handle.0);
-            }
-            return; // closed before sending anything
+        let pipe = Arc::new(Pipe::new(handle));
+        let outcome = match PipeIo::new(pipe.clone(), None) {
+            Ok(read_half) => serve_connection(
+                &app,
+                std::io::BufReader::new(read_half),
+                &token,
+                &window_label,
+                || {
+                    let write_half = PipeIo::new(pipe.clone(), Some(WRITE_TIMEOUT))?;
+                    let control = pipe.clone();
+                    Ok(spawn_writer_on(write_half, move || control.abort()))
+                },
+            ),
+            Err(_) => None,
         };
-        let Some(sanitized_hello) = check_and_sanitize_hello(&first_line, &token) else {
-            unsafe {
-                DisconnectNamedPipe(handle.0);
-                CloseHandle(handle.0);
-            }
-            return; // wrong method, missing/wrong token, or malformed — drop silently
-        };
-
-        let (conn_id, mut route) = super::register_connection(&app, &window_label);
-
-        let mut write = |out: &str| -> bool {
-            let mut framed = out.to_string();
-            framed.push('\n');
-            write_all(handle, framed.as_bytes()).is_ok()
-        };
-        let mut ok = super::serve_frame(&app, &mut route, &sanitized_hello, &mut write);
-        while ok {
-            let Some(line) = read_line(handle, &mut leftover) else {
-                break; // peer closed / read error
-            };
-            // `trim_end`, not a bare emptiness check on `line` — `read_line`
-            // only strips the `\n` byte itself, so a CRLF-terminated blank
-            // line would otherwise still carry a lone `\r` and fail to
-            // match unix's `line.trim_end().is_empty()` skip (unix's
-            // `BufReader::read_line` also keeps the `\n`, trimmed the same
-            // way). Adversarial review found this platform divergence.
-            let trimmed = line.trim_end();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let sanitized = strip_token(trimmed);
-            ok = super::serve_frame(&app, &mut route, &sanitized, &mut write);
-        }
-
-        super::unregister_connection(&app, conn_id, &mut route);
-
-        unsafe {
-            // `FlushFileBuffers` before `DisconnectNamedPipe` — NOT
-            // optional. `DisconnectNamedPipe` forcibly tears down the
-            // connection, discarding any bytes the server has written
-            // that the client has not yet read; unlike a unix domain
-            // socket's `close` (where already-transmitted-but-unread data
-            // survives in the kernel buffer for the peer to still read),
-            // a named pipe has no such grace. Without this flush, the
-            // synthesized reply `serve_frame` writes right before
-            // returning `false` on a reply timeout — the load-bearing
-            // "the desktop app did not reply in time" answer — could be
-            // destroyed before the client ever sees it. `FlushFileBuffers`
-            // on a named pipe blocks until the client has read everything
-            // written or the pipe breaks, which is the standard remedy
-            // and is sufficient here: every write on this connection
-            // (`serve_frame`'s `write_all`) already completed
-            // before this point, so there is nothing still being written
-            // for it to race against. The one residual cost is that a
-            // client that stops reading entirely (frozen, not merely
-            // slow) can block this call indefinitely — this thread is
-            // per-connection and blocking it does not affect any other
-            // connection or the app itself, the same tradeoff every other
-            // blocking call in this transport already accepts.
-            FlushFileBuffers(handle.0);
-            DisconnectNamedPipe(handle.0);
-            CloseHandle(handle.0);
-        }
+        // Both halves are done here: the reader returned and the writer was
+        // joined, so no I/O is pending on the handle.
+        pipe.disconnect(outcome == Some(true));
     }
 
-    /// Reads one newline-delimited frame from `handle`, blocking — no
-    /// per-read timeout here, mirroring unix's own incoming-frame read
-    /// (`BufReader::read_line` has none either): the connection just waits
-    /// for the client's next frame or its close. `leftover` carries any
-    /// bytes read past the last newline forward to the next call, since a
-    /// named pipe `HANDLE` has no built-in line buffering the way
-    /// `BufReader` gives unix for free. `None` for EOF, a hard read error,
-    /// or a line that is not valid UTF-8 — the same three cases unix's
-    /// `Ok(0) | Err(_)` collapses into "the connection is done".
-    fn read_line(handle: SendableHandle, leftover: &mut Vec<u8>) -> Option<String> {
-        loop {
-            if let Some(pos) = leftover.iter().position(|&b| b == b'\n') {
-                let mut line: Vec<u8> = leftover.drain(..=pos).collect();
-                line.pop(); // the newline itself
-                return String::from_utf8(line).ok();
-            }
-            let mut buf = [0u8; 4096];
-            let mut n: u32 = 0;
-            let ok = unsafe {
-                ReadFile(
-                    handle.0,
-                    buf.as_mut_ptr(),
-                    buf.len() as u32,
-                    &mut n,
-                    ptr::null_mut(),
-                )
-            };
-            if ok == 0 || n == 0 {
-                return None;
-            }
-            leftover.extend_from_slice(&buf[..n as usize]);
-        }
-    }
+    /// A manual-reset event for one overlapped operation at a time, closed
+    /// on drop.
+    struct Event(HANDLE);
 
-    fn write_all(handle: SendableHandle, mut buf: &[u8]) -> std::io::Result<()> {
-        while !buf.is_empty() {
-            let mut n: u32 = 0;
-            let ok = unsafe {
-                WriteFile(
-                    handle.0,
-                    buf.as_ptr(),
-                    buf.len().min(u32::MAX as usize) as u32,
-                    &mut n,
-                    ptr::null_mut(),
-                )
-            };
-            if ok == 0 {
+    // SAFETY: an event handle names a process-wide kernel object, usable
+    // from any thread.
+    unsafe impl Send for Event {}
+
+    impl Event {
+        fn new() -> std::io::Result<Event> {
+            // Manual reset: `GetOverlappedResult` waits on it, and every
+            // overlapped `ReadFile`/`WriteFile`/`ConnectNamedPipe` resets it
+            // when the operation starts.
+            let event = unsafe { CreateEventW(ptr::null(), TRUE, FALSE, ptr::null()) };
+            if event.is_null() {
                 return Err(std::io::Error::last_os_error());
             }
-            buf = &buf[n as usize..];
+            Ok(Event(event))
         }
-        Ok(())
+    }
+
+    impl Drop for Event {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    /// One connected pipe instance, shared by its reader, its writer, and
+    /// the writer's failure hook; the last owner closes the handle.
+    struct Pipe {
+        handle: HANDLE,
+        /// Set once by [`Pipe::abort`]: no new I/O starts, and any I/O that
+        /// started anyway is cancelled (see [`PipeIo::run`]).
+        aborted: AtomicBool,
+    }
+
+    // SAFETY: the pipe handle names a process-wide kernel object;
+    // overlapped ReadFile/WriteFile/CancelIoEx on it are documented safe
+    // from any thread, each operation with its own OVERLAPPED and event.
+    unsafe impl Send for Pipe {}
+    unsafe impl Sync for Pipe {}
+
+    impl Pipe {
+        fn new(handle: SendableHandle) -> Pipe {
+            Pipe {
+                handle: handle.0,
+                aborted: AtomicBool::new(false),
+            }
+        }
+
+        /// Tears the connection down from the writer's side: every read or
+        /// write pending on the handle, from any thread, completes with
+        /// `ERROR_OPERATION_ABORTED`, and none starts after. The writer
+        /// calls this when a write failed or stalled past `WRITE_TIMEOUT`,
+        /// so the reader, waiting on the peer's next frame, ends too.
+        fn abort(&self) {
+            self.aborted.store(true, Ordering::SeqCst);
+            unsafe { CancelIoEx(self.handle, ptr::null()) };
+        }
+
+        /// The end of a connection, once nothing is pending on the handle.
+        /// `flush` waits for the client to read what was written before
+        /// `DisconnectNamedPipe`, which discards unread bytes (unlike
+        /// closing a unix socket): without it, the synthesized reply a
+        /// reply timeout writes right before closing could be destroyed
+        /// before the client sees it. It is passed only when the writer
+        /// ended cleanly: a writer that stalled already gave up on a peer
+        /// that stopped reading, and flushing to that peer would block
+        /// forever. The residual: a client that stops reading in the last
+        /// moments, with a clean writer, can still hold this one
+        /// connection's thread in the flush; no other connection or the app
+        /// waits on it.
+        fn disconnect(&self, flush: bool) {
+            unsafe {
+                if flush {
+                    FlushFileBuffers(self.handle);
+                }
+                DisconnectNamedPipe(self.handle);
+            }
+        }
+    }
+
+    impl Drop for Pipe {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.handle) };
+        }
+    }
+
+    /// One direction of a connected pipe as `Read` or `Write`: the reader
+    /// and the writer each own one, with its own `OVERLAPPED` and event.
+    ///
+    /// Why overlapped: a synchronous pipe handle serializes every I/O on
+    /// it, so a writer thread's reply or event would wait behind the
+    /// reader thread's `ReadFile`, which waits on the client's next frame,
+    /// possibly forever (an `events --live` client never sends one). With
+    /// `FILE_FLAG_OVERLAPPED` the two run independently. Each call starts
+    /// one operation and waits for it to finish, so from the caller's side
+    /// it is a plain blocking read or write, and the buffer and the
+    /// `OVERLAPPED` are never released while the operation is in flight:
+    /// a timed-out or aborted operation is cancelled and then waited for
+    /// before the call returns.
+    struct PipeIo {
+        pipe: Arc<Pipe>,
+        event: Event,
+        /// A write's bound (`WRITE_TIMEOUT`); `None` waits as long as the
+        /// operation takes (a read waits on the client's next frame, as
+        /// unix's does).
+        timeout: Option<Duration>,
+    }
+
+    impl PipeIo {
+        fn new(pipe: Arc<Pipe>, timeout: Option<Duration>) -> std::io::Result<PipeIo> {
+            Ok(PipeIo {
+                pipe,
+                event: Event::new()?,
+                timeout,
+            })
+        }
+
+        /// Starts one overlapped operation through `start` and waits for
+        /// it: bytes transferred, or the error it ended with. A timeout
+        /// cancels it and answers `TimedOut`; an aborted pipe answers
+        /// `ConnectionAborted`.
+        fn run(
+            &mut self,
+            start: impl FnOnce(HANDLE, *mut OVERLAPPED) -> i32,
+        ) -> std::io::Result<u32> {
+            let handle = self.pipe.handle;
+            if self.pipe.aborted.load(Ordering::SeqCst) {
+                return Err(std::io::ErrorKind::ConnectionAborted.into());
+            }
+            // SAFETY: OVERLAPPED is plain data; all-zero is its documented
+            // initial state. It stays on this frame until the operation is
+            // finished (below), so its address is stable for the kernel.
+            let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
+            ov.hEvent = self.event.0;
+            // TRUE: the operation already finished, so there is nothing to
+            // wait for or cancel; the event is only waited on for an
+            // operation that is still pending (see the wait below).
+            let pending = if start(handle, &mut ov) == 0 {
+                let err = unsafe { GetLastError() };
+                if err != ERROR_IO_PENDING {
+                    return Err(std::io::Error::from_raw_os_error(err as i32));
+                }
+                true
+            } else {
+                false
+            };
+            // An abort that raced the start (it ran between the check
+            // above and the operation reaching the kernel) is caught here:
+            // `abort` sets the flag before it cancels, so either its
+            // `CancelIoEx` saw this operation or this load sees the flag.
+            let mut cancelled = false;
+            if pending && self.pipe.aborted.load(Ordering::SeqCst) {
+                unsafe { CancelIoEx(handle, &ov) };
+                cancelled = true;
+            }
+            let mut timed_out = false;
+            if let (Some(timeout), true, false) = (self.timeout, pending, cancelled) {
+                let ms = timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32;
+                if unsafe { WaitForSingleObject(self.event.0, ms) } != WAIT_OBJECT_0 {
+                    unsafe { CancelIoEx(handle, &ov) };
+                    timed_out = true;
+                }
+            }
+            // Waits for the operation to finish, cancelled or not; after
+            // this the kernel no longer touches `ov` or the buffer. For a
+            // finished operation it returns at once: it reads the status
+            // from `ov` and waits on the event only while that status is
+            // still pending. (The event is signalled on completion either
+            // way; only `FILE_SKIP_SET_EVENT_ON_HANDLE`, never set here,
+            // changes signalling, and that one affects the file handle,
+            // not `hEvent`. Skipping the wait for a synchronous completion
+            // keeps this correct without relying on it.)
+            let mut n: u32 = 0;
+            if unsafe { GetOverlappedResult(handle, &ov, &mut n, TRUE) } != 0 {
+                // Finished before the cancel landed: the bytes count.
+                return Ok(n);
+            }
+            let err = unsafe { GetLastError() };
+            if err == ERROR_OPERATION_ABORTED {
+                if timed_out {
+                    return Err(std::io::ErrorKind::TimedOut.into());
+                }
+                return Err(std::io::ErrorKind::ConnectionAborted.into());
+            }
+            Err(std::io::Error::from_raw_os_error(err as i32))
+        }
+    }
+
+    impl std::io::Read for PipeIo {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            let len = buf.len().min(u32::MAX as usize) as u32;
+            let ptr = buf.as_mut_ptr();
+            match self.run(|handle, ov| unsafe { ReadFile(handle, ptr, len, ptr::null_mut(), ov) })
+            {
+                Ok(n) => Ok(n as usize),
+                // The client closed its end: end of stream, as a 0-byte
+                // unix read.
+                Err(e) if e.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) => Ok(0),
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    /// The most one overlapped `WriteFile` carries. A pipe write finishes
+    /// only once the client has taken its bytes, so the write bound is per
+    /// chunk: like unix's per-`write` socket timeout, it trips on a client
+    /// that stopped reading, not on one still reading a large frame.
+    const WRITE_CHUNK: usize = 64 * 1024;
+
+    impl std::io::Write for PipeIo {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            let len = buf.len().min(WRITE_CHUNK) as u32;
+            let ptr = buf.as_ptr();
+            self.run(|handle, ov| unsafe { WriteFile(handle, ptr, len, ptr::null_mut(), ov) })
+                .map(|n| n as usize)
+        }
+
+        /// Every write has finished by the time it returns; nothing is
+        /// buffered here.
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     #[cfg(test)]
@@ -1511,6 +2133,160 @@ mod windows {
             assert!(!is_reparse_point(&dir));
             let _ = std::fs::remove_dir_all(&dir);
         }
+
+        // ------------------------------------------- overlapped pipe I/O
+
+        /// A connected pair over a fresh overlapped instance: the server
+        /// end as `create_pipe_instance` and `connect_client` make it, the
+        /// client end opened overlapped the way `hew-cli` opens it.
+        fn pipe_pair(tag: &str) -> (Arc<Pipe>, Arc<Pipe>) {
+            use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+            use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING};
+            let name = format!(
+                r"\\.\pipe\hew-live-test-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            let name_w = wide(&name);
+            let server = SendableHandle(create_pipe_instance(&name_w, true).unwrap());
+            let accept = std::thread::spawn(move || {
+                let server = server;
+                let event = Event::new().unwrap();
+                assert!(connect_client(server, &event));
+                server
+            });
+            let client = unsafe {
+                CreateFileW(
+                    name_w.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0,
+                    ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_OVERLAPPED,
+                    ptr::null_mut(),
+                )
+            };
+            assert_ne!(client, INVALID_HANDLE_VALUE, "the client end opens");
+            let server = accept.join().unwrap();
+            (
+                Arc::new(Pipe::new(server)),
+                Arc::new(Pipe::new(SendableHandle(client))),
+            )
+        }
+
+        /// Runs `f` on a thread and waits at most `bound` for it.
+        fn within<T: Send + 'static>(
+            bound: Duration,
+            f: impl FnOnce() -> T + Send + 'static,
+        ) -> Option<T> {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(f());
+            });
+            rx.recv_timeout(bound).ok()
+        }
+
+        /// A thread waiting on `server`'s next frame.
+        fn pending_reader(server: &Arc<Pipe>) -> std::thread::JoinHandle<Option<String>> {
+            let pipe = server.clone();
+            std::thread::spawn(move || {
+                let mut reader = std::io::BufReader::new(PipeIo::new(pipe, None).unwrap());
+                next_frame(&mut reader)
+            })
+        }
+
+        /// The reason for overlapped I/O: while the reader waits on the
+        /// client's next frame, the writer's frames still go out, whole and
+        /// in order, and the reader then gets the client's frame.
+        #[test]
+        fn a_pending_read_does_not_hold_up_the_writer() {
+            let (server, client) = pipe_pair("pending-read");
+            let reader = pending_reader(&server);
+            std::thread::sleep(Duration::from_millis(100)); // the read is pending
+            let (tx, writer) = spawn_writer_on(
+                PipeIo::new(server.clone(), Some(Duration::from_secs(5))).unwrap(),
+                || {},
+            );
+            tx.send(r#"{"id":1,"result":{}}"#.into()).unwrap();
+            tx.send(r#"{"method":"hew.event.units_changed"}"#.into())
+                .unwrap();
+            let client_reader = client.clone();
+            let got = within(Duration::from_secs(5), move || {
+                let mut r = std::io::BufReader::new(PipeIo::new(client_reader, None).unwrap());
+                let mut lines = Vec::new();
+                for _ in 0..2 {
+                    let mut line = String::new();
+                    r.read_line(&mut line).unwrap();
+                    lines.push(line);
+                }
+                lines
+            })
+            .expect("the writer's frames arrive while a read is pending");
+            assert_eq!(
+                got,
+                vec![
+                    "{\"id\":1,\"result\":{}}\n".to_string(),
+                    "{\"method\":\"hew.event.units_changed\"}\n".to_string()
+                ]
+            );
+            let mut client_writer = PipeIo::new(client.clone(), None).unwrap();
+            std::io::Write::write_all(&mut client_writer, b"{\"id\":2}\r\n").unwrap();
+            assert_eq!(reader.join().unwrap().as_deref(), Some("{\"id\":2}"));
+            drop(tx);
+            assert!(writer.join().unwrap(), "a drained writer ends cleanly");
+        }
+
+        /// `abort` cancels a read pending on another thread, and no I/O
+        /// starts after it.
+        #[test]
+        fn abort_ends_a_pending_read() {
+            let (server, _client) = pipe_pair("abort");
+            let reader = pending_reader(&server);
+            std::thread::sleep(Duration::from_millis(100));
+            server.abort();
+            let ended = within(Duration::from_secs(5), move || reader.join().unwrap());
+            assert_eq!(ended, Some(None), "the pending read ends on abort");
+            let mut late = PipeIo::new(server, None).unwrap();
+            let err = std::io::Read::read(&mut late, &mut [0u8; 8]).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::ConnectionAborted);
+        }
+
+        /// A client that stops reading: the write stalls past its bound,
+        /// the writer ends unclean, and its failure hook ends the reader.
+        #[test]
+        fn a_peer_that_stops_reading_ends_the_writer_and_the_reader() {
+            let (server, _client) = pipe_pair("stalled");
+            let reader = pending_reader(&server);
+            let control = server.clone();
+            let (tx, writer) = spawn_writer_on(
+                PipeIo::new(server.clone(), Some(Duration::from_millis(100))).unwrap(),
+                move || control.abort(),
+            );
+            let big = "x".repeat(1 << 20);
+            for _ in 0..4 {
+                let _ = tx.send(big.clone());
+            }
+            drop(tx);
+            let clean = within(Duration::from_secs(5), move || writer.join().unwrap());
+            assert_eq!(clean, Some(false), "the stalled write gives up in time");
+            let ended = within(Duration::from_secs(5), move || reader.join().unwrap());
+            assert_eq!(ended, Some(None), "the reader ends with the writer");
+        }
+
+        /// The client closing its end is the end of the stream.
+        #[test]
+        fn the_client_closing_is_end_of_stream() {
+            let (server, client) = pipe_pair("close");
+            let reader = pending_reader(&server);
+            std::thread::sleep(Duration::from_millis(100));
+            drop(client);
+            let ended = within(Duration::from_secs(5), move || reader.join().unwrap());
+            assert_eq!(ended, Some(None));
+            server.disconnect(false);
+        }
     }
 }
 
@@ -1587,6 +2363,498 @@ mod tests {
     #[test]
     fn check_and_sanitize_hello_rejects_malformed_json() {
         assert!(check_and_sanitize_hello("not json at all", "secret").is_none());
+    }
+
+    #[test]
+    fn reply_events_route_to_their_connection() {
+        assert_eq!(
+            route_reply_event("hew://api-reply", r#"{"connId":4,"frame":"{}"}"#),
+            Some((4, ReplyEvent::Reply("{}".into())))
+        );
+        assert_eq!(
+            route_reply_event("hew://api-started", r#"{"connId":9}"#),
+            Some((9, ReplyEvent::Started))
+        );
+        assert_eq!(route_reply_event("hew://api-started", "nope"), None);
+        assert_eq!(
+            route_reply_event("hew://api-reply", r#"{"connId":4}"#),
+            None
+        );
+        assert_eq!(
+            route_reply_event("hew://api-queued", r#"{"connId":4}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn event_payloads_route_to_their_connection() {
+        assert_eq!(
+            route_event_payload(r#"{"connId":3,"frame":"{\"jsonrpc\":\"2.0\"}"}"#),
+            Some((3, r#"{"jsonrpc":"2.0"}"#.to_string()))
+        );
+        assert_eq!(route_event_payload(r#"{"connId":3}"#), None);
+        assert_eq!(route_event_payload("nope"), None);
+    }
+
+    #[test]
+    fn subscriptions_are_read_from_the_reply() {
+        let sub = r#"{"jsonrpc":"2.0","id":2,"method":"hew.event.subscribe","params":{"events":["document_opened"]}}"#;
+        let ok = r#"{"jsonrpc":"2.0","id":2,"result":{"subscribed":["document_closed","document_opened"],"denied":[]}}"#;
+        assert_eq!(
+            subscribed_after(sub, ok),
+            Some(vec![
+                "document_closed".to_string(),
+                "document_opened".to_string()
+            ])
+        );
+        let bad =
+            r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"unknown event name: x"}}"#;
+        assert_eq!(subscribed_after(sub, bad), None);
+        let other = r#"{"jsonrpc":"2.0","id":3,"method":"hew.meta.hello","params":{}}"#;
+        assert_eq!(subscribed_after(other, ok), None);
+    }
+
+    #[test]
+    fn a_lifecycle_broadcast_reaches_subscribers_not_already_served() {
+        let frame = r#"{"jsonrpc":"2.0","method":"hew.event.document_opened","params":{"document":"doc_2"}}"#;
+        let payload = serde_json::json!({ "frame": frame, "except": [2] }).to_string();
+        let (name, f, except) = route_broadcast_payload(&payload).unwrap();
+        assert_eq!(name, "document_opened");
+        assert_eq!(f, frame);
+        assert_eq!(
+            route_broadcast_payload(r#"{"frame":"{}","except":[]}"#),
+            None
+        );
+        assert_eq!(route_broadcast_payload("nope"), None);
+
+        let mut outbound = HashMap::new();
+        let mut rxs = Vec::new();
+        for (id, subs) in [
+            (1u32, vec!["document_opened"]),
+            (2, vec!["document_opened"]),
+            (3, vec!["document_closed"]),
+            (4, vec![]),
+        ] {
+            let (tx, rx) = mpsc::channel();
+            let mut gate = EventGate::new(tx);
+            gate.set_window_subscriptions("A", subs.into_iter().map(String::from).collect());
+            outbound.insert(id, gate);
+            rxs.push((id, rx));
+        }
+        broadcast_lifecycle(&mut outbound, &name, &f, &except);
+        for (id, rx) in rxs {
+            let got: Vec<String> = rx.try_iter().collect();
+            match id {
+                1 => assert_eq!(got, vec![frame.to_string()]),
+                _ => assert!(got.is_empty(), "conn {id} got {got:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn subscriptions_are_kept_per_window_and_unioned() {
+        let (tx, _rx) = mpsc::channel();
+        let mut gate = EventGate::new(tx);
+        // document_opened in window A, selection_changed in window B: the
+        // connection is subscribed to both.
+        gate.set_window_subscriptions("A", vec!["document_opened".to_string()]);
+        gate.set_window_subscriptions("B", vec!["selection_changed".to_string()]);
+        assert!(gate.subscribed_to("document_opened"));
+        assert!(gate.subscribed_to("selection_changed"));
+        // B's later reply replaces only B's set.
+        gate.set_window_subscriptions("B", vec![]);
+        assert!(gate.subscribed_to("document_opened"));
+        assert!(!gate.subscribed_to("selection_changed"));
+        // Re-attaching A with a different set replaces A's, nothing else.
+        gate.set_window_subscriptions("B", vec!["document_closed".to_string()]);
+        gate.set_window_subscriptions("A", vec!["tool_changed".to_string()]);
+        assert!(!gate.subscribed_to("document_opened"));
+        assert!(gate.subscribed_to("document_closed"));
+        // A closed session or detached window stops counting.
+        gate.clear_window("B");
+        assert!(!gate.subscribed_to("document_closed"));
+        assert!(gate.subscribed_to("tool_changed"));
+        // Windows that no longer exist are dropped.
+        gate.retain_windows(|label| label != "A");
+        assert!(!gate.subscribed_to("tool_changed"));
+    }
+
+    #[test]
+    fn a_broadcast_follows_the_union_across_windows() {
+        let frame = r#"{"jsonrpc":"2.0","method":"hew.event.document_opened","params":{}}"#;
+        let (tx, rx) = mpsc::channel();
+        let mut gate = EventGate::new(tx);
+        gate.set_window_subscriptions("A", vec!["document_opened".to_string()]);
+        gate.set_window_subscriptions("B", vec!["selection_changed".to_string()]);
+        let mut outbound = HashMap::from([(1u32, gate)]);
+        broadcast_lifecycle(&mut outbound, "document_opened", frame, &[]);
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![frame.to_string()]);
+    }
+
+    /// The writer writes each line whole, newline framed, in send order,
+    /// and finishes the queue after the last sender goes.
+    #[test]
+    fn write_lines_frames_each_line_whole_and_drains_on_close() {
+        let (tx, rx) = mpsc::channel::<String>();
+        let out = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
+        struct Shared(std::sync::Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Shared {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Shared(out.clone());
+        let event_tx = tx.clone();
+        tx.send(r#"{"id":1,"result":{}}"#.into()).unwrap();
+        event_tx
+            .send(r#"{"method":"hew.event.units_changed"}"#.into())
+            .unwrap();
+        tx.send(r#"{"id":2,"result":{}}"#.into()).unwrap();
+        drop(tx);
+        drop(event_tx);
+        write_lines(rx, sink);
+        assert_eq!(
+            String::from_utf8(out.lock().unwrap().clone()).unwrap(),
+            "{\"id\":1,\"result\":{}}\n{\"method\":\"hew.event.units_changed\"}\n{\"id\":2,\"result\":{}}\n"
+        );
+    }
+
+    /// Events offered while a frame awaits its reply follow that reply;
+    /// between frames they go straight out.
+    #[test]
+    fn events_wait_behind_the_reply_their_frame_is_owed() {
+        let (tx, rx) = mpsc::channel::<String>();
+        let mut gate = EventGate::new(tx.clone());
+        gate.offer("before".into());
+        gate.hold();
+        gate.offer("caused".into());
+        tx.send("reply".into()).unwrap();
+        gate.release();
+        gate.offer("after".into());
+        drop(gate);
+        drop(tx);
+        assert_eq!(
+            rx.iter().collect::<Vec<_>>(),
+            vec!["before", "reply", "caused", "after"]
+        );
+    }
+
+    /// A peer that stops reading cannot hold the writer: a stalled write
+    /// gives up after the write timeout, so joining it is bounded.
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_peer_releases_the_writer_within_the_timeout() {
+        let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (tx, writer) = spawn_writer(ours, Duration::from_millis(100)).unwrap();
+        let big = "x".repeat(1 << 20);
+        for _ in 0..16 {
+            let _ = tx.send(big.clone());
+        }
+        drop(tx);
+        let started = std::time::Instant::now();
+        writer.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// A failed write ends the writer, so the connection's sends start
+    /// failing and its reader stops.
+    #[test]
+    fn write_lines_stops_on_a_failed_write() {
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (tx, rx) = mpsc::channel::<String>();
+        let writer = std::thread::spawn(move || write_lines(rx, Broken));
+        tx.send("a".into()).unwrap();
+        writer.join().unwrap();
+        assert!(tx.send("b".into()).is_err());
+    }
+
+    /// The writer's failure hook runs when a write fails, never when the
+    /// queue drains cleanly; the thread's result says which it was.
+    #[test]
+    fn spawn_writer_on_runs_the_failure_hook_only_on_a_failed_write() {
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let hook = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let h = hook.clone();
+        let (tx, writer) = spawn_writer_on(Broken, move || {
+            h.fetch_add(1, Ordering::SeqCst);
+        });
+        tx.send("a".into()).unwrap();
+        assert!(!writer.join().unwrap());
+        assert_eq!(hook.load(Ordering::SeqCst), 1);
+
+        let h = hook.clone();
+        let (tx, writer) = spawn_writer_on(Vec::<u8>::new(), move || {
+            h.fetch_add(1, Ordering::SeqCst);
+        });
+        tx.send("a".into()).unwrap();
+        drop(tx);
+        assert!(writer.join().unwrap());
+        assert_eq!(hook.load(Ordering::SeqCst), 1, "a clean drain runs no hook");
+    }
+
+    /// Frames come out trimmed (CRLF too), blank lines skipped, tokens
+    /// stripped; the stream's end, a read error, and a non-UTF-8 line each
+    /// end it.
+    #[test]
+    fn next_frame_reads_one_clean_frame_at_a_time() {
+        let input =
+            b"\r\n\n{\"id\":1}\r\n  \n{\"id\":2,\"params\":{\"token\":\"secret\"}}\n{\"id\":3}";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        assert_eq!(next_frame(&mut reader).as_deref(), Some("{\"id\":1}"));
+        let second = next_frame(&mut reader).unwrap();
+        assert!(!second.contains("secret"), "{second}");
+        // A last line without its newline is still a frame, as unix's
+        // `read_line` gives it.
+        assert_eq!(next_frame(&mut reader).as_deref(), Some("{\"id\":3}"));
+        assert_eq!(next_frame(&mut reader), None);
+
+        let mut bad = std::io::Cursor::new(&b"\xff\xfe\n{\"id\":4}\n"[..]);
+        assert_eq!(next_frame(&mut bad), None);
+
+        struct Failing;
+        impl std::io::Read for Failing {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::ConnectionAborted.into())
+            }
+        }
+        assert_eq!(next_frame(&mut std::io::BufReader::new(Failing)), None);
+    }
+
+    /// A peer that stops reading ends the whole connection, not just the
+    /// writer: the stalled writer shuts the socket down, so the reader
+    /// waiting on the peer's next frame returns too.
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_peer_ends_the_pending_reader_too() {
+        let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let read_half = ours.try_clone().unwrap();
+        let reader = std::thread::spawn(move || next_frame(&mut BufReader::new(read_half)));
+        let (tx, writer) = spawn_writer(ours, Duration::from_millis(100)).unwrap();
+        let big = "x".repeat(1 << 20);
+        for _ in 0..4 {
+            let _ = tx.send(big.clone());
+        }
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let clean = writer.join().unwrap();
+            let frame = reader.join().unwrap();
+            let _ = done_tx.send((clean, frame));
+        });
+        let (clean, frame) = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the writer and the reader both end in time");
+        assert!(!clean);
+        assert_eq!(frame, None);
+        drop(tx);
+    }
+
+    /// Replies and events from different threads go through one writer:
+    /// each line arrives whole, in the order the channel took them, while
+    /// the reader on the same socket is still waiting on the peer.
+    #[cfg(unix)]
+    #[test]
+    fn one_writer_keeps_frames_whole_while_a_read_is_pending() {
+        use std::io::BufRead as _;
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let read_half = ours.try_clone().unwrap();
+        let reader = std::thread::spawn(move || next_frame(&mut BufReader::new(read_half)));
+        let (tx, writer) = spawn_writer(ours, Duration::from_secs(5)).unwrap();
+        let mut gate = EventGate::new(tx.clone());
+        let event_thread = std::thread::spawn(move || {
+            for i in 0..50 {
+                gate.offer(format!("{{\"method\":\"hew.event.e\",\"n\":{i}}}"));
+            }
+        });
+        for i in 0..50 {
+            tx.send(format!("{{\"id\":{i},\"result\":{{}}}}")).unwrap();
+        }
+        event_thread.join().unwrap();
+        drop(tx);
+        let mut lines = Vec::new();
+        let mut peer = BufReader::new(theirs.try_clone().unwrap());
+        for _ in 0..100 {
+            let mut line = String::new();
+            peer.read_line(&mut line).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&line).expect("a whole frame");
+            lines.push(v);
+        }
+        let replies: Vec<u64> = lines.iter().filter_map(|v| v.get("id")?.as_u64()).collect();
+        let events: Vec<u64> = lines.iter().filter_map(|v| v.get("n")?.as_u64()).collect();
+        assert_eq!(replies, (0..50).collect::<Vec<u64>>());
+        assert_eq!(events, (0..50).collect::<Vec<u64>>());
+        assert!(writer.join().unwrap());
+        // The peer's frame reaches the reader that waited throughout.
+        std::io::Write::write_all(&mut &theirs, b"{\"id\":99}\n").unwrap();
+        assert_eq!(reader.join().unwrap().as_deref(), Some("{\"id\":99}"));
+    }
+
+    // ------------------------------------------------- serve_connection
+
+    /// A stand-in for the app: it logs what `serve_connection` asks of it
+    /// and, while serving a frame, offers the event that frame caused
+    /// before answering, the way the webview's `hew://api-event` can beat
+    /// its `hew://api-reply`.
+    #[derive(Default)]
+    struct FakeHost {
+        log: Mutex<Vec<String>>,
+        outbound: Mutex<HashMap<u32, EventGate>>,
+        /// Bytes of padding on each reply (to stall a peer that never
+        /// reads).
+        reply_padding: usize,
+    }
+
+    const FAKE_CONN: u32 = 7;
+
+    impl ConnHost for FakeHost {
+        type Route = ();
+        fn register(&self, window_label: &str) -> (u32, ()) {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("register {window_label}"));
+            (FAKE_CONN, ())
+        }
+        fn gates(&self) -> std::sync::MutexGuard<'_, HashMap<u32, EventGate>> {
+            self.outbound.lock().unwrap()
+        }
+        fn serve(&self, _: &mut (), frame: &str, write: &mut dyn FnMut(&str) -> bool) -> bool {
+            self.log.lock().unwrap().push(format!("serve {frame}"));
+            let id = serde_json::from_str::<serde_json::Value>(frame).unwrap()["id"].clone();
+            if let Some(gate) = self.gates().get_mut(&FAKE_CONN) {
+                gate.offer(format!("event for {id}"));
+            }
+            write(&format!("reply {id}{}", " ".repeat(self.reply_padding)))
+        }
+        fn unregister(&self, conn_id: u32, _: &mut ()) {
+            self.log.lock().unwrap().push("unregister".into());
+            self.outbound.lock().unwrap().remove(&conn_id);
+        }
+    }
+
+    const HELLO: &str =
+        "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"hew.meta.hello\",\"params\":{\"token\":\"tok\"}}\n";
+
+    /// A `Write` into a shared buffer, so the test reads what went out.
+    #[derive(Clone, Default)]
+    struct Sink(std::sync::Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The whole connection loop: the event each frame causes goes out
+    /// after that frame's reply, never ahead of it; the token never
+    /// reaches the host; the connection is unregistered (its gate gone)
+    /// and the writer has written everything by the time the call
+    /// returns.
+    #[test]
+    fn serve_connection_sends_each_frames_events_after_its_reply_and_drains_on_close() {
+        let host = FakeHost::default();
+        let input =
+            format!("{HELLO}{{\"id\":1}}\n\n{{\"id\":2,\"params\":{{\"token\":\"tok\"}}}}\n");
+        let sink = Sink::default();
+        let out = sink.clone();
+        let outcome = serve_connection(
+            &host,
+            std::io::Cursor::new(input.into_bytes()),
+            "tok",
+            "main",
+            || Ok(spawn_writer_on(out, || {})),
+        );
+        assert_eq!(outcome, Some(true));
+        assert_eq!(
+            String::from_utf8(sink.0.lock().unwrap().clone()).unwrap(),
+            "reply 0\nevent for 0\nreply 1\nevent for 1\nreply 2\nevent for 2\n"
+        );
+        let log = host.log.lock().unwrap().clone();
+        assert_eq!(log.first().map(String::as_str), Some("register main"));
+        assert_eq!(log.last().map(String::as_str), Some("unregister"));
+        assert_eq!(log.len(), 5, "{log:?}");
+        assert!(log.iter().all(|l| !l.contains("tok\"")), "{log:?}");
+        assert!(host.outbound.lock().unwrap().is_empty());
+    }
+
+    /// A failed hello, or a writer that cannot start, registers nothing:
+    /// the webview never hears of the connection.
+    #[test]
+    fn serve_connection_registers_nothing_without_a_hello_and_a_writer() {
+        let host = FakeHost::default();
+        let bad = "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"hew.meta.hello\",\"params\":{\"token\":\"no\"}}\n";
+        let outcome = serve_connection(
+            &host,
+            std::io::Cursor::new(bad.as_bytes()),
+            "tok",
+            "main",
+            || Ok(spawn_writer_on(Sink::default(), || {})),
+        );
+        assert_eq!(outcome, None);
+        let outcome = serve_connection(
+            &host,
+            std::io::Cursor::new(HELLO.as_bytes()),
+            "tok",
+            "main",
+            || Err(std::io::ErrorKind::Other.into()),
+        );
+        assert_eq!(outcome, None);
+        assert!(host.log.lock().unwrap().is_empty());
+    }
+
+    /// A peer that sends frames but never reads: the writer stalls past
+    /// its timeout and shuts the socket, the loop sees the end of the
+    /// stream, unregisters, and returns with an unclean writer, in time.
+    #[cfg(unix)]
+    #[test]
+    fn serve_connection_ends_when_the_writer_gives_up_on_the_peer() {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        std::io::Write::write_all(&mut &theirs, HELLO.as_bytes()).unwrap();
+        for i in 1..=4 {
+            std::io::Write::write_all(&mut &theirs, format!("{{\"id\":{i}}}\n").as_bytes())
+                .unwrap();
+        }
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let host = FakeHost {
+                reply_padding: 1 << 20,
+                ..FakeHost::default()
+            };
+            let read_half = ours.try_clone().unwrap();
+            let outcome = serve_connection(&host, BufReader::new(read_half), "tok", "main", || {
+                spawn_writer(ours.try_clone()?, Duration::from_millis(100))
+            });
+            let log = host.log.lock().unwrap().clone();
+            let _ = done_tx.send((outcome, log));
+        });
+        let (outcome, log) = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the connection ends in time");
+        assert_eq!(outcome, Some(false));
+        assert_eq!(log.last().map(String::as_str), Some("unregister"));
+        drop(theirs);
     }
 
     #[test]

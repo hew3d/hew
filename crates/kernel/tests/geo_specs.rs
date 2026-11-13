@@ -66,7 +66,7 @@ fn a_new_document_has_no_geo_reference_and_writes_no_key() {
     assert_eq!(doc.geo_reference(), None);
     let m = manifest_json(&doc.save());
     assert!(m.get("geo").is_none());
-    assert_eq!(m["format_version"], 26);
+    assert_eq!(m["format_version"], 29);
 }
 
 #[test]

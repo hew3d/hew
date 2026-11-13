@@ -35,10 +35,20 @@ msgstr "· red"
 msgid "\"{matDeleteName}\" — used on {matDeleteUsage, plural, one {# face} other {# faces}} — delete and unpaint them?"
 msgstr "\"{matDeleteName}\" — used on {matDeleteUsage, plural, one {# face} other {# faces}} — delete and unpaint them?"
 
+#. placeholder {0}: r.frameDiffered
+#: src/linkSimilar.ts
+#~ msgid "{0, plural, one {# copy had its own axes; the first copy’s axes now apply} other {# copies had their own axes; the first copy’s axes now apply}}"
+#~ msgstr "{0, plural, one {# copy had its own axes; the first copy’s axes now apply} other {# copies had their own axes; the first copy’s axes now apply}}"
+
 #. placeholder {0}: item.summary.materials
 #: src/library/libraryModel.ts
 msgid "{0, plural, one {# material} other {# materials}}"
 msgstr "{0, plural, one {# material} other {# materials}}"
+
+#. placeholder {0}: r.skipped
+#: src/linkSimilar.ts
+#~ msgid "{0, plural, one {# object could not be linked} other {# objects could not be linked}}"
+#~ msgstr "{0, plural, one {# object could not be linked} other {# objects could not be linked}}"
 
 #. placeholder {0}: shapes - mendable
 #: src/health/healthCopy.ts
@@ -55,10 +65,25 @@ msgstr "{0, plural, one {# part} other {# parts}}"
 msgid "{0, plural, one {# solid} other {# solids}}"
 msgstr "{0, plural, one {# solid} other {# solids}}"
 
+#. placeholder {0}: r.linked + r.sets
+#: src/linkSimilar.ts
+#~ msgid "{0, plural, one {Linked # copy} other {Linked # copies}}"
+#~ msgstr "{0, plural, one {Linked # copy} other {Linked # copies}}"
+
 #. placeholder {0}: d.openEdges
 #: src/panels/MakeSolidSketches.tsx
 msgid "{0, plural, one {Not closed yet. # open edge is marked in red.} other {Not closed yet. # open edges are marked in red.}}"
 msgstr "{0, plural, one {Not closed yet. # open edge is marked in red.} other {Not closed yet. # open edges are marked in red.}}"
+
+#. placeholder {0}: r.skipped
+#: src/linkSimilar.ts
+#~ msgid "{0, plural, one {Nothing was linked: # object looked alike but was not the same shape.} other {Nothing was linked: # objects looked alike but were not the same shape.}}"
+#~ msgstr "{0, plural, one {Nothing was linked: # object looked alike but was not the same shape.} other {Nothing was linked: # objects looked alike but were not the same shape.}}"
+
+#. placeholder {0}: r.droppedFacePaint
+#: src/linkSimilar.ts
+#~ msgid "{0, plural, one {paint on the faces of # copy was dropped} other {paint on the faces of # copies was dropped}}"
+#~ msgstr "{0, plural, one {paint on the faces of # copy was dropped} other {paint on the faces of # copies was dropped}}"
 
 #: src/health/healthCopy.ts
 msgid "{base}. The distance you typed is used where it fits; other objects use their own."
@@ -105,6 +130,14 @@ msgstr "{count, plural, one {{count} change since last save.} other {{count} cha
 msgid "{count, plural, one {{count} change undone since last save.} other {{count} changes undone since last save.}}"
 msgstr "{count, plural, one {{count} change undone since last save.} other {{count} changes undone since last save.}}"
 
+#: src/health/healthCopy.ts
+#~ msgid "{count, plural, one {# look-alike object can be linked} other {# look-alike objects can be linked}}"
+#~ msgstr "{count, plural, one {# look-alike object can be linked} other {# look-alike objects can be linked}}"
+
+#: src/linkedCopyCopy.ts
+#~ msgid "{count, plural, one {Cut all # copy} other {Cut all # copies}}"
+#~ msgstr "{count, plural, one {Cut all # copy} other {Cut all # copies}}"
+
 #: src/panels/RecoveryDialog.tsx
 msgid "{count, plural, one {Recover Unsaved Document?} other {Recover # Unsaved Documents?}}"
 msgstr "{count, plural, one {Recover Unsaved Document?} other {Recover # Unsaved Documents?}}"
@@ -116,6 +149,10 @@ msgstr "{count, plural, one {Recover unsaved document} other {Recover unsaved do
 #: src/viewport/isolation.ts
 msgid "{count, plural, one {Showing # object} other {Showing # objects}}"
 msgstr "{count, plural, one {Showing # object} other {Showing # objects}}"
+
+#: src/linkedCopyCopy.ts
+#~ msgid "{count, plural, one {Unlinked # copy to join it} other {Unlinked # copies to join them}}"
+#~ msgstr "{count, plural, one {Unlinked # copy to join it} other {Unlinked # copies to join them}}"
 
 #: src/print/usePrintController.ts
 msgid "{count} + {extraPages} cut list"
@@ -282,9 +319,33 @@ msgstr "{k}k"
 msgid "{kb} KB"
 msgstr "{kb} KB"
 
+#. Measurements box readout while a copy is armed: the kind of copy (Copy, Independent copy, or Linked copy), then the measured value
+#. Measurements box readout while a copy is armed: the kind of copy (Copy, Independent copy, or Linked copy), then the measured value
+#: src/tools/MoveTool.ts
+#: src/tools/RotateTool.ts
+#~ msgid "{kind} · {text}"
+#~ msgstr "{kind} · {text}"
+
+#: src/tools/MoveTool.ts
+#~ msgid "{kind} is on — click a base point to start the copy. Tap {COPY_MODIFIER_LABEL} to {next}."
+#~ msgstr "{kind} is on — click a base point to start the copy. Tap {COPY_MODIFIER_LABEL} to {next}."
+
+#: src/tools/RotateTool.ts
+#~ msgid "{kind} is on — click to set the center of rotation. Tap {COPY_MODIFIER_LABEL} to {next}."
+#~ msgstr "{kind} is on — click to set the center of rotation. Tap {COPY_MODIFIER_LABEL} to {next}."
+
+#: src/tools/FlipTool.ts
+#~ msgid "{kind} is on. Click a square or a face to place a mirrored copy. Tap {COPY_MODIFIER_LABEL} to change."
+#~ msgstr "{kind} is on. Click a square or a face to place a mirrored copy. Tap {COPY_MODIFIER_LABEL} to change."
+
 #: src/panels/PrintDialog.tsx
 msgid "{label} (fit)"
 msgstr "{label} (fit)"
+
+#. Undo label suffix; the first word is the action, e.g. "Union (unlinked)"
+#: src/linkedCopyCopy.ts
+#~ msgid "{label} (unlinked)"
+#~ msgstr "{label} (unlinked)"
 
 #: src/panels/ImportReportDialog.tsx
 msgid "{lines_added, plural, one {{lines_added} line of drawing came in too.} other {{lines_added} lines of drawing came in too.}}"
@@ -451,6 +512,10 @@ msgstr "{name} · in {parentLabel}"
 #: src/health/healthCopy.ts
 msgid "{name} ({copy})"
 msgstr "{name} ({copy})"
+
+#: src/panels/BusyNotice.tsx
+msgid "{name} is working…"
+msgstr "{name} is working…"
 
 #: src/health/healthCopy.ts
 msgid "{needing} mending: Mend can merge points, separate parts and fill gaps."
@@ -711,6 +776,10 @@ msgid "{shapes, plural, one {Rejoin # split shape and keep the inside walls.} ot
 msgstr "{shapes, plural, one {Rejoin # split shape and keep the inside walls.} other {Rejoin # split shapes and keep the inside walls.}}"
 
 #: src/health/healthCopy.ts
+#~ msgid "{shapes, plural, one {Rejoin # split shape as one solid.} other {Rejoin # split shapes as one solid.}}"
+#~ msgstr "{shapes, plural, one {Rejoin # split shape as one solid.} other {Rejoin # split shapes as one solid.}}"
+
+#: src/health/healthCopy.ts
 msgid "{shapes, plural, one {Rejoin # split shape.} other {Rejoin # split shapes.}}"
 msgstr "{shapes, plural, one {Rejoin # split shape.} other {Rejoin # split shapes.}}"
 
@@ -956,6 +1025,10 @@ msgstr "A finished piece: true-curve oak rim, brass hour markers as components, 
 msgid "A group can't be moved into itself or into one of its own members. Pick a different group, or move it out to the top level."
 msgstr "A group can't be moved into itself or into one of its own members. Pick a different group, or move it out to the top level."
 
+#: src/tools/MoveTool.ts
+#~ msgid "A guide copies along one direction only — type a single count."
+#~ msgstr "A guide copies along one direction only — type a single count."
+
 #: src/App.tsx
 msgid "A kernel error occurred — the session is no longer usable. Reload the page to recover."
 msgstr "A kernel error occurred — the session is no longer usable. Reload the page to recover."
@@ -964,13 +1037,33 @@ msgstr "A kernel error occurred — the session is no longer usable. Reload the 
 msgid "A line needs a length. Type a length other than 0."
 msgstr "A line needs a length. Type a length other than 0."
 
+#: src/tools/FlipTool.ts
+#~ msgid "A mirrored copy can't be made while you're editing inside a component. Close the component first, or flip in place."
+#~ msgstr "A mirrored copy can't be made while you're editing inside a component. Close the component first, or flip in place."
+
 #: src/kernelErrors.ts
-msgid "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
-msgstr "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
+#~ msgid "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
+#~ msgstr "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
 
 #: src/kernelErrors.ts
 msgid "A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis."
 msgstr "A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis."
+
+#: src/kernelErrors.ts
+msgid "A plugin command's answer could not be delivered. If this keeps happening, use Report Bug."
+msgstr "A plugin command's answer could not be delivered. If this keeps happening, use Report Bug."
+
+#: src/kernelErrors.ts
+msgid "A plugin could not connect because its permissions were unreadable. Reinstall the plugin, or use Report Bug if this keeps happening."
+msgstr "A plugin could not connect because its permissions were unreadable. Reinstall the plugin, or use Report Bug if this keeps happening."
+
+#: src/kernelErrors.ts
+msgid "A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window."
+msgstr "A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window."
+
+#: src/kernelErrors.ts
+msgid "A plugin's commands could not be added: its manifest declares a command Hew cannot accept. Update or reinstall the plugin."
+msgstr "A plugin's commands could not be added: its manifest declares a command Hew cannot accept. Update or reinstall the plugin."
 
 #: src/panels/WelcomeScreen.tsx
 msgid "A round table with a textured oak top, walnut cylinder legs, crossed stretchers, and a resting pen cup."
@@ -1459,6 +1552,7 @@ msgid "cancel"
 msgstr "cancel"
 
 #: src/health/healthCopy.ts
+#: src/panels/BusyNotice.tsx
 #: src/panels/ConfirmDialog.tsx
 #: src/panels/ExportDialog.tsx
 #: src/panels/library/LibraryDetailPane.tsx
@@ -1506,6 +1600,10 @@ msgstr "Centered"
 #: src/settings/units.ts
 msgid "Centimeters"
 msgstr "Centimeters"
+
+#: src/i18n/historyLabels.ts
+msgid "Change component axes"
+msgstr "Change component axes"
 
 #: src/i18n/historyLabels.ts
 msgid "Change material opacity"
@@ -1715,9 +1813,17 @@ msgstr "Click a sketch point to pick it up."
 msgid "Click a solid to cut it along the plane — arrow keys aim the plane along an axis, hovering a face aligns to it, or type an offset."
 msgstr "Click a solid to cut it along the plane — arrow keys aim the plane along an axis, hovering a face aligns to it, or type an offset."
 
+#: src/tools/FlipTool.ts
+#~ msgid "Click a square to flip across that plane, or click a face to flip across it. Tap {COPY_MODIFIER_LABEL} to make a mirrored copy."
+#~ msgstr "Click a square to flip across that plane, or click a face to flip across it. Tap {COPY_MODIFIER_LABEL} to make a mirrored copy."
+
 #: src/tools/RotateTool.ts
 msgid "Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis."
 msgstr "Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis."
+
+#: src/tools/RotateTool.ts
+#~ msgid "Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis. Tap {COPY_MODIFIER_LABEL} to {next}."
+#~ msgstr "Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis. Tap {COPY_MODIFIER_LABEL} to {next}."
 
 #: src/tools/RotateTool.ts
 msgid "Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis. Tap {COPY_MODIFIER_LABEL} to rotate instead."
@@ -1726,6 +1832,10 @@ msgstr "Click a start point for the angle. Shift or → / ← / ↑ lock the rot
 #: src/tools/PositionTextureTool.ts
 msgid "Click a textured face to position its texture."
 msgstr "Click a textured face to position its texture."
+
+#: src/tools/FlipTool.ts
+#~ msgid "Click an object to flip it"
+#~ msgstr "Click an object to flip it"
 
 #: src/tools/MoveTool.ts
 msgid "Click an object to move it"
@@ -1899,6 +2009,14 @@ msgstr "Click to sweep it, or drag along the path for a partial sweep."
 msgid "Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment. Ctrl detaches the shape from the face."
 msgstr "Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment. Ctrl detaches the shape from the face."
 
+#: src/tools/FlipTool.ts
+#~ msgid "Click what you want to flip."
+#~ msgstr "Click what you want to flip."
+
+#: src/tools/MoveTool.ts
+#~ msgid "Click where the copy lands — type an exact distance, arrow keys lock an axis, tap {COPY_MODIFIER_LABEL} to {next}."
+#~ msgstr "Click where the copy lands — type an exact distance, arrow keys lock an axis, tap {COPY_MODIFIER_LABEL} to {next}."
+
 #: src/tools/MoveTool.ts
 msgid "Click where the copy lands — type an exact distance, arrow keys lock an axis, tap {COPY_MODIFIER_LABEL} to move instead."
 msgstr "Click where the copy lands — type an exact distance, arrow keys lock an axis, tap {COPY_MODIFIER_LABEL} to move instead."
@@ -1958,6 +2076,10 @@ msgstr "Close the pieces where they meet and keep the inside walls"
 #: src/health/healthCopy.ts
 msgid "Close the pieces where they meet and remove the inside walls between them"
 msgstr "Close the pieces where they meet and remove the inside walls between them"
+
+#: src/health/healthCopy.ts
+#~ msgid "Close the pieces where they meet, remove the inside walls, and join the pieces into one solid"
+#~ msgstr "Close the pieces where they meet, remove the inside walls, and join the pieces into one solid"
 
 #: src/settings/ControlsPane.tsx
 msgid "Close this document window."
@@ -2080,6 +2202,10 @@ msgstr "Component {n}"
 msgid "Component exploded to solids for the boolean."
 msgstr "Component exploded to solids for the boolean."
 
+#: src/App.tsx
+#~ msgid "Component name"
+#~ msgstr "Component name"
+
 #. Command palette entry that jumps to a named component instance
 #: src/App.tsx
 msgid "Component: {label}"
@@ -2135,6 +2261,28 @@ msgstr "Coordinate system"
 #: src/panels/ReportBugDialog.tsx
 msgid "Copied"
 msgstr "Copied"
+
+#: src/App.tsx
+#: src/panels/DocumentTree.tsx
+#: src/panels/ObjectInfoPanel.tsx
+#: src/settings/EditingPane.tsx
+#~ msgid "Copies"
+#~ msgstr "Copies"
+
+#. Row label for a placement of a linked set that has no name at all
+#: src/panels/treeModel.ts
+#~ msgctxt "unnamed item"
+#~ msgid "Copies"
+#~ msgstr "Copies"
+
+#. Short uppercase chip on the contextual dock when one linked copy is selected
+#: src/panels/dockLogic.ts
+#~ msgid "COPIES"
+#~ msgstr "COPIES"
+
+#: src/settings/EditingPane.tsx
+#~ msgid "Copies are linked"
+#~ msgstr "Copies are linked"
 
 #: src/i18n/historyLabels.ts
 #: src/i18n/nativeMenu.ts
@@ -2192,6 +2340,11 @@ msgstr "Copy the selected objects, groups, and components to the clipboard."
 #: src/palette/registry.ts
 msgid "Copy the selection to the clipboard, then delete it."
 msgstr "Copy the selection to the clipboard, then delete it."
+
+#. Command palette entry that jumps to a named linked copy
+#: src/App.tsx
+#~ msgid "Copy: {label}"
+#~ msgstr "Copy: {label}"
 
 #: src/settings/serverForm.ts
 msgid "Could not reach {host} — check the address, your connection, and that the server is up."
@@ -2347,6 +2500,10 @@ msgstr "Couldn’t read the library: {loadError}"
 msgid "Couldn't read those Mend settings."
 msgstr "Couldn't read those Mend settings."
 
+#: src/health/healthCopy.ts
+#~ msgid "Couldn't rejoin: {reason}"
+#~ msgstr "Couldn't rejoin: {reason}"
+
 #: src/tools/TapeMeasureTool.ts
 msgid "Couldn't resize {scopeLabel}: {raw}"
 msgstr "Couldn't resize {scopeLabel}: {raw}"
@@ -2469,6 +2626,10 @@ msgstr "Cut list page"
 #: src/palette/registry.ts
 #~ msgid "Cut the second selected solid out of the first (boolean difference)."
 #~ msgstr "Cut the second selected solid out of the first (boolean difference)."
+
+#: src/linkedCopyCopy.ts
+#~ msgid "Cut with one solid at a time"
+#~ msgstr "Cut with one solid at a time"
 
 #: src/shop/PartsSheet.tsx
 msgid "Cutlist"
@@ -2712,6 +2873,10 @@ msgstr "deselect all"
 #: src/palette/registry.ts
 msgid "Deselect everything."
 msgstr "Deselect everything."
+
+#: src/palette/registry.ts
+#~ msgid "detach copy"
+#~ msgstr "detach copy"
 
 #: src/tools/detachedMode.ts
 msgid "Detach is on — the shape stays apart from the face until you push it."
@@ -3119,6 +3284,10 @@ msgstr "Edited {when}"
 msgid "editing"
 msgstr "editing"
 
+#: src/settings/SettingsWindow.tsx
+#~ msgid "Editing"
+#~ msgstr "Editing"
+
 #: src/panels/ReportBugDialog.tsx
 msgid "Email for follow-up (optional)"
 msgstr "Email for follow-up (optional)"
@@ -3454,6 +3623,10 @@ msgid "Finish editing group"
 msgstr "Finish editing group"
 
 #: src/kernelErrors.ts
+msgid "Finish editing the component before changing its axes."
+msgstr "Finish editing the component before changing its axes."
+
+#: src/kernelErrors.ts
 msgid "Finishing this step needed the drawing it just closed and couldn't find it, so nothing was placed and the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
 msgstr "Finishing this step needed the drawing it just closed and couldn't find it, so nothing was placed and the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
 
@@ -3509,6 +3682,46 @@ msgstr "Flat panel, kept"
 #: src/health/healthCopy.ts
 msgid "Flat panels"
 msgstr "Flat panels"
+
+#: src/i18n/nativeMenu.ts
+#: src/tools/toolRegistry.ts
+#~ msgctxt "tool"
+#~ msgid "Flip"
+#~ msgstr "Flip"
+
+#: src/tools/FlipTool.ts
+#~ msgctxt "undo verb"
+#~ msgid "Flip"
+#~ msgstr "Flip"
+
+#: src/i18n/nativeMenu.ts
+#: src/panels/MenuBar.tsx
+#~ msgid "Flip Along"
+#~ msgstr "Flip Along"
+
+#: src/palette/registry.ts
+#~ msgid "Flip Along Blue"
+#~ msgstr "Flip Along Blue"
+
+#: src/palette/registry.ts
+#~ msgid "Flip Along Green"
+#~ msgstr "Flip Along Green"
+
+#: src/palette/registry.ts
+#~ msgid "Flip Along Red"
+#~ msgstr "Flip Along Red"
+
+#: src/palette/registry.ts
+#~ msgid "flip x"
+#~ msgstr "flip x"
+
+#: src/palette/registry.ts
+#~ msgid "flip y"
+#~ msgstr "flip y"
+
+#: src/palette/registry.ts
+#~ msgid "flip z"
+#~ msgstr "flip z"
 
 #: src/palette/registry.ts
 msgid "floating toolbar"
@@ -3955,6 +4168,10 @@ msgstr "Hew is already checking for updates."
 msgid "Hew keeps a private key for this report on this computer and checks for a reply when it starts. No account, no email. You can stop any time under Help ▸ Sent Reports."
 msgstr "Hew keeps a private key for this report on this computer and checks for a reply when it starts. No account, no email. You can stop any time under Help ▸ Sent Reports."
 
+#: src/kernelErrors.ts
+msgid "Hew lost track of a plugin's work in progress. Nothing was changed; if this keeps happening, use Report Bug."
+msgstr "Hew lost track of a plugin's work in progress. Nothing was changed; if this keeps happening, use Report Bug."
+
 #: src/io/docFormat.ts
 #: src/io/tauriFileHost.ts
 #: src/io/webFileHost.ts
@@ -4016,6 +4233,10 @@ msgstr "Hew's own request to the model kernel carried a malformed camera. If thi
 #: src/kernelErrors.ts
 msgid "Hew's own request to the model kernel carried a malformed direction. If this keeps happening, use Report Bug."
 msgstr "Hew's own request to the model kernel carried a malformed direction. If this keeps happening, use Report Bug."
+
+#: src/kernelErrors.ts
+#~ msgid "Hew's own request to the model kernel carried a malformed flip plane or copy choice. If this keeps happening, use Report Bug."
+#~ msgstr "Hew's own request to the model kernel carried a malformed flip plane or copy choice. If this keeps happening, use Report Bug."
 
 #: src/kernelErrors.ts
 msgid "Hew's own request to the model kernel carried a malformed move, rotate, or scale. If this keeps happening, use Report Bug."
@@ -4298,6 +4519,19 @@ msgstr "Inches"
 #: src/panels/PrintDialog.tsx
 msgid "Include"
 msgstr "Include"
+
+#: src/palette/registry.ts
+#~ msgid "independent"
+#~ msgstr "independent"
+
+#: src/palette/registry.ts
+#~ msgid "independent copies"
+#~ msgstr "independent copies"
+
+#: src/tools/MoveTool.ts
+#: src/tools/RotateTool.ts
+#~ msgid "Independent copy"
+#~ msgstr "Independent copy"
 
 #: src/palette/registry.ts
 msgid "insert"
@@ -4740,6 +4974,34 @@ msgid "lines only"
 msgstr "lines only"
 
 #: src/health/healthCopy.ts
+#: src/i18n/historyLabels.ts
+#: src/i18n/nativeMenu.ts
+#: src/linkSimilar.ts
+#: src/palette/registry.ts
+#: src/panels/MenuBar.tsx
+#~ msgid "Link identical copies"
+#~ msgstr "Link identical copies"
+
+#: src/palette/registry.ts
+#~ msgid "link similar"
+#~ msgstr "link similar"
+
+#: src/palette/registry.ts
+#~ msgid "linked copies"
+#~ msgstr "linked copies"
+
+#. Object Info row: how many linked copies share this shape
+#: src/linkedCopyCopy.ts
+#~ msgid "Linked copies: {count}"
+#~ msgstr "Linked copies: {count}"
+
+#: src/panels/ObjectInfoPanel.tsx
+#: src/tools/MoveTool.ts
+#: src/tools/RotateTool.ts
+#~ msgid "Linked copy"
+#~ msgstr "Linked copy"
+
+#: src/health/healthCopy.ts
 msgid "List the objects that are selected now"
 msgstr "List the objects that are selected now"
 
@@ -4846,6 +5108,20 @@ msgstr "Look straight down at the model."
 msgid "Look straight up at the model."
 msgstr "Look straight up at the model."
 
+#: src/palette/registry.ts
+#~ msgid "look-alike"
+#~ msgstr "look-alike"
+
+#: src/tools/MoveTool.ts
+#: src/tools/RotateTool.ts
+#~ msgid "make a linked copy"
+#~ msgstr "make a linked copy"
+
+#: src/tools/MoveTool.ts
+#: src/tools/RotateTool.ts
+#~ msgid "make an independent copy"
+#~ msgstr "make an independent copy"
+
 #: src/i18n/historyLabels.ts
 msgid "Make component"
 msgstr "Make component"
@@ -4856,6 +5132,10 @@ msgstr "Make component"
 #: src/panels/MenuBar.tsx
 msgid "Make Component"
 msgstr "Make Component"
+
+#: src/palette/registry.ts
+#~ msgid "Make every copy of the selected linked copy independent."
+#~ msgstr "Make every copy of the selected linked copy independent."
 
 #: src/palette/registry.ts
 msgid "make group"
@@ -4883,9 +5163,17 @@ msgstr "Make Solid can close what can be closed."
 msgid "Make Solid…"
 msgstr "Make Solid…"
 
+#: src/palette/registry.ts
+#~ msgid "Make the selected copy independent. The other copies stay linked."
+#~ msgstr "Make the selected copy independent. The other copies stay linked."
+
 #: src/health/healthCopy.ts
 msgid "Make the selection solid"
 msgstr "Make the selection solid"
+
+#: src/health/healthCopy.ts
+#~ msgid "Make these objects linked copies, so editing one changes them all"
+#~ msgstr "Make these objects linked copies, so editing one changes them all"
 
 #: src/health/healthCopy.ts
 msgid "Make these objects solid"
@@ -5104,6 +5392,26 @@ msgstr "Millimeters"
 msgid "Minimize"
 msgstr "Minimize"
 
+#: src/palette/registry.ts
+#~ msgid "mirror"
+#~ msgstr "mirror"
+
+#: src/palette/registry.ts
+#~ msgid "Mirror the selection across a plane through its center or across a face, in place or as a copy."
+#~ msgstr "Mirror the selection across a plane through its center or across a face, in place or as a copy."
+
+#: src/palette/registry.ts
+#~ msgid "Mirror the selection across the plane through its center, across the blue axis."
+#~ msgstr "Mirror the selection across the plane through its center, across the blue axis."
+
+#: src/palette/registry.ts
+#~ msgid "Mirror the selection across the plane through its center, across the green axis."
+#~ msgstr "Mirror the selection across the plane through its center, across the green axis."
+
+#: src/palette/registry.ts
+#~ msgid "Mirror the selection across the plane through its center, across the red axis."
+#~ msgstr "Mirror the selection across the plane through its center, across the red axis."
+
 #: src/health/healthCopy.ts
 msgid "Missing textures ({textures})"
 msgstr "Missing textures ({textures})"
@@ -5221,6 +5529,10 @@ msgstr "Move guide"
 msgid "Move imprint"
 msgstr "Move imprint"
 
+#: src/tools/MoveTool.ts
+#~ msgid "move instead"
+#~ msgstr "move instead"
+
 #: src/i18n/historyLabels.ts
 msgid "Move into group"
 msgstr "Move into group"
@@ -5282,6 +5594,10 @@ msgid "Move to scale, click to commit, or type an exact factor/dimension — Ctr
 msgstr "Move to scale, click to commit, or type an exact factor/dimension — Ctrl anchors at the center."
 
 #: src/tools/RotateTool.ts
+#~ msgid "Move to set the angle (snaps to 15°), or type exact degrees, then click to place the copy. Shift or → / ← / ↑ lock the axis. Tap {COPY_MODIFIER_LABEL} to {next}."
+#~ msgstr "Move to set the angle (snaps to 15°), or type exact degrees, then click to place the copy. Shift or → / ← / ↑ lock the axis. Tap {COPY_MODIFIER_LABEL} to {next}."
+
+#: src/tools/RotateTool.ts
 msgid "Move to set the angle (snaps to 15°), or type exact degrees, then click to place the copy. Shift or → / ← / ↑ lock the axis. Tap {COPY_MODIFIER_LABEL} to rotate instead."
 msgstr "Move to set the angle (snaps to 15°), or type exact degrees, then click to place the copy. Shift or → / ← / ↑ lock the axis. Tap {COPY_MODIFIER_LABEL} to rotate instead."
 
@@ -5324,6 +5640,11 @@ msgstr "n-gon"
 #: src/settings/view.ts
 msgid "Name"
 msgstr "Name"
+
+#: src/linkedCopyCopy.ts
+#: src/panels/ObjectInfoPanel.tsx
+#~ msgid "Name (all copies)"
+#~ msgstr "Name (all copies)"
 
 #: src/panels/MaterialPalette.tsx
 msgid "Name…"
@@ -5604,6 +5925,10 @@ msgstr "Nothing to export — the model has no solids."
 msgid "Nothing to export — the model has nothing visible."
 msgstr "Nothing to export — the model has nothing visible."
 
+#: src/viewport/Viewport.tsx
+#~ msgid "Nothing to flip"
+#~ msgstr "Nothing to flip"
+
 #: src/kernelErrors.ts
 msgid "Nothing to mend here: no nearby points, touching parts or small gaps."
 msgstr "Nothing to mend here: no nearby points, touching parts or small gaps."
@@ -5669,6 +5994,10 @@ msgstr "Nothing was given a thickness."
 #: src/health/healthCopy.ts
 msgid "Nothing was kept."
 msgstr "Nothing was kept."
+
+#: src/linkSimilar.ts
+#~ msgid "Nothing was linked: no two objects were the same shape."
+#~ msgstr "Nothing was linked: no two objects were the same shape."
 
 #: src/health/healthCopy.ts
 msgid "Nothing was mended."
@@ -5886,6 +6215,10 @@ msgstr "Only siblings can be grouped — everything selected must be top-level, 
 #: src/panels/PrintDialog.tsx
 msgid "Only the selected parts"
 msgstr "Only the selected parts"
+
+#: src/linkedCopyCopy.ts
+#~ msgid "Only this one"
+#~ msgstr "Only this one"
 
 #: src/panels/MaterialPalette.tsx
 msgid "Opacity"
@@ -6210,8 +6543,20 @@ msgid "Paint face"
 msgstr "Paint face"
 
 #: src/i18n/historyLabels.ts
+msgid "Paint instance"
+msgstr "Paint instance"
+
+#: src/i18n/historyLabels.ts
 msgid "Paint object"
 msgstr "Paint object"
+
+#: src/tools/PaintTool.ts
+msgid "Painting a component colors this placement. Edit the component to paint its faces."
+msgstr "Painting a component colors this placement. Edit the component to paint its faces."
+
+#: src/tools/PaintTool.ts
+#~ msgid "Painting a linked copy colors just that copy. Edit the copy to paint faces on every copy."
+#~ msgstr "Painting a linked copy colors just that copy. Edit the copy to paint faces on every copy."
 
 #: src/i18n/nativeMenu.ts
 msgid "Pan"
@@ -6321,6 +6666,32 @@ msgstr "Paste In Place"
 msgid "paste in-place"
 msgstr "paste in-place"
 
+#: src/i18n/nativeMenu.ts
+#: src/linkedCopyCopy.ts
+#: src/palette/registry.ts
+#: src/panels/MenuBar.tsx
+#~ msgid "Paste independent"
+#~ msgstr "Paste independent"
+
+#: src/palette/registry.ts
+#~ msgid "paste link"
+#~ msgstr "paste link"
+
+#: src/i18n/nativeMenu.ts
+#: src/linkedCopyCopy.ts
+#: src/palette/registry.ts
+#: src/panels/MenuBar.tsx
+#~ msgid "Paste linked"
+#~ msgstr "Paste linked"
+
+#: src/palette/registry.ts
+#~ msgid "paste new"
+#~ msgstr "paste new"
+
+#: src/palette/registry.ts
+#~ msgid "paste unlinked"
+#~ msgstr "paste unlinked"
+
 #: src/App.tsx
 msgid "Pasted objects"
 msgstr "Pasted objects"
@@ -6395,12 +6766,20 @@ msgid "Place a copy of the clipboard at the cursor."
 msgstr "Place a copy of the clipboard at the cursor."
 
 #: src/palette/registry.ts
+#~ msgid "Place a copy of the clipboard that stays linked to the original."
+#~ msgstr "Place a copy of the clipboard that stays linked to the original."
+
+#: src/palette/registry.ts
 msgid "Place a leader-text annotation from a face, edge, or point."
 msgstr "Place a leader-text annotation from a face, edge, or point."
 
 #: src/palette/registry.ts
 msgid "Place a linear or radius/diameter dimension between snap points."
 msgstr "Place a linear or radius/diameter dimension between snap points."
+
+#: src/palette/registry.ts
+#~ msgid "Place a plain copy of the clipboard that is not linked to the original."
+#~ msgstr "Place a plain copy of the clipboard that is not linked to the original."
 
 #: src/palette/registry.ts
 msgid "Place a PNG or JPEG picture on a face or the ground."
@@ -6859,6 +7238,10 @@ msgid "Rejoin"
 msgstr "Rejoin"
 
 #: src/health/healthCopy.ts
+#~ msgid "Rejoin as one solid"
+#~ msgstr "Rejoin as one solid"
+
+#: src/health/healthCopy.ts
 msgid "Rejoin split shapes"
 msgstr "Rejoin split shapes"
 
@@ -6869,6 +7252,10 @@ msgstr "Rejoin the pieces and keep the inside walls"
 #: src/health/healthCopy.ts
 msgid "Rejoin the pieces and remove the inside walls"
 msgstr "Rejoin the pieces and remove the inside walls"
+
+#: src/health/healthCopy.ts
+#~ msgid "Rejoined as one solid."
+#~ msgstr "Rejoined as one solid."
 
 #: src/io/savePanel.ts
 msgid "Release"
@@ -7242,6 +7629,10 @@ msgctxt "undo verb"
 msgid "Rotate"
 msgstr "Rotate"
 
+#: src/tools/RotateTool.ts
+#~ msgid "rotate instead"
+#~ msgstr "rotate instead"
+
 #: src/palette/registry.ts
 msgid "Rotate the camera around the model."
 msgstr "Rotate the camera around the model."
@@ -7262,9 +7653,25 @@ msgstr "Roughness (select a material swatch first)"
 msgid "Roughness for {selectedName}"
 msgstr "Roughness for {selectedName}"
 
+#: src/tools/MoveTool.ts
+#~ msgid "Rows across the move — press an arrow key to change them, or type another count. Enter applies."
+#~ msgstr "Rows across the move — press an arrow key to change them, or type another count. Enter applies."
+
+#: src/tools/MoveTool.ts
+#~ msgid "Rows along {color} — press an arrow key to change them, or type another count. Enter applies."
+#~ msgstr "Rows along {color} — press an arrow key to change them, or type another count. Enter applies."
+
+#: src/tools/MoveTool.ts
+#~ msgid "Rows cannot run along the move — pick another direction."
+#~ msgstr "Rows cannot run along the move — pick another direction."
+
 #: src/viewport/Viewport.tsx
 msgid "Running without graphics acceleration — large models will be slow."
 msgstr "Running without graphics acceleration — large models will be slow."
+
+#: src/palette/registry.ts
+#~ msgid "same shape"
+#~ msgstr "same shape"
 
 #: src/panels/WelcomeScreen.tsx
 msgid "Sample models"
@@ -7651,6 +8058,13 @@ msgstr "Select a textured face to position its texture"
 msgid "Select All"
 msgstr "Select All"
 
+#: src/i18n/nativeMenu.ts
+#: src/linkedCopyCopy.ts
+#: src/palette/registry.ts
+#: src/panels/MenuBar.tsx
+#~ msgid "Select all copies"
+#~ msgstr "Select all copies"
+
 #: src/panels/library/LibraryDetailPane.tsx
 msgid "Select an item to see its details."
 msgstr "Select an item to see its details."
@@ -7666,6 +8080,10 @@ msgstr "Select at least one object to turn into a component."
 #: src/kernelErrors.ts
 msgid "Select at least two objects to combine."
 msgstr "Select at least two objects to combine."
+
+#: src/palette/registry.ts
+#~ msgid "Select every copy linked to the selected one."
+#~ msgstr "Select every copy linked to the selected one."
 
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Select every instance of this component"
@@ -7839,6 +8257,10 @@ msgstr "Shapes like this are usually open on purpose, like a pipe fitting or an 
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Shared by every instance of this component"
 msgstr "Shared by every instance of this component"
+
+#: src/panels/ObjectInfoPanel.tsx
+#~ msgid "Shared by every linked copy"
+#~ msgstr "Shared by every linked copy"
 
 #: src/panels/MenuBar.tsx
 #: src/shop/DocumentMenu.tsx
@@ -8590,6 +9012,10 @@ msgid "That file is too large to send."
 msgstr "That file is too large to send."
 
 #: src/kernelErrors.ts
+msgid "That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions."
+msgstr "That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions."
+
+#: src/kernelErrors.ts
 msgid "That geo-location has a number that isn't finite or a unit size that isn't above zero, so it wasn't set. Fix the value and try again."
 msgstr "That geo-location has a number that isn't finite or a unit size that isn't above zero, so it wasn't set. Fix the value and try again."
 
@@ -8644,6 +9070,14 @@ msgstr "That offset distance is too small to make a new boundary. Drag further, 
 #: src/kernelErrors.ts
 msgid "That opening is already closed. Check the list again for what is left."
 msgstr "That opening is already closed. Check the list again for what is left."
+
+#: src/kernelErrors.ts
+msgid "That part has no faces to measure."
+msgstr "That part has no faces to measure."
+
+#: src/kernelErrors.ts
+msgid "That part is no longer in the model. Pick it again."
+msgstr "That part is no longer in the model. Pick it again."
 
 #: src/kernelErrors.ts
 msgid "That path line is no longer there — the model changed since it was picked. Click it again."
@@ -8964,6 +9398,10 @@ msgid "The saved file could not be loaded."
 msgstr "The saved file could not be loaded."
 
 #: src/kernelErrors.ts
+msgid "The selection could not be shared with a connected program. If this keeps happening, use Report Bug."
+msgstr "The selection could not be shared with a connected program. If this keeps happening, use Report Bug."
+
+#: src/kernelErrors.ts
 msgid "The selection has nothing visible to transform — everything in it is hidden or empty. Unhide its contents, or select something visible."
 msgstr "The selection has nothing visible to transform — everything in it is hidden or empty. Unhide its contents, or select something visible."
 
@@ -9073,6 +9511,10 @@ msgid "These are single flat faces, such as glass, signs, or a drawn floor. To m
 msgstr "These are single flat faces, such as glass, signs, or a drawn floor. To make one solid, give it a thickness."
 
 #: src/kernelErrors.ts
+#~ msgid "These aren't the same shape."
+#~ msgstr "These aren't the same shape."
+
+#: src/kernelErrors.ts
 msgid "These faces touch along more than one separate edge run, which merge can't dissolve yet. Merge along one shared run at a time."
 msgstr "These faces touch along more than one separate edge run, which merge can't dissolve yet. Merge along one shared run at a time."
 
@@ -9087,6 +9529,10 @@ msgstr "These lines do not lie on one plane, so they can't form a face."
 #: src/health/healthCopy.ts
 msgid "These objects aren't solid, so the {format} may not print cleanly:"
 msgstr "These objects aren't solid, so the {format} may not print cleanly:"
+
+#: src/kernelErrors.ts
+#~ msgid "These pieces can't be joined into one solid. An opening may keep the result open, there may be only one piece, the pieces may sit in different groups, they may not fit together into one solid, or they may be in a group inside a component, which Hew can't rejoin yet. Use Rejoin to close each piece instead."
+#~ msgstr "These pieces can't be joined into one solid. An opening may keep the result open, there may be only one piece, the pieces may sit in different groups, they may not fit together into one solid, or they may be in a group inside a component, which Hew can't rejoin yet. Use Rejoin to close each piece instead."
 
 #: src/health/healthCopy.ts
 msgid "These shapes have open sides or gaps. Most are open on purpose, like a duct, a pipe, or a box without a lid. Closing one adds a flat face across each opening, which makes it solid."
@@ -9128,6 +9574,10 @@ msgstr "This build can’t send reports, so there is nothing to follow."
 msgid "This can take a while on a large object."
 msgstr "This can take a while on a large object."
 
+#: src/App.tsx
+#~ msgid "This can't be pasted linked: the original isn't in this model any more, or this copy came from another model. Use Paste independent instead."
+#~ msgstr "This can't be pasted linked: the original isn't in this model any more, or this copy came from another model. Use Paste independent instead."
+
 #: src/panels/PhoneShareDialog.tsx
 msgid "This code expired — reopen to try again."
 msgstr "This code expired — reopen to try again."
@@ -9143,6 +9593,19 @@ msgstr "This component is already open for editing further out. Step back out to
 #: src/kernelErrors.ts
 msgid "This component is used inside another component's definition. Make that component's instances unique or explode them first, or delete the outer component."
 msgstr "This component is used inside another component's definition. Make that component's instances unique or explode them first, or delete the outer component."
+
+#: src/linkedCopyCopy.ts
+#: src/panels/ObjectInfoPanel.tsx
+#~ msgid "This copy"
+#~ msgstr "This copy"
+
+#: src/kernelErrors.ts
+msgid "This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again."
+msgstr "This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again."
+
+#: src/panels/ObjectInfoPanel.tsx
+#~ msgid "This copy only — leave empty to show the shared name"
+#~ msgstr "This copy only — leave empty to show the shared name"
 
 #: src/panels/UnsavedChangesDialog.tsx
 msgid "This document has unsaved changes."
@@ -9208,6 +9671,10 @@ msgstr "This instance has an unfinished sketch inside it, and its scale isn't ev
 msgid "This instance is scaled unevenly across its axes, so a single typed distance can't map onto it without ambiguity. Drag to the exact size instead of typing a length."
 msgstr "This instance is scaled unevenly across its axes, so a single typed distance can't map onto it without ambiguity. Drag to the exact size instead of typing a length."
 
+#: src/kernelErrors.ts
+msgid "This instance is scaled unevenly, so it can't be opened for direct editing. Even out its scale first."
+msgstr "This instance is scaled unevenly, so it can't be opened for direct editing. Even out its scale first."
+
 #: src/panels/ObjectInfoPanel.tsx
 msgid "This instance only — leave empty to show the definition name"
 msgstr "This instance only — leave empty to show the definition name"
@@ -9217,8 +9684,8 @@ msgid "This instance sits inside a group, so it opens in the in-context editing 
 msgstr "This instance sits inside a group, so it opens in the in-context editing mode instead."
 
 #: src/kernelErrors.ts
-msgid "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first."
-msgstr "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first."
+#~ msgid "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first."
+#~ msgstr "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first."
 
 #: src/kernelErrors.ts
 msgid "This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid."
@@ -9244,13 +9711,21 @@ msgstr "This loop of lines has no face to push or pull. Draw over one of its lin
 msgid "This may take a moment for large files."
 msgstr "This may take a moment for large files."
 
+#: src/kernelErrors.ts
+msgid "This model has more placed parts than Hew can list at once."
+msgstr "This model has more placed parts than Hew can list at once."
+
 #: src/App.tsx
 msgid "This model is too large for Hew to open"
 msgstr "This model is too large for Hew to open"
 
 #: src/kernelErrors.ts
-msgid "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
-msgstr "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
+#~ msgid "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
+#~ msgstr "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
+
+#: src/kernelErrors.ts
+msgid "This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts."
+msgstr "This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts."
 
 #: src/health/healthBatch.ts
 msgid "This object is no longer in the model."
@@ -9373,8 +9848,8 @@ msgid "This throws away everything you changed since the last save."
 msgstr "This throws away everything you changed since the last save."
 
 #: src/kernelErrors.ts
-msgid "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
-msgstr "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
+#~ msgid "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
+#~ msgstr "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
 
 #: src/panels/MakeSolidSketches.tsx
 msgid "Those edges don't lie flat on one plane, so a single face can't close them. Draw a line across the opening to split it into flat faces."
@@ -9571,6 +10046,10 @@ msgstr "Try Another"
 msgid "Try launching Hew with these environment variables, which switch it to a slower but reliable software renderer:"
 msgstr "Try launching Hew with these environment variables, which switch it to a slower but reliable software renderer:"
 
+#: src/palette/registry.ts
+#~ msgid "Turn objects that are the same shape into linked copies, so editing one changes them all."
+#~ msgstr "Turn objects that are the same shape into linked copies, so editing one changes them all."
+
 #: src/health/healthCopy.ts
 msgid "Turn open shapes into solids so you can push, pull, combine, or 3D print them."
 msgstr "Turn open shapes into solids so you can push, pull, combine, or 3D print them."
@@ -9582,6 +10061,10 @@ msgstr "Turn the placed section plane's clip on or off without removing it."
 #: src/palette/registry.ts
 msgid "Turn the selection into a reusable component definition."
 msgstr "Turn the selection into a reusable component definition."
+
+#: src/settings/EditingPane.tsx
+#~ msgid "Turn this off to make copies independent; you can still choose a linked copy each time."
+#~ msgstr "Turn this off to make copies independent; you can still choose a linked copy each time."
 
 #: src/palette/registry.ts
 msgid "tween"
@@ -9600,6 +10083,10 @@ msgstr "Two faces lie on top of each other where the red marks are; erase one of
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Type"
 msgstr "Type"
+
+#: src/tools/MoveTool.ts
+#~ msgid "Type 3x to make 3 copies, 3/ to divide the distance, or 4x,3x for a grid — Enter applies."
+#~ msgstr "Type 3x to make 3 copies, 3/ to divide the distance, or 4x,3x for a grid — Enter applies."
 
 #: src/tools/RotateTool.ts
 msgid "Type 3x to make 3 copies, or 3/ to divide the angle — Enter applies."
@@ -9636,6 +10123,10 @@ msgstr "Type an exact angle to redo the rotation you just made — or click to s
 #: src/tools/ArcTool.ts
 msgid "Type an exact bulge to redraw the arc you just drew — or click the first point of the next one."
 msgstr "Type an exact bulge to redraw the arc you just drew — or click the first point of the next one."
+
+#: src/tools/MoveTool.ts
+#~ msgid "Type an exact distance to redo the copy you just made, 3x to add copies, 3/ to divide it, or 4x,3x for a grid — Enter applies."
+#~ msgstr "Type an exact distance to redo the copy you just made, 3x to add copies, 3/ to divide it, or 4x,3x for a grid — Enter applies."
 
 #: src/tools/MoveTool.ts
 msgid "Type an exact distance to redo the copy you just made, or 3x / 3/ for an array — Enter applies."
@@ -9772,6 +10263,28 @@ msgstr "unknown GPU"
 #: src/log/reportBundle.ts
 msgid "unknown OS"
 msgstr "unknown OS"
+
+#: src/i18n/nativeMenu.ts
+#: src/linkedCopies.ts
+#: src/linkedCopyCopy.ts
+#: src/palette/registry.ts
+#: src/panels/dockLogic.ts
+#: src/panels/MenuBar.tsx
+#~ msgid "Unlink"
+#~ msgstr "Unlink"
+
+#: src/i18n/nativeMenu.ts
+#: src/linkedCopies.ts
+#: src/linkedCopyCopy.ts
+#: src/palette/registry.ts
+#: src/panels/dockLogic.ts
+#: src/panels/MenuBar.tsx
+#~ msgid "Unlink all"
+#~ msgstr "Unlink all"
+
+#: src/linkedCopyCopy.ts
+#~ msgid "Unlinked this copy and cut it"
+#~ msgstr "Unlinked this copy and cut it"
 
 #: src/panels/SentReportsDialog.tsx
 msgid "Unread"
@@ -10001,6 +10514,14 @@ msgstr "What did you expect instead?"
 #: src/panels/ReportBugDialog.tsx
 msgid "What happened?"
 msgstr "What happened?"
+
+#: src/kernelErrors.ts
+msgid "What is isolated could not be shared with a connected program. If this keeps happening, use Report Bug."
+msgstr "What is isolated could not be shared with a connected program. If this keeps happening, use Report Bug."
+
+#: src/kernelErrors.ts
+msgid "What is open for editing could not be shared with a connected program. If this keeps happening, use Report Bug."
+msgstr "What is open for editing could not be shared with a connected program. If this keeps happening, use Report Bug."
 
 #: src/panels/ReportBugDialog.tsx
 msgid "What’s included"

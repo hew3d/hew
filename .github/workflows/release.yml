@@ -300,6 +300,9 @@ jobs:
       - name: Stage hew-cli sidecar (macOS universal)
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          # Compile-time stamp read by hew-cli's `--version` (option_env!).
+          HEW_RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
         run: |
           cargo build --release -p hew-cli --target x86_64-apple-darwin
           cargo build --release -p hew-cli --target aarch64-apple-darwin
@@ -313,7 +316,26 @@ jobs:
       - name: Stage hew-cli sidecar
         if: runner.os != 'macOS'
         shell: bash
+        env:
+          HEW_RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
         run: node shells/tauri/scripts/stage-cli-sidecar.mjs
+
+      # The staged sidecar must report the tag's version, not the
+      # workspace version. macOS runs the binary built for the runner's
+      # own architecture; the others run the one staged binary.
+      - name: Check the staged sidecar's version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            case "$(uname -m)" in
+              arm64) BIN=shells/tauri/src-tauri/binaries/hew-cli-aarch64-apple-darwin ;;
+              *) BIN=shells/tauri/src-tauri/binaries/hew-cli-x86_64-apple-darwin ;;
+            esac
+          else
+            BIN="$(ls shells/tauri/src-tauri/binaries/hew-cli-* | head -n 1)"
+          fi
+          [[ "$("$BIN" --version)" == "hew-cli ${TAG#v}" ]]
 
       # tauri-action runs beforeBuildCommand (app build, which builds the
       # WASM kernel via build-wasm.mjs), bundles, and uploads the artifacts
@@ -333,6 +355,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Compile-time stamp read by the shell's outbound identifiers.
+          HEW_RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
         with:
           projectPath: shells/tauri
           releaseId: ${{ needs.create-release.outputs.release_id }}
@@ -527,29 +551,20 @@ jobs:
             exit 0
           fi
           cp shells/web/_headers shells/web/dist/_headers
-          # A pre-release tag must never replace production. Each effort
-          # that cuts pre-releases deploys to its own Pages branch, which
-          # Pages serves at its own URL and which a custom domain can be
-          # pointed at. Separate hosts keep the efforts' browser storage
-          # apart, since their document formats differ. A pre-release tag
-          # of an unknown effort deploys nowhere.
-          case "$TAG" in
-            *-pre.plugin-*) branch=preview-plugins ;;
-            *-pre.curves-*) branch=preview-curves ;;
-            *-pre.*)
-              echo "::warning::No preview branch is mapped for $TAG; skipping the web deploy."
-              exit 0
-              ;;
-            *) branch=main ;;
-          esac
+          # A pre-release tag must never replace production: deploy it to
+          # the `preview` branch, which Pages serves at its own URL.
+          branch=main
+          if [[ "$TAG" == *-pre.* ]]; then
+            branch=preview
+          fi
           npx wrangler@4 pages deploy shells/web/dist \
             --project-name=hew-app --branch="$branch" --commit-dirty=true
-          if [ "$branch" != main ]; then
+          if [ "$branch" = preview ]; then
             {
               echo "### Pre-release web preview"
               echo
-              echo "Deployed to the Pages \`$branch\` branch, not production:"
-              echo "https://$branch.hew3d.com (custom domain), also https://$branch.hew-app.pages.dev"
+              echo "Deployed to the Pages \`preview\` branch, not production:"
+              echo "https://preview.hew3d.com (needs the custom domain on the hew-app Pages project; the always-available URL is https://preview.hew-app.pages.dev)"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -590,6 +605,8 @@ jobs:
           rustup target add ${{ matrix.target }}
 
       - name: Build hew-relay (static)
+        env:
+          HEW_RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
         run: cargo build --release -p hew-relay --target ${{ matrix.target }}
 
       - name: Smoke the binary
@@ -597,7 +614,7 @@ jobs:
           set -euo pipefail
           BIN="target/${{ matrix.target }}/release/hew-relay"
           file "$BIN" | grep -qi 'static' || { echo "::error::hew-relay is not statically linked"; file "$BIN"; exit 1; }
-          "$BIN" --version
+          [[ "$("$BIN" --version)" == "hew-relay ${TAG#v}" ]]
           "$BIN" --listen 127.0.0.1:18787 &
           sleep 1
           curl -sf http://127.0.0.1:18787/relay/ | grep -q '"service":"hew-relay"'

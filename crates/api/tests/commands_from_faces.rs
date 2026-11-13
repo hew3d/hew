@@ -5,9 +5,13 @@
 //! applies to API drawing as to pointer drawing, so an agent that draws a
 //! rectangle and four lines to an apex gets a pyramid.
 
-use api::{Connection, DispatchOutcome, NoHost, Profile, Request, RequestId, Response, codes};
+use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, Response, codes};
 use kernel::{Document, EntityRef, Plane, Point3, SketchId, WatertightState};
 use serde_json::{Value, json};
+
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
 
 // ----------------------------------------------------------------- fixtures
 
@@ -26,7 +30,8 @@ fn hello_attach(conn: &mut Connection, doc: &mut Document) {
         (0, "hew.meta.hello", json!({ "protocol": 1 })),
         (1, "hew.doc.attach", json!({})),
     ] {
-        let DispatchOutcome::Reply(r) = conn.dispatch(doc, &mut NoHost, req(id, method, params))
+        let DispatchOutcome::Reply(r) =
+            conn.dispatch(&REGISTRY, doc, &mut NoHost, req(id, method, params))
         else {
             panic!("{method} replies")
         };
@@ -35,14 +40,16 @@ fn hello_attach(conn: &mut Connection, doc: &mut Document) {
 }
 
 fn session() -> (Connection, Document) {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     (conn, doc)
 }
 
 fn call(conn: &mut Connection, doc: &mut Document, method: &str, params: Value) -> Response {
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, &mut NoHost, req(7, method, params)) else {
+    let DispatchOutcome::Reply(r) =
+        conn.dispatch(&REGISTRY, doc, &mut NoHost, req(7, method, params))
+    else {
         panic!("{method} replies")
     };
     r

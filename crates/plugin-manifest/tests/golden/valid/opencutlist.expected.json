@@ -1,0 +1,200 @@
+{
+  "activation": [
+    "on_command",
+    "on_tool",
+    "on_surface_open",
+    "on_document_has_namespace"
+  ],
+  "activationReason": "Shows the cut list as soon as a document opens.",
+  "agent": {
+    "notes": "agent-notes.md"
+  },
+  "api": 1,
+  "author": {
+    "name": "Tiny Workshop Design",
+    "url": "https://example.com"
+  },
+  "contributes": {
+    "actions": [
+      {
+        "command": "com.tinyworkshop.opencutlist.cutlist.generate",
+        "id": "open"
+      }
+    ],
+    "commands": [
+      {
+        "class": "read_only",
+        "concurrency": "serial",
+        "id": "cutlist.generate",
+        "label": {
+          "$t": "command.generate"
+        },
+        "params": {
+          "additionalProperties": false,
+          "properties": {
+            "scope": {
+              "enum": [
+                "selection",
+                "model"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "permission": "model.read",
+        "refusals": [
+          "nothing_to_list"
+        ],
+        "result": {
+          "additionalProperties": false,
+          "properties": {
+            "parts": {
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "summary": "Build the cut list for the selection or the whole model.",
+        "timeout_ms": 120000
+      },
+      {
+        "class": "mutating",
+        "concurrency": "parallel",
+        "id": "parts.set_grain",
+        "label": null,
+        "params": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "permission": null,
+        "refusals": [],
+        "result": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "summary": "Set the grain direction stored on a part.",
+        "timeout_ms": 50000
+      }
+    ],
+    "dialogSlots": {
+      "export": [
+        {
+          "id": "x"
+        }
+      ]
+    },
+    "events": [
+      "document_changed"
+    ],
+    "exportFormats": [
+      {
+        "extensions": [
+          "csv"
+        ],
+        "id": "csv"
+      }
+    ],
+    "hud": {
+      "tool": "pick"
+    },
+    "importFormats": [
+      {
+        "extensions": [
+          "ocl"
+        ],
+        "id": "ocl"
+      }
+    ],
+    "menus": {
+      "extensions": [
+        {
+          "action": "open"
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": "parts"
+      }
+    ],
+    "presave": false,
+    "printPages": [
+      {
+        "id": "cutlist"
+      }
+    ],
+    "settings": {
+      "units": {
+        "type": "string"
+      }
+    },
+    "sheets": [
+      {
+        "id": "parts"
+      }
+    ],
+    "toolbars": [
+      {
+        "id": "main",
+        "items": [
+          "open"
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "id": "pick"
+      }
+    ],
+    "viewportSurfaces": [
+      {
+        "id": "labels"
+      }
+    ],
+    "windows": [
+      {
+        "id": "cutlist"
+      }
+    ]
+  },
+  "data": {
+    "migrate": "data.migrate",
+    "version": 2
+  },
+  "description": "Cut lists, cutting diagrams, labels, and estimates.",
+  "hew": ">=1.4.0",
+  "homepage": "https://example.com/opencutlist",
+  "icon": "icon.svg",
+  "id": "com.tinyworkshop.opencutlist",
+  "license": "GPL-3.0-only",
+  "locales": {
+    "catalogs": "locales/",
+    "default": "en"
+  },
+  "main": "dist/background.js",
+  "manifest": 1,
+  "name": "OpenCutList",
+  "optionalPermissions": [
+    "network:www.lairdubois.fr",
+    "network:api.opencollective.com"
+  ],
+  "permissions": [
+    "model.read",
+    "model.write",
+    "attributes.write",
+    "view",
+    "files",
+    "clipboard"
+  ],
+  "requires": [
+    {
+      "id": "org.hew3d.units",
+      "range": "^1.2"
+    }
+  ],
+  "source": "https://github.com/example/opencutlist-hew",
+  "version": "1.0.0"
+}

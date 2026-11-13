@@ -86,16 +86,18 @@ enum FuzzOp {
     CollapseSubFace {
         face_sel: usize,
     },
-    /// Slide/turn/scale the `face_sel`-th face on its parent if it is an
-    /// imprint (usually rejected typed — a non-imprint, or a move that
-    /// leaves the parent — exercising the strong guarantee); an accepted
-    /// move is handle-stable and its own inverse under undo.
+    /// Slide/turn/scale — and, with `mirror`, first mirror across a line of
+    /// the face — the `face_sel`-th face on its parent if it is an imprint
+    /// (usually rejected typed — a non-imprint, or a move that leaves the
+    /// parent — exercising the strong guarantee); an accepted move is
+    /// handle-stable and its own inverse under undo.
     TransformSubFace {
         face_sel: usize,
         du: f64,
         dv: f64,
         angle: f64,
         scale: f64,
+        mirror: bool,
     },
     Undo,
     Redo,
@@ -131,15 +133,24 @@ fn arb_fuzz_op() -> impl Strategy<Value = FuzzOp> {
         }),
         1 => any::<usize>().prop_map(|face_sel| FuzzOp::MergeInnerFace { face_sel }),
         1 => any::<usize>().prop_map(|face_sel| FuzzOp::CollapseSubFace { face_sel }),
-        2 => (any::<usize>(), -0.4..0.4f64, -0.4..0.4f64, -3.2..3.2f64, 0.6..1.5f64).prop_map(
-            |(face_sel, du, dv, angle, scale)| FuzzOp::TransformSubFace {
-                face_sel,
-                du,
-                dv,
-                angle,
-                scale,
-            }
-        ),
+        2 => (
+            any::<usize>(),
+            -0.4..0.4f64,
+            -0.4..0.4f64,
+            -3.2..3.2f64,
+            0.6..1.5f64,
+            any::<bool>()
+        )
+            .prop_map(|(face_sel, du, dv, angle, scale, mirror)| {
+                FuzzOp::TransformSubFace {
+                    face_sel,
+                    du,
+                    dv,
+                    angle,
+                    scale,
+                    mirror,
+                }
+            }),
         2 => Just(FuzzOp::Undo),
         1 => Just(FuzzOp::Redo),
     ]
@@ -313,8 +324,111 @@ fn staple_loop(origin: Point3, ua: Point3, vb: Point3) -> Vec<Point3> {
 /// Seed solids for a fuzz case, weighted toward the shapes with the richest
 /// op surface (quads everywhere) but always covering triangles, concave caps,
 /// slanted side walls, and faces that already carry a concave hole.
+/// A box built through a [`kernel::Document`] whose faces and edges carry
+/// attribute dictionaries (docs/agents/HEW_API.md §8), written with the
+/// document's own face and edge writes, then taken out as a bare Object.
+/// Several faces share a dictionary, so interned slots are shared too.
+/// Every op then carries them by its per-site rule, and the round-trip
+/// checks hold them to it.
+fn arb_attr_box() -> impl Strategy<Value = Object> {
+    (
+        (-10.0..10.0f64, -10.0..10.0f64),
+        (0.5..10.0f64, 0.5..10.0f64, 0.5..10.0f64),
+        any::<u8>(),
+        any::<u16>(),
+    )
+        .prop_map(|((x, y), (dx, dy, dz), face_mask, edge_mask)| {
+            let mut doc = kernel::Document::new();
+            let ground = Plane::from_polygon(&[
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+            ])
+            .unwrap();
+            let s = doc.add_sketch(ground);
+            let c = [
+                Point3::new(x, y, 0.0),
+                Point3::new(x + dx, y, 0.0),
+                Point3::new(x + dx, y + dy, 0.0),
+                Point3::new(x, y + dy, 0.0),
+            ];
+            let sk = doc.sketch_mut(s).unwrap();
+            for i in 0..4 {
+                sk.add_segment(c[i], c[(i + 1) % 4]).unwrap();
+            }
+            let r = doc.extrudable_regions(s).unwrap()[0];
+            let (id, _) = doc.extrude_region(s, r, dz).unwrap();
+            let o = doc.object(id).unwrap();
+            let faces: Vec<_> = o.faces().keys().collect();
+            let edges: Vec<_> = o.edges().keys().collect();
+            for (i, f) in faces.into_iter().enumerate() {
+                if face_mask & (1 << i) != 0 {
+                    doc.face_attr_set(
+                        id,
+                        f,
+                        "com.example.fuzz",
+                        "k",
+                        kernel::AttrValue::Int(i as i64 % 2),
+                    )
+                    .unwrap();
+                }
+            }
+            for (i, e) in edges.into_iter().enumerate() {
+                if edge_mask & (1 << i) != 0 {
+                    doc.edge_attr_set(
+                        id,
+                        e,
+                        "com.example.fuzz",
+                        "e",
+                        kernel::AttrValue::Int(i as i64 % 3),
+                    )
+                    .unwrap();
+                }
+            }
+            doc.object(id).unwrap().clone()
+        })
+}
+
+/// Every face's and edge's dictionary, keyed by quantized geometry (the
+/// face's outer-ring centroid and normal, the edge's endpoints), sorted: a
+/// handle-free fingerprint to compare across round trips.
+fn attr_snapshot(o: &Object) -> Vec<(String, kernel::AttrDict)> {
+    let q = |p: Point3| {
+        let r = |v: f64| (v * 1e6).round() as i64;
+        format!("{},{},{}", r(p.x), r(p.y), r(p.z))
+    };
+    let mut out: Vec<(String, kernel::AttrDict)> = Vec::new();
+    for (f, face) in o.faces() {
+        let Some(d) = o.face_attrs(f) else { continue };
+        let ring: Vec<Point3> = o.loop_positions(face.outer_loop).collect();
+        let k = 1.0 / ring.len() as f64;
+        let c = ring.iter().fold(Point3::new(0.0, 0.0, 0.0), |a, p| {
+            Point3::new(a.x + p.x * k, a.y + p.y * k, a.z + p.z * k)
+        });
+        let n = face.plane.normal();
+        out.push((
+            format!("f {} {}", q(c), q(Point3::new(n.x, n.y, n.z))),
+            d.clone(),
+        ));
+    }
+    for e in o.edges().keys() {
+        let Some(d) = o.edge_attrs(e) else { continue };
+        let (a, b) = o.edge_endpoints(e).unwrap();
+        let (a, b) = (q(a), q(b));
+        let key = if a < b {
+            format!("e {a} {b}")
+        } else {
+            format!("e {b} {a}")
+        };
+        out.push((key, d.clone()));
+    }
+    out.sort_by(|x, y| x.0.cmp(&y.0));
+    out
+}
+
 fn arb_seed() -> impl Strategy<Value = Object> {
     prop_oneof![
+        3 => arb_attr_box(),
         4 => arb_box(),
         1 => arb_tetra(),
         3 => arb_l_prism(),
@@ -398,6 +512,7 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
                     loop_path,
                     restore: None,
                     curves: Vec::new(),
+                    edge_attrs: Vec::new(),
                 });
             }
             // Shrink the boundary toward its vertex centroid; strictly inside
@@ -412,6 +527,7 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
                 loop_path,
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             })
         }
         FuzzOp::ImprintCircle {
@@ -474,6 +590,7 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
                 loop_path,
                 restore: None,
                 curves: vec![Some(CurveGeom { center: c, radius }); sides],
+                edge_attrs: Vec::new(),
             })
         }
         FuzzOp::ExtrudeSubFace { face_sel, distance } => {
@@ -500,6 +617,7 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
             dv,
             angle,
             scale,
+            mirror,
         } => {
             let n = object.faces().len();
             let sub_face = object.faces().keys().nth(face_sel % n)?;
@@ -521,7 +639,28 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
             // scale, then slide within the plane.
             let to_origin = Transform::translation(c.to_vec() * -1.0);
             let back = Transform::translation(c.to_vec() + u * *du + v * *dv);
+            // The mirror across the line along `u` (I - 2·v·vᵀ): it keeps
+            // the normal, so it is a move on the face.
+            let flip = if *mirror {
+                Transform::from_affine(&[
+                    1.0 - 2.0 * v.x * v.x,
+                    -2.0 * v.x * v.y,
+                    -2.0 * v.x * v.z,
+                    0.0,
+                    -2.0 * v.y * v.x,
+                    1.0 - 2.0 * v.y * v.y,
+                    -2.0 * v.y * v.z,
+                    0.0,
+                    -2.0 * v.z * v.x,
+                    -2.0 * v.z * v.y,
+                    1.0 - 2.0 * v.z * v.z,
+                    0.0,
+                ])
+            } else {
+                Transform::IDENTITY
+            };
             let xf = to_origin
+                .then(&flip)
                 .then(&Transform::rotation(normal, *angle).ok()?)
                 .then(&Transform::uniform_scale(*scale))
                 .then(&back);
@@ -664,6 +803,12 @@ fn check_serialize_roundtrip(object: &Object, what: &str) -> Result<(), TestCase
         "{}: hole count changed across the round-trip",
         what
     );
+    prop_assert_eq!(
+        attr_snapshot(&decoded),
+        attr_snapshot(object),
+        "{}: face or edge dictionaries changed across the round-trip",
+        what
+    );
     Ok(())
 }
 
@@ -688,7 +833,45 @@ fn check_state(object: &Object, step: usize, what: &str) -> Result<(), TestCaseE
         step,
         what
     );
+    // Winding oracle: every outer loop runs counter-clockwise about its
+    // face's stored normal and every hole clockwise (the validator does not
+    // check this), so a mirror that forgot to reverse its loops fails here.
+    for (fid, face) in object.faces() {
+        let n = face.plane.normal();
+        let outer = newell(object, face.outer_loop).dot(n);
+        prop_assert!(
+            outer > 0.0,
+            "step {} ({}): face {:?}'s outer loop winds against its normal ({})",
+            step,
+            what,
+            fid,
+            outer
+        );
+        for &hole in &face.inner_loops {
+            let h = newell(object, hole).dot(n);
+            prop_assert!(
+                h < 0.0,
+                "step {} ({}): a hole of face {:?} winds with its normal ({})",
+                step,
+                what,
+                fid,
+                h
+            );
+        }
+    }
     Ok(())
+}
+
+/// Twice the area vector of a loop (Newell): its direction is the side the
+/// loop winds counter-clockwise about.
+fn newell(object: &Object, l: kernel::LoopId) -> Vec3 {
+    let pts: Vec<Point3> = object.loop_positions(l).collect();
+    let mut sum = Vec3::new(0.0, 0.0, 0.0);
+    for (i, &a) in pts.iter().enumerate() {
+        let b = pts[(i + 1) % pts.len()];
+        sum = sum + a.to_vec().cross(b.to_vec());
+    }
+    sum
 }
 
 proptest! {
@@ -700,6 +883,8 @@ proptest! {
         ops in proptest::collection::vec(arb_fuzz_op(), 1..16),
     ) {
         let original = object.to_polygons();
+        let original_attrs = attr_snapshot(&object);
+        check_serialize_roundtrip(&object, "seed")?;
         if std::env::var("FUZZ_TRACE").is_ok() {
             eprintln!("CASE verts={:?} ops={:?}", original.0, ops);
         }
@@ -820,11 +1005,17 @@ proptest! {
                 "full undo did not restore the original object: {why}"
             )));
         }
+        prop_assert_eq!(
+            attr_snapshot(&object),
+            original_attrs.clone(),
+            "full undo did not restore the original dictionaries"
+        );
 
         if !replay(&mut object, &mut history, "first replay")? {
             return Ok(());
         }
         let maximal = object.to_polygons();
+        let maximal_attrs = attr_snapshot(&object);
 
         if !unwind(&mut object, &mut history, "second unwind")? {
             return Ok(());
@@ -843,6 +1034,11 @@ proptest! {
                 "second full redo did not reproduce the maximal state: {why}"
             )));
         }
+        prop_assert_eq!(
+            attr_snapshot(&object),
+            maximal_attrs,
+            "second full redo did not reproduce the maximal dictionaries"
+        );
 
         // The maximal state must survive the round-trip too (it can contain
         // geometry the post-sequence state never had).

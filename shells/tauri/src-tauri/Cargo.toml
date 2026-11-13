@@ -108,11 +108,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_Graphics_Printing",
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
-    # Not used directly (no overlapped I/O here — every pipe handle is
-    # blocking), but `ConnectNamedPipe`/`ReadFile`/`WriteFile` all take an
-    # `OVERLAPPED` parameter (always null in this transport) in their
-    # signatures, so windows-sys gates those functions' very existence
-    # behind this feature.
+    # The live API's overlapped named-pipe I/O (src/live.rs): `OVERLAPPED`,
+    # `GetOverlappedResult`, `CancelIoEx`.
     "Win32_System_IO",
     "Win32_System_Threading",
     "Win32_Security",

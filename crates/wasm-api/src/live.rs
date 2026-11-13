@@ -12,11 +12,239 @@
 //! kernel::Document`.
 
 use api::{
-    DocFormat, Host, LibraryListing, LibraryReadResult, LibraryWriteResult, LibraryWriteTarget,
-    Refusal, SaveOutcome, SnapshotProjection, StandardView, ViewCameraSpec,
+    ContextEntry, ContextKind, DocFormat, Host, IsolationEntry, LibraryListing, LibraryReadResult,
+    LibraryWriteResult, LibraryWriteTarget, Refusal, SaveOutcome, SelectMode, SelectionEntry,
+    SelectionState, SnapshotProjection, StandardView, ViewCameraSpec,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use slotmap::{Key, KeyData};
+
+/// A kernel handle as the app holds it: the slotmap key's FFI value, carried
+/// on the wire as a decimal string so JavaScript reads it as a `BigInt`
+/// without losing bits.
+mod decimal {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse::<u64>().map_err(serde::de::Error::custom)
+    }
+}
+
+/// One entry of the app's selection as the app mirrors it into the `Scene`
+/// ([`crate::Scene::set_ui_selection`]) and as a
+/// [`ViewDirective::Selection`] hands it back: a kind and a kernel handle
+/// (a decimal string on the wire). The app's draft kinds have no public id
+/// and are never mirrored.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UiSelectionEntry {
+    Object {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+    Group {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+    Instance {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+    Sketch {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+    Guide {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+    Annotation {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+}
+
+impl UiSelectionEntry {
+    /// The entry with kernel ids, for the [`api::Host`] boundary.
+    pub fn to_entry(&self) -> SelectionEntry {
+        let key = |id: u64| KeyData::from_ffi(id);
+        match *self {
+            UiSelectionEntry::Object { id } => SelectionEntry::Object(key(id).into()),
+            UiSelectionEntry::Group { id } => SelectionEntry::Group(key(id).into()),
+            UiSelectionEntry::Instance { id } => SelectionEntry::Instance(key(id).into()),
+            UiSelectionEntry::Sketch { id } => SelectionEntry::Sketch(key(id).into()),
+            UiSelectionEntry::Guide { id } => SelectionEntry::Guide(key(id).into()),
+            UiSelectionEntry::Annotation { id } => SelectionEntry::Annotation(key(id).into()),
+        }
+    }
+
+    /// The app's form of a kernel entry.
+    pub fn from_entry(entry: SelectionEntry) -> UiSelectionEntry {
+        match entry {
+            SelectionEntry::Object(id) => UiSelectionEntry::Object {
+                id: id.data().as_ffi(),
+            },
+            SelectionEntry::Group(id) => UiSelectionEntry::Group {
+                id: id.data().as_ffi(),
+            },
+            SelectionEntry::Instance(id) => UiSelectionEntry::Instance {
+                id: id.data().as_ffi(),
+            },
+            SelectionEntry::Sketch(id) => UiSelectionEntry::Sketch {
+                id: id.data().as_ffi(),
+            },
+            SelectionEntry::Guide(id) => UiSelectionEntry::Guide {
+                id: id.data().as_ffi(),
+            },
+            SelectionEntry::Annotation(id) => UiSelectionEntry::Annotation {
+                id: id.data().as_ffi(),
+            },
+        }
+    }
+}
+
+/// One isolation target as the app mirrors it ([`crate::Scene::set_ui_isolation`])
+/// and as a [`ViewDirective::Isolate`] hands it back: the app's
+/// `IsolationTarget`, handles as decimal strings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UiIsolationEntry {
+    Object {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+    Group {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+    Instance {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+    Member {
+        #[serde(with = "decimal")]
+        object: u64,
+        #[serde(with = "decimal")]
+        instance: u64,
+    },
+}
+
+impl UiIsolationEntry {
+    /// The entry with kernel ids, for the [`api::Host`] boundary.
+    pub fn to_entry(&self) -> IsolationEntry {
+        let key = |id: u64| KeyData::from_ffi(id);
+        match *self {
+            UiIsolationEntry::Object { id } => {
+                IsolationEntry::Node(kernel::NodeId::Object(key(id).into()))
+            }
+            UiIsolationEntry::Group { id } => {
+                IsolationEntry::Node(kernel::NodeId::Group(key(id).into()))
+            }
+            UiIsolationEntry::Instance { id } => {
+                IsolationEntry::Node(kernel::NodeId::Instance(key(id).into()))
+            }
+            UiIsolationEntry::Member { object, instance } => IsolationEntry::Member {
+                object: key(object).into(),
+                instance: key(instance).into(),
+            },
+        }
+    }
+
+    /// The app's form of a kernel entry.
+    pub fn from_entry(entry: IsolationEntry) -> UiIsolationEntry {
+        match entry {
+            IsolationEntry::Node(kernel::NodeId::Object(id)) => UiIsolationEntry::Object {
+                id: id.data().as_ffi(),
+            },
+            IsolationEntry::Node(kernel::NodeId::Group(id)) => UiIsolationEntry::Group {
+                id: id.data().as_ffi(),
+            },
+            IsolationEntry::Node(kernel::NodeId::Instance(id)) => UiIsolationEntry::Instance {
+                id: id.data().as_ffi(),
+            },
+            IsolationEntry::Member { object, instance } => UiIsolationEntry::Member {
+                object: object.data().as_ffi(),
+                instance: instance.data().as_ffi(),
+            },
+        }
+    }
+}
+
+/// One of the app's in-context entries as it mirrors them
+/// ([`crate::Scene::set_ui_context`]): the kinds its fallback can hold, with
+/// the handle as a decimal string. A group always opens a session, so it is
+/// never one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UiContextEntry {
+    Object {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+    Instance {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+}
+
+impl UiContextEntry {
+    /// The entry with kernel ids, for the [`api::Host`] boundary.
+    pub fn to_entry(&self) -> ContextEntry {
+        let key = |id: u64| KeyData::from_ffi(id);
+        match *self {
+            UiContextEntry::Object { id } => ContextEntry {
+                kind: ContextKind::Object,
+                node: kernel::NodeId::Object(key(id).into()),
+            },
+            UiContextEntry::Instance { id } => ContextEntry {
+                kind: ContextKind::Instance,
+                node: kernel::NodeId::Instance(key(id).into()),
+            },
+        }
+    }
+}
+
+/// A tree node on the wire of a [`ViewDirective::EnterContext`]: an object,
+/// group, or instance, the handle a decimal string (the app's `NodeRef`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UiNode {
+    Object {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+    Group {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+    Instance {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+}
+
+impl UiNode {
+    /// The app's form of a kernel node.
+    pub fn from_node(node: kernel::NodeId) -> UiNode {
+        match node {
+            kernel::NodeId::Object(id) => UiNode::Object {
+                id: id.data().as_ffi(),
+            },
+            kernel::NodeId::Group(id) => UiNode::Group {
+                id: id.data().as_ffi(),
+            },
+            kernel::NodeId::Instance(id) => UiNode::Instance {
+                id: id.data().as_ffi(),
+            },
+        }
+    }
+}
 
 /// A viewport/app-settings effect requested by `hew.view.camera`,
 /// `hew.view.zoom_extents`, or `hew.view.units` that `LiveHost` cannot
@@ -26,12 +254,13 @@ use sha2::{Digest, Sha256};
 /// records the intent here and answers success; `Scene` (`lib.rs`)
 /// captures it off `LiveHost` right after dispatch and hands it to the
 /// webview's live bridge (`app/src/api/liveBridge.ts`) through
-/// [`crate::Scene::take_pending_view_directive`] — a second, JS-side step
+/// [`crate::Scene::take_pending_view_directives`] — a second, JS-side step
 /// exactly like how `Scene::api_method_mutates` already tells the bridge
 /// "should you resync" outside the JSON-RPC reply itself.
 ///
-/// Deliberately NOT folded into the JSON-RPC reply `api_dispatch` returns:
-/// that string is the actual wire response sent back over the socket to
+/// Deliberately NOT folded into the JSON-RPC reply `api_dispatch` returns
+/// (the `reply` frame inside its tagged answer): that frame is the actual
+/// wire response sent back over the socket to
 /// whatever dialed in (`hew-cli --live`, an MCP agent) per docs/agents/HEW_API.md
 /// §4 — those clients have no viewport or Settings window of their own to
 /// act on a directive with, and JSON-RPC responses are contractually
@@ -71,9 +300,49 @@ pub enum ViewDirective {
     /// for the bridge to drive whatever app-side activation logic
     /// `useScenesController`'s `scenes.activate` path already has
     /// (camera tween, panel/outliner sync), rather than duplicating that
-    /// logic here from raw numbers. See `applyPendingViewDirective`
+    /// logic here from raw numbers. See `applyPendingViewDirectives`
     /// (`app/src/api/liveBridge.ts`) for the JS side.
     ActivateScene { sid: u64 },
+    /// `hew.selection.set`/`clear`'s effect: the merged selection, which the
+    /// bridge applies wholesale through the app's own selection handlers
+    /// (`handleSelectMany(nodes, 'replace')`, `handleSelectGuide`,
+    /// `handleSelectAnnotation`). `mode` is always `"replace"`: the merge
+    /// already happened here.
+    Selection {
+        entries: Vec<UiSelectionEntry>,
+        mode: String,
+    },
+    /// `hew.view.hide`/`show`/`show_all`'s notification: the kernel's
+    /// user-hidden flags changed, so the app re-reads them into its hidden
+    /// set and pushes the union to the renderer and the pick/snap exclusion.
+    HiddenChanged,
+    /// `hew.view.isolate`'s effect: the bridge calls `ViewportApi.isolate`
+    /// with these targets, framing them when `frame` is set (an aborted
+    /// plugin command putting an isolation back does not reframe).
+    Isolate {
+        entries: Vec<UiIsolationEntry>,
+        frame: bool,
+    },
+    /// `hew.view.clear_isolation`'s effect: `ViewportApi.clearIsolation`.
+    ClearIsolation,
+    /// `hew.view.zoom_to`'s effect: `ViewportApi.zoomToWorldBounds` over
+    /// the box, which already carries the padding.
+    ZoomTo {
+        min: [f64; 3],
+        max: [f64; 3],
+        padding: f64,
+    },
+    /// `hew.view.enter`'s effect: the bridge converges the user's window on
+    /// `leaf` the way an Outliner double click does, calling the app's
+    /// `enterNode` for each instance of `path` (outermost first) and then
+    /// for `leaf`. The outcome is `context_changed`, not a reply.
+    EnterContext { path: Vec<UiNode>, leaf: UiNode },
+    /// `hew.view.exit`'s effect: the app pops its innermost entry or
+    /// session frame (`setPathDepth(total - 1)`).
+    ExitContext,
+    /// `hew.view.exit_all`'s effect: the app closes everything
+    /// (`setPathDepth(0)`).
+    ExitAllContexts,
 }
 
 /// The wire shape `ViewDirective::Camera` hands the live bridge for an
@@ -136,10 +405,9 @@ impl From<&ViewCameraSpec> for ViewDirective {
 }
 
 /// The `api::Host` for a live desktop connection. The webview's WASM
-/// runtime has no filesystem, no native renderer, and no viewport handle
-/// to give back to `crates/api`, so most host-implemented commands
-/// (docs/agents/HEW_API.md §3: `hew.doc.new/open/import`, `hew.view.snapshot`)
-/// are honestly refused here with `host_capability_missing` rather than
+/// runtime has no filesystem, so most host-implemented commands
+/// (docs/agents/HEW_API.md §3: `hew.doc.new/open/import`, a snapshot's
+/// `path` write) are honestly refused here with `host_capability_missing` rather than
 /// faked (the registry declares that exact refusal name for every one of
 /// these — see `crates/api/src/registry.rs`'s Wave D block).
 /// `hew.doc.save` and `hew.doc.export` are the two exceptions: neither
@@ -160,29 +428,46 @@ impl From<&ViewCameraSpec> for ViewDirective {
 /// `hew.doc.new`/`open` from its `app` grant" — because a remote
 /// connection silently replacing the user's live, unsaved document is
 /// precisely the "astonishing" case §12 warns `--live` must never be.
-/// `Profile::App` grants unconditionally today (`registry.rs`'s
-/// `Profile::grants` — not this crate's to narrow, and doing so is a
+/// `Grant::app()` grants unconditionally today (`grant.rs`'s
+/// `Grant::grants` — not this crate's to narrow, and doing so is a
 /// `crates/api` change outside this effort's ownership), so the
 /// equivalent is enforced here instead: both refuse typed, pointing at
 /// the app's own File menu, rather than either faking the swap or
-/// reaching past this crate's boundary to narrow the profile.
+/// reaching past this crate's boundary to narrow the grant.
 ///
 /// `set_camera`/`zoom_extents`/`set_display_units`, unlike every method
 /// above, are cleanly reachable from inside the WASM sandbox — not
 /// through this trait's own effect (which still has no DOM access), but
-/// by recording a [`ViewDirective`] into `directive` and answering
+/// by recording a [`ViewDirective`] into `directives` and answering
 /// success; see that type's doc comment for the full JS hand-off story.
+/// The selection and isolation commands work the same way over a copy of
+/// the app's mirrors that `Scene::api_dispatch` seeds before the dispatch
+/// and writes back only after it succeeds, so a refused command (or an
+/// aborted transaction) leaves the mirrors and the app untouched.
 #[derive(Debug, Default)]
 pub struct LiveHost {
-    /// Set by the last `set_camera`/`zoom_extents`/`set_display_units`
-    /// call on this `LiveHost`. `Scene::api_dispatch` (`lib.rs`)
-    /// constructs a fresh `LiveHost` per dispatch, so this never leaks a
-    /// stale directive from an earlier command into a later one.
-    pub directive: Option<ViewDirective>,
+    /// Every directive this dispatch left, in the order its commands ran:
+    /// a transaction can carry several view-state commands.
+    /// `Scene::api_dispatch` (`lib.rs`) constructs a fresh `LiveHost` per
+    /// dispatch, so a directive never leaks from an earlier command into a
+    /// later one.
+    pub directives: Vec<ViewDirective>,
+    /// The app's selection as mirrored into the `Scene`, merged into by
+    /// `hew.selection.set`.
+    pub selection: SelectionState,
+    /// The live viewport's isolation as mirrored into the `Scene`.
+    pub isolation: Option<Vec<IsolationEntry>>,
     /// The app's display length format (`app/src/settings/units.ts`'s
     /// `LengthFormat`), which a SketchUp export opens in unless the caller
     /// names one; `None` writes SketchUp's own defaults.
     pub display_units: Option<String>,
+    /// The app's in-context entries as mirrored into the `Scene`.
+    pub fallback: Vec<ContextEntry>,
+    /// Whether a tool gesture is armed in the user's window.
+    pub gesture_armed: bool,
+    /// Whether the user's window is at the top level (no session frame, no
+    /// fallback entry): `hew.view.exit` has nothing to pop then.
+    pub at_top_level: bool,
 }
 
 /// Builds the `host_capability_missing` refusal every method below
@@ -275,6 +560,7 @@ impl Host for LiveHost {
         path: Option<&str>,
         segments_per_turn: u32,
         units: Option<&str>,
+        selection: Option<&[api::locate::RenderRoot]>,
         compat: bool,
     ) -> Result<Option<Vec<u8>>, Refusal> {
         if path.is_some() {
@@ -308,9 +594,14 @@ impl Host for LiveHost {
                     .map_err(|e| Refusal::api("export_failed", &e.to_string()))?
                     .bytes
             }
-            _ => {
-                mesh_export::export(doc, format, segments_per_turn, true).map_err(export_refusal)?
-            }
+            _ => match selection {
+                Some(roots) => {
+                    mesh_export::export_occurrences(doc, roots, format, segments_per_turn, true)
+                        .map_err(export_refusal)?
+                }
+                None => mesh_export::export(doc, format, segments_per_turn, true)
+                    .map_err(export_refusal)?,
+            },
         };
         Ok(Some(bytes))
     }
@@ -453,7 +744,9 @@ impl Host for LiveHost {
         let (report, _change) = doc
             .ingest(scene, missing)
             .map_err(|e| Refusal::from_document_error(&e))?;
-        record();
+        if options.record {
+            record();
+        }
         Ok(serde_json::json!({
             "objects_created": report.objects_created,
             "watertight": report.watertight,
@@ -468,15 +761,24 @@ impl Host for LiveHost {
         }))
     }
 
+    /// Rendered here by the same software rasterizer `hew-cli` uses
+    /// (`crates/headless-render`), synchronously on the calling thread; the
+    /// request's size clamp is the only bound. Read-only: it touches
+    /// nothing but the document it is handed.
     fn snapshot(
         &mut self,
-        _doc: &kernel::Document,
-        _params: &api::SnapshotParams,
+        doc: &kernel::Document,
+        params: &api::SnapshotParams,
     ) -> Result<api::SnapshotResult, Refusal> {
-        Err(refuse(
-            "render a snapshot",
-            "The WASM host does not render. hew-cli renders live documents itself — it fetches the document with hew.doc.save and renders the bytes with the headless rasterizer; a raw client should do the same.",
-        ))
+        headless_render::snapshot(doc, params)
+    }
+
+    fn line_drawing(
+        &mut self,
+        doc: &kernel::Document,
+        params: &api::LineDrawingParams,
+    ) -> Result<api::LineDrawingResult, Refusal> {
+        headless_render::line_drawing(doc, params)
     }
 
     fn write_snapshot(&mut self, _path: &str, _bytes: &[u8]) -> Result<(), Refusal> {
@@ -503,6 +805,12 @@ impl Host for LiveHost {
         }
     }
 
+    /// `crypto.getRandomValues` ([`random_16`]), the source a document id
+    /// needs: `random_u64` keeps `Math.random()`.
+    fn random_16(&self) -> [u8; 16] {
+        random_16()
+    }
+
     /// `Math.random()` — 53 bits twice over — in place of the native
     /// default's pid and OS entropy, neither of which exists here.
     fn random_u64(&self) -> u64 {
@@ -521,18 +829,122 @@ impl Host for LiveHost {
     }
 
     fn set_camera(&mut self, spec: &ViewCameraSpec) -> Result<(), Refusal> {
-        self.directive = Some(ViewDirective::from(spec));
+        self.directives.push(ViewDirective::from(spec));
         Ok(())
     }
 
     fn zoom_extents(&mut self) -> Result<(), Refusal> {
-        self.directive = Some(ViewDirective::ZoomExtents);
+        self.directives.push(ViewDirective::ZoomExtents);
         Ok(())
     }
 
     fn set_display_units(&mut self, format: &str) -> Result<(), Refusal> {
-        self.directive = Some(ViewDirective::Units {
+        self.directives.push(ViewDirective::Units {
             format: format.to_string(),
+        });
+        Ok(())
+    }
+
+    fn selection(&self) -> Result<SelectionState, Refusal> {
+        Ok(self.selection.clone())
+    }
+
+    /// Merges into this dispatch's copy of the mirror and leaves the merged
+    /// result for the app to apply wholesale.
+    fn set_selection(
+        &mut self,
+        entries: Vec<SelectionEntry>,
+        mode: SelectMode,
+    ) -> Result<SelectionState, Refusal> {
+        self.selection.entries = api::selection::merge(&self.selection.entries, &entries, mode);
+        self.directives.push(ViewDirective::Selection {
+            entries: self
+                .selection
+                .entries
+                .iter()
+                .map(|e| UiSelectionEntry::from_entry(*e))
+                .collect(),
+            mode: "replace".to_string(),
+        });
+        Ok(self.selection.clone())
+    }
+
+    fn hidden_changed(&mut self) -> Result<(), Refusal> {
+        self.directives.push(ViewDirective::HiddenChanged);
+        Ok(())
+    }
+
+    fn isolation(&self) -> Result<Option<Vec<IsolationEntry>>, Refusal> {
+        Ok(self.isolation.clone())
+    }
+
+    fn isolate(&mut self, entries: Vec<IsolationEntry>) -> Result<(), Refusal> {
+        self.directives.push(ViewDirective::Isolate {
+            entries: entries
+                .iter()
+                .map(|e| UiIsolationEntry::from_entry(*e))
+                .collect(),
+            frame: true,
+        });
+        self.isolation = Some(entries);
+        Ok(())
+    }
+
+    fn clear_isolation(&mut self) -> Result<(), Refusal> {
+        self.isolation = None;
+        self.directives.push(ViewDirective::ClearIsolation);
+        Ok(())
+    }
+
+    fn fallback_context(&self) -> Vec<ContextEntry> {
+        self.fallback.clone()
+    }
+
+    fn gesture_armed(&self) -> bool {
+        self.gesture_armed
+    }
+
+    fn enter_user_context(
+        &mut self,
+        path: &[kernel::InstanceId],
+        leaf: kernel::NodeId,
+    ) -> Result<(), Refusal> {
+        self.directives.push(ViewDirective::EnterContext {
+            path: path
+                .iter()
+                .map(|i| UiNode::from_node(kernel::NodeId::Instance(*i)))
+                .collect(),
+            leaf: UiNode::from_node(leaf),
+        });
+        Ok(())
+    }
+
+    fn exit_user_context(&mut self) -> Result<(), Refusal> {
+        if self.at_top_level {
+            return Err(Refusal::api(
+                "nothing_to_exit",
+                "Nothing is open for editing; the model is already at the top level.",
+            ));
+        }
+        self.directives.push(ViewDirective::ExitContext);
+        Ok(())
+    }
+
+    fn exit_all_user_contexts(&mut self) -> Result<(), Refusal> {
+        self.directives.push(ViewDirective::ExitAllContexts);
+        Ok(())
+    }
+
+    fn zoom_to(
+        &mut self,
+        min: kernel::Point3,
+        max: kernel::Point3,
+        padding: f64,
+    ) -> Result<(), Refusal> {
+        self.directives.push(ViewDirective::ZoomTo {
+            min: [min.x, min.y, min.z],
+            max: [max.x, max.y, max.z],
+            padding,
         });
         Ok(())
     }
@@ -543,7 +955,7 @@ impl Host for LiveHost {
     /// state before `crates/api`'s handler calls this) — it never itself
     /// refuses, it only records the directive for the bridge to pick up.
     fn scene_applied(&mut self, sid: u64) -> Result<(), Refusal> {
-        self.directive = Some(ViewDirective::ActivateScene { sid });
+        self.directives.push(ViewDirective::ActivateScene { sid });
         Ok(())
     }
 
@@ -717,10 +1129,51 @@ pub(crate) fn picture_report(
     })
 }
 
+/// 16 bytes from the platform's cryptographic source, for minting a
+/// document id (`kernel::Document::ensure_document_id`). In the page and in
+/// a Worker alike, `crypto.getRandomValues` reached through the global
+/// object (`window` does not exist in a Worker); should an engine lack it,
+/// `Math.random()` fills the bytes instead rather than failing a save.
+/// Native builds (tests only) use a deterministic counter.
+pub(crate) fn random_16() -> [u8; 16] {
+    let mut out = [0u8; 16];
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::{JsCast, JsValue};
+        let buf = js_sys::Uint8Array::new_with_length(16);
+        let filled = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("crypto"))
+            .ok()
+            .filter(|c| c.is_object())
+            .and_then(|crypto| {
+                let f =
+                    js_sys::Reflect::get(&crypto, &JsValue::from_str("getRandomValues")).ok()?;
+                let f: js_sys::Function = f.dyn_into().ok()?;
+                f.call1(&crypto, &buf).ok()
+            })
+            .is_some();
+        if filled {
+            buf.copy_to(&mut out);
+        } else {
+            for b in &mut out {
+                *b = (js_sys::Math::random() * 256.0) as u8;
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        out[..8].copy_from_slice(&n.to_le_bytes());
+        out[8..].copy_from_slice(&n.wrapping_mul(0x9E37_79B9_7F4A_7C15).to_le_bytes());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use api::{Connection, DispatchOutcome, Profile, Request, RequestId};
+    use api::{Connection, DispatchOutcome, Grant, Request, RequestId};
 
     fn req(id: i64, method: &str, params: serde_json::Value) -> Request {
         Request {
@@ -797,7 +1250,7 @@ mod tests {
                 skp_import::skpwright::Container::Stream
             };
             let bytes = host
-                .export_document(&doc, &format, None, 0, None, false)
+                .export_document(&doc, &format, None, 0, None, None, false)
                 .expect("a box exports as a .skp live")
                 .expect("bytes come back");
             assert_eq!(skp_import::skpwright::detect_container(&bytes), container);
@@ -824,7 +1277,7 @@ mod tests {
         };
         let unit = |host: &mut LiveHost, units: Option<&str>| {
             let bytes = host
-                .export_document(&doc, "skp", None, 0, units, false)
+                .export_document(&doc, "skp", None, 0, units, None, false)
                 .unwrap()
                 .unwrap();
             skp_import::skpwright::Model::parse(&bytes)
@@ -869,7 +1322,7 @@ mod tests {
         let doc = box_document();
         let mut host = LiveHost::default();
         let bytes = host
-            .export_document(&doc, "stl", None, 0, None, false)
+            .export_document(&doc, "stl", None, 0, None, None, false)
             .expect("a solid box exports live")
             .expect("bytes come back since there is no filesystem to write to");
         let direct =
@@ -887,7 +1340,7 @@ mod tests {
         let doc = box_document();
         let mut host = LiveHost::default();
         let err = host
-            .export_document(&doc, "stl", Some("/tmp/out.stl"), 0, None, false)
+            .export_document(&doc, "stl", Some("/tmp/out.stl"), 0, None, None, false)
             .unwrap_err();
         assert_eq!(err.name, "host_capability_missing");
     }
@@ -897,7 +1350,7 @@ mod tests {
         let doc = kernel::Document::new();
         let mut host = LiveHost::default();
         let err = host
-            .export_document(&doc, "stl", None, 0, None, false)
+            .export_document(&doc, "stl", None, 0, None, None, false)
             .unwrap_err();
         assert_eq!(err.name, "nothing_to_export");
     }
@@ -907,20 +1360,23 @@ mod tests {
     /// `LiveHost` withholding document lifecycle.
     #[test]
     fn live_host_refuses_new_document_typed() {
-        let mut conn = Connection::new(Profile::App, "test");
+        let mut conn = Connection::new(Grant::app(), "test");
         let mut doc = kernel::Document::new();
         let mut host = LiveHost::default();
         conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut host,
             req(0, "hew.meta.hello", serde_json::json!({"protocol": 1})),
         );
         conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut host,
             req(1, "hew.doc.attach", serde_json::json!({})),
         );
         let DispatchOutcome::Reply(r) = conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut host,
             req(2, "hew.doc.new", serde_json::json!({})),
@@ -946,15 +1402,17 @@ mod tests {
     /// as a real `--live` save would exercise them.
     #[test]
     fn library_save_over_a_live_connection_extracts_stamps_and_returns_bytes() {
-        let mut conn = Connection::new(Profile::App, "test");
+        let mut conn = Connection::new(Grant::app(), "test");
         let mut doc = box_document();
         let mut host = LiveHost::default();
         conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut host,
             req(0, "hew.meta.hello", serde_json::json!({"protocol": 1})),
         );
         conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut host,
             req(1, "hew.doc.attach", serde_json::json!({})),
@@ -977,6 +1435,7 @@ mod tests {
             .expect("a live object carries a stable id");
 
         let DispatchOutcome::Reply(r) = conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut host,
             req(
@@ -1019,32 +1478,97 @@ mod tests {
         );
     }
 
-    /// `hew.view.snapshot` is core-granted (docs/agents/HEW_API.md §10) but
-    /// still refuses on `LiveHost` — the live viewport isn't wired to
-    /// the API host yet, so this must not silently return a blank image.
-    #[test]
-    fn live_host_refuses_snapshot_typed() {
-        let mut conn = Connection::new(Profile::App, "test");
+    /// Dispatches one command on a fresh live host holding a one-box
+    /// document, after the hello/attach handshake.
+    fn dispatch_on_box(method: &str, params: serde_json::Value) -> api::Response {
+        let mut conn = Connection::new(Grant::app(), "test");
         let mut doc = kernel::Document::new();
+        let ground = kernel::Plane::from_polygon(&[
+            kernel::Point3::new(0.0, 0.0, 0.0),
+            kernel::Point3::new(1.0, 0.0, 0.0),
+            kernel::Point3::new(0.0, 1.0, 0.0),
+        ])
+        .unwrap();
+        let s = doc.add_sketch(ground);
+        let c = [
+            kernel::Point3::new(0.0, 0.0, 0.0),
+            kernel::Point3::new(1.0, 0.0, 0.0),
+            kernel::Point3::new(1.0, 1.0, 0.0),
+            kernel::Point3::new(0.0, 1.0, 0.0),
+        ];
+        for k in 0..4 {
+            doc.sketch_mut(s)
+                .unwrap()
+                .add_segment(c[k], c[(k + 1) % 4])
+                .unwrap();
+        }
+        let regions = doc.extrudable_regions(s).unwrap();
+        doc.extrude_region(s, regions[0], 1.0).unwrap();
         let mut host = LiveHost::default();
         conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut host,
             req(0, "hew.meta.hello", serde_json::json!({"protocol": 1})),
         );
         conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut host,
             req(1, "hew.doc.attach", serde_json::json!({})),
         );
         let DispatchOutcome::Reply(r) = conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut host,
-            req(2, "hew.view.snapshot", serde_json::json!({})),
+            req(2, method, params),
         ) else {
             panic!("dispatch replies")
         };
-        let err = r.error.expect("hew.view.snapshot refuses on a live host");
+        r
+    }
+
+    /// The app renders `hew.view.snapshot` itself: a PNG, no id palette
+    /// unless asked for.
+    #[test]
+    fn live_host_renders_a_snapshot() {
+        let r = dispatch_on_box("hew.view.snapshot", serde_json::json!({}));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let result = r.result.expect("a result");
+        assert_eq!(
+            (result["width"].as_u64(), result["height"].as_u64()),
+            (Some(512), Some(512))
+        );
+        let b64 = result["png_base64"].as_str().expect("inline png");
+        assert!(b64.starts_with("iVBORw0KGgo"), "PNG signature: {b64:.16}");
+        assert!(
+            result
+                .get("id_palette")
+                .is_none_or(|p| p.as_array().is_some_and(Vec::is_empty))
+        );
+    }
+
+    #[test]
+    fn live_host_renders_a_line_drawing() {
+        let r = dispatch_on_box(
+            "hew.view.line_drawing",
+            serde_json::json!({ "format": "segments", "view": "iso" }),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let result = r.result.expect("a result");
+        assert!(result["count"].as_u64().unwrap() > 0);
+        assert!(!result["segments"].as_array().unwrap().is_empty());
+    }
+
+    /// There is still no filesystem at the wasm boundary: a `path` is
+    /// refused after the render, by `write_snapshot`.
+    #[test]
+    fn live_host_still_refuses_a_snapshot_path() {
+        let r = dispatch_on_box(
+            "hew.view.snapshot",
+            serde_json::json!({ "path": "/tmp/x.png" }),
+        );
+        let err = r.error.expect("a path is refused");
         assert_eq!(err.data.unwrap()["refusal"], "host_capability_missing");
     }
 
@@ -1053,20 +1577,23 @@ mod tests {
     /// useful despite every `Host` method above refusing.
     #[test]
     fn kernel_served_commands_run_for_real_on_a_live_host() {
-        let mut conn = Connection::new(Profile::App, "test");
+        let mut conn = Connection::new(Grant::app(), "test");
         let mut doc = kernel::Document::new();
         let mut host = LiveHost::default();
         conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut host,
             req(0, "hew.meta.hello", serde_json::json!({"protocol": 1})),
         );
         conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut host,
             req(1, "hew.doc.attach", serde_json::json!({})),
         );
         let DispatchOutcome::Reply(r) = conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut host,
             req(2, "hew.query.scene", serde_json::json!({})),
@@ -1087,14 +1614,16 @@ mod tests {
     /// notifies the host, both in the same dispatch.
     #[test]
     fn scene_apply_leaves_an_activate_scene_directive() {
-        let mut conn = Connection::new(Profile::App, "test");
+        let mut conn = Connection::new(Grant::app(), "test");
         let mut doc = kernel::Document::new();
         conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut LiveHost::default(),
             req(0, "hew.meta.hello", serde_json::json!({"protocol": 1})),
         );
         conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut LiveHost::default(),
             req(1, "hew.doc.attach", serde_json::json!({})),
@@ -1103,6 +1632,7 @@ mod tests {
         // Add a Scene through the same live connection first.
         let mut host = LiveHost::default();
         let DispatchOutcome::Reply(add_reply) = conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut host,
             req(2, "hew.scenes.add", serde_json::json!({ "name": "Front" })),
@@ -1128,10 +1658,11 @@ mod tests {
 
         // A directive from `add` (registry-state, ModelMutating, no
         // Host effect) must not leak into the NEXT dispatch's directive.
-        assert!(host.directive.is_none());
+        assert!(host.directives.is_empty());
 
         let mut host = LiveHost::default();
         let DispatchOutcome::Reply(apply_reply) = conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut host,
             req(3, "hew.scenes.apply", serde_json::json!({ "id": id })),
@@ -1143,8 +1674,8 @@ mod tests {
             "apply succeeds: {:?}",
             apply_reply.error
         );
-        match host.directive {
-            Some(ViewDirective::ActivateScene { sid: got }) => assert_eq!(got, sid),
+        match host.directives.as_slice() {
+            [ViewDirective::ActivateScene { sid: got }] => assert_eq!(*got, sid),
             other => panic!("expected an ActivateScene directive, got {other:?}"),
         }
     }
@@ -1167,13 +1698,18 @@ mod tests {
     }
 
     fn app_connection(doc: &mut kernel::Document) -> Connection {
-        let mut conn = Connection::new(Profile::App, "t");
+        let mut conn = Connection::new(Grant::app(), "t");
         let mut host = LiveHost::default();
         for (id, method, params) in [
             (1, "hew.meta.hello", serde_json::json!({ "protocol": 1 })),
             (2, "hew.doc.attach", serde_json::json!({})),
         ] {
-            conn.dispatch(doc, &mut host, req(id, method, params));
+            conn.dispatch(
+                &api::Registry::protocol_1(),
+                doc,
+                &mut host,
+                req(id, method, params),
+            );
         }
         conn
     }
@@ -1186,6 +1722,7 @@ mod tests {
         let mut host = LiveHost::default();
         let stl = box_stl();
         let DispatchOutcome::Reply(r) = conn.dispatch(
+            &api::Registry::protocol_1(),
             &mut doc,
             &mut host,
             req(
@@ -1235,6 +1772,7 @@ mod tests {
             ),
         ] {
             let DispatchOutcome::Reply(r) = conn.dispatch(
+                &api::Registry::protocol_1(),
                 &mut doc,
                 &mut host,
                 req(9, "hew.doc.import", params.clone()),

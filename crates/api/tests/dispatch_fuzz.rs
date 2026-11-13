@@ -31,7 +31,15 @@
 //!    byte-identical (§6's atomicity); every success adds at most one
 //!    undo entry, which undoes cleanly when it added one.
 //!
-//! Suite 3 (MCP-frame fuzz) lives in
+//! 3. `hostile_plugin_declarations_and_replies_never_panic` — arbitrary
+//!    plugin command declarations (random ids, random JSON as schemas) go
+//!    through `Registry::register_plugin`, where either outcome is fine,
+//!    and every command that does register is called with arbitrary
+//!    params and completed with an arbitrary `ForwardReply`; so is a
+//!    known-good command. Every response must be well-formed (§4.4) and
+//!    answer the request's id, and no forward is left pending.
+//!
+//! The MCP-frame fuzz lives in
 //! `crates/hew-cli/tests/mcp_fuzz.rs`, against `hew_cli::mcp::McpServer`
 //! directly — a different crate and a different-shaped surface (raw
 //! newline-delimited JSON-RPC text), not this dispatcher.
@@ -53,9 +61,15 @@
 //! adversarial framing is for: depth restored, undo did not error or
 //! corrupt anything.
 
-use api::{Connection, DispatchOutcome, NoHost, Profile, Registry, Request, RequestId, Response};
+use api::{
+    Connection, DispatchOutcome, Grant, NoHost, Permission, Registry, Request, RequestId, Response,
+};
 use proptest::prelude::*;
 use serde_json::{Value, json};
+
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
 
 // --------------------------------------------------------------- plumbing
 //
@@ -75,6 +89,7 @@ fn req(id: Option<RequestId>, method: String, params: Option<Value>) -> Request 
 
 fn hello_attach(conn: &mut Connection, doc: &mut kernel::Document) {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(
@@ -87,6 +102,7 @@ fn hello_attach(conn: &mut Connection, doc: &mut kernel::Document) {
     };
     assert!(r.error.is_none(), "hello failed: {:?}", r.error);
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(
@@ -110,6 +126,7 @@ fn ground_rect(corner_a: [f64; 3], corner_b: [f64; 3]) -> Value {
 /// with real (if unpredictable-to-the-fuzzer) content, not an empty one.
 fn seed_document(conn: &mut Connection, doc: &mut kernel::Document) {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(
@@ -188,6 +205,7 @@ fn assert_well_formed_reply(response: &Response) -> Result<(), TestCaseError> {
 /// shared by both suites' "a mutating success undoes cleanly" check.
 fn undo_succeeds(conn: &mut Connection, doc: &mut kernel::Document) -> Result<bool, TestCaseError> {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(
@@ -378,7 +396,33 @@ proptest! {
     /// cleanly.
     #[test]
     fn hostile_envelopes_never_panic_or_corrupt(request in arb_hostile_request()) {
-        let mut conn = Connection::new(Profile::Core, "fuzz-dispatch");
+        hostile_envelope_case(Grant::core(), request)?;
+    }
+
+    /// The same invariants under a restricted plugin grant bound to one
+    /// document (docs/agents/HEW_API.md §10): the binding, path, and
+    /// namespace checks never panic or let a refused envelope through.
+    #[test]
+    fn hostile_envelopes_never_panic_or_corrupt_under_a_plugin_grant(
+        request in arb_hostile_request()
+    ) {
+        hostile_envelope_case(
+            Grant::plugin(
+                "com.example.fuzz",
+                Some("doc_1"),
+                [Permission::ModelRead, Permission::ModelWrite, Permission::AttributesWrite]
+                    .into_iter()
+                    .collect(),
+            ),
+            request,
+        )?;
+    }
+}
+
+/// One hostile-envelope case under `grant`.
+fn hostile_envelope_case(grant: Grant, request: Request) -> Result<(), TestCaseError> {
+    {
+        let mut conn = Connection::new(grant, "fuzz-dispatch");
         let mut doc = kernel::Document::new();
         hello_attach(&mut conn, &mut doc);
         seed_document(&mut conn, &mut doc);
@@ -387,15 +431,30 @@ proptest! {
         let depth_before = doc.undo_depth();
 
         let method_name = request.method.clone();
-        let outcome = conn.dispatch(&mut doc, &mut NoHost, request);
+        let outcome = conn.dispatch(&REGISTRY, &mut doc, &mut NoHost, request);
 
         match outcome {
+            DispatchOutcome::Forward(f) => {
+                prop_assert!(false, "no plugin is registered, yet {} forwarded", f.method);
+            }
             DispatchOutcome::Dropped => {
                 // A client-originated notification is dropped UNEXECUTED
                 // (§4.1) — it must never reach the document at all.
                 prop_assert_eq!(
-                    doc.save(), bytes_before,
+                    doc.save(),
+                    bytes_before,
                     "a dropped notification must never mutate the document"
+                );
+                prop_assert_eq!(doc.undo_depth(), depth_before);
+            }
+            DispatchOutcome::DryRun(response) => {
+                // A rehearsal answers like any reply and never touches the
+                // document, success or failure.
+                assert_well_formed_reply(&response)?;
+                prop_assert_eq!(
+                    doc.save(),
+                    bytes_before,
+                    "a dry run must leave the document untouched"
                 );
                 prop_assert_eq!(doc.undo_depth(), depth_before);
             }
@@ -405,7 +464,8 @@ proptest! {
 
                 if response.error.is_some() {
                     prop_assert_eq!(
-                        doc.save(), bytes_before,
+                        doc.save(),
+                        bytes_before,
                         "a refused/errored envelope must leave the document untouched"
                     );
                     prop_assert_eq!(depth_after, depth_before);
@@ -432,28 +492,36 @@ proptest! {
                     let registry_state = matches!(
                         method_name.as_str(),
                         "hew.material.create" | "hew.tag.create" | "hew.tag.set_visible"
-                    ) || (method_name.starts_with("hew.scenes.") && method_name != "hew.scenes.list");
+                    ) || (method_name.starts_with("hew.scenes.")
+                        && method_name != "hew.scenes.list");
                     if !registry_state {
                         prop_assert_eq!(
-                            doc.save(), bytes_before,
+                            doc.save(),
+                            bytes_before,
                             "a success that added no undo entry must not change the document bytes"
                         );
                     }
                 } else {
                     prop_assert_eq!(
-                        depth_after, depth_before + 1,
+                        depth_after,
+                        depth_before + 1,
                         "a mutating success adds exactly one undo entry (§6.1)"
                     );
                     let ok = undo_succeeds(&mut conn, &mut doc)?;
-                    prop_assert!(ok, "hew.history.undo must restore a mutating success cleanly");
+                    prop_assert!(
+                        ok,
+                        "hew.history.undo must restore a mutating success cleanly"
+                    );
                     prop_assert_eq!(
-                        doc.undo_depth(), depth_before,
+                        doc.undo_depth(),
+                        depth_before,
                         "undo must restore the prior undo depth"
                     );
                 }
             }
         }
     }
+    Ok(())
 }
 
 // ============================================================ suite 2 ===
@@ -814,7 +882,7 @@ proptest! {
     /// the prior depth.
     #[test]
     fn transaction_envelopes_are_atomic_under_hostile_command_sequences(steps in arb_steps()) {
-        let mut conn = Connection::new(Profile::Core, "fuzz-transact");
+        let mut conn = Connection::new(Grant::core(), "fuzz-transact");
         let mut doc = kernel::Document::new();
         hello_attach(&mut conn, &mut doc);
         seed_document(&mut conn, &mut doc);
@@ -828,7 +896,7 @@ proptest! {
             "hew.doc.transact".to_string(),
             Some(json!({ "commands": commands })),
         );
-        let DispatchOutcome::Reply(response) = conn.dispatch(&mut doc, &mut NoHost, request) else {
+        let DispatchOutcome::Reply(response) = conn.dispatch(&REGISTRY, &mut doc, &mut NoHost, request) else {
             return Err(TestCaseError::fail("hew.doc.transact is a request, never a notification"));
         };
         assert_well_formed_reply(&response)?;
@@ -851,5 +919,192 @@ proptest! {
                 prop_assert_eq!(doc.undo_depth(), depth_before, "undo must restore the prior undo depth");
             }
         }
+    }
+}
+
+// ============================================================ suite 3 ===
+// hostile plugin declarations and forward replies: never panic.
+
+/// A plugin id: mostly valid, sometimes reserved or garbage.
+fn arb_plugin_id() -> impl Strategy<Value = String> {
+    prop_oneof![
+        6 => "[a-z][a-z0-9]{0,6}\\.[a-z][a-z0-9-]{0,6}",
+        1 => Just("hew.evil".to_string()),
+        1 => "[A-Za-z0-9._ -]{0,12}",
+    ]
+}
+
+/// A command id: mostly valid (dotted or not), sometimes garbage.
+fn arb_command_id() -> impl Strategy<Value = String> {
+    prop_oneof![
+        6 => "[a-z_]{1,6}(\\.[a-z0-9_]{1,6}){0,2}",
+        1 => "[A-Za-z0-9._ -]{0,10}",
+    ]
+}
+
+/// A schema: a closed object built from supported keywords, or any JSON.
+fn arb_schema() -> impl Strategy<Value = Value> {
+    let leaf = prop_oneof![
+        Just(json!({ "type": "number", "minimum": 0 })),
+        Just(json!({ "type": "integer", "maximum": 10 })),
+        Just(json!({ "type": "string", "minLength": 1, "maxLength": 4 })),
+        Just(json!({ "enum": ["a", 1, null] })),
+        Just(json!({ "type": "array", "items": { "type": "boolean" }, "maxItems": 2 })),
+        Just(json!({ "oneOf": [{ "type": "string" }, { "type": "integer" }] })),
+        Just(json!({ "anyOf": [{ "type": "null" }, { "const": 3 }] })),
+        arb_json(),
+    ];
+    prop_oneof![
+        3 => proptest::collection::vec(("[a-z]{1,3}", leaf, proptest::bool::ANY), 0..4).prop_map(|props| {
+            let mut properties = serde_json::Map::new();
+            let mut required = Vec::new();
+            for (name, schema, needed) in props {
+                if needed {
+                    required.push(json!(name.clone()));
+                }
+                properties.insert(name, schema);
+            }
+            json!({ "type": "object", "properties": properties, "required": required, "additionalProperties": false })
+        }),
+        1 => arb_json(),
+    ]
+}
+
+fn arb_contribution() -> impl Strategy<Value = Value> {
+    (
+        arb_command_id(),
+        proptest::bool::ANY,
+        "[ -~]{0,12}",
+        proptest::option::of("[ -~]{0,12}"),
+        proptest::option::of(prop_oneof![
+            Just("model.read".to_string()),
+            Just("model.write".to_string()),
+            Just("documents.other".to_string()),
+            Just("all".to_string()),
+            "[a-z.:]{0,12}",
+        ]),
+        any::<u32>(),
+        proptest::bool::ANY,
+        arb_schema(),
+        arb_schema(),
+        proptest::collection::vec("[a-z_]{0,8}", 0..3),
+    )
+        .prop_map(
+            |(
+                id,
+                mutating,
+                summary,
+                label,
+                permission,
+                timeout,
+                serial,
+                params,
+                result,
+                refusals,
+            )| {
+                let mut decl = json!({
+                    "id": id,
+                    "class": if mutating { "mutating" } else { "read_only" },
+                    "summary": summary,
+                    "timeout_ms": timeout,
+                    "concurrency": if serial { "serial" } else { "parallel" },
+                    "params": params,
+                    "result": result,
+                    "refusals": refusals,
+                });
+                if let Some(label) = label {
+                    decl["label"] = json!(label);
+                }
+                if let Some(permission) = permission {
+                    decl["permission"] = json!(permission);
+                }
+                decl
+            },
+        )
+}
+
+fn arb_forward_reply() -> impl Strategy<Value = api::ForwardReply> {
+    use api::{ForwardFailure, ForwardReply};
+    prop_oneof![
+        4 => arb_json().prop_map(ForwardReply::Ok),
+        2 => ("[ -~]{0,12}", "[ -~]{0,20}", arb_json()).prop_map(|(name, explanation, detail)| {
+            ForwardReply::Refusal { name, explanation, detail }
+        }),
+        1 => Just(ForwardReply::Failed(ForwardFailure::Timeout)),
+        1 => Just(ForwardReply::Failed(ForwardFailure::Crashed)),
+        1 => Just(ForwardReply::Failed(ForwardFailure::Unavailable)),
+        1 => Just(ForwardReply::Failed(ForwardFailure::NoHandler)),
+        1 => Just(ForwardReply::Failed(ForwardFailure::Cancelled)),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn hostile_plugin_declarations_and_replies_never_panic(
+        plugin in arb_plugin_id(),
+        decls in proptest::collection::vec(arb_contribution(), 0..4),
+        calls in proptest::collection::vec((arb_json(), arb_forward_reply()), 1..4),
+        good_reply in arb_forward_reply(),
+    ) {
+        let mut registry = Registry::protocol_1();
+        let good: Vec<plugin_manifest::CommandContribution> = serde_json::from_value(json!([{
+            "id": "sum", "class": "read_only", "summary": "Adds.",
+            "params": { "type": "object", "properties": { "a": { "type": "number" } }, "required": ["a"], "additionalProperties": false },
+            "result": { "type": "object", "properties": { "sum": { "type": "number" } }, "required": ["sum"], "additionalProperties": false }
+        }]))
+        .expect("the known-good declaration parses");
+        registry.register_plugin("org.fuzz.known", &good).expect("the known-good plugin registers");
+        let before = registry.commands().count();
+
+        // Hostile JSON may not even be a declaration; when it is, either
+        // registration outcome is fine.
+        let parsed: Result<Vec<plugin_manifest::CommandContribution>, _> =
+            serde_json::from_value(Value::Array(decls));
+        let registered = match parsed {
+            Ok(decls) => match registry.register_plugin(&plugin, &decls) {
+                Ok(()) => decls.len(),
+                Err(e) => {
+                    prop_assert!(!e.name().is_empty() && !e.to_string().is_empty());
+                    prop_assert_eq!(registry.commands().count(), before, "a refused registration inserts nothing");
+                    0
+                }
+            },
+            Err(_) => 0,
+        };
+        prop_assert_eq!(registry.commands().count(), before + registered);
+
+        let mut conn = Connection::new(Grant::core(), "fuzz-plugin");
+        let mut doc = kernel::Document::new();
+        for method in ["hew.meta.hello", "hew.doc.attach"] {
+            let params = if method == "hew.meta.hello" { json!({ "protocol": 1 }) } else { json!({}) };
+            conn.dispatch(&registry, &mut doc, &mut NoHost, req(Some(RequestId::Number(0)), method.into(), Some(params)));
+        }
+        let mut targets: Vec<(String, Value)> = registry
+            .plugin_commands(&plugin)
+            .map(|c| c.name.clone())
+            .zip(calls.iter().map(|(params, _)| params.clone()))
+            .collect();
+        targets.push(("org.fuzz.known.sum".into(), json!({ "a": 1 })));
+        let replies = calls.iter().map(|(_, r)| r.clone()).chain([good_reply]);
+        for (i, ((method, params), reply)) in targets.into_iter().zip(replies).enumerate() {
+            let id = RequestId::Number(100 + i as i64);
+            let outcome = conn.dispatch(&registry, &mut doc, &mut NoHost, req(Some(id.clone()), method.clone(), Some(params)));
+            let response = match outcome {
+                DispatchOutcome::Reply(r) | DispatchOutcome::DryRun(r) => r,
+                DispatchOutcome::Forward(f) => {
+                    prop_assert_eq!(&f.method, &method);
+                    prop_assert!(f.timeout_ms <= 50_000);
+                    conn.complete_forward(&registry, f.token, reply)
+                }
+                DispatchOutcome::Dropped => {
+                    return Err(TestCaseError::fail("a request with an id was dropped"));
+                }
+            };
+            assert_well_formed_reply(&response)?;
+            prop_assert_eq!(response.id, Some(id));
+        }
+        prop_assert_eq!(conn.pending_forward_count(), 0);
     }
 }
