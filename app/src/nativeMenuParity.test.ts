@@ -566,6 +566,47 @@ describe('Import Image menu item parity', () => {
   })
 })
 
+/**
+ * Linked copies: Unlink, Unlink all, Select all copies (Object menu) and
+ * Paste independent / Paste linked (Edit menu) are gated native items, each
+ * attached to a submenu and dispatching to the same action id the web menu,
+ * the palette, and (for the first three) the contextual dock use.
+ */
+describe('linked copy menu items parity', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const menuBarSource = readFileSync(MENU_BAR_TSX, 'utf8')
+  const ids = [
+    'edit-unlink',
+    'edit-unlink-all',
+    'edit-select-all-copies',
+    'edit-paste-independent',
+    'edit-paste-linked',
+  ]
+
+  it.each(ids)('%s is a gated native item, attached to a submenu, with a dispatch arm', (id) => {
+    const binding = new RegExp(`let\\s+(\\w+)\\s*=\\s*gated_item\\(\\s*handle,\\s*&mut \\w+,\\s*"${id}"`).exec(source)
+    expect(binding, `no gated_item binding found for ${id}`).not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(source.includes(`.item(&${variable})`), `${id} is built but never attached to a submenu`).toBe(true)
+    expect(new RegExp(`"${id}"\\s*=>\\s*"${id}"`).test(source), `${id} has no dispatch arm`).toBe(true)
+    // Disabled until the app's selection says otherwise.
+    expect(source.includes(`&${variable},`), `${id} is not in the initial disable list`).toBe(true)
+  })
+
+  it('the web menu and the palette offer the same actions', () => {
+    for (const id of ids) {
+      expect(menuBarSource.includes(`'${id}'`), `MenuBar lacks ${id}`).toBe(true)
+      expect(paletteEntries().map((e) => e.id)).toContain(id)
+      expect(NATIVE_MENU_LABELS[id], `no native label for ${id}`).toBeDefined()
+    }
+  })
+
+  it('the contextual dock offers Unlink and Unlink all for a linked copy', () => {
+    const verbs = dockVerbsFor('instance', { canGroup: false, canMakeComponent: true, canUnlink: true, canUnlinkAll: true }).map((v) => v.id)
+    expect(verbs).toEqual(expect.arrayContaining(['edit-unlink', 'edit-unlink-all']))
+  })
+})
+
 describe('native menu ↔ keymap', () => {
   const source = readFileSync(MAIN_RS, 'utf8')
   const fnStart = source.indexOf('fn menu_action_for(')

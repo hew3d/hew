@@ -351,8 +351,8 @@ below.
   while editing another folds it in when you step out. The definition
   graph stays acyclic and bounded — a component cannot contain itself,
   and nesting past 64 levels or a million rendered parts is refused
-- Make Unique (detach an instance into its own copy, named "<definition>
-  Copy" — or after the instance's own name if it has one; the copied
+- Make Unique (detach an instance into its own copy, keeping the
+  definition's name — or taking the instance's own name if it has one; the copied
   members keep their names, tags, and attributes) and Explode
   (bake an instance back into ordinary geometry; a nested member
   surfaces as an ordinary instance, its geometry still shared)
@@ -369,6 +369,27 @@ below.
   (another window, or after File ▸ Open/New in this one) copies the
   definition as before, with repeat pastes of the same copy reusing it by
   clipboard provenance; Make Unique breaks a link on purpose
+- Linked copies in the app: Move, Rotate, array, and Paste copies are
+  linked by default (Settings ▸ Editing ▸ "Copies are linked"); tapping
+  the copy key cycles Move, Copy, the other kind of copy, Move, and the
+  cursor badge, hint, and readout follow (`+`, `+ independent`, `+ linked`).
+  An array repeats the kind of copy it follows. Paste into the same
+  document links to the copied nodes while they are still live (the
+  clipboard records the document and window it came from); Edit ▸ Paste
+  independent and Paste linked force either form. A placement of a linked
+  set reads in the Outliner by its own name, else the shared name, else its
+  part's name, else "Copies", with a link glyph and a ×N count (none for a
+  set of one) and a row "Copies" menu: Unlink, Unlink all, Make component
+  (promote: asks for a name), Select all copies, Rename. The same actions
+  sit in the Object menu, the contextual dock, and Object Info ("Linked
+  copies: N", "Name (all copies)", "This copy"). Subtract on a placement
+  cuts through the shared shape (a strip offers "Cut all N copies" or
+  "Only this one"); Union and Intersect unlink the placement first, as one
+  undo step labeled "(unlinked)", and say so. Slice and Push/Pull on a face
+  reached through a linked placement edit the shared shape with no context
+  to enter. Link identical copies (joining look-alike loose Objects into
+  one set) is not built yet: it waits on the query that fingerprints a
+  shape.
 - Slice: cut a solid along a plane into two independent watertight solids
 - Push/pull on any planar face of a solid, not just faces with
   perpendicular neighbors: it follows classic SketchUp translate-and-build —
@@ -1553,7 +1574,17 @@ below.
   (`Document::make_unique_by_path`: with the cascade, only that placement
   diverges; `deep` forks the nested definitions too; one undo entry),
   exported to the app as `make_unique_by_path_json`; its bus command
-  (`hew.component.make_unique` by path) is still to come. `hew-cli --version` and `hew-relay --version` report the release
+  (`hew.component.make_unique` by path) is still to come. The kernel's
+  copies link when the caller asks for it (`LinkPolicy::Linked` on
+  `duplicate_node`, `duplicate_nodes_array`, and
+  `duplicate_nodes_placements`): each Object or Group copied is wrapped
+  as a linked set (`Document::wrap_linked`, a definition carrying `hew` /
+  `linked`) and every copy is a placement of it, in one undo entry; a set
+  goes with its last placement, `promote_linked` turns one into a named
+  component, change sets carry `linked` and `copied_from`, and the wasm
+  surface exports `wrap_linked`, `is_linked`, `set_linked`,
+  `owner_definition`, and `duplicate_selection_array_linked`. The bus
+  still copies independently. `hew-cli --version` and `hew-relay --version` report the release
   tag's version on a tag build; the `core` ceiling grants `hew.view.hide`,
   `show`, `show_all`, and `hidden` without a window; `hew_query` admits every
   command that does not change the document; `hew.entity.rotate`'s angle is

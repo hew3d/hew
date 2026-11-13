@@ -186,3 +186,24 @@ describe('dockChipLabel', () => {
     expect(dockChipLabel('sketch')).toBe('SKETCH')
   })
 })
+
+describe('dock verbs for a linked copy', () => {
+  it('replace Make Unique with the copy actions, and hide Unlink all for a set of one', () => {
+    const plain = dockVerbsFor('instance').map((v) => v.id)
+    expect(plain).toContain('make-unique')
+    expect(plain).not.toContain('edit-unlink')
+
+    const linked = dockVerbsFor('instance', { canGroup: false, canMakeComponent: true, canUnlink: true, canUnlinkAll: true }).map((v) => v.id)
+    expect(linked).toEqual(['enter-context', 'tool-move', 'tool-scale', 'edit-unlink', 'edit-unlink-all', 'edit-make-component', 'explode-instance'])
+
+    const solo = dockVerbsFor('instance', { canGroup: false, canMakeComponent: true, canUnlink: true, canUnlinkAll: false }).map((v) => v.id)
+    expect(solo).not.toContain('edit-unlink-all')
+    expect(solo).toContain('edit-unlink')
+  })
+
+  it('the chip reads COPIES for a linked copy and COMPNT otherwise', () => {
+    expect(dockChipLabel('instance', true)).toBe('COPIES')
+    expect(dockChipLabel('instance')).toBe('COMPNT')
+    expect(dockChipLabel('object', true)).toBe('OBJECT')
+  })
+})

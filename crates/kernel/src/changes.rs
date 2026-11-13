@@ -9,7 +9,7 @@
 //! loses one. Hosts read it to emit `document_changed` events and to answer
 //! `hew.query.changes_since`.
 
-use crate::document::{AttrTarget, EntityRef, HistoryOrigin};
+use crate::document::{AttrTarget, EntityRef, HistoryOrigin, LinkedWrap};
 
 /// What moved the history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -87,6 +87,14 @@ pub struct ChangeSet {
     pub document: bool,
     /// The lists are empty and everything may have changed.
     pub full: bool,
+    /// Every Object or Group the change wrapped as a linked set, with the
+    /// placement that took its spot ([`LinkedWrap`]).
+    pub linked: Vec<LinkedWrap>,
+    /// `(new, source)` for every entity the change copied: an independent
+    /// copy's nodes, a linked copy's new placement and the placement it was
+    /// copied from (the wrap's own placement for a just-wrapped node), and
+    /// every id a make-unique (Unlink) minted.
+    pub copied_from: Vec<(ChangeRef, ChangeRef)>,
 }
 
 impl ChangeSet {
@@ -99,10 +107,14 @@ impl ChangeSet {
     }
 
     /// `added` and `removed` exchanged: what an undo of these changes did.
+    /// An undo wraps and copies nothing, so `linked` and `copied_from` are
+    /// empty (the placements the undo took away are in `removed`).
     pub fn swapped(&self) -> ChangeSet {
         ChangeSet {
             added: self.removed.clone(),
             removed: self.added.clone(),
+            linked: Vec::new(),
+            copied_from: Vec::new(),
             ..self.clone()
         }
     }
@@ -118,12 +130,16 @@ impl ChangeSet {
             self.removed.clear();
             self.modified.clear();
             self.attrs.clear();
+            self.linked.clear();
+            self.copied_from.clear();
             return;
         }
         extend_unique(&mut self.added, &other.added);
         extend_unique(&mut self.removed, &other.removed);
         extend_unique(&mut self.modified, &other.modified);
         extend_unique(&mut self.attrs, &other.attrs);
+        extend_unique(&mut self.linked, &other.linked);
+        extend_unique(&mut self.copied_from, &other.copied_from);
     }
 }
 

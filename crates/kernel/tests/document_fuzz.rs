@@ -190,6 +190,12 @@ enum DocOp {
         obj_sel: usize,
         offset: (f64, f64, f64),
     },
+    /// A linked copy of a visible object: the object is wrapped as a linked
+    /// set and the copy is a second placement of it.
+    DuplicateLinked {
+        obj_sel: usize,
+        offset: (f64, f64, f64),
+    },
     /// A NON-SIMILARITY transform (non-uniform scale) baked into a visible
     /// object — the class of transform `Annotation::reanchor` cannot carry
     /// a `RadialDimension`'s captured circle through (it would turn the
@@ -944,6 +950,9 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         }),
         2 => (any::<usize>(), arb_offset()).prop_map(|(obj_sel, offset)| {
             DocOp::Duplicate { obj_sel, offset }
+        }),
+        1 => (any::<usize>(), arb_offset()).prop_map(|(obj_sel, offset)| {
+            DocOp::DuplicateLinked { obj_sel, offset }
         }),
         2 => (any::<usize>(), (0.2..3.0f64, 0.2..3.0f64, 0.2..3.0f64)).prop_map(
             |(obj_sel, factors)| DocOp::NonUniformScale { obj_sel, factors }
@@ -3830,7 +3839,14 @@ fn apply_doc_op(
                 return Ok(true);
             };
             let t = Transform::translation(Vec3::new(offset.0, offset.1, offset.2));
-            let _ = doc.duplicate_node(NodeId::Object(oid), &t);
+            let _ = doc.duplicate_node(NodeId::Object(oid), &t, kernel::LinkPolicy::Independent);
+        }
+        DocOp::DuplicateLinked { obj_sel, offset } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let t = Transform::translation(Vec3::new(offset.0, offset.1, offset.2));
+            let _ = doc.duplicate_node(NodeId::Object(oid), &t, kernel::LinkPolicy::Linked);
         }
         DocOp::OwnSketch {
             obj_sel,

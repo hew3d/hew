@@ -293,6 +293,7 @@ fn duplicates_mint_fresh_sids() {
         .duplicate_node(
             NodeId::Object(obj),
             &Transform::translation(Vec3::new(3.0, 0.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         )
         .expect("duplicate");
     let NodeId::Object(copy_obj) = copy else {

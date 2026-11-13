@@ -81,6 +81,15 @@ describe('cursorFor', () => {
     expect(cursorFor('Move', false)).toBe(plain)
   })
 
+  it('spells out the other kind of copy with a second mark under the plus', () => {
+    const plus = cursorFor('Move', '+')
+    const linked = cursorFor('Move', '+ linked')
+    const independent = cursorFor('Move', '+ independent')
+    expect(plus).toBe(cursorFor('Move', true))
+    expect(new Set([plus, linked, independent]).size).toBe(3)
+    expect(cursorFor('Move', '')).toBe(cursorFor('Move'))
+  })
+
   it('with eyedropper, swaps the glyph to the eyedropper icon and the hotspot to Paint\'s, regardless of toolName', () => {
     const paintPlain = cursorFor('Paint')
     const paintEyedropper = cursorFor('Paint', false, true)

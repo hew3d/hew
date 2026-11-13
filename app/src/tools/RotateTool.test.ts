@@ -1,6 +1,7 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import * as THREE from 'three'
 import { RotateTool } from './RotateTool'
+import { setCopiesLinked } from '../settings/editing'
 import { DragCommitGate } from '../viewport/dragCommit'
 import { CleanModifierTap } from '../viewport/cleanModifierTap'
 import type { Snap } from './types'
@@ -25,6 +26,11 @@ vi.mock('../platform', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../platform')>()
   return { ...actual, isMac: true, COPY_MODIFIER_KEY: 'Alt', COPY_MODIFIER_LABEL: 'Option' }
 })
+
+// The tool tests below were written when every copy was independent; with
+// "Copies are linked" off the primary copy is that same independent copy.
+// The linked-copy tests turn the preference back on for themselves.
+beforeEach(() => setCopiesLinked(false))
 
 const CTX = ctxGround()
 /** Kernel keys are 16-hex strings. */
@@ -207,7 +213,7 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
     pick_face: vi.fn(() => undefined),
     transform_selection: vi.fn(() => { gen++ }),
     duplicate_selection_array: vi.fn(
-      (_kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number) => {
+      (_kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number, _linked?: boolean) => {
         const out: { kind: string; id: bigint }[] = []
         for (let k = 0; k < count; k++) {
           for (let i = 0; i < ids.length; i++) {
@@ -216,6 +222,23 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
         }
         gen++
         return out
+      },
+    ),
+    // A linked copy: every loose source is wrapped as its own set, and each
+    // copy is a placement (an instance) of it.
+    duplicate_selection_array_linked: vi.fn(
+      (kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number) => {
+        const nodes: { kind: string; id: string }[] = []
+        for (let k = 0; k < count; k++) {
+          for (let i = 0; i < ids.length; i++) nodes.push({ kind: 'instance', id: String(nextObjId++) })
+        }
+        const linked = Array.from(ids).map((id, i) => ({
+          source: { kind: kinds[i] === 1 ? 'group' : kinds[i] === 2 ? 'instance' : 'object', id: String(id) },
+          instance: String(nextObjId++),
+          definition: String(nextObjId++),
+        })).filter((w) => w.source.kind !== 'instance')
+        gen++
+        return JSON.stringify({ nodes, linked })
       },
     ),
     max_array_count: vi.fn(() => 1000),
@@ -838,17 +861,42 @@ function runNinetyDegreeGesture(tool: RotateTool): void {
 }
 
 describe('RotateTool — durable Alt copy toggle', () => {
-  it('tapping Alt toggles copy mode on and off (not hold-to-copy)', () => {
-    const { tool, onCopyModeChange } = makeTool()
+  it('rotate_copy_cycles_and_passes_the_mode', () => {
+    setCopiesLinked(true)
+    const { tool, wasmScene, onCopyModeChange } = makeTool()
     expect(tool.statusHint()).toContain('center of rotation')
 
     tool.onKey(makeKeyEvent('Alt'))
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', true)
     expect(tool.statusHint()).toContain('Copy is on')
 
     tool.onKey(makeKeyEvent('Alt'))
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(false)
-    expect(tool.statusHint()).not.toContain('Copy is on')
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('alternate', false)
+    expect(tool.statusHint()).toContain('Independent copy is on')
+
+    tool.onKey(makeKeyEvent('Alt'))
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('off', false)
+    expect(tool.statusHint()).not.toContain('is on')
+
+    // A linked copy goes through the call that reports its wraps...
+    tool.onKey(makeKeyEvent('Alt'))
+    wasmScene.duplicate_selection_array_linked.mockImplementationOnce(() =>
+      JSON.stringify({ nodes: [{ kind: 'instance', id: '200' }], linked: [] }),
+    )
+    runNinetyDegreeGesture(tool)
+    expect(wasmScene.duplicate_selection_array_linked).toHaveBeenCalledTimes(1)
+    expect(wasmScene.duplicate_selection_array).not.toHaveBeenCalled()
+  })
+
+  it('rotate_alternate_copy_passes_linked_false_with_the_preference_on', () => {
+    setCopiesLinked(true)
+    const { tool, wasmScene } = makeTool()
+    tool.onKey(makeKeyEvent('Alt'))
+    tool.onKey(makeKeyEvent('Alt')) // Independent copy
+    runNinetyDegreeGesture(tool)
+    expect(wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    expect(wasmScene.duplicate_selection_array.mock.calls[0][4]).toBe(false)
+    expect(wasmScene.duplicate_selection_array_linked).not.toHaveBeenCalled()
   })
 
   it('ignores Alt autorepeat (a held Alt toggles exactly once)', () => {
@@ -857,7 +905,7 @@ describe('RotateTool — durable Alt copy toggle', () => {
     tool.onKey(makeKeyEvent('Alt', { repeat: true }))
     tool.onKey(makeKeyEvent('Alt', { repeat: true }))
     expect(onCopyModeChange).toHaveBeenCalledTimes(1)
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
   })
 
   it('a full gesture commits a COPY (via duplicate_selection_array) while toggled on — Alt long released', () => {
@@ -879,7 +927,8 @@ describe('RotateTool — durable Alt copy toggle', () => {
   it('a full gesture commits a plain ROTATE (transform_selection) after toggling back off', () => {
     const { tool, wasmScene } = makeTool()
     tool.onKey(makeKeyEvent('Alt'))
-    tool.onKey(makeKeyEvent('Alt')) // back off
+    tool.onKey(makeKeyEvent('Alt')) // the other kind of copy
+    tool.onKey(makeKeyEvent('Alt')) // back to plain Rotate
     runNinetyDegreeGesture(tool)
 
     expect(wasmScene.transform_selection).toHaveBeenCalledTimes(1)
@@ -901,10 +950,11 @@ describe('RotateTool — copy modifier is platform-specific (Option on macOS, Ct
   it('toggleCopyMode() flips copy mode directly — the method a Windows/Linux Control clean tap calls', () => {
     const { tool, onCopyModeChange } = makeTool()
     tool.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
     expect(tool.statusHint()).toContain('Copy is on')
     tool.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(false)
+    tool.toggleCopyMode()
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('off', false)
   })
 
   it('a bare Control keydown does NOT toggle copy mode on macOS — Option owns it here', () => {
@@ -921,7 +971,7 @@ describe('RotateTool — copy modifier is platform-specific (Option on macOS, Ct
     const armed = tap.onKeyUp({ key: 'Control' }, tool)
     expect(armed).not.toBeNull()
     armed!.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
   })
 
   it('a Ctrl+Z chord does NOT toggle copy mode (the clean-tap combo guard)', () => {
@@ -970,7 +1020,7 @@ describe('RotateTool — on Windows/Linux, Alt is NOT the copy modifier (Ctrl is
 
     // The Viewport's Control clean tap calls this directly on this platform.
     tool.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
     expect(tool.statusHint()).toContain('Copy is on')
     expect(tool.statusHint()).toContain('Ctrl')
   })

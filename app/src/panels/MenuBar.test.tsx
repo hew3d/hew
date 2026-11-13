@@ -315,6 +315,60 @@ describe('MenuBar', () => {
     expect(onEditAction).not.toHaveBeenCalled()
   })
 
+  // --- Linked copies: Unlink / Unlink all / Select all copies, Paste independent / linked ---
+
+  it('edit_menu_gates_unlink_and_make_component_by_selection', () => {
+    const onEditAction = vi.fn()
+    const closed = { ...openGates, canMakeComponent: false, canMakeUnique: false, canUnlink: false, canUnlinkAll: false, canPromote: false }
+    const { rerender } = render(<MenuBar {...defaultProps} editGates={closed} onEditAction={onEditAction} />)
+    fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+    for (const label of ['Unlink', 'Unlink all', 'Select all copies', 'Make Component']) {
+      fireEvent.mouseDown(screen.getByText(label))
+    }
+    expect(onEditAction).not.toHaveBeenCalled()
+
+    // One linked copy among several: every copy action lights up, and Make
+    // Component is the promote even though a plain Make Component is off.
+    rerender(
+      <MenuBar {...defaultProps} editGates={{ ...closed, canUnlink: true, canUnlinkAll: true, canPromote: true }} onEditAction={onEditAction} />,
+    )
+    const commands: Array<[string, string]> = [
+      ['Unlink', 'edit-unlink'],
+      ['Unlink all', 'edit-unlink-all'],
+      ['Select all copies', 'edit-select-all-copies'],
+      ['Make Component', 'edit-make-component'],
+    ]
+    for (const [label, action] of commands) {
+      // The disabled clicks above left the menu open (see the note below).
+      if (screen.queryByText(label) === null) fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+      fireEvent.mouseDown(screen.getByText(label))
+      expect(onEditAction).toHaveBeenLastCalledWith(action)
+    }
+    // A set of one: Unlink works, Unlink all and Select all copies do not.
+    onEditAction.mockClear()
+    rerender(<MenuBar {...defaultProps} editGates={{ ...closed, canUnlink: true, canPromote: true }} onEditAction={onEditAction} />)
+    if (screen.queryByText('Unlink all') === null) fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+    fireEvent.mouseDown(screen.getByText('Unlink all'))
+    fireEvent.mouseDown(screen.getByText('Select all copies'))
+    expect(onEditAction).not.toHaveBeenCalled()
+  })
+
+  it('Paste independent is always offered; Paste linked joins it only while copies default to independent', () => {
+    const onEditAction = vi.fn()
+    const gates = { ...openGates, clipboardHasContent: true }
+    const { rerender } = render(<MenuBar {...defaultProps} editGates={gates} onEditAction={onEditAction} />)
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+    expect(screen.getByText('Paste independent')).toBeInTheDocument()
+    expect(screen.queryByText('Paste linked')).toBeNull()
+    fireEvent.mouseDown(screen.getByText('Paste independent'))
+    expect(onEditAction).toHaveBeenLastCalledWith('edit-paste-independent')
+
+    rerender(<MenuBar {...defaultProps} editGates={gates} onEditAction={onEditAction} copiesLinked={false} />)
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+    fireEvent.mouseDown(screen.getByText('Paste linked'))
+    expect(onEditAction).toHaveBeenLastCalledWith('edit-paste-linked')
+  })
+
   // --- Tools menu: active tool checkmark ---
 
   it('shows a checkmark next to the active tool in the Tools menu', () => {

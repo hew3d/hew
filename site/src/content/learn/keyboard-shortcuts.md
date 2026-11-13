@@ -87,7 +87,7 @@ These keys change what the *current tool operation* does. Each is covered in mor
 | `→` / `←` / `↑` | Lock to the X / Y / Z axis (Line, Move, Rotate, Protractor, Slice, Tape Measure); `↓` clears |
 | `⌘`/`Ctrl` (held) | Measure without dropping a guide (Tape Measure) · turn off inertia for a precise, 1:1 orbit or pan (Orbit/Pan tools and middle-button orbit); pressing it while the camera is still coasting stops it dead |
 | `⌘`/`Ctrl` (tap) | Line, Rectangle, Circle, Polygon, and Arc toggle **Detached**: the shape stays apart from the face or drawing under it (the cursor gains a `+`; stays on until tapped again or the tool changes) · Push/Pull toggles extruding a new object instead of changing the clicked one |
-| `Option` (Mac) / `Ctrl` (Windows, Linux) (tap) | Move/Rotate toggles between moving/rotating and copying (stays on until tapped again) |
+| `Option` (Mac) / `Ctrl` (Windows, Linux) (tap) | Move/Rotate cycles moving/rotating, then a copy (linked by default), then the other kind of copy (independent), then back to moving; the cursor badge reads `+`, `+ independent`, or nothing, and it stays on until tapped again |
 | `Option`/`Alt` (press) | Arc cycles how the arc closes: open · pie · segment |
 | `3x` or `3/` + `Enter` | Right after a copy commits: multiply it into 3 copies / divide the distance into 3 (Move; `x3` and `/3` work too) |
 | `Shift`-click | Toggle each clicked object in the selection (Select tool); same for a Shift-drag marquee |

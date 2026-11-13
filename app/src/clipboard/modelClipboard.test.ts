@@ -51,6 +51,29 @@ describe('modelClipboard — web build (no shell)', () => {
     expect(content.contentHash).toMatch(/^[0-9a-f]{64}$/)
   })
 
+  it('copy_records_the_link_source_with_document_id_and_nonce', async () => {
+    const m = await loadWebModule()
+    const source = { documentId: 'doc-uuid', nonce: 'win-1', generation: 0, nodes: [{ kind: 'object' as const, id: 7n }] }
+    const content = await m.setClipboardBytes(new Uint8Array([1]), 1, ['object'], 'win-1', null, source)
+    expect(content.linkSource).toEqual(source)
+    expect(m.getClipboard()?.linkSource).toEqual(source)
+    // Without one (a cross-window reconstruction), nothing links.
+    const plain = await m.setClipboardBytes(new Uint8Array([2]), 1, ['object'], 'win-1', null)
+    expect(plain.linkSource).toBeNull()
+  })
+
+  it('repointLinkSource records the placement on the clipboard the paste came from, beside the originals', async () => {
+    const m = await loadWebModule()
+    const source = { documentId: 'doc-uuid', nonce: 'win-1', generation: 0, nodes: [{ kind: 'object' as const, id: 7n }] }
+    const content = await m.setClipboardBytes(new Uint8Array([1]), 1, ['object'], 'win-1', null, source)
+    // A later copy replaces the current clipboard; the earlier one is still repointed.
+    await m.setClipboardBytes(new Uint8Array([2]), 1, ['object'], 'win-1', null, null)
+    m.repointLinkSource(content, [{ kind: 'instance', id: 9n }])
+    expect(content.linkSource?.repointed).toEqual([{ kind: 'instance', id: 9n }])
+    expect(content.linkSource?.nodes).toEqual(source.nodes)
+    expect(m.getClipboard()?.linkSource).toBeNull()
+  })
+
   it('clearClipboard empties it', async () => {
     const m = await loadWebModule()
     await m.setClipboardBytes(new Uint8Array([1]), 1, ['object'], 'doc-1', null)

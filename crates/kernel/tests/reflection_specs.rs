@@ -305,7 +305,11 @@ fn duplicate_with_a_mirrored_step_is_a_mirrored_copy() {
     let mut doc = Document::new();
     let id = make_box(&mut doc, 1.0, 3.0, 2.0);
     let (copy, _) = doc
-        .duplicate_node(kernel::NodeId::Object(id), &mirror_x())
+        .duplicate_node(
+            kernel::NodeId::Object(id),
+            &mirror_x(),
+            kernel::LinkPolicy::Independent,
+        )
         .expect("a mirrored copy step is accepted");
     let kernel::NodeId::Object(cid) = copy else {
         panic!("copy of an object is an object");

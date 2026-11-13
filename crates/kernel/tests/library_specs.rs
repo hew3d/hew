@@ -1883,6 +1883,7 @@ fn move_copy_and_clipboard_paste_both_place_the_original_definition() {
         .duplicate_node(
             NodeId::Instance(iid),
             &Transform::translation(Vec3::new(2.0, 0.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         )
         .unwrap();
     let NodeId::Instance(dup) = dup else {

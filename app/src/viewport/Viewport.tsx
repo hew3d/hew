@@ -56,7 +56,9 @@ import { SectionManager, rescaleSectionPlane } from './sectionManager'
 import { isVisiblePartSnap, isClearFaceSnap, classifyTapeHold } from './tapePartsGate'
 import * as inputRecorder from '../recording/inputRecorder'
 import { ToolController } from '../tools/ToolController'
-import { draftEdgesToErase } from '../tools/transformSelection'
+import { draftEdgesToErase, inHistoryBracket } from '../tools/transformSelection'
+import { routeBooleanMany, subtractThroughPlacement, opLabel, OP_SUBTRACT } from './placementBoolean'
+import { unlinkedLabel, unlinkedToJoin, cutOnlyThisOne, cutOneSolidAtATime } from '../linkedCopyCopy'
 import { RectangleTool } from '../tools/RectangleTool'
 import { CircleTool } from '../tools/CircleTool'
 import { PolygonTool, DEFAULT_POLYGON_SIDES } from '../tools/PolygonTool'
@@ -130,7 +132,7 @@ import type { Snap, SnapConstraint, Tool, EditContext } from '../tools/types'
 import { toolHasArmedGesture } from '../tools/types'
 import { rayPlaneIntersect, subV3, addV3, perpComponentV3, type V3 } from './geoHelpers'
 import { readAnnotation, commitAnnotationText, initialEditorText, type AnnotationSnapshot } from './annotationEdit'
-import { collectLeafIds, isDraftKind, nodeEq, nodeKey, nodeRefFromJs, resolveLabel, structuralSelection, treeIndexOf, type NodeRef, type SelectMode } from '../panels/treeModel'
+import { collectLeafIds, isDraftKind, nodeEq, nodeKey, nodeRefFromJs, placementLabel, resolveLabel, structuralSelection, treeIndexOf, type NodeRef, type SelectMode } from '../panels/treeModel'
 import { selectModeFor, isModifiedSelectPress } from './selectModifiers'
 import { baseBindingFor, desiredDragState, switchDragTo, orbitDragState, setPreciseOrbit, forceBaseAfterPress, type SwitchableDrag } from './orbitDragSwitch'
 import { MarqueeProjector, WINDOW_COVERAGE_MIN, boundsCoverage, emptyScreenBounds, normalizedRect, type MarqueeMode, type MarqueeRect, type ScreenBounds } from './marquee'
@@ -171,6 +173,8 @@ import {
 import { runDraft, setDraftSolidSelector } from '../tools/draftCommit'
 import { dedupeRefs, invertWithin, objectDrawingIslands } from './drawnSelection'
 import { cursorFor as toolIconCursor } from '../tools/toolIcons'
+import { copyBadgeText } from '../tools/copyMode'
+import { getCopiesLinked, subscribeCopiesLinked } from '../settings/editing'
 import {
   getShowToolPointer,
   subscribeShowToolPointer,
@@ -713,7 +717,7 @@ export interface ViewportApi {
    * toast (naming what committed, what failed, and exactly how many undo
    * steps restore the pre-explode state) is already shown before this
    * returns. */
-  runBoolean: (op: number, nodes: NodeRef[]) => NodeRef | null | 'mutated-failed'
+  runBoolean: (op: number, nodes: NodeRef[], scope?: 'all' | 'one') => NodeRef | null | 'mutated-failed'
   /** Group the given nodes into a merge group. */
   runGroup: (nodes: NodeRef[]) => bigint | null
   /** Dissolve a group. */
@@ -2493,6 +2497,82 @@ export function runBooleanCore(
 }
 
 /**
+ * May a tool act through the linked copy a pick landed on, with no context
+ * to enter? Only at the top level with nothing open for editing, and only
+ * when the copy is itself what a click there would select: a copy buried in
+ * a closed group keeps the double-click-to-enter rule, exactly like a plain
+ * object does.
+ */
+export function linkedPlacementPickEligible(
+  wasmScene: WasmScene,
+  activeContext: NodeRef[],
+  sessionOpen: boolean,
+  objectId: bigint,
+  instanceId: bigint | undefined,
+): boolean {
+  if (instanceId === undefined || activeContext.length > 0 || sessionOpen) return false
+  if (!wasmScene.is_linked(instanceId)) return false
+  const resolved = resolvePickToSelectable(wasmScene, objectId, activeContext, instanceId)
+  return resolved !== null && resolved.kind === 'instance' && resolved.id === instanceId
+}
+
+/**
+ * Union or Intersect (or a Subtract whose cutter is a placement) where an
+ * operand is a placement: each placement operand is made unique and exploded
+ * into plain solids, then the world boolean runs. The whole thing is ONE undo
+ * step labeled "… (unlinked)", and a refusal anywhere puts the document back
+ * exactly (the bracket aborts), so nothing is left half-split.
+ *
+ * `unlinked` is how many operands were placements of a linked set, for the
+ * "Unlinked N copies to join them" announcement.
+ */
+export type UnlinkAndJoinOutcome =
+  | { kind: 'ok'; node: NodeRef; unlinked: number; exploded: number }
+  | { kind: 'refused'; code?: string; message: string }
+
+export function booleanUnlinkingPlacements(
+  wasmScene: WasmScene,
+  op: number,
+  a: NodeRef,
+  b: NodeRef,
+  ...more: NodeRef[]
+): UnlinkAndJoinOutcome {
+  const kindNum = (n: NodeRef) => (n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0)
+  const operands = [a, b, ...more]
+  const placements = operands.filter((n) => n.kind === 'instance')
+  const unlinked = placements.filter((n) => wasmScene.is_linked(n.id)).length
+  try {
+    const node = inHistoryBracket(wasmScene, unlinkedLabel(opLabel(op)), () => {
+      const settle = (operand: NodeRef): NodeRef => {
+        if (operand.kind !== 'instance') return operand
+        const outcome = explodeInstanceOperand(wasmScene, operand)
+        if (!outcome.ok) {
+          // Thrown so the bracket aborts and the document is restored.
+          throw Object.assign(new Error(outcome.message), { code: outcome.code, plain: true })
+        }
+        return outcome.node
+      }
+      const settled = operands.map(settle)
+      // Exactly two operands use the original two-operand call; any other
+      // count goes through the N-way `boolean_nodes_many` (as runBooleanCore).
+      return nodeRefFromJs(
+        settled.length === 2
+          ? wasmScene.boolean_nodes(op, kindNum(settled[0]), settled[0].id, kindNum(settled[1]), settled[1].id)
+          : wasmScene.boolean_nodes_many(op, Uint8Array.from(settled.map(kindNum)), BigUint64Array.from(settled.map((n) => n.id))),
+      )
+    })
+    return { kind: 'ok', node, unlinked, exploded: placements.length }
+  } catch (err) {
+    if (err instanceof Error && (err as Error & { plain?: boolean }).plain === true) {
+      return { kind: 'refused', code: (err as Error & { code?: string }).code, message: err.message }
+    }
+    const code = parseKernelErrorCode(err)
+    const rawMsg = err instanceof Error ? err.message : String(err)
+    return { kind: 'refused', code: code ?? undefined, message: kernelErrorMessage(code ?? 'Unknown', rawMsg) }
+  }
+}
+
+/**
  * Map a `scene_undo`/`scene_redo` catch-site error to toast copy, or null
  * when it shouldn't be toasted at all. A refused undo/redo (RestoreConflicts,
  * InverseDiverged, InverseFailed — kernelErrors.ts) used to only
@@ -4123,6 +4203,28 @@ export default function Viewport({
       return resolved !== null && resolved.kind === 'object' && resolved.id === objectId
     }
 
+    /**
+     * Push/Pull's eligibility: everything a draw tool may draw on, plus a face
+     * reached through a placement of a LINKED set. That pushes the shared
+     * shape for this one gesture (the commit routes through the placement),
+     * with no context to enter first, so every copy follows. Other components
+     * keep the double-click-to-edit rule; so does a linked copy while a group
+     * or component is open, because the kernel refuses a push there.
+     */
+    function linkedPlacementEligible(objectId: bigint, instanceId: bigint | undefined): boolean {
+      return linkedPlacementPickEligible(
+        wasmScene,
+        activeContextRef.current,
+        sessionStackRef.current.length > 0,
+        objectId,
+        instanceId,
+      )
+    }
+
+    function pushPullEligible(objectId: bigint, instanceId: bigint | undefined): boolean {
+      return faceDrawEligible(objectId, instanceId) || linkedPlacementEligible(objectId, instanceId)
+    }
+
     // Marquee drag state (Select tool, top-level context only). Armed on
     // pointerdown; becomes active past a small threshold. While armed, the
     // click-pick is DEFERRED to pointerup so a drag can become a marquee
@@ -5260,7 +5362,7 @@ export default function Viewport({
     // into the side effects real usage needs (scene refresh, selection,
     // toast), which is exactly the part testing the accounting itself
     // doesn't need to exercise.
-    function runBoolean(op: number, nodes: NodeRef[]): NodeRef | null | 'mutated-failed' {
+    function runBoolean(op: number, nodes: NodeRef[], scope: 'all' | 'one' = 'all'): NodeRef | null | 'mutated-failed' {
       const editCtx = computeEditContext(wasmScene, activeContextRef.current)
       if (editCtx.kind === 'instance') {
         let result: NodeRef
@@ -5278,6 +5380,61 @@ export default function Viewport({
         onSelectRef.current?.(result, 'replace')
         scheduleRender()
         return result
+      }
+
+      // A placement (a copy of a linked set, or a component) is never split
+      // silently: Subtract cuts through its shared shape, and Union or
+      // Intersect unlink it first and say so.
+      const route = routeBooleanMany(op, nodes, (id) => wasmScene.is_linked(id))
+      if (route === 'refuse-cutter') {
+        handleToast(cutOneSolidAtATime())
+        return null
+      }
+      if (route === 'through-placement') {
+        try {
+          const [host, ...cutters] = nodes
+          if (cutters.length === 1) {
+            subtractThroughPlacement(wasmScene, host.id, cutters[0].id, scope)
+          } else {
+            // Several cutters: one undo step; "Only this one" unlinks the host
+            // with the first cut.
+            const label = scope === 'one' ? unlinkedLabel(opLabel(OP_SUBTRACT)) : opLabel(OP_SUBTRACT)
+            inHistoryBracket(wasmScene, label, () => {
+              cutters.forEach((c, i) => subtractThroughPlacement(wasmScene, host.id, c.id, i === 0 ? scope : 'all'))
+            })
+          }
+        } catch (err) {
+          const code = parseKernelErrorCode(err)
+          const rawMsg = err instanceof Error ? err.message : String(err)
+          // A rolled-back "Only this one" may have passed through other states.
+          handleSceneRefresh()
+          sceneRenderer.refreshAllSketches()
+          handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+          scheduleRender()
+          return null
+        }
+        handleSceneRefresh()
+        sceneRenderer.refreshAllSketches()
+        sceneRenderer.refreshGuides()
+        onSelectRef.current?.(nodes[0], 'replace')
+        scheduleRender()
+        if (scope === 'one') handleToast(cutOnlyThisOne())
+        return nodes[0]
+      }
+      if (route === 'unlink-and-join') {
+        const joined = booleanUnlinkingPlacements(wasmScene, op, nodes[0], nodes[1], ...nodes.slice(2))
+        // The bracket may have run and rolled back; re-pull what is rendered.
+        handleSceneRefresh()
+        sceneRenderer.refreshAllSketches()
+        sceneRenderer.refreshGuides()
+        scheduleRender()
+        if (joined.kind === 'refused') {
+          handleToast(joined.message, joined.code)
+          return null
+        }
+        onSelectRef.current?.(joined.node, 'replace')
+        handleToast(unlinkedToJoin(joined.unlinked))
+        return joined.node
       }
 
       const outcome = runBooleanCore(wasmScene, op, nodes)
@@ -5647,7 +5804,21 @@ export default function Viewport({
      *  a positional placeholder — the same preference `resolveLabel` (the
      *  Outliner's own label resolver) applies, at index 0 since a transient
      *  status chip has no outliner position to match. */
+    /** A linked copy's label, captured just before its session opens: the
+     *  session hides the placement, so afterwards nothing can tell it was a
+     *  linked copy rather than a component. */
+    const linkedSessionLabels = new Map<bigint, string>()
+    function rememberLinkedSessionLabel(instanceId: bigint): void {
+      if (wasmScene.is_linked(instanceId)) {
+        linkedSessionLabels.set(instanceId, placementLabel(wasmScene, instanceId, 0))
+      } else {
+        linkedSessionLabels.delete(instanceId)
+      }
+    }
+
     function componentSessionLabel(instanceId: bigint): string {
+      const remembered = linkedSessionLabels.get(instanceId)
+      if (remembered !== undefined) return remembered
       // Resolve the definition through the SESSION, not the instance: the
       // entered instance is hidden for the session's duration, so
       // `instance_def(instanceId)` answers undefined and the label fell
@@ -5786,6 +5957,7 @@ export default function Viewport({
      *  every other refusal. */
     function runOpenExplodeSession(instanceId: bigint): boolean {
       try {
+        rememberLinkedSessionLabel(instanceId)
         wasmScene.open_explode_session(instanceId)
       } catch (err) {
         const code = parseKernelErrorCode(err)
@@ -5825,6 +5997,7 @@ export default function Viewport({
     function openExplodeSessionOrFallback(instanceId: bigint, fallback: NodeRef): void {
       const componentId = wasmScene.instance_def(instanceId)
       try {
+        rememberLinkedSessionLabel(instanceId)
         wasmScene.open_explode_session(instanceId)
       } catch (err) {
         const code = parseKernelErrorCode(err)
@@ -7709,8 +7882,8 @@ export default function Viewport({
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       // Same context-path-aware eligibility as the draw tools: plain objects
       // are directly push/pullable; group/instance members only from inside
-      // their container's editing context.
-      tool.setFaceEligibility(faceDrawEligible)
+      // their container's editing context, except a linked copy's face.
+      tool.setFaceEligibility(pushPullEligible)
       return tool
     }
 
@@ -7844,6 +8017,17 @@ export default function Viewport({
       return tool
     }
 
+    // The cursor badge says what a copy would be NOW: when "Copies are
+    // linked" flips while Move or Rotate is armed, re-badge from the tool's
+    // own copy state.
+    const unsubscribeCopiesLinked = subscribeCopiesLinked(() => {
+      const active = toolController.activeTool
+      if (active instanceof MoveTool || active instanceof RotateTool) {
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
+        renderer.domElement.style.cursor = cursorFor(active.name, copyBadgeText(active.currentCopyState(), getCopiesLinked()))
+      }
+    })
+
     function makeMoveTool(selection?: NodeRef[]): MoveTool {
       const tool = new MoveTool(
         wasmScene,
@@ -7851,7 +8035,9 @@ export default function Viewport({
         sceneRenderer.objectsGroup,
         selection ?? [...selectedIdsRef.current],
         (nodes) => {
-          handleSceneRefresh(touchedForNodes(nodes))
+          // A linked copy wraps its loose source as a set, which removes a
+          // world node: refresh everything, not just the copies.
+          handleSceneRefresh(tool.takeLinkedWraps().length > 0 ? undefined : touchedForNodes(nodes))
           // A sketch move bakes new vertex positions; rebuild sketch buffers so
           // the lines follow (objects refresh via handleSceneRefresh; sketches
           // do not). Mirrors the boolean/undo refresh pairing.
@@ -7866,9 +8052,9 @@ export default function Viewport({
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
         // Durable copy toggle → badge the Move cursor with a `+` (the same
         // cursorFor pipeline the tool-switch cursor uses).
-        (on: boolean) => {
+        (state) => {
           // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
-          renderer.domElement.style.cursor = cursorFor('Move', on)
+          renderer.domElement.style.cursor = cursorFor('Move', copyBadgeText(state, getCopiesLinked()))
         },
         // ×N / /N array re-resolve: the previous copies were scene-undone
         // before the new set landed, so a targeted refresh isn't enough —
@@ -7922,7 +8108,7 @@ export default function Viewport({
         sceneRenderer.objectsGroup,
         [...selectedIdsRef.current],
         (nodes) => {
-          handleSceneRefresh(touchedForNodes(nodes))
+          handleSceneRefresh(tool.takeLinkedWraps().length > 0 ? undefined : touchedForNodes(nodes))
           // Rebuild sketch buffers so a rotated sketch's lines follow (see
           // makeMoveTool).
           sceneRenderer.refreshAllSketches()
@@ -7937,9 +8123,9 @@ export default function Viewport({
         (text: string) => { onMeasurementRef.current?.(text) },
         // Durable copy toggle → badge the Rotate cursor with a `+` (see
         // makeMoveTool).
-        (on: boolean) => {
+        (state) => {
           // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
-          renderer.domElement.style.cursor = cursorFor('Rotate', on)
+          renderer.domElement.style.cursor = cursorFor('Rotate', copyBadgeText(state, getCopiesLinked()))
         },
         // ×N / /N array re-resolve: full scene refresh, same reasoning as
         // makeMoveTool's onArrayCommit.
@@ -8095,16 +8281,20 @@ export default function Viewport({
         // A slice consumes the source object and yields two new ones; refresh
         // the scene and select the returned (positive) piece so highlight lands
         // on live geometry, mirroring how runBoolean reports its result.
-        (objectId: bigint) => {
+        (objectId: bigint, placement?: bigint) => {
           handleSceneRefresh()
           sceneRenderer.refreshGuides()
-          onSelectRef.current?.({ kind: 'object', id: objectId }, 'replace')
+          onSelectRef.current?.(
+            placement !== undefined ? { kind: 'instance', id: placement } : { kind: 'object', id: objectId },
+            'replace',
+          )
         },
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
       )
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       tool.setFaceEligibility(faceDrawEligible)
+      tool.setPlacementEligibility(linkedPlacementEligible)
       return tool
     }
 
@@ -11977,6 +12167,7 @@ export default function Viewport({
 
     // ------------------------------------------------------------------ cleanup
     return () => {
+      unsubscribeCopiesLinked()
       setDraftSolidSelector(null)
       renderScheduler.cancel()
       document.removeEventListener('visibilitychange', onVisibilityChange)

@@ -5800,7 +5800,9 @@ impl Scene {
     /// [`Scene::transform_object`]). Returns the new node (always the **same kind**
     /// as the source `kind`/`id`): an Object/Group copy bakes the offset into
     /// fresh geometry; an Instance copy shares its definition at the offset pose.
-    /// Undoable; the source is left untouched.
+    /// Undoable; the source is left untouched. Always an independent copy
+    /// ([`kernel::LinkPolicy::Independent`]); a linked copy goes through
+    /// [`Scene::duplicate_selection_array`] with `linked`.
     pub fn duplicate_node(
         &mut self,
         kind: u8,
@@ -5813,7 +5815,10 @@ impl Scene {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
         let t = Transform::from_affine(rows);
-        let (new_node, change) = self.doc.duplicate_node(node, &t).map_err(doc_err)?;
+        let (new_node, change) = self
+            .doc
+            .duplicate_node(node, &t, kernel::LinkPolicy::Independent)
+            .map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DuplicateNode {
             kind,
@@ -5831,7 +5836,10 @@ impl Scene {
     /// the full offset divided by `count`. Placement per kind matches
     /// [`Scene::duplicate_node`]: an Object/Group copy bakes fresh
     /// independent geometry, an Instance copy shares its definition at the
-    /// composed pose. The whole array is **one undoable step**.
+    /// composed pose. With `linked`, each Object or Group is first wrapped
+    /// as its own linked set ([`Scene::wrap_linked`]) and every copy is a
+    /// placement of it; the returned nodes are then instances. The whole
+    /// array is **one undoable step** either way.
     ///
     /// `kinds`/`ids` are parallel arrays naming live sibling-or-not tree
     /// nodes (kind `0` = object, `1` = group, `2` = instance, as in
@@ -5851,8 +5859,12 @@ impl Scene {
     /// - `EmptySelection` — nothing to duplicate.
     /// - `UnknownObject`/`UnknownGroup`/`UnknownInstance` — a stale or hidden
     ///   handle.
-    /// - `Transform` — a singular `affine`, or one that reflects a baked
-    ///   target.
+    /// - `Transform` — a singular `affine`, or one that shrinks a baked
+    ///   target below what a saved file could reopen (a reflection bakes a
+    ///   mirrored copy).
+    /// - With `linked`: `DuplicateMember` for a node listed beside a group
+    ///   that contains it, `ExplodeSessionScope` / `ComponentDepthExceeded`
+    ///   / `ComponentExpansionExceeded` as for [`Scene::wrap_linked`].
     ///
     /// On error the document is untouched (partial clones are rolled back).
     pub fn duplicate_selection_array(
@@ -5861,7 +5873,62 @@ impl Scene {
         ids: &[u64],
         affine: &[f64],
         count: u32,
+        linked: bool,
     ) -> Result<Vec<NodeJs>, ApiError> {
+        self.ensure_not_busy()?;
+        let (roots, _) = self.duplicate_selection_array_core(kinds, ids, affine, count, linked)?;
+        Ok(roots.into_iter().map(node_js).collect())
+    }
+
+    /// The [`Scene::duplicate_selection_array`] call with `linked = true`,
+    /// returning the new placements and every wrap it made as JSON:
+    /// `{"nodes":[{"kind":"instance","id":"<ffi>"},...],
+    ///   "linked":[{"source":{"kind":"object","id":"<ffi>"},"instance":"<ffi>","definition":"<ffi>"},...]}`
+    /// (decimal-string handles). The selection store maps each `source` to
+    /// its `instance`. Same errors.
+    pub fn duplicate_selection_array_linked(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        affine: &[f64],
+        count: u32,
+    ) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        let (roots, change) =
+            self.duplicate_selection_array_core(kinds, ids, affine, count, true)?;
+        let node_json = |n: NodeId| {
+            let (kind, id) = match n {
+                NodeId::Object(o) => ("object", o.data().as_ffi()),
+                NodeId::Group(g) => ("group", g.data().as_ffi()),
+                NodeId::Instance(i) => ("instance", i.data().as_ffi()),
+            };
+            serde_json::json!({ "kind": kind, "id": id.to_string() })
+        };
+        let nodes: Vec<serde_json::Value> = roots.iter().map(|&n| node_json(n)).collect();
+        let linked: Vec<serde_json::Value> = change
+            .linked
+            .iter()
+            .map(|w| {
+                serde_json::json!({
+                    "source": node_json(w.source),
+                    "instance": w.instance.data().as_ffi().to_string(),
+                    "definition": w.definition.data().as_ffi().to_string(),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "nodes": nodes, "linked": linked }).to_string())
+    }
+
+    /// The shared body of the two array-copy entry points: validates at the
+    /// trust boundary, runs the kernel op, reconciles, and records.
+    fn duplicate_selection_array_core(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        affine: &[f64],
+        count: u32,
+        linked: bool,
+    ) -> Result<(Vec<NodeId>, kernel::DocChange), ApiError> {
         self.ensure_not_busy()?;
         if kinds.len() != ids.len() {
             return Err(ApiError(
@@ -5889,9 +5956,14 @@ impl Scene {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
         let t = Transform::from_affine(rows);
+        let policy = if linked {
+            kernel::LinkPolicy::Linked
+        } else {
+            kernel::LinkPolicy::Independent
+        };
         let (roots, change) = self
             .doc
-            .duplicate_nodes_array(&nodes, &t, count_nz)
+            .duplicate_nodes_array(&nodes, &t, count_nz, policy)
             .map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DuplicateSelectionArray {
@@ -5899,8 +5971,9 @@ impl Scene {
             ids: ids.to_vec(),
             affine: *rows,
             count,
+            linked,
         });
-        Ok(roots.into_iter().map(node_js).collect())
+        Ok((roots, change))
     }
 
     /// The ceiling [`Scene::duplicate_selection_array`] enforces on `count`
@@ -6452,6 +6525,81 @@ impl Scene {
         self.reconcile(&change);
         recording::record(recording::RecordedCall::MakeUnique { instance });
         Ok(new_def.data().as_ffi())
+    }
+
+    /// Wraps one Object or Group (`kind` 0 or 1) as a linked set
+    /// ([`kernel::Document::wrap_linked`]): a new definition carrying
+    /// `hew` / `linked`, whose only member is the node (same id), placed
+    /// once at identity in the node's spot. Returns the new placement's
+    /// handle; the definition is [`Scene::instance_def`] of it. One undo
+    /// step.
+    ///
+    /// # Errors
+    /// `NotWrappable` for an instance (kind 2), `UnknownObject` /
+    /// `UnknownGroup` for a stale node, `ExplodeSessionScope` for a node
+    /// outside an open session, `ComponentDepthExceeded`,
+    /// `ComponentExpansionExceeded`, `BadNodeKind`.
+    pub fn wrap_linked(&mut self, kind: u8, id: u64) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        let node = node_id(kind, id)?;
+        let (_, instance, change) = self.doc.wrap_linked(node).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::WrapLinked { kind, id });
+        Ok(instance.data().as_ffi())
+    }
+
+    /// Whether `instance` places a linked set (its definition carries
+    /// `hew` / `linked`). False for a stale handle.
+    pub fn is_linked(&self, instance: u64) -> bool {
+        self.doc
+            .instance_def(instance_id(instance))
+            .is_some_and(|c| self.doc.is_linked_set(c))
+    }
+
+    /// Whether a node handle (`kind` 0 object, 1 group, 2 instance) is a
+    /// live, visible world node. False for a stale, hidden, or
+    /// definition-owned handle, or a bad kind. Read-only.
+    pub fn node_is_live(&self, kind: u8, id: u64) -> bool {
+        node_id(kind, id).is_ok_and(|node| self.doc.node_is_live(node))
+    }
+
+    /// `linked = false` removes `hew` / `linked` from `component` (the
+    /// attribute half of "Make component"; the name is
+    /// [`Scene::set_component_name`]'s). One undo step. `linked = true` is
+    /// refused `NotLinkable`: a component never becomes a linked set.
+    ///
+    /// # Errors
+    /// `NotLinkable` (see above), `NotLinked` for a component that is not a
+    /// linked set, `UnknownComponent` for a stale handle.
+    pub fn set_linked(&mut self, component: u64, linked: bool) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        if linked {
+            return Err(ApiError::new(
+                "NotLinkable",
+                "a component cannot become a linked set",
+            ));
+        }
+        let change = match self.doc.promote_linked(component_id(component)) {
+            Ok(change) => change,
+            Err(DocumentError::UnknownAttr) => {
+                return Err(ApiError::new(
+                    "NotLinked",
+                    "that component is not a linked set",
+                ));
+            }
+            Err(e) => return Err(doc_err(e)),
+        };
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetLinked { component, linked });
+        Ok(())
+    }
+
+    /// The definition that owns a node (`kind` 0 object, 1 group, 2
+    /// instance) when it is a definition member, or `None` for a world
+    /// node, a stale handle, or a bad kind. Read-only.
+    pub fn owner_definition(&self, kind: u8, id: u64) -> Option<u64> {
+        let node = node_id(kind, id).ok()?;
+        self.doc.owner_definition(node).map(|c| c.data().as_ffi())
     }
 
     /// "Make Unique" by occurrence path. `path` is instance handles, outermost
@@ -12417,8 +12565,15 @@ impl Scene {
                     ids,
                     affine,
                     count,
+                    linked,
                 } => {
-                    self.duplicate_selection_array(&kinds, &ids, &affine, count)?;
+                    self.duplicate_selection_array(&kinds, &ids, &affine, count, linked)?;
+                }
+                WrapLinked { kind, id } => {
+                    self.wrap_linked(kind, id)?;
+                }
+                SetLinked { component, linked } => {
+                    self.set_linked(component, linked)?;
                 }
                 PushPull {
                     object,
@@ -15546,7 +15701,7 @@ mod tests {
             0.0, 0.0, 1.0, 0.0,
         ];
         let roots = scene
-            .duplicate_selection_array(&[0], &[o], &step, 3)
+            .duplicate_selection_array(&[0], &[o], &step, 3, false)
             .unwrap();
         assert_eq!(roots.len(), 3);
         assert!(roots.iter().all(|n| n.kind == "object"));
@@ -15560,19 +15715,19 @@ mod tests {
 
         // Typed rejections, document untouched.
         let err = scene
-            .duplicate_selection_array(&[0], &[o], &step, 0)
+            .duplicate_selection_array(&[0], &[o], &step, 0, false)
             .unwrap_err();
         assert!(err.0.starts_with("BadCount"), "got {}", err.0);
         let err = scene
-            .duplicate_selection_array(&[0, 0], &[o], &step, 1)
+            .duplicate_selection_array(&[0, 0], &[o], &step, 1, false)
             .unwrap_err();
         assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
         let err = scene
-            .duplicate_selection_array(&[0], &[o], &step[..7], 1)
+            .duplicate_selection_array(&[0], &[o], &step[..7], 1, false)
             .unwrap_err();
         assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
         let err = scene
-            .duplicate_selection_array(&[], &[], &step, 1)
+            .duplicate_selection_array(&[], &[], &step, 1, false)
             .unwrap_err();
         assert!(err.0.starts_with("EmptySelection"), "got {}", err.0);
         assert_eq!(scene.object_ids().len(), 4, "refusals mutate nothing");
@@ -15595,7 +15750,7 @@ mod tests {
 
         // cap + 1 refuses typed, document untouched.
         let err = scene
-            .duplicate_selection_array(&[0], &[o], &step, MAX_ARRAY_COUNT + 1)
+            .duplicate_selection_array(&[0], &[o], &step, MAX_ARRAY_COUNT + 1, false)
             .unwrap_err();
         assert!(err.0.starts_with("BadCount"), "got {}", err.0);
         assert_eq!(scene.object_ids().len(), 1, "refusal mutates nothing");
@@ -15609,7 +15764,7 @@ mod tests {
 
         // Exactly the cap succeeds.
         let roots = scene
-            .duplicate_selection_array(&[0], &[o], &step, MAX_ARRAY_COUNT)
+            .duplicate_selection_array(&[0], &[o], &step, MAX_ARRAY_COUNT, false)
             .unwrap();
         assert_eq!(roots.len(), MAX_ARRAY_COUNT as usize);
         assert_eq!(scene.object_ids().len(), 1 + MAX_ARRAY_COUNT as usize);
@@ -15621,6 +15776,189 @@ mod tests {
         );
         let err = Scene::new().replay(&rogue).unwrap_err();
         assert!(err.0.starts_with("BadCount"), "got {}", err.0);
+    }
+
+    const STEP_X2: [f64; 12] = [
+        1.0, 0.0, 0.0, 2.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0,
+    ];
+
+    /// A linked array returns the new placements and reports each wrap as
+    /// JSON with decimal-string handles.
+    #[test]
+    fn duplicate_selection_array_linked_returns_placements_and_reports_wraps_as_json() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let json = scene
+            .duplicate_selection_array_linked(&[0], &[o], &STEP_X2, 2)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let nodes = v["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.iter().all(|n| n["kind"] == "instance"));
+        let linked = v["linked"].as_array().unwrap();
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0]["source"]["kind"], "object");
+        assert_eq!(linked[0]["source"]["id"], o.to_string());
+        let wrap: u64 = linked[0]["instance"].as_str().unwrap().parse().unwrap();
+        let def: u64 = linked[0]["definition"].as_str().unwrap().parse().unwrap();
+        assert_eq!(scene.instance_def(wrap), Some(def));
+        for n in nodes {
+            let id: u64 = n["id"].as_str().unwrap().parse().unwrap();
+            assert_eq!(scene.instance_def(id), Some(def));
+            assert!(scene.is_linked(id));
+        }
+        // One undo step for the wraps and the copies.
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.object_ids(), vec![o]);
+        assert!(!scene.is_linked(wrap));
+    }
+
+    /// `linked = false` is the old array copy exactly: baked objects, and
+    /// the same document as before the flag existed.
+    #[test]
+    fn duplicate_selection_array_independent_matches_the_old_behavior() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let roots = scene
+            .duplicate_selection_array(&[0], &[o], &STEP_X2, 2, false)
+            .unwrap();
+        assert!(roots.iter().all(|n| n.kind == "object"));
+        assert_eq!(scene.object_ids().len(), 3);
+        // The same call with the flag on links instead.
+        let mut linked = Scene::new();
+        let (s, r) = ground_unit_square(&mut linked);
+        let o = linked.extrude_region(s, r, 1.0).unwrap();
+        let roots = linked
+            .duplicate_selection_array(&[0], &[o], &STEP_X2, 2, true)
+            .unwrap();
+        assert!(roots.iter().all(|n| n.kind == "instance"));
+        assert_ne!(linked.state_hash(), scene.state_hash());
+    }
+
+    #[test]
+    fn wrap_linked_is_linked_and_set_linked_false_round_trip() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let ins = scene.wrap_linked(0, o).unwrap();
+        assert!(scene.is_linked(ins));
+        let def = scene.instance_def(ins).unwrap();
+        scene.set_linked(def, false).unwrap();
+        assert!(!scene.is_linked(ins));
+        let err = scene.set_linked(def, false).unwrap_err();
+        assert!(err.0.starts_with("NotLinked"), "got {}", err.0);
+        scene.scene_undo().unwrap();
+        assert!(scene.is_linked(ins));
+        let err = scene.wrap_linked(2, ins).unwrap_err();
+        assert!(err.0.starts_with("NotWrappable"), "got {}", err.0);
+        assert!(!scene.is_linked(u64::MAX), "a stale handle is not linked");
+    }
+
+    #[test]
+    fn node_is_live_follows_the_wrap_and_its_undo() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        assert!(scene.node_is_live(0, o));
+        let ins = scene.wrap_linked(0, o).unwrap();
+        assert!(
+            !scene.node_is_live(0, o),
+            "the wrapped object is now a member"
+        );
+        assert!(scene.node_is_live(2, ins));
+        scene.scene_undo().unwrap();
+        assert!(scene.node_is_live(0, o));
+        assert!(!scene.node_is_live(2, ins));
+        assert!(!scene.node_is_live(9, o), "a bad kind is not live");
+        assert!(!scene.node_is_live(0, u64::MAX));
+    }
+
+    #[test]
+    fn set_linked_true_is_refused_not_linkable() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let ins = scene.make_component(&[0], &[o]).unwrap();
+        let def = scene.instance_def(ins).unwrap();
+        let hash = scene.state_hash();
+        let err = scene.set_linked(def, true).unwrap_err();
+        assert!(err.0.starts_with("NotLinkable"), "got {}", err.0);
+        assert!(!scene.is_linked(ins));
+        assert_eq!(scene.state_hash(), hash);
+    }
+
+    #[test]
+    fn owner_definition_answers_for_a_wrapped_node_and_none_for_a_world_node() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 3.0, 0.0);
+        let world = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let ins = scene.wrap_linked(0, o).unwrap();
+        assert_eq!(scene.owner_definition(0, o), scene.instance_def(ins));
+        assert_eq!(scene.owner_definition(0, world), None);
+        assert_eq!(scene.owner_definition(2, ins), None, "a world placement");
+        assert_eq!(scene.owner_definition(9, o), None, "a bad kind");
+    }
+
+    /// A recording made before linked copies has no `linked` field on its
+    /// array copy; it replays as an independent copy.
+    #[test]
+    fn a_recording_without_linked_replays_as_independent() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        scene
+            .duplicate_selection_array(&[0], &[o], &STEP_X2, 2, false)
+            .unwrap();
+        scene.stop_recording();
+        let json = scene.take_recording();
+        assert!(
+            !json.contains("\"linked\""),
+            "independent copies record as before"
+        );
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // The old shape exactly: no `linked` key at all.
+        for call in v["calls"].as_array_mut().unwrap() {
+            if let Some(obj) = call.as_object_mut() {
+                obj.remove("linked");
+            }
+        }
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&v.to_string()).unwrap(), scene.state_hash());
+        assert_eq!(replayed.object_ids().len(), 3);
+        recording::reset();
+    }
+
+    #[test]
+    fn a_linked_copy_records_and_replays_to_the_same_state_hash() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        let p = scene.extrude_region(s2, r2, 1.0).unwrap();
+        scene
+            .duplicate_selection_array(&[0], &[o], &STEP_X2, 3, true)
+            .unwrap();
+        let ins = scene.wrap_linked(0, p).unwrap();
+        let def = scene.instance_def(ins).unwrap();
+        scene.set_linked(def, false).unwrap();
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("\"linked\":true"));
+        assert!(json.contains("wrap_linked") && json.contains("set_linked"));
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        recording::reset();
     }
 
     /// `history_generation` crosses the FFI with the kernel's semantics: it
@@ -15759,7 +16097,7 @@ mod tests {
             0.0, 0.0, 1.0, 0.0,
         ];
         scene
-            .duplicate_selection_array(&[0, 0], &[o, copy.id], &step, 2)
+            .duplicate_selection_array(&[0, 0], &[o, copy.id], &step, 2, false)
             .unwrap();
         assert_eq!(scene.object_ids().len(), 6);
 

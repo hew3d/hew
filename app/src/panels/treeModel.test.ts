@@ -28,6 +28,8 @@ import {
   collectDescendants,
   filterTreeKeys,
   dropTargetFor,
+  placementLabel,
+  type LabelScene,
   type NodeRef,
 } from './treeModel'
 
@@ -1079,5 +1081,38 @@ describe('makeLabelFor — sketches', () => {
   it('an unplaced sketch is "Sketch", never a wrong "Sketch 1"', () => {
     const label = makeLabelFor(scene([4n]), new Map())
     expect(label({ kind: 'sketch', id: 99n })).toBe('Sketch')
+  })
+})
+
+describe('placementLabel', () => {
+  const scene = (opts: {
+    linked: boolean
+    instanceName?: string
+    defName?: string
+    members?: { id: bigint; name?: string }[]
+  }): LabelScene => ({
+    group_name: () => undefined,
+    object_name: (id) => opts.members?.find((m) => m.id === id)?.name,
+    instance_name: () => opts.instanceName,
+    instance_def: () => 100n,
+    component_name: () => opts.defName,
+    is_linked: () => opts.linked,
+    component_member_objects: () => (opts.members ?? []).map((m) => m.id),
+  })
+
+  it('placementLabel_prefers_instance_then_definition_then_single_member_then_copies', () => {
+    const members = [{ id: 5n, name: 'Leg' }]
+    expect(placementLabel(scene({ linked: true, instanceName: 'Front leg', defName: 'Leg set', members }), 1n, 0)).toBe('Front leg')
+    expect(placementLabel(scene({ linked: true, defName: 'Leg set', members }), 1n, 0)).toBe('Leg set')
+    expect(placementLabel(scene({ linked: true, members }), 1n, 0)).toBe('Leg')
+    expect(placementLabel(scene({ linked: true, members: [{ id: 5n }] }), 1n, 0)).toBe('Copies')
+    expect(placementLabel(scene({ linked: true, members: [{ id: 5n, name: 'A' }, { id: 6n, name: 'B' }] }), 1n, 0)).toBe('Copies')
+  })
+
+  it('an_ordinary_component_keeps_its_label', () => {
+    const s = scene({ linked: false, instanceName: 'Left', defName: 'Chair' })
+    expect(placementLabel(s, 1n, 0)).toBe('Left (Chair)')
+    expect(placementLabel(scene({ linked: false, defName: 'Chair' }), 1n, 0)).toBe('Chair')
+    expect(placementLabel(scene({ linked: false }), 1n, 2)).toBe(resolveLabel(undefined, undefined, 'instance', 2))
   })
 })

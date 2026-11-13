@@ -110,7 +110,7 @@ export function makeSetting<T>(
 }
 
 /** Parses a persisted/broadcast boolean given as 'true'/'false' or a real boolean. */
-function parseBool(raw: unknown): boolean | undefined {
+export function parseBool(raw: unknown): boolean | undefined {
   if (raw === true || raw === 'true') return true
   if (raw === false || raw === 'false') return false
   return undefined

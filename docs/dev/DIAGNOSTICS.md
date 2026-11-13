@@ -268,8 +268,7 @@ longer replay.
 | `delete_node` | `kind` (0=object, 1=group, 2=instance), `id` | delete a node |
 | `delete_selection` | `kinds[]`, `ids[]` | delete several nodes as one undo step (the Delete and Cut batch delete) |
 | `reparent_nodes` | `kinds[]`, `ids[]`, `group` (or null) | move several nodes into a group, or to the top level when `group` is null, as one undo step |
-| `duplicate_node` | `kind`, `id`, `affine[12]` | Move+copy of one node: a deep clone placed at the offset |
-| `duplicate_selection_array` | `kinds[]`/`ids[]` (parallel node lists), `affine[12]`, `count` (1–1000; an out-of-range count fails the replay typed rather than hanging) | array copy: every listed node cloned `count` times along the step, one undo step |
+| `duplicate_selection_array` | `kinds[]`/`ids[]` (parallel node lists), `affine[12]`, `count` (1–1000; an out-of-range count fails the replay typed rather than hanging), `linked` (optional, written only when `true`) | array copy: every listed node cloned `count` times along the step, one undo step. With `linked`, each Object or Group is first wrapped as its own linked set and the copies are placements of it; a recording without the field replays as independent copies |
 | `scene_undo` / `scene_redo` | — | document-level undo/redo (recorded only when it succeeded) |
 | `transform_sketch` | `sketch`, `affine[12]` | bake an affine into a free-standing sketch |
 | `transform_sketch_island` | `sketch`, `island`, `affine[12]` | rigidly move one sketch island |
@@ -290,6 +289,8 @@ longer replay.
 | `close_explode_session` | — | close the explode session |
 | `make_unique` | `instance` | detach an instance onto a private definition copy |
 | `make_unique_by_path` | `path[]`, `cascade`, `deep` | fork the placement at the end of an instance path (outermost first) onto a private definition copy; `cascade` forks every definition on the path so only that placement diverges, `deep` also forks the definitions nested inside the leaf's. One undo entry |
+| `wrap_linked` | `kind` (0=object, 1=group), `id` | wrap one Object or Group as a linked set: a definition carrying `hew` / `linked` with the node as its only member, placed once in the node's spot. One undo entry |
+| `set_linked` | `component`, `linked` (only `false` replays; `true` is refused) | remove `hew` / `linked` from a linked set, so it reads as a named component. One undo entry |
 | `delete_definition` | `component` | delete a component definition and every instance that places it |
 | `purge_unused` | — | delete every unused definition and material in one undo step; recorded only when something was purged |
 | `push_pull_in_component` | `component`, `object`, `face`, `distance` | push/pull a face inside a component definition |

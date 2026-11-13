@@ -266,6 +266,9 @@ fn forked_definition_keeps_the_linked_attribute_and_drops_the_library_stamp() {
     )
     .unwrap();
     let before = entity_dict(&doc, EntityRef::Component(def));
+    // A second placement keeps the source set live after the fork (a linked
+    // set goes with its last placement).
+    doc.place_instance(def, shift(5.0)).unwrap();
 
     let (new_def, _, _, _) = doc.make_unique_by_path(&[a1], true, false).unwrap();
     let dict = entity_dict(&doc, EntityRef::Component(new_def)).expect("attributes copied");
@@ -487,7 +490,8 @@ fn a_nested_deep_fork_keeps_its_instance_name() {
     assert_eq!(doc.instance_name(b_copy), Some("Front leg"));
     assert_eq!(
         doc.component_name(remap.components[&def_b]),
-        Some(format!("{def_b_name} Copy").as_str())
+        Some(def_b_name.as_str()),
+        "the nested fork keeps the definition's name"
     );
     doc.undo().unwrap();
     doc.redo().unwrap();
@@ -629,13 +633,11 @@ fn instance_name_is_promoted_to_the_definition_name_at_each_step() {
     let (first, _, _, _) = doc.make_unique_by_path(&[a2], true, false).unwrap();
     assert_eq!(
         doc.component_name(first),
-        Some(format!("{base} Copy").as_str())
+        Some(base.as_str()),
+        "an unnamed placement's fork keeps the definition's name"
     );
     let (second, _, _, _) = doc.make_unique_by_path(&[a3], true, false).unwrap();
-    assert_eq!(
-        doc.component_name(second),
-        Some(format!("{base} Copy 2").as_str())
-    );
+    assert_eq!(doc.component_name(second), Some(base.as_str()));
 
     // Undo of the cascade restores both promoted names.
     doc.undo().unwrap();
@@ -910,6 +912,108 @@ fn boolean_result_does_not_take_operand_b_identity() {
     assert_eq!(doc.object_name(result), None);
     assert!(doc.node_tags(NodeId::Object(result)).is_empty());
     assert_eq!(entity_dict(&doc, EntityRef::Object(result)), None);
+}
+
+#[test]
+fn boolean_nodes_result_keeps_operand_a_name_tags_and_attributes() {
+    // The app's Booleans go through `boolean_nodes`; a board cut by a tool
+    // is still that board there too.
+    let mut doc = Document::new();
+    let a = named_tagged_box(&mut doc, 0.0, "Rail", &["Frame"]);
+    let b = named_tagged_box(&mut doc, 1.0, "Cutter", &["Tools"]);
+    let a_dict = entity_dict(&doc, EntityRef::Object(a));
+    let pristine = doc.state_hash();
+    let (root, _) = doc
+        .boolean_nodes(BooleanOp::Union, NodeId::Object(a), NodeId::Object(b))
+        .unwrap();
+    let NodeId::Object(result) = root else {
+        panic!("one piece, one Object");
+    };
+    assert_eq!(doc.object_name(result), Some("Rail"));
+    assert_eq!(doc.node_tags(NodeId::Object(result)), [tag(&["Frame"])]);
+    assert_eq!(entity_dict(&doc, EntityRef::Object(result)), a_dict);
+    assert!(
+        doc.object_name(b).is_none(),
+        "the hidden tool is not visible to lookups"
+    );
+
+    let after = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(
+        doc.state_hash(),
+        pristine,
+        "undo restores the document exactly"
+    );
+    assert_eq!(doc.object_name(a), Some("Rail"));
+    assert!(
+        doc.object_name(result).is_none(),
+        "the result is gone after undo"
+    );
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), after);
+    assert_eq!(doc.object_name(result), Some("Rail"));
+}
+
+#[test]
+fn boolean_nodes_multi_piece_result_is_unnamed_pieces_in_a_labeled_group() {
+    // A cut that splits the named operand leaves plain pieces inside the
+    // group named after the operation; the name does not spread to every
+    // piece.
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 3.0, 1.0, 1.0);
+    doc.set_node_name(NodeId::Object(a), Some("Rail".into()))
+        .unwrap();
+    doc.add_node_tag(NodeId::Object(a), tag(&["Frame"]))
+        .unwrap();
+    let b = extrude_box(&mut doc, 1.0, -0.5, 2.0, 1.5, 1.0);
+    doc.set_node_name(NodeId::Object(b), Some("Cutter".into()))
+        .unwrap();
+    let (root, _) = doc
+        .boolean_nodes(BooleanOp::Subtract, NodeId::Object(a), NodeId::Object(b))
+        .unwrap();
+    let NodeId::Group(g) = root else {
+        panic!("two pieces land in a group");
+    };
+    assert_eq!(doc.group_name(g), Some("Rail \u{2212} Cutter"));
+    let members = doc.group_members(g).expect("the group is live");
+    assert_eq!(members.len(), 2);
+    for m in members {
+        let NodeId::Object(o) = m else {
+            panic!("pieces are Objects");
+        };
+        assert_eq!(doc.object_name(o), None);
+        assert!(doc.node_tags(NodeId::Object(o)).is_empty());
+    }
+}
+
+#[test]
+fn boolean_nodes_result_does_not_take_operand_b_identity_or_a_groups() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 2.0, 1.0, 1.0);
+    let b = named_tagged_box(&mut doc, 1.0, "Cutter", &["Tools"]);
+    let (root, _) = doc
+        .boolean_nodes(BooleanOp::Subtract, NodeId::Object(a), NodeId::Object(b))
+        .unwrap();
+    let NodeId::Object(result) = root else {
+        panic!("one piece, one Object");
+    };
+    assert_eq!(doc.object_name(result), None);
+    assert!(doc.node_tags(NodeId::Object(result)).is_empty());
+    assert_eq!(entity_dict(&doc, EntityRef::Object(result)), None);
+
+    // A group operand's identity stays with the group it names.
+    let mut doc = Document::new();
+    let a = named_tagged_box(&mut doc, 0.0, "Rail", &["Frame"]);
+    let b = extrude_box(&mut doc, 1.0, 0.0, 2.0, 1.0, 1.0);
+    let (g, _) = doc.group_nodes(&[NodeId::Object(a)]).unwrap();
+    let (root, _) = doc
+        .boolean_nodes(BooleanOp::Union, NodeId::Group(g), NodeId::Object(b))
+        .unwrap();
+    let NodeId::Object(result) = root else {
+        panic!("one piece, one Object");
+    };
+    assert_eq!(doc.object_name(result), None);
+    assert!(doc.node_tags(NodeId::Object(result)).is_empty());
 }
 
 #[test]

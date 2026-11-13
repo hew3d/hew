@@ -60,7 +60,14 @@ async function pinCamera(page: Page, cam: CameraParams): Promise<Ctx> {
   return { vp: buildViewProjection(cam, rect.width / rect.height), rect }
 }
 
-async function setup(page: Page): Promise<Ctx> {
+async function setup(page: Page, linked = false): Promise<Ctx> {
+  // Most specs here predate linked copies and assert on plain, independent
+  // copies; the preference gives them exactly that. The instance specs ask
+  // for the default (`linked`); linked-copies.spec.ts covers the rest.
+  await page.addInitScript(
+    (on) => localStorage.setItem('hew.settings.copiesLinked', String(on)),
+    linked,
+  )
   await page.goto('/')
   await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, {
     timeout: 15_000,
@@ -535,7 +542,7 @@ test('Copy/Paste of a component instance places a LINKED instance: editing the p
 test('Paste In Place of a component instance is linked too, and undo of the paste leaves the definition alone', async ({
   page,
 }) => {
-  await setup(page)
+  await setup(page, true)
   const { instance, component } = await copyOneInstance(page)
 
   await page.keyboard.press('Control+Shift+v')
@@ -559,7 +566,7 @@ test('Paste In Place of a component instance is linked too, and undo of the past
 })
 
 test('Copy of several instances of one definition pastes them onto that ONE definition', async ({ page }) => {
-  await setup(page)
+  await setup(page, true)
   const made = await page.evaluate(() => {
     const h = window.__hew_test!
     const box = h.drawBox([0, 0, 0], [1, 1, 0], 1)
@@ -582,7 +589,7 @@ test('Copy of several instances of one definition pastes them onto that ONE defi
 })
 
 test('Cut then Paste of a component instance re-places the same definition', async ({ page }) => {
-  await setup(page)
+  await setup(page, true)
   const made = await page.evaluate(() => {
     const h = window.__hew_test!
     const box = h.drawBox([0, 0, 0], [1, 1, 0], 1)

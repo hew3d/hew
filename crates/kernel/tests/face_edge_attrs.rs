@@ -898,6 +898,7 @@ fn clone_sites_carry_dictionaries() {
         .duplicate_node(
             NodeId::Object(id),
             &Transform::translation(Vec3::new(3.0, 0.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         )
         .unwrap();
     let NodeId::Object(copy) = copy else {

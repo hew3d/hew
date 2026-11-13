@@ -578,6 +578,7 @@ describe('ObjectInfoPanel — Materials row', () => {
       group_name: () => 'Grp',
       instance_name: () => undefined,
       instance_def: () => 7n,
+      is_linked: () => false,
       component_name: () => 'Def',
       instances_of: () => [5n],
       instance_expanded_members: () => [1n, 4n],

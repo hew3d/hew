@@ -31,7 +31,18 @@ With several cutters, one that misses is simply left where it was, as long as an
 
 Either side of a boolean can be a whole [group](/learn/groups-and-components/) instead of a single object. You can mix, too — subtract a group of cutters from one solid in a single command. Because you asked for volume algebra, Hew first fuses the solids inside each group operand into one composite (grouping alone never merges anything), then applies the command between the composites. Every solid under a group operand has to be watertight — one that isn't solid anywhere refuses the whole operation.
 
-One thing a boolean won't do is quietly consume a component instance — instances share their geometry with every other copy, and a boolean destroys its inputs. A selected instance is made unique and exploded to plain solids for you first, each of those its own undo step, and the toast says so; an instance nested inside a selected group refuses and tells you so. **Explode** it first (or **Make Unique**, then Explode) and combine the result.
+One thing a boolean won't do is quietly consume a component instance — instances share their geometry with every other copy, and a boolean destroys its inputs. A selected component is made unique and exploded to plain solids for you first, each of those its own undo step, and the toast says so (a [linked copy](/learn/groups-and-components/#linked-copies) is handled differently, as described next); an instance nested inside a selected group refuses and tells you so. **Explode** it first (or **Make Unique**, then Explode) and combine the result.
+
+### Cutting a linked copy
+
+**Subtract** with a linked copy as the thing being cut changes the shared shape, so **every copy shows the cut**. Cut a mortise into one of four table legs and all four legs have it. When the part has other copies, a strip above the status bar asks how far the cut reaches:
+
+- **Cut all 4 copies** (the default; press `Enter`) cuts the shared shape.
+- **Only this one** unlinks the selected copy first and cuts just that one. The status line says "Unlinked this copy and cut it", and one undo takes back both the unlink and the cut.
+
+`Esc` cancels the Subtract. The cutters have to be loose solids (one or several): cutting a linked copy with a group, or with another copy, is refused with "Cut with one solid at a time". The result keeps the cut part's name, tags, and attributes.
+
+**Union** and **Intersect** can't be shared across copies, because the result would belong to two shapes at once. Hew unlinks each linked copy you join, joins them, and announces it: "Unlinked 2 copies to join them". The undo step is labeled "Union (unlinked)" or "Intersect (unlinked)", and one undo restores the copies and their links. A Subtract whose *cutter* is a linked copy does the same.
 
 Booleans also work between individual members while a group is open for editing — Union, Subtract, or Intersect them just like top-level objects — and the result folds back in as the group's member when you close it.
 

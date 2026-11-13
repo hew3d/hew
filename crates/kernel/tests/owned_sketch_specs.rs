@@ -851,7 +851,9 @@ fn a_duplicate_owns_a_placed_copy_of_the_drawing() {
     let before = doc.save();
 
     let place = Transform::translation(Vec3::new(5.0, 2.0, 0.0));
-    let (node, _) = doc.duplicate_node(NodeId::Object(a), &place).expect("copy");
+    let (node, _) = doc
+        .duplicate_node(NodeId::Object(a), &place, kernel::LinkPolicy::Independent)
+        .expect("copy");
     let NodeId::Object(copy) = node else {
         panic!("an object duplicates to an object");
     };
@@ -938,7 +940,11 @@ fn a_member_duplicated_in_a_session_folds_its_sketch_in_at_close() {
     doc.open_explode_session(inst).expect("open session");
     let place = Transform::translation(Vec3::new(3.0, 0.0, 0.0));
     let (node, _) = doc
-        .duplicate_node(NodeId::Object(member), &place)
+        .duplicate_node(
+            NodeId::Object(member),
+            &place,
+            kernel::LinkPolicy::Independent,
+        )
         .expect("duplicate in session");
     let NodeId::Object(copy) = node else {
         panic!("an object duplicates to an object");

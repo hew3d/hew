@@ -1,6 +1,6 @@
 ---
 title: "Settings and diagnostics"
-description: "Units, how the viewport feels, theme, the server Open on Phone uses, plus Debug Mode and a bug reporter that bundles everything a developer needs into one file."
+description: "Units, how the viewport feels, how copies behave, theme, the server Open on Phone uses, plus Debug Mode and a bug reporter that bundles everything a developer needs into one file."
 order: 22
 ---
 
@@ -36,6 +36,10 @@ The View pane is about how the viewport feels. Everything in it starts out the w
 - **Smooth camera moves** is on by default. Views, scenes, and other camera moves glide into place, and orbiting coasts to a stop after you let go. Turn it off and the camera jumps straight to where it is going and stops the moment you release. It wins over **View ▸ Scenes ▸ Scene Transitions**: with smooth moves off, scenes always snap.
 - **At the cursor** has two switches. **Show tool hints** controls the small labels that follow the pointer, like Endpoint or On Edge. **Show tool pointer** controls the cursor that is shaped like your current tool; turn it off and you get the plain arrow. The hint line in the status bar stays either way.
 - **Measurements box** puts the box that shows the number you are typing in the **Top right** (the default) or **Bottom right** of the viewport. The fly speed readout moves with it.
+
+## Editing
+
+**Copies are linked** is on by default. A copy made with Move, Rotate, Paste, or an array shares its shape with the original, so editing one changes all of them ([Linked copies](/learn/groups-and-components/#linked-copies)). Turn it off and copies come out independent; you can still ask for a linked copy each time (the second tap of the copy key in Move and Rotate, or **Edit ▸ Paste linked**). Either way the copy key cycles Copy, the other kind of copy, and back to moving. The choice is yours alone and isn't saved in the file.
 
 ## Theme
 

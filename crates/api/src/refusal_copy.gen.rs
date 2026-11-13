@@ -317,6 +317,15 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "AmbiguousHost" => {
             "This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again."
         }
+        "NotWrappable" => {
+            "Only an object or a group can start a set of linked copies. This is already a component, so copy it as it is."
+        }
+        "NotLinkable" => {
+            "A component can't be turned back into linked copies. Copy one of its parts to start a new set."
+        }
+        "NotLinked" => {
+            "This is already a component, not a set of linked copies, so there's nothing to change."
+        }
         "BooleanOperandNotSolid" => {
             "Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…"
         }

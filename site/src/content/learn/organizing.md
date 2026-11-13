@@ -21,14 +21,16 @@ The Outliner (View ▸ Model Info, `⇧⌘I` / `Ctrl+Shift+I`) lists the documen
 - **Filter** the list with the search field above it: type a few letters and only matches (plus the collapsed groups standing between them and the top, shown dimmed) stay visible. Clear it to get everything back, including whatever you'd expanded or collapsed by hand.
 - **Sort** the list with the three small buttons next to the search field: **Document order** (the default, the order things were made), **Name**, or **Kind** (objects, groups, components, then sketches, each by name). Names ignore capitals and read numbers as numbers, so "Group 2" comes before "Group 10". The choice applies at every level, is remembered for you rather than saved in the file, and only changes the order you see: an unnamed "Group 3" stays "Group 3".
 - **Hide or show everything at once** from the Model row's own eye, or hover a group row for a second, stacked-eye button that hides or shows every one of its members in one click, reaching into nested groups too.
-- Icons carry meaning: a cube is an object (a flat panel or curved sheet has a thin outline, and any other open shape has a dashed one), a folder is a group, a hexagon is a component instance, a pen curve is a sketch.
+- **Linked copies** show a link icon in place of the hexagon, and a **×N** badge when more than one copy shares the shape. A copy reads as its own name if it has one, else the shared name, else the board's name, else "Copies". Hover the badge to light up the other copies; hover the row for a small **Copies** menu with Unlink, Unlink all, Make component, Select all copies, and Rename. See [Linked copies](/learn/groups-and-components/#linked-copies).
+- Icons carry meaning: a cube is an object (a flat panel or curved sheet has a thin outline, and any other open shape has a dashed one), a folder is a group, a hexagon is a component instance, two linked rings are a linked copy, a pen curve is a sketch.
 
 ## Object Info: names and tags
 
 Object Info (View ▸ Object Info, `⇧⌘O` / `Ctrl+Shift+O`) shows the single selected item:
 
 - **Name**: type a new one and press `Enter`. Clear the field to fall back to the automatic label ("Object 1", "Group 2", …). Sketches can't be renamed.
-- **Type**: Object, Group, Component, or Sketch.
+- **Type**: Object, Group, Component, Linked copy, or Sketch.
+- **Copies**, for a linked copy: **Linked copies: N**, a **Select all copies** link, and the **Unlink** and **Make component** buttons. The two name fields read **Name (all copies)**, which renames every copy, and **This copy**, which names only the selected one; leave **This copy** empty and the shared name shows.
 - **Geometry**, for objects: **Solid**, **Flat panel**, **Curved sheet**, or what's open ("Open: 2 openings", "Open edges branch"). An object that isn't solid also gets the buttons that apply: **Close**, **Add thickness…**, **Keep as is**, and **Show in list**. [Core concepts](/learn/core-concepts/) explains why solids matter.
 - **Dimensions**: the selection's overall size — `X × Y × Z` in your current units — as a world, axis-aligned bounding box. A rotated part's box is bigger than its own footprint, same as SketchUp's; it's the number that tells you whether the thing fits your print bed or stock, not its true local size.
 - **Tags**: the item's tag chips. Click **+** to add a tag; click a chip's **×** to remove it. Click a chip's name to jump to that tag in the Tags panel: the panel opens if it was closed, the tag's parents open, and the tag's row is selected and scrolled into view.

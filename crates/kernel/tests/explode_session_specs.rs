@@ -1437,7 +1437,8 @@ fn structural_and_outside_scope_ops_refuse_mid_session() {
     assert_eq!(
         doc.duplicate_node(
             NodeId::Object(outside),
-            &Transform::translation(Vec3::new(1.0, 0.0, 0.0))
+            &Transform::translation(Vec3::new(1.0, 0.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         )
         .unwrap_err(),
         DocumentError::ExplodeSessionScope
@@ -1448,6 +1449,7 @@ fn structural_and_outside_scope_ops_refuse_mid_session() {
         .duplicate_node(
             NodeId::Object(member_a),
             &Transform::translation(Vec3::new(0.0, 8.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         )
         .expect("duplicating a session member is allowed");
     let NodeId::Object(dup) = dup else {

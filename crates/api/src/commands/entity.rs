@@ -464,7 +464,11 @@ fn move_(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             }
             return Err(sketch_copy_refusal());
         }
-        let (roots, _) = ctx.doc.duplicate_nodes_placements(&nodes, &placements)?;
+        let (roots, _) = ctx.doc.duplicate_nodes_placements(
+            &nodes,
+            &placements,
+            kernel::LinkPolicy::Independent,
+        )?;
         return Ok(serde_json::json!({ "ids": public_ids(ctx, &roots) }));
     }
     if has_translation == has_from_to {
@@ -529,10 +533,14 @@ fn apply_node_transform(
     let count = NonZeroU32::new(count)
         .ok_or_else(|| CmdError::Params("copy count must be positive".into()))?;
     let ids = if nodes.len() == 1 && count.get() == 1 {
-        let (root, _) = ctx.doc.duplicate_node(nodes[0], t)?;
+        let (root, _) = ctx
+            .doc
+            .duplicate_node(nodes[0], t, kernel::LinkPolicy::Independent)?;
         vec![root]
     } else {
-        let (roots, _) = ctx.doc.duplicate_nodes_array(nodes, t, count)?;
+        let (roots, _) =
+            ctx.doc
+                .duplicate_nodes_array(nodes, t, count, kernel::LinkPolicy::Independent)?;
         roots
     };
     Ok(serde_json::json!({ "ids": public_ids(ctx, &ids) }))

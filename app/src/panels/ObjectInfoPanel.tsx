@@ -48,7 +48,7 @@ import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import { plural, t as tCore } from '@lingui/core/macro'
 import { Trans, useLingui } from '@lingui/react/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { entityLabel, resolveLabel, makeLabelFor, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, isDraftKind, type NodeRef } from './treeModel'
+import { entityLabel, resolveLabel, placementLabel, sharedLinkedLabel, makeLabelFor, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, isDraftKind, type NodeRef } from './treeModel'
 import { pathAbove } from './selectionPath'
 import {
   runsOfCurve,
@@ -80,6 +80,7 @@ import { selectionMaterials } from './selectionMaterials'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { MIN_SEGMENTS_PER_TURN } from '../tools/arcMath'
 import { isComposingKey } from '../input/keyboard'
+import { copiesRow, unlinkLabel, makeComponentLabel, selectAllCopiesLabel } from '../linkedCopyCopy'
 
 /**
  * The fewest facets a circle may have. Mirrors the kernel's
@@ -164,6 +165,13 @@ interface Props {
    */
   sessionStack?: readonly { node: NodeRef; label: string }[]
   sessionMembers?: readonly NodeRef[] | null
+  /**
+   * The Copies row's buttons for a placement of a linked set: make this
+   * copy independent, or turn the set into a named component. The buttons
+   * render only when supplied.
+   */
+  onUnlink?: (node: NodeRef) => void
+  onMakeComponent?: (node: NodeRef) => void
 }
 
 /** The guide accessor the panel reads. */
@@ -195,6 +203,27 @@ const PANEL_STYLE: React.CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   gap: '10px',
+}
+
+const LINK_BUTTON_STYLE: React.CSSProperties = {
+  background: 'none',
+  border: 'none',
+  padding: 0,
+  font: 'inherit',
+  fontFamily: 'var(--font-family-ui)',
+  color: 'var(--accent-base, #7aa7e0)',
+  cursor: 'pointer',
+}
+
+const ACTION_BUTTON_STYLE: React.CSSProperties = {
+  padding: '3px 10px',
+  background: 'var(--surface-input)',
+  border: '1px solid var(--border-panel)',
+  borderRadius: 'var(--radius-control)',
+  color: 'var(--text-primary)',
+  fontFamily: 'var(--font-family-ui)',
+  fontSize: '12px',
+  cursor: 'pointer',
 }
 
 const HEALTH_ACTION_STYLE: React.CSSProperties = {
@@ -254,7 +283,7 @@ const ADD_TAG_BUTTON_STYLE: React.CSSProperties = {
   flexShrink: 0,
 }
 
-export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onSelectTag, onSelectMaterial, onToast, onShowHealth, selectedAnnotation = null, selectedGuide = null, sessionStack, sessionMembers = null }: Props) {
+export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onSelectTag, onSelectMaterial, onToast, onShowHealth, selectedAnnotation = null, selectedGuide = null, sessionStack, sessionMembers = null, onUnlink, onMakeComponent }: Props) {
   const { t } = useLingui()
   // Re-render the length readouts when the format OR the Precision changes.
   useLengthDisplay()
@@ -399,12 +428,16 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     let defName: string | undefined
     let defId: bigint | null = null
     let instanceIds: bigint[] = []
+    // A placement of a linked set (what copies make) reads as a copy, not a
+    // component: its own words, its own two name fields.
+    let linked = false
     if (kind === 'object') {
       nameFromScene = scene.object_name(id)
     } else if (kind === 'group') {
       nameFromScene = scene.group_name(id)
     } else {
       nameFromScene = scene.instance_name(id)
+      linked = scene.is_linked(id)
       const def = scene.instance_def(id)
       if (def !== undefined) {
         defId = def
@@ -426,7 +459,10 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       (groupId) => scene.group_members(groupId).map(nodeRefFromJs),
     )
     const idx = treeIndex.get(nodeKey(node)) ?? 0
-    const defaultLabel = resolveLabel(undefined, defName, kind, idx)
+    const defaultLabel = linked ? placementLabel(scene, id, idx) : resolveLabel(undefined, defName, kind, idx)
+    // "Name (all copies)" shows the shared name when the set has none of its own;
+    // never this copy's name, which belongs to the other field.
+    const sharedPlaceholder = linked ? (sharedLinkedLabel(scene, defId ?? undefined) ?? '') : ''
 
     // Tags: array of "Seg1/Seg2" strings from the kernel, split to string[][]
     const rawTags = scene.node_tags(kindNum, id)
@@ -461,6 +497,8 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       defId,
       defName,
       instanceIds,
+      linked,
+      sharedPlaceholder,
       points: null as number | null,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1036,10 +1074,10 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       ) : nodeInfo.kind === 'instance' ? (
         <>
           <div>
-            <div style={LABEL_STYLE}><Trans>Definition Name</Trans></div>
+            <div style={LABEL_STYLE}>{nodeInfo.linked ? <Trans>Name (all copies)</Trans> : <Trans>Definition Name</Trans>}</div>
             <input
               style={INPUT_STYLE}
-              aria-label={t`Definition Name`}
+              aria-label={nodeInfo.linked ? t`Name (all copies)` : t`Definition Name`}
               value={localDefName}
               onChange={(e) => setLocalDefName(e.target.value)}
               onBlur={commitDefName}
@@ -1049,15 +1087,16 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
                   e.currentTarget.blur()
                 }
               }}
-              title={t`Shared by every instance of this component`}
+              title={nodeInfo.linked ? t`Shared by every linked copy` : t`Shared by every instance of this component`}
+              placeholder={nodeInfo.linked ? nodeInfo.sharedPlaceholder : undefined}
               spellCheck={false}
             />
           </div>
           <div>
-            <div style={LABEL_STYLE}><Trans>Instance Name</Trans></div>
+            <div style={LABEL_STYLE}>{nodeInfo.linked ? <Trans>This copy</Trans> : <Trans>Instance Name</Trans>}</div>
             <input
               style={INPUT_STYLE}
-              aria-label={t`Instance Name`}
+              aria-label={nodeInfo.linked ? t`This copy` : t`Instance Name`}
               value={localName}
               onChange={(e) => setLocalName(e.target.value)}
               onBlur={commitName}
@@ -1068,7 +1107,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
                 }
               }}
               placeholder={nodeInfo.defaultLabel}
-              title={t`This instance only — leave empty to show the definition name`}
+              title={nodeInfo.linked ? t`This copy only — leave empty to show the shared name` : t`This instance only — leave empty to show the definition name`}
               spellCheck={false}
             />
           </div>
@@ -1098,13 +1137,13 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       <div>
         <div style={LABEL_STYLE}><Trans>Type</Trans></div>
         <div style={VALUE_STYLE}>
-          <span>{kindLabel(nodeInfo.kind)}</span>
+          <span>{nodeInfo.kind === 'instance' && nodeInfo.linked ? t`Linked copy` : kindLabel(nodeInfo.kind)}</span>
           {nodeInfo.store !== null && (
             <div data-testid="object-info-store" style={{ ...VALUE_STYLE, color: 'var(--text-faint, #888)' }}>
               {nodeInfo.store}
             </div>
           )}
-          {nodeInfo.kind === 'instance' && nodeInfo.instanceIds.length > 0 && (
+          {nodeInfo.kind === 'instance' && !nodeInfo.linked && nodeInfo.instanceIds.length > 0 && (
             <>
               {' '}
               <button
@@ -1161,6 +1200,40 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
           )}
         </div>
       </div>
+
+      {/* Copies — a placement of a linked set: how many copies share its
+       * shape, the way out of the link (Unlink), and the way to make the set
+       * a named component. */}
+      {nodeInfo.kind === 'instance' && nodeInfo.linked && (
+        <div data-testid="object-info-copies">
+          <div style={LABEL_STYLE}><Trans>Copies</Trans></div>
+          <div style={VALUE_STYLE}>
+            <span>{copiesRow(instanceCount)}</span>
+            {instanceCount > 1 && (
+              <>
+                {' '}
+                <button type="button" onClick={selectAllInstances} style={LINK_BUTTON_STYLE}>
+                  {selectAllCopiesLabel()}
+                </button>
+              </>
+            )}
+          </div>
+          {(onUnlink !== undefined || onMakeComponent !== undefined) && (
+            <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
+              {onUnlink !== undefined && (
+                <button type="button" style={ACTION_BUTTON_STYLE} onClick={() => onUnlink(nodeInfo.node)}>
+                  {unlinkLabel()}
+                </button>
+              )}
+              {onMakeComponent !== undefined && (
+                <button type="button" style={ACTION_BUTTON_STYLE} onClick={() => onMakeComponent(nodeInfo.node)}>
+                  {makeComponentLabel()}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Length — a drawn line, or a curve (the sum of its edges). */}
       {drawnLength !== null && (

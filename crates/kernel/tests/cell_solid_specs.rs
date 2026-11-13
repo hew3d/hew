@@ -252,6 +252,33 @@ fn a_pyramid_of_lines_becomes_one_solid() {
     one_step(&mut doc, before);
 }
 
+/// The change feed reports what a drawn closing line did through its
+/// follow-ups: the solid the cells search made, and the scaffolding it
+/// consumed, in the same record as the line itself.
+#[test]
+fn a_drawn_solid_is_in_the_change_feed() {
+    let mut doc = Document::new();
+    doc.set_torture_mode(true);
+    draw(&mut doc, ground(), &ring(&[A, B, C, D]));
+    line_on(&mut doc, FOOT, APEX, Vec3::new(0., 1., 0.));
+    for q in [A, B, C] {
+        line(&mut doc, APEX, q);
+    }
+    let generation = doc.history_generation();
+    let r = line(&mut doc, APEX, D);
+    let id = created(&r.cells);
+    let changes = doc
+        .changes_since_generation(generation)
+        .expect("the ring reaches back one step");
+    assert!(
+        changes
+            .added
+            .iter()
+            .any(|c| c.entity == kernel::EntityRef::Object(id)),
+        "the commit's record names the solid it made: {changes:?}"
+    );
+}
+
 /// §16 R20: a sketch move or copy that closes a solid reports it as a draw
 /// does ([`Document::sketch_edit_report`]): the pyramid's last slanted line,
 /// drawn away from it and moved (or copied) into place, closes the last two

@@ -305,7 +305,9 @@ fn duplicating_a_group_copies_the_drawing_it_holds() {
     let s = line(&mut doc, 0.0);
     doc.set_sketch_group(s, Some(g)).unwrap();
     let shift = kernel::Transform::translation(kernel::Vec3::new(0.0, 10.0, 0.0));
-    let (root, _) = doc.duplicate_node(NodeId::Group(g), &shift).unwrap();
+    let (root, _) = doc
+        .duplicate_node(NodeId::Group(g), &shift, kernel::LinkPolicy::Independent)
+        .unwrap();
     let NodeId::Group(copy) = root else {
         panic!("a group copies as a group: {root:?}");
     };

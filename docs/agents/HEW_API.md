@@ -455,6 +455,12 @@ many commands it ran: while a plugin command runs, the envelopes it
 commits produce no events, and when it ends its one entry does (or, if
 it is aborted, one `abort` and nothing of what it did).
 
+The kernel's change sets (`kernel::ChangeSet`) also carry `linked` (every
+Object or Group a copy wrapped as a linked set, with the placement that
+took its spot) and `copied_from` (new-to-source pairs for every copy and
+every id an unlink minted; both empty for an undo); their wire shape on
+`document_changed` is still to come.
+
 The host emits one `document_changed` per change since it last sent
 events. More than 64 at once, or a gap its history no longer reaches,
 collapse into one `commit` with `full: true` at the current clock.

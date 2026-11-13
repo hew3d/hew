@@ -256,6 +256,12 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   definition member included) marks it as a surface someone accepted
   (Model Health); it is an ordinary attribute in the file, and any other
   value means "not marked".
+
+  Hew reserves the attribute `hew` / `linked` (a boolean) on a component
+  definition to mark a linked set: a definition created by copying an
+  Object or a Group. It changes no record field. A reader that does not
+  know the key shows an ordinary component. A definition without the key
+  is a named component.
 - **`camera`** (v13+, optional) — the camera's working view at last save.
 - **`view_style`** (v19+, optional) — how the document asks to be shown:
   its backdrop and axes (§4.15). Absent → Hew's own look.
