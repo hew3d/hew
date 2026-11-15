@@ -2,6 +2,10 @@ import { test, expect, type Page } from '@playwright/test'
 import type { CameraParams } from './helpers/projectWorldToScreen'
 import { activateFromToolsMenu } from './helpers/offset'
 import { aim, clickAt, moveTo, sweep, activateFromMenu, shot, type Ctx } from './helpers/shapes'
+import { requiresPreview } from './helpers/preview'
+
+// Drives a Preview feature: skipped in the production-shape run (e2e/helpers/preview.ts).
+requiresPreview('deform')
 
 /**
  * Deform — Twist, Taper and Bend, driven with REAL pointer and keyboard

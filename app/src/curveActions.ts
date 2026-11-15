@@ -9,6 +9,8 @@
  * touch.)
  */
 
+import { actionAllowed, behaviorEnabled } from './preview'
+
 /** Object ▸ Smooth ▸ Off / 1 / 2 / 3: the subdivision level each id sets. */
 export const SMOOTH_LEVEL_ACTIONS: readonly { id: string; level: 0 | 1 | 2 | 3 }[] = [
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- command ids
@@ -31,4 +33,19 @@ export const TANGENT_EDGES_ACTION = 'toggle-tangent-edges'
 /** The Smooth level command `id` sets, or undefined when it is not one. */
 export function smoothLevelFor(id: string): 0 | 1 | 2 | 3 | undefined {
   return SMOOTH_LEVEL_ACTIONS.find((a) => a.id === id)?.level
+}
+
+/**
+ * Whether command `id` is OFFERED: as a menu item, a palette entry, a key, a
+ * native-menu item. The Preview wall withholds what the registry lists.
+ * Smooth ▸ Off is the one command that is not listed (it must keep working,
+ * for a file that arrives with Smooth on) and is still not offered as a menu
+ * item, palette entry or key: without the Smooth preview it is reachable only
+ * from Object Info, for an object that already has a level
+ * (`panels/SmoothSection.tsx`). `menuActionRef` itself runs it either way.
+ */
+export function actionOffered(id: string): boolean {
+  if (!actionAllowed(id)) return false
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- command id
+  return id !== 'smooth-off' || behaviorEnabled('smooth-apply')
 }

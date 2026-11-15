@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, beforeEach } from 'vitest'
 import { scalePresetsFor } from '../print/scale'
 import {
   DEFAULT_STL_SEGMENTS,
@@ -13,6 +13,7 @@ import {
   savePanelFormats,
 } from './savePanel'
 import { SKP_STREAM_FORMATS } from './docFormat'
+import { requiresPreview } from '../test/requiresPreview'
 
 function byIdCompat(formats: ReturnType<typeof exportPanelFormats>) {
   return formats.find((f) => f.id === 'skp')?.options
@@ -82,6 +83,7 @@ describe('the native save panel\'s formats', () => {
 })
 
 describe('Export cages instead', () => {
+  beforeEach((ctx) => { requiresPreview(ctx, 'smooth') })
   it('adds the check to the mesh formats only when the model has a Smooth object', () => {
     const plain = Object.fromEntries(exportPanelFormats('mm').map((f) => [f.id, f.options ?? []]))
     expect(plain.glb).toEqual([])

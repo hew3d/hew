@@ -8,7 +8,7 @@ use kernel::{AttrTarget, AttrValue, AttrValueError, EdgeId, EntityRef, FaceId, O
 use serde_json::Value;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.attr.get" => get,
         "hew.attr.set" => set,

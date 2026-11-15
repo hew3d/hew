@@ -46,6 +46,7 @@
  * build step.
  */
 
+import { previewBuild } from './preview'
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -330,8 +331,11 @@ describe('kernelErrorMessage — coverage', () => {
 
   it('has copy for every kernel error code the boundary can emit (derived structurally from the Rust sources)', () => {
     const described = new Set(describedErrorCodes())
+    // The crease refusals' copy is compiled out of a production build, where
+    // `hew.object.crease` is refused before the kernel can raise them.
+    const compiledOut = new Set(previewBuild ? [] : ['CreaseOnSoftEdge', 'CreaseOnBoundary'])
     const missing = DERIVED_KERNEL_ERROR_CODES.filter(
-      (c) => !described.has(c) && !WRAPPER_CODES.has(c),
+      (c) => !described.has(c) && !WRAPPER_CODES.has(c) && !compiledOut.has(c),
     )
     expect(missing).toEqual([])
   })

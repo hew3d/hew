@@ -6,6 +6,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { SmoothSection } from './SmoothSection'
 import type { Scene as WasmScene } from '../wasm/loader'
+import { requiresPreview } from '../test/requiresPreview'
 
 function setup(levels: Record<string, number>, objects: bigint[], opts: { throwOnSet?: boolean; softened?: number; dense?: bigint[] } = {}) {
   const free = vi.fn()
@@ -45,13 +46,15 @@ describe('SmoothSection', () => {
     expect(screen.queryByText('too dense for this level')).not.toBeInTheDocument()
   })
 
-  it('shows Off for an object with no level and no Bake button', () => {
+  it('shows Off for an object with no level and no Bake button', (ctx) => {
+    requiresPreview(ctx, 'smooth', 'soften')
     setup({}, [1n])
     expect(screen.getByRole('combobox', { name: 'Smooth' })).toHaveValue('0')
     expect(screen.queryByRole('button', { name: 'Bake' })).not.toBeInTheDocument()
   })
 
-  it('setting a level calls the kernel and refreshes', () => {
+  it('setting a level calls the kernel and refreshes', (ctx) => {
+    requiresPreview(ctx, 'smooth', 'soften')
     const { scene, onGeometryChanged } = setup({}, [1n])
     fireEvent.change(screen.getByRole('combobox', { name: 'Smooth' }), { target: { value: '2' } })
     expect(scene.set_smooth_level).toHaveBeenCalledWith(1n, 2)
@@ -67,21 +70,24 @@ describe('SmoothSection', () => {
     expect(scene.history_bracket_commit).toHaveBeenCalledWith('Set Smooth')
   })
 
-  it('a too-dense cage explains itself and changes nothing', () => {
+  it('a too-dense cage explains itself and changes nothing', (ctx) => {
+    requiresPreview(ctx, 'smooth', 'soften')
     const { onToast, onGeometryChanged } = setup({}, [1n], { throwOnSet: true })
     fireEvent.change(screen.getByRole('combobox', { name: 'Smooth' }), { target: { value: '3' } })
     expect(onToast).toHaveBeenCalledWith('This cage is too dense for Smooth level 3.', 'AmountOutOfRange')
     expect(onGeometryChanged).not.toHaveBeenCalled()
   })
 
-  it('Bake appears once a level is set and bakes', () => {
+  it('Bake appears once a level is set and bakes', (ctx) => {
+    requiresPreview(ctx, 'smooth', 'soften')
     const { scene, onGeometryChanged } = setup({ '1': 2 }, [1n])
     fireEvent.click(screen.getByRole('button', { name: 'Bake' }))
     expect(scene.bake).toHaveBeenCalledWith(1n)
     expect(onGeometryChanged).toHaveBeenCalledOnce()
   })
 
-  it('Soften starts at 20 degrees and toasts how many edges it softened', () => {
+  it('Soften starts at 20 degrees and toasts how many edges it softened', (ctx) => {
+    requiresPreview(ctx, 'smooth', 'soften')
     const { scene, onToast, onGeometryChanged } = setup({}, [1n], { softened: 12 })
     expect(screen.getByRole('textbox', { name: 'Soften angle in degrees' })).toHaveValue('20')
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
@@ -90,14 +96,16 @@ describe('SmoothSection', () => {
     expect(onGeometryChanged).toHaveBeenCalledOnce()
   })
 
-  it('Soften with nothing to soften says so and does not refresh', () => {
+  it('Soften with nothing to soften says so and does not refresh', (ctx) => {
+    requiresPreview(ctx, 'smooth', 'soften')
     const { onToast, onGeometryChanged } = setup({}, [1n], { softened: 0 })
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
     expect(onToast).toHaveBeenCalledWith('No edges to soften.')
     expect(onGeometryChanged).not.toHaveBeenCalled()
   })
 
-  it('Soften rejects a bad angle before calling the kernel', () => {
+  it('Soften rejects a bad angle before calling the kernel', (ctx) => {
+    requiresPreview(ctx, 'smooth', 'soften')
     const { scene, onToast } = setup({}, [1n])
     fireEvent.change(screen.getByRole('textbox', { name: 'Soften angle in degrees' }), { target: { value: '200' } })
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }))

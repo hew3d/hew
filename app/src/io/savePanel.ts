@@ -11,6 +11,7 @@
  * options from here, so the two offer exactly the same things.
  */
 
+import { behaviorEnabled } from '../preview'
 import { t } from '@lingui/core/macro'
 import { isTauri, type DocFormat } from './fileHost'
 import {
@@ -334,8 +335,13 @@ export function exportPanelIdFor(format: ExportFormat): string {
   return isSkpStreamFormat(format) ? SKP_OLDER_PICKER_ID : format
 }
 
-/** Formats that can carry a Smooth object's cage instead of its smooth surface. */
-export const CAGE_FORMATS: ReadonlySet<ExportFormat> = new Set<ExportFormat>(['glb', 'stl', '3mf', 'usdz'])
+/** Formats that can carry a Smooth object's cage instead of its smooth
+ *  surface. Empty without the Smooth preview (`export-cages` on the Preview
+ *  wall): neither the Export dialog nor the native panel offers the check,
+ *  and an answer that carries it is ignored. */
+export const CAGE_FORMATS: ReadonlySet<ExportFormat> = new Set<ExportFormat>(
+  behaviorEnabled('export-cages') ? ['glb', 'stl', '3mf', 'usdz'] : [],
+)
 
 /** The "Export cages instead" check, offered when the model has a Smooth object. */
 export function cagesOption(): PanelOption {

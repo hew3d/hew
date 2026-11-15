@@ -1,16 +1,21 @@
-/* oxlint-disable lingui/no-unlocalized-strings -- True Curves strings are not yet wrapped for translation: this file is English-only until they are */
 /**
- * EraserTool — erase drawn lines, and crease the edges of solids.
+ * EraserTool — erase drawn lines. With the Smooth preview, also crease the
+ * edges of solids.
  *
  * Hover an edge to see what a click would do:
  *   - a drawn line (a line, a curve, a shape's edge, on the ground or on a
  *     face): a click erases it, the whole curve if it is one. Drag across
  *     several lines to erase them all as one undo step.
  *   - an edge of a solid: a plain click only explains that solid edges can't
- *     be erased. Ctrl-click (Cmd on a Mac) creases it, which keeps it sharp
- *     when the object is smoothed; Ctrl-click a creased edge to let it
- *     soften again. Ctrl-drag creases every edge it crosses.
- *   - a soft seam: Ctrl-click says seams can't be creased.
+ *     be erased.
+ *
+ * The crease half is a Preview behavior (`eraser-crease`, part of the Smooth
+ * feature). While it is on: Ctrl-click (Cmd on a Mac) creases an edge, which
+ * keeps it sharp when the object is smoothed; Ctrl-click a creased edge to
+ * let it soften again; Ctrl-drag creases every edge it crosses; Ctrl-click
+ * on a soft seam says seams can't be creased. While it is off the modifier
+ * is ignored and the tool behaves as if it were never held, and none of the
+ * crease words (`eraserCreaseCopy.ts`) are reachable.
  *
  * The kernel owns every rule; drawn lines erase through the same path as the
  * dock's Erase (`runDelete`), creases through `set_crease`.
@@ -22,7 +27,9 @@ import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
-import { isMac } from '../platform'
+import { t } from '@lingui/core/macro'
+import { behaviorEnabled } from '../preview'
+import { creaseCopy, type CreaseCopy } from './eraserCreaseCopy'
 import { LineSlot } from './previewLines'
 import { cueColors, pathHoverColors } from './FollowMeTool'
 import { geometryOf, type PlaneUnitsScene } from './planeUnits'
@@ -30,15 +37,13 @@ import { takeTouched, type TouchedIds } from './offsetShared'
 
 export type OnToast = (message: string, code?: string) => void
 
-/** The confirmation after a crease commit: what is now creased and what
- *  is not, in plain words. */
-export function creaseToast(creased: number, uncreased: number): string {
-  const edges = (n: number): string => (n === 1 ? 'the edge' : `${n} edges`)
-  if (creased > 0 && uncreased > 0) {
-    return `Creased ${creased === 1 ? 'one edge' : `${creased} edges`} and uncreased ${uncreased === 1 ? 'one' : uncreased}.`
-  }
-  if (creased > 0) return `Creased ${edges(creased)}. ${creased === 1 ? 'It stays' : 'They stay'} sharp under Smooth.`
-  return `Uncreased ${edges(uncreased)}. ${uncreased === 1 ? 'It softens' : 'They soften'} under Smooth again.`
+/** Whether the crease modifier does anything: the Smooth preview's `eraser-crease` behavior. */
+export const creaseAvailable = (): boolean => creaseCopy !== null && behaviorEnabled('eraser-crease')
+
+/** The crease words; only called where the gate is on, which a production build never is. */
+function words(): CreaseCopy {
+  if (creaseCopy === null) throw new Error('unreachable')
+  return creaseCopy
 }
 
 /** What the viewport lends the tool. */
@@ -89,6 +94,8 @@ export class EraserTool implements Tool {
     private readonly preview: THREE.Group,
     private readonly host: EraserHost,
     private readonly onToast: OnToast,
+    /** Whether the crease modifier is live; tests pass their own. */
+    private readonly creaseEnabled: () => boolean = creaseAvailable,
   ) {
     this.hoverLine = new LineSlot(preview, 995)
     this.collectLine = new LineSlot(preview, 996)
@@ -96,35 +103,33 @@ export class EraserTool implements Tool {
 
   /** The crease modifier (Ctrl, or Cmd on a Mac), read live from each pointer event. */
   setCreaseModifier(on: boolean): void {
-    this.crease = on
+    this.crease = on && this.creaseEnabled()
   }
 
   // ----------------------------------------------------------------- status
 
-  private get modifierName(): string {
-    return isMac ? 'Cmd' : 'Ctrl'
-  }
-
   statusHint(): string {
-    const t = this.target
-    const mod = this.modifierName
-    if (t === null) {
-      return `Click a drawn line to erase it. Drag across lines to erase several. ${mod}-click an edge of a solid to crease it.`
+    const t_ = this.target
+    const creasing = this.creaseEnabled()
+    if (t_ === null) {
+      const base = t`Click a drawn line to erase it. Drag across lines to erase several.`
+      return creasing ? words().idle(base) : base
     }
-    switch (t.kind) {
+    switch (t_.kind) {
       case 'drawn':
-        return this.crease ? `${mod}-click works on the edges of solids. Let go of ${mod} to erase this line.` : 'Click to erase this line.'
+        return this.crease ? words().drawnWithModifier() : t`Click to erase this line.`
       case 'solid': {
-        if (!this.crease) return `Edges of a solid can't be erased. ${mod}-click to crease (keeps it sharp under Smooth).`
-        const creased = t.edges.length > 0 && this.wasmScene.edge_is_creased(t.object, t.edges[0])
-        return creased ? 'Uncrease: lets this edge soften under Smooth' : 'Crease: keeps this edge sharp under Smooth'
+        if (!creasing) return t`Edges of a solid can't be erased.`
+        if (!this.crease) return words().solidEdge()
+        const creased = t_.edges.length > 0 && this.wasmScene.edge_is_creased(t_.object, t_.edges[0])
+        return creased ? words().creaseOff : words().creaseOn
       }
       case 'seam':
-        return this.crease ? "Soft seams can't be creased." : 'That edge is a soft seam.'
+        return this.crease ? words().seamWithModifier : t`That edge is a soft seam.`
       case 'fill':
-        return 'Click a line to erase it, not the inside of a shape.'
+        return t`Click a line to erase it, not the inside of a shape.`
       case 'component':
-        return 'Open the component first to erase or crease its edges.'
+        return creasing ? words().componentEdge : t`Open the component first to erase its edges.`
     }
   }
 
@@ -220,7 +225,7 @@ export class EraserTool implements Tool {
     if (!this.pressed || !this.dragging || this.pressMode !== 'crease') return
     if (t === null || t.kind !== 'seam' || this.seamToasted) return
     this.seamToasted = true
-    this.onToast("Soft seams can't be creased.", 'CreaseOnSoftEdge')
+    this.onToast(words().seamToast, words().seamCode)
   }
 
   onPointerScreenMove(x: number, y: number): void {
@@ -309,7 +314,7 @@ export class EraserTool implements Tool {
       const refs = targets.flatMap((t) => (t.kind === 'drawn' ? [t.ref] : []))
       if (refs.length === 0) return
       try {
-        this._inBracket('Erase', refs.length, () => this.host.runDelete(refs))
+        this._inBracket(t`Erase`, refs.length, () => this.host.runDelete(refs))
       } catch (err) {
         this._toast(err)
       }
@@ -319,7 +324,7 @@ export class EraserTool implements Tool {
     if (edges.length === 0) return
     const touched: TouchedIds = { objectIds: [], componentIds: [], instanceIds: [] }
     try {
-      this._inBracket('Crease', edges.length, () => {
+      this._inBracket(words().historyLabel, edges.length, () => {
         for (const t of edges) {
           // Each logical edge toggles from its own first edge's flag.
           const creased = t.edges.length > 0 && this.wasmScene.edge_is_creased(t.object, t.edges[0])
@@ -346,7 +351,7 @@ export class EraserTool implements Tool {
       if (on) creasedN++
       else uncreasedN++
     }
-    this.onToast(creaseToast(creasedN, uncreasedN))
+    this.onToast(words().toast(creasedN, uncreasedN))
   }
 
   private _toast(err: unknown): void {

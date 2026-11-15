@@ -482,8 +482,27 @@ fn library_item_schema() -> serde_json::Value {
 }
 
 impl Registry {
-    /// Builds the protocol-1 inventory (docs/agents/HEW_API.md §7).
+    /// The protocol-1 inventory THIS build serves (docs/agents/HEW_API.md
+    /// §7): every host dispatches through it. In a preview build it is the
+    /// whole [`Registry::reference`] inventory. In a production build the
+    /// commands of every `preview-features.json` entry are left out, and
+    /// each preview parameter is left out of its command's params schema
+    /// ([`crate::preview`]): what is not declared is not listed anywhere.
     pub fn protocol_1() -> Registry {
+        let mut registry = Registry::reference();
+        if !crate::preview::PREVIEW_BUILD {
+            crate::preview::wall_off(&mut registry.commands);
+        }
+        registry
+    }
+
+    /// The whole protocol-1 inventory, preview commands included, in every
+    /// build: the published contract the generated API reference and
+    /// TypeScript SDK are built from (they mark what is preview). Not for
+    /// dispatch: a host serves [`Registry::protocol_1`]. A production build
+    /// dispatching through this one still refuses every preview command,
+    /// because the dispatcher checks [`crate::preview`] itself.
+    pub fn reference() -> Registry {
         let mut commands = BTreeMap::new();
         let mut add = |name: &'static str,
                        class: CommandClass,
@@ -2740,7 +2759,7 @@ impl Registry {
                                 },
                                 "branching_vertices": { "type": "integer" },
                                 "islands": { "type": "integer" },
-                                "degenerate_faces": { "type": "integer", "description": "zero-width or sub-tolerance faces hew.solid.remove_degenerate_faces would remove; a solid is listed only when it has some" },
+                                "degenerate_faces": { "type": "integer", "description": "zero-width or sub-tolerance faces on the solid; a solid is listed only when it has some" },
                                 "faces": { "type": "integer", "description": "how many faces the object has" }
                             },
                             "required": ["object", "verdict", "rims", "accepted", "placements"]
@@ -8328,7 +8347,9 @@ mod tests {
     /// the transaction container.
     #[test]
     fn every_command_has_a_permission() {
-        let reg = Registry::protocol_1();
+        // The table covers the whole inventory, Preview commands included,
+        // whichever build this is.
+        let reg = Registry::reference();
         let table = permission_table();
         let mut seen = std::collections::BTreeSet::new();
         for (name, permission) in &table {

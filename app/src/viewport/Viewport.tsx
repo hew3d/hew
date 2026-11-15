@@ -60,6 +60,7 @@ import * as inputRecorder from '../recording/inputRecorder'
 import { ToolController } from '../tools/ToolController'
 import type { ToolContext, ToolRegistration } from '../tools/toolRegistration'
 import { toolRegistration } from '../tools/registrations'
+import { usableTool } from '../tools/toolRegistry'
 import { draftEdgesToErase, inHistoryBracket } from '../tools/transformSelection'
 import { routeBooleanMany, subtractThroughPlacement, opLabel, OP_SUBTRACT } from './placementBoolean'
 import { unlinkedLabel, unlinkedToJoin, cutOnlyThisOne, cutOneSolidAtATime } from '../linkedCopyCopy'
@@ -7901,6 +7902,7 @@ export default function Viewport({
       // A1 — the single channel every tool consults).
       scopeToEditContext: (tool) => { applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current)) },
       faceEligibility: faceDrawEligible,
+      pushPullEligibility: pushPullEligible,
       resolveSelectable: (snap, ray) => resolveSelectableRef(snap, ray, selectionDeps()),
       deleteNodes: runDelete,
       acquireTransformTargets,
@@ -8540,7 +8542,12 @@ export default function Viewport({
     // Show tool pointer setting flips (Settings ▸ View).
     // oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifier
     let lastToolCursorName = 'Select'
-    switchToolRef.current = (toolName: string) => {
+    switchToolRef.current = (requestedTool: string) => {
+      // The Preview wall's last line (src/preview): a tool this build
+      // withholds can never be armed, whoever asks (a stale id, restored
+      // state, a script). It becomes Select, and the report below tells the
+      // app so. The registration table leaves such a tool out as well.
+      const toolName = usableTool(requestedTool)
       // Shop Mode's read-only contract (shop-mode adversarial review,
       // CRITICAL finding 1): this is the ONE choke point every tool switch
       // funnels through — keyboard shortcuts, the command palette, and any

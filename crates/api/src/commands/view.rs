@@ -41,7 +41,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     match name {
         "hew.view.camera" => Some(camera),
         "hew.view.zoom_extents" => Some(zoom_extents),

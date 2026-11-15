@@ -13,6 +13,15 @@
 # parallel and off the critical path (`wasm-release`), so a wasm-opt failure
 # still turns a PR red; deploy-beta reuses that artifact.
 #
+# The Preview wall (docs/dev/DEVELOPMENT.md "Preview features"): the kernel
+# module embeds the API's wall, fixed at compile time, so `wasm` builds two
+# flavors (scripts/wasm-flavors.sh), and every lane the flag changes runs in
+# both builds: Rust and Tauri through scripts/verify.sh, the unit suites in
+# `web`, the replay, and the chromium E2E (the preview build with the curve
+# specs, the production-shape build with the wall spec). Nothing here sets
+# HEW_PREVIEW at the workflow or job level; a step that wants the preview
+# build says so itself. The production half has no switch to skip it.
+#
 # Every toolchain here is pinned, and every action is pinned to a commit SHA;
 # Renovate proposes the bumps (.github/renovate.json5). Nothing in this file
 # should resolve to "whatever is newest" — that is how a clippy lint reached
@@ -33,10 +42,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # The kernel, built once for the test lanes. --no-opt skips wasm-opt (see
-  # the header). Both wasm-pack targets compile the same cargo artifact, so
-  # the second build is bindgen only. Both packages are gitignored build
-  # outputs; they travel between jobs as artifacts.
+  # The kernel, built once per flavor for the test lanes. --no-opt skips
+  # wasm-opt (see the header). A flavor's two wasm-pack targets compile the
+  # same cargo artifact, so its second build is bindgen only. The packages
+  # are gitignored build outputs; they travel between jobs as one artifact,
+  # target/wasm-flavors/<production|preview>/<web|nodejs>.
   wasm:
     runs-on: ubuntu-latest
     steps:
@@ -47,25 +57,21 @@ jobs:
       - name: Install wasm-pack (pinned)
         run: scripts/install-wasm-pack.sh
 
-      # NB: wasm-pack's --out-dir is relative to the crate dir.
-      - name: Build kernel (web target, no wasm-opt)
-        run: wasm-pack build crates/wasm-api --target web --no-opt --out-dir ../../app/src/wasm/pkg
+      - name: Build kernel, production flavor (web + Node, no wasm-opt)
+        run: |
+          scripts/wasm-flavors.sh build production web --no-opt
+          scripts/wasm-flavors.sh build production nodejs --no-opt
 
-      - name: Build kernel (Node target, no wasm-opt)
-        run: wasm-pack build crates/wasm-api --target nodejs --no-opt --out-dir ../../tools/replay-runner/pkg-node
+      - name: Build kernel, preview flavor (web + Node, no wasm-opt)
+        run: |
+          scripts/wasm-flavors.sh build preview web --no-opt
+          scripts/wasm-flavors.sh build preview nodejs --no-opt
 
-      - name: Upload kernel (web)
+      - name: Upload kernel flavors
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: wasm-web
-          path: app/src/wasm/pkg
-          if-no-files-found: error
-
-      - name: Upload kernel (Node)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: wasm-node
-          path: tools/replay-runner/pkg-node
+          name: wasm-flavors
+          path: target/wasm-flavors
           if-no-files-found: error
 
   # Rust: packaging tests, fmt, clippy -D warnings, cargo test.
@@ -89,17 +95,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up JS toolchain
         uses: ./.github/actions/setup-js
-      # Downloaded after checkout, so the files are NEWER than the sources;
-      # touch them anyway because app/scripts/build-wasm.mjs rebuilds the
-      # kernel when any Rust source is newer than the package, and an
-      # artifact can restore its original (older) mtimes.
-      - name: Download kernel (WASM, web target)
+      # verify.sh's web lane copies each flavor into app/src/wasm/pkg as it
+      # needs it (scripts/wasm-flavors.sh use), freshening the mtimes so
+      # app/scripts/build-wasm.mjs does not rebuild over it.
+      - name: Download kernel flavors (WASM)
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: wasm-web
-          path: app/src/wasm/pkg
-      - name: Freshen kernel package mtimes
-        run: find app/src/wasm/pkg -type f -exec touch {} +
+          name: wasm-flavors
+          path: target/wasm-flavors
       - name: Web gate
         env:
           # This lane builds against the unoptimized test kernel; see the
@@ -173,57 +176,111 @@ jobs:
         with:
           node-version-file: .node-version
 
-      - name: Download kernel (WASM, Node target)
+      - name: Download kernel flavors (WASM)
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: wasm-node
-          path: tools/replay-runner/pkg-node
+          name: wasm-flavors
+          path: target/wasm-flavors
 
-      - name: Replay gate (golden state-hash fixtures)
-        run: node tools/replay-runner/run.mjs
+      # Both modules, as scripts/verify-full.sh runs it.
+      - name: Replay gate (golden state-hash fixtures, both flavors)
+        run: |
+          for flavor in production preview; do
+            scripts/wasm-flavors.sh use-node "$flavor"
+            node tools/replay-runner/run.mjs
+          done
 
   # Chromium (SwiftShader software GL): boot smoke, harness specs, and the
   # draw -> push/pull -> save/reload lifecycle. Sharded across runners:
   # playwright.config.ts pins workers: 1 because SwiftShader is CPU-bound
   # and parallel workers on ONE machine contend; separate runners do not.
   # fullyParallel is off, so a shard is a set of whole spec files.
+  #
+  # Both builds (the Preview wall): `preview` is the Vite dev server with the
+  # flag on, curve specs included; `production` is `vite build` with the
+  # flag off, served as a release is, with the wall spec. The only skips
+  # allowed are the wall's own (scripts/check-e2e-skips.mjs).
   e2e-chromium:
     needs: wasm
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
+        build: [preview, production]
         shard: [1, 2, 3, 4]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up JS toolchain
         uses: ./.github/actions/setup-js
-      # Downloaded after checkout, so the files are NEWER than the sources;
-      # touch them anyway because app/scripts/build-wasm.mjs rebuilds the
-      # kernel when any Rust source is newer than the package, and an
-      # artifact can restore its original (older) mtimes.
-      - name: Download kernel (WASM, web target)
+      - name: Download kernel flavors (WASM)
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: wasm-web
-          path: app/src/wasm/pkg
-      - name: Freshen kernel package mtimes
-        run: find app/src/wasm/pkg -type f -exec touch {} +
+          name: wasm-flavors
+          path: target/wasm-flavors
+      - name: Select the ${{ matrix.build }} kernel
+        run: scripts/wasm-flavors.sh use ${{ matrix.build }}
       - name: Install Playwright browsers
         run: pnpm --dir app exec playwright install --with-deps chromium
 
-      - name: Web E2E smoke (chromium, shard ${{ matrix.shard }}/4)
+      - name: Web E2E smoke (chromium, ${{ matrix.build }} build, shard ${{ matrix.shard }}/4)
         env:
           CI: '1'
-        run: pnpm --dir app exec playwright test --project=chromium --shard=${{ matrix.shard }}/4
+          HEW_PREVIEW: ${{ matrix.build == 'preview' && '1' || '0' }}
+          PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ runner.temp }}/e2e-report.json
+        run: |
+          pnpm --dir app exec playwright test --project=chromium --shard=${{ matrix.shard }}/4 --reporter=list,html,json
+          node scripts/check-e2e-skips.mjs "$PLAYWRIGHT_JSON_OUTPUT_FILE" ${{ matrix.build }}
 
       - name: Upload Playwright report on failure
         if: failure()
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: playwright-report-chromium-${{ matrix.shard }}
+          name: playwright-report-chromium-${{ matrix.build }}-${{ matrix.shard }}
+          path: app/playwright-report
+          if-no-files-found: ignore
+
+  # The wall spec (app/e2e/preview-wall.spec.ts) whole, in each build, with
+  # the check that it passed something there: sharding spreads files, so
+  # this is where "the wall was checked" is asserted.
+  e2e-wall:
+    needs: wasm
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [preview, production]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up JS toolchain
+        uses: ./.github/actions/setup-js
+      - name: Download kernel flavors (WASM)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-flavors
+          path: target/wasm-flavors
+      - name: Select the ${{ matrix.build }} kernel
+        run: scripts/wasm-flavors.sh use ${{ matrix.build }}
+      - name: Install Playwright browsers
+        run: pnpm --dir app exec playwright install --with-deps chromium
+
+      - name: Preview wall spec (chromium, ${{ matrix.build }} build)
+        env:
+          CI: '1'
+          HEW_PREVIEW: ${{ matrix.build == 'preview' && '1' || '0' }}
+          PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ runner.temp }}/e2e-report.json
+        run: |
+          pnpm --dir app exec playwright test --project=chromium preview-wall.spec.ts --reporter=list,html,json
+          node scripts/check-e2e-skips.mjs "$PLAYWRIGHT_JSON_OUTPUT_FILE" ${{ matrix.build }} --wall
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-report-wall-${{ matrix.build }}
           path: app/playwright-report
           if-no-files-found: ignore
 
@@ -254,23 +311,22 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up JS toolchain
         uses: ./.github/actions/setup-js
-      # Downloaded after checkout, so the files are NEWER than the sources;
-      # touch them anyway because app/scripts/build-wasm.mjs rebuilds the
-      # kernel when any Rust source is newer than the package, and an
-      # artifact can restore its original (older) mtimes.
-      - name: Download kernel (WASM, web target)
+      # The goldens and the WebKit smoke run the preview build (the Vite dev
+      # server, flag on), so they take the preview kernel.
+      - name: Download kernel flavors (WASM)
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: wasm-web
-          path: app/src/wasm/pkg
-      - name: Freshen kernel package mtimes
-        run: find app/src/wasm/pkg -type f -exec touch {} +
+          name: wasm-flavors
+          path: target/wasm-flavors
+      - name: Select the preview kernel
+        run: scripts/wasm-flavors.sh use preview
       - name: Install Playwright browsers
         run: pnpm --dir app exec playwright install --with-deps chromium
 
       - name: Web E2E visual goldens
         env:
           CI: '1'
+          HEW_PREVIEW: '1'
         run: pnpm --dir app exec playwright test --project=visual
 
       - name: Upload Playwright report on failure
@@ -311,17 +367,15 @@ jobs:
 
       - name: Set up JS toolchain
         uses: ./.github/actions/setup-js
-      # Downloaded after checkout, so the files are NEWER than the sources;
-      # touch them anyway because app/scripts/build-wasm.mjs rebuilds the
-      # kernel when any Rust source is newer than the package, and an
-      # artifact can restore its original (older) mtimes.
-      - name: Download kernel (WASM, web target)
+      # The goldens and the WebKit smoke run the preview build (the Vite dev
+      # server, flag on), so they take the preview kernel.
+      - name: Download kernel flavors (WASM)
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: wasm-web
-          path: app/src/wasm/pkg
-      - name: Freshen kernel package mtimes
-        run: find app/src/wasm/pkg -type f -exec touch {} +
+          name: wasm-flavors
+          path: target/wasm-flavors
+      - name: Select the preview kernel
+        run: scripts/wasm-flavors.sh use preview
       - name: Install Playwright browsers
         run: pnpm --dir app exec playwright install --with-deps webkit
 
@@ -329,6 +383,7 @@ jobs:
         continue-on-error: true
         env:
           CI: '1'
+          HEW_PREVIEW: '1'
         run: xvfb-run -a pnpm --dir app exec playwright test --project=webkit --shard=${{ matrix.shard }}/4
 
       - name: Upload Playwright report on failure
@@ -408,8 +463,12 @@ jobs:
       - name: Install wasm-pack (pinned)
         run: scripts/install-wasm-pack.sh
 
-      - name: Build kernel (web target, optimized)
-        run: wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
+      # The production flavor, always: this is the module beta.hew3d.com
+      # ships.
+      - name: Build kernel (web target, optimized, production flavor)
+        run: |
+          scripts/wasm-flavors.sh build production web
+          scripts/wasm-flavors.sh use production
 
       - name: Upload optimized kernel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -440,7 +499,7 @@ jobs:
   # separate from the production deploy: release.yml's `web` job still
   # publishes app.hew3d.com at tag time and is unaffected.
   deploy-beta:
-    needs: [wasm, rust, web, tauri, replay, e2e-chromium, e2e-visual, relay-contract, bug-intake-tests, wasm-release]
+    needs: [wasm, rust, web, tauri, replay, e2e-chromium, e2e-wall, e2e-visual, relay-contract, bug-intake-tests, wasm-release]
     if: >-
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
@@ -467,6 +526,15 @@ jobs:
           path: app/src/wasm/pkg
       - name: Freshen kernel package mtimes
         run: find app/src/wasm/pkg -type f -exec touch {} +
+
+      # beta.hew3d.com is a production build: the production module, and no
+      # preview flag in the environment of the app build below.
+      - name: Refuse a preview build
+        run: |
+          if [ "${HEW_PREVIEW:-}" = 1 ] || [ "$(cat app/src/wasm/pkg/preview-build)" != 0 ]; then
+            echo "::error::beta.hew3d.com must be a production build; HEW_PREVIEW is set or the kernel is the preview flavor."
+            exit 1
+          fi
 
       # Freshness guard. Skip a stale run before spending minutes building it.
       - name: Skip if main has moved on

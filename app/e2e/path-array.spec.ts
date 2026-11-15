@@ -1,5 +1,9 @@
 import { test, expect, type Page } from '@playwright/test'
 import { activateFromToolsMenu } from './helpers/offset'
+import { requiresPreview } from './helpers/preview'
+
+// Drives a Preview feature: skipped in the production-shape run (e2e/helpers/preview.ts).
+requiresPreview('path-array')
 
 declare global {
   interface Window {

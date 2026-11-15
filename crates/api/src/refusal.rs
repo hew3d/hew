@@ -163,8 +163,10 @@ pub fn snake_case(pascal: &str) -> String {
 /// UI copy for a kernel error code — delegates to the generated table
 /// (see the module doc comment above). Codes the UI table has none for
 /// fall back to the kernel `Display` text.
+/// In a production build, copy that would point at a Preview feature is
+/// replaced by the app's production wording ([`crate::preview::production_copy`]).
 fn ui_copy(code: &str) -> Option<&'static str> {
-    refusal_copy_gen::ui_copy(code)
+    crate::preview::production_copy(code).or_else(|| refusal_copy_gen::ui_copy(code))
 }
 
 /// The inverse of [`snake_case`]: `push_pull_obstructed` →
@@ -195,6 +197,13 @@ pub fn pascal_case(snake: &str) -> String {
 /// kernel error variants and legitimately have none.
 pub fn explanation_for(refusal_name: &str) -> Option<&'static str> {
     ui_copy(&pascal_case(refusal_name))
+}
+
+/// [`explanation_for`] as the published reference states it: the UI table's
+/// copy whatever the build, so the generated API reference is the same in a
+/// preview and a production build.
+pub fn reference_explanation_for(refusal_name: &str) -> Option<&'static str> {
+    refusal_copy_gen::ui_copy(&pascal_case(refusal_name))
 }
 
 #[cfg(test)]

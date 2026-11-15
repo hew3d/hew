@@ -31,6 +31,7 @@ import { i18n, type MessageDescriptor } from '@lingui/core'
 import { curveActionPaletteEntries, deformPaletteEntries, skinPaletteEntry } from './curveEntries'
 import { msg, t } from '@lingui/core/macro'
 import { MENU } from '../health/healthCopy'
+import { actionOffered } from '../curveActions'
 import { TOOL_REGISTRY, type ToolName } from '../tools/toolRegistry'
 import { shortcutLabel } from '../keymap/keymap'
 
@@ -117,7 +118,7 @@ const TOOL_DESCRIPTIONS: Record<ToolName, MessageDescriptor> = {
   'Offset': msg`Copy a face or profile's boundary inward or outward at a set distance.`,
   'Shell': msg`Hollow out a solid to a wall thickness, leaving the faces you click open.`,
   'Project': msg`Draw a closed shape onto a curved or flat solid, then engrave or emboss it.`,
-  'Eraser': msg`Erase drawn lines, or crease the edges of a solid so they stay sharp when smoothed.`,
+  'Eraser': msg`Erase drawn lines. Click one, or drag across several.`,
   'Fillet': msg`Round or bevel the edges of a solid, or round a drawn corner.`,
   'Array along Path': msg`Place evenly spaced copies of the selection along a line, curve, or face edge, optionally shrinking or growing.`,
   'Paint': msg`Apply the current material to a face or object.`,
@@ -169,7 +170,7 @@ function toolSynonyms(): Partial<Record<ToolName, string[]>> {
     'Array along Path': [t`path array`, t`copies along path`, t`follow path copies`],
     'Shell': [t`hollow`, t`thicken`, t`wall`],
     'Project': [t`drape`, t`project`, t`emboss`, t`engrave`],
-    'Eraser': [t`erase`, t`delete edge`, t`crease`],
+    'Eraser': [t`erase`, t`delete edge`],
     'Offset': [t`inset`, t`outset`, t`concentric`],
     'Rectangle': [t`rect`, t`box`],
     'Polygon': [t`polygon`, t`hexagon`, t`hex`, t`pentagon`, t`n-gon`, t`nut`, t`bolt`],
@@ -321,7 +322,8 @@ export const PALETTE_EXCLUDED_ACTION_IDS: Record<string, string> = {
 /** The full palette registry — tools first (spec ranks Tools above Actions
  * absent other signals), then hand-authored actions. */
 export function paletteEntries(): PaletteEntry[] {
-  return [...toolEntries(), ...actionEntries()]
+  // The Preview wall: nothing the build withholds is searchable.
+  return [...toolEntries(), ...actionEntries()].filter((e) => actionOffered(e.id))
 }
 
 /** The shortcut to display next to a palette result — the first key of its

@@ -1,0 +1,577 @@
+/**
+ * The Preview wall test (docs/design/preview-channel.md section 3, point 2).
+ *
+ * It walks `preview-features.json` and names no feature: adding an entry puts
+ * it under every check here, and graduating one (deleting its entry) removes
+ * it, so the diff of this run is the record of what became public.
+ *
+ *  - Flag OFF (a production build): nothing an entry names is reachable from
+ *    any single source: the tool registry, the viewport registrations, the
+ *    menus, the palette, the keymap (defaults and a saved binding), the native
+ *    command set, the dock, the tool command table.
+ *  - Flag ON: every id an entry names exists in the app (an entry can never
+ *    gate nothing), and the same surfaces contain it.
+ *
+ * The build flag is read in one tiny module (`./build.ts`). To get the app as
+ * a production build sees it inside one vitest run, each case replaces that
+ * module with a mock and imports the app fresh. There is no run-time switch.
+ */
+
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import * as THREE from 'three'
+import type { PreviewFeature } from './registry'
+import { createWall } from './wall'
+import { chainItems, chainText, dispatchMap, parseSubmenu, pruneChain } from './nativeChains'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const SRC = resolve(HERE, '..')
+const ROOT = resolve(HERE, '../../..')
+const FEATURES = (JSON.parse(readFileSync(join(ROOT, 'preview-features.json'), 'utf8')) as { features: PreviewFeature[] })
+  .features
+
+/** The app's surfaces, loaded in a fresh module graph for one configuration. */
+async function loadApp(build: boolean) {
+  vi.resetModules()
+  vi.doMock('./build', () => ({ previewBuild: build }))
+  const [
+    preview,
+    toolRegistry,
+    toolActions,
+    registrations,
+    toolPanels,
+    menuModel,
+    palette,
+    defaults,
+    keymap,
+    nativeMenu,
+    dock,
+    curveActions,
+    savePanel,
+    kernelErrors,
+    toastActions,
+    healthReport,
+    eraser,
+    eraserCopy,
+    creaseErrors,
+  ] = await Promise.all([
+    import('./index'),
+    import('../tools/toolRegistry'),
+    import('../tools/toolActions'),
+    import('../tools/registrations'),
+    import('../tools/toolPanels'),
+    import('../panels/toolsMenuModel'),
+    import('../palette/registry'),
+    import('../keymap/defaults'),
+    import('../keymap/keymap'),
+    import('../keymap/nativeMenu'),
+    import('../panels/dockLogic'),
+    import('../curveActions'),
+    import('../io/savePanel'),
+    import('../kernelErrors'),
+    import('../toastActions'),
+    import('../health/healthReport'),
+    import('../tools/EraserTool'),
+    import('../tools/eraserCreaseCopy'),
+    import('../kernelErrorCopy/crease'),
+  ])
+  return {
+    preview, toolRegistry, toolActions, registrations, toolPanels, menuModel, palette, defaults, keymap,
+    nativeMenu, dock, curveActions, savePanel, kernelErrors, toastActions, healthReport, eraser, eraserCopy, creaseErrors,
+  }
+}
+type App = Awaited<ReturnType<typeof loadApp>>
+
+/** An Eraser over a fake scene whose one solid edge is a hard edge, for the crease gate. */
+function eraserOver(app: App) {
+  const scene = {
+    edge_smoothness: () => 0,
+    logical_edge: () => ({ edges: () => new BigUint64Array([5n]), free: () => undefined }),
+    edge_is_creased: () => false,
+    edge_endpoints: () => new Float64Array([0, 0, 0, 1, 0, 0]),
+    set_crease: vi.fn(),
+    history_bracket_open: vi.fn(),
+    history_bracket_commit: vi.fn(),
+    history_bracket_abort: vi.fn(),
+  }
+  const toast = vi.fn()
+  const tool = new app.eraser.EraserTool(
+    scene as never,
+    new THREE.Group(),
+    { resolveRef: () => null, runDelete: vi.fn(), onCreaseCommit: vi.fn() },
+    toast,
+  )
+  const ray = { origin: [0, 0, 5], direction: [0, 0, -1] } as never
+  const snap = { x: 0, y: 0, z: 0, kind: 'edge', object: 7n, element: 5n, elementKind: 'edge' } as never
+  return { scene, toast, tool, ray, snap }
+}
+
+const CONTEXTS = ['empty', 'object', 'group', 'instance', 'multi', 'sketch'] as const
+const ALL_GATES = {
+  canGroup: true, canMakeComponent: true, canBoolean: true, canSaveToLibrary: true, canUnlink: true, canUnlinkAll: true,
+}
+const PLATFORMS = [
+  { isMac: true, isDesktop: true },
+  { isMac: true, isDesktop: false },
+  { isMac: false, isDesktop: true },
+  { isMac: false, isDesktop: false },
+]
+
+/** Every dock verb id the app offers, across contexts and with and without gates. */
+function dockIds(app: App): Set<string> {
+  const ids = new Set<string>()
+  for (const ctx of CONTEXTS) {
+    for (const gates of [undefined, ALL_GATES, { ...ALL_GATES, canUnlink: false }]) {
+      for (const v of app.dock.dockVerbsFor(ctx, gates)) ids.add(v.id)
+    }
+  }
+  return ids
+}
+
+function menuActionIds(app: App): string[] {
+  const walk = (entries: readonly import('../panels/toolsMenuModel').MenuEntry[]): string[] =>
+    entries.flatMap((e) =>
+      e.kind === 'submenu' ? walk(e.items) : [app.menuModel.menuEntryActionId(e)].filter((x): x is string => x !== undefined),
+    )
+  return [...walk(app.menuModel.TOOLS_MENU), ...walk(app.menuModel.DRAW_MENU)]
+}
+
+function menuActionIdsOf(entries: readonly import('../panels/toolsMenuModel').MenuEntry[], app: App): string[] {
+  return entries.flatMap((e) =>
+    e.kind === 'submenu' ? menuActionIdsOf(e.items, app) : [app.menuModel.menuEntryActionId(e)].filter((x): x is string => x !== undefined),
+  )
+}
+
+function paletteIds(app: App): Set<string> {
+  return new Set(app.palette.paletteEntries().map((e) => e.id))
+}
+
+function sourceFiles(dir: string): string[] {
+  const out: string[] = []
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name)
+    if (name === 'wasm' || name === 'locales' || name === 'node_modules') continue
+    if (statSync(p).isDirectory()) out.push(...sourceFiles(p))
+    else if (/\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name) && !p.includes(`${join(SRC, 'preview')}/`)) out.push(p)
+  }
+  return out
+}
+
+describe('the registry file', () => {
+  it('has unique feature ids, and no id claimed by two features', () => {
+    expect(new Set(FEATURES.map((f) => f.id)).size).toBe(FEATURES.length)
+    for (const kind of ['tools', 'actions', 'dockChips', 'behaviors', 'apiCommands'] as const) {
+      const all = FEATURES.flatMap((f) => f[kind])
+      expect(all.filter((id, i) => all.indexOf(id) !== i), `${kind} named twice`).toEqual([])
+    }
+  })
+  it('gives every feature an English name and a one-line state', () => {
+    for (const f of FEATURES) {
+      expect(f.name.trim(), f.id).not.toBe('')
+      expect(f.state.trim(), f.id).not.toBe('')
+      expect(f.state.includes('\n'), f.id).toBe(false)
+    }
+  })
+})
+
+describe('createWall', () => {
+  const some = FEATURES[0]
+  it('withholds everything it lists when the build flag is off', () => {
+    const wall = createWall(false, FEATURES, new Set())
+    expect(wall.featureEnabled(some.id)).toBe(false)
+    expect(wall.features()).toEqual([])
+    for (const t of some.tools) expect(wall.toolAllowed(t)).toBe(false)
+    expect(wall.toolAllowed('a tool nobody lists')).toBe(true)
+  })
+  it('honors a switch only in a preview build', () => {
+    const off = new Set([some.id])
+    const preview = createWall(true, FEATURES, off)
+    expect(preview.featureEnabled(some.id)).toBe(false)
+    for (const t of some.tools) expect(preview.toolAllowed(t)).toBe(false)
+    const other = FEATURES.find((f) => f.id !== some.id)
+    if (other !== undefined) expect(preview.featureEnabled(other.id)).toBe(true)
+    // A stored switch means nothing in production, and nothing is switched on there.
+    expect(createWall(false, FEATURES, new Set()).featureEnabled(some.id)).toBe(false)
+  })
+  it('hangs the Eraser\'s crease modifier on Smooth, and leaves the Eraser itself public', () => {
+    expect(FEATURES.find((f) => f.id === 'smooth')?.behaviors).toContain('eraser-crease')
+    expect(FEATURES.find((f) => f.id === 'smooth')?.apiCommands).toContain('hew.object.crease')
+    expect(FEATURES.some((f) => f.tools.includes('Eraser') || f.actions.includes('tool-eraser'))).toBe(false)
+    const on = createWall(true, FEATURES, new Set())
+    const smoothOff = createWall(true, FEATURES, new Set(['smooth']))
+    const production = createWall(false, FEATURES, new Set())
+    expect(on.behaviorEnabled('eraser-crease')).toBe(true)
+    for (const w of [on, smoothOff, production]) {
+      expect(w.toolAllowed('Eraser')).toBe(true)
+      expect(w.actionAllowed('tool-eraser')).toBe(true)
+    }
+    expect(smoothOff.behaviorEnabled('eraser-crease')).toBe(false)
+    expect(production.behaviorEnabled('eraser-crease')).toBe(false)
+  })
+  it('treats an id the registry does not list as public (a graduated feature)', () => {
+    const wall = createWall(false, [], new Set())
+    expect(wall.featureEnabled('anything')).toBe(true)
+    expect(wall.toolAllowed('Fillet')).toBe(true)
+  })
+})
+
+describe('flag OFF: a production build', () => {
+  let app: App
+  beforeAll(async () => {
+    app = await loadApp(false)
+  })
+  afterAll(() => {
+    vi.doUnmock('./build')
+    vi.resetModules()
+  })
+
+  it('reports itself as a production build with every feature off', () => {
+    expect(app.preview.previewBuild).toBe(false)
+    expect(app.preview.previewFeatures()).toEqual([])
+    expect(app.preview.enabledFeatureIds()).toEqual([])
+    for (const f of FEATURES) expect(app.preview.featureEnabled(f.id), f.id).toBe(false)
+  })
+
+  for (const f of FEATURES) {
+    describe(`entry "${f.id}"`, () => {
+      it('has no tool in the registry, the rail, the registrations or the panels', () => {
+        const names = app.toolRegistry.TOOL_REGISTRY.map((t) => t.name as string)
+        const railed = app.toolRegistry.RAIL_GROUPS.flatMap((g) => app.toolRegistry.toolsInGroup(g)).map((t) => t.name as string)
+        for (const tool of f.tools) {
+          expect(app.preview.toolAllowed(tool), tool).toBe(false)
+          expect(names, tool).not.toContain(tool)
+          expect(app.toolRegistry.TOOLS as readonly string[], tool).not.toContain(tool)
+          expect(railed, tool).not.toContain(tool)
+          expect(app.registrations.TOOL_REGISTRATIONS.map((r) => r.name as string), tool).not.toContain(tool)
+          expect(app.registrations.toolRegistration(tool), tool).toBeUndefined()
+          expect(app.toolPanels.TOOL_PANELS.map((p) => p.tool as string), tool).not.toContain(tool)
+          expect(app.toolPanels.panelsForTool(tool), tool).toEqual([])
+          // A stale id (persisted, restored, scripted) falls back to Select.
+          expect(app.toolRegistry.usableTool(tool), tool).toBe('Select')
+        }
+      })
+
+      it('has no action in the menus, the palette, the keymap, the native set or the dispatch table', () => {
+        const menus = menuActionIds(app)
+        const palette = paletteIds(app)
+        const dispatched = app.toolActions.TOOL_ACTIONS.map((a) => a.id)
+        for (const id of f.actions) {
+          expect(app.preview.actionAllowed(id), id).toBe(false)
+          expect(app.curveActions.actionOffered(id), id).toBe(false)
+          expect(menus, id).not.toContain(id)
+          expect(palette, id).not.toContain(id)
+          expect(dispatched, id).not.toContain(id)
+          expect(app.toolActions.toolActionFor(id), id).toBeUndefined()
+          const opened: string[] = []
+          expect(app.toolActions.runToolAction(id, (t) => opened.push(t)), id).toBe(false)
+          expect(opened, id).toEqual([])
+          expect(app.nativeMenu.NATIVE_COMMANDS.has(id), id).toBe(false)
+          for (const platform of PLATFORMS) expect(Object.keys(app.defaults.defaultBindings(platform)), id).not.toContain(id)
+        }
+        // No palette entry opens a withheld tool either, whatever its id.
+        for (const e of app.palette.paletteEntries()) {
+          if (e.toolName !== undefined) expect(f.tools, e.id).not.toContain(e.toolName)
+        }
+      })
+
+      it('ignores a saved key binding for each of its actions', () => {
+        const base = app.defaults.defaultBindings({ isMac: false, isDesktop: false })
+        for (const id of f.actions) {
+          const km = app.keymap.buildKeymap(base, { [id]: ['Mod+Alt+9'] }, false)
+          expect(km.bindings[id], id).toBeUndefined()
+          expect([...km.byChord.values()], id).not.toContain(id)
+          expect(km.byChord.has('Ctrl+Alt+9'), id).toBe(false)
+        }
+      })
+
+      it('has no dock chip', () => {
+        const chips = dockIds(app)
+        for (const id of f.dockChips) {
+          expect(app.preview.chipAllowed(id), id).toBe(false)
+          expect(chips, id).not.toContain(id)
+        }
+        for (const id of f.actions) expect(chips, id).not.toContain(id)
+      })
+
+      it('has every behavior off', () => {
+        for (const b of f.behaviors) expect(app.preview.behaviorEnabled(b), b).toBe(false)
+      })
+    })
+  }
+
+  it('prunes the menus without leaving an empty submenu or a stray separator', () => {
+    const check = (entries: readonly import('../panels/toolsMenuModel').MenuEntry[]): void => {
+      expect(entries[0]?.kind).not.toBe('separator')
+      expect(entries[entries.length - 1]?.kind).not.toBe('separator')
+      entries.forEach((e, i) => {
+        if (e.kind === 'separator') expect(entries[i - 1]?.kind).not.toBe('separator')
+        if (e.kind === 'submenu') {
+          expect(e.items.length).toBeGreaterThan(0)
+          check(e.items)
+        }
+      })
+    }
+    check(app.menuModel.TOOLS_MENU)
+    check(app.menuModel.DRAW_MENU)
+  })
+
+  it('leaves the ungated tools alone', () => {
+    const gated = new Set(FEATURES.flatMap((f) => f.tools))
+    const names = app.toolRegistry.TOOL_REGISTRY.map((t) => t.name as string)
+    expect(names.length).toBeGreaterThan(10)
+    expect(names.filter((n) => gated.has(n))).toEqual([])
+    for (const n of ['Select', 'Line', 'Push/Pull', 'Follow Me', 'Move', 'Eraser']) expect(names).toContain(n)
+  })
+
+  describe('behaviors that are not lists', () => {
+    it('keeps the Eraser: its tool, action, palette entry and shortcut are all offered', () => {
+      expect(app.toolRegistry.TOOL_REGISTRY.map((t) => t.name as string)).toContain('Eraser')
+      expect(app.preview.toolAllowed('Eraser')).toBe(true)
+      expect(app.preview.actionAllowed('tool-eraser')).toBe(true)
+      expect(menuActionIds(app)).toContain('tool-eraser')
+      expect(paletteIds(app).has('tool-eraser')).toBe(true)
+      expect(app.nativeMenu.NATIVE_COMMANDS.has('tool-eraser')).toBe(true)
+      for (const platform of PLATFORMS) expect(app.defaults.defaultBindings(platform)['tool-eraser']).toEqual(['E'])
+    })
+    it('ignores the Eraser\'s crease modifier: a Ctrl-click on a solid edge changes nothing and says nothing of creasing', () => {
+      expect(app.preview.behaviorEnabled('eraser-crease')).toBe(false)
+      const { scene, toast, tool, ray, snap } = eraserOver(app)
+      tool.setCreaseModifier(true)
+      tool.onPointerMove(snap, ray)
+      expect(tool.statusHint()).toBe("Edges of a solid can't be erased.")
+      tool.onPointerRawDown(0, 0)
+      tool.onPointerDown(snap, ray)
+      tool.onPointerUp(snap, ray)
+      expect(scene.set_crease).not.toHaveBeenCalled()
+      expect(toast).not.toHaveBeenCalled()
+    })
+    it('compiles the crease words out: the copy objects are empty, so no crease text is in the bundle', () => {
+      expect(app.eraserCopy.creaseCopy).toBeNull()
+      expect(app.creaseErrors.CREASE_ERRORS).toEqual({})
+    })
+    it('hides the cage export option from the Export dialog and the native panel', () => {
+      expect(app.savePanel.CAGE_FORMATS.size).toBe(0)
+      expect(app.savePanel.exportChoiceFrom({ format: 'glb', options: { cages: true } } as never, 'mm' as never)?.cages).toBeUndefined()
+    })
+    it('words the zero-area refusal without pointing at Remove degenerate faces, and offers no button', () => {
+      expect(app.kernelErrors.kernelErrorMessage('DegenerateInput', '')).not.toMatch(/Model Health|Remove degenerate/)
+      expect(app.toastActions.toastActionFor('DegenerateInput', () => undefined)).toBeUndefined()
+    })
+    it('leaves zero-area objects out of the Model Health report', () => {
+      const json = JSON.stringify({
+        rows: [
+          { object: '1', verdict: { kind: 'solid' }, degenerate_faces: 3 },
+          { object: '2', verdict: { kind: 'flat_sheet' }, degenerate_faces: 2 },
+        ],
+      })
+      const report = app.healthReport.parseHealthReport(json)
+      expect(report.rows.map((r) => r.object)).toEqual([2n])
+      expect(report.rows[0].degenerateFaces).toBe(0)
+    })
+    it('keeps Smooth > Off working but offers it only from Object Info', () => {
+      expect(app.preview.actionAllowed('smooth-off')).toBe(true)
+      expect(app.curveActions.actionOffered('smooth-off')).toBe(false)
+      expect(paletteIds(app).has('smooth-off')).toBe(false)
+      expect(app.nativeMenu.NATIVE_COMMANDS.has('smooth-off')).toBe(false)
+      for (const platform of PLATFORMS) expect(Object.keys(app.defaults.defaultBindings(platform))).not.toContain('smooth-off')
+    })
+  })
+})
+
+describe('flag ON: a preview build', () => {
+  let app: App
+  beforeAll(async () => {
+    app = await loadApp(true)
+  })
+  afterAll(() => {
+    vi.doUnmock('./build')
+    vi.resetModules()
+  })
+
+  const allToolNames = (): Set<string> => new Set(app.toolRegistry.ALL_TOOL_SPECS.map((t) => t.name as string))
+
+  it('is a preview build with every feature on', () => {
+    expect(app.preview.previewBuild).toBe(true)
+    expect(app.preview.previewFeatures().map((f) => f.id)).toEqual(FEATURES.map((f) => f.id))
+    expect(app.preview.enabledFeatureIds()).toEqual(FEATURES.map((f) => f.id))
+  })
+
+  it('offers the Eraser\'s crease modifier (the eraser-crease behavior, part of Smooth)', () => {
+    expect(app.preview.behaviorEnabled('eraser-crease')).toBe(true)
+    const { scene, tool, ray, snap } = eraserOver(app)
+    tool.setCreaseModifier(true)
+    tool.onPointerMove(snap, ray)
+    expect(tool.statusHint()).toBe('Crease: keeps this edge sharp under Smooth')
+    tool.onPointerRawDown(0, 0)
+    tool.onPointerDown(snap, ray)
+    tool.onPointerUp(snap, ray)
+    expect(scene.set_crease).toHaveBeenCalledOnce()
+  })
+
+  it('carries the crease words in a preview build', () => {
+    expect(app.eraserCopy.creaseCopy?.creaseOn).toBe('Crease: keeps this edge sharp under Smooth')
+    expect(Object.keys(app.creaseErrors.CREASE_ERRORS).sort()).toEqual(['CreaseOnBoundary', 'CreaseOnSoftEdge'])
+  })
+
+  it('has the whole tool registry (nothing is withheld)', () => {
+    expect(app.toolRegistry.TOOL_REGISTRY.map((t) => t.name)).toEqual(app.toolRegistry.ALL_TOOL_SPECS.map((t) => t.name))
+  })
+
+  for (const f of FEATURES) {
+    describe(`entry "${f.id}"`, () => {
+      it('names tools that exist, each declaring its command in the same entry', () => {
+        const specs = new Map(app.toolRegistry.ALL_TOOL_SPECS.map((t) => [t.name as string, t]))
+        for (const tool of f.tools) {
+          const spec = specs.get(tool)
+          expect(spec, `"${tool}" is not a tool in toolRegistry.ts`).toBeDefined()
+          expect(f.actions, `${tool}'s command ${spec?.actionId} is not in ${f.id}.actions`).toContain(spec?.actionId)
+        }
+        expect(allToolNames().size).toBeGreaterThan(0)
+      })
+
+      it('has each tool in the registry, the rail (when it has a slot), the registrations and the dispatch table', () => {
+        for (const tool of f.tools) {
+          const spec = app.toolRegistry.ALL_TOOL_SPECS.find((t) => t.name === tool)!
+          expect(app.toolRegistry.TOOL_REGISTRY.map((t) => t.name as string)).toContain(tool)
+          if (spec.group !== undefined) expect(app.toolRegistry.toolsInGroup(spec.group).map((t) => t.name as string)).toContain(tool)
+          expect(app.toolActions.toolActionFor(spec.actionId)?.tool).toBe(tool)
+          expect(app.toolRegistry.usableTool(tool)).toBe(tool)
+        }
+      })
+
+      it('names actions the app dispatches, lists and offers', () => {
+        const known = new Set<string>([
+          ...app.toolActions.TOOL_ACTIONS.map((a) => a.id),
+          ...paletteIds(app),
+          ...app.nativeMenu.ALL_NATIVE_COMMANDS,
+          ...menuActionIds(app),
+        ])
+        const palette = paletteIds(app)
+        for (const id of f.actions) {
+          expect(known.has(id), `action "${id}" is not a command anywhere in the app`).toBe(true)
+          expect(app.preview.actionAllowed(id), id).toBe(true)
+          expect(palette.has(id), `${id} is missing from the palette`).toBe(true)
+          // A command the native menu has (not every one does: Skin is palette-only) is in its set.
+          expect(app.nativeMenu.NATIVE_COMMANDS.has(id), `${id} is missing from the native command set`).toBe(
+            app.nativeMenu.ALL_NATIVE_COMMANDS.includes(id),
+          )
+        }
+      })
+
+      it('names dock chips the dock offers', () => {
+        const chips = dockIds(app)
+        for (const id of f.dockChips) expect(chips.has(id), `dock chip "${id}" is not in the dock`).toBe(true)
+      })
+
+      it('names API commands that exist in the generated client', () => {
+        const client = readFileSync(join(SRC, 'api/hewApi.gen.ts'), 'utf8')
+        for (const cmd of f.apiCommands) expect(client.includes(`'${cmd}'`), `${cmd} is not in hewApi.gen.ts`).toBe(true)
+      })
+    })
+  }
+
+  it('lets a saved key binding through for an action that is on', () => {
+    const base = app.defaults.defaultBindings({ isMac: false, isDesktop: false })
+    const id = FEATURES.flatMap((f) => f.actions)[0]
+    if (id === undefined) return
+    expect(app.keymap.buildKeymap(base, { [id]: ['Mod+Alt+9'] }, false).bindings[id]).toEqual(['Ctrl+Alt+9'])
+  })
+})
+
+describe('behavior ids in the code and the registry', () => {
+  const referenced = new Map<string, string[]>()
+  for (const file of sourceFiles(SRC)) {
+    const text = readFileSync(file, 'utf8')
+    for (const m of text.matchAll(/\bbehaviorEnabled\(\s*'([^']+)'\s*\)/g)) {
+      referenced.set(m[1], [...(referenced.get(m[1]) ?? []), file.slice(SRC.length + 1)])
+    }
+  }
+  const declared = FEATURES.flatMap((f) => f.behaviors)
+
+  it('every behavior the registry names is read somewhere (an entry cannot gate nothing)', () => {
+    expect(declared.filter((b) => !referenced.has(b))).toEqual([])
+  })
+  it('every behavior the code reads is in the registry (a typo would leave it open)', () => {
+    expect([...referenced.keys()].filter((b) => !declared.includes(b))).toEqual([])
+  })
+})
+
+describe('the wall at its entry points', () => {
+  const app = readFileSync(join(SRC, 'App.tsx'), 'utf8')
+  const viewport = readFileSync(join(SRC, 'viewport/Viewport.tsx'), 'utf8')
+
+  it("drops a withheld command at the top of App's menuActionRef dispatch", () => {
+    const at = app.indexOf('menuActionRef.current = (payload: string) => {')
+    expect(at).toBeGreaterThan(0)
+    expect(app.slice(at, at + 900)).toContain('if (!actionAllowed(payload)) return')
+  })
+  it("sends every write to App's activeTool through the wall", () => {
+    expect(app).toContain('usableTool(typeof next ===')
+    expect(app.match(/setActiveToolState\(/g)?.length).toBe(1)
+  })
+  it("resolves the Viewport's tool switch through the wall before anything else runs", () => {
+    const at = viewport.indexOf('switchToolRef.current = (requestedTool: string) => {')
+    expect(at).toBeGreaterThan(0)
+    expect(viewport.slice(at, at + 700)).toContain('const toolName = usableTool(requestedTool)')
+  })
+  it('does not read the build flag anywhere but the one tiny module', () => {
+    const offenders = sourceFiles(SRC)
+      .filter((f) => !f.endsWith('src/test/previewFlag.ts') && !f.endsWith('src/vite-env.d.ts'))
+      .filter((f) => /__HEW_PREVIEW__/.test(readFileSync(f, 'utf8')))
+      .map((f) => f.slice(SRC.length + 1))
+    expect(offenders).toEqual([])
+    expect(readFileSync(join(HERE, 'build.ts'), 'utf8').match(/__HEW_PREVIEW__/g)?.length).toBeGreaterThan(0)
+  })
+  it('has no run-time way to set the flag (no URL parameter, storage key or global setter)', () => {
+    const wallSources = readdirSync(HERE).filter((n) => /\.tsx?$/.test(n) && !n.endsWith('.test.ts'))
+    for (const name of wallSources) {
+      const text = readFileSync(join(HERE, name), 'utf8')
+      expect(text, name).not.toMatch(/location\.(search|hash)|URLSearchParams|window\.__|globalThis\.__/)
+    }
+    // The only storage the wall touches is the per-feature switch list.
+    const keys = wallSources.flatMap((n) => [...readFileSync(join(HERE, n), 'utf8').matchAll(/'(hew\.[A-Za-z.]+)'/g)].map((m) => m[1]))
+    expect([...new Set(keys)]).toEqual(['hew.settings.preview'])
+  })
+})
+
+describe('native menu chains in a production build (derived from the registry)', () => {
+  const main = readFileSync(join(ROOT, 'shells/tauri/src-tauri/src/main.rs'), 'utf8')
+  const gatedActions = new Set(FEATURES.flatMap((f) => f.actions))
+  // Smooth > Off is not in the registry but is not offered either (see actionOffered).
+  const offered = (action: string): boolean => !gatedActions.has(action) && action !== 'smooth-off'
+  const SUBMENUS = ['submenu:tools', 'submenu:draw', 'submenu:object', 'submenu:view']
+
+  for (const id of SUBMENUS) {
+    it(`${id}: no withheld command, no empty submenu, no stray separator`, () => {
+      const full = parseSubmenu(main, id)
+      const pruned = pruneChain(full, offered)
+      const inPruned = chainItems(pruned).map((i) => i.action)
+      for (const a of gatedActions) expect(inPruned, a).not.toContain(a)
+      expect(inPruned).not.toContain('smooth-off')
+      // Everything not withheld survives, in order.
+      expect(inPruned).toEqual(chainItems(full).map((i) => i.action).filter(offered))
+      const text = chainText(pruned)
+      expect(text).not.toMatch(/\[submenu:[a-z-]+: \]/)
+      expect(text).not.toMatch(/-, -/)
+      if (process.env.HEW_WALL_PRINT === '1') console.log(`${id}\n  on : ${chainText(full)}\n  off: ${text}`)
+    })
+  }
+
+  it('the Tools chain matches the web Tools menu once the wall is up (same commands, same order)', async () => {
+    const app = await loadApp(false)
+    const web = menuActionIdsOf(app.menuModel.TOOLS_MENU, app)
+    const native = chainItems(pruneChain(parseSubmenu(main, 'submenu:tools'), offered)).map((i) => i.action)
+    expect(native).toEqual(web)
+    vi.doUnmock('./build')
+    vi.resetModules()
+  })
+
+  it('every id the dispatch forwards for a withheld command is gone from the derived chains', () => {
+    const forwarded = [...dispatchMap(main)].filter(([, action]) => gatedActions.has(action)).map(([native]) => native)
+    expect(forwarded.length).toBeGreaterThan(0)
+    const all = SUBMENUS.flatMap((id) => chainItems(pruneChain(parseSubmenu(main, id), offered)).map((i) => i.native))
+    for (const native of forwarded) expect(all, native).not.toContain(native)
+  })
+})

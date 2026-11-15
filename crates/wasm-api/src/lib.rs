@@ -126,6 +126,15 @@ pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Whether this module's live API is a preview build's (`HEW_PREVIEW=1`
+/// when it was compiled; docs/dev/DEVELOPMENT.md "Preview features"). The
+/// app compares it with its own build flag at startup, so a production page
+/// can never run on a preview module, or the reverse, unnoticed.
+#[wasm_bindgen]
+pub fn preview_build() -> bool {
+    api::preview::PREVIEW_BUILD
+}
+
 // ------------------------------------------------------- diagnostic logging
 //
 // The wasm half of the log seam (see `log.rs`): install the kernel-side
@@ -27940,5 +27949,128 @@ mod records_itself_tests {
         let mixed = r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.transact","params":{"commands":[{"method":"hew.doc.import"},{"method":"hew.sketch.draw_rect"}]}}"#;
         assert!(!records_itself("hew.doc.transact", mixed));
         assert!(!records_itself("hew.sketch.draw_rect", "{}"));
+    }
+}
+
+/// The Preview wall on the app's live API (docs/dev/DEVELOPMENT.md
+/// "Preview features"): the socket bus a `hew-cli --live` or MCP client
+/// reaches, a plugin realm's connection, and the frames a plugin sends while
+/// serving a forward all dispatch through [`Scene::api_dispatch_outcome`],
+/// so a production build refuses every preview command there `preview_only`
+/// and a preview build runs it. Walks `preview-features.json`; names no
+/// feature. (`cfg(hew_preview)` is `crates/api`'s; this module asks it.)
+#[cfg(test)]
+mod preview_wall_tests {
+    use super::*;
+
+    fn reply(answer: Option<String>) -> serde_json::Value {
+        let tagged: serde_json::Value =
+            serde_json::from_str(&answer.expect("an answer")).expect("tagged JSON");
+        let frame = tagged["reply"]
+            .as_str()
+            .or_else(|| tagged["dry_run"].as_str())
+            .unwrap_or_else(|| panic!("a reply, got {tagged}"));
+        serde_json::from_str(frame).expect("a JSON-RPC frame")
+    }
+
+    fn frame(id: u32, method: &str, params: serde_json::Value) -> String {
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+            .to_string()
+    }
+
+    fn open(scene: &mut Scene, conn: u32) {
+        for (id, method, params) in [
+            (0, "hew.meta.hello", serde_json::json!({ "protocol": 1 })),
+            (1, "hew.doc.attach", serde_json::json!({})),
+        ] {
+            let r = reply(scene.api_dispatch(conn, &frame(id, method, params)));
+            assert!(r.get("error").is_none(), "{method}: {r}");
+        }
+    }
+
+    #[test]
+    fn the_module_reports_the_build_it_is() {
+        assert_eq!(preview_build(), api::preview::PREVIEW_BUILD);
+    }
+
+    #[test]
+    fn the_live_api_answers_the_wall_on_every_connection_kind() {
+        let preview = api::preview::PREVIEW_BUILD;
+        let mut scene = Scene::new();
+        let app = scene.api_connection_open();
+        open(&mut scene, app);
+        let plugin = scene
+            .api_plugin_connection_open(
+                &serde_json::json!({
+                    "ceiling": "app",
+                    "permissions": ["model.read", "model.write", "view"],
+                    "plugin": "com.example.wall",
+                    "app": null,
+                    "document": null
+                })
+                .to_string(),
+            )
+            .expect("a plugin connection");
+        open(&mut scene, plugin);
+
+        let caps = reply(scene.api_dispatch(
+            app,
+            &frame(2, "hew.meta.capabilities", serde_json::json!({})),
+        ));
+        let listed: Vec<String> = caps["result"]["commands"]
+            .as_array()
+            .expect("a command list")
+            .iter()
+            .filter_map(|c| c["name"].as_str().map(str::to_string))
+            .collect();
+
+        for feature in api::preview::features() {
+            for command in &feature.api_commands {
+                assert_eq!(listed.contains(command), preview, "{command} listed");
+                let answers = [
+                    ("app", reply(scene.api_dispatch(app, &frame(3, command, serde_json::json!({}))))),
+                    (
+                        "plugin",
+                        reply(scene.api_dispatch(plugin, &frame(4, command, serde_json::json!({})))),
+                    ),
+                    (
+                        "in forward",
+                        reply(scene.api_dispatch_in_forward(
+                            plugin,
+                            11,
+                            &frame(5, command, serde_json::json!({})),
+                        )),
+                    ),
+                    (
+                        "transaction",
+                        reply(scene.api_dispatch(
+                            app,
+                            &frame(
+                                6,
+                                "hew.doc.transact",
+                                serde_json::json!({ "commands": [{ "method": command, "params": {} }] }),
+                            ),
+                        )),
+                    ),
+                ];
+                for (path, r) in answers {
+                    let refusal = r.pointer("/error/data/refusal");
+                    if preview {
+                        assert_ne!(
+                            refusal,
+                            Some(&serde_json::json!("preview_only")),
+                            "{command} {path}: {r}"
+                        );
+                    } else {
+                        assert_eq!(
+                            refusal,
+                            Some(&serde_json::json!("preview_only")),
+                            "{command} {path}: {r}"
+                        );
+                        assert_eq!(r["error"]["data"]["detail"]["feature"], feature.id.as_str());
+                    }
+                }
+            }
+        }
     }
 }

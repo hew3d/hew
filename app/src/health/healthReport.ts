@@ -11,6 +11,7 @@
  */
 import { plural, t } from '@lingui/core/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
+import { behaviorEnabled } from '../preview'
 import { KIND_NAME, PANEL, ZERO_AREA, rowDetail, type KindKey, type OpenReason } from './healthCopy'
 
 export type VerdictKind =
@@ -113,7 +114,13 @@ export const EMPTY_REPORT: HealthReport = { rows: [], families: [], counts: EMPT
 /** Parse `Scene.health_report_json`. Handles arrive as decimal strings. */
 export function parseHealthReport(json: string): HealthReport {
   const raw = JSON.parse(json) as any
-  const rows: HealthRow[] = (raw.rows ?? []).map((r: any): HealthRow => ({
+  // Zero-area faces are a Preview feature's concern (the Preview wall,
+  // `health-remove-degenerate`): without it a closed object the kernel lists
+  // only for them is left out, and no row reports a count.
+  const degenerate = behaviorEnabled('health-remove-degenerate')
+  const rows: HealthRow[] = (raw.rows ?? [])
+    .filter((r: any) => degenerate || r.verdict?.kind !== 'solid')
+    .map((r: any): HealthRow => ({
     object: BigInt(r.object),
     name: r.name ?? null,
     definition: r.definition == null ? null : BigInt(r.definition),
@@ -139,7 +146,7 @@ export function parseHealthReport(json: string): HealthReport {
     branchingVertices: r.branching_vertices ?? 0,
     islands: r.islands ?? 1,
     faces: r.faces ?? 0,
-    degenerateFaces: r.degenerate_faces ?? 0,
+    degenerateFaces: degenerate ? (r.degenerate_faces ?? 0) : 0,
   }))
   const families: HealthFamily[] = (raw.families ?? []).map((f: any): HealthFamily => ({
     members: (f.members ?? []).map((m: string) => BigInt(m)),

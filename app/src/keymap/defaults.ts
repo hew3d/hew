@@ -23,6 +23,8 @@
  * and the palette show, so a bare key comes before its Cmd-combo.
  */
 
+import { actionOffered } from '../curveActions'
+
 export interface KeymapPlatform {
   isMac: boolean
   /** Running in the desktop shell (Tauri), not a browser tab. */
@@ -32,7 +34,12 @@ export interface KeymapPlatform {
 export type Bindings = Readonly<Record<string, readonly string[]>>
 
 // oxlint-disable lingui/no-unlocalized-strings -- command ids and chord strings are identifiers, not copy
-export function defaultBindings({ isMac, isDesktop }: KeymapPlatform): Bindings {
+export function defaultBindings(platform: KeymapPlatform): Bindings {
+  // The Preview wall: a command this build withholds has no default key.
+  return Object.fromEntries(Object.entries(allDefaultBindings(platform)).filter(([id]) => actionOffered(id)))
+}
+
+function allDefaultBindings({ isMac, isDesktop }: KeymapPlatform): Bindings {
   const macDesktop = isMac && isDesktop
   /** A second, macOS-desktop-only binding. */
   const mac = (chord: string): string[] => (macDesktop ? [chord] : [])

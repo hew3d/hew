@@ -18,6 +18,7 @@ vi.mock('./objectBounds', () => ({
 }))
 import { worldBoundsForSelection } from './objectBounds'
 import { taggedDispatch } from '../test/taggedDispatch'
+import { requiresPreview } from '../test/requiresPreview'
 
 const RIM = { role: 'outer', planar: true, closed: true, cappable: true, perimeter: 4, extent: 1, edges: 4 }
 
@@ -996,6 +997,7 @@ describe("ModelHealthPanel — reasons for items that can't be closed", () => {
 })
 
 describe('ModelHealthPanel — zero-area faces', () => {
+  beforeEach((ctx) => { requiresPreview(ctx, 'remove-degenerate-faces') })
   /** A closed object with sliver faces, an open one that also has some, and a clean open one. */
   const DEGENERATE_ROWS = [
     row({ object: '10', name: 'Statue', verdict: { kind: 'solid' }, rims: [], degenerate_faces: 3 }),

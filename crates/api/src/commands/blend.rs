@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use std::f64::consts::{FRAC_PI_2, PI};
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.solid.fillet" => fillet,
         "hew.solid.chamfer" => chamfer,

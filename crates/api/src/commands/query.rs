@@ -27,7 +27,7 @@ macro_rules! clocked {
 }
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     match name {
         "hew.meta.documents" => Some(documents),
         "hew.query.scene" => Some(clocked!(scene)),

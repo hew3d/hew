@@ -14,6 +14,7 @@
  * through `runToolAction`.
  */
 
+import { actionAllowed, toolAllowed } from '../preview'
 import { TOOL_REGISTRY, type ToolName } from './toolRegistry'
 import { setDeformMode } from './deformMode'
 import { setFilletProfile } from './filletSettings'
@@ -35,7 +36,7 @@ const OWN_PREPARE: Readonly<Record<string, () => void>> = {
 }
 
 /** Commands that open a tool under another name or in another mode. */
-const ALIAS_ACTIONS: readonly ToolAction[] = [
+const ALL_ALIAS_ACTIONS: readonly ToolAction[] = [
   { id: 'tool-chamfer', tool: 'Fillet', prepare: () => { setFilletProfile({ kind: 'chamfer' }) } },
   { id: 'tool-skin', tool: 'Loft' },
   { id: 'tool-deform-bend', tool: 'Deform', prepare: () => { setDeformMode('bend') } },
@@ -44,6 +45,13 @@ const ALIAS_ACTIONS: readonly ToolAction[] = [
 ]
 /* oxlint-enable lingui/no-unlocalized-strings */
 
+/** The aliases this build offers: the Preview wall withholds a command by its
+ *  own id or through the tool it opens. */
+const ALIAS_ACTIONS: readonly ToolAction[] = ALL_ALIAS_ACTIONS.filter(
+  (a) => actionAllowed(a.id) && toolAllowed(a.tool),
+)
+
+/** Every tool command this build dispatches. */
 export const TOOL_ACTIONS: readonly ToolAction[] = [
   ...TOOL_REGISTRY.map((spec): ToolAction => ({ id: spec.actionId, tool: spec.name, prepare: OWN_PREPARE[spec.actionId] })),
   ...ALIAS_ACTIONS,

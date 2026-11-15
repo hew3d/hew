@@ -705,7 +705,7 @@ export function ModelHealthPanel({
                 {ACTION.closeThis}
               </button>
             )}
-            {row.degenerateFaces > 0 && (
+            {degenerateRows([row]).length > 0 && (
               <button
                 type="button"
                 data-health-remove-degenerate

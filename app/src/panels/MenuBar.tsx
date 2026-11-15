@@ -24,7 +24,10 @@ import { msg } from '@lingui/core/macro'
 import { Trans, useLingui } from '@lingui/react/macro'
 import { toolLabel, toolSpec, type ToolName } from '../tools/toolRegistry'
 import { DRAW_MENU, TOOLS_MENU, type MenuEntry } from './toolsMenuModel'
-import { BAKE_SMOOTH_ACTION, SMOOTH_LEVEL_ACTIONS, SOFTEN_EDGES_ACTION } from '../curveActions'
+import { isPreviewAction, isPreviewTool, previewBuild } from '../preview'
+import { PreviewMark } from '../preview/PreviewMark'
+import { PREVIEW_TAG } from '../preview/copy'
+import { BAKE_SMOOTH_ACTION, SMOOTH_LEVEL_ACTIONS, SOFTEN_EDGES_ACTION, actionOffered } from '../curveActions'
 import { shortcutLabel } from '../keymap/keymap'
 import { useKeymap } from '../keymap/useKeymap'
 import type { StandardView } from '../viewport/Viewport'
@@ -362,6 +365,12 @@ const T = {
 }
 /* oxlint-enable lingui/no-unlocalized-strings */
 
+/** Object ▸ Smooth and Soften Edges… as this build offers them (the Preview
+ *  wall). Fixed when the app loads. */
+const smoothLevels = SMOOTH_LEVEL_ACTIONS.filter((a) => actionOffered(a.id))
+const bakeOffered = actionOffered(BAKE_SMOOTH_ACTION)
+const softenOffered = actionOffered(SOFTEN_EDGES_ACTION)
+
 /** The shortcut a menu item shows: the first key of its command in the
  * keymap (keymap/), `undefined` when it has none. */
 function sc(id: string): string | undefined {
@@ -569,14 +578,22 @@ function GearButton({ onClick, shortcutHint }: { onClick: () => void; shortcutHi
   )
 }
 
+/** The "Preview" tag on a Preview feature's menu item, drawn by CSS from this
+ *  attribute (`index.css`) so the item's text stays its name. Preview builds only. */
+function previewTagFor(preview: boolean): string | undefined {
+  return previewBuild && preview ? PREVIEW_TAG : undefined
+}
+
 interface MenuItemProps {
   label: string
   shortcut?: string
   disabled?: boolean
+  /** A Preview feature's item: carries the "Preview" tag (preview builds only). */
+  preview?: boolean
   onClick: () => void
 }
 
-function MenuItem({ label, shortcut, disabled = false, onClick }: MenuItemProps) {
+function MenuItem({ label, shortcut, disabled = false, preview = false, onClick }: MenuItemProps) {
   const [hovered, setHovered] = useState(false)
   return (
     <div
@@ -594,7 +611,7 @@ function MenuItem({ label, shortcut, disabled = false, onClick }: MenuItemProps)
       {/* Empty check gutter, same width as CheckMenuItem's — every row is
           inset so labels align down the menu's left edge, whether or not
           the row can carry a checkmark. */}
-      <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+      <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }} data-preview-tag={previewTagFor(preview)}>
         <span style={{ width: '12px' }} aria-hidden="true" />
         {label}
       </span>
@@ -690,10 +707,12 @@ interface CheckMenuItemProps {
    * (D3, section-plane-polish): toggling is a documented no-op then, so
    * disabling reads better than an always-clickable unchecked box. */
   disabled?: boolean
+  /** A Preview feature's item: carries the "Preview" tag (preview builds only). */
+  preview?: boolean
   onClick: () => void
 }
 
-function CheckMenuItem({ label, shortcut, checked, disabled = false, onClick }: CheckMenuItemProps) {
+function CheckMenuItem({ label, shortcut, checked, disabled = false, preview = false, onClick }: CheckMenuItemProps) {
   const [hovered, setHovered] = useState(false)
   return (
     <div
@@ -708,7 +727,7 @@ function CheckMenuItem({ label, shortcut, checked, disabled = false, onClick }: 
         if (!disabled) onClick()
       }}
     >
-      <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+      <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }} data-preview-tag={previewTagFor(preview)}>
         <span style={{ width: '12px', fontSize: '10px', color: 'var(--accent-base, #7aaaee)' }}>{checked ? '✓' : ''}</span>
         {label}
       </span>
@@ -885,6 +904,7 @@ export function MenuBar({
               label={toolLabel(entry.tool)}
               shortcut={entry.showKey === false ? undefined : keyFor(entry.tool)}
               checked={activeTool === entry.tool}
+              preview={isPreviewTool(entry.tool)}
               onClick={withClose(() => onSelectTool?.(entry.tool))}
             />
           )
@@ -893,6 +913,7 @@ export function MenuBar({
             <MenuItem
               key={entry.actionId}
               label={i18n._(entry.label)}
+              preview={isPreviewAction(entry.actionId)}
               onClick={withClose(() => onSelectTool?.(entry.selectName))}
             />
           )
@@ -902,6 +923,7 @@ export function MenuBar({
               key={entry.actionId}
               label={i18n._(entry.label)}
               checked={activeTool === 'Deform' && deformMode === entry.mode}
+              preview={isPreviewAction(entry.actionId)}
               onClick={withClose(() => onSelectDeformMode?.(entry.mode))}
             />
           )
@@ -1224,29 +1246,40 @@ export function MenuBar({
               onClick={withClose(() => onEditAction?.('edit-intersect'))}
             />
             <div style={SEPARATOR_STYLE} />
-            <SubMenu label={t`Smooth`}>
-              {SMOOTH_LEVEL_ACTIONS.map(({ id, level }) => (
-                <CheckMenuItem
-                  key={id}
-                  label={level === 0 ? t`Off` : String(level)}
-                  checked={editGates?.smoothLevel === level}
-                  disabled={!(editGates?.canSmooth ?? false)}
-                  onClick={withClose(() => onEditAction?.(id))}
-                />
-              ))}
-              <div style={SEPARATOR_STYLE} />
+            {/* The Preview wall (src/preview): Smooth and Soften Edges are
+                offered only while their features are. */}
+            {smoothLevels.length > 0 || bakeOffered ? (
+              <SubMenu label={t`Smooth`}>
+                {smoothLevels.map(({ id, level }) => (
+                  <CheckMenuItem
+                    key={id}
+                    label={level === 0 ? t`Off` : String(level)}
+                    checked={editGates?.smoothLevel === level}
+                    disabled={!(editGates?.canSmooth ?? false)}
+                    preview={isPreviewAction(id)}
+                    onClick={withClose(() => onEditAction?.(id))}
+                  />
+                ))}
+                {smoothLevels.length > 0 && bakeOffered ? <div style={SEPARATOR_STYLE} /> : null}
+                {bakeOffered ? (
+                  <MenuItem
+                    label={t`Bake Smooth`}
+                    disabled={!(editGates?.canSmooth ?? false)}
+                    preview={isPreviewAction(BAKE_SMOOTH_ACTION)}
+                    onClick={withClose(() => onEditAction?.(BAKE_SMOOTH_ACTION))}
+                  />
+                ) : null}
+              </SubMenu>
+            ) : null}
+            {softenOffered ? (
               <MenuItem
-                label={t`Bake Smooth`}
-                disabled={!(editGates?.canSmooth ?? false)}
-                onClick={withClose(() => onEditAction?.(BAKE_SMOOTH_ACTION))}
+                label={t`Soften Edges…`}
+                disabled={!(editGates?.canSoften ?? false)}
+                preview={isPreviewAction(SOFTEN_EDGES_ACTION)}
+                onClick={withClose(() => onEditAction?.(SOFTEN_EDGES_ACTION))}
               />
-            </SubMenu>
-            <MenuItem
-              label={t`Soften Edges…`}
-              disabled={!(editGates?.canSoften ?? false)}
-              onClick={withClose(() => onEditAction?.(SOFTEN_EDGES_ACTION))}
-            />
-            <div style={SEPARATOR_STYLE} />
+            ) : null}
+            {smoothLevels.length > 0 || bakeOffered || softenOffered ? <div style={SEPARATOR_STYLE} /> : null}
             <MenuItem
               label={MENU.makeSolid}
               shortcut={sc('make-solid')}
@@ -1711,6 +1744,9 @@ export function MenuBar({
           <Trans>BETA</Trans>
         </span>
       )}
+
+      {/* Preview build mark (preview builds only; src/preview). */}
+      {previewBuild && <PreviewMark />}
 
       {/* Settings gear on the trailing edge — the modern menu-bar convention
           for reaching Settings (macOS reaches it via the app menu). */}

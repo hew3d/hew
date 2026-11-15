@@ -13,8 +13,12 @@
 #
 #   verify.sh            fmt, clippy, cargo test, wasm (web), vitest, builds, tauri
 #   cargo-deny           advisories (incl. yanked crates) for both cargo trees
-#   replay gate          node-target wasm + golden state-hash fixtures
-#   web E2E (chromium)   Playwright — the blocking functional browser lane
+#   replay gate          node-target wasm + golden state-hash fixtures, on
+#                        the production and the preview module
+#   web E2E (chromium)   Playwright — the blocking functional browser lane,
+#                        in the preview build (flag on, the curve specs
+#                        included) and in the production-shape build (flag
+#                        off, the Preview wall spec included)
 #   relay contract       scripts/relay-contract.sh — the share-relay Worker's
 #                        unit suite plus the black-box conformance suite
 #                        against wrangler dev AND the hew-relay binary (CI's
@@ -39,7 +43,11 @@
 #
 # Env:
 #   SKIP_VERIFY=1   skip the verify.sh leg (e.g. re-running only the E2E lanes
-#                   after verify.sh already passed).
+#                   after verify.sh already passed). The production build's
+#                   wall tests still run (verify.sh wall), and nothing here
+#                   skips a production-build lane: the Preview wall's
+#                   production half has no knob (docs/dev/DEVELOPMENT.md
+#                   "Preview features").
 #
 set -euo pipefail
 
@@ -48,8 +56,17 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # Change to repo root
 cd "$(dirname "$0")/.."
 
+# Production steps run with the flag absent, whatever the caller's shell
+# says; preview steps set it explicitly (see scripts/verify.sh).
+unset HEW_PREVIEW
+
 if [ "${SKIP_VERIFY:-0}" = "1" ]; then
-  echo "=== SKIP_VERIFY=1 — skipping scripts/verify.sh ==="
+  echo "=== SKIP_VERIFY=1 — skipping scripts/verify.sh except its production wall tests ==="
+  scripts/verify.sh wall
+  # The E2E lanes below need both WASM flavors; build them if verify.sh's
+  # wasm lane has not.
+  [ -f target/wasm-flavors/production/web/preview-build ] || scripts/wasm-flavors.sh build production web --no-opt
+  [ -f target/wasm-flavors/preview/web/preview-build ] || scripts/wasm-flavors.sh build preview web --no-opt
 else
   echo "=== scripts/verify.sh (standard gate) ==="
   scripts/verify.sh
@@ -81,12 +98,17 @@ cargo deny --manifest-path shells/tauri/src-tauri/Cargo.toml --config deny.toml 
 
 # Replay gate — mirrors ci.yml. The runner consumes `--target nodejs`
 # (CommonJS) bindings, a build distinct from verify.sh's `--target web` app
-# build. NB: wasm-pack's --out-dir is relative to the crate dir.
-echo "=== build kernel for Node (replay runner) ==="
-wasm-pack build crates/wasm-api --target nodejs --out-dir ../../tools/replay-runner/pkg-node
-
-echo "=== replay gate (golden state-hash fixtures) ==="
-node tools/replay-runner/run.mjs
+# build, unoptimized as in CI (the replay checks state hashes, not size).
+# Both modules: a recording replays the same in either (the kernel is never
+# gated), except a recorded live-API frame of a preview command, which the
+# production module refuses.
+for flavor in production preview; do
+  echo "=== build kernel for Node (replay runner, $flavor) ==="
+  scripts/wasm-flavors.sh build "$flavor" nodejs --no-opt
+  scripts/wasm-flavors.sh use-node "$flavor"
+  echo "=== replay gate (golden state-hash fixtures, $flavor) ==="
+  node tools/replay-runner/run.mjs
+done
 
 # Web E2E smoke — the blocking chromium lane. Playwright starts its own vite
 # on HEW_E2E_PORT (default 4173, so it will not collide with a `pnpm dev`
@@ -111,17 +133,32 @@ echo "=== web E2E smoke (chromium) ==="
 # existed. A genuinely unrunnable case belongs behind a capability check that
 # FAILS when the capability is missing, or it belongs deleted — either way it
 # gets argued for here rather than added quietly.
-E2E_LOG="$(mktemp -t hew-e2e-XXXXXX)"
-trap 'rm -f "$E2E_LOG"' EXIT
-pnpm --dir app exec playwright test --project=chromium --forbid-only | tee "$E2E_LOG"
-if grep -qE '[0-9]+ skipped' "$E2E_LOG"; then
-  echo
-  echo "verify-full: FAILED — the chromium E2E run skipped tests:"
-  grep -E '[0-9]+ skipped' "$E2E_LOG"
-  echo "A skipped test reports green while testing nothing. Fix the test, or"
-  echo "state the case for the skip in scripts/verify-full.sh."
-  exit 1
-fi
+#
+# The Preview wall adds the one argued-for exception, in both builds: a spec
+# that drives a Preview feature skips in the production-shape run, and each
+# half of the wall spec skips in the other build. Those skips come only from
+# the app's registry-driven helpers (app/e2e/helpers/preview.ts), whose
+# reasons carry the "preview-wall:" mark; scripts/check-e2e-skips.mjs fails
+# any other skip, and fails the run if the wall spec passed nothing.
+#
+# Two runs, each against its own build and WASM flavor:
+#   preview      HEW_PREVIEW=1: the Vite dev server, flag on; the curve specs
+#   production   HEW_PREVIEW=0: `vite build` with the flag off, served as a
+#                release is (app/playwright.config.ts); the wall spec. This
+#                run has no skip knob.
+E2E_REPORT="$(mktemp -t hew-e2e-XXXXXX)"
+trap 'rm -f "$E2E_REPORT"' EXIT
+for build in preview production; do
+  echo "=== web E2E smoke (chromium, $build build) ==="
+  scripts/wasm-flavors.sh use "$build"
+  if [ "$build" = preview ]; then flag=1; else flag=0; fi
+  HEW_PREVIEW="$flag" PLAYWRIGHT_JSON_OUTPUT_FILE="$E2E_REPORT" \
+    pnpm --dir app exec playwright test --project=chromium --forbid-only --reporter=list,json
+  node scripts/check-e2e-skips.mjs "$E2E_REPORT" "$build" --wall
+done
+# Leave the slot as the preview module, the dev server's default, as
+# verify.sh does.
+scripts/wasm-flavors.sh use preview
 
 # Relay contract — mirrors ci.yml's `relay-contract` job exactly (same
 # script). Starts and stops its own local servers on the 187xx/1879x ports.

@@ -23,6 +23,7 @@
 import { i18n } from '@lingui/core'
 import { msg, t } from '@lingui/core/macro'
 import type { MessageDescriptor } from '@lingui/core'
+import { behaviorEnabled } from './preview'
 import { BLEND_ERRORS } from './kernelErrorCopy/blend'
 import { LOFT_ERRORS } from './kernelErrorCopy/loft'
 import { REVOLVE_ERRORS } from './kernelErrorCopy/revolve'
@@ -41,6 +42,9 @@ import { REMOVE_DEGENERATE_FACES_ERRORS } from './kernelErrorCopy/removeDegenera
 // so a translator sees and can reorder the complete message. The table is
 // built once at import, so it holds descriptors; `kernelErrorMessage`
 // resolves them against the active language at call time.
+
+/** `DegenerateInput` where "Remove degenerate faces" is not offered. */
+const DEGENERATE_INPUT_PLAIN: MessageDescriptor = msg`One of these objects has a face with no area, so these objects can't be combined.`
 
 /** The curve features' copy, one file per feature (`./kernelErrorCopy/`). */
 const CURVE_FEATURE_ERRORS: Record<string, MessageDescriptor> = {
@@ -574,6 +578,11 @@ export function parseKernelErrorCode(err: unknown): string | null {
  * test — still gets a plain sentence, with the code kept for Report Bug.
  */
 export function kernelErrorMessage(code: string, rawMsg: string): string {
+  // Without the Remove degenerate faces preview (the Preview wall) the
+  // boolean refusal cannot point at it.
+  if (code === 'DegenerateInput' && !behaviorEnabled('health-remove-degenerate')) {
+    return i18n._(DEGENERATE_INPUT_PLAIN)
+  }
   const described = DESCRIPTIONS[code]
   if (described !== undefined) return i18n._(described)
   return t`Hew couldn't complete that (${code}: ${rawMsg}). If this keeps happening, use Report Bug.`

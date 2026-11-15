@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, beforeEach } from 'vitest'
+import { requiresPreview } from '../test/requiresPreview'
 import {
   filterRows,
   groupRows,
@@ -246,6 +247,7 @@ describe('segmentBounds', () => {
 })
 
 describe('zero-area faces', () => {
+  beforeEach((ctx) => { requiresPreview(ctx, 'remove-degenerate-faces') })
   const statue = () => row({ object: '30', name: 'Statue', verdict: { kind: 'solid' }, rims: [], degenerate_faces: 3 })
 
   it('reads the count, and 0 when the field is missing', () => {

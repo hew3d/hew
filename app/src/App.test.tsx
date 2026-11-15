@@ -24,6 +24,7 @@ import { resetHealthReportCache } from './health/healthReport'
 import { BANNED_RE, readableText } from './health/bannedWords'
 import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react'
 import { describe, expect, it, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
+import { requiresPreview } from './test/requiresPreview'
 
 /**
  * Scope a query to the top menu bar. Tool/panel names (e.g. "Select",
@@ -378,9 +379,12 @@ describe('App — the bus view mirrors', () => {
   it('selection effect mirrors into the scene', async () => {
     vi.clearAllMocks()
     await renderAndLoad()
-    // Mount mirrors the empty selection and the active tool.
-    expect(mockScene.set_ui_selection).toHaveBeenLastCalledWith('[]')
-    expect(mockScene.note_tool_changed).toHaveBeenLastCalledWith('Select')
+    // Mount mirrors the empty selection and the active tool. The mirror
+    // effects run after the rail first paints, so wait for them.
+    await waitFor(() => {
+      expect(mockScene.set_ui_selection).toHaveBeenLastCalledWith('[]')
+      expect(mockScene.note_tool_changed).toHaveBeenLastCalledWith('Select')
+    })
     const props = (): {
       onSelectMany: (nodes: { kind: string; id: bigint }[], mode: string) => void
     } => {
@@ -4662,7 +4666,8 @@ describe('App — native Smooth check marks after a refused level', () => {
     nativeMenu.invoke.mockClear()
   })
 
-  it('re-pushes the menu state with the previous level checked when Smooth is refused', async () => {
+  it('re-pushes the menu state with the previous level checked when Smooth is refused', async (ctx) => {
+    requiresPreview(ctx, 'smooth')
     const m = mockScene as unknown as Record<string, unknown>
     const prior = { object_ids: m.object_ids, smooth_level: m.smooth_level, set_smooth_level: m.set_smooth_level }
     m.object_ids = vi.fn(() => BigUint64Array.from([1n]))

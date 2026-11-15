@@ -13,7 +13,7 @@ use kernel::{EntityRef, ObjectId};
 use serde_json::{Value, json};
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.doc.health" => health,
         "hew.solid.cap" => cap,

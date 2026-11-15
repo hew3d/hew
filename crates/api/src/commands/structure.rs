@@ -14,7 +14,7 @@ use kernel::{EntityRef, NodeId, Transform};
 use serde_json::Value;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.group.create" => group_create,
         "hew.group.explode" => group_explode,

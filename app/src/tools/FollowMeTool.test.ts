@@ -14,6 +14,7 @@ import type { Ray } from '../viewport/math'
 import { worldPerPixelPerspective } from '../viewport/math'
 import { followsViewPlane } from '../viewport/heldPointerReplay'
 import { clearPreview } from './transformPreview'
+import { behaviorEnabled } from '../preview'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
@@ -1081,7 +1082,9 @@ describe('FollowMeTool — solid-face PROFILES (design §3a)', () => {
     tool.onPointerDown(null, RAY) // path: face loop on object 30n
     ;(scene.pick_face as ReturnType<typeof vi.fn>).mockReturnValue(makeFacePick(40n, 41n))
     tool.onPointerMove(null, RAY) // hover a DIFFERENT object's face
-    expect(tool.statusHint()).toBe('Click this face to use it as the profile. Type 30deg to twist it or 40% to shrink its end.')
+    // The twist invitation is the Preview option's; the plain cue is not.
+    const plain = 'Click this face to use it as the profile.'
+    expect(tool.statusHint()).toBe(behaviorEnabled('follow-me-twist') ? `${plain} Type 30deg to twist it or 40% to shrink its end.` : plain)
   })
 
   it('discloses the group-birth gap while editing a group (no group-birth surface on this route)', () => {

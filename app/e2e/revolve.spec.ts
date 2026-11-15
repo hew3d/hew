@@ -2,6 +2,10 @@ import { test, expect } from '@playwright/test'
 import type { CameraParams } from './helpers/projectWorldToScreen'
 import { segmentsPerTurn } from '../src/tools/arcMath'
 import { aim, clickAt, moveTo, sweep, activateFromMenu, shot } from './helpers/shapes'
+import { requiresPreview } from './helpers/preview'
+
+// Drives a Preview feature: skipped in the production-shape run (e2e/helpers/preview.ts).
+requiresPreview('revolve')
 
 /**
  * Revolve — driven end to end with REAL pointer and keyboard input.

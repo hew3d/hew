@@ -19,7 +19,7 @@ use serde_json::Value;
 use std::num::NonZeroU32;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.entity.rename" => rename,
         "hew.entity.delete" => delete,

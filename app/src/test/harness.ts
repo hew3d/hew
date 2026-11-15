@@ -34,7 +34,15 @@ import type { ViewportApi } from '../viewport/Viewport'
 import type { IsolationTarget } from '../viewport/isolation'
 import { nodeKindToNumber, type NodeKind, type NodeRef } from '../panels/treeModel'
 import { curveRunsView, imprintView } from './drawingView'
+import * as kernelModule from '../wasm/pkg/wasm_api.js'
 import { setBusy } from '../api/busyState'
+import { paletteEntries } from '../palette/registry'
+import { rankEntries } from '../palette/search'
+import { RAIL_GROUPS, TOOL_REGISTRY, toolsInGroup } from '../tools/toolRegistry'
+import { TOOL_ACTIONS } from '../tools/toolActions'
+import { dockVerbsFor } from '../panels/dockLogic'
+import { NATIVE_COMMANDS } from '../keymap/nativeMenu'
+import { boundCommandIds, commandForChord } from '../keymap/keymap'
 import { applyPendingViewDirectives, directiveTargets, dispatchFrameNow, type LiveBridgeDeps } from '../api/liveBridge'
 import {
   ctxGround,
@@ -472,6 +480,30 @@ export interface HewTestHarness {
    *  (one row per connected shape: "Shape", numbered when several). */
   getOutlinerShapeLabels(object: string): string[]
   getLastError(): string | null
+  /**
+   * What this build offers on each Preview-wall surface (the effective lists,
+   * after the wall filtered them): the rail's tools, every tool, the tool
+   * command table, the palette's command ids, the dock's chip ids across every
+   * selection, the native menu's command set, and the commands that have a key.
+   */
+  wallSurfaces(): {
+    rail: string[]
+    tools: string[]
+    toolCommands: string[]
+    palette: string[]
+    dock: string[]
+    nativeCommands: string[]
+    bound: string[]
+  }
+  /**
+   * Which flavor the loaded WASM module is, from its own `preview_build()`:
+   * `'unknown'` for a module built before that export existed.
+   */
+  wasmFlavor(): 'production' | 'preview' | 'unknown'
+  /** The command ids the palette ranks for `query` (the same ranking the UI uses). */
+  paletteSearch(query: string): string[]
+  /** The command a key chord (e.g. `Shift+F`, `Ctrl+Alt+9`) runs right now, if any. */
+  commandForChord(chord: string): string | undefined
   /**
    * The document's current movable drawing axes (tool-parity §4): the flat
    * 12-float `Scene::axes()` buffer — `[ox,oy,oz, xx,xy,xz, yx,yy,yz,
@@ -2114,6 +2146,28 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         )
       }),
     getLastError: () => lastError,
+    wallSurfaces: () => {
+      const dock = new Set<string>()
+      const gates = { canGroup: true, canMakeComponent: true, canBoolean: true, canSaveToLibrary: true, canUnlink: true, canUnlinkAll: true }
+      for (const ctx of ['empty', 'object', 'group', 'instance', 'multi', 'sketch'] as const) {
+        for (const g of [undefined, gates, { ...gates, canUnlink: false }]) for (const v of dockVerbsFor(ctx, g)) dock.add(v.id)
+      }
+      return {
+        rail: RAIL_GROUPS.flatMap((g) => toolsInGroup(g).map((t) => t.name as string)),
+        tools: TOOL_REGISTRY.map((t) => t.name as string),
+        toolCommands: TOOL_ACTIONS.map((a) => a.id),
+        palette: paletteEntries().map((e) => e.id),
+        dock: [...dock],
+        nativeCommands: [...NATIVE_COMMANDS],
+        bound: boundCommandIds(),
+      }
+    },
+    wasmFlavor: () => {
+      const flag = (kernelModule as { preview_build?: () => boolean }).preview_build
+      return flag === undefined ? 'unknown' : flag() ? 'preview' : 'production'
+    },
+    paletteSearch: (query) => rankEntries(query, paletteEntries(), []).map((e) => e.id),
+    commandForChord: (chord) => commandForChord(chord),
     getDrawingAxes: () => query((s) => Array.from(s.axes())),
 
     getAnnotationIds: () => query((s) => Array.from(s.annotation_ids()).map(String)),

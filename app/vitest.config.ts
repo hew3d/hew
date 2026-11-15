@@ -33,7 +33,7 @@ export default defineConfig({
           environmentOptions: { jsdom: { url: 'http://localhost/' } },
           // jest-dom matchers + post-test React unmount. Harmless for the
           // node suites.
-          setupFiles: ['src/test/setup.ts'],
+          setupFiles: ['src/test/previewFlag.ts', 'src/test/setup.ts'],
         },
       },
       {
@@ -47,7 +47,7 @@ export default defineConfig({
           // timed out otherwise-passing tests.
           testTimeout: 20_000,
           environmentOptions: { jsdom: { url: 'http://localhost/' } },
-          setupFiles: ['src/test/setup.ts'],
+          setupFiles: ['src/test/previewFlag.ts', 'src/test/setup.ts'],
         },
       },
     ],

@@ -211,7 +211,9 @@ import { SentReportsDialog } from './panels/SentReportsDialog'
 import { FollowNoticeBar, useFollowedReports } from './panels/FollowNoticeBar'
 import { getFollowHost, totalUnread } from './io/followHost'
 import { startWebLaunchCheck } from './io/webFollowHost'
-import { TOOLS, isToolAction, toolLabel, type ToolName } from './tools/toolRegistry'
+import { actionAllowed, behaviorEnabled, previewBuild } from './preview'
+import { PREVIEW_TAG } from './preview/copy'
+import { TOOLS, isToolAction, toolLabel, usableTool, type ToolName } from './tools/toolRegistry'
 
 /** Autosave tick interval (ms). Exported as a test seam (App.autosave.test.tsx
  *  drives fake timers by this exact value rather than hardcoding it). */
@@ -605,7 +607,13 @@ export default function App() {
   const [watertightMap, setWatertightMap] = useState<Map<bigint, boolean>>(new Map())
   /** Tool driven from toolbar clicks */
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifier
-  const [activeTool, setActiveTool] = useState<ToolName>('Select')
+  const [activeTool, setActiveToolState] = useState<ToolName>('Select')
+  /** Every write to `activeTool` goes through the Preview wall: a tool this
+   * build withholds becomes Select (src/preview), so no path (a library
+   * action, a stale id, a restored state) can arm it. */
+  const setActiveTool = useCallback((next: ToolName | ((prev: ToolName) => ToolName)) => {
+    setActiveToolState((prev) => usableTool(typeof next === 'function' ? next(prev) : next))
+  }, [])
   /** Which Deform mode (Twist, Bend, Taper, Bend to Path) the next or the running Deform tool is in. */
   const deformMode = useSyncExternalStore(subscribeDeformMode, getDeformMode)
   /** Bumped on every EXPLICIT camera-tool selection (menu/native
@@ -1461,8 +1469,12 @@ export default function App() {
     const title = deriveTitle(docSession)
     document.title = title
     if (isTauri) {
+      // A preview build says so in the native window title too (English, like
+      // the rest of the Preview surfaces): the one cue a native title bar can
+      // carry. The web tab keeps the plain title; its menu bar has the mark.
+      const windowTitle = previewBuild ? `${title} · ${PREVIEW_TAG}` : title
       import('@tauri-apps/api/core').then(({ invoke }) => {
-        invoke('set_window_title', { title }).catch(() => { /* ignore */ })
+        invoke('set_window_title', { title: windowTitle }).catch(() => { /* ignore */ })
       }).catch(() => { /* ignore */ })
     }
   }, [docSession, activeI18n.locale])
@@ -5593,7 +5605,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIds, filletSettings.profile, docRev])
   const profileSections = useProfileSections({
-    active: activeTool === 'Fillet',
+    active: activeTool === 'Fillet' && behaviorEnabled('fillet-profiles'),
     canSave: profileCanSave,
     onSave: openSaveProfile,
   })
@@ -5709,7 +5721,7 @@ export default function App() {
 
   const handleExportFormat = useCallback((format: ExportFormat, stlSegmentsPerTurn: number, svg?: SvgExportOptions, skpCompat = false, cages?: boolean) => {
     setExportDialogOpen(false)
-    exportCagesRef.current = cages === true ? true : undefined
+    exportCagesRef.current = cages === true && behaviorEnabled('export-cages') ? true : undefined
     if (isSkpExportFormat(format)) {
       void exportSkp(format, skpCompat)
     } else if (format === 'glb') {
@@ -6250,6 +6262,10 @@ export default function App() {
 
   const menuActionRef = useRef<(payload: string) => void>(() => {})
   menuActionRef.current = (payload: string) => {
+    // The Preview wall (src/preview): a command this build withholds is
+    // dropped here, wherever it came from (the native menu, a keymap chord,
+    // the palette, the dock, a saved binding).
+    if (!actionAllowed(payload)) return
     // A plugin command holds the document (docs/agents/PLUGINS.md
     // "Compounds"): only window focus, settings, updates, and help run.
     // The palette's actions come through here too.
@@ -6592,7 +6608,9 @@ export default function App() {
         const scene = sceneRef.current
         void (async () => {
           let asProfile: Uint8Array | null = null
-          if (scene !== null) {
+          // Profiles belong to the Fillet preview (the Preview wall): without
+          // it a drawn chain saves as an ordinary model.
+          if (scene !== null && behaviorEnabled('fillet-profiles')) {
             try {
               const bytes = scene.extract_document_item(JSON.stringify({ category: 'profile' }))
               if ((await readItemSummary(bytes)).profile_chain_only) asProfile = bytes
@@ -8372,7 +8390,7 @@ export default function App() {
                 toolName={toolName}
                 value={measurement}
                 label={
-                  toolName === 'Fillet'
+                  toolName === 'Fillet' && behaviorEnabled('fillet-profiles')
                     ? (filletGripLabel ?? profileSizeLabel(filletSettings.profile))
                     : toolName === 'Arc'
                       ? (toolStageLabel ?? undefined)

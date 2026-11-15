@@ -48,7 +48,7 @@ use kernel::{
 use serde_json::{Value, json};
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.solid.extrude" => extrude,
         "hew.solid.push_pull" => push_pull,

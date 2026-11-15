@@ -73,7 +73,7 @@ use kernel::{
 use serde_json::Value;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.sketch.draw_line" => draw_line,
         "hew.sketch.draw_rect" => draw_rect,

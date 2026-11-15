@@ -28,6 +28,8 @@ entries assume (transactions, `$ref`, face locators, refusals).
 
 Copy nodes along a sketch curve or face loop, with an optional scale ramp.
 
+> **Preview.** Part of the preview feature Array along Path (`path-array`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
 **Params schema:**
 
 ```json
@@ -4069,6 +4071,8 @@ Close an open document window (the attached one, or the named `document`). Refus
 
 Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp ("skp", the 2021-and-later container; "skp3" to "skp8", "skp2013" to "skp2020") — bytes base64, or a path on hosts with filesystem access.
 
+> **Preview parameters:** `cages`, part of the preview feature Smooth (`smooth`). A production build leaves them out of the params schema and refuses them with `preview_only`.
+
 **Params schema:**
 
 ```json
@@ -4363,7 +4367,7 @@ Model health: every open object (world or component member) with its verdict, op
             ]
           },
           "degenerate_faces": {
-            "description": "zero-width or sub-tolerance faces hew.solid.remove_degenerate_faces would remove; a solid is listed only when it has some",
+            "description": "zero-width or sub-tolerance faces on the solid; a solid is listed only when it has some",
             "type": "integer"
           },
           "faces": {
@@ -6809,6 +6813,8 @@ Undo the top history entry (optionally guarded by expected_label).
 
 One library item's full metadata, manifest summary, and document attributes.
 
+> **Preview values:** `"profile"` of `category`, part of the preview feature Fillet and Chamfer (`fillet`). A production build leaves them out of the schemas, refuses them with `preview_only`, and reports no item that carries one.
+
 **Params schema:**
 
 ```json
@@ -7030,6 +7036,8 @@ Insert a library item into the attached document, wired for idempotent re-insert
 
 List items in the Hew Library, optionally filtered by category, collection, or a text query.
 
+> **Preview values:** `"profile"` of `category`, part of the preview feature Fillet and Chamfer (`fillet`). A production build leaves them out of the schemas, refuses them with `preview_only`, and reports no item that carries one.
+
 **Params schema:**
 
 ```json
@@ -7198,6 +7206,10 @@ Delete a library item.
 
 Save a selection, one material, or the whole document to the library. Records no undo entry (§6.4).
 
+> **Preview parameters:** `profile_chain`, part of the preview feature Fillet and Chamfer (`fillet`). A production build leaves them out of the params schema and refuses them with `preview_only`.
+
+> **Preview values:** `"profile"` of `category`, part of the preview feature Fillet and Chamfer (`fillet`). A production build leaves them out of the schemas, refuses them with `preview_only`, and reports no item that carries one.
+
 **Params schema:**
 
 ```json
@@ -7323,6 +7335,8 @@ Save a selection, one material, or the whole document to the library. Records no
 - **Permission:** library
 
 Edit a library item's name, keywords, or collection in place.
+
+> **Preview values:** `"profile"` of `category`, part of the preview feature Fillet and Chamfer (`fillet`). A production build leaves them out of the schemas, refuses them with `preview_only`, and reports no item that carries one.
 
 **Params schema:**
 
@@ -8196,6 +8210,8 @@ Open the connection: negotiate protocol and encoding, learn the granted profile 
 
 Set or clear the crease on edges, which keeps them sharp under Smooth.
 
+> **Preview.** Part of the preview feature Smooth (`smooth`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
 **Params schema:**
 
 ```json
@@ -8267,6 +8283,8 @@ Set or clear the crease on edges, which keeps them sharp under Smooth.
 - **Permission:** model.write
 
 Set an object's Smooth level (0 = Off, 1–3): its faces become the cage of a subdivision surface.
+
+> **Preview.** Part of the preview feature Smooth (`smooth`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
 
 **Params schema:**
 
@@ -13522,6 +13540,8 @@ List a plane's drawing as units: islands of edges (with where each is stored) an
 
 Replace a smoothed object's cage with its Smooth surface and clear the level.
 
+> **Preview.** Part of the preview feature Smooth (`smooth`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
 **Params schema:**
 
 ```json
@@ -13654,6 +13674,8 @@ Close an open object's flat openings with faces; an object closed all round beco
 - **Permission:** model.write
 
 Chamfer the edges of a solid, or chamfer a 2D corner, as the Fillet tool's Chamfer mode does.
+
+> **Preview.** Part of the preview feature Fillet and Chamfer (`fillet`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
 
 **Params schema:**
 
@@ -13810,6 +13832,8 @@ Chamfer the edges of a solid, or chamfer a 2D corner, as the Fillet tool's Chamf
 - **Permission:** model.write
 
 Twist, bend or taper a solid along its bounding box, or bend it along a path, as the Deform tool does.
+
+> **Preview.** Part of the preview feature Deform (`deform`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
 
 **Params schema:**
 
@@ -14140,6 +14164,8 @@ Extrude a region into a new Object, consuming the profile.
 
 Round, cove, bullnose or profile the edges of a solid, or round a 2D corner, as the Fillet tool does.
 
+> **Preview.** Part of the preview feature Fillet and Chamfer (`fillet`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
 **Params schema:**
 
 ```json
@@ -14317,6 +14343,8 @@ Round, cove, bullnose or profile the edges of a solid, or round a 2D corner, as 
 - **Permission:** model.write
 
 Sweep a profile along an edge-chain path, as the tool does.
+
+> **Preview parameters:** `twist`, `end_scale`, `stations`, part of the preview feature Follow Me twist and scale (`follow-me-twist`). A production build leaves them out of the params schema and refuses them with `preview_only`.
 
 **Params schema:**
 
@@ -14795,6 +14823,8 @@ Boolean intersection of two or more solids: the material in all of them.
 
 Skin a new solid through closed shapes in order, optionally to an apex and along rails, as the Loft tool does.
 
+> **Preview.** Part of the preview feature Loft (`loft`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
 **Params schema:**
 
 ```json
@@ -15219,6 +15249,8 @@ Kept for compatibility: slide a drawn shape (sub-face or chord island) in its pl
 
 Drape a sketch's shape onto an object's faces, then engrave or emboss it.
 
+> **Preview.** Part of the preview feature Project (`project`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
 **Params schema:**
 
 ```json
@@ -15518,6 +15550,8 @@ Remove a fillet or chamfer, restoring the sharp edges, by naming any face of it.
 
 Remove an object's zero-width and sub-tolerance faces, keeping it closed.
 
+> **Preview.** Part of the preview feature Remove degenerate faces (`remove-degenerate-faces`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
 **Params schema:**
 
 ```json
@@ -15676,6 +15710,8 @@ Resize a fillet or chamfer (or switch it between round and chamfer) by naming an
 - **Permission:** model.write
 
 Turn a profile about an axis in its plane into a solid, as the Revolve tool does.
+
+> **Preview.** Part of the preview feature Revolve (`revolve`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
 
 **Params schema:**
 
@@ -15950,6 +15986,8 @@ Kept for compatibility: uniformly scale a drawn shape about an anchor in its pla
 
 Hollow a solid to a wall of one thickness, leaving chosen faces open.
 
+> **Preview.** Part of the preview feature Shell (`shell`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
 **Params schema:**
 
 ```json
@@ -16141,6 +16179,8 @@ Slice a solid by a plane into two solids; the object may be a path to a definiti
 - **Permission:** model.write
 
 Soften the edges of an object that bend less than an angle, so faceted walls read as smooth.
+
+> **Preview.** Part of the preview feature Soften Edges (`soften`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
 
 **Params schema:**
 

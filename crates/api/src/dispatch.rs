@@ -418,6 +418,18 @@ impl Connection {
         if request.jsonrpc != "2.0" {
             return Response::err(id, codes::INVALID_PARAMS, "jsonrpc must be \"2.0\"").into();
         }
+        // The Preview wall (crate::preview): a production build's registry
+        // does not hold a preview command, and whatever registry this is,
+        // the name refuses typed here, before anything else is looked at.
+        if let Err(refusal) = crate::preview::command_allowed(&request.method) {
+            return Response::err_with(
+                id,
+                codes::REFUSED,
+                "refused",
+                refusal.into_data(0, &request.method),
+            )
+            .into();
+        }
         let Some(cmd) = registry.get(&request.method) else {
             return Response::err(id, codes::METHOD_NOT_FOUND, "unknown method").into();
         };
@@ -932,17 +944,16 @@ impl Connection {
         name: &str,
         params: &serde_json::Value,
     ) -> Response {
-        let Some(handler) = commands::handler(name) else {
-            return Response::err_with(
-                id,
-                codes::REFUSED,
-                "refused",
-                crate::refusal::Refusal::api(
-                    "unimplemented",
-                    &format!("{name} is declared but not implemented yet in this build."),
-                )
-                .into_data(0, name),
-            );
+        let handler = match commands::resolve(name, params) {
+            Ok(handler) => handler,
+            Err(refusal) => {
+                return Response::err_with(
+                    id,
+                    codes::REFUSED,
+                    "refused",
+                    refusal.into_data(0, name),
+                );
+            }
         };
         let mut face_tokens = FaceTokens::new();
         let mut ctx = Ctx {
@@ -1110,6 +1121,10 @@ impl Connection {
     fn capabilities(&self, registry: &Registry, id: Option<RequestId>) -> Response {
         let commands: Vec<serde_json::Value> = registry
             .commands()
+            // A production build's registry holds no preview command; this
+            // keeps one out even of a host that dispatches through the
+            // whole inventory (crate::preview).
+            .filter(|c| crate::preview::command_allowed(&c.name).is_ok())
             .filter(|c| self.grant.grants(c))
             .map(|c| {
                 let mut entry = serde_json::json!({

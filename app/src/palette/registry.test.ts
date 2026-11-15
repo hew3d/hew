@@ -8,6 +8,8 @@ vi.mock('../io/fileHost', async (orig) => ({ ...(await orig<typeof import('../io
 
 import { paletteEntries, paletteShortcut, PALETTE_EXCLUDED_ACTION_IDS } from './registry'
 import { TOOLS } from '../tools/toolRegistry'
+import { requiresPreview } from '../test/requiresPreview'
+import { actionOffered } from '../curveActions'
 
 describe('paletteEntries', () => {
   const entries = paletteEntries()
@@ -22,7 +24,7 @@ describe('paletteEntries', () => {
     // Deform is one tool with four palette entries, one per mode; Loft also
     // answers to Skin; Chamfer is the Fillet tool's second entry.
     const expected = TOOLS.flatMap((t) => (t === 'Deform' ? ['Twist', 'Bend', 'Taper', 'Bend to Path'] : t === 'Loft' ? ['Loft', 'Skin'] : [t]))
-    expect(toolLabels.sort()).toEqual([...expected, 'Chamfer'].sort())
+    expect(toolLabels.sort()).toEqual([...expected, ...(actionOffered('tool-chamfer') ? ['Chamfer'] : [])].sort())
   })
 
   it('every entry has a non-empty label and description', () => {
@@ -56,24 +58,28 @@ describe('paletteEntries', () => {
 })
 
 describe('palette search words', () => {
-  it("Fillet answers to SketchUp's RoundCorner words", () => {
+  it("Fillet answers to SketchUp's RoundCorner words", (ctx) => {
+    requiresPreview(ctx, 'fillet', 'loft', 'revolve', 'deform', 'path-array', 'shell', 'project', 'smooth', 'soften')
     const fillet = paletteEntries().find((e) => e.id === 'tool-fillet')
     expect(fillet?.synonyms).toEqual(expect.arrayContaining(['round corner', 'roundcorner', 'fredocorner']))
   })
 
-  it("every Deform mode answers to FredoScale's name", () => {
+  it("every Deform mode answers to FredoScale's name", (ctx) => {
+    requiresPreview(ctx, 'deform')
     for (const id of ['tool-deform-twist', 'tool-deform-bend', 'tool-deform-taper']) {
       expect(paletteEntries().find((e) => e.id === id)?.synonyms).toContain('fredoscale')
     }
   })
 
-  it('Soften Edges… is gated on a directly selected solid, the Smooth levels and Bake on any selection', () => {
+  it('Soften Edges… is gated on a directly selected solid, the Smooth levels and Bake on any selection', (ctx) => {
+    requiresPreview(ctx, 'smooth', 'soften')
     const gate = (id: string) => paletteEntries().find((e) => e.id === id)?.gate
     expect(gate('soften-edges')).toBe('canSoften')
     for (const id of ['smooth-off', 'smooth-1', 'smooth-2', 'smooth-3', 'bake-smooth']) expect(gate(id)).toBe('selection')
   })
 
-  it('every Object-menu Smooth action is in the palette (Smooth levels, Bake, Soften Edges)', () => {
+  it('every Object-menu Smooth action is in the palette (Smooth levels, Bake, Soften Edges)', (ctx) => {
+    requiresPreview(ctx, 'smooth', 'soften')
     const ids = paletteEntries().map((e) => e.id)
     expect(ids).toEqual(expect.arrayContaining(['smooth-off', 'smooth-1', 'smooth-2', 'smooth-3', 'bake-smooth', 'soften-edges']))
   })
@@ -115,8 +121,9 @@ describe('palette completeness against the menuActionRef switch', () => {
   })
 
   it('every dispatchable action is in the palette or explicitly excused', () => {
+    // An action the Preview wall withholds is not in a production palette.
     const missing = [...switchCaseIds].filter(
-      (id) => !registryIds.has(id) && !excusedIds.has(id),
+      (id) => actionOffered(id) && !registryIds.has(id) && !excusedIds.has(id),
     )
     expect(missing, 'register these ids in palette/registry.ts (or excuse them in PALETTE_EXCLUDED_ACTION_IDS with a reason)').toEqual([])
   })

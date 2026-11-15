@@ -29,6 +29,7 @@ import { NATIVE_MENU_LABELS } from './i18n/nativeMenu'
 import { PSEUDO_LOCALE, SHIPPED_LOCALES } from './i18n/locales'
 import { NATIVE_ALIASES, NATIVE_COMMANDS, JS_FIRST, PINNED_NATIVE_CHORDS } from './keymap/nativeMenu'
 import { chordToAccelerator, parseChord } from './keymap/chord'
+import { actionOffered } from './curveActions'
 
 const MAIN_RS = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -786,10 +787,10 @@ describe('native menu ↔ keymap', () => {
     expect(arms.size).toBeGreaterThan(80)
   })
 
-  it('NATIVE_COMMANDS is exactly the set of commands the native menu dispatches', () => {
+  it('NATIVE_COMMANDS is exactly the set of commands the native menu dispatches, less the Preview wall\'s', () => {
     // The keymap leaves a chord to the native menu only for these commands;
     // a drift either way would run a chord twice or not at all on macOS.
-    expect([...NATIVE_COMMANDS].sort()).toEqual([...arms].sort())
+    expect([...NATIVE_COMMANDS].sort()).toEqual([...arms].filter(actionOffered).sort())
   })
 
   it('every native alias names a command the menu dispatches', () => {

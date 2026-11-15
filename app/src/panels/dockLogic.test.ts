@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest'
 import { deriveDockContext, dockVerbsFor, dockChipLabel, isDockVerbEnabled } from './dockLogic'
 import type { NodeRef } from './treeModel'
+import { chipAllowed } from '../preview'
+
+/** What the Preview wall leaves of a list of dock verb ids. */
+const offered = (ids: string[]) => ids.filter((id) => chipAllowed(id))
 
 const obj = (id: bigint): NodeRef => ({ kind: 'object', id })
 const group = (id: bigint): NodeRef => ({ kind: 'group', id })
@@ -75,7 +79,7 @@ describe('dockVerbsFor', () => {
   // Position Texture leaves it (Paint is the way to it) to cap the row at eight.
   it('object: primary Push/Pull, then Fillet, Move, Paint, Shell, Make Component, Save to Library, Erase', () => {
     const verbs = dockVerbsFor('object')
-    expect(verbs.map((v) => v.id)).toEqual(['tool-pushpull', 'tool-fillet', 'tool-move', 'tool-paint', 'tool-shell', 'edit-make-component', 'save-to-library', 'edit-delete'])
+    expect(verbs.map((v) => v.id)).toEqual(offered(['tool-pushpull', 'tool-fillet', 'tool-move', 'tool-paint', 'tool-shell', 'edit-make-component', 'save-to-library', 'edit-delete']))
     expect(verbs.map((v) => v.id)).not.toContain('tool-position-texture')
   })
 
@@ -115,7 +119,7 @@ describe('dockVerbsFor', () => {
     // Object inside an editing context (canMakeComponent is top-level-only).
     expect(
       dockVerbsFor('object', { canGroup: false, canMakeComponent: false }).map((v) => v.id),
-    ).toEqual(['tool-pushpull', 'tool-fillet', 'tool-move', 'tool-paint', 'tool-shell', 'edit-delete'])
+    ).toEqual(offered(['tool-pushpull', 'tool-fillet', 'tool-move', 'tool-paint', 'tool-shell', 'edit-delete']))
     expect(
       dockVerbsFor('group', { canGroup: false, canMakeComponent: false }).map((v) => v.id),
     ).toEqual(['enter-context', 'tool-move', 'tool-scale', 'ungroup', 'edit-delete'])
@@ -148,9 +152,9 @@ describe('dockVerbsFor', () => {
 
   it('sketch: primary Push/Pull, then Revolve, Loft, Follow Me, Move, Rotate, Erase', () => {
     const verbs = dockVerbsFor('sketch')
-    expect(verbs.map((v) => v.id)).toEqual([
+    expect(verbs.map((v) => v.id)).toEqual(offered([
       'tool-pushpull', 'tool-revolve', 'tool-loft', 'tool-follow-me', 'tool-move', 'tool-rotate', 'edit-delete',
-    ])
+    ]))
     expect(verbs.map((v) => v.id)).not.toContain('tool-scale')
   })
 
@@ -167,8 +171,8 @@ describe('dockVerbsFor', () => {
     expect(objectIds.has('edit-delete')).toBe(true)
     expect(groupIds.has('tool-scale')).toBe(true)
     // The True Curves verbs use the tool-menu ids the native menu dispatches.
-    for (const id of ['tool-revolve', 'tool-loft', 'tool-follow-me']) expect(sketchIds.has(id)).toBe(true)
-    for (const id of ['tool-fillet', 'tool-shell']) expect(objectIds.has(id)).toBe(true)
+    for (const id of offered(['tool-revolve', 'tool-loft', 'tool-follow-me'])) expect(sketchIds.has(id)).toBe(true)
+    for (const id of offered(['tool-fillet', 'tool-shell'])) expect(objectIds.has(id)).toBe(true)
   })
 
   it('every context stays within the spec cap (originally "4-6 items max, curated"; the Library effort raised the ungated ceiling to 7, and the True Curves organization gives the Object row eight — the other rows stay at seven or fewer)', () => {
@@ -184,7 +188,7 @@ describe('isDockVerbEnabled', () => {
     // Each of the three starts by clicking a shape, so a click-through works;
     // Follow Me needs a path first, and Move/Rotate/Erase need a selection.
     const enabled = dockVerbsFor('sketch').filter((v) => isDockVerbEnabled(v, true))
-    expect(enabled.map((v) => v.id)).toEqual(['tool-pushpull', 'tool-revolve', 'tool-loft'])
+    expect(enabled.map((v) => v.id)).toEqual(offered(['tool-pushpull', 'tool-revolve', 'tool-loft']))
   })
 
   it('with a real selection every verb is enabled, in every context', () => {

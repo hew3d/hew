@@ -1,0 +1,125 @@
+{
+  "features": [
+    {
+      "id": "fillet",
+      "name": "Fillet and Chamfer",
+      "state": "Rounds and chamfers straight, arc and swept edges. Some corners and large sizes are refused.",
+      "owner": "curves",
+      "tools": ["Fillet"],
+      "actions": ["tool-fillet", "tool-chamfer"],
+      "dockChips": ["tool-fillet"],
+      "apiCommands": ["hew.solid.fillet", "hew.solid.chamfer"],
+      "behaviors": ["fillet-profiles"]
+    },
+    {
+      "id": "loft",
+      "name": "Loft",
+      "state": "Builds a solid through two or more profiles, with optional rails.",
+      "owner": "curves",
+      "tools": ["Loft"],
+      "actions": ["tool-loft", "tool-skin"],
+      "dockChips": ["tool-loft"],
+      "apiCommands": ["hew.solid.loft"],
+      "behaviors": []
+    },
+    {
+      "id": "revolve",
+      "name": "Revolve",
+      "state": "Spins a profile around an axis into a solid.",
+      "owner": "curves",
+      "tools": ["Revolve"],
+      "actions": ["tool-revolve"],
+      "dockChips": ["tool-revolve"],
+      "apiCommands": ["hew.solid.revolve"],
+      "behaviors": []
+    },
+    {
+      "id": "deform",
+      "name": "Deform",
+      "state": "Twists, bends and tapers a solid.",
+      "owner": "curves",
+      "tools": ["Deform"],
+      "actions": ["tool-deform-twist", "tool-deform-bend", "tool-deform-taper", "tool-deform-bend-path"],
+      "dockChips": [],
+      "apiCommands": ["hew.solid.deform"],
+      "behaviors": []
+    },
+    {
+      "id": "path-array",
+      "name": "Array along Path",
+      "state": "Copies a shape along a path.",
+      "owner": "curves",
+      "tools": ["Array along Path"],
+      "actions": ["tool-path-array"],
+      "dockChips": [],
+      "apiCommands": ["hew.array.path"],
+      "behaviors": []
+    },
+    {
+      "id": "shell",
+      "name": "Shell",
+      "state": "Hollows a solid to a wall thickness.",
+      "owner": "curves",
+      "tools": ["Shell"],
+      "actions": ["tool-shell"],
+      "dockChips": ["tool-shell"],
+      "apiCommands": ["hew.solid.shell"],
+      "behaviors": []
+    },
+    {
+      "id": "project",
+      "name": "Project",
+      "state": "Engraves or embosses a shape onto a solid.",
+      "owner": "curves",
+      "tools": ["Project"],
+      "actions": ["tool-project"],
+      "dockChips": [],
+      "apiCommands": ["hew.solid.project"],
+      "behaviors": []
+    },
+    {
+      "id": "smooth",
+      "name": "Smooth",
+      "state": "Rounds a whole object from its faces, with creases (Eraser, Ctrl-click) that stay sharp.",
+      "owner": "curves",
+      "tools": [],
+      "actions": ["smooth-1", "smooth-2", "smooth-3", "bake-smooth"],
+      "dockChips": [],
+      "apiCommands": ["hew.object.smooth", "hew.object.crease", "hew.solid.bake"],
+      "behaviors": ["smooth-apply", "export-cages", "eraser-crease"]
+    },
+    {
+      "id": "soften",
+      "name": "Soften Edges",
+      "state": "Hides edges by angle so facets shade as one surface.",
+      "owner": "curves",
+      "tools": [],
+      "actions": ["soften-edges"],
+      "dockChips": [],
+      "apiCommands": ["hew.solid.soften"],
+      "behaviors": []
+    },
+    {
+      "id": "follow-me-twist",
+      "name": "Follow Me twist and scale",
+      "state": "Twists or scales a profile as it follows an open path.",
+      "owner": "curves",
+      "tools": [],
+      "actions": [],
+      "dockChips": [],
+      "apiCommands": [],
+      "behaviors": ["follow-me-twist"]
+    },
+    {
+      "id": "remove-degenerate-faces",
+      "name": "Remove degenerate faces",
+      "state": "A Model Health repair that removes zero-area faces.",
+      "owner": "curves",
+      "tools": [],
+      "actions": [],
+      "dockChips": [],
+      "apiCommands": ["hew.solid.remove_degenerate_faces"],
+      "behaviors": ["health-remove-degenerate"]
+    }
+  ]
+}

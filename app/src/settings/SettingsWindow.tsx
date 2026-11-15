@@ -27,6 +27,9 @@ import { LanguagePane } from './LanguagePane'
 import { DebugPane } from './DebugPane'
 import { FoldersPane } from './FoldersPane'
 import { AdvancedPane } from './AdvancedPane'
+import { previewBuild } from '../preview'
+import { PREVIEW_SETTINGS } from '../preview/copy'
+import { PreviewPane } from '../preview/PreviewPane'
 import { useTextFieldMenuActions } from '../clipboard/useTextFieldMenuActions'
 
 type Category =
@@ -39,6 +42,7 @@ type Category =
   | 'folders'
   | 'advanced'
   | 'debug'
+  | 'preview'
 
 const iconProps = {
   width: 22,
@@ -144,7 +148,18 @@ function AdvancedIcon() {
   )
 }
 
-const TABS: { id: Category; label: MessageDescriptor; icon: ReactElement }[] = [
+/** Flask — Preview (unfinished features). */
+function PreviewIcon() {
+  return (
+    <svg {...iconProps}>
+      <path d="M9.5 3.5h5M10.5 3.5v6L5 19a1.5 1.5 0 0 0 1.3 2.2h11.4A1.5 1.5 0 0 0 19 19l-5.5-9.5v-6" />
+      <path d="M7.5 15h9" />
+    </svg>
+  )
+}
+
+/** A tab's label: a catalog message, or plain English for the Preview tab. */
+const TABS: { id: Category; label: MessageDescriptor | string; icon: ReactElement }[] = [
   { id: 'units', label: msg`Units`, icon: <UnitsIcon /> },
   { id: 'view', label: msg`View`, icon: <ViewIcon /> },
   { id: 'controls', label: msg`Controls`, icon: <ControlsIcon /> },
@@ -154,6 +169,8 @@ const TABS: { id: Category; label: MessageDescriptor; icon: ReactElement }[] = [
   { id: 'folders', label: msg`Folders`, icon: <FoldersIcon /> },
   { id: 'advanced', label: msg`Advanced`, icon: <AdvancedIcon /> },
   { id: 'debug', label: msg`Debug`, icon: <DebugIcon /> },
+  // Preview builds only, and English only (src/preview).
+  ...(previewBuild ? [{ id: 'preview' as const, label: PREVIEW_SETTINGS.heading, icon: <PreviewIcon /> }] : []),
 ]
 
 const tabStyle: CSSProperties = {
@@ -209,7 +226,10 @@ export function SettingsWindow() {
         aria-label={t`Settings`}
         style={{
           display: 'flex',
-          justifyContent: 'center',
+          // `safe`: a strip wider than its window (the Preview tab makes ten)
+          // scrolls from the left instead of clipping both ends.
+          justifyContent: 'safe center',
+          overflowX: 'auto',
           gap: '2px',
           padding: '7px 12px',
           background: 'var(--surface-bar, #202020)',
@@ -231,7 +251,7 @@ export function SettingsWindow() {
               style={selected ? activeTabStyle : tabStyle}
             >
               {tab.icon}
-              <span>{i18n._(tab.label)}</span>
+              <span>{typeof tab.label === 'string' ? tab.label : i18n._(tab.label)}</span>
             </button>
           )
         })}
@@ -253,6 +273,7 @@ export function SettingsWindow() {
         {active === 'folders' && <FoldersPane />}
         {active === 'advanced' && <AdvancedPane />}
         {active === 'debug' && <DebugPane />}
+        {previewBuild && active === 'preview' && <PreviewPane />}
       </div>
     </div>
   )

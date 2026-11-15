@@ -185,7 +185,9 @@ import {
   formatDegrees,
   formatPercent,
 } from './shapeInput'
+import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
+import { behaviorEnabled } from '../preview'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import {
   evaluateStart,
@@ -202,6 +204,17 @@ import { isDraftRef, resolveDraft } from './planeUnits'
 import { pickRegionAt, pickFaceAt, regionRing, ringSegments, rayAtProfile } from './profilePick'
 import { pickEdgePath } from './edgePathPick'
 import { seamWalk, nearestOnWalk, subWalkTo, reverseWalk, type SeamWalk } from './followMeDrag'
+
+/**
+ * Twist and end scale are a Preview feature (src/preview, `follow-me-twist`).
+ * Without it Follow Me types a length and nothing else: no suffix grammar, no
+ * offer in the hint, no retype of a finished sweep. Fixed when the app loads.
+ */
+const TWIST = behaviorEnabled('follow-me-twist')
+const isInputKey = (key: string): boolean => (TWIST ? isShapeInputKey(key) : isLengthInputKey(key))
+const editBuffer = (buf: string, key: string, format: ReturnType<typeof getLengthUnit>): string =>
+  TWIST ? editShapeBuffer(buf, key, format) : editLengthBuffer(buf, key, format)
+const parseToken = (buf: string): ReturnType<typeof parseShapeToken> => (TWIST ? parseShapeToken(buf) : null)
 
 export type PathTarget =
   | { kind: 'edges'; sketchHandle: bigint; edgeHandles: bigint[] }
@@ -696,7 +709,7 @@ export class FollowMeTool implements Tool {
     }
     // Typed options are otherwise invisible: name them at the profile stage
     // (spelled `deg`, which every keyboard can type).
-    const offer = this.stage.kind === 'pick-profile' && this.profileVerdict?.kind !== 'refused'
+    const offer = TWIST && this.stage.kind === 'pick-profile' && this.profileVerdict?.kind !== 'refused'
     return offer ? `${base} ${twistOffer()}` : base
   }
 
@@ -869,10 +882,10 @@ export class FollowMeTool implements Tool {
    */
   capturesKey(key: string): boolean {
     if (this.stage.kind === 'pick-path') {
-      return this.retype.isOpen && idleRetypeCapturesKey(key, this.typed, isShapeInputKey)
+      return this.retype.isOpen && idleRetypeCapturesKey(key, this.typed, isInputKey)
     }
     if (this.stage.kind === 'dragging' || this.typed !== '') {
-      return key === 'Enter' || isShapeInputKey(key)
+      return key === 'Enter' || isInputKey(key)
     }
     // pick-profile, nothing typed yet: only what can START a fresh entry —
     // the non-letter subset of isLengthInputKey (digits, sign, decimal
@@ -1314,14 +1327,14 @@ export class FollowMeTool implements Tool {
     if (ev.key === 'Enter') {
       // A twist (30°), end size (40%) or station count (8s) sets an option
       // and keeps the gesture going; a plain number is a partial-sweep length.
-      const token = parseShapeToken(this.typed)
+      const token = parseToken(this.typed)
       if (token !== null) {
         this.opts = this._withToken(this.opts, token)
         this.typed = ''
         this.onMeasurementCb('')
         return
       }
-      if (isZeroPercent(this.typed)) {
+      if (TWIST && isZeroPercent(this.typed)) {
         this.onToast(endSizeZero())
         this.typed = ''
         this.onMeasurementCb('')
@@ -1366,8 +1379,8 @@ export class FollowMeTool implements Tool {
       return
     }
 
-    if (isShapeInputKey(ev.key)) {
-      this.typed = editShapeBuffer(this.typed, ev.key, getLengthUnit())
+    if (isInputKey(ev.key)) {
+      this.typed = editBuffer(this.typed, ev.key, getLengthUnit())
       this.onMeasurementCb(typedReadout(this.typed))
     }
   }
@@ -1391,7 +1404,7 @@ export class FollowMeTool implements Tool {
     if (!this.retype.isOpen) return
     if (ev.key === 'Enter') {
       const buf = this.typed
-      const token = parseShapeToken(buf)
+      const token = parseToken(buf)
       this.typed = ''
       this.onMeasurementCb('')
       if (token === null) {
@@ -1401,8 +1414,8 @@ export class FollowMeTool implements Tool {
       this._retypeApply(token)
       return
     }
-    if (isShapeInputKey(ev.key)) {
-      this.typed = editShapeBuffer(this.typed, ev.key, getLengthUnit())
+    if (isInputKey(ev.key)) {
+      this.typed = editBuffer(this.typed, ev.key, getLengthUnit())
       this.onMeasurementCb(typedReadout(this.typed))
     }
   }
@@ -1663,7 +1676,7 @@ export class FollowMeTool implements Tool {
     this.opts = { ...DEFAULT_SWEEP_OPTS }
     // The options reset for the next gesture, but the sweep just made stays
     // retypeable: a twist or end size typed now redoes it.
-    if (redo !== undefined && typeof this.wasmScene.history_generation === 'function') {
+    if (TWIST && redo !== undefined && typeof this.wasmScene.history_generation === 'function') {
       this.retype.arm(redo)
     } else {
       this.retype.close()

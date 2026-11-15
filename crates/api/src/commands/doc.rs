@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     match name {
         "hew.doc.new" => Some(new_doc),
         "hew.doc.open" => Some(open_doc),

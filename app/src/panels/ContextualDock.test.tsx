@@ -2,6 +2,8 @@ import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
 import { ContextualDock } from './ContextualDock'
 import type { NodeRef } from './treeModel'
+import { requiresPreview } from '../test/requiresPreview'
+import { toolAllowed } from '../preview'
 
 const obj = (id: bigint): NodeRef => ({ kind: 'object', id })
 const group = (id: bigint): NodeRef => ({ kind: 'group', id })
@@ -26,21 +28,28 @@ describe('ContextualDock', () => {
     expect(screen.getByText('Paint')).toBeInTheDocument()
     expect(screen.getByText('Make Component')).toBeInTheDocument()
     expect(screen.getByText('Erase')).toBeInTheDocument()
+    expect(screen.queryByText('Position Texture')).not.toBeInTheDocument()
+  })
+
+  it('offers Fillet and Shell for a single selected Object', (ctx) => {
+    requiresPreview(ctx, 'fillet', 'shell')
+    render(<ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} />)
     expect(screen.getByText('Fillet')).toBeInTheDocument()
     expect(screen.getByText('Shell')).toBeInTheDocument()
-    expect(screen.queryByText('Position Texture')).not.toBeInTheDocument()
   })
 
   it('Object row order is Push/Pull, Fillet, Move, Paint, Shell, Make Component, Save to Library, Erase, each with an icon', () => {
     render(<ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} />)
     const buttons = screen.getAllByRole('button')
+    // Fillet and Shell appear only where the Preview wall lets them.
     expect(buttons.map((b) => b.getAttribute('title'))).toEqual([
       'Push/Pull', 'Fillet', 'Move', 'Paint', 'Shell', 'Make Component', 'Save to Library', 'Erase',
-    ])
+    ].filter((t) => toolAllowed(t)))
     for (const b of buttons) expect(b.querySelector('svg'), b.getAttribute('title') ?? '').not.toBeNull()
   })
 
-  it('clicking Fillet and Shell dispatches their tool ids', () => {
+  it('clicking Fillet and Shell dispatches their tool ids', (ctx) => {
+    requiresPreview(ctx, 'fillet', 'shell')
     const onRun = vi.fn()
     render(<ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={onRun} />)
     fireEvent.click(screen.getByText('Fillet'))
@@ -146,8 +155,6 @@ describe('ContextualDock', () => {
     render(<ContextualDock selectedIds={[sketch(1n)]} selectedGuide={null} onRun={vi.fn()} />)
     expect(screen.getByText('SKETCH')).toBeInTheDocument()
     expect(screen.getByText('Push/Pull')).toBeInTheDocument()
-    expect(screen.getByText('Revolve')).toBeInTheDocument()
-    expect(screen.getByText('Loft')).toBeInTheDocument()
     expect(screen.getByText('Follow Me')).toBeInTheDocument()
     expect(screen.getByText('Move')).toBeInTheDocument()
     expect(screen.getByText('Rotate')).toBeInTheDocument()
@@ -155,10 +162,25 @@ describe('ContextualDock', () => {
     expect(screen.getByText('Erase')).toBeInTheDocument()
   })
 
-  it('clicking Revolve, Loft, and Follow Me on a sketch dispatches their tool ids', () => {
+  it('offers Revolve and Loft for a single selected free-standing sketch', (ctx) => {
+    requiresPreview(ctx, 'revolve', 'loft')
+    render(<ContextualDock selectedIds={[sketch(1n)]} selectedGuide={null} onRun={vi.fn()} />)
+    expect(screen.getByText('Revolve')).toBeInTheDocument()
+    expect(screen.getByText('Loft')).toBeInTheDocument()
+  })
+
+  it('clicking Follow Me on a sketch dispatches its tool id', () => {
     const onRun = vi.fn()
     render(<ContextualDock selectedIds={[sketch(1n)]} selectedGuide={null} onRun={onRun} />)
-    for (const [label, id] of [['Revolve', 'tool-revolve'], ['Loft', 'tool-loft'], ['Follow Me', 'tool-follow-me']]) {
+    fireEvent.click(screen.getByText('Follow Me'))
+    expect(onRun).toHaveBeenLastCalledWith('tool-follow-me')
+  })
+
+  it('clicking Revolve and Loft on a sketch dispatches their tool ids', (ctx) => {
+    requiresPreview(ctx, 'revolve', 'loft')
+    const onRun = vi.fn()
+    render(<ContextualDock selectedIds={[sketch(1n)]} selectedGuide={null} onRun={onRun} />)
+    for (const [label, id] of [['Revolve', 'tool-revolve'], ['Loft', 'tool-loft']]) {
       fireEvent.click(screen.getByText(label))
       expect(onRun).toHaveBeenLastCalledWith(id)
     }
@@ -343,11 +365,11 @@ describe('ContextualDock', () => {
 
   // --- Hover-preview disables everything except Push/Pull ------------------
 
-  it('hover-preview: Push/Pull, Revolve, and Loft are enabled; the other sketch verbs render disabled', () => {
+  it('hover-preview: Push/Pull, Revolve, and Loft are enabled where offered; the other sketch verbs render disabled', () => {
     render(
       <ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} hoveringSketchRegion />,
     )
-    for (const label of ['Push/Pull', 'Revolve', 'Loft']) {
+    for (const label of ['Push/Pull', 'Revolve', 'Loft'].filter((l) => toolAllowed(l))) {
       expect(screen.getByRole('button', { name: label })).not.toBeDisabled()
     }
     for (const label of ['Follow Me', 'Move', 'Rotate', 'Erase']) {
@@ -380,7 +402,7 @@ describe('ContextualDock', () => {
 
   it('a real sketch SELECTION keeps every sketch verb enabled', () => {
     render(<ContextualDock selectedIds={[sketch(1n)]} selectedGuide={null} onRun={vi.fn()} />)
-    for (const label of ['Push/Pull', 'Revolve', 'Loft', 'Follow Me', 'Move', 'Rotate', 'Erase']) {
+    for (const label of ['Push/Pull', 'Revolve', 'Loft', 'Follow Me', 'Move', 'Rotate', 'Erase'].filter((l) => toolAllowed(l))) {
       const btn = screen.getByRole('button', { name: label })
       expect(btn).not.toBeDisabled()
       expect(btn).toHaveAttribute('aria-disabled', 'false')

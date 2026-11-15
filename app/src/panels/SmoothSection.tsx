@@ -24,6 +24,16 @@ import {
   softenToast,
 } from './smoothActions'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
+import { actionOffered, BAKE_SMOOTH_ACTION, SOFTEN_EDGES_ACTION } from '../curveActions'
+import { behaviorEnabled } from '../preview'
+
+/** The Preview wall (src/preview): without the Smooth preview, the Smooth row
+ *  is only for an object that already has a level, and offers only Off. With
+ *  it, the full row. Soften and Bake follow their own commands. Fixed when
+ *  the app loads. */
+const SMOOTH_APPLY = behaviorEnabled('smooth-apply')
+const BAKE_OFFERED = actionOffered(BAKE_SMOOTH_ACTION)
+const SOFTEN_OFFERED = actionOffered(SOFTEN_EDGES_ACTION)
 
 const LABEL_STYLE: React.CSSProperties = {
   fontSize: '10px',
@@ -95,6 +105,8 @@ export function SmoothSection({ scene, docRev, objects, onGeometryChanged, onToa
   }, [key])
 
   if (objects.length === 0) return null
+  const showSmooth = SMOOTH_APPLY || anySmooth
+  if (!showSmooth && !SOFTEN_OFFERED) return null
 
   const toastError = (err: unknown): void => {
     const code = parseKernelErrorCode(err)
@@ -103,6 +115,7 @@ export function SmoothSection({ scene, docRev, objects, onGeometryChanged, onToa
   }
 
   const onLevel = (level: number): void => {
+    if (!SMOOTH_APPLY && level !== 0) return
     try {
       setSmoothLevel(scene, objects, level)
     } catch (err) {
@@ -142,6 +155,7 @@ export function SmoothSection({ scene, docRev, objects, onGeometryChanged, onToa
 
   return (
     <>
+      {showSmooth && (
       <div data-smooth-section>
         <div style={LABEL_STYLE}>Smooth</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
@@ -154,8 +168,8 @@ export function SmoothSection({ scene, docRev, objects, onGeometryChanged, onToa
             title={t`Round the object's shape. The shape you edit stays as it is.`}
           >
             {current === null && <option value="mixed" disabled>Mixed</option>}
-            {SMOOTH_LEVELS.map((l) => (
-              <option key={l} value={l}>{l === 0 ? 'Off' : String(l)}</option>
+            {SMOOTH_LEVELS.filter((l) => SMOOTH_APPLY || l === 0 || l === current).map((l) => (
+              <option key={l} value={l} disabled={!SMOOTH_APPLY && l !== 0}>{l === 0 ? 'Off' : String(l)}</option>
             ))}
           </select>
           {tooDense && (
@@ -167,7 +181,7 @@ export function SmoothSection({ scene, docRev, objects, onGeometryChanged, onToa
               too dense for this level
             </span>
           )}
-          {anySmooth && (
+          {anySmooth && BAKE_OFFERED && (
             <button
               type="button"
               data-smooth-bake
@@ -180,6 +194,8 @@ export function SmoothSection({ scene, docRev, objects, onGeometryChanged, onToa
           )}
         </div>
       </div>
+      )}
+      {SOFTEN_OFFERED && (
       <div data-soften-section>
         <div style={LABEL_STYLE}>Soften edges</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', fontSize: '12px', color: 'var(--text-secondary, #ccc)' }}>
@@ -215,6 +231,7 @@ export function SmoothSection({ scene, docRev, objects, onGeometryChanged, onToa
           </button>
         </div>
       </div>
+      )}
     </>
   )
 }

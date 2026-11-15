@@ -10,6 +10,7 @@
  * repeating until the batch succeeds or is empty. Pure of React; the panel
  * and Object Info call `runBatch` and show the result.
  */
+import { behaviorEnabled } from '../preview'
 import { i18n } from '@lingui/core'
 import { msg, t } from '@lingui/core/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -255,7 +256,8 @@ export const removeDegenerateOp = (row: HealthRow): BatchOp => ({
 })
 
 /** Rows that carry zero-area faces to remove. */
-export const degenerateRows = (rows: readonly HealthRow[]): HealthRow[] => rows.filter((r) => r.degenerateFaces > 0)
+export const degenerateRows = (rows: readonly HealthRow[]): HealthRow[] =>
+  behaviorEnabled('health-remove-degenerate') ? rows.filter((r) => r.degenerateFaces > 0) : []
 
 /** How many faces a finished batch removed (the sum of each command's `removed`). */
 export function removedCount(result: BatchResult): number {

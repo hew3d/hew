@@ -147,19 +147,13 @@ pub fn run(
             }
             path_check(grant, &cmd.method, &cmd.params, 0)?;
             check_refs(&cmd.params, &[], 0)?;
-            let Some(handler) = commands::handler(&cmd.method) else {
-                return Err(TxError::Refused {
+            let params = cmd.params.clone().unwrap_or(serde_json::json!({}));
+            let handler =
+                commands::resolve(&cmd.method, &params).map_err(|refusal| TxError::Refused {
                     index: 0,
                     method: cmd.method.clone(),
-                    refusal: Refusal::api(
-                        "unimplemented",
-                        &format!(
-                            "{} is declared but not implemented yet in this build.",
-                            cmd.method
-                        ),
-                    ),
-                });
-            };
+                    refusal,
+                })?;
             let mut face_tokens = FaceTokens::new();
             let mut ctx = Ctx {
                 doc,
@@ -168,7 +162,6 @@ pub fn run(
                 current_label: cmd.label.clone(),
                 grant,
             };
-            let params = cmd.params.clone().unwrap_or(serde_json::json!({}));
             let label = parsed.label.clone().unwrap_or_else(|| cmd.method.clone());
             return match handler(&mut ctx, &params) {
                 Ok(result) => Ok(serde_json::json!({ "results": [result], "label": label })),
@@ -256,6 +249,18 @@ fn static_pass(
     let mut labels: Vec<&str> = Vec::new();
     let mut context_depth: i64 = 0;
     for (i, cmd) in parsed.commands.iter().enumerate() {
+        // A preview command refuses typed, not as an unknown method, and
+        // before anything in the envelope runs (crate::preview).
+        if let Err(refusal) = crate::preview::check(
+            &cmd.method,
+            cmd.params.as_ref().unwrap_or(&serde_json::Value::Null),
+        ) {
+            return Err(TxError::Refused {
+                index: i,
+                method: cmd.method.clone(),
+                refusal,
+            });
+        }
         let Some(decl) = registry.get(&cmd.method) else {
             return Err(TxError::Invalid(format!(
                 "command {i}: unknown method {}",
@@ -352,19 +357,12 @@ fn execute(
             method: cmd.method.clone(),
             refusal,
         })?;
-        let Some(handler) = commands::handler(&cmd.method) else {
-            return Err(TxError::Refused {
+        let handler =
+            commands::resolve(&cmd.method, &params).map_err(|refusal| TxError::Refused {
                 index: i,
                 method: cmd.method.clone(),
-                refusal: Refusal::api(
-                    "unimplemented",
-                    &format!(
-                        "{} is declared but not implemented yet in this build.",
-                        cmd.method
-                    ),
-                ),
-            });
-        };
+                refusal,
+            })?;
         let mut ctx = Ctx {
             doc,
             host,

@@ -1,10 +1,12 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { TOOL_REGISTRY, type ToolName } from '../toolRegistry'
 import { TOOL_ACTIONS, toolActionFor } from '../toolActions'
 import { TOOL_REGISTRATIONS, toolRegistration } from './index'
 import { DRAW_MENU, TOOLS_MENU, menuEntryActionId, pruneMenuEntries, type MenuEntry } from '../../panels/toolsMenuModel'
+import { requiresPreview } from '../../test/requiresPreview'
+import { actionOffered } from '../../curveActions'
 
 /* oxlint-disable lingui/no-unlocalized-strings -- tool IDs and test fixtures, never shown */
 /**
@@ -78,8 +80,12 @@ describe('viewport tool registrations', () => {
   })
 
   it('toolRegistration looks up by name', () => {
-    expect(toolRegistration('Fillet')?.name).toBe('Fillet')
     expect(toolRegistration('Walk')).toBeUndefined()
+  })
+
+  it('toolRegistration finds the Fillet tool', (ctx) => {
+    requiresPreview(ctx, 'fillet')
+    expect(toolRegistration('Fillet')?.name).toBe('Fillet')
   })
 })
 
@@ -99,7 +105,8 @@ describe('tool command table', () => {
 
   it("App.tsx's dispatch has a case label for each tool command and none extra", () => {
     const app = read('../../App.tsx')
-    const cases = new Set([...app.matchAll(/^\s*case '(tool-[a-z-]+)':/gm)].map((m) => m[1]))
+    // A command the Preview wall withholds has a case label but no command here.
+    const cases = new Set([...app.matchAll(/^\s*case '(tool-[a-z-]+)':/gm)].map((m) => m[1]).filter(actionOffered))
     expect([...cases].sort()).toEqual(TOOL_ACTIONS.map((a) => a.id).sort())
   })
 })
@@ -131,5 +138,31 @@ describe('Tools and Draw menu models', () => {
     }
     expect(kinds[0]).not.toBe('separator')
     expect(kinds[kinds.length - 1]).not.toBe('separator')
+  })
+})
+
+describe('Push/Pull registration', () => {
+  it("judges a face by the Push/Pull rule (a linked copy's face counts), not the draw tools' rule", () => {
+    // Regression: the registration refactor handed Push/Pull the draw tools'
+    // eligibility, so a linked copy could no longer be pushed or pulled.
+    const pushPull = vi.fn(() => true)
+    const draw = vi.fn(() => false)
+    const ctx = {
+      scene: {},
+      previewGroup: { children: [], add: () => undefined, remove: () => undefined },
+      refreshScene: () => undefined,
+      refreshSketches: () => undefined,
+      refreshGuides: () => undefined,
+      toast: () => undefined,
+      measurement: () => undefined,
+      setToolCursor: () => undefined,
+      scopeToEditContext: () => undefined,
+      faceEligibility: draw,
+      pushPullEligibility: pushPull,
+    }
+    const tool = toolRegistration('Push/Pull')!.create(ctx as never) as unknown as { _faceEligible: (o: bigint, i: bigint | undefined) => boolean }
+    expect(tool._faceEligible(1n, 2n)).toBe(true)
+    expect(pushPull).toHaveBeenCalledWith(1n, 2n)
+    expect(draw).not.toHaveBeenCalled()
   })
 })

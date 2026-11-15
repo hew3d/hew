@@ -1,5 +1,9 @@
 import { test, expect } from '@playwright/test'
 import { activateFromToolsMenu, clickWorld, expectStatus, setup, shot, volume } from './helpers/offset'
+import { requiresPreview } from './helpers/preview'
+
+// Drives a Preview feature: skipped in the production-shape run (e2e/helpers/preview.ts).
+requiresPreview('shell')
 
 /**
  * Shell, driven with real pointer and keyboard events: click a face to leave

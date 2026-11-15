@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { TOOL_REGISTRY, TOOLS, RAIL_GROUPS, toolSpec, toolsInGroup, isToolAction } from './toolRegistry'
+import { toolAllowed } from '../preview'
 
 describe('toolRegistry', () => {
   it('TOOLS matches TOOL_REGISTRY order and length', () => {
@@ -15,8 +16,10 @@ describe('toolRegistry', () => {
   })
 
   it('groups the 03_tool_rail.md tools plus Arc, Polygon, Follow Me, Fillet, Loft, Flip, Eraser, Dimension, and Section Plane', () => {
+    // The Preview wall's tools are in the lists below only in a preview build.
+    const offered = (names: string[]) => names.filter(toolAllowed)
     expect(toolsInGroup('Draw').map((t) => t.name)).toEqual(['Select', 'Line', 'Rectangle', 'Circle', 'Polygon', 'Arc'])
-    expect(toolsInGroup('Modify').map((t) => t.name)).toEqual(['Push/Pull', 'Follow Me', 'Offset', 'Fillet', 'Loft', 'Move', 'Rotate', 'Scale', 'Flip', 'Eraser'])
+    expect(toolsInGroup('Modify').map((t) => t.name)).toEqual(offered(['Push/Pull', 'Follow Me', 'Offset', 'Fillet', 'Loft', 'Move', 'Rotate', 'Scale', 'Flip', 'Eraser']))
     expect(toolsInGroup('Inspect').map((t) => t.name)).toEqual(['Tape Measure', 'Dimension', 'Paint', 'Section Plane'])
   })
 
@@ -26,7 +29,7 @@ describe('toolRegistry', () => {
       'Revolve', 'Deform', 'Array along Path', 'Shell', 'Project', 'Protractor', 'Slice', 'Edit Vertex', 'Drawing Axes', 'Text', 'Position Texture',
       'Orbit', 'Pan', 'Zoom', 'Zoom Window',
       'Position Camera', 'Look Around', 'Walk',
-    ])
+    ].filter(toolAllowed))
   })
 
   it('RAIL_GROUPS is Draw/Modify/Inspect in spec order', () => {

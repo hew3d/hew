@@ -11,7 +11,8 @@
 
 import { msg } from '@lingui/core/macro'
 import type { MessageDescriptor } from '@lingui/core'
-import { toolSpec, type ToolName } from '../tools/toolRegistry'
+import { actionOffered } from '../curveActions'
+import { ALL_TOOL_SPECS, type ToolName } from '../tools/toolRegistry'
 
 export type MenuEntry =
   /** A check item that selects a registry tool and checks while it is active. */
@@ -30,7 +31,7 @@ const tool = (name: ToolName, showKey = true): MenuEntry => ({ kind: 'tool', too
 /* oxlint-disable lingui/no-unlocalized-strings -- tool IDs, mode IDs, and submenu IDs are identifiers; every label is a msg descriptor */
 /** Draw ▸ strokes (open paths), then closed shapes. (3D Text… follows in the
  *  MenuBar: it opens a dialog, it is not a tool.) */
-export const DRAW_MENU: readonly MenuEntry[] = [
+const ALL_DRAW_MENU: readonly MenuEntry[] = [
   tool('Line'),
   tool('Arc'),
   SEP,
@@ -42,7 +43,7 @@ export const DRAW_MENU: readonly MenuEntry[] = [
 /** Tools ▸ select and eraser, transform, the everyday shaping tools, the
  *  Shape and Deform submenus, then measure & annotate and model-space
  *  utilities (docs/design/true-curves-ui-organization.md section 4). */
-export const TOOLS_MENU: readonly MenuEntry[] = [
+const ALL_TOOLS_MENU: readonly MenuEntry[] = [
   tool('Select'),
   tool('Eraser'),
   tool('Paint'),
@@ -97,10 +98,18 @@ export const TOOLS_MENU: readonly MenuEntry[] = [
 ]
 /* oxlint-enable lingui/no-unlocalized-strings */
 
+/** Draw ▸ as this build offers it: the Preview wall prunes what it withholds. */
+export const DRAW_MENU: readonly MenuEntry[] = pruneMenuEntries(ALL_DRAW_MENU, actionOffered)
+/** Tools ▸ as this build offers it (empty submenus and stray separators go
+ *  with the entries the Preview wall withholds). */
+export const TOOLS_MENU: readonly MenuEntry[] = pruneMenuEntries(ALL_TOOLS_MENU, actionOffered)
+
 /** The command id an entry runs; undefined for a separator or a submenu. */
 export function menuEntryActionId(entry: MenuEntry): string | undefined {
   switch (entry.kind) {
-    case 'tool': return toolSpec(entry.tool).actionId
+    // The full list, not the effective registry: pruning asks about tools the
+    // build may withhold.
+    case 'tool': return ALL_TOOL_SPECS.find((t) => t.name === entry.tool)?.actionId
     case 'alias':
     case 'deformMode': return entry.actionId
     default: return undefined

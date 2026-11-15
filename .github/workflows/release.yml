@@ -31,9 +31,15 @@
 #              docs describe the release people can download rather than
 #              whatever main says today (see docs/dev/DEVELOPMENT.md §2)
 #
-# A `vX.Y.Z-pre.LABEL` tag is a pre-release of an effort that has not
-# shipped: it builds every package, but deploys the web app to the effort's
-# own preview branch, skips :latest, and never moves `site-live`.
+# A `vX.Y.Z-pre.LABEL` tag is a preview build of `main` (docs/dev/DEVELOPMENT.md
+# "Preview features"): every package is built with HEW_PREVIEW=1, so the
+# Preview features are in it; the GitHub release is created as a
+# pre-release and never marked latest; the desktop builds carry no updater
+# (they neither take nor publish updates: no updater artifacts, no
+# latest.json); the web app deploys to the one `preview` Pages branch; the
+# relay image skips :latest; and `site-live` never moves. A production tag
+# never sets HEW_PREVIEW, and every job that builds refuses to run if it is
+# set on one.
 #
 # Releases stay DRAFTS. Publishing is a deliberate human act after smoke
 # installs.
@@ -86,16 +92,25 @@ jobs:
           fi
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
+      # A preview build's release is a pre-release from the moment it
+      # exists, so publishing it can never make it the "latest" release
+      # that /releases/latest (and so the updater's endpoint) resolves to.
       - name: Create draft release
         id: create
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          if [[ "$TAG" == *-pre.* ]]; then
+            channel=(-F prerelease=true -f make_latest=false)
+          else
+            channel=()
+          fi
           release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases" \
             -f tag_name="$TAG" \
             -f name="Hew $TAG" \
             -f body="Build in progress — the download table is added when all artifacts have been uploaded." \
             -F draft=true \
+            "${channel[@]}" \
             --jq '.id')"
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
 
@@ -124,6 +139,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The Preview wall's build flag (docs/dev/DEVELOPMENT.md "Preview
+      # features"): on for every -pre. tag, for every later step of this job
+      # (the WASM kernel, the app, the shell, the hew-cli sidecar); never on
+      # for a production tag, which refuses to build if it finds it set.
+      - name: Set the Preview build flag
+        shell: bash
+        run: |
+          if [[ "$TAG" == *-pre.* ]]; then
+            echo "HEW_PREVIEW=1" >> "$GITHUB_ENV"
+            echo "::notice::$TAG is a pre-release: a preview build (HEW_PREVIEW=1)."
+          elif [ -n "${HEW_PREVIEW:-}" ]; then
+            echo "::error::HEW_PREVIEW is set ('$HEW_PREVIEW') for the production tag $TAG. A production release is never a preview build."
+            exit 1
+          fi
 
       # Same stack ci.yml installs for the Tauri host crate, plus xdg-utils:
       # the AppImage bundler embeds /usr/bin/xdg-open, which the arm64 runner
@@ -222,11 +252,17 @@ jobs:
       # .sig files). That flag lives HERE, not in tauri.conf.json, on purpose:
       # with it in the base config, a keyless local `pnpm --dir shells/tauri
       # build` would fail demanding TAURI_SIGNING_PRIVATE_KEY.
+      #
+      # A preview build makes no updater artifacts: it carries no updater
+      # (shells/tauri/src-tauri/build.rs), and a pre-release that published
+      # an update feed could reach production installs if it were ever made
+      # the latest release.
       - name: Stamp release version
         shell: bash
         run: |
-          printf '{"version": "%s", "bundle": {"createUpdaterArtifacts": true}}\n' \
-            "${TAG#v}" > release-version.json
+          if [[ "$TAG" == *-pre.* ]]; then updater=false; else updater=true; fi
+          printf '{"version": "%s", "bundle": {"createUpdaterArtifacts": %s}}\n' \
+            "${TAG#v}" "$updater" > release-version.json
 
       # Apple code signing + notarization (RR9). Exported through GITHUB_ENV
       # only when the secrets exist: `env:` on a step always materializes
@@ -366,6 +402,17 @@ jobs:
           tauriScript: pnpm tauri
           args: ${{ matrix.args }} --config ${{ github.workspace }}/release-version.json
 
+      # The kernel the bundle carries is the flavor this tag must ship.
+      - name: Check the kernel flavor
+        shell: bash
+        run: |
+          want=0; [[ "$TAG" == *-pre.* ]] && want=1
+          have="$(node scripts/wasm-flavor-of.mjs app/src/wasm/pkg)"
+          if [ "$have" != "$want" ]; then
+            echo "::error::The bundled kernel reports preview_build=$have; $TAG needs $want."
+            exit 1
+          fi
+
       # The bundler sweeps the build distro's libwayland into the AppImage
       # as a GTK dependency, and that stale copy breaks EGL display creation
       # against newer hosts' graphics stacks — white window, "Could not
@@ -481,6 +528,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The Preview wall's build flag (docs/dev/DEVELOPMENT.md "Preview
+      # features"): on for every -pre. tag, for every later step of this job
+      # (the WASM kernel, the app, the shell, the hew-cli sidecar); never on
+      # for a production tag, which refuses to build if it finds it set.
+      - name: Set the Preview build flag
+        shell: bash
+        run: |
+          if [[ "$TAG" == *-pre.* ]]; then
+            echo "HEW_PREVIEW=1" >> "$GITHUB_ENV"
+            echo "::notice::$TAG is a pre-release: a preview build (HEW_PREVIEW=1)."
+          elif [ -n "${HEW_PREVIEW:-}" ]; then
+            echo "::error::HEW_PREVIEW is set ('$HEW_PREVIEW') for the production tag $TAG. A production release is never a preview build."
+            exit 1
+          fi
+
       - name: Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
@@ -514,6 +576,15 @@ jobs:
       # app build + CSP <meta> injection (shells/web/inject-csp.mjs).
       - name: Build web shell
         run: pnpm --dir shells/web build
+
+      - name: Check the kernel flavor
+        run: |
+          want=0; [[ "$TAG" == *-pre.* ]] && want=1
+          have="$(node scripts/wasm-flavor-of.mjs app/src/wasm/pkg)"
+          if [ "$have" != "$want" ]; then
+            echo "::error::The built kernel reports preview_build=$have; $TAG needs $want."
+            exit 1
+          fi
 
       # The self-hosting artifact: "unzip behind any static file server".
       # Deliberately excludes the Cloudflare-specific _headers file. Carries
@@ -551,19 +622,13 @@ jobs:
             exit 0
           fi
           cp shells/web/_headers shells/web/dist/_headers
-          # A pre-release tag must never replace production. Each effort
-          # that cuts pre-releases deploys to its own Pages branch, which
-          # Pages serves at its own URL and which a custom domain can be
-          # pointed at. Separate hosts keep the efforts' browser storage
-          # apart, since their document formats differ. A pre-release tag
-          # of an unknown effort deploys nowhere.
+          # A pre-release tag must never replace production. Every preview
+          # build (any -pre. tag) deploys to the one `preview` Pages branch,
+          # which Pages serves at its own URL and which the preview custom
+          # domain is pointed at; its own host keeps its browser storage
+          # apart from production's.
           case "$TAG" in
-            *-pre.plugin-*) branch=preview-plugins ;;
-            *-pre.curves-*) branch=preview-curves ;;
-            *-pre.*)
-              echo "::warning::No preview branch is mapped for $TAG; skipping the web deploy."
-              exit 0
-              ;;
+            *-pre.*) branch=preview ;;
             *) branch=main ;;
           esac
           npx wrangler@4 pages deploy shells/web/dist \
@@ -573,7 +638,7 @@ jobs:
               echo "### Pre-release web preview"
               echo
               echo "Deployed to the Pages \`$branch\` branch, not production:"
-              echo "https://$branch.hew3d.com (custom domain), also https://$branch.hew-app.pages.dev"
+              echo "https://preview.hew3d.com (custom domain), also https://$branch.hew-app.pages.dev"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -708,8 +773,12 @@ jobs:
   # asset path (/releases/download/<tag>/…) — they resolve once the draft is
   # published; during the draft window the updater is tested against an
   # explicit endpoint override (RELEASE_PLANNING §14 step 9).
+  #
+  # Production tags only: a preview build carries no updater and publishes no
+  # update feed (see the header).
   updater-manifest:
     needs: [create-release, desktop]
+    if: ${{ !contains(github.ref_name, '-pre.') }}
     runs-on: ubuntu-latest
     steps:
       # The assembly script and CHANGELOG.md (the manifest's `notes`) come
@@ -794,12 +863,13 @@ jobs:
             {
               echo "### Publish as a pre-release"
               echo
-              echo "Tick **Set as a pre-release** when publishing \`$TAG\`."
-              echo "Leaving it unticked marks this build as the latest release,"
-              echo "which the updater and the package channels would pick up."
+              echo "This release was created as a pre-release. Keep **Set as a"
+              echo "pre-release** ticked when publishing \`$TAG\`: unticked, it"
+              echo "would become the latest release, which the package channels"
+              echo "would pick up. (It publishes no update feed, so installed"
+              echo "copies are not offered it either way.)"
               echo
-              echo "Cut pre-release tags from the effort's integration branch;"
-              echo "\`main\` is for real releases only."
+              echo "A pre-release tag is a preview build of \`main\` (HEW_PREVIEW=1)."
             } >> "$GITHUB_STEP_SUMMARY"
           else
             LEAD="_Draft: replace this line with release highlights before publishing._"
@@ -833,6 +903,12 @@ jobs:
           RELAY_ARM="hew-relay-v${VERSION}-linux-aarch64.tar.gz";  need "$RELAY_ARM"
 
           url() { echo "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$1"; }
+
+          if [[ "$TAG" == *-pre.* ]]; then
+            UPDATE_NOTE="This is a preview build: it does not update itself; install the next preview build over it. Production builds check for new versions."
+          else
+            UPDATE_NOTE="Desktop builds check for new versions."
+          fi
 
           if [ "$APPLE_SIGNED" = "true" ]; then
             MAC_NOTE="The macOS disk image is signed and notarized; one universal app"
@@ -868,7 +944,7 @@ jobs:
             first run, or install the .deb/.rpm. Arch, Gentoo, and Flatpak
             users have native packages too, at
             [hew3d.github.io/hew-packages](https://hew3d.github.io/hew-packages/).
-          - Desktop builds check for new versions. The macOS and Windows
+          - $UPDATE_NOTE The macOS and Windows
             apps, the AppImage, and .deb/.rpm installs update in place;
             Flatpak, Arch, and Gentoo copies update through their package
             manager. \`latest.json\` and the \`.sig\` assets serve that

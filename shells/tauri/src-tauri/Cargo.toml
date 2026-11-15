@@ -128,6 +128,9 @@ windows-sys = { version = "0.61", features = [
 # and show the command that updates them. The Homebrew cask installs the
 # notarized .dmg unchanged and declares `auto_updates`, leaving updates to
 # this updater. Building with `--no-default-features` compiles the plugin,
-# menu item, and launch check out entirely; no shipped recipe does that.
+# menu item, and launch check out entirely; no shipped recipe does that. A
+# preview build (`HEW_PREVIEW=1`) leaves the update check out as well
+# (build.rs): a preview install never takes a production update, and the
+# production feed never offers a preview build.
 default = ["updater"]
 updater = ["dep:tauri-plugin-updater"]

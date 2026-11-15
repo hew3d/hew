@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import type { CameraParams } from './helpers/projectWorldToScreen'
 import { aim, clickAt, moveTo, shot } from './helpers/shapes'
+import { offeredTools, requiresPreview } from './helpers/preview'
 
 /**
  * Where the True Curves tools live (docs/design/true-curves-ui-organization.md):
@@ -40,14 +41,17 @@ test('rail: Modify is Push/Pull, Follow Me, Offset, Fillet, Loft, Move, Rotate, 
     .getByRole('radiogroup', { name: 'Tools' })
     .getByRole('radio')
     .evaluateAll((els) => els.map((e) => e.getAttribute('aria-label')))
-  const modify = names.slice(names.indexOf('Push/Pull'), names.indexOf('Eraser') + 1)
-  expect(modify).toEqual(['Push/Pull', 'Follow Me', 'Offset', 'Fillet', 'Loft', 'Move', 'Rotate', 'Scale', 'Flip', 'Eraser'])
+  // A production-shape build has neither Fillet nor Loft; the Eraser is in every build.
+  const expected = offeredTools(['Push/Pull', 'Follow Me', 'Offset', 'Fillet', 'Loft', 'Move', 'Rotate', 'Scale', 'Flip', 'Eraser'])
+  const modify = names.slice(names.indexOf('Push/Pull'), names.indexOf(expected[expected.length - 1]) + 1)
+  expect(modify).toEqual(expected)
   expect(names).not.toContain('Revolve')
   expect(names).not.toContain('Deform')
   await shot(page, 'rail')
 })
 
 test('Tools > Shape > Revolve from the menu bar starts Revolve', async ({ page }) => {
+  requiresPreview('revolve')
   await aim(page, CAMERA)
   await openMenu(page, /^tools$/i)
   await shot(page, 'menu-tools')
@@ -64,6 +68,7 @@ test('Tools > Shape > Revolve from the menu bar starts Revolve', async ({ page }
 })
 
 test('Tools > Deform opens Twist, Bend, Taper, Bend to Path', async ({ page }) => {
+  requiresPreview('deform')
   await aim(page, CAMERA)
   await openMenu(page, /^tools$/i)
   await menuBar(page).getByText('Deform', { exact: true }).hover()
@@ -74,6 +79,7 @@ test('Tools > Deform opens Twist, Bend, Taper, Bend to Path', async ({ page }) =
 })
 
 test('Object > Smooth: the selection\'s level is checked, picking a level sets it, Bake and Soften are reachable', async ({ page }) => {
+  requiresPreview('smooth', 'soften')
   await aim(page, CAMERA)
   const id = await page.evaluate(() => {
     const h = window.__hew_test!
@@ -106,6 +112,7 @@ test('Object > Smooth: the selection\'s level is checked, picking a level sets i
 })
 
 test('Object > Smooth does nothing with nothing selected', async ({ page }) => {
+  requiresPreview('smooth')
   await aim(page, CAMERA)
   const id = await page.evaluate(() => {
     const h = window.__hew_test!
@@ -130,9 +137,9 @@ test('dock, object row: Push/Pull, Fillet, Move, Paint, Shell, Make Component, S
   const labels = await dockLabels(page)
   // The full eight-chip row. Save to Library needs a library backend, which
   // Chromium provides through OPFS.
-  expect(labels).toEqual([
+  expect(labels).toEqual(offeredTools([
     'Push/Pull', 'Fillet', 'Move', 'Paint', 'Shell', 'Make Component', 'Save to Library', 'Erase',
-  ])
+  ]))
   await shot(page, 'dock-object')
 })
 
@@ -151,14 +158,23 @@ test('dock, multi row: Move, Union, Subtract, Intersect, Group, Erase for two so
   await expect.poll(() => page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(1)
 })
 
-test('dock, sketch row: a selected drawn rectangle offers Revolve, Loft, Follow Me; Revolve goes straight to the axis', async ({ page }) => {
+test('dock, sketch row: a selected drawn rectangle offers Push/Pull, Follow Me, Move, Rotate, Erase (and Revolve, Loft where offered)', async ({ page }) => {
   const ctx = await aim(page, CAMERA)
   await buildSketchScene(page)
   await page.getByRole('radio', { name: 'Select' }).click()
   await clickAt(page, ctx, 1.5, 0.5, 0)
   await expect(dock(page)).toHaveAttribute('data-dock-context', 'sketch')
-  expect(await dockLabels(page)).toEqual(['Push/Pull', 'Revolve', 'Loft', 'Follow Me', 'Move', 'Rotate', 'Erase'])
+  expect(await dockLabels(page)).toEqual(offeredTools(['Push/Pull', 'Revolve', 'Loft', 'Follow Me', 'Move', 'Rotate', 'Erase']))
   await shot(page, 'dock-sketch')
+})
+
+test('dock, sketch row: Revolve goes straight to the axis', async ({ page }) => {
+  requiresPreview('revolve')
+  const ctx = await aim(page, CAMERA)
+  await buildSketchScene(page)
+  await page.getByRole('radio', { name: 'Select' }).click()
+  await clickAt(page, ctx, 1.5, 0.5, 0)
+  await expect(dock(page)).toHaveAttribute('data-dock-context', 'sketch')
 
   await dock(page).getByRole('button', { name: 'Revolve' }).click()
   // The selected rectangle is already the profile: no profile click.
@@ -184,7 +200,7 @@ test('dock, hover preview: with nothing selected, hovering a drawn shape enables
   const enabled = await dock(page).getByRole('button').evaluateAll((els) =>
     els.filter((e) => !(e as HTMLButtonElement).disabled).map((e) => e.getAttribute('title')),
   )
-  expect(enabled).toEqual(['Push/Pull', 'Revolve', 'Loft'])
+  expect(enabled).toEqual(offeredTools(['Push/Pull', 'Revolve', 'Loft']))
   await shot(page, 'dock-hover-preview')
 })
 

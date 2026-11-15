@@ -17,7 +17,7 @@ use kernel::{EntityRef, ImageFormat, Material, Point3, Rgba8, Texture, Transform
 use serde_json::Value;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.material.create" => material_create,
         "hew.material.paint" => material_paint,

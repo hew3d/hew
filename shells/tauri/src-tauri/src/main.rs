@@ -29,10 +29,14 @@ use tauri::{
 mod fly_cursor;
 mod fonts;
 // How this copy was installed, and so how it updates. Only the updater reads
-// it; a build without the `updater` feature leaves it unused.
-#[cfg_attr(not(feature = "updater"), allow(dead_code))]
+// it; a build without it (no `updater` feature, or a preview build, see
+// build.rs) leaves it unused.
+#[cfg_attr(not(hew_updater), allow(dead_code))]
 mod install_channel;
 mod menu_labels;
+// The Preview wall in the native menu: a production build prunes every
+// Preview feature's item (preview-features.json) before attaching it.
+mod preview_menu;
 mod version;
 
 // The desktop half of `--live` (docs/agents/HEW_API.md §11.2): the local socket
@@ -74,7 +78,7 @@ mod report_client;
 // command that updates it. Every branch below reads the `UpdatePlan` and
 // nothing else, so no code here inspects the platform.
 // ---------------------------------------------------------------------------
-#[cfg(feature = "updater")]
+#[cfg(hew_updater)]
 mod updater {
     use crate::install_channel::{self, InstallChannel, UpdateMode, UpdatePlan};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -429,20 +433,21 @@ mod updater {
 /// no-op when the updater was compiled out.
 #[tauri::command]
 async fn check_for_updates(app: tauri::AppHandle) {
-    #[cfg(feature = "updater")]
+    #[cfg(hew_updater)]
     updater::run_check(app, true).await;
-    #[cfg(not(feature = "updater"))]
+    #[cfg(not(hew_updater))]
     let _ = app;
 }
 
 /// Whether this build carries the update check. The in-app menu bar shows the
-/// "Check for Updates" item only when true. Every channel of a default build
-/// has it (package-manager copies are told the command to run), so it is
-/// false only for a `--no-default-features` build, which no shipped package
-/// uses.
+/// "Check for Updates" item only when true. Every channel of a default
+/// production build has it (package-manager copies are told the command to
+/// run), so it is false only for a `--no-default-features` build, which no
+/// shipped package uses, and for a preview build (`HEW_PREVIEW=1`), which
+/// never updates itself (build.rs).
 #[tauri::command]
 fn updater_available() -> bool {
-    cfg!(feature = "updater")
+    cfg!(hew_updater)
 }
 
 // ---------------------------------------------------------------------------
@@ -3433,7 +3438,7 @@ fn main() {
 
     // The updater plugin ships only in updater-enabled builds (the `updater`
     // feature); package-manager builds compile it out.
-    #[cfg(feature = "updater")]
+    #[cfg(hew_updater)]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
     // Register custom file-I/O commands.
@@ -3594,7 +3599,7 @@ fn main() {
             let app_menu_builder =
                 SubmenuBuilder::with_id(handle, "submenu:app", lbl!("submenu:app"))
                     .item(&predef_about);
-            #[cfg(feature = "updater")]
+            #[cfg(hew_updater)]
             let app_menu_builder = app_menu_builder.item(
                 &MenuItemBuilder::with_id("app-check-updates", lbl!("app-check-updates"))
                     .build(handle)?,
@@ -5079,6 +5084,9 @@ fn main() {
                 .item(&window_menu)
                 .item(&help_menu)
                 .build()?;
+            // A production build holds no Preview feature's item
+            // (preview_menu.rs); a preview build keeps them all.
+            preview_menu::wall_off(&menu)?;
 
             // Attach the menu. macOS shows a single global menu bar owned by the
             // app, so the app-level menu is correct there.
@@ -5221,7 +5229,7 @@ fn main() {
             // kick off the silent launch check (updater-enabled builds only):
             // quiet unless an update is actually available, at which point the
             // user is prompted to download and restart.
-            #[cfg(feature = "updater")]
+            #[cfg(hew_updater)]
             {
                 app.manage(updater::UpdateGuard::default());
                 let handle = handle.clone();
@@ -5404,10 +5412,15 @@ fn main() {
             // The macOS "Check for Updates…" item runs the whole flow shell-side
             // rather than emitting to the webview (Windows/Linux reach the same
             // `check_for_updates` command from the in-app menu bar).
-            #[cfg(feature = "updater")]
+            #[cfg(hew_updater)]
             if id == "app-check-updates" {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move { updater::run_check(app, true).await });
+                return;
+            }
+            // A Preview feature's id cannot arrive from a production menu,
+            // which holds none; one that does anyway is dropped.
+            if preview_menu::blocks_event(id) {
                 return;
             }
             let Some(action) = menu_action_for(id) else {

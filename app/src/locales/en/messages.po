@@ -1345,10 +1345,6 @@ msgstr "Amount"
 msgid "An arc stays on its drawing plane. Move the cursor along the plane, or press an arrow key to change it, then type the length."
 msgstr "An arc stays on its drawing plane. Move the cursor along the plane, or press an arrow key to change it, then type the length."
 
-#: src/kernelErrorCopy/crease.ts
-msgid "An edge on an opening can't be creased."
-msgstr "An edge on an opening can't be creased."
-
 #: src/palette/registry.ts
 msgid "angle"
 msgstr "angle"
@@ -1928,6 +1924,10 @@ msgstr "clear selection"
 msgid "Click a base point to start the move."
 msgstr "Click a base point to start the move."
 
+#: src/tools/EraserTool.ts
+msgid "Click a drawn line to erase it. Drag across lines to erase several."
+msgstr "Click a drawn line to erase it. Drag across lines to erase several."
+
 #: src/tools/OffsetTool.ts
 msgid "Click a face or a closed profile to offset its boundary."
 msgstr "Click a face or a closed profile to offset its boundary."
@@ -1955,6 +1955,10 @@ msgstr "Click a face, edge, or point to anchor the leader text."
 #: src/tools/TextPlaceTool.ts
 msgid "Click a face, the ground, or an arrow-locked plane to place the text."
 msgstr "Click a face, the ground, or an arrow-locked plane to place the text."
+
+#: src/tools/EraserTool.ts
+msgid "Click a line to erase it, not the inside of a shape."
+msgstr "Click a line to erase it, not the inside of a shape."
 
 #: src/panels/PrintDialog.tsx
 msgid "Click a page to see it at 100 %"
@@ -2123,6 +2127,10 @@ msgstr "Click this face to use it as the profile."
 #: src/tools/ProtractorTool.ts
 msgid "Click to drop an angular guide at the measured angle — or type exact degrees."
 msgstr "Click to drop an angular guide at the measured angle — or type exact degrees."
+
+#: src/tools/EraserTool.ts
+msgid "Click to erase this line."
+msgstr "Click to erase this line."
 
 #: src/tools/TapeMeasureTool.ts
 msgid "Click to measure from the crossing."
@@ -2764,10 +2772,6 @@ msgstr "Count or scale"
 #: src/palette/registry.ts
 msgid "cove"
 msgstr "cove"
-
-#: src/palette/registry.ts
-msgid "crease"
-msgstr "crease"
 
 #: src/palette/registry.ts
 msgid "create component"
@@ -3534,6 +3538,10 @@ msgctxt "drawn shape"
 msgid "Edge shape"
 msgstr "Edge shape"
 
+#: src/tools/EraserTool.ts
+msgid "Edges of a solid can't be erased."
+msgstr "Edges of a solid can't be erased."
+
 #: src/palette/registry.ts
 msgid "edges only"
 msgstr "edges only"
@@ -3648,12 +3656,13 @@ msgid "erase"
 msgstr "erase"
 
 #: src/panels/dockLogic.ts
+#: src/tools/EraserTool.ts
 msgid "Erase"
 msgstr "Erase"
 
 #: src/palette/registry.ts
-msgid "Erase drawn lines, or crease the edges of a solid so they stay sharp when smoothed."
-msgstr "Erase drawn lines, or crease the edges of a solid so they stay sharp when smoothed."
+msgid "Erase drawn lines. Click one, or drag across several."
+msgstr "Erase drawn lines. Click one, or drag across several."
 
 #: src/i18n/nativeMenu.ts
 #: src/tools/toolRegistry.ts
@@ -3901,8 +3910,8 @@ msgid "Fillet"
 msgstr "Fillet"
 
 #: src/palette/curveEntries.ts
-msgid "fillet lines"
-msgstr "fillet lines"
+#~ msgid "fillet lines"
+#~ msgstr "fillet lines"
 
 #: src/kernelErrorCopy/blend.ts
 msgid "Fillet needs a solid. This object has gaps."
@@ -6667,6 +6676,10 @@ msgstr "One object's placement is scaled down to nothing, so the operation can't
 msgid "One of these objects has a face that isn't flat enough to combine."
 msgstr "One of these objects has a face that isn't flat enough to combine."
 
+#: src/kernelErrors.ts
+msgid "One of these objects has a face with no area, so these objects can't be combined."
+msgstr "One of these objects has a face with no area, so these objects can't be combined."
+
 #: src/kernelErrorCopy/removeDegenerateFaces.ts
 msgid "One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first."
 msgstr "One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first."
@@ -6869,6 +6882,10 @@ msgstr "Open shared model?"
 #: src/panels/PrintDialog.tsx
 msgid "Open the browser print dialog instead"
 msgstr "Open the browser print dialog instead"
+
+#: src/tools/EraserTool.ts
+msgid "Open the component first to erase its edges."
+msgstr "Open the component first to erase its edges."
 
 #: src/App.tsx
 msgid "Open the Library from an empty window to open this item as its own document."
@@ -9084,8 +9101,12 @@ msgid "Show or hide the Tags panel."
 msgstr "Show or hide the Tags panel."
 
 #: src/palette/curveEntries.ts
-msgid "Show or hide the thin lines where a fillet or rounded corner meets a flat face."
-msgstr "Show or hide the thin lines where a fillet or rounded corner meets a flat face."
+#~ msgid "Show or hide the thin lines where a fillet or rounded corner meets a flat face."
+#~ msgstr "Show or hide the thin lines where a fillet or rounded corner meets a flat face."
+
+#: src/palette/curveEntries.ts
+msgid "Show or hide the thin lines where a rounded edge or corner meets a flat face."
+msgstr "Show or hide the thin lines where a rounded edge or corner meets a flat face."
 
 #: src/palette/registry.ts
 msgid "Show or hide the world axes."
@@ -9317,10 +9338,6 @@ msgstr "Smooth: 3"
 #: src/palette/curveEntries.ts
 msgid "Smooth: Off"
 msgstr "Smooth: Off"
-
-#: src/kernelErrorCopy/crease.ts
-msgid "Soft seams can't be creased."
-msgstr "Soft seams can't be creased."
 
 #: src/palette/curveEntries.ts
 msgid "soften"
@@ -9763,6 +9780,10 @@ msgstr "That doesn't look like a Hew code — keep scanning."
 #: src/kernelErrors.ts
 msgid "That drawing can't belong to this object: it doesn't lie on any of the object's faces."
 msgstr "That drawing can't belong to this object: it doesn't lie on any of the object's faces."
+
+#: src/tools/EraserTool.ts
+msgid "That edge is a soft seam."
+msgstr "That edge is a soft seam."
 
 #: src/kernelErrorCopy/blend.ts
 msgid "That edge is already smooth."

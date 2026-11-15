@@ -30,6 +30,7 @@ pub mod ids;
 pub mod locate;
 pub mod part_frame;
 pub mod paths;
+pub mod preview;
 pub mod print_layout;
 pub mod refusal;
 pub mod registry;

@@ -11,7 +11,7 @@ use kernel::{EntityRef, ObjectId, Point3, Vec3};
 use serde_json::{Value, json};
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.solid.revolve" => revolve,
         "hew.solid.deform" => deform,

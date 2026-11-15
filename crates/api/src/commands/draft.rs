@@ -45,7 +45,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.sketch.units" => units,
         "hew.sketch.move" => move_units,

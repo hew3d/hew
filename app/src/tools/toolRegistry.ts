@@ -18,6 +18,7 @@
 import { i18n } from '@lingui/core'
 import { msg } from '@lingui/core/macro'
 import type { MessageDescriptor } from '@lingui/core'
+import { toolAllowed, actionAllowed } from '../preview'
 import type { ToolName } from './toolIcons'
 
 export type { ToolName }
@@ -41,7 +42,10 @@ export interface ToolSpec {
 }
 
 // oxlint-disable lingui/no-unlocalized-strings -- tool IDs, rail group IDs, and shortcut keys are identifiers, not copy; every label is a msg descriptor
-export const TOOL_REGISTRY: readonly ToolSpec[] = [
+/** Every tool the app knows, gated or not. Nothing reads this but the wall
+ *  test: the app works from `TOOL_REGISTRY`, which leaves out what the Preview
+ *  wall withholds. */
+export const ALL_TOOL_SPECS: readonly ToolSpec[] = [
   // ---- Draw ----
   { name: 'Select', label: msg({ context: 'tool', message: 'Select' }), group: 'Draw', actionId: 'tool-select' },
   { name: 'Line', label: msg({ context: 'tool', message: 'Line' }), group: 'Draw', actionId: 'tool-line' },
@@ -102,6 +106,31 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   { name: 'Walk', label: msg({ context: 'tool', message: 'Walk' }), actionId: 'tool-walk' },
 ]
 // oxlint-enable lingui/no-unlocalized-strings
+
+/** The tools this build offers, in registry order: `ALL_TOOL_SPECS` minus any
+ *  tool (or tool command) the Preview wall withholds. The rail, menus,
+ *  palette, dock, dispatch table and viewport registrations all derive from
+ *  this list. */
+export const TOOL_REGISTRY: readonly ToolSpec[] = ALL_TOOL_SPECS.filter(
+  (t) => toolAllowed(t.name) && actionAllowed(t.actionId),
+)
+
+/** Whether this build withholds tool `name` (a Preview tool whose feature is
+ *  off or absent from this build). Names the registry does not know, such as
+ *  the viewport's internal placement tools, are not withheld. */
+export function toolWithheld(name: string): boolean {
+  if (!toolAllowed(name)) return true
+  const spec = ALL_TOOL_SPECS.find((t) => t.name === name)
+  return spec !== undefined && !actionAllowed(spec.actionId)
+}
+
+/** `name`, or Select when this build withholds that tool: where a tool name
+ *  arrives from outside the registry (a stale id, restored state, a request
+ *  from a script) it goes through here before anything activates it. */
+export function usableTool<T extends string>(name: T): T | 'Select' {
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifier
+  return toolWithheld(name) ? 'Select' : name
+}
 
 /** Every tool name, in registry order — replaces the old App.tsx `TOOLS` const. */
 export const TOOLS: readonly ToolName[] = TOOL_REGISTRY.map((t) => t.name)

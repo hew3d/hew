@@ -1,6 +1,10 @@
 import { test, expect, type Page } from '@playwright/test'
 import type { CameraParams } from './helpers/projectWorldToScreen'
 import { aim, clickAt, moveTo, activateFromRail, shot } from './helpers/shapes'
+import { requiresPreview } from './helpers/preview'
+
+// Drives a Preview feature: skipped in the production-shape run (e2e/helpers/preview.ts).
+requiresPreview('loft')
 
 /**
  * Loft — real pointer and keyboard. A drawn rectangle and the top face of a box at a different height,

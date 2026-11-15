@@ -14,6 +14,7 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { SettingsWindow } from './SettingsWindow'
+import { previewBuild } from '../preview'
 import { UnitsPane } from './UnitsPane'
 import { DebugPane } from './DebugPane'
 import { setLengthUnit, getLengthUnit, getPrecision, setPrecision } from './units'
@@ -32,7 +33,11 @@ describe('SettingsWindow', () => {
   it('shows the toolbar tab strip with one tab per pane', () => {
     render(<SettingsWindow />)
     const tabs = screen.getAllByRole('tab')
-    expect(tabs.map((t) => t.textContent)).toEqual(['Units', 'View', 'Controls', 'Editing', 'Theme', 'Language', 'Folders', 'Advanced', 'Debug'])
+    // The Preview tab exists in a preview build only (unit tests run as one).
+    expect(tabs.map((t) => t.textContent)).toEqual([
+      'Units', 'View', 'Controls', 'Editing', 'Theme', 'Language', 'Folders', 'Advanced', 'Debug',
+      ...(previewBuild ? ['Preview'] : []),
+    ])
   })
 
   it('shows the Units pane by default (Units tab selected)', () => {

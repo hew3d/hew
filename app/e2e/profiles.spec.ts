@@ -1,5 +1,9 @@
 import { test, expect, type Page, type TestInfo } from '@playwright/test'
 import { settleFrame } from './helpers/render'
+import { requiresPreview } from './helpers/preview'
+
+// Drives a Preview feature: skipped in the production-shape run (e2e/helpers/preview.ts).
+requiresPreview('fillet')
 
 declare global {
   interface Window {

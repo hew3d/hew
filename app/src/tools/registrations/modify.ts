@@ -34,7 +34,7 @@ export const pushPullTool = defineTool({
     // from inside their container's editing context, except a linked copy's
     // face.
     ctx.scopeToEditContext(tool)
-    tool.setFaceEligibility(ctx.faceEligibility)
+    tool.setFaceEligibility(ctx.pushPullEligibility)
     return tool
   },
 })

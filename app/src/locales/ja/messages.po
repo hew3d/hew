@@ -1345,10 +1345,6 @@ msgstr ""
 msgid "An arc stays on its drawing plane. Move the cursor along the plane, or press an arrow key to change it, then type the length."
 msgstr ""
 
-#: src/kernelErrorCopy/crease.ts
-msgid "An edge on an opening can't be creased."
-msgstr ""
-
 #: src/palette/registry.ts
 msgid "angle"
 msgstr ""
@@ -1928,6 +1924,10 @@ msgstr ""
 msgid "Click a base point to start the move."
 msgstr ""
 
+#: src/tools/EraserTool.ts
+msgid "Click a drawn line to erase it. Drag across lines to erase several."
+msgstr ""
+
 #: src/tools/OffsetTool.ts
 msgid "Click a face or a closed profile to offset its boundary."
 msgstr ""
@@ -1954,6 +1954,10 @@ msgstr ""
 
 #: src/tools/TextPlaceTool.ts
 msgid "Click a face, the ground, or an arrow-locked plane to place the text."
+msgstr ""
+
+#: src/tools/EraserTool.ts
+msgid "Click a line to erase it, not the inside of a shape."
 msgstr ""
 
 #: src/panels/PrintDialog.tsx
@@ -2122,6 +2126,10 @@ msgstr ""
 
 #: src/tools/ProtractorTool.ts
 msgid "Click to drop an angular guide at the measured angle — or type exact degrees."
+msgstr ""
+
+#: src/tools/EraserTool.ts
+msgid "Click to erase this line."
 msgstr ""
 
 #: src/tools/TapeMeasureTool.ts
@@ -2759,10 +2767,6 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "cove"
-msgstr ""
-
-#: src/palette/registry.ts
-msgid "crease"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -3530,6 +3534,10 @@ msgctxt "drawn shape"
 msgid "Edge shape"
 msgstr ""
 
+#: src/tools/EraserTool.ts
+msgid "Edges of a solid can't be erased."
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "edges only"
 msgstr ""
@@ -3644,11 +3652,12 @@ msgid "erase"
 msgstr ""
 
 #: src/panels/dockLogic.ts
+#: src/tools/EraserTool.ts
 msgid "Erase"
 msgstr ""
 
 #: src/palette/registry.ts
-msgid "Erase drawn lines, or crease the edges of a solid so they stay sharp when smoothed."
+msgid "Erase drawn lines. Click one, or drag across several."
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
@@ -3897,8 +3906,8 @@ msgid "Fillet"
 msgstr ""
 
 #: src/palette/curveEntries.ts
-msgid "fillet lines"
-msgstr ""
+#~ msgid "fillet lines"
+#~ msgstr ""
 
 #: src/kernelErrorCopy/blend.ts
 msgid "Fillet needs a solid. This object has gaps."
@@ -6661,6 +6670,10 @@ msgstr ""
 msgid "One of these objects has a face that isn't flat enough to combine."
 msgstr ""
 
+#: src/kernelErrors.ts
+msgid "One of these objects has a face with no area, so these objects can't be combined."
+msgstr ""
+
 #: src/kernelErrorCopy/removeDegenerateFaces.ts
 msgid "One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first."
 msgstr ""
@@ -6862,6 +6875,10 @@ msgstr ""
 
 #: src/panels/PrintDialog.tsx
 msgid "Open the browser print dialog instead"
+msgstr ""
+
+#: src/tools/EraserTool.ts
+msgid "Open the component first to erase its edges."
 msgstr ""
 
 #: src/App.tsx
@@ -9078,7 +9095,11 @@ msgid "Show or hide the Tags panel."
 msgstr ""
 
 #: src/palette/curveEntries.ts
-msgid "Show or hide the thin lines where a fillet or rounded corner meets a flat face."
+#~ msgid "Show or hide the thin lines where a fillet or rounded corner meets a flat face."
+#~ msgstr ""
+
+#: src/palette/curveEntries.ts
+msgid "Show or hide the thin lines where a rounded edge or corner meets a flat face."
 msgstr ""
 
 #: src/palette/registry.ts
@@ -9310,10 +9331,6 @@ msgstr ""
 
 #: src/palette/curveEntries.ts
 msgid "Smooth: Off"
-msgstr ""
-
-#: src/kernelErrorCopy/crease.ts
-msgid "Soft seams can't be creased."
 msgstr ""
 
 #: src/palette/curveEntries.ts
@@ -9756,6 +9773,10 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "That drawing can't belong to this object: it doesn't lie on any of the object's faces."
+msgstr ""
+
+#: src/tools/EraserTool.ts
+msgid "That edge is a soft seam."
 msgstr ""
 
 #: src/kernelErrorCopy/blend.ts

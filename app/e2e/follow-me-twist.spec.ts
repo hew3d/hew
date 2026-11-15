@@ -1,6 +1,10 @@
 import { test, expect, type Page } from '@playwright/test'
 import type { CameraParams } from './helpers/projectWorldToScreen'
 import { aim, clickAt, moveTo, shot, type Ctx } from './helpers/shapes'
+import { requiresPreview } from './helpers/preview'
+
+// Drives a Preview feature: skipped in the production-shape run (e2e/helpers/preview.ts).
+requiresPreview('follow-me-twist')
 
 /**
  * Follow Me twist and end size (true-curves.md §5.2), typed during the drag

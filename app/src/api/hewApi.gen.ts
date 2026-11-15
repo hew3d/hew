@@ -98,6 +98,7 @@ export type UnspecifiedShape = Record<string, unknown>
  * `hew.array.path` (v1) — Copy nodes along a sketch curve or face loop, with an optional scale ramp.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: amount_out_of_range, path_too_short_for_count, array_count_too_large, empty_path, unknown_path_edge, path_branches, path_disconnected, path_segment_too_short, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_face, unknown_entity, locator_missed, ambiguous_locator, reflection, unimplemented
+ * Preview: Array along Path (`path-array`). A production build leaves this command out and refuses it `preview_only`.
  */
 export interface ArrayPathParams {
   /** turn copies to follow the path tangent (default true) */
@@ -514,6 +515,7 @@ export interface DocCloseResult {
  * `hew.doc.export` (v1) — Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp ("skp", the 2021-and-later container; "skp3" to "skp8", "skp2013" to "skp2020") — bytes base64, or a path on hosts with filesystem access.
  * Tier: Required · Class: solitary · Served: host
  * Refusals: export_failed, host_capability_missing, nothing_to_export, save_failed, unknown_entity, unknown_occurrence, too_many_occurrences
+ * Preview parameters: cages, from Smooth (`smooth`). A production build refuses them `preview_only`.
  */
 export interface DocExportParams {
   /** Mesh formats: export smoothed objects' cages instead of their Smooth surfaces. */
@@ -1012,6 +1014,7 @@ export interface HistoryUndoResult {}
  * `hew.library.describe` (v1) — One library item's full metadata, manifest summary, and document attributes.
  * Tier: Standard · Class: read-only · Served: host
  * Refusals: host_capability_missing, unknown_library_item
+ * Preview values of category: profile, from Fillet and Chamfer (`fillet`). A production build neither accepts nor reports them.
  */
 export interface LibraryDescribeParams {
   /** the item's id or relative path */
@@ -1071,6 +1074,7 @@ export interface LibraryInsertResult {
  * `hew.library.list` (v1) — List items in the Hew Library, optionally filtered by category, collection, or a text query.
  * Tier: Standard · Class: read-only · Served: host
  * Refusals: host_capability_missing
+ * Preview values of category: profile, from Fillet and Chamfer (`fillet`). A production build neither accepts nor reports them.
  */
 export interface LibraryListParams {
   category?: "component" | "material" | "model" | "profile"
@@ -1103,6 +1107,8 @@ export interface LibraryRemoveResult {
  * `hew.library.save` (v1) — Save a selection, one material, or the whole document to the library. Records no undo entry (§6.4).
  * Tier: Standard · Class: read-only · Served: kernel
  * Refusals: host_capability_missing, unknown_entity, empty_component, duplicate_member, unknown_object, unknown_group, unknown_instance, explode_session_scope, save_failed, unknown_library_item, invalid_profile, locator_missed, ambiguous_locator
+ * Preview parameters: profile_chain, from Fillet and Chamfer (`fillet`). A production build refuses them `preview_only`.
+ * Preview values of category: profile, from Fillet and Chamfer (`fillet`). A production build neither accepts nor reports them.
  */
 export interface LibrarySaveParams {
   /** defaults to component (a selection), material (a material), or model (the whole document) */
@@ -1135,6 +1141,7 @@ export interface LibrarySaveResult {
  * `hew.library.update_meta` (v1) — Edit a library item's name, keywords, or collection in place.
  * Tier: Standard · Class: read-only · Served: host
  * Refusals: host_capability_missing, unknown_library_item, save_failed
+ * Preview values of category: profile, from Fillet and Chamfer (`fillet`). A production build neither accepts nor reports them.
  */
 export interface LibraryUpdateMetaParams {
   collection?: string
@@ -1306,6 +1313,7 @@ export interface MetaHelloResult {
  * `hew.object.crease` (v1) — Set or clear the crease on edges, which keeps them sharp under Smooth.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: crease_on_soft_edge, crease_on_boundary, edges_span_objects, shape_degenerate, unknown_object, unknown_component, unknown_entity, locator_missed, ambiguous_locator
+ * Preview: Smooth (`smooth`). A production build leaves this command out and refuses it `preview_only`.
  */
 export interface ObjectCreaseParams {
   crease?: boolean
@@ -1323,6 +1331,7 @@ export interface ObjectCreaseResult {
  * `hew.object.smooth` (v1) — Set an object's Smooth level (0 = Off, 1–3): its faces become the cage of a subdivision surface.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: amount_out_of_range, smooth_too_dense, unknown_object, unknown_component, unknown_entity
+ * Preview: Smooth (`smooth`). A production build leaves this command out and refuses it `preview_only`.
  */
 export interface ObjectSmoothParams {
   /** 0 = Off */
@@ -2061,6 +2070,7 @@ export interface SketchUnitsResult {
  * `hew.solid.bake` (v1) — Replace a smoothed object's cage with its Smooth surface and clear the level.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: amount_out_of_range, smooth_too_dense, shape_degenerate, unknown_object, unknown_component, unknown_entity
+ * Preview: Smooth (`smooth`). A production build leaves this command out and refuses it `preview_only`.
  */
 export interface SolidBakeParams {
   /** an object id */
@@ -2097,6 +2107,7 @@ export interface SolidCapResult {
  * `hew.solid.chamfer` (v1) — Chamfer the edges of a solid, or chamfer a 2D corner, as the Fillet tool's Chamfer mode does.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: radius_too_large, profile_too_wide, edge_is_smooth, blend_needs_solid, unsupported_vertex, blend_faces_flush, unsupported_edge, obstructed, segments_out_of_range, non_uniform_instance, stop_out_of_range, corner_not_blendable, corner_is_straight, corner_radius_too_large, corner_leaves_face, edges_span_objects, unknown_object, unknown_face, unknown_entity, locator_missed, ambiguous_locator, angle_does_not_fit
+ * Preview: Fillet and Chamfer (`fillet`). A production build leaves this command out and refuses it `preview_only`.
  */
 export interface SolidChamferParams {
   /** radians measured from the primary face; with `distance` */
@@ -2132,6 +2143,7 @@ export interface SolidChamferResult {
  * `hew.solid.deform` (v1) — Twist, bend or taper a solid along its bounding box, or bend it along a path, as the Deform tool does.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: self_intersecting, shape_needs_solid, amount_out_of_range, shape_degenerate, unknown_object, unknown_entity, unknown_face, locator_missed, ambiguous_locator, follow_me_in_component_unsupported, unimplemented
+ * Preview: Deform (`deform`). A production build leaves this command out and refuses it `preview_only`.
  */
 export interface SolidDeformParams {
   /** twist or bend, radians: |twist| ≤ 4π, |bend| ≤ 2π */
@@ -2213,6 +2225,7 @@ export interface SolidExtrudeResult {
  * `hew.solid.fillet` (v1) — Round, cove, bullnose or profile the edges of a solid, or round a 2D corner, as the Fillet tool does.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: radius_too_large, profile_too_wide, edge_is_smooth, blend_needs_solid, unsupported_vertex, blend_faces_flush, unsupported_edge, obstructed, segments_out_of_range, non_uniform_instance, stop_out_of_range, corner_not_blendable, corner_is_straight, corner_radius_too_large, corner_leaves_face, edges_span_objects, unknown_object, unknown_face, unknown_entity, locator_missed, ambiguous_locator, profile_needs_convex_edge, bullnose_needs_parallel_sides, invalid_profile, unknown_profile, load_failed, host_capability_missing
+ * Preview: Fillet and Chamfer (`fillet`). A production build leaves this command out and refuses it `preview_only`.
  */
 export interface SolidFilletParams {
   /** a 2D corner instead of solid edges: {sketch: <sketch id>, at: [x,y,z]} for a drawn corner, or {face: <face locator>, at: [x,y,z]} for a corner of a shape drawn on a face */
@@ -2250,6 +2263,7 @@ export interface SolidFilletResult {
  * `hew.solid.follow_me` (v1) — Sweep a profile along an edge-chain path, as the tool does.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: empty_path, unknown_path_edge, path_branches, path_disconnected, path_segment_too_short, profile_not_perpendicular, follow_me_in_component_unsupported, path_detached_from_profile, path_reverses, path_too_tight, profile_crosses_axis, partial_sweep_on_pole, sweep_self_intersects, sweep_degenerate, twist_needs_open_path, unknown_region, unknown_object, unknown_face, unknown_entity, locator_missed, ambiguous_locator, unimplemented
+ * Preview parameters: twist, end_scale, stations, from Follow Me twist and scale (`follow-me-twist`). A production build refuses them `preview_only`.
  */
 export interface SolidFollowMeParams {
   /** scale of the end profile relative to the start (1 = none); open paths only */
@@ -2329,6 +2343,7 @@ export interface SolidIntersectResult {
  * `hew.solid.loft` (v1) — Skin a new solid through closed shapes in order, optionally to an apex and along rails, as the Loft tool does.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: open_profile, loft_profile_has_hole, loft_needs_two_profiles, loft_too_many_rails, rail_misses_profile, self_intersecting, amount_out_of_range, shape_degenerate, unknown_region, unknown_object, unknown_face, unknown_entity, locator_missed, ambiguous_locator, follow_me_in_component_unsupported, unimplemented
+ * Preview: Loft (`loft`). A production build leaves this command out and refuses it `preview_only`.
  */
 export interface SolidLoftParams {
   /** [x, y, z] or a derived-point locator: the point the loft ends in */
@@ -2431,6 +2446,7 @@ export interface SolidMoveImprintResult {
  * `hew.solid.project` (v1) — Drape a sketch's shape onto an object's faces, then engrave or emboss it.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: project_misses, project_needs_closed_shape, would_sever, self_intersecting, unsupported_shell_corner, wall_too_thick, shape_needs_solid, amount_out_of_range, shape_degenerate, degenerate_contact, non_planar_input, degenerate_input, unknown_object, unknown_sketch, unknown_component, unknown_entity
+ * Preview: Project (`project`). A production build leaves this command out and refuses it `preview_only`.
  */
 export interface SolidProjectParams {
   /** meters; > 0 engraves, < 0 embosses; absent imprints only */
@@ -2503,6 +2519,7 @@ export interface SolidRemoveBlendResult {
  * `hew.solid.remove_degenerate_faces` (v1) — Remove an object's zero-width and sub-tolerance faces, keeping it closed.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: object_is_solid, unknown_component, unknown_entity, explode_session_scope, invalid, nothing_to_remove
+ * Preview: Remove degenerate faces (`remove-degenerate-faces`). A production build leaves this command out and refuses it `preview_only`.
  */
 export interface SolidRemoveDegenerateFacesParams {
   /** obj_ id (a world object or a component member) */
@@ -2544,6 +2561,7 @@ export interface SolidResizeBlendResult {
  * `hew.solid.revolve` (v1) — Turn a profile about an axis in its plane into a solid, as the Revolve tool does.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: axis_not_in_profile_plane, amount_out_of_range, profile_crosses_axis, partial_sweep_on_pole, sweep_self_intersects, sweep_degenerate, follow_me_in_component_unsupported, unknown_region, unknown_object, unknown_face, unknown_entity, locator_missed, ambiguous_locator
+ * Preview: Revolve (`revolve`). A production build leaves this command out and refuses it `preview_only`.
  */
 export interface SolidRevolveParams {
   /** radians, 0 < |angle| ≤ 2π, right-hand rule about from→to; default 2π (a closed solid) */
@@ -2597,6 +2615,7 @@ export interface SolidScaleImprintResult {
  * `hew.solid.shell` (v1) — Hollow a solid to a wall of one thickness, leaving chosen faces open.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: wall_too_thick, self_intersecting, unsupported_shell_corner, shape_needs_solid, amount_out_of_range, shape_degenerate, unknown_object, unknown_component, unknown_entity, locator_missed, ambiguous_locator
+ * Preview: Shell (`shell`). A production build leaves this command out and refuses it `preview_only`.
  */
 export interface SolidShellParams {
   /** an object id */
@@ -2631,6 +2650,7 @@ export interface SolidSliceResult {
  * `hew.solid.soften` (v1) — Soften the edges of an object that bend less than an angle, so faceted walls read as smooth.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: amount_out_of_range, shape_degenerate, unknown_object, unknown_component, unknown_entity
+ * Preview: Soften Edges (`soften`). A production build leaves this command out and refuses it `preview_only`.
  */
 export interface SolidSoftenParams {
   /** radians: edges bending less than this are softened (coplanar and creased edges are left alone) */

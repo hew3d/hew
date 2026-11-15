@@ -10,6 +10,7 @@
  * Position Texture, the measuring and annotating tools, and the camera tools.
  */
 
+import { toolAllowed } from '../../preview'
 import type { ToolName } from '../toolIcons'
 import type { ToolRegistration } from '../toolRegistration'
 import { arcTool, circleTool, lineTool, polygonTool, rectangleTool } from './shapes'
@@ -26,7 +27,7 @@ import {
 } from './curves'
 
 /** Table order is the order tools are listed in; it carries no behavior. */
-export const TOOL_REGISTRATIONS: readonly ToolRegistration[] = [
+const ALL_TOOL_REGISTRATIONS: readonly ToolRegistration[] = [
   // ---- Draw ----
   lineTool,
   rectangleTool,
@@ -46,6 +47,10 @@ export const TOOL_REGISTRATIONS: readonly ToolRegistration[] = [
   projectTool,
   eraserTool,
 ]
+
+/** The registrations this build offers. A tool the Preview wall withholds is
+ *  left out here, so the Viewport can never construct or activate it. */
+export const TOOL_REGISTRATIONS: readonly ToolRegistration[] = ALL_TOOL_REGISTRATIONS.filter((r) => toolAllowed(r.name))
 
 const BY_NAME: ReadonlyMap<ToolName, ToolRegistration> = new Map(TOOL_REGISTRATIONS.map((r) => [r.name, r]))
 

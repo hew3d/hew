@@ -29,7 +29,7 @@ use serde_json::{Map, Value, json};
 /// This namespace's slice of the handler table. `hew.compute.project` and
 /// `hew.compute.stretch` are declared but have no handler yet (core C6 and
 /// C7), so they answer `unimplemented`.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.compute.boolean" => boolean,
         "hew.compute.slice" => slice,

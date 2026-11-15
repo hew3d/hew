@@ -52,6 +52,7 @@
  */
 
 import { t } from '@lingui/core/macro'
+import { enabledFeatureIds, previewBuild } from '../preview'
 import { plural } from '@lingui/core/macro'
 import * as diagnosticLog from './diagnosticLog'
 import { formatNumber } from '../i18n/format'
@@ -278,6 +279,10 @@ export interface ReportSystemInfo {
    *  set by `i18n/activate.ts`), so a report written in another language
    *  arrives with that context. Empty when unknown. */
   locale: string
+  /** `true` on a preview build (the Preview wall, src/preview). Absent otherwise. */
+  preview?: true
+  /** The Preview features switched on in this window. Present with `preview`. */
+  previewFeatures?: string[]
 }
 
 export function gatherSystemInfo(appVersion: string, platform: string): ReportSystemInfo {
@@ -305,8 +310,26 @@ export function gatherSystemInfo(appVersion: string, platform: string): ReportSy
   } catch {
     locale = ''
   }
-  return { appVersion, platform, os, gpu, userAgent, locale }
+  const info: ReportSystemInfo = { appVersion, platform, os, gpu, userAgent, locale }
+  // A preview build stamps itself, so such a report is recognizable at a
+  // glance. Production adds nothing. The keys sit inside `system`, which the
+  // intake service reads by name and otherwise ignores.
+  if (previewBuild) {
+    info.preview = true
+    info.previewFeatures = enabledFeatureIds()
+  }
+  return info
 }
+
+/** The dialog's line about a preview build: " · Preview build: fillet, loft".
+ *  English, like the stamp itself; empty outside a preview build. */
+/* oxlint-disable lingui/no-unlocalized-strings -- Preview-build copy is English only (src/preview) */
+function previewNote(system: ReportSystemInfo): string {
+  if (!previewBuild || system.preview !== true) return ''
+  const features = system.previewFeatures ?? []
+  return ` · Preview build: ${features.length === 0 ? 'no features on' : features.join(', ')}`
+}
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 function base64FromBytes(bytes: Uint8Array): string {
   // Chunked to avoid blowing the call stack on a large document — mirrors
@@ -868,7 +891,7 @@ export function describeReport(
       bytes: utf8Length(JSON.stringify(system)),
       disabledReason: null,
       droppedFromSend: false,
-      preview: `${system.appVersion} · ${system.platform} · ${system.os || t`unknown OS`} · ${system.gpu || t`unknown GPU`} · ${system.userAgent}`,
+      preview: `${system.appVersion} · ${system.platform} · ${system.os || t`unknown OS`} · ${system.gpu || t`unknown GPU`} · ${system.userAgent}${previewNote(system)}`,
     },
     recording: {
       included: inc.recording,

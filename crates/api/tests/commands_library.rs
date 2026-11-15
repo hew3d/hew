@@ -1011,9 +1011,15 @@ fn base64_encode(bytes: &[u8]) -> String {
 }
 
 // ======================================================== profile items
+//
+// Saving a profile (`profile_chain`) belongs to a Preview feature
+// (`fillet-profiles` in preview-features.json): these run in a preview
+// build only; a production build refuses the parameter `preview_only`
+// (preview_wall.rs).
 
 /// Draws a three-point open chain in the ground plane and returns the
 /// sketch id with the two edge locators in drawing order.
+#[cfg(hew_preview)]
 fn draw_profile_chain(conn: &mut Connection, doc: &mut Document) -> (String, Vec<Value>) {
     let r = call_ok(
         conn,
@@ -1035,6 +1041,7 @@ fn draw_profile_chain(conn: &mut Connection, doc: &mut Document) -> (String, Vec
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn save_a_profile_chain_then_fillet_with_it_and_replace_it() {
     let mut conn = new_conn();
     let mut doc = Document::new();
@@ -1109,6 +1116,7 @@ fn save_a_profile_chain_then_fillet_with_it_and_replace_it() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn a_profile_item_cannot_be_inserted_and_save_refuses_a_bad_chain() {
     let mut conn = new_conn();
     let mut doc = Document::new();
@@ -1155,4 +1163,219 @@ fn a_profile_item_cannot_be_inserted_and_save_refuses_a_bad_chain() {
         }),
     );
     assert_eq!(d["refusal"], "invalid_profile");
+}
+
+// ============================================ profile items, both builds
+//
+// A Library folder can hold profile items (a preview build wrote them, or
+// a file was copied in). A production build tolerates them: it lists none,
+// refuses to describe, edit or write over one (`preview_only`, naming the
+// feature), and refuses to place one with copy that names no preview
+// feature. A preview build serves them like any other item.
+
+/// A Library holding one component item and one profile item.
+fn library_with_a_profile() -> FakeHost {
+    let mut host = FakeHost::default();
+    host.seed(
+        "Components/a.hew",
+        bare_item_bytes("id-a", "A", "component"),
+    );
+    host.seed(
+        "Profiles/edge.hew",
+        bare_item_bytes("id-p", "Edge", "profile"),
+    );
+    host
+}
+
+#[test]
+#[cfg(not(hew_preview))]
+fn a_production_build_tolerates_profile_items_and_serves_none() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = library_with_a_profile();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let wall = |d: &Value, what: &str| {
+        assert_eq!(d["refusal"], "preview_only", "{what}: {d}");
+        assert_eq!(d["detail"]["feature"], "fillet", "{what}: {d}");
+        assert!(
+            d["explanation"]
+                .as_str()
+                .unwrap()
+                .contains("Fillet and Chamfer"),
+            "{what}: {d}"
+        );
+    };
+
+    // Listing leaves the profile out, filtered or not.
+    let listed = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.library.list",
+        json!({}),
+    );
+    let paths: Vec<&str> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["Components/a.hew"]);
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.list",
+        json!({ "category": "profile" }),
+    );
+    wall(&d, "list by category");
+
+    // Describe and update_meta refuse it; the component still answers.
+    for (id, method, params) in [
+        (4, "hew.library.describe", json!({ "item": "id-p" })),
+        (
+            5,
+            "hew.library.describe",
+            json!({ "item": "Profiles/edge.hew" }),
+        ),
+        (
+            6,
+            "hew.library.update_meta",
+            json!({ "item": "id-p", "name": "X" }),
+        ),
+    ] {
+        let d = call_err(&mut conn, &mut doc, &mut host, id, method, params);
+        wall(&d, method);
+    }
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        7,
+        "hew.library.describe",
+        json!({ "item": "id-a" }),
+    );
+
+    // Saving as a profile refuses, and so does writing over one, whatever
+    // the category asked for.
+    for (id, params) in [
+        (8, json!({ "name": "P", "category": "profile" })),
+        (9, json!({ "name": "P", "replace": "id-p" })),
+        (
+            10,
+            json!({ "name": "P", "replace": "id-p", "category": "model" }),
+        ),
+        (
+            11,
+            json!({ "name": "P", "replace": "id-p", "category": "profile" }),
+        ),
+    ] {
+        let d = call_err(
+            &mut conn,
+            &mut doc,
+            &mut host,
+            id,
+            "hew.library.save",
+            params.clone(),
+        );
+        wall(&d, &format!("save {params}"));
+    }
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        12,
+        "hew.doc.transact",
+        json!({ "commands": [{ "method": "hew.library.save", "params": { "name": "P", "replace": "id-p" } }] }),
+    );
+    wall(&d, "save replace in a transaction");
+    assert!(host.write_log.is_empty(), "nothing was written");
+
+    // A typo is told the categories this build takes.
+    let d = call(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        13,
+        "hew.library.save",
+        json!({ "name": "P", "category": "profiles" }),
+    );
+    let message = d.error.unwrap().message;
+    assert!(message.contains("\"model\""), "{message}");
+    assert!(!message.contains("\"profile\""), "{message}");
+
+    // Placing it refuses, in words that name no preview feature.
+    for (id, params) in [
+        (14, json!({ "item": "id-p" })),
+        (
+            15,
+            json!({ "bytes_base64": base64_encode(&bare_item_bytes("id-q", "Q", "profile")) }),
+        ),
+    ] {
+        let d = call_err(
+            &mut conn,
+            &mut doc,
+            &mut host,
+            id,
+            "hew.library.insert",
+            params,
+        );
+        assert_eq!(d["refusal"], "profile_not_insertable");
+        let copy = d["explanation"].as_str().unwrap();
+        assert_eq!(copy, api::preview::GATED_API_COPY[0].3);
+        for f in api::preview::features() {
+            assert!(!copy.contains(&f.name), "{copy} names {}", f.name);
+            for t in &f.tools {
+                assert!(!copy.contains(t.as_str()), "{copy} names {t}");
+            }
+        }
+    }
+    assert_eq!(host.items.len(), 2, "the profile file is still there");
+}
+
+#[test]
+#[cfg(hew_preview)]
+fn a_preview_build_serves_profile_items() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = library_with_a_profile();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let listed = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.library.list",
+        json!({ "category": "profile" }),
+    );
+    assert_eq!(listed["items"][0]["path"], "Profiles/edge.hew");
+    let d = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.describe",
+        json!({ "item": "id-p" }),
+    );
+    assert_eq!(d["category"], "profile");
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        4,
+        "hew.library.update_meta",
+        json!({ "item": "id-p", "name": "Edge 2" }),
+    );
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        5,
+        "hew.library.insert",
+        json!({ "item": "id-p" }),
+    );
+    assert_eq!(d["refusal"], "profile_not_insertable");
+    assert_eq!(d["explanation"], api::preview::GATED_API_COPY[0].2);
 }

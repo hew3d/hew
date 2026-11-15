@@ -1,5 +1,9 @@
 import { test, expect } from '@playwright/test'
 import { clickWorld, setup, shot, volume } from './helpers/offset'
+import { requiresPreview } from './helpers/preview'
+
+// Drives a Preview feature: skipped in the production-shape run (e2e/helpers/preview.ts).
+requiresPreview('smooth')
 
 /**
  * Smooth in the real UI: the Object Info Smooth row, the cage wire while a

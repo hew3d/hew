@@ -36,7 +36,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     match name {
         "hew.scenes.list" => Some(list),
         "hew.scenes.add" => Some(add),

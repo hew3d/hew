@@ -33,6 +33,7 @@ import { PhoneShareDialog } from './PhoneShareDialog'
 import { resetStlImportUnitForTest, setLastStlImportUnit } from '../settings/stlImportUnit'
 import type { RecoveryListing } from '../io/recoveryStore'
 import type { ImportReport } from '../io/fileHost'
+import { requiresPreview } from '../test/requiresPreview'
 
 // PhoneShareDialog's external dependencies — hoisted so the vi.mock
 // factories below (themselves hoisted above these imports by Vitest) can
@@ -795,11 +796,13 @@ describe('ExportDialog', () => {
     expect(onExport).toHaveBeenCalledWith('glb', 48, undefined, false)
   })
 
-  it('offers "Export cages instead" only for a model with a Smooth object, and passes the choice', () => {
-    const plain = render(<ExportDialog onExport={vi.fn()} onCancel={vi.fn()} />)
+  it('offers no "Export cages instead" for a model with no Smooth object', () => {
+    render(<ExportDialog onExport={vi.fn()} onCancel={vi.fn()} />)
     expect(screen.queryByLabelText(/export cages instead/i)).not.toBeInTheDocument()
-    plain.unmount()
+  })
 
+  it('offers "Export cages instead" for a model with a Smooth object, and passes the choice', (ctx) => {
+    requiresPreview(ctx, 'smooth')
     const onExport = vi.fn()
     render(<ExportDialog onExport={onExport} onCancel={vi.fn()} hasSmoothed />)
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))

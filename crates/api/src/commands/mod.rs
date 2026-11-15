@@ -246,9 +246,32 @@ pub mod structure;
 pub mod style;
 pub mod view;
 
+/// The handler a first-party command runs, after the Preview wall
+/// ([`crate::preview::check`]): the dispatcher's ONE execution choke point.
+/// Every path that runs a command (a plain request, a transaction's
+/// commands, a dry run, the solitary fast path, a call made while serving a
+/// plugin forward) resolves its handler here, so a production build refuses
+/// a preview command, or a preview parameter, `preview_only` on all of
+/// them. A command with no handler refuses `unimplemented` (§14).
+pub fn resolve(name: &str, params: &serde_json::Value) -> Result<Handler, Refusal> {
+    crate::preview::check(name, params)?;
+    handler(name).ok_or_else(|| {
+        Refusal::api(
+            "unimplemented",
+            &format!("{name} is declared but not implemented yet in this build."),
+        )
+    })
+}
+
 /// The handler table, partitioned per namespace so each module owns its
-/// own match — a `None` answers the `unimplemented` refusal (§14).
+/// own match — a `None` answers the `unimplemented` refusal (§14). A
+/// production build has no handler for a preview command
+/// ([`crate::preview::command_allowed`]); run commands through
+/// [`resolve`], which also checks their parameters.
 pub fn handler(name: &str) -> Option<Handler> {
+    if crate::preview::command_allowed(name).is_err() {
+        return None;
+    }
     query::handler(name)
         .or_else(|| parts::handler(name))
         .or_else(|| sketch::handler(name))

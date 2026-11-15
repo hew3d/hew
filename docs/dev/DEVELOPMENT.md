@@ -479,14 +479,108 @@ merges, and it's what CI runs:
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
-pnpm --dir app typecheck && pnpm --dir app test && pnpm --dir app build
+HEW_PREVIEW=1 cargo clippy / cargo test   (the crates the flag changes)
+scripts/wasm-flavors.sh build production web; ... build preview web --no-opt
+pnpm --dir app typecheck && pnpm --dir app test (both builds) && pnpm --dir app build
 pnpm --dir site check && pnpm --dir site build
 ```
 
 It also holds the desktop shell crate to the same formatting/Clippy bar,
 even though it isn't a workspace member (it carries desktop-only
-dependencies that don't belong in the kernel test loop).
+dependencies that don't belong in the kernel test loop). Every step the
+Preview flag changes runs twice, once per build (see below).
+
+### Preview features
+
+Unfinished features live on `main` behind a build-time flag. A preview
+build has them; a production build, the one regular users get, has no way
+to reach them: no tool, menu item, palette entry, keyboard shortcut, dock
+chip or API command. The flag is fixed when Hew is built, so there is
+nothing to switch on in a production build.
+
+**The flag.** `HEW_PREVIEW=1` in the build environment makes a preview
+build. Any other value, or none, makes a production build. It reaches:
+
+- `crates/api` (its `build.rs` sets `cfg(hew_preview)`), and through it
+  `hew-cli`, the MCP server, the WASM module's live API, and the plugin
+  host's dispatch;
+- the desktop shell (`shells/tauri/src-tauri/build.rs`), for the native
+  menu and the updater: a preview build never updates itself;
+- the app, as `__HEW_PREVIEW__` (`app/vite.config.ts`). The dev server
+  defaults it to on and `vite build` to off; set `HEW_PREVIEW=0` or `1` to
+  choose.
+
+A `vX.Y.Z-pre.N` tag builds every package with the flag on, publishes a
+pre-release with no update feed, and deploys the web app to the `preview`
+Pages branch. A production tag never sets it, and the release workflow
+fails if it finds it set.
+
+**The registry.** `preview-features.json` at the repo root lists every
+Preview feature: an id, a name, a one-line state, an owner, and what it
+gates (`tools`, `actions`, `dockChips`, `apiCommands`, `behaviors`).
+Nothing is gated anywhere else. The app reads it in `app/src/preview/`,
+`crates/api` in `src/preview.rs`, and the desktop shell in
+`src/preview_menu.rs`. In a production build an API command of an entry
+is left out of the registry, so it appears in no listing, and a call
+naming it is refused with `preview_only`. A behavior that is an API
+parameter (Follow Me's `twist`, for one) is bound to its command in
+`GATED_PARAMS` in `crates/api/src/preview.rs`; the command stays, the
+parameter is refused. A behavior that is a value of a live field (the
+Library's `profile` category) is bound in `GATED_VALUES`: the value
+leaves the command's schemas, a request naming it is refused, and the
+handler neither lists nor touches an item that carries it. Refusal copy a
+handler writes that would name a Preview feature lives in
+`GATED_API_COPY`, with the production wording beside it; the wall test
+fails on any other handler string that names one.
+
+**Adding a feature.** Add its entry to `preview-features.json` and build
+the feature as usual. The wall tests walk the registry, so the entry is
+covered without a test change: `crates/api/tests/preview_wall.rs`,
+`crates/hew-cli/tests/preview_wall.rs`, the live-API test in
+`crates/wasm-api`, the native menu test in the shell,
+`app/src/preview/wall.test.ts`, and `app/e2e/preview-wall.spec.ts`. A
+test of the feature itself runs in the preview build only: in Rust,
+`#[cfg(hew_preview)]` (in `crates/api`; other crates check
+`api::preview::PREVIEW_BUILD`); in a browser spec,
+`requiresPreview('<id>')`. Every name in an entry must be real, and the
+tests fail on one that is not.
+
+**Graduating a feature.** Delete its entry, then regenerate the API
+artifacts (`REGENERATE_API_ARTIFACTS=1 cargo test -p api --test
+generate_artifacts`): the reference and the TypeScript SDK mark each
+Preview command, so their diff shows what became public. Remove the
+feature's `GATED_PARAMS`, `GATED_VALUES` and `GATED_API_COPY` rows, if it
+has any, and its `cfg(hew_preview)` and
+`requiresPreview` marks. Removing a feature that will not ship is the same
+deletion, with its code.
+
+**Commits and the changelog.** A commit whose work can only be reached
+in a preview build takes the type `preview` in place of `feat`, with the
+usual scope: `preview(kernel): …`, `preview(app): …`. `feat` is kept for
+what a production build gains, so the history never promises a feature
+users cannot find. Where such a commit also changes something in every
+build, its body says what. Graduating a feature is the `feat` commit.
+`CHANGELOG.md` and release notes do not mention a Preview feature until
+it graduates; `app/src/preview/guidePages.test.ts` checks the unreleased
+changelog, the README, the roadmap and the published guide for the
+names it knows.
+
+**Running both builds.** `scripts/verify.sh` and `scripts/verify-full.sh`
+run both on their own; nothing in them skips the production half. By hand:
+
+```
+cargo test -p api                       # production
+HEW_PREVIEW=1 cargo test -p api         # preview
+scripts/wasm-flavors.sh build preview web --no-opt
+scripts/wasm-flavors.sh use preview     # app/src/wasm/pkg is the preview module
+HEW_PREVIEW=1 pnpm --dir app dev
+scripts/wasm-flavors.sh build production web --no-opt
+scripts/wasm-flavors.sh use production
+HEW_PREVIEW=0 pnpm --dir app exec playwright test --project=chromium
+```
+
+The WASM module carries the API's live half, so each build has its own
+module; `preview_build()` on the module says which one it is.
 
 **Determinism and replay.** The kernel is required to be bit-for-bit
 deterministic — the same input produces the same output on every machine,

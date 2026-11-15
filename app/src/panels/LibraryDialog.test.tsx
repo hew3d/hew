@@ -23,6 +23,8 @@ import {
 } from './LibraryDialog'
 import type { LibraryItemSummary } from '../library/types'
 import { loadListColWidths } from './library/LibraryListHead'
+import { requiresPreview } from '../test/requiresPreview'
+import { featureEnabled } from '../preview'
 
 /** Scopes a name lookup to the tile grid (`role="listbox"`). Plain
  * `screen.getByText`/`findByText` are ambiguous for whichever item is
@@ -382,8 +384,9 @@ describe('LibraryDialog', () => {
     // All: every item = 5. Components: chair, hinge = 2. Materials: oak = 1.
     // Models: house + the errored "broken" fixture (erroredItem defaults to
     // 'model') = 2.
-    // Profiles: none in this fixture library.
-    expect(counts).toEqual(['5', '2', '1', '2', '0'])
+    // Profiles: none in this fixture library; the tab itself is a Fillet
+    // feature, so a production build has no Profiles count at all.
+    expect(counts).toEqual(featureEnabled('fillet') ? ['5', '2', '1', '2', '0'] : ['5', '2', '1', '2'])
   })
 
   it('switches category', async () => {
@@ -1443,7 +1446,8 @@ describe('LibraryDialog', () => {
   // The built-in profiles are Library items: an empty folder still lists
   // them, under All and Profiles alike, and every count agrees.
   describe('the built-in profiles', () => {
-    it('show and count under All and Profiles even when the folder is empty', async () => {
+    it('show and count under All and Profiles even when the folder is empty', async (ctx) => {
+      requiresPreview(ctx, 'fillet')
       fx.builtIns = [
         { id: 'builtin:ogee', name: 'Ogee' },
         { id: 'builtin:cove', name: 'Cove' },

@@ -1,12 +1,16 @@
 /**
- * EraserTool unit tests: a click erases a drawn line, a solid edge only
- * explains itself until the crease modifier is held, Ctrl-click toggles a
- * crease, a soft seam refuses, and a drag sweeps several in one undo step.
+ * EraserTool unit tests: a click erases a drawn line and a drag sweeps
+ * several in one undo step; a solid edge only explains itself. Those run in
+ * both builds. The crease half (Ctrl-click toggles a crease, a soft seam
+ * refuses) is the Smooth preview's `eraser-crease` behavior: its tests are
+ * marked `requiresPreview(ctx, 'smooth')`, and the "gated" block runs in
+ * both builds against a tool whose gate is off.
  * A fake scene and host stand in for wasm and the viewport.
  */
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
 import { EraserTool, CLICK_SLOP_PX, type EraserHost } from './EraserTool'
+import { requiresPreview } from '../test/requiresPreview'
 import type { Snap } from './types'
 import type { NodeRef } from '../panels/treeModel'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -21,7 +25,7 @@ const drawn = (key: string): NodeRef => ({ kind: 'draft-edge', id: 1n, ctx: '{"p
 
 interface EdgeInfo { smooth: number; group: bigint[]; ring?: bigint[]; creased?: boolean }
 
-function makeTool(edges: Record<string, EdgeInfo> = {}, opts: { setCreaseThrows?: string } = {}) {
+function makeTool(edges: Record<string, EdgeInfo> = {}, opts: { setCreaseThrows?: string; crease?: boolean } = {}) {
   const creased = new Map<string, boolean>()
   const setCreaseCalls: unknown[][] = []
   const scene = {
@@ -56,7 +60,10 @@ function makeTool(edges: Record<string, EdgeInfo> = {}, opts: { setCreaseThrows?
     onCreaseCommit: vi.fn(),
   }
   const onToast = vi.fn()
-  const tool = new EraserTool(scene as unknown as WasmScene, new THREE.Group(), host, onToast)
+  const tool = new EraserTool(
+    scene as unknown as WasmScene, new THREE.Group(), host, onToast,
+    opts.crease === undefined ? undefined : () => opts.crease === true,
+  )
   return {
     tool, scene, host, onToast, setCreaseCalls,
     setRef: (r: NodeRef | null) => { ref = r },
@@ -73,6 +80,10 @@ function click(tool: EraserTool, snap: Snap | null, opts: { ctrl?: boolean; dx?:
   tool.onPointerUp(snap, RAY)
 }
 
+/** A tool whose crease gate is forced on (the Smooth preview's behavior). */
+const makeCreaseTool = (edges: Record<string, EdgeInfo> = {}, opts: { setCreaseThrows?: string } = {}) =>
+  makeTool(edges, { ...opts, crease: true })
+
 describe('EraserTool', () => {
   it('erases a drawn line with a plain click', () => {
     const t = makeTool()
@@ -88,17 +99,122 @@ describe('EraserTool', () => {
     expect(t.host.runDelete).not.toHaveBeenCalled()
     expect(t.scene.set_crease).not.toHaveBeenCalled()
     expect(t.tool.statusHint()).toContain("Edges of a solid can't be erased.")
+  })
+
+  it('with the crease half on, the same hint also offers the modifier', (ctx) => {
+    requiresPreview(ctx, 'smooth')
+    const t = makeCreaseTool({ '7:5': { smooth: 0, group: [5n, 6n] } })
+    click(t.tool, edgeSnap(7n, 5n))
+    expect(t.host.runDelete).not.toHaveBeenCalled()
+    expect(t.scene.set_crease).not.toHaveBeenCalled()
+    expect(t.tool.statusHint()).toContain("Edges of a solid can't be erased.")
     expect(t.tool.statusHint()).toContain('to crease (keeps it sharp under Smooth)')
   })
 
-  it('Ctrl-click on one facet of a faceted round creases the whole base ring', () => {
-    const t = makeTool({ '7:5': { smooth: 0, group: [5n], ring: [5n, 6n, 7n, 8n] } })
+  describe('with the crease half gated off (production, or Smooth switched off)', () => {
+    it('Ctrl-click on a solid edge does nothing and says nothing about creasing', () => {
+      const t = makeTool({ '7:5': { smooth: 0, group: [5n] } }, { crease: false })
+      click(t.tool, edgeSnap(7n, 5n), { ctrl: true })
+      expect(t.scene.set_crease).not.toHaveBeenCalled()
+      expect(t.host.runDelete).not.toHaveBeenCalled()
+      expect(t.host.onCreaseCommit).not.toHaveBeenCalled()
+      expect(t.onToast).not.toHaveBeenCalled()
+      expect(t.tool.statusHint()).toBe("Edges of a solid can't be erased.")
+    })
+
+    it('Ctrl is ignored: Ctrl-click erases a drawn line like a plain click', () => {
+      const t = makeTool({}, { crease: false })
+      const ref = drawn('a')
+      t.setRef(ref)
+      click(t.tool, null, { ctrl: true })
+      expect(t.host.runDelete).toHaveBeenCalledWith([ref])
+    })
+
+    it('a Ctrl drag erases the lines it crosses and leaves solid edges alone', () => {
+      const t = makeTool({ '7:5': { smooth: 0, group: [5n] } }, { crease: false })
+      const line = drawn('a')
+      t.tool.setCreaseModifier(true)
+      t.setRef(line)
+      t.tool.onPointerMove(null, RAY)
+      t.tool.onPointerRawDown(0, 0)
+      t.tool.onPointerDown(null, RAY)
+      t.tool.onPointerScreenMove(40, 0)
+      t.tool.onPointerMove(edgeSnap(7n, 5n), RAY)
+      t.tool.onPointerUp(null, RAY)
+      expect(t.host.runDelete).toHaveBeenCalledWith([line])
+      expect(t.scene.set_crease).not.toHaveBeenCalled()
+    })
+
+    it('every status hint is free of crease and Smooth words', () => {
+      const t = makeTool(
+        { '7:5': { smooth: 0, group: [5n] }, '7:6': { smooth: 2, group: [] }, '7:7': { smooth: 1, group: [] } },
+        { crease: false },
+      )
+      const hints: string[] = [t.tool.statusHint()]
+      for (const e of [5n, 6n, 7n]) {
+        for (const ctrl of [false, true]) {
+          t.tool.setCreaseModifier(ctrl)
+          t.tool.onPointerMove(edgeSnap(7n, e), RAY)
+          hints.push(t.tool.statusHint())
+        }
+      }
+      t.tool.onPointerMove(edgeSnap(7n, 5n, 9n), RAY)
+      hints.push(t.tool.statusHint())
+      t.setRef(drawn('a'))
+      t.tool.setCreaseModifier(true)
+      t.tool.onPointerMove(null, RAY)
+      hints.push(t.tool.statusHint())
+      t.setRef({ kind: 'draft-region', id: 2n, ctx: 'c', key: 'r' })
+      t.tool.onPointerMove(null, RAY)
+      hints.push(t.tool.statusHint())
+      for (const h of hints) expect(h, h).not.toMatch(/crease|smooth|ctrl|cmd/i)
+    })
+
+    it('a soft seam says it is a soft seam, with or without Ctrl, and never toasts', () => {
+      const t = makeTool({ '7:6': { smooth: 2, group: [] } }, { crease: false })
+      click(t.tool, edgeSnap(7n, 6n))
+      expect(t.tool.statusHint()).toBe('That edge is a soft seam.')
+      click(t.tool, edgeSnap(7n, 6n), { ctrl: true })
+      expect(t.tool.statusHint()).toBe('That edge is a soft seam.')
+      expect(t.scene.set_crease).not.toHaveBeenCalled()
+      expect(t.onToast).not.toHaveBeenCalled()
+    })
+
+    it('a Ctrl drag across a seam, a solid edge and a line erases only the line, with no toast', () => {
+      const t = makeTool({ '7:5': { smooth: 0, group: [5n] }, '7:6': { smooth: 2, group: [] } }, { crease: false })
+      const line = drawn('a')
+      t.tool.setCreaseModifier(true)
+      t.tool.onPointerMove(edgeSnap(7n, 6n), RAY)
+      t.tool.onPointerRawDown(0, 0)
+      t.tool.onPointerDown(edgeSnap(7n, 6n), RAY)
+      t.tool.onPointerScreenMove(40, 0)
+      t.tool.onPointerMove(edgeSnap(7n, 5n), RAY)
+      t.setRef(line)
+      t.tool.onPointerMove(null, RAY)
+      t.tool.onPointerUp(null, RAY)
+      expect(t.host.runDelete).toHaveBeenCalledWith([line])
+      expect(t.scene.set_crease).not.toHaveBeenCalled()
+      expect(t.onToast).not.toHaveBeenCalled()
+    })
+
+    it('an edge of a component copy says to open the component, with no mention of creasing', () => {
+      const t = makeTool({ '7:5': { smooth: 0, group: [5n] } }, { crease: false })
+      click(t.tool, edgeSnap(7n, 5n, 9n), { ctrl: true })
+      expect(t.scene.set_crease).not.toHaveBeenCalled()
+      expect(t.tool.statusHint()).toBe('Open the component first to erase its edges.')
+    })
+  })
+
+  it('Ctrl-click on one facet of a faceted round creases the whole base ring', (ctx) => {
+    requiresPreview(ctx, 'smooth')
+    const t = makeCreaseTool({ '7:5': { smooth: 0, group: [5n], ring: [5n, 6n, 7n, 8n] } })
     click(t.tool, edgeSnap(7n, 5n), { ctrl: true })
     expect(t.setCreaseCalls[0]).toEqual([7n, [5n, 6n, 7n, 8n], true])
   })
 
-  it('Ctrl-click creases the whole logical edge, and again lets it soften', () => {
-    const t = makeTool({ '7:5': { smooth: 0, group: [5n, 6n] } })
+  it('Ctrl-click creases the whole logical edge, and again lets it soften', (ctx) => {
+    requiresPreview(ctx, 'smooth')
+    const t = makeCreaseTool({ '7:5': { smooth: 0, group: [5n, 6n] } })
     click(t.tool, edgeSnap(7n, 5n), { ctrl: true })
     expect(t.setCreaseCalls[0]).toEqual([7n, [5n, 6n], true])
     expect(t.host.onCreaseCommit).toHaveBeenCalledWith({ objectIds: [7n], componentIds: [], instanceIds: [] })
@@ -108,8 +224,9 @@ describe('EraserTool', () => {
     expect(t.onToast).toHaveBeenLastCalledWith('Uncreased the edge. It softens under Smooth again.')
   })
 
-  it('shows the crease status while the modifier is held', () => {
-    const t = makeTool({ '7:5': { smooth: 0, group: [5n] }, '7:9': { smooth: 0, group: [9n], creased: true } })
+  it('shows the crease status while the modifier is held', (ctx) => {
+    requiresPreview(ctx, 'smooth')
+    const t = makeCreaseTool({ '7:5': { smooth: 0, group: [5n] }, '7:9': { smooth: 0, group: [9n], creased: true } })
     t.tool.setCreaseModifier(true)
     t.tool.onPointerMove(edgeSnap(7n, 5n), RAY)
     expect(t.tool.statusHint()).toBe('Crease: keeps this edge sharp under Smooth')
@@ -117,14 +234,16 @@ describe('EraserTool', () => {
     expect(t.tool.statusHint()).toBe('Uncrease: lets this edge soften under Smooth')
   })
 
-  it('a tangent edge is creased on its own', () => {
-    const t = makeTool({ '7:5': { smooth: 1, group: [] } })
+  it('a tangent edge is creased on its own', (ctx) => {
+    requiresPreview(ctx, 'smooth')
+    const t = makeCreaseTool({ '7:5': { smooth: 1, group: [] } })
     click(t.tool, edgeSnap(7n, 5n), { ctrl: true })
     expect(t.setCreaseCalls[0]).toEqual([7n, [5n], true])
   })
 
-  it('a soft seam says so, and Ctrl-click shows the kernel refusal', () => {
-    const t = makeTool({ '7:5': { smooth: 2, group: [] } }, { setCreaseThrows: 'CreaseOnSoftEdge: seam' })
+  it('a soft seam says so, and Ctrl-click shows the kernel refusal', (ctx) => {
+    requiresPreview(ctx, 'smooth')
+    const t = makeCreaseTool({ '7:5': { smooth: 2, group: [] } }, { setCreaseThrows: 'CreaseOnSoftEdge: seam' })
     click(t.tool, edgeSnap(7n, 5n))
     expect(t.tool.statusHint()).toBe('That edge is a soft seam.')
     expect(t.scene.set_crease).not.toHaveBeenCalled()
@@ -151,9 +270,18 @@ describe('EraserTool', () => {
 
   it('an edge of a component copy points to editing the component', () => {
     const t = makeTool({ '7:5': { smooth: 0, group: [5n] } })
+    click(t.tool, edgeSnap(7n, 5n, 9n))
+    expect(t.scene.set_crease).not.toHaveBeenCalled()
+    expect(t.host.runDelete).not.toHaveBeenCalled()
+    expect(t.tool.statusHint()).toContain('Open the component first')
+  })
+
+  it('with the crease half on, Ctrl-click on a component copy edge creases nothing and says to open it', (ctx) => {
+    requiresPreview(ctx, 'smooth')
+    const t = makeCreaseTool({ '7:5': { smooth: 0, group: [5n] } })
     click(t.tool, edgeSnap(7n, 5n, 9n), { ctrl: true })
     expect(t.scene.set_crease).not.toHaveBeenCalled()
-    expect(t.tool.statusHint()).toContain('Open the component first')
+    expect(t.tool.statusHint()).toBe('Open the component first to erase or crease its edges.')
   })
 
   it('a small wobble is still a click', () => {
@@ -189,10 +317,9 @@ describe('EraserTool', () => {
     expect(t.scene.history_bracket_commit).toHaveBeenCalledWith('Erase')
   })
 
-  it('a plain drag skips solid edges; a Ctrl drag skips drawn lines', () => {
+  it('a plain drag skips solid edges and erases the line', () => {
     const t = makeTool({ '7:5': { smooth: 0, group: [5n] }, '7:8': { smooth: 0, group: [8n], creased: true } })
     const line = drawn('a')
-    // Plain drag over a solid edge and a line: only the line goes.
     t.tool.setCreaseModifier(false)
     t.setRef(line)
     t.tool.onPointerMove(null, RAY)
@@ -203,8 +330,12 @@ describe('EraserTool', () => {
     t.tool.onPointerUp(null, RAY)
     expect(t.host.runDelete).toHaveBeenCalledWith([line])
     expect(t.scene.set_crease).not.toHaveBeenCalled()
+  })
 
-    // Ctrl drag over two solid edges and a line: each edge toggles from its own flag.
+  it('a Ctrl drag skips drawn lines and toggles each solid edge from its own flag', (ctx) => {
+    requiresPreview(ctx, 'smooth')
+    const t = makeCreaseTool({ '7:5': { smooth: 0, group: [5n] }, '7:8': { smooth: 0, group: [8n], creased: true } })
+    const line = drawn('a')
     t.tool.setCreaseModifier(true)
     t.tool.onPointerMove(edgeSnap(7n, 5n), RAY)
     t.tool.onPointerRawDown(0, 0)
@@ -214,6 +345,7 @@ describe('EraserTool', () => {
     t.setRef(line)
     t.tool.onPointerMove(null, RAY)
     t.tool.onPointerUp(null, RAY)
+    expect(t.host.runDelete).not.toHaveBeenCalled()
     expect(t.setCreaseCalls).toEqual([[7n, [5n], true], [7n, [8n], false]])
     expect(t.scene.history_bracket_commit).toHaveBeenLastCalledWith('Crease')
   })
@@ -230,8 +362,9 @@ describe('EraserTool', () => {
     expect(t.host.runDelete).not.toHaveBeenCalled()
   })
 
-  it('aborts the bracket when a crease in a drag is refused', () => {
-    const t = makeTool(
+  it('aborts the bracket when a crease in a drag is refused', (ctx) => {
+    requiresPreview(ctx, 'smooth')
+    const t = makeCreaseTool(
       { '7:5': { smooth: 0, group: [5n] }, '7:8': { smooth: 0, group: [8n] } },
       { setCreaseThrows: 'CreaseOnBoundary: opening' },
     )
@@ -245,8 +378,9 @@ describe('EraserTool', () => {
     expect(t.scene.history_bracket_abort).toHaveBeenCalledOnce()
     expect(t.onToast).toHaveBeenCalledWith("An edge on an opening can't be creased.", 'CreaseOnBoundary')
   })
-  it('a soft seam inside a Ctrl drag creases the rest and toasts once', () => {
-    const t = makeTool({
+  it('a soft seam inside a Ctrl drag creases the rest and toasts once', (ctx) => {
+    requiresPreview(ctx, 'smooth')
+    const t = makeCreaseTool({
       '7:5': { smooth: 0, group: [5n] },
       '7:6': { smooth: 2, group: [] },
       '7:8': { smooth: 0, group: [8n] },
@@ -268,8 +402,9 @@ describe('EraserTool', () => {
     expect(t.onToast).toHaveBeenLastCalledWith('Creased 2 edges. They stay sharp under Smooth.')
   })
 
-  it('a Ctrl drag over a creased and an uncreased edge says both', () => {
-    const t = makeTool({
+  it('a Ctrl drag over a creased and an uncreased edge says both', (ctx) => {
+    requiresPreview(ctx, 'smooth')
+    const t = makeCreaseTool({
       '7:5': { smooth: 0, group: [5n], creased: true },
       '7:8': { smooth: 0, group: [8n] },
     })
@@ -284,8 +419,9 @@ describe('EraserTool', () => {
     expect(t.onToast).toHaveBeenLastCalledWith('Creased one edge and uncreased one.')
   })
 
-  it('a component member is refused in a Ctrl drag too: nothing is creased', () => {
-    const t = makeTool({ '7:5': { smooth: 0, group: [5n] } })
+  it('a component member is refused in a Ctrl drag too: nothing is creased', (ctx) => {
+    requiresPreview(ctx, 'smooth')
+    const t = makeCreaseTool({ '7:5': { smooth: 0, group: [5n] } })
     t.tool.setCreaseModifier(true)
     t.tool.onPointerMove(edgeSnap(7n, 5n, 9n), RAY)
     t.tool.onPointerRawDown(0, 0)

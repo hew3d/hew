@@ -19,7 +19,7 @@ use serde_json::Value;
 pub const MAX_SELECTION_IDS: usize = 10_000;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.selection.get" => get,
         "hew.selection.set" => set,

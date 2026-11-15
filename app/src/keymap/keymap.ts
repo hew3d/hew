@@ -14,6 +14,7 @@
  * always what works.
  */
 
+import { actionOffered } from '../curveActions'
 import { isTauri } from '../io/fileHost'
 import { isMac } from '../platform'
 import { makeSetting } from '../settings/view'
@@ -89,7 +90,10 @@ export function buildKeymap(defaults: Bindings, overrides: Overrides, isMacPlatf
     if (!Object.prototype.hasOwnProperty.call(overrides, id)) bindings[id] = clean(chords)
   }
   const overridden: Record<string, string[]> = {}
-  for (const [id, chords] of Object.entries(overrides)) overridden[id] = clean(chords)
+  // A saved binding for a command this build withholds (the Preview wall) is
+  // ignored: it neither runs the command nor shows up in Settings ▸ Controls.
+  // The stored value stays, for a build that offers the command.
+  for (const [id, chords] of Object.entries(overrides)) if (actionOffered(id)) overridden[id] = clean(chords)
 
   const byChord = new Map<string, string>()
   for (const [id, chords] of Object.entries(overridden).reverse()) {

@@ -58,16 +58,19 @@ fn check_or_write(path: &Path, fresh: &str) {
     );
 }
 
+/// The committed artifacts are generated from the whole inventory, Preview
+/// commands included and marked, so they are byte-identical whether this
+/// test runs in a preview build or a production one.
 #[test]
 fn ts_sdk_regenerates_byte_identically() {
-    let registry = Registry::protocol_1();
+    let registry = Registry::reference();
     let fresh = generate_ts_sdk(&registry);
     check_or_write(&repo_root().join("app/src/api/hewApi.gen.ts"), &fresh);
 }
 
 #[test]
 fn api_reference_regenerates_byte_identically() {
-    let registry = Registry::protocol_1();
+    let registry = Registry::reference();
     let fresh = generate_api_reference(&registry);
     check_or_write(&repo_root().join("docs/API_REFERENCE.gen.md"), &fresh);
 }
@@ -125,11 +128,11 @@ fn plugin_sdk_types_golden() {
 /// plugin registered generates exactly what protocol 1 alone does.
 #[test]
 fn committed_artifacts_ignore_plugin_commands() {
-    let mut with_plugin = Registry::protocol_1();
+    let mut with_plugin = Registry::reference();
     with_plugin
         .register_plugin("com.example.lib", &plugin_types_fixture())
         .expect("fixture registers");
-    let bare = Registry::protocol_1();
+    let bare = Registry::reference();
     assert_eq!(generate_ts_sdk(&with_plugin), generate_ts_sdk(&bare));
     assert_eq!(
         generate_api_reference(&with_plugin),

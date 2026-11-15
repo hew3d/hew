@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { normalizeChord } from './chord'
 import { defaultBindings, type KeymapPlatform } from './defaults'
 import { buildKeymap, isReservedChord } from './keymap'
+import { requiresPreview } from '../test/requiresPreview'
 
 const PLATFORMS: [string, KeymapPlatform][] = [
   ['web', { isMac: false, isDesktop: false }],
@@ -40,6 +41,17 @@ describe('default bindings', () => {
     }
   })
 
+  it('keeps the shortcuts the Preview tools dispatched (Windows/Linux/web)', (ctx) => {
+    requiresPreview(ctx, 'fillet')
+    const b = effective({ isMac: false, isDesktop: false })
+    expect(b['tool-fillet']).toEqual(['Shift+F'])
+  })
+
+  it('keeps the Eraser shortcut E in every build', () => {
+    const b = effective({ isMac: false, isDesktop: false })
+    expect(b['tool-eraser']).toEqual(['E'])
+  })
+
   it('keeps the shortcuts the hand-written handlers dispatched (Windows/Linux/web)', () => {
     const b = effective({ isMac: false, isDesktop: false })
     expect(b['tool-select']).toEqual(['Space', '1'])
@@ -49,8 +61,6 @@ describe('default bindings', () => {
     expect(b['tool-arc']).toEqual(['A'])
     expect(b['tool-pushpull']).toEqual(['P', '3'])
     expect(b['tool-offset']).toEqual(['F'])
-    expect(b['tool-fillet']).toEqual(['Shift+F'])
-    expect(b['tool-eraser']).toEqual(['E'])
     expect(b['tool-move']).toEqual(['M', '4'])
     expect(b['tool-rotate']).toEqual(['Q', '5'])
     expect(b['tool-scale']).toEqual(['S', '6'])

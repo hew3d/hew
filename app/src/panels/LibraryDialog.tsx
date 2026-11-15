@@ -39,6 +39,7 @@ import {
   type ListSortDirection,
   type LibraryScope,
 } from '../library/libraryModel'
+import { behaviorEnabled } from '../preview'
 import { bundledProfiles, profileShapeOfBytes, profileThumbnailPng } from '../library/profiles'
 import type { LibraryCategory, LibraryFileEntry, LibraryItem } from '../library/types'
 import { measureGridColumns } from './library/gridMeasure'
@@ -219,7 +220,8 @@ const CATEGORIES: { value: LibraryCategory | 'all'; label: MessageDescriptor }[]
   { value: 'component', label: msg`Components` },
   { value: 'material', label: msg`Materials` },
   { value: 'model', label: msg`Models` },
-  { value: 'profile', label: msg`Profiles` },
+  // Profiles belong to the Fillet preview (the Preview wall hides them).
+  ...(behaviorEnabled('fillet-profiles') ? [{ value: 'profile' as const, label: msg`Profiles` }] : []),
 ]
 
 const SCOPES: { value: LibraryScope; label: MessageDescriptor }[] = [
@@ -442,8 +444,14 @@ export function LibraryDialog({
         if (!cancelled) {
           // The built-in profiles ride at the end of the list: bundled with
           // the app, never files in the folder.
-          const builtIns = (await bundledProfiles().catch(() => [])).map((p) => builtInProfileItem(p.id, p.name))
-          if (!cancelled) setItems([...built, ...builtIns])
+          // Without the Fillet preview there are no profiles: neither the
+          // built-in ones nor a profile file in the folder is listed.
+          const profiles = behaviorEnabled('fillet-profiles')
+          const builtIns = profiles
+            ? (await bundledProfiles().catch(() => [])).map((p) => builtInProfileItem(p.id, p.name))
+            : []
+          const listed = profiles ? built : built.filter((i) => i.category !== 'profile')
+          if (!cancelled) setItems([...listed, ...builtIns])
         }
       } catch (err) {
         // list()/webStorage() themselves rejected (storage failure, a lazy

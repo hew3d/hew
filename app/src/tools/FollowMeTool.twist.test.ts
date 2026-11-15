@@ -9,6 +9,7 @@ import * as THREE from 'three'
 import { FollowMeTool } from './FollowMeTool'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
+import { requiresPreview } from '../test/requiresPreview'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
@@ -65,7 +66,11 @@ function setup(o: Opts = {}) {
 }
 
 describe('FollowMeTool — twist, end scale and stations', () => {
-  it('a typed twist and end size reach the _with twin as radians and a ratio', () => {
+  // Only what the twist option drives is marked; the plain-sweep tests below
+  // are about behavior a production build has too.
+  const needsTwist = (ctx: Parameters<typeof requiresPreview>[0]) => requiresPreview(ctx, 'follow-me-twist')
+  it('a typed twist and end size reach the _with twin as radians and a ratio', (ctx) => {
+    needsTwist(ctx)
     const { scene, tool, onCommit } = setup()
     tool.onPointerDown(null, RAY) // path (edge island)
     typeText(tool, '30°')
@@ -84,7 +89,8 @@ describe('FollowMeTool — twist, end scale and stations', () => {
     expect(onCommit).toHaveBeenCalledWith(78n)
   })
 
-  it('the profile stage offers a twist and end size, typed as 90deg or 90d', () => {
+  it('the profile stage offers a twist and end size, typed as 90deg or 90d', (ctx) => {
+    needsTwist(ctx)
     const { scene, tool } = setup()
     tool.onPointerDown(null, RAY) // path
     expect(tool.statusHint()).toContain('Type 30deg to twist it or 40% to shrink its end.')
@@ -105,7 +111,8 @@ describe('FollowMeTool — twist, end scale and stations', () => {
     expect(tool.statusHint()).not.toContain('Twist')
   })
 
-  it('options reset at the start of the next gesture', () => {
+  it('options reset at the start of the next gesture', (ctx) => {
+    needsTwist(ctx)
     const { tool } = setup()
     tool.onPointerDown(null, RAY)
     typeText(tool, '30°')
@@ -118,7 +125,8 @@ describe('FollowMeTool — twist, end scale and stations', () => {
     expect(tool.statusHint()).not.toContain('Twist')
   })
 
-  it('a twist on a face-loop path is refused before any call, with the open-path copy', () => {
+  it('a twist on a face-loop path is refused before any call, with the open-path copy', (ctx) => {
+    needsTwist(ctx)
     const { scene, tool, onToast } = setup({ edgePath: false })
     tool.onPointerDown(null, RAY) // face loop path
     typeText(tool, '30°')
@@ -129,7 +137,8 @@ describe('FollowMeTool — twist, end scale and stations', () => {
     expect(onToast.mock.calls[0][1]).toBe('TwistNeedsOpenPath')
   })
 
-  it('a twist on a closed path says so before the click, and Escape clears it but keeps the path', () => {
+  it('a twist on a closed path says so before the click, and Escape clears it but keeps the path', (ctx) => {
+    needsTwist(ctx)
     const { scene, tool } = setup({ edgePath: false })
     tool.onPointerDown(null, RAY) // face loop path
     expect(tool.statusHint()).not.toContain('is closed')
@@ -146,7 +155,8 @@ describe('FollowMeTool — twist, end scale and stations', () => {
     expect(scene.follow_me_around_face_with).not.toHaveBeenCalled()
   })
 
-  it('an open path takes a twist with no warning', () => {
+  it('an open path takes a twist with no warning', (ctx) => {
+    needsTwist(ctx)
     const { tool } = setup()
     tool.onPointerDown(null, RAY)
     typeText(tool, '30deg')
@@ -164,7 +174,8 @@ describe('FollowMeTool — twist, end scale and stations', () => {
     expect(call[4]).toBeCloseTo(0.5, 9)
   })
 
-  it('after the commit, a typed twist redoes the sweep through the retype window', () => {
+  it('after the commit, a typed twist redoes the sweep through the retype window', (ctx) => {
+    needsTwist(ctx)
     const { scene, tool, onCommit } = setup()
     tool.onPointerDown(null, RAY)
     tool.onPointerDown(null, RAY) // plain commit → 78
@@ -191,7 +202,8 @@ describe('FollowMeTool — twist, end scale and stations', () => {
     expect(tool.statusHint()).not.toContain('set to')
   })
 
-  it('a refused retype keeps the original sweep and tells why', () => {
+  it('a refused retype keeps the original sweep and tells why', (ctx) => {
+    needsTwist(ctx)
     const { scene, tool, onToast } = setup()
     tool.onPointerDown(null, RAY)
     tool.onPointerDown(null, RAY)
@@ -204,7 +216,8 @@ describe('FollowMeTool — twist, end scale and stations', () => {
     expect(scene.scene_redo).toHaveBeenCalledTimes(1)
   })
 
-  it('a click, Escape or explicit undo ends the retype window', () => {
+  it('a click, Escape or explicit undo ends the retype window', (ctx) => {
+    needsTwist(ctx)
     const { tool } = setup()
     tool.onPointerDown(null, RAY)
     tool.onPointerDown(null, RAY)
@@ -215,7 +228,8 @@ describe('FollowMeTool — twist, end scale and stations', () => {
     tool.disarmRetype()
     expect(tool.capturesKey('4')).toBe(false)
   })
-  it('a zero end size is refused with a toast and sets nothing', () => {
+  it('a zero end size is refused with a toast and sets nothing', (ctx) => {
+    needsTwist(ctx)
     const { scene, tool, onToast } = setup()
     tool.onPointerDown(null, RAY) // path
     typeText(tool, '0%')
@@ -228,7 +242,8 @@ describe('FollowMeTool — twist, end scale and stations', () => {
     expect(scene.follow_me_along_edges).toHaveBeenCalledTimes(1)
   })
 
-  it('a retype keeps the other option and the stations count', () => {
+  it('a retype keeps the other option and the stations count', (ctx) => {
+    needsTwist(ctx)
     const { scene, tool } = setup()
     tool.onPointerDown(null, RAY)
     typeText(tool, '8s')
@@ -243,7 +258,8 @@ describe('FollowMeTool — twist, end scale and stations', () => {
     expect(calls[1][8]).toBe(8)
   })
 
-  it('digits half-typed in the retype window do not leak into the next gesture', () => {
+  it('digits half-typed in the retype window do not leak into the next gesture', (ctx) => {
+    needsTwist(ctx)
     const { scene, tool, onCommit } = setup()
     tool.onPointerDown(null, RAY)
     tool.onPointerDown(null, RAY) // plain commit

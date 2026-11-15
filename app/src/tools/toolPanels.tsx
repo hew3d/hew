@@ -6,6 +6,7 @@
  */
 
 import type { ReactNode } from 'react'
+import { toolAllowed } from '../preview'
 import { CornersChip } from '../viewport/CornersChip'
 import { ProfileChip, type ProfileChipSection } from '../viewport/ProfileChip'
 import type { ToolName } from './toolIcons'
@@ -21,7 +22,7 @@ export interface ToolPanel {
   render(props: ToolPanelProps): ReactNode
 }
 
-export const TOOL_PANELS: readonly ToolPanel[] = [
+const ALL_TOOL_PANELS: readonly ToolPanel[] = [
   {
     // The Fillet tool's chips sit to the left of the measurement box.
     tool: 'Fillet',
@@ -43,6 +44,9 @@ export const TOOL_PANELS: readonly ToolPanel[] = [
     ),
   },
 ]
+
+/** The panels this build mounts: a tool the Preview wall withholds has none. */
+export const TOOL_PANELS: readonly ToolPanel[] = ALL_TOOL_PANELS.filter((p) => toolAllowed(p.tool))
 
 /** The panels to mount while `activeTool` runs. */
 export function panelsForTool(activeTool: string): readonly ToolPanel[] {

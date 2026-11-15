@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     match name {
         "hew.view.line_drawing" => Some(line_drawing),
         "hew.print.pdf" => Some(print_pdf),

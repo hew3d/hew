@@ -8,6 +8,7 @@
  */
 
 import type { HealthScope } from './health/healthReport'
+import { behaviorEnabled } from './preview'
 
 export interface ToastAction {
   label: string
@@ -21,7 +22,8 @@ export function toastActionFor(
   code: string | undefined,
   openModelHealth: (view: { scope: HealthScope }) => void,
 ): ToastAction | undefined {
-  if (code === 'DegenerateInput') {
+  // Model Health's Remove degenerate faces is a Preview feature (the wall).
+  if (code === 'DegenerateInput' && behaviorEnabled('health-remove-degenerate')) {
     return { label: 'Open Model Health', run: () => openModelHealth({ scope: 'selection' }) }
   }
   // A fillet refused on an object with gaps: Model Health's Make Solid is

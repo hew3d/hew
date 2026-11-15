@@ -21,6 +21,7 @@
 
 import { i18n, type MessageDescriptor } from '@lingui/core'
 import { msg, t } from '@lingui/core/macro'
+import { actionAllowed, chipAllowed } from '../preview'
 import type { ToolName } from '../tools/toolIcons'
 import { TOOL_REGISTRY, toolLabel } from '../tools/toolRegistry'
 import { isSketchScopedKind, type NodeRef } from './treeModel'
@@ -238,8 +239,11 @@ export function dockVerbsFor(context: DockContext, gates?: DockGates): DockVerb[
       case 'sketch': return SKETCH_VERBS
     }
   })()
-  if (gates === undefined) return verbs
-  return verbs.filter((v) => {
+  // The Preview wall: a chip (or the command it runs) this build withholds is
+  // not offered, gates or no gates.
+  const offered = verbs.filter((v) => chipAllowed(v.id) && actionAllowed(v.id))
+  if (gates === undefined) return offered
+  return offered.filter((v) => {
     if (v.id === 'edit-group') return gates.canGroup
     if (v.id === 'edit-make-component') return gates.canMakeComponent
     if (v.id === 'edit-union' || v.id === 'edit-subtract' || v.id === 'edit-intersect') return gates.canBoolean ?? false

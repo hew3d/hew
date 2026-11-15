@@ -10,6 +10,9 @@ import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { MenuBar, type MenuBarProps } from './MenuBar'
 import { TOOLS } from '../tools/toolRegistry'
+import { requiresPreview } from '../test/requiresPreview'
+import { toolAllowed } from '../preview'
+import { actionOffered } from '../curveActions'
 
 const defaultProps: MenuBarProps = {
   name: 'Untitled',
@@ -31,6 +34,12 @@ const defaultProps: MenuBarProps = {
 /** Hover a submenu row open (Shape, Deform, Smooth, …) in the open dropdown. */
 function openSubmenu(label: string): void {
   fireEvent.mouseEnter(screen.getByText(label))
+}
+
+/** Opens a submenu only where the Preview wall leaves it (a production
+ *  build has no Shape or Deform submenu). */
+function openSubmenuIfPresent(label: string): void {
+  if (screen.queryByText(label) !== null) openSubmenu(label)
 }
 
 describe('MenuBar', () => {
@@ -451,8 +460,8 @@ describe('MenuBar', () => {
       fireEvent.click(screen.getByRole('button', { name: menu }))
       // The Tools menu keeps the Shape and Deform families in submenus.
       if (menu.source === '^tools$') {
-        openSubmenu('Shape')
-        openSubmenu('Deform')
+        openSubmenuIfPresent('Shape')
+        openSubmenuIfPresent('Deform')
       }
       for (const tool of TOOLS) {
         if (screen.queryByText(tool) !== null) seen.add(tool)
@@ -932,7 +941,7 @@ describe('MenuBar', () => {
       let item: HTMLElement | null = null
       for (const menu of ['draw', 'tools', 'camera']) {
         fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${menu}$`, 'i') }))
-        if (menu === 'tools') openSubmenu('Shape')
+        if (menu === 'tools') openSubmenuIfPresent('Shape')
         item = screen.queryByText(tool)
         if (item !== null) break
       }
@@ -989,7 +998,10 @@ describe('MenuBar', () => {
     fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
     const rows = toolsMenuRows()
     // Top to bottom; '' marks a separator.
-    expect(rows).toEqual([
+    // The preview-build layout; a production build drops what the Preview
+    // wall withholds (a submenu with nothing left goes too), then any
+    // separator that is doubled or at an edge.
+    const full = [
       'Select', 'Eraser', 'Paint', 'Position Texture', '',
       'Move', 'Rotate', 'Scale', 'Flip', '',
       'Push/Pull', 'Follow Me', 'Offset', 'Fillet', 'Chamfer', '',
@@ -997,10 +1009,18 @@ describe('MenuBar', () => {
       'Slice', 'Edit Vertex', '',
       'Tape Measure', 'Protractor', 'Dimension', 'Text', '',
       'Drawing Axes', 'Section Plane',
-    ])
+    ]
+    const shapeTools = ['Revolve', 'Loft', 'Shell', 'Project', 'Array along Path']
+    const offered = (row: string): boolean =>
+      row === 'Chamfer' ? actionOffered('tool-chamfer')
+        : row === 'Shape' ? shapeTools.some(toolAllowed)
+          : toolAllowed(row)
+    const expected = full.filter((r) => r === '' || offered(r)).filter((r, i, a) => r !== '' || (i > 0 && a[i - 1] !== '' && i < a.length - 1))
+    expect(rows).toEqual(expected)
   })
 
-  it('Tools menu: Shape holds Revolve, Loft, Shell, Project, then Array along Path', () => {
+  it('Tools menu: Shape holds Revolve, Loft, Shell, Project, then Array along Path', (ctx) => {
+    requiresPreview(ctx, 'revolve', 'loft', 'shell', 'project', 'path-array')
     const onSelectTool = vi.fn()
     render(<MenuBar {...defaultProps} activeTool="Select" onSelectTool={onSelectTool} />)
     fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
@@ -1018,7 +1038,8 @@ describe('MenuBar', () => {
     expect(onSelectTool).toHaveBeenLastCalledWith('Revolve')
   })
 
-  it('Tools menu: Deform holds Twist, Bend, Taper, Bend to Path and checks the running mode', () => {
+  it('Tools menu: Deform holds Twist, Bend, Taper, Bend to Path and checks the running mode', (ctx) => {
+    requiresPreview(ctx, 'deform')
     const onSelectDeformMode = vi.fn()
     render(
       <MenuBar {...defaultProps} activeTool="Deform" deformMode="taper" onSelectDeformMode={onSelectDeformMode} />,
@@ -1032,18 +1053,31 @@ describe('MenuBar', () => {
     expect(onSelectDeformMode).toHaveBeenLastCalledWith('bend-to-path')
   })
 
-  it('Tools menu keeps the accelerators: Eraser E, Fillet Shift+F, Push/Pull P', () => {
+  // The accelerator chip is the row's second child; reading the whole row
+  // would match the label itself ("Eraser" contains E, "Push/Pull" contains P).
+  const accelChip = (label: string) => screen.getByText(label).parentElement?.children[1]?.textContent ?? ''
+
+  it('Tools menu keeps the Push/Pull accelerator P', () => {
     render(<MenuBar {...defaultProps} activeTool="Select" />)
     fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
-    // The accelerator chip is the row's second child; reading the whole row
-    // would match the label itself ("Eraser" contains E, "Push/Pull" contains P).
-    const chip = (label: string) => screen.getByText(label).parentElement?.children[1]?.textContent ?? ''
-    expect(chip('Eraser')).toBe('E')
-    expect(chip('Fillet')).toMatch(/^(Shift\+F|⇧F)$/)
-    expect(chip('Push/Pull')).toBe('P')
+    expect(accelChip('Push/Pull')).toBe('P')
   })
 
-  it('Object menu: Smooth submenu (Off, 1, 2, 3, Bake Smooth) and Soften Edges… dispatch the palette action ids', () => {
+  it('Tools menu keeps the Eraser accelerator E in every build', () => {
+    render(<MenuBar {...defaultProps} activeTool="Select" />)
+    fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+    expect(accelChip('Eraser')).toBe('E')
+  })
+
+  it('Tools menu keeps the Preview accelerator Fillet Shift+F', (ctx) => {
+    requiresPreview(ctx, 'fillet')
+    render(<MenuBar {...defaultProps} activeTool="Select" />)
+    fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+    expect(accelChip('Fillet')).toMatch(/^(Shift\+F|⇧F)$/)
+  })
+
+  it('Object menu: Smooth submenu (Off, 1, 2, 3, Bake Smooth) and Soften Edges… dispatch the palette action ids', (ctx) => {
+    requiresPreview(ctx, 'soften')
     const onEditAction = vi.fn()
     render(
       <MenuBar
@@ -1067,7 +1101,8 @@ describe('MenuBar', () => {
     expect(onEditAction).toHaveBeenLastCalledWith('soften-edges')
   })
 
-  it("Object ▸ Smooth checks the selection's level and is greyed out without a solid", () => {
+  it("Object ▸ Smooth checks the selection's level and is greyed out without a solid", (ctx) => {
+    requiresPreview(ctx, 'smooth', 'soften')
     const onEditAction = vi.fn()
     const { unmount } = render(
       <MenuBar {...defaultProps} editGates={{ ...openGates, canSmooth: true, smoothLevel: 2 }} onEditAction={onEditAction} />,
@@ -1087,7 +1122,8 @@ describe('MenuBar', () => {
     expect(onEditAction).not.toHaveBeenCalled()
   })
 
-  it('Object ▸ Soften Edges… follows canSoften, not canSmooth', () => {
+  it('Object ▸ Soften Edges… follows canSoften, not canSmooth', (ctx) => {
+    requiresPreview(ctx, 'soften')
     const onEditAction = vi.fn()
     render(<MenuBar {...defaultProps} editGates={{ ...openGates, canSmooth: true, canSoften: false }} onEditAction={onEditAction} />)
     fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
@@ -1095,7 +1131,8 @@ describe('MenuBar', () => {
     expect(onEditAction).not.toHaveBeenCalled()
   })
 
-  it('Object menu: Smooth and Soften Edges… sit before Make Solid…', () => {
+  it('Object menu: Smooth and Soften Edges… sit before Make Solid…', (ctx) => {
+    requiresPreview(ctx, 'soften')
     render(<MenuBar {...defaultProps} editGates={openGates} />)
     fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
     const soften = screen.getByText('Soften Edges…')

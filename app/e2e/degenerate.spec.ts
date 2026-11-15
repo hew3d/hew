@@ -2,6 +2,10 @@ import { test, expect, type Page } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { setup } from './helpers/offset'
+import { requiresPreview } from './helpers/preview'
+
+// Drives a Preview feature: skipped in the production-shape run (e2e/helpers/preview.ts).
+requiresPreview('remove-degenerate-faces')
 
 /**
  * Zero-area faces in the real UI: a closed cube carrying a sliver face (made

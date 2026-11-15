@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import { toastActionFor } from './toastActions'
+import { requiresPreview } from './test/requiresPreview'
 
 describe('toastActionFor', () => {
-  it('a boolean refused for a face with no area offers Model Health on the selection', () => {
+  it('a boolean refused for a face with no area offers Model Health on the selection', (ctx) => {
+    requiresPreview(ctx, 'remove-degenerate-faces')
     const open = vi.fn()
     const action = toastActionFor('DegenerateInput', open)
     expect(action?.label).toBe('Open Model Health')

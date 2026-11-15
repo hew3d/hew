@@ -28,7 +28,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.library.list" => list_items,
         "hew.library.describe" => describe_item,
@@ -56,18 +56,29 @@ fn unknown_library_item(item: &str) -> CmdError {
     )
 }
 
-/// Parses `s` as one of the three category strings, refusing typed
-/// (`CmdError::Params`) for anything else — the enum every `category`
-/// param in this module shares.
-fn parse_category(s: &str) -> Result<&'static str, CmdError> {
-    match s {
-        "component" => Ok("component"),
-        "material" => Ok("material"),
-        "model" => Ok("model"),
-        "profile" => Ok("profile"),
-        _ => Err(CmdError::Params(format!(
-            "category must be one of \"component\", \"material\", \"model\", \"profile\" — got {s:?}"
-        ))),
+/// Every Library category, in the order the schemas list them.
+const CATEGORIES: [&str; 4] = ["component", "material", "model", "profile"];
+
+/// Parses `s` as one of the category strings `command` takes in this
+/// build, refusing typed (`CmdError::Params`) for anything else — the enum
+/// every `category` param in this module shares. A category that belongs
+/// to a Preview feature is not offered in a production build (the
+/// dispatcher has already refused it `preview_only`; this is the copy of
+/// the list a typo sees).
+fn parse_category(command: &str, s: &str) -> Result<&'static str, CmdError> {
+    let offered: Vec<&'static str> = CATEGORIES
+        .into_iter()
+        .filter(|c| crate::preview::value_gated(command, "category", c).is_none())
+        .collect();
+    match offered.iter().find(|c| **c == s) {
+        Some(c) => Ok(c),
+        None => {
+            let names: Vec<String> = offered.iter().map(|c| format!("{c:?}")).collect();
+            Err(CmdError::Params(format!(
+                "category must be one of {} — got {s:?}",
+                names.join(", ")
+            )))
+        }
     }
 }
 
@@ -174,12 +185,22 @@ struct ListParams {
 
 fn list_items(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: ListParams = parse(params)?;
-    let category = p.category.as_deref().map(parse_category).transpose()?;
+    let category = p
+        .category
+        .as_deref()
+        .map(|c| parse_category("hew.library.list", c))
+        .transpose()?;
     let query = p.query.as_deref().map(str::to_lowercase);
     let listing = ctx.host.library_list().map_err(CmdError::Refusal)?;
     let items: Vec<Value> = listing
         .items
         .iter()
+        // An item of a Preview feature's category (a fillet profile) is
+        // left out of a production build's listing, as the app leaves it
+        // out of the Library window; the file stays where it is.
+        .filter(|e| {
+            crate::preview::value_gated("hew.library.list", "category", &e.category).is_none()
+        })
         .filter(|e| category.is_none_or(|c| e.category == c))
         .filter(|e| {
             p.collection
@@ -203,6 +224,8 @@ struct ItemParams {
 fn describe_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: ItemParams = parse(params)?;
     let entry = resolve_entry(ctx, &p.item)?;
+    crate::preview::value_allowed("hew.library.describe", "category", &entry.category)
+        .map_err(CmdError::Refusal)?;
     let mut v = entry_to_json(&entry);
     let attrs = entry
         .summary
@@ -250,6 +273,8 @@ fn load_failed(e: impl std::fmt::Debug) -> CmdError {
 fn update_meta(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: UpdateMetaParams = parse(params)?;
     let entry = resolve_entry(ctx, &p.item)?;
+    crate::preview::value_allowed("hew.library.update_meta", "category", &entry.category)
+        .map_err(CmdError::Refusal)?;
     let read = ctx
         .host
         .library_read(&entry.path)
@@ -420,7 +445,7 @@ fn insert_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     if is_profile {
         return Err(CmdError::Refusal(Refusal::api(
             "profile_not_insertable",
-            "Profiles are used by the Fillet tool, not inserted. Pick it in the Fillet tool's profile chip.",
+            crate::preview::api_copy("profile_not_insertable"),
         )));
     }
     if library_meta_text(&item_doc, "category").as_deref() == Some("material") {
@@ -580,7 +605,7 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     };
 
     let category = match &p.category {
-        Some(c) => parse_category(c)?,
+        Some(c) => parse_category("hew.library.save", c)?,
         None => default_category,
     };
     if default_category == "profile" && category != "profile" {
@@ -599,6 +624,12 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         Some(item) => Some(resolve_entry(ctx, item)?),
         None => None,
     };
+    // A production build does not write over an item of a Preview
+    // feature's category (a fillet profile), whatever replaces it.
+    if let Some(old) = &replaced {
+        crate::preview::value_allowed("hew.library.save", "category", &old.category)
+            .map_err(CmdError::Refusal)?;
+    }
     if let Some(old) = &replaced
         && old.category != category
     {

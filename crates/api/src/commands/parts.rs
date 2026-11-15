@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 pub const MAX_MESH_BYTES: usize = 64 * 1024 * 1024;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     fn clocked(
         f: fn(&mut Ctx, &Value) -> Result<Value, CmdError>,
         ctx: &mut Ctx,

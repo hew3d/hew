@@ -69,7 +69,7 @@ export function curveActionPaletteEntries(): PaletteEntry[] {
     { id: 'smooth-3', label: t`Smooth: 3`, description: t`Round the selected objects three steps.`, group: 'Actions', synonyms: [t`subdivide`, t`subd`, t`pillow`], gate: 'selection' },
     { id: 'bake-smooth', label: t`Bake Smooth`, description: t`Keep the rounded surface of the selected smooth objects as real faces.`, group: 'Actions', synonyms: [t`subdivide`, t`subd`, t`pillow`, t`apply smooth`], gate: 'selection' },
     { id: 'soften-edges', label: t`Soften Edges…`, description: t`Hide the lines on gentle edges of the selected objects so curved shapes look smooth.`, group: 'Actions', synonyms: [t`soften`, t`smooth edges`, t`hide edges`], gate: 'canSoften' },
-    { id: 'toggle-tangent-edges', label: t`Toggle Tangent Edges`, description: t`Show or hide the thin lines where a fillet or rounded corner meets a flat face.`, group: 'Actions', synonyms: [t`rails`, t`fillet lines`, t`tangent lines`] },
+    { id: 'toggle-tangent-edges', label: t`Toggle Tangent Edges`, description: t`Show or hide the thin lines where a rounded edge or corner meets a flat face.`, group: 'Actions', synonyms: [t`rails`, t`tangent lines`] },
   ]
 }
 // oxlint-enable lingui/no-unlocalized-strings

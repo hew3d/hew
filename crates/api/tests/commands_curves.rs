@@ -2,6 +2,12 @@
 //! analytic surface classes in query output, and (in later work) the
 //! fillet, chamfer, revolve, deform, loft, shell, project, smooth and array
 //! commands.
+//!
+//! A test that drives a Preview feature's command or parameter
+//! (`preview-features.json`) is compiled into a preview build only
+//! (`HEW_PREVIEW=1`, `cfg(hew_preview)`): a production build refuses those
+//! `preview_only`, which `preview_wall.rs` covers for every entry.
+#![cfg_attr(not(hew_preview), allow(dead_code, unused_imports))]
 
 use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, Response, codes};
 use kernel::{Document, ObjectId, Plane, Point3, SurfaceRef, Vec3};
@@ -167,6 +173,7 @@ fn object_of(doc: &Document, public: &str) -> ObjectId {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn revolve_rectangle_about_a_two_point_axis_makes_a_closed_cylinder() {
     let mut doc = Document::new();
     let mut conn = Connection::new(Grant::core(), "test");
@@ -201,6 +208,7 @@ fn revolve_rectangle_about_a_two_point_axis_makes_a_closed_cylinder() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn revolve_about_a_sketch_edge_partial_turn() {
     let mut doc = Document::new();
     let mut conn = Connection::new(Grant::core(), "test");
@@ -243,6 +251,7 @@ fn revolve_about_a_sketch_edge_partial_turn() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn revolve_refuses_an_axis_off_the_profile_plane_and_a_crossing_axis() {
     let mut doc = Document::new();
     let mut conn = Connection::new(Grant::core(), "test");
@@ -295,6 +304,7 @@ fn revolve_refuses_an_axis_off_the_profile_plane_and_a_crossing_axis() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn revolve_a_box_face_about_its_edge() {
     let mut doc = Document::new();
     let _obj = build_box(&mut doc);
@@ -325,6 +335,7 @@ fn revolve_a_box_face_about_its_edge() {
 // ------------------------------------------------- hew.solid.follow_me twist
 
 #[test]
+#[cfg(hew_preview)]
 fn follow_me_twist_and_end_scale() {
     let mut doc = Document::new();
     let mut conn = Connection::new(Grant::core(), "test");
@@ -362,6 +373,7 @@ fn follow_me_twist_and_end_scale() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn follow_me_twist_around_a_face_refuses_twist_needs_open_path() {
     let mut doc = Document::new();
     let _ = build_box(&mut doc);
@@ -389,6 +401,7 @@ fn follow_me_twist_around_a_face_refuses_twist_needs_open_path() {
 // ----------------------------------------------------------- hew.solid.shell
 
 #[test]
+#[cfg(hew_preview)]
 fn shell_hollows_a_box_with_its_top_open() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc);
@@ -436,6 +449,7 @@ fn shell_hollows_a_box_with_its_top_open() {
 // ---------------------------------------------------------- hew.solid.deform
 
 #[test]
+#[cfg(hew_preview)]
 fn deform_twists_a_box_about_its_bounding_box() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc);
@@ -463,6 +477,7 @@ fn deform_twists_a_box_about_its_bounding_box() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn deform_bend_too_far_refuses_with_the_limit() {
     let mut doc = Document::new();
     let _ = build_box(&mut doc);
@@ -486,6 +501,7 @@ fn deform_bend_too_far_refuses_with_the_limit() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn deform_bends_a_bar_along_a_drawn_arc() {
     let mut doc = Document::new();
     let mut conn = Connection::new(Grant::core(), "test");
@@ -537,6 +553,7 @@ fn deform_bends_a_bar_along_a_drawn_arc() {
 // --------------------------------------------------------- hew.solid.project
 
 #[test]
+#[cfg(hew_preview)]
 fn project_engraves_a_square_into_a_box_top() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc);
@@ -659,6 +676,7 @@ fn signed_volume(doc: &Document, object: ObjectId) -> f64 {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn project_follow_mode_engraves_the_wall_without_refusing() {
     let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
@@ -688,6 +706,7 @@ fn project_follow_mode_engraves_the_wall_without_refusing() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn project_refused_depth_leaves_no_imprint_behind() {
     let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
@@ -727,6 +746,7 @@ fn rect_region(conn: &mut Connection, doc: &mut Document, id: i64, z: f64, h: f6
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn loft_two_rectangles_and_an_apex() {
     let mut doc = Document::new();
     let mut conn = Connection::new(Grant::core(), "test");
@@ -766,6 +786,7 @@ fn loft_two_rectangles_and_an_apex() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn loft_refusals() {
     let mut doc = Document::new();
     let mut conn = Connection::new(Grant::core(), "test");
@@ -798,6 +819,7 @@ fn loft_refusals() {
 // ------------------------------------------- hew.object.smooth / crease / bake
 
 #[test]
+#[cfg(hew_preview)]
 fn smooth_crease_and_bake_through_the_api() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc);
@@ -907,6 +929,7 @@ fn top_edge(object: &str) -> Value {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn fillet_rounds_the_top_rim_through_a_face_locator() {
     let mut doc = Document::new();
     let (mut conn, id) = box_in_connection(&mut doc);
@@ -945,6 +968,7 @@ fn fillet_rounds_the_top_rim_through_a_face_locator() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn fillet_one_edge_with_tangent_propagation_off_and_on_a_cylinder_top() {
     let mut doc = Document::new();
     let (mut conn, id) = box_in_connection(&mut doc);
@@ -963,6 +987,7 @@ fn fillet_one_edge_with_tangent_propagation_off_and_on_a_cylinder_top() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn fillet_edge_set_forms_all_and_loop_near() {
     let mut doc = Document::new();
     let (mut conn, id) = box_in_connection(&mut doc);
@@ -996,6 +1021,7 @@ fn fillet_edge_set_forms_all_and_loop_near() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn fillet_refusals_name_their_limit_and_family() {
     let mut doc = Document::new();
     let (mut conn, id) = box_in_connection(&mut doc);
@@ -1061,6 +1087,7 @@ fn fillet_refusals_name_their_limit_and_family() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn fillet_refuses_a_smooth_edge_and_edges_across_objects() {
     let mut doc = Document::new();
     let (mut conn, id) = box_in_connection(&mut doc);
@@ -1125,6 +1152,7 @@ fn fillet_refuses_a_smooth_edge_and_edges_across_objects() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn chamfer_forms_distance_pair_and_angle() {
     // Equal setbacks.
     let mut doc = Document::new();
@@ -1203,6 +1231,7 @@ fn chamfer_forms_distance_pair_and_angle() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn fillet_with_a_built_in_profile_makes_a_profile_blend() {
     let mut doc = Document::new();
     let (mut conn, id) = box_in_connection(&mut doc);
@@ -1231,6 +1260,7 @@ fn fillet_with_a_built_in_profile_makes_a_profile_blend() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn cove_and_variable_radius_and_stops_pass_through() {
     let mut doc = Document::new();
     let (mut conn, id) = box_in_connection(&mut doc);
@@ -1263,6 +1293,7 @@ fn cove_and_variable_radius_and_stops_pass_through() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn resize_and_remove_a_blend_by_any_of_its_faces() {
     let mut doc = Document::new();
     let (mut conn, id) = box_in_connection(&mut doc);
@@ -1329,6 +1360,7 @@ fn resize_and_remove_a_blend_by_any_of_its_faces() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn fillet_rounds_a_drawn_sketch_corner() {
     let mut doc = Document::new();
     let mut conn = Connection::new(Grant::core(), "test");
@@ -1370,6 +1402,7 @@ fn fillet_rounds_a_drawn_sketch_corner() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn fillet_rounds_a_corner_of_a_shape_drawn_on_a_face() {
     let mut doc = Document::new();
     let (mut conn, id) = box_in_connection(&mut doc);
@@ -1411,6 +1444,7 @@ fn fillet_rounds_a_corner_of_a_shape_drawn_on_a_face() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn chamfer_angle_form_uses_the_law_of_sines() {
     // 30 degrees from the top face on a right-angle edge: d_b = d sin30 / sin60.
     let mut doc = Document::new();
@@ -1462,6 +1496,7 @@ fn chamfer_angle_form_uses_the_law_of_sines() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn fillet_default_segments_follow_the_turn_of_the_edge() {
     // A right-angle edge turns pi/2: arc_segments(0.1, pi/2) facets.
     let mut doc = Document::new();
@@ -1489,6 +1524,7 @@ fn refusal_name(r: &Response) -> String {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn array_path_copies_along_a_drawn_circle_as_one_undo_step() {
     let mut doc = Document::new();
     build_box(&mut doc);
@@ -1555,6 +1591,7 @@ fn array_path_copies_along_a_drawn_circle_as_one_undo_step() {
 // ------------------------------------------ hew.solid.remove_degenerate_faces
 
 #[test]
+#[cfg(hew_preview)]
 fn remove_degenerate_faces_refuses_a_clean_box() {
     let mut doc = Document::new();
     build_box(&mut doc);
@@ -1578,6 +1615,7 @@ fn remove_degenerate_faces_refuses_a_clean_box() {
 // ------------------------------------------------------------ hew.solid.soften
 
 #[test]
+#[cfg(hew_preview)]
 fn soften_counts_and_refuses_a_bad_angle() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc);
@@ -1787,6 +1825,7 @@ fn endpoint_near_miss_also_guards_draw_arc() {
 /// 0.2 m plate with 0.04 m rounded corners, extruded 0.05 m, its top rim
 /// filleted. Keep this and the guide in step.
 #[test]
+#[cfg(hew_preview)]
 fn guide_rounded_plate_extrudes_and_fillets_its_top_rim() {
     let mut doc = Document::new();
     let mut conn = Connection::new(Grant::core(), "test");
@@ -1843,6 +1882,7 @@ fn guide_rounded_plate_extrudes_and_fillets_its_top_rim() {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn push_pull_beside_a_fillet_names_the_object() {
     // The face next to a blend moves with the blend re-applied; the reply
     // names the object like every other in-place Push/Pull.
@@ -1927,6 +1967,7 @@ fn equal_radius_tee(doc: &mut Document) -> (ObjectId, Vec<(Point3, Point3)>) {
 }
 
 #[test]
+#[cfg(hew_preview)]
 fn a_blend_where_the_faces_meet_flush_refuses_naming_the_point() {
     // D-234 through the API: an equal-radius tee's walls are tangent where
     // the junction passes the branch's sides, so a round or a chamfer of

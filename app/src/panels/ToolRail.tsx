@@ -18,6 +18,8 @@
 import { useState } from 'react'
 import { Trans, useLingui } from '@lingui/react/macro'
 import { TOOL_ICON_SVG } from '../tools/toolIcons'
+import { isPreviewTool, previewBuild } from '../preview'
+import { withPreviewTag } from '../preview/copy'
 import { RAIL_GROUPS, TOOL_GROUP_LABELS, toolsInGroup, toolSpec, toolLabel, type ToolName } from '../tools/toolRegistry'
 import { useKeymap } from '../keymap/useKeymap'
 import { railShortcutLabel } from '../keymap/keymap'
@@ -235,6 +237,13 @@ function KbdChip({ shortcut, active }: { shortcut: string; active: boolean }) {
   )
 }
 
+/** A rail button's tooltip: the name and key, plus the Preview tag on a
+ *  Preview feature's tool (preview builds only). */
+function railTitle(label: string, shortcut: string, preview: boolean): string {
+  const text = shortcut === '' ? label : `${label} (${shortcut})`
+  return preview ? withPreviewTag(text) : text
+}
+
 function ToolRow({
   name,
   active,
@@ -256,7 +265,7 @@ function ToolRow({
       role="radio"
       aria-checked={active}
       aria-label={label}
-      title={shortcut === '' ? label : `${label} (${shortcut})`}
+      title={railTitle(label, shortcut, previewBuild && isPreviewTool(name))}
       onClick={onSelect}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}

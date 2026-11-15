@@ -68,6 +68,10 @@ export interface ToolContext {
   /** Whether a face of this object/placement is directly drawable in the
    *  current editing context. */
   faceEligibility(objectId: bigint, instanceId: bigint | undefined): boolean
+  /** Like `faceEligibility`, and also true for a face of a linked copy's
+   *  placement: Push/Pull edits a copy's shared solid from outside the
+   *  component. */
+  pushPullEligibility(objectId: bigint, instanceId: bigint | undefined): boolean
 
   /** Hit-test the node a click would select (editing-context aware). */
   resolveSelectable(snap: Snap | null, ray: Ray): NodeRef | null

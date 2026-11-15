@@ -1,10 +1,13 @@
 //! Generators for the two remaining docs/agents/HEW_API.md §9 artifacts: the
 //! TypeScript client SDK (`app/src/api/hewApi.gen.ts`) and the published
 //! API reference (`docs/API_REFERENCE.gen.md`). Both are driven, at
-//! runtime, off [`Registry::protocol_1`] — no TypeScript parsing, no
+//! runtime, off [`Registry::reference`] — no TypeScript parsing, no
 //! hand-maintained copies of a command's contract (§9: "hand-maintained
 //! copies of a command's contract are forbidden because they will
-//! drift").
+//! drift"). The reference inventory is the same in a preview and a
+//! production build, so the committed files are too: each command and
+//! parameter of a Preview feature (`preview-features.json`,
+//! [`crate::preview`]) is listed and marked "Preview".
 //!
 //! `crates/api/tests/generate_artifacts.rs` is the REGENERATE harness that
 //! calls these two functions and either asserts byte-identity against the
@@ -19,7 +22,7 @@
 //! is built without the `preserve_order` feature, so nested object keys
 //! are `BTreeMap`-ordered too. No timestamps, no hash-map iteration.
 
-use crate::refusal::{explanation_for, pascal_case};
+use crate::refusal::{pascal_case, reference_explanation_for};
 use crate::registry::{CommandClass, CommandDecl, Registry, Served, Tier};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -464,6 +467,28 @@ pub fn generate_ts_sdk(registry: &Registry) -> String {
         } else {
             out.push_str(&format!(" * Refusals: {}\n", cmd.refusals.join(", ")));
         }
+        if let Some(feature) = crate::preview::feature_of_command(&cmd.name) {
+            out.push_str(&format!(
+                " * Preview: {} (`{}`). A production build leaves this command out and refuses it `preview_only`.\n",
+                feature.name, feature.id
+            ));
+        }
+        for (feature, params) in crate::preview::gated_params(&cmd.name) {
+            out.push_str(&format!(
+                " * Preview parameters: {}, from {} (`{}`). A production build refuses them `preview_only`.\n",
+                params.join(", "),
+                feature.name,
+                feature.id
+            ));
+        }
+        for (feature, field, values) in crate::preview::gated_values(&cmd.name) {
+            out.push_str(&format!(
+                " * Preview values of {field}: {}, from {} (`{}`). A production build neither accepts nor reports them.\n",
+                values.join(", "),
+                feature.name,
+                feature.id
+            ));
+        }
         out.push_str(" */\n");
         write_named_type(&mut out, &format!("{stem}Params"), &cmd.params_schema);
         write_named_type(&mut out, &format!("{stem}Result"), &cmd.result_schema);
@@ -541,7 +566,7 @@ pub fn generate_ts_sdk(registry: &Registry) -> String {
 /// entry per command: name, version, tier, class, served, permission,
 /// summary, the
 /// params/result JSON Schemas verbatim, and the refusal inventory with
-/// explanations pulled from `api::refusal::explanation_for` wherever the
+/// explanations pulled from `api::refusal::reference_explanation_for` wherever the
 /// UI copy table (`app/src/kernelErrors.ts`, via `refusal_copy.gen.rs`)
 /// has one.
 pub fn generate_api_reference(registry: &Registry) -> String {
@@ -582,6 +607,36 @@ pub fn generate_api_reference(registry: &Registry) -> String {
             cmd.permission.to_wire(),
         ));
         out.push_str(&format!("{}\n\n", cmd.summary));
+        if let Some(feature) = crate::preview::feature_of_command(&cmd.name) {
+            out.push_str(&format!(
+                "> **Preview.** Part of the preview feature {} (`{}`). Only a preview \
+                 build serves it; a production build leaves it out of every listing \
+                 and refuses it with `preview_only`.\n\n",
+                feature.name, feature.id
+            ));
+        }
+        for (feature, params) in crate::preview::gated_params(&cmd.name) {
+            let names: Vec<String> = params.iter().map(|p| format!("`{p}`")).collect();
+            out.push_str(&format!(
+                "> **Preview parameters:** {}, part of the preview feature {} (`{}`). \
+                 A production build leaves them out of the params schema and refuses \
+                 them with `preview_only`.\n\n",
+                names.join(", "),
+                feature.name,
+                feature.id
+            ));
+        }
+        for (feature, field, values) in crate::preview::gated_values(&cmd.name) {
+            let names: Vec<String> = values.iter().map(|v| format!("`{v:?}`")).collect();
+            out.push_str(&format!(
+                "> **Preview values:** {} of `{field}`, part of the preview feature {} \
+                 (`{}`). A production build leaves them out of the schemas, refuses \
+                 them with `preview_only`, and reports no item that carries one.\n\n",
+                names.join(", "),
+                feature.name,
+                feature.id
+            ));
+        }
         if !cmd.implemented {
             out.push_str(
                 "> **Not yet implemented.** Every call answers the `unimplemented` \
@@ -602,7 +657,7 @@ pub fn generate_api_reference(registry: &Registry) -> String {
         } else {
             out.push_str("**Refusals:**\n\n");
             for refusal in &cmd.refusals {
-                match explanation_for(refusal) {
+                match reference_explanation_for(refusal) {
                     Some(explanation) => out.push_str(&format!("- `{refusal}` — {explanation}\n")),
                     None => out.push_str(&format!("- `{refusal}`\n")),
                 }

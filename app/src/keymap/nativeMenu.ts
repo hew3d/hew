@@ -18,6 +18,7 @@
  *   while typing in a text field.
  */
 
+import { actionOffered } from '../curveActions'
 import { chordToAccelerator, hasCommandModifier, parseChord } from './chord'
 
 // oxlint-disable lingui/no-unlocalized-strings -- command ids are identifiers
@@ -65,7 +66,8 @@ export const MAC_SYSTEM_CHORDS: ReadonlySet<string> = new Set(['Meta+Q', 'Meta+H
  * main.rs, kept in step by `nativeMenuParity.test.ts`). A command outside
  * this set has no native item, so even a Cmd-combo of it runs in the page.
  */
-export const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
+/** Every command the native menu can dispatch, whichever build. */
+export const ALL_NATIVE_COMMANDS: readonly string[] = [
   'close', 'draw-3d-text', 'edit-copy', 'edit-cut', 'edit-delete',
   'edit-delete-guides', 'edit-explode', 'edit-group', 'edit-intersect',
   'edit-invert-selection', 'edit-make-component', 'edit-make-unique',
@@ -100,7 +102,11 @@ export const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   'tool-tape-measure', 'tool-text', 'tool-walk', 'tool-zoom',
   'tool-zoom-window', 'undo', 'view-back', 'view-bottom', 'view-front',
   'view-iso', 'view-left', 'view-right', 'view-top', 'zoom-extents',
-])
+]
+
+/** The ones this build's native menu has (the Preview wall's commands exist
+ *  there only in a preview build; `main.rs` builds the same menu). */
+export const NATIVE_COMMANDS: ReadonlySet<string> = new Set(ALL_NATIVE_COMMANDS.filter(actionOffered))
 
 /**
  * Native menu ids' command ids that differ from the keymap's own: the
