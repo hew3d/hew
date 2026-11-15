@@ -53,6 +53,9 @@ To trace over a floor plan, a photo of a wall, or a sketch, place it in the mode
 The picture follows the cursor, 1 m wide, on the face under it or on the ground. Click where one corner goes, then move to size it: it keeps its proportions, and it grows toward whichever side of that corner you move to. Click again to place it, or type the width: the picture takes that width at once, and Enter or a click places it. Esc after the first click starts over; Esc before it cancels. To place a picture on a plane of its own, press an arrow key before the first click, the same way you lock a plane for the drawing tools: right for red, left for green, up for blue. With a plane locked, the first Esc unlocks it and leaves the picture ready to place; the next Esc cancels.
 
 A placed picture is a component named after the file, holding one face painted with the picture, the way a SketchUp image arrives. It stands upright on a wall and faces you. Placing it is one undo step, and it is selected afterward. To size it to a known length, double-click it to open it, measure an edge whose real length you know with the Tape Measure, type that length, and choose to resize: the picture stays stretched over the face. Hew keeps the picture file exactly as it is, so a large photo makes a large model file; pictures over 64 megapixels are refused, so save a smaller copy first. A picture can also be placed too small or too big: each side has to be at least 0.001 mm and at most 1,000,000 m, and Hew tells you which when you drag or type a size outside that.
+### Combining with large imports
+
+A union, subtract, or intersect against a big imported mesh (hundreds of thousands of triangles) works, but it can take a while on the biggest ones. If it says a face "isn't flat enough to combine," that object has a warped face from the source file; nothing is guessed or patched, and the object stays as it was.
 
 ## Making imported shapes solid
 

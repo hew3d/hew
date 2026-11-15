@@ -26,7 +26,8 @@ Because the two are so alike, whether Hew works *for you* comes down to whether 
 | Freehand | Yes | No |
 | Drawing on a face | Splits the face (sticky geometry) | Same — drawing on a solid's face splits it for push/pull |
 | Choosing the drawing plane | Inferred from faces and view | Hovered face, or arrow-key locks to a world-axis plane through the next click |
-| Editing a drawing | Sticky edges, Eraser tool | Lines select and delete individually, a drawn curve selects as one, each connected shape moves as its own island, and an Edit Vertex tool adjusts single points; no eraser-drag tool |
+| Editing a drawing | Sticky edges, Eraser tool | Lines select and delete individually, a drawn curve selects as one, each connected shape moves as its own island, and an Edit Vertex tool adjusts single points |
+| Eraser (`E`) | Erase, soften, and smooth edges by clicking or dragging | Click or drag across drawn lines to erase them, with one undo for the whole drag; a solid's edges are never erased, and there is no soften or smooth by dragging |
 
 </details>
 

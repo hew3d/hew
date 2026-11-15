@@ -12,6 +12,7 @@ is not guaranteed: releases that change the `.hew` format say so under
 
 ### Added
 
+- **Eraser:** A new Eraser tool (`E`, also in the Tools menu and the command palette) erases a drawn line with a click, or every line you drag across as one undo step. The edges of a solid are not erased, and the status bar says so.
 - **Drawing:** Faces from lines on any plane. A loop of lines on one plane becomes a face even when each line was drawn on a different plane, so three Lines to an apex fill a triangle and a cube drawn edge by edge fills as it closes. Lines that do not lie on one plane make no face, and Line says so.
 - **Drawing:** Automatic solids. When flat faces enclose a space with no gap, they become a solid in the same undo step as the line or shape that closed it: a pyramid from a Rectangle and four Lines, a cube from twelve Lines or six Rectangles. A shape closed against an existing solid grows that solid (a roof drawn on a box), keeping its name and tags. A Detached shape becomes a separate Object. Detached lines that share corners close the faces the connected lines enclose (rafters ending on a box's top corners, say); lines that only cross never make a face, and a face already drawn stays as it is, so draw a dividing line first or erase the face and redraw. A shape inside a solid does nothing.
 - **Move, Rotate, Scale, Copy:** Moving, turning, scaling, or copying drawn shapes works like drawing them. When the shapes land so that they close a loop or enclose a space, they become a face or a solid, with the same message as a draw and the new solid selected. Moving a whole sketch (not just part of one) reports nothing yet.
@@ -20,6 +21,9 @@ is not guaranteed: releases that change the `.hew` format say so under
 - **Object:** Make Solid also works on selected sketches. It first fills any faces the lines can close, as one undo step; if no solid forms, it changes nothing. When they do not close a space, the open edges are marked in red, and if those edges form a loop that does not lie flat, the message suggests trying a line across the opening to split it into flat faces.
 - **API:** `hew.solid.from_faces` makes a solid from drawn faces, filling any faces the lines can close first. Drawing and sketch-edit commands report `faces_closed` and `solid` when an edit closed a face or made a solid.
 - **Viewport:** A view die in the top-right corner shows which way the camera is looking and turns with it. Click a face to look straight at it, click a corner to look from that corner, or drag it to orbit. Four pips under it (red, green, blue, and one for any other plane) show the plane the next drawing click lands on; a padlock marks a locked or pinned plane, and clicking a pip locks or releases it, the mouse form of the arrow keys. The die is not shown in Shop mode.
+- **Follow Me:** Sweeps around a drawn circle now carry the exact sphere, torus, or cone they lie on.
+- **View:** View ▸ Tangent Edges shows the thin lines where a smooth surface joins another without a crease.
+- **API:** `draw_line` and `draw_arc` refuse a point that misses an open end of the sketch by less than 0.1 mm with `endpoint_near_miss`, naming the gap, instead of leaving a profile quietly open.
 
 ### Changed
 
@@ -30,6 +34,11 @@ is not guaranteed: releases that change the `.hew` format say so under
 - **Drawing:** Shapes drawn in empty space land on the axis plane facing the camera, as in SketchUp. From a low view that squarely faces a wall (a Front or Side standard view, for one) Line, Rectangle, Circle, Polygon, Arc, and Place Image start on that wall's plane, shown by a status-bar line before you click; from above or a three-quarter view they still start on the ground. The arrow keys and Shift still override it. With the drawing axes moved, empty-space drawing follows the moved axes' ground.
 - **Viewport:** The Orbit, Top, Iso, and Front chips in the top-left corner are removed. The view die covers standard views; Orbit remains in the tool rail, the Camera menu, and `O`.
 - **Drawing:** At a corner or edge shared by two faces, a shape starts on the face the cursor is leaning toward, not always the one facing the camera most squarely. Off the solid to one side, it takes that side's plane.
+- **Format:** The `.hew` format moves from manifest version 26 to 31 and from geometry version 8 to 10. This release opens every older file, but a file saved by it needs this release or later.
+- **Drawing:** Tangent lines, such as where a rounded rectangle's straight walls meet its corner arcs, are hidden by default. View ▸ Tangent Edges brings them back.
+- **Paint:** Painting a face paints its whole curved surface, not one facet.
+- **Combine:** A union, subtract, or intersect against a very large imported mesh no longer refuses with a wrong reason.
+- **Development:** Features that take more than one release to finish are now built behind a preview wall. They are compiled out of release builds and exist only in preview builds made for testing, so nothing changes in the Hew you install. Developers: see "Preview features" in `docs/dev/DEVELOPMENT.md`.
 
 ### Fixed
 

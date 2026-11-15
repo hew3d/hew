@@ -34,7 +34,7 @@ To finish a chain *without* closing it: click the last point again (or double-cl
 
 Press on the first point, drag, and let go on the second instead, and you get a single segment: the chain ends there, ready for a new line, and a length typed right after you let go resizes that segment.
 
-**Exact lengths:** once a chain is started, type a length (e.g. `750mm`) and press `Enter` — the next segment commits at exactly that length along the direction you're pointing.
+**Exact lengths:** once a chain is started, type a length (e.g. `750mm`) and press `Enter` — the next segment commits at exactly that length along the direction you're pointing. If the typed length ends within snapping distance of the chain's starting point, the segment ends on that point exactly and closes the shape, the same as clicking there.
 
 Type a length right after a segment commits, before moving the cursor, and it resizes *that* segment instead, along the direction it was already drawn — the chain then continues from the new end point. Move the cursor first and a typed length goes back to drawing the next segment, as above (see "Typing exact values" below).
 
@@ -95,7 +95,7 @@ A two-point arc, like SketchUp's:
 2. Click the other endpoint to set the chord.
 3. Move perpendicular to the chord to pull out the bulge, then click to commit.
 
-`Esc` steps back one stage at a time. The readout shows the arc's radius. Typed values work at both stages: in the chord stage a typed length places the second endpoint at that distance, and in the bulge stage it sets the bulge depth. A flat, zero-bulge arc is refused ("Pull out the bulge"). Arcs facet at the same density as circles of the same radius, and like circles they carry their exact center and radius for snapping, smooth display, and export.
+`Esc` steps back one stage at a time. In the bulge stage the measurement box is labeled Bulge and shows how far the arc bows out from the chord, the same number a typed value sets. A click commits exactly the bulge the box shows, so clicking and typing give the same arc. The arc's radius is still there: it appears as "R" in the status line while you pull. Typed values work at both stages: in the chord stage a typed length places the second endpoint at that distance, and in the bulge stage it sets the bulge depth. A flat, zero-bulge arc is refused ("Pull out the bulge"). Arcs facet at the same density as circles of the same radius, and like circles they carry their exact center and radius for snapping, smooth display, and export.
 
 A typed length after the third click works too: the arc you just drew redraws with that bulge, on the same side of the same chord and with the same open/pie/segment closure (see "Typing exact values" below).
 
@@ -126,6 +126,8 @@ A solid's own edges are not part of the drawing. You can snap to them and draw u
 At the top level, any plain object's face is drawable directly. Faces inside a **group or component** are the exception: double-click in first, and drawing is then scoped to what you entered. Starting a line on an edge or corner two faces share is fine; the face the line runs across is settled by where you put its second point (or by an arrow-key lock), so a line from the midpoint of a box's top edge to the midpoint of the opposite one cuts the top, not the side.
 
 A line chain on a face may run from edge to edge, cross shapes you've drawn there, or wander across the middle; an arc arched over a rectangle splits it. Each segment is its own step, so `Ctrl+Z` takes the chain back one segment at a time. A circle or arc you drew stays one **Circle** or **Arc** when other shapes cut it apart, so you can select it whole and delete it in one step.
+
+One limit: a circle drawn on a face, then stretched into an oval with Scale, shows its facet lines when you push or pull it, where the same stretch on the ground stays smooth. For a smooth oval on a face, push or pull the circle first and stretch the finished solid instead.
 
 ![A box with a circular boss pulled out and a circular recess pushed in, both drawn directly on its front face](/docs/drawing-on-face.webp)
 
@@ -198,6 +200,8 @@ Everything you draw is made of four kinds of unit, and the Select tool picks the
 A rubber-band drag selects the shapes it encloses (or touches, dragging right to left), on the ground or on a face. Start the drag off a solid; pressing on a solid and dragging moves it. Shapes drawn apart from each other are independent: selecting, deleting, or moving one never touches the other.
 
 **Deleting a line or curve.** With the Select tool, click a line or curve run and press `Delete`. If it separated two regions, they merge; if it closed a region, the region opens back up. Deleting a shape's last line removes it entirely. Every line you can see is an ordinary line: pulling a region into a solid removes its outline from the drawing (the outline became the solid's base), so nothing invisible lingers behind to complicate later edits. A solid's own edges are the exception in the other direction: you can't select them as drawing, so `Delete` can't erase one.
+
+**Erasing with the Eraser.** Press `E` for the Eraser, hover a line or curve to see it highlight, and click to erase it. A curve goes as a whole. Drag across several lines to erase them all, and one `Ctrl+Z` brings them all back. Escape during a drag changes nothing. On the edge of a solid the Eraser erases nothing, and the status bar says why: "Edges of a solid can't be erased." Clicking inside a shape's fill doesn't erase it either; click one of its lines, or select the shape and press `Delete`.
 
 **Deleting or moving a whole shape.** Click inside a shape's filled region (or its row in the outliner) to select the shape, then `Delete` removes it or Move slides it, without disturbing anything else you've drawn. On a face it works the same way: a shape drawn there selects when you click inside it, and clicking anywhere else on the solid selects the solid.
 

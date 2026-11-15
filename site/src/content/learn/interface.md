@@ -23,7 +23,7 @@ A floating readout in the bottom-right corner shows live measurements — distan
 The left rail lists the everyday tools in three groups, each with its keyboard shortcut:
 
 - **Draw** — Select `Space`, Line `L`, Rectangle `R`, Circle `C`, Polygon, Arc `A`
-- **Modify** — Push/Pull `P`, Follow Me, Offset `F`, Move `M`, Rotate `Q`, Scale `S`
+- **Modify** — Push/Pull `P`, Follow Me, Offset `F`, Move `M`, Rotate `Q`, Scale `S`, Eraser `E`
 - **Inspect** — Tape Measure `T`, Dimension, Paint `B`, Section Plane
 
 More tools don't have rail slots: **Protractor**, **Slice**, **Edit Vertex**, **Text**, **Drawing Axes**, and **Position Texture**, plus the camera tools **Orbit** `O`, **Pan** `H`, **Zoom** `Z`, **Zoom Window**, **Position Camera**, **Look Around**, and **Walk**. Reach them from the **Tools** and **Camera** menus, or from the command palette.
@@ -47,13 +47,13 @@ The floating bar at the bottom-center of the viewport follows your selection and
 | Selection | Dock shows |
 |---|---|
 | Nothing | Rectangle, Line, Circle, Arc |
-| An Object | Push/Pull, Move, Paint, Make Component, Erase |
+| An Object | Push/Pull, Move, Paint, Make Component, Save to Library, Erase |
 | A group | Edit, Move, Scale, Make Component, Ungroup, Erase |
 | A component instance | Edit, Move, Scale, Make Unique, Explode |
-| Several things | Move, Group, Erase |
-| A sketch | Push/Pull, Move, Rotate, Scale, Erase |
+| Several things | Move, Union, Subtract, Intersect, Group, Erase |
+| A sketch | Push/Pull, Follow Me, Move, Rotate, Erase |
 
-Group and Make Component appear only when the selection qualifies (Group needs two or more siblings; Make Component takes objects and groups, not instances). Everything on the dock also lives in the menus (Edit is a double-click on the group or component); nothing is reachable only from it.
+Group, Make Component, and the three boolean chips appear only when the selection qualifies (Group needs two or more siblings; Make Component takes objects and groups, not instances; Union, Subtract, and Intersect need solids that can be combined). Hover a drawn shape with nothing selected and the sketch row previews, with Push/Pull ready to click. Everything on the dock also lives in the menus (Edit is a double-click on the group or component); nothing is reachable only from it.
 
 If you'd rather not have it, turn it off with **View ▸ Contextual Dock**. It stays off, across restarts too, until you turn it back on there.
 

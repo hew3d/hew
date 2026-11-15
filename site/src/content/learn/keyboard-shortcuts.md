@@ -21,6 +21,7 @@ Tool shortcuts are plain letters, the same on every platform, matching SketchUp'
 | Move | `M` |
 | Rotate | `Q` |
 | Scale | `S` |
+| Eraser | `E` |
 | Flip | — |
 | Tape Measure | `T` |
 | Paint | `B` |

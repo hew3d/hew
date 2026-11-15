@@ -423,8 +423,9 @@ below.
   group land in that group. Facet seams of drawn curves — along the path
   and around the profile — render soft (smoothed shading, no seam lines);
   a drawn circle swept along a straight run stays a true stamped
-  cylinder, while walls around a path's turns keep honest facets (no
-  toroidal surface identity yet — see Planned). Ineligible sweeps —
+  cylinder, and a sweep around a drawn circle or arc stamps its walls
+  with the sphere, torus or cone they lie on (see Curves and curved
+  surfaces). Ineligible sweeps —
   branching or disconnected selections, bends tighter than the profile,
   straddled corner starts, an on-axis profile on a non-circular path,
   self-intersecting results — refuse typed with the document untouched
@@ -638,6 +639,125 @@ below.
   edge) is orange and pushes the solid itself. The viewport colors each edge
   by its store (`Scene::sketch_owner_object`); the rubber band is orange only
   when the shape would join a face, and Offset's ghost takes its source's color
+
+### Curves and curved surfaces
+
+- Sphere, Torus and Cone join Cylinder as analytic claims on planar
+  facets: the face stays a planar polygon, and the claim gives snapping,
+  measuring and export re-faceting the true center, axis and radius. Each
+  claim follows the map-or-drop rule (kept under a similarity transform,
+  inherited by split and boolean pieces, dropped under a non-similarity or
+  when a face leaves its chord plane). A face also carries an optional blend
+  tag (which fillet, chamfer or profile made it) and an edge carries a
+  crease flag; all of it is geometry buffer v9 and manifest v27
+  (`docs/dev/HEW_FILE_FORMAT.md`), and v8 files open unchanged
+- Smoothness survives what it should. Booleans re-derive soft seams and
+  circle claims from where each result face and edge came from, so a
+  revolved bowl unioned with a pedestal still shades smooth; scaling a
+  curve non-uniformly (an oval from a circle) leaves soft seams instead of
+  hard facets; and the tessellator derives smoothness from the surfaces
+  themselves, so fillet rails and the joints of a rounded rectangle's walls
+  are hidden by default. **View ▸ Tangent Edges** draws them thin and
+  half-lit, and printing follows the same switch
+- Follow Me stamps the sphere, torus, cone or cylinder a sweep around a
+  drawn circle lies on, and **Revolve** (Tools ▸ Shape, and the dock's
+  sketch row, where a selected drawn shape skips to the axis step) turns a
+  drawn shape or a solid's face about an axis you click, for a full turn or
+  a typed angle: a goblet, a bowl, a wheel. A partial turn of a shape
+  that touches the axis refuses. Follow Me also takes a **twist** and an
+  **end scale** along an open path (typed `30°`, `40%`, `8s`)
+- **Fillet** (`⇧F`, tool rail and the dock's object row) and **Chamfer**
+  (Tools menu) round or bevel the edges of a solid: click an edge, a face
+  (its whole rim) or a tangent chain, Shift-click to collect several,
+  Ctrl/Cmd+A to take every sharp edge of the object under the pointer,
+  preselect objects to arm all their edges; size by moving or typing
+  (`6`, `6,3`, `3,45°`, `8s` facets). A fillet removes material from a
+  convex edge and adds it to a concave one. Where new edges meet an
+  existing fillet, the corner is solved again with both, larger first. A
+  size that does not fit clamps to the largest the commit takes, and the
+  status bar names what limits it. The profile chip chooses Round,
+  Chamfer, Cove, Bullnose, a built-in router profile or a Library
+  profile; the Corners chip chooses rolled or mitered corners (rounds)
+  and mitered or flat ones (chamfers). Rims and hole mouths become tori
+  and cones, a cube with all twelve edges rounded gets sphere corners,
+  and mixed convex and concave corners solve in two passes. Stopped
+  blends and variable radius have end and radius grips. A round too
+  large for a Loft's or an imported mesh's facets rolls across them as a
+  swept blend, and a corner the facet planners cannot build at the size
+  asked names the largest size they build. Fillets on pipe
+  tees, oblique cuts and imported meshes (the swept blend) take Round,
+  Chamfer, Cove (outside edges, as everywhere) and any profile, around a
+  closed loop or along an open chain that ends on a face at both ends; a
+  bullnose or a stop there refuses `UnsupportedEdge`, and a chain end
+  that is not on one face (another picked edge meets it, or the sharp
+  edge goes on) or a corner the engine cannot solve refuses
+  `UnsupportedVertex`. The 2D version rounds or chamfers a corner of a
+  drawn line shape, on the ground or on a face
+- Blends stay editable: hover a fillet to resize it by pointer or typing,
+  Delete removes it (each blend records what it replaced when it is made
+  and replays the record, with a later fillet that ran into it taken off
+  and put back; a record that no longer fits, or a blend from a file older
+  than the records, falls back to deriving the sharp geometry and verifying
+  it, else it refuses), Alt switches Round and Chamfer, Push/Pull on a
+  fillet's face resizes it, and Push/Pull of the face beside a fillet
+  moves the face and re-applies the blend. A resize gives what deleting
+  the fillet and filleting its edges again at the new size gives: a
+  corner with another fillet is solved again (at the same size the two
+  become one fillet), and it clamps the same way. A fillet is painted and
+  picked as one face. A fillet that was cut or moved away from its
+  original shape is ordinary geometry and refuses edits. A swept blend (a
+  tee's junction, an oblique cut's rim, an imported mesh, a lofted deck)
+  is editable the same way: its record keeps every facet it cut whole with
+  the pieces the cut left (in the v28 record), and its chains start and run by
+  their geometry alone, so a resize builds what a fresh blend at that size
+  builds (D-228).
+- **Profiles** are a Library category: draw an open chain of lines and arcs
+  on a plane, **Save profile…** from the profile chip, and use it on any
+  edge; a Profiles filter, Use, Open for editing and Replace complete the
+  loop, and seven router profiles ship built in (Ogee, Roman ogee, Bead,
+  Thumbnail, Cove and bead, Chamfer and bead, Cavetto)
+- **Smooth**: Object Info or Object ▸ Smooth sets an object's level
+  (Off, 1, 2, 3; Object ▸ Soften Edges… reaches the soften field) and the
+  object draws as a subdivision surface over its faces, which stay the cage
+  that tools edit and that snaps and measures. A thin cage wire shows while
+  a tool other than Select is active. The **Eraser** (`E`) erases drawn
+  lines, and Ctrl/Cmd-click on a solid's edge creases it (keeps it sharp
+  under Smooth). Booleans use the cages and the result keeps the level;
+  **Bake** turns the Smooth surface into real faces. Export writes the
+  smooth mesh, with **Export cages instead** for the editable cage
+- **Deform** (Tools ▸ Deform: Twist, Bend, Taper, Bend to Path) reshapes a
+  whole solid through a bounding-box gizmo and stops at the largest
+  workable amount where the result would pass through itself; **Loft** joins
+  closed shapes (and an apex point) with up to two rails and start
+  markers; shapes with the same number of corners loft corner to corner
+  whatever their sizes, starts are chosen for the least twist (a circle
+  meets a square's corners square-on), and a column that is a corner of
+  both shapes it runs between creases, while one that is a corner of only
+  one creases only where it stands out from the surface beside it
+  (D-126); between two shapes the hull stays inside the box the pair
+  spans (for circles on one axis, between their radii), circles on one
+  axis join angle to angle so their rims round as exact tori, and a
+  corner of one shape creases the hull where it leaves that shape, is
+  smooth between shapes with no corner there, and elsewhere fades where it
+  folds by a degree or less;
+  **Shell** hollows a solid to a typed wall with chosen faces
+  left open (a pocket's floor opens into the hollow, with its rim on the
+  floor, or as a hole straight through the top's wall when the pocket is
+  as deep as the wall or shallower; walls that would run into each other
+  refuse as too thick); **Project** draws a closed shape onto a curved or flat
+  solid and engraves or embosses it, straight (which can cut through a wall) or
+  following the surface; **Array along Path** places copies along a line,
+  curve or face edge with a scale ramp
+- Imported meshes: booleans against very large imports no longer refuse
+  with a wrong reason (a 500,000-face import combines), Model Health
+  gains Remove degenerate faces, and Object Info's **Soften edges under N°**
+  shades an import smooth by dihedral angle
+- All of it is in the Hew API and the recorded history: `hew.solid.fillet`,
+  `chamfer`, `resize_blend`, `remove_blend`, `revolve`, `deform`, `loft`,
+  `shell`, `project`, `bake`, `soften`, `remove_degenerate_faces`,
+  `hew.object.smooth` and `crease`, `hew.array.path`, and `profile` in
+  `hew.library` (HEW_API.md §7 and §8); every in-place operation is one
+  undo step that restores the exact earlier object
 
 ### Inference & precision
 
@@ -1143,11 +1263,14 @@ below.
   Make Solid. **Object ▸ Model Health…** opens a floating window (closed
   at launch, moved and sized by the person, remembered) listing every
   object that isn't solid for one-at-a-time repairs; framing from it fits
-  the object beside the window. Object Info has the same buttons, and
+  the object beside the window. A repair beside Close and Thicken,
+  **Remove degenerate faces**, drops the zero-width and sub-tolerance
+  faces an import can carry (reported, explicit, never automatic) and
+  lists a closed object that has some. Object Info has the same buttons, and
   Push/Pull on a flat panel makes it a slab. The same is in the API
   (`hew.doc.health` with per-rim `cappable` / `shared` / `sheet_edge`,
-  `hew.solid.cap` / `thicken` / `delete_faces` / `mark_surface`, `health`
-  in `hew.query`), so a script can repair a file. **Mend**
+  `hew.solid.cap` / `thicken` / `delete_faces` / `mark_surface` /
+  `remove_degenerate_faces`, `health` in `hew.query`), so a script can repair a file. **Mend**
   (`kernel::repair::mend`, `hew.solid.mend`) is the repair for imported
   and scanned meshes Close can't finish: it merges points closer than a
   merge distance, removes paper-thin overlaps, separates parts that touch
@@ -1194,9 +1317,11 @@ below.
   `loop_not_planar`, `faces_not_solid`, or `unknown_entity`
 - Binary STL export, scaled for 3D printing; export is gated on every
   object being a solid, so an exported file is guaranteed manifold
-- STL curve resolution: cylinder walls re-facet from their analytic
-  definitions at a chosen smoothness (the stored facets are the floor,
-  not the ceiling), staying manifold at any setting
+- STL curve resolution: cylinder walls, and the cone and torus bands of
+  fillets and revolved shapes, re-facet from their analytic definitions at
+  a chosen smoothness (the stored facets are the floor, not the ceiling),
+  staying manifold at any setting. Sphere fans export at their stored
+  facets
 - 3MF export — a modern print format alongside STL: explicit millimeter
   units, one mesh per object carrying its name and per-face colors,
   better suited to multi-part prints; gated on solids the same way STL is
@@ -1259,11 +1384,17 @@ below.
   changes or the window is hidden, and the periodic app timers (save-state
   label, autosave) arm only when they have work — an idle Hew costs the
   machine nothing
-- A labeled tool rail, a command palette (Ctrl/Cmd-/) for finding any tool
-  or action by name, a contextual action dock that follows the current
-  selection (including Group for a multi-selection and Make Component for
-  objects and groups, shown only when the selection qualifies), and a
-  docked properties/outliner/materials tray
+- A labeled tool rail (Draw, Modify, Inspect; Modify is Push/Pull, Offset,
+  Follow Me, Fillet, Loft, Move, Rotate, Scale, Eraser), a Tools menu in
+  SketchUp's order with Shape (Revolve, Loft, Shell, Project, Array along
+  Path) and Deform (Twist, Bend, Taper, Bend to Path) submenus, an Object
+  menu that also holds Smooth and Soften Edges…, a command palette
+  (Ctrl/Cmd-/) for finding any tool or action by name, a contextual action
+  dock that follows the current selection (Fillet and Shell for a solid;
+  Revolve, Loft, and Follow Me for a drawn shape; Union, Subtract, and
+  Intersect for a multi-selection of solids; Group and Make Component
+  shown only when the selection qualifies), and a docked
+  properties/outliner/materials tray
 - Room to model on demand: the tool rail compacts to icons (View ▸ Compact
   Tool Rail, or its chevron), the tray hides entirely (View ▸ Tray, or its
   chevron), and the contextual dock can be turned off (View ▸ Contextual
@@ -1535,13 +1666,6 @@ below.
   real models (the rest have real open ends), so it waits for a model where
   inside faces are the main cause
 
-- **True toroidal surfaces** (`SurfaceRef::Torus`): sweep walls around a
-  turning path currently carry no analytic surface claim — a cylinder
-  claim there would be false, so the verifier refuses it and push/pull
-  and refacet on such walls stay facet-level (rendering is already
-  smooth via soft seams). A torus surface class through the validator,
-  tessellation, and serialization (a geometry-buffer bump) restores
-  analytic behavior for pipes and lathe rings
 - **STEP/IGES import and export**, for precise CAD interchange with
   engineering tools (via OpenCASCADE)
 - **Section fill** (capping the cut) and multi-plane management, on top
@@ -1800,3 +1924,7 @@ below.
   still not a general face or edge editor — a boss's wall or a solid's
   own corner cannot be dragged. Model Health's face removal is the other
   exception, and it works only on open imported objects, never a solid.
+  Fillet, Deform, and Crease are direct-pick or whole-object tools, not
+  sub-element editors: Fillet picks an edge or a face and replaces the
+  edge by a validated blend, Deform moves a whole object, and Crease flags
+  an edge without moving anything.

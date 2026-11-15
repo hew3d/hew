@@ -72,6 +72,8 @@ Undo (`⌘Z` / `Ctrl+Z`) and redo (`⇧⌘Z` / `Ctrl+Shift+Z` or `Ctrl+Y`) span 
 
 Your view is the one exception to both rules above. It's saved with the file, so reopening a model brings back the last view you had it framed in, but changing it is never an undo step — panning, orbiting, or walking around isn't something you'd want an accidental `Ctrl+Z` to reverse.
 
+On a very large model, such as a dense scan, each step can hold a lot of memory. To keep the app responsive, Hew sets a memory budget for undo and lets go of the oldest steps once the history passes it. When that happens the status bar says "Undo history trimmed to save memory: 12 steps kept" (with the real number), and hovering it explains that the most recent steps can still be undone. Smaller models never reach the budget, so their history is not cut. The note is only a heads-up; nothing in your model changes.
+
 Opening and closing a group or component for editing is on that same undo list — `Ctrl+Z` right after double-clicking in really does back out of the edit — but it isn't a *change*: it never marks the document dirty, and it's left off the Changes panel below, since nothing about the model actually moved.
 
 ## Changes panel

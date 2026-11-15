@@ -96,7 +96,6 @@ explains in plain language and leaves your geometry untouched.
 - STEP/IGES import and export, for interchange with engineering CAD
 - DWG/DXF for the architectural crowd
 - Chamfer/fillet
-- True toroidal surfaces, so swept bends are exact instead of faceted
 - Push/pull an outer face past its own holes (the one push/pull case
   still refused)
 - A single-file embedded model viewer — one self-contained HTML file

@@ -643,8 +643,9 @@ is designed so that watertightness can never be broken as a side effect:
 
 - **Push-through.** Pushing or pulling a face past the Object's opposite
   face performs a boolean subtraction of the swept volume rather than
-  producing an open shell — this is the *only* way material is removed from
-  a solid in Hew. Every result piece carries the source's name and tags
+  producing an open shell. Together with the blend and Deform operations
+  below, this is one of the few ways material is removed from or moved on a
+  solid in Hew. Every result piece carries the source's name and tags
   (when an inward push severs the solid, each piece does: tags are
   membership, and names are not unique). Undo is unchanged. Booleans give
   their result no name and no tags, since two Objects merge there and
@@ -672,6 +673,16 @@ is designed so that watertightness can never be broken as a side effect:
   Model Health's `delete_faces` removes faces from an **open** Object only
   (an import's stray sheet, an importer's partition sheet); a solid refuses
   it with `ObjectIsSolid`, the same stance.
+
+Blends (fillets and chamfers) and Deform are the second and third
+sanctioned ways a solid's material changes, each by clone-validate-swap:
+the operation edits a clone, validates it as a watertight solid, and swaps
+it in or refuses with the object untouched. The invariant's purpose (no
+everyday action opens a shell) is therefore kept by construction, rather
+than by routing the change through push-through's boolean. Shell and the
+surface-following depth of Project change material the same way. Every one
+of them records the exact pre-operation object so Undo restores it and
+Redo re-runs the recorded operation on it.
 
 ### 2.11 The session model: editing containers with the unmodified tool set
 
@@ -1180,10 +1191,12 @@ affine per-face UV frame is precise enough to reproduce an imported model's
 authored texture mapping without needing per-vertex UV storage, which a
 flat-faced, solids-first model doesn't otherwise require.
 
-**Push-through is the only way to remove material from a solid.** Covered
-in 2.10. Centralizing material removal in one boolean-backed operation is
-what makes the "delete a whole node only" restriction on plain deletion safe
-rather than merely convenient.
+**Plain deletion never removes material from a solid; push-through is the
+everyday route.** Covered in 2.10, which also names the blend, Deform,
+Shell and Project operations that change material by clone-validate-swap.
+Keeping material removal in a few validated operations is what makes the
+"delete a whole node only" restriction on plain deletion safe rather than
+merely convenient.
 
 **Units are a display concern layered losslessly over an f64-meter
 kernel.** The kernel always works in meters; metric and imperial display
