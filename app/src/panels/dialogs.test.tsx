@@ -795,6 +795,23 @@ describe('ExportDialog', () => {
     expect(onExport).toHaveBeenCalledWith('glb', 48, undefined, false)
   })
 
+  it('offers "Export cages instead" only for a model with a Smooth object, and passes the choice', () => {
+    const plain = render(<ExportDialog onExport={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.queryByLabelText(/export cages instead/i)).not.toBeInTheDocument()
+    plain.unmount()
+
+    const onExport = vi.fn()
+    render(<ExportDialog onExport={onExport} onCancel={vi.fn()} hasSmoothed />)
+    fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
+    expect(onExport).toHaveBeenLastCalledWith('glb', 48, undefined, false, false)
+    fireEvent.click(screen.getByLabelText(/export cages instead/i))
+    fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
+    expect(onExport).toHaveBeenLastCalledWith('glb', 48, undefined, false, true)
+    // SVG has no cages to carry.
+    fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'svg' } })
+    expect(screen.queryByLabelText(/export cages instead/i)).not.toBeInTheDocument()
+  })
+
   it('SVG reveals view/scale/hidden-lines options and passes them to onExport (1:1 default)', () => {
     const onExport = vi.fn()
     render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)

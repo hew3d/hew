@@ -54,6 +54,8 @@ function makeMesh(watertight: boolean) {
     group_counts: () => new Uint32Array([3]),
     group_backs: () => new Uint8Array([0]),
     edge_positions: () => new Float32Array([0, 0, 0, 1, 0, 0]),
+    tangent_edge_positions: () => new Float32Array(0),
+    cage_edge_positions: () => new Float32Array(0),
     watertight: () => watertight,
     free: vi.fn(),
   }
@@ -313,6 +315,82 @@ describe('SceneRenderer — double-sided rendering for open shells', () => {
 function meshSpy(scene: WasmScene): ReturnType<typeof vi.fn> {
   return (scene as unknown as { object_mesh: ReturnType<typeof vi.fn> }).object_mesh
 }
+
+describe('SceneRenderer — tangent edges (View ▸ Tangent Edges)', () => {
+  const TANGENT = new Float32Array([0, 0, 0, 0, 0, 1])
+  function tangentScene(extra: Parameters<typeof makeScene>[0]) {
+    const scene = makeScene(extra)
+    const base = scene.object_mesh as unknown as (id: bigint) => object
+    ;(scene as unknown as { object_mesh: unknown }).object_mesh = vi.fn((id: bigint) => ({
+      ...base(id),
+      tangent_edge_positions: () => TANGENT,
+      cage_edge_positions: () => new Float32Array(0),
+    }))
+    return scene
+  }
+
+  it('builds a hidden half-opacity line per object and shows it with the setting', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), tangentScene({ objects: { '1': true } }))
+    renderer.refresh()
+    expect(renderer.getTangentEdgeInfo()).toEqual({ lines: 1, visible: 0, segments: 1 })
+    const group = renderer.objectsGroup.getObjectByName('Object_1') as THREE.Group
+    const tangent = group.children.find(
+      (c) => c instanceof THREE.LineSegments && (c.material as THREE.LineBasicMaterial).opacity === 0.5,
+    ) as THREE.LineSegments
+    expect((tangent.material as THREE.LineBasicMaterial).transparent).toBe(true)
+    renderer.setTangentEdgesVisible(true)
+    expect(renderer.getTangentEdgeInfo().visible).toBe(1)
+    renderer.setTangentEdgesVisible(false)
+    expect(renderer.getTangentEdgeInfo().visible).toBe(0)
+  })
+
+  it('a rebuild while the setting is on keeps the lines visible, and a plain object has none', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), tangentScene({ objects: { '1': true } }))
+    renderer.setTangentEdgesVisible(true)
+    renderer.refresh()
+    expect(renderer.getTangentEdgeInfo().visible).toBe(1)
+    renderer.refreshTouched({ objectIds: [1n] })
+    expect(renderer.getTangentEdgeInfo()).toEqual({ lines: 1, visible: 1, segments: 1 })
+    const plain = new SceneRenderer(new THREE.Scene(), makeScene({ objects: { '1': true } }))
+    plain.refresh()
+    expect(plain.getTangentEdgeInfo().lines).toBe(0)
+  })
+
+  it('disposes the tangent geometry and material with the object', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), tangentScene({ objects: { '1': true } }))
+    renderer.refresh()
+    const group = renderer.objectsGroup.getObjectByName('Object_1') as THREE.Group
+    const tangent = group.children.find(
+      (c) => c instanceof THREE.LineSegments && (c.material as THREE.LineBasicMaterial).opacity === 0.5,
+    ) as THREE.LineSegments
+    const geo = vi.spyOn(tangent.geometry, 'dispose')
+    const mat = vi.spyOn(tangent.material as THREE.Material, 'dispose')
+    renderer.refreshTouched({ objectIds: [1n] })
+    expect(geo).toHaveBeenCalled()
+    expect(mat).toHaveBeenCalled()
+  })
+
+  it('instanced members get a tangent batch that follows the setting', () => {
+    const renderer = new SceneRenderer(
+      new THREE.Scene(),
+      tangentScene({
+        instances: { '10': { def: 5n, memberIds: [20n], memberWatertight: { '20': true }, pose: IDENTITY_POSE } },
+      }),
+    )
+    renderer.refresh()
+    expect(renderer.getTangentEdgeInfo()).toEqual({ lines: 1, visible: 0, segments: 1 })
+    renderer.setTangentEdgesVisible(true)
+    expect(renderer.getTangentEdgeInfo().visible).toBe(1)
+  })
+
+  it('print edge collection includes tangent lines only while the setting is on', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), tangentScene({ objects: { '1': true } }))
+    renderer.refresh()
+    const off = renderer.collectPrintEdgeSegments().length
+    renderer.setTangentEdgesVisible(true)
+    expect(renderer.collectPrintEdgeSegments().length).toBe(off + 6)
+  })
+})
 
 describe('SceneRenderer — targeted refresh (refreshTouched)', () => {
   it('rebuilds only the touched object group and leaves untouched groups alone', () => {
@@ -2147,6 +2225,8 @@ describe('SceneRenderer — section widget coverage (D1, section-plane-polish)',
       group_counts: () => new Uint32Array([3]),
       group_backs: () => new Uint8Array([0]),
       edge_positions: () => new Float32Array([ox, oy, oz, ox + 1, oy, oz]),
+      tangent_edge_positions: () => new Float32Array(0),
+      cage_edge_positions: () => new Float32Array(0),
       watertight: () => true,
       free: vi.fn(),
     }
@@ -2504,6 +2584,8 @@ describe('SceneRenderer — untextured painted materials', () => {
         group_counts: () => new Uint32Array([3]),
         group_backs: () => new Uint8Array([0]),
         edge_positions: () => new Float32Array([0, 0, 0, 1, 0, 0]),
+        tangent_edge_positions: () => new Float32Array(0),
+        cage_edge_positions: () => new Float32Array(0),
         watertight: () => true,
         free: vi.fn(),
       }
@@ -3198,6 +3280,64 @@ describe('SceneRenderer — draw color language (free blue / attached orange)', 
     expect(lines).toHaveLength(2)
     expect(lines).toContainEqual({ kind: 'attached', color: ATTACHED })
     expect(lines).toContainEqual({ kind: 'free', color: FREE })
+  })
+})
+
+describe('SceneRenderer — face mask (Fillet preview)', () => {
+  /** Two one-triangle faces: vertices 0-2 are face 1, vertices 3-5 face 2. */
+  function maskScene() {
+    const scene = makeScene({ objects: { '1': true } })
+    ;(scene as unknown as { object_mesh: unknown }).object_mesh = vi.fn(() => ({
+      ...makeMesh(true),
+      positions: () => new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0, 0, 3, 0, 0, 2, 1, 0]),
+      normals: () => new Float32Array(18),
+      colors: () => new Float32Array(18),
+      uvs: () => new Float32Array(12),
+      indices: () => new Uint32Array([0, 1, 2, 3, 4, 5]),
+      group_counts: () => new Uint32Array([6]),
+    }))
+    ;(scene as unknown as { face_mesh_range: unknown }).face_mesh_range = vi.fn((_o: bigint, f: bigint) =>
+      f === 1n ? Uint32Array.from([0, 3]) : f === 2n ? Uint32Array.from([3, 3]) : undefined,
+    )
+    return scene
+  }
+  const indexOf = (root: THREE.Group): { count: number; start: number; groupCount: number } => {
+    const mesh = root.getObjectByName('Object_1')!.children[0] as THREE.Mesh
+    const g = mesh.geometry
+    return { count: g.getIndex()!.count, start: g.groups[0].start, groupCount: g.groups[0].count }
+  }
+
+  it('drops the masked faces triangles and restores them on clear', () => {
+    const root = new THREE.Scene()
+    const renderer = new SceneRenderer(root, maskScene())
+    renderer.refresh()
+    expect(indexOf(renderer.objectsGroup).count).toBe(6)
+    expect(renderer.setFaceMask(1n, [2n], 1000)).toBe(true)
+    expect(indexOf(renderer.objectsGroup)).toEqual({ count: 3, start: 0, groupCount: 3 })
+    // Same set again: no rebuild, still masked.
+    expect(renderer.setFaceMask(1n, [2n], 1000)).toBe(true)
+    // A different set rebuilds from the original buffer, not the filtered one.
+    expect(renderer.setFaceMask(1n, [1n], 1000)).toBe(true)
+    expect(indexOf(renderer.objectsGroup).count).toBe(3)
+    renderer.clearFaceMask(1n)
+    expect(indexOf(renderer.objectsGroup)).toEqual({ count: 6, start: 0, groupCount: 6 })
+  })
+
+  it('skips the mask on an object over the triangle budget', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), maskScene())
+    renderer.refresh()
+    expect(renderer.setFaceMask(1n, [2n], 1)).toBe(false)
+    expect(indexOf(renderer.objectsGroup).count).toBe(6)
+  })
+
+  it('forgets the mask when the object is rebuilt', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), maskScene())
+    renderer.refresh()
+    renderer.setFaceMask(1n, [2n], 1000)
+    renderer.refresh()
+    expect(indexOf(renderer.objectsGroup).count).toBe(6)
+    // Clearing a mask that was dropped is a no-op.
+    expect(() => renderer.clearFaceMask(1n)).not.toThrow()
   })
 })
 

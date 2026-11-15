@@ -28,6 +28,11 @@ const defaultProps: MenuBarProps = {
   canRedo: false,
 }
 
+/** Hover a submenu row open (Shape, Deform, Smooth, …) in the open dropdown. */
+function openSubmenu(label: string): void {
+  fireEvent.mouseEnter(screen.getByText(label))
+}
+
 describe('MenuBar', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -444,8 +449,17 @@ describe('MenuBar', () => {
     const seen = new Set<string>()
     for (const menu of [/draw/i, /^tools$/i, /camera/i]) {
       fireEvent.click(screen.getByRole('button', { name: menu }))
+      // The Tools menu keeps the Shape and Deform families in submenus.
+      if (menu.source === '^tools$') {
+        openSubmenu('Shape')
+        openSubmenu('Deform')
+      }
       for (const tool of TOOLS) {
         if (screen.queryByText(tool) !== null) seen.add(tool)
+      }
+      // Deform is one tool with a menu entry per mode.
+      if (['Twist', 'Bend', 'Taper', 'Bend to Path'].every((m) => screen.queryByText(m) !== null)) {
+        seen.add('Deform')
       }
     }
     for (const tool of TOOLS) {
@@ -552,6 +566,24 @@ describe('MenuBar', () => {
     fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
     fireEvent.mouseDown(screen.getByText('Axes'))
     expect(onToggleAxes).toHaveBeenCalledOnce()
+  })
+
+  it('lists Tangent Edges after Guides, unchecked by default, and toggles it', () => {
+    const onToggleTangentEdges = vi.fn()
+    render(<MenuBar {...defaultProps} onToggleTangentEdges={onToggleTangentEdges} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    const guides = screen.getByText('Guides')
+    const tangent = screen.getByText('Tangent Edges')
+    expect(guides.compareDocumentPosition(tangent) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(tangent.closest('div')?.textContent).not.toContain('✓')
+    fireEvent.mouseDown(tangent)
+    expect(onToggleTangentEdges).toHaveBeenCalledOnce()
+  })
+
+  it('shows a checkmark for Tangent Edges when showTangentEdges=true', () => {
+    render(<MenuBar {...defaultProps} showTangentEdges={true} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    expect(screen.getByText('Tangent Edges').closest('div')?.textContent).toContain('✓')
   })
 
   it('view_menu_has_a_part_axes_check_item', () => {
@@ -871,11 +903,36 @@ describe('MenuBar', () => {
     // (Follow Me shipped wired into the dispatcher but missing from both
     // menu surfaces — this pins the web one).
     const onSelectTool = vi.fn()
-    render(<MenuBar {...defaultProps} activeTool="Select" onSelectTool={onSelectTool} />)
+    const onSelectDeformMode = vi.fn()
+    render(
+      <MenuBar
+        {...defaultProps}
+        activeTool="Select"
+        onSelectTool={onSelectTool}
+        onSelectDeformMode={onSelectDeformMode}
+      />,
+    )
     for (const tool of TOOLS) {
+      if (tool === 'Deform') {
+        // Deform is one tool with four menu entries, one per mode (Twist,
+        // Bend, Taper, Bend to Path); each must be present and open it.
+        for (const [label, mode] of [
+          ['Twist', 'twist'], ['Bend', 'bend'], ['Taper', 'taper'], ['Bend to Path', 'bend-to-path'],
+        ]) {
+          fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+          openSubmenu('Deform')
+          // "Deform" is also the row label; the mode entries are the leaves.
+          const entry = screen.queryByText(label)
+          expect(entry, `Deform mode "${label}" is missing from the Tools menu`).not.toBeNull()
+          fireEvent.mouseDown(entry as HTMLElement)
+          expect(onSelectDeformMode).toHaveBeenLastCalledWith(mode)
+        }
+        continue
+      }
       let item: HTMLElement | null = null
       for (const menu of ['draw', 'tools', 'camera']) {
         fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${menu}$`, 'i') }))
+        if (menu === 'tools') openSubmenu('Shape')
         item = screen.queryByText(tool)
         if (item !== null) break
       }
@@ -913,5 +970,138 @@ describe('MenuBar', () => {
       openFile()
       expect(screen.queryByText('Revert to Saved')).not.toBeInTheDocument()
     })
+  })
+
+  // --- True Curves organization (docs/design/true-curves-ui-organization.md) ---
+
+  /** The row labels of the open Tools dropdown, top to bottom, with '' for
+   *  a separator (submenu contents are absent until hovered). */
+  function toolsMenuRows(): string[] {
+    const dropdown = screen.getByText('Select').parentElement?.parentElement
+    if (dropdown === null || dropdown === undefined) return []
+    return Array.from(dropdown.children).map((c) =>
+      (c.firstElementChild?.textContent ?? '').replace(/[✓▸]/g, ''),
+    )
+  }
+
+  it('Tools menu: flat list in SketchUp order with Shape and Deform submenus', () => {
+    render(<MenuBar {...defaultProps} activeTool="Select" />)
+    fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+    const rows = toolsMenuRows()
+    // Top to bottom; '' marks a separator.
+    expect(rows).toEqual([
+      'Select', 'Eraser', 'Paint', 'Position Texture', '',
+      'Move', 'Rotate', 'Scale', 'Flip', '',
+      'Push/Pull', 'Follow Me', 'Offset', 'Fillet', 'Chamfer', '',
+      'Shape', 'Deform', '',
+      'Slice', 'Edit Vertex', '',
+      'Tape Measure', 'Protractor', 'Dimension', 'Text', '',
+      'Drawing Axes', 'Section Plane',
+    ])
+  })
+
+  it('Tools menu: Shape holds Revolve, Loft, Shell, Project, then Array along Path', () => {
+    const onSelectTool = vi.fn()
+    render(<MenuBar {...defaultProps} activeTool="Select" onSelectTool={onSelectTool} />)
+    fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+    // Nothing from the family is on the flat list.
+    for (const name of ['Revolve', 'Loft', 'Shell', 'Project', 'Array along Path']) {
+      expect(screen.queryByText(name)).toBeNull()
+    }
+    openSubmenu('Shape')
+    const order = ['Revolve', 'Loft', 'Shell', 'Project', 'Array along Path']
+    const positions = order.map((n) => screen.getByText(n))
+    for (let i = 1; i < positions.length; i++) {
+      expect(positions[i - 1].compareDocumentPosition(positions[i]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    }
+    fireEvent.mouseDown(screen.getByText('Revolve'))
+    expect(onSelectTool).toHaveBeenLastCalledWith('Revolve')
+  })
+
+  it('Tools menu: Deform holds Twist, Bend, Taper, Bend to Path and checks the running mode', () => {
+    const onSelectDeformMode = vi.fn()
+    render(
+      <MenuBar {...defaultProps} activeTool="Deform" deformMode="taper" onSelectDeformMode={onSelectDeformMode} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+    expect(screen.queryByText('Twist')).toBeNull()
+    openSubmenu('Deform')
+    expect(screen.getByText('Taper').textContent).toBe('✓Taper')
+    expect(screen.getByText('Twist').textContent).toBe('Twist')
+    fireEvent.mouseDown(screen.getByText('Bend to Path'))
+    expect(onSelectDeformMode).toHaveBeenLastCalledWith('bend-to-path')
+  })
+
+  it('Tools menu keeps the accelerators: Eraser E, Fillet Shift+F, Push/Pull P', () => {
+    render(<MenuBar {...defaultProps} activeTool="Select" />)
+    fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+    // The accelerator chip is the row's second child; reading the whole row
+    // would match the label itself ("Eraser" contains E, "Push/Pull" contains P).
+    const chip = (label: string) => screen.getByText(label).parentElement?.children[1]?.textContent ?? ''
+    expect(chip('Eraser')).toBe('E')
+    expect(chip('Fillet')).toMatch(/^(Shift\+F|⇧F)$/)
+    expect(chip('Push/Pull')).toBe('P')
+  })
+
+  it('Object menu: Smooth submenu (Off, 1, 2, 3, Bake Smooth) and Soften Edges… dispatch the palette action ids', () => {
+    const onEditAction = vi.fn()
+    render(
+      <MenuBar
+        {...defaultProps}
+        editGates={{ ...openGates, canSmooth: true, canSoften: true, smoothLevel: 2 }}
+        onEditAction={onEditAction}
+      />,
+    )
+    const cases: Array<[string, string]> = [
+      ['Off', 'smooth-off'], ['1', 'smooth-1'], ['2', 'smooth-2'], ['3', 'smooth-3'],
+      ['Bake Smooth', 'bake-smooth'],
+    ]
+    for (const [label, action] of cases) {
+      fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+      openSubmenu('Smooth')
+      fireEvent.mouseDown(screen.getByText(label))
+      expect(onEditAction).toHaveBeenLastCalledWith(action)
+    }
+    fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+    fireEvent.mouseDown(screen.getByText('Soften Edges…'))
+    expect(onEditAction).toHaveBeenLastCalledWith('soften-edges')
+  })
+
+  it("Object ▸ Smooth checks the selection's level and is greyed out without a solid", () => {
+    const onEditAction = vi.fn()
+    const { unmount } = render(
+      <MenuBar {...defaultProps} editGates={{ ...openGates, canSmooth: true, smoothLevel: 2 }} onEditAction={onEditAction} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+    openSubmenu('Smooth')
+    expect(screen.getByText('2').textContent).toBe('✓2')
+    expect(screen.getByText('Off').textContent).toBe('Off')
+    unmount()
+
+    render(<MenuBar {...defaultProps} editGates={{ ...openGates, canSmooth: false }} onEditAction={onEditAction} />)
+    fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+    openSubmenu('Smooth')
+    fireEvent.mouseDown(screen.getByText('Off'))
+    fireEvent.mouseDown(screen.getByText('Bake Smooth'))
+    fireEvent.mouseDown(screen.getByText('Soften Edges…'))
+    expect(onEditAction).not.toHaveBeenCalled()
+  })
+
+  it('Object ▸ Soften Edges… follows canSoften, not canSmooth', () => {
+    const onEditAction = vi.fn()
+    render(<MenuBar {...defaultProps} editGates={{ ...openGates, canSmooth: true, canSoften: false }} onEditAction={onEditAction} />)
+    fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+    fireEvent.mouseDown(screen.getByText('Soften Edges…'))
+    expect(onEditAction).not.toHaveBeenCalled()
+  })
+
+  it('Object menu: Smooth and Soften Edges… sit before Make Solid…', () => {
+    render(<MenuBar {...defaultProps} editGates={openGates} />)
+    fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+    const soften = screen.getByText('Soften Edges…')
+    const smooth = screen.getByText('Smooth')
+    const solid = screen.getByText('Make Solid…')
+    expect(smooth.compareDocumentPosition(soften) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(soften.compareDocumentPosition(solid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })

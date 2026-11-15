@@ -37,11 +37,18 @@ import dragPanSvg from '@material-symbols/svg-400/outlined/drag_pan.svg?raw'
 import verticalSplitSvg from '@material-symbols/svg-400/outlined/vertical_split.svg?raw'
 import personPinSvg from '@material-symbols/svg-400/outlined/person_pin.svg?raw'
 import threeSixtySvg from '@material-symbols/svg-400/outlined/360.svg?raw'
+import layersSvg from '@material-symbols/svg-400/outlined/layers.svg?raw'
+import airwaveSvg from '@material-symbols/svg-400/outlined/airwave.svg?raw'
 import directionsWalkSvg from '@material-symbols/svg-400/outlined/directions_walk.svg?raw'
 import controlCameraSvg from '@material-symbols/svg-400/outlined/control_camera.svg?raw'
 import lineAxisSvg from '@material-symbols/svg-400/outlined/line_axis.svg?raw'
+import timelineSvg from '@material-symbols/svg-400/outlined/timeline.svg?raw'
+import selectAllSvg from '@material-symbols/svg-400/outlined/select_all.svg?raw'
+import textureSvg from '@material-symbols/svg-400/outlined/texture.svg?raw'
+import inkEraserSvg from '@material-symbols/svg-400/outlined/ink_eraser.svg?raw'
 import squareFootSvg from '@material-symbols/svg-400/outlined/square_foot.svg?raw'
 import textFieldsSvg from '@material-symbols/svg-400/outlined/text_fields.svg?raw'
+import roundedCornerSvg from '@material-symbols/svg-400/outlined/rounded_corner.svg?raw'
 import flipSvg from '@material-symbols/svg-400/outlined/flip.svg?raw'
 
 /** Keep in sync with the `ToolName` union in App.tsx (not imported here to
@@ -56,7 +63,15 @@ export type ToolName =
   | 'Line'
   | 'Push/Pull'
   | 'Follow Me'
+  | 'Revolve'
+  | 'Loft'
+  | 'Deform'
   | 'Offset'
+  | 'Fillet'
+  | 'Array along Path'
+  | 'Shell'
+  | 'Project'
+  | 'Eraser'
   | 'Paint'
   | 'Position Texture'
   | 'Move'
@@ -89,7 +104,15 @@ export const TOOL_ICON_SVG: Record<ToolName, string> = {
   'Line': polylineSvg,
   'Push/Pull': unfoldMoreSvg, // matches the up/down-arrow cursor stop-gap
   'Follow Me': conversionPathSvg,
+  'Loft': layersSvg, // shapes stacked and skinned
+  'Revolve': threeSixtySvg, // a profile turned a full circle
+  'Deform': airwaveSvg, // a wave: twist, bend, taper
   'Offset': allOutSvg, // concentric outline pushed outward
+  'Fillet': roundedCornerSvg, // a corner with a rounded inside curve
+  'Array along Path': timelineSvg,
+  'Shell': selectAllSvg,
+  'Project': textureSvg,
+  'Eraser': inkEraserSvg,
   'Paint': formatPaintSvg,
   'Position Texture': controlCameraSvg,
   'Move': openWithSvg,
@@ -125,7 +148,15 @@ const CURSOR_HOTSPOT: Record<ToolName, { x: number; y: number }> = {
   'Line': { x: 0.1, y: 0.9 },
   'Push/Pull': { x: 0.5, y: 0.5 },
   'Follow Me': { x: 0.25, y: 0.75 },
+  'Revolve': { x: 0.5, y: 0.5 },
+  'Loft': { x: 0.5, y: 0.5 },
+  'Deform': { x: 0.5, y: 0.5 },
   'Offset': { x: 0.5, y: 0.5 },
+  'Fillet': { x: 0.5, y: 0.5 },
+  'Array along Path': { x: 0.1, y: 0.9 },
+  'Shell': { x: 0.1, y: 0.9 },
+  'Project': { x: 0.1, y: 0.9 },
+  'Eraser': { x: 0.2, y: 0.85 },
   'Paint': { x: 0.15, y: 0.9 },
   'Position Texture': { x: 0.5, y: 0.5 },
   'Move': { x: 0.5, y: 0.5 },

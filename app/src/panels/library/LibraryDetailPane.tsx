@@ -11,7 +11,7 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { materialSubline, metadataLine, type CollectionNode, normalizeCollectionPath, savedLine } from '../../library/libraryModel'
+import { isBuiltInItem, materialSubline, metadataLine, type CollectionNode, normalizeCollectionPath, savedLine } from '../../library/libraryModel'
 import type { LibraryCategory, LibraryItem } from '../../library/types'
 import { CubeGlyph, RerenderGlyph, WarningGlyph } from './icons'
 import { i18n } from '@lingui/core'
@@ -27,6 +27,7 @@ import { isComposingKey } from '../../input/keyboard'
 const NEW_COLLECTION_VALUE = '\u0000__new__'
 
 function actionLabels(category: LibraryCategory): { primary: string; secondary: string } {
+  if (category === 'profile') return { primary: tCore`Use`, secondary: tCore`Open for editing` }
   if (category === 'component') return { primary: tCore`Insert`, secondary: tCore`Open as document` }
   if (category === 'model') return { primary: tCore`Open as document`, secondary: tCore`Insert` }
   return { primary: tCore`Paint`, secondary: tCore`Add to palette` }
@@ -186,6 +187,30 @@ export function LibraryDetailPane({
         {deleteArmed && (
           <DeleteConfirm onConfirm={onConfirmDelete} onCancel={onCancelDelete} name={item.displayName} />
         )}
+      </div>
+    )
+  }
+
+  if (isBuiltInItem(item)) {
+    // A built-in profile is bundled with the app: read-only, usable and
+    // copyable, with nothing to rename, collect or delete.
+    return (
+      <div className="hwlib__detail" style={widthStyle}>
+        <div className="hwlib__detail-thumb">
+          {thumbUrl ? <img src={thumbUrl} alt="" className="hwlib__detail-thumb-img" /> : <CubeGlyph />}
+        </div>
+        <div className="hwlib__detail-name">{item.displayName}</div>
+        <p className="hwlib__detail-error" style={{ color: 'var(--text-faint)' }}>
+          <Trans>Built-in profile. Use it in the Fillet tool, or save a copy to edit.</Trans>
+        </p>
+        <div className="hwlib__manage-row">
+          <button type="button" className={btnClass('hwlib__btn-primary')} onClick={onPrimaryAction}>
+            <Trans>Use</Trans>
+          </button>
+          <button type="button" className={btnClass('hwlib__btn-secondary')} onClick={onSecondaryAction}>
+            <Trans>Save a copy</Trans>
+          </button>
+        </div>
       </div>
     )
   }

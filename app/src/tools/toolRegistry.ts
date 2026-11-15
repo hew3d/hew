@@ -53,12 +53,26 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   { name: 'Push/Pull', label: msg`Push/Pull`, group: 'Modify', actionId: 'tool-pushpull' },
   { name: 'Follow Me', label: msg`Follow Me`, group: 'Modify', actionId: 'tool-follow-me' },
   { name: 'Offset', label: msg({ context: 'tool', message: 'Offset' }), group: 'Modify', actionId: 'tool-offset' },
+  // Fillet: Shift+F by default (keymap/defaults.ts); the same tool answers
+  // to Chamfer in the Tools menu and the palette (one tool, two entries).
+  { name: 'Fillet', label: msg`Fillet`, group: 'Modify', actionId: 'tool-fillet' },
+  { name: 'Loft', label: msg`Loft`, group: 'Modify', actionId: 'tool-loft' },
   { name: 'Move', label: msg({ context: 'tool', message: 'Move' }), group: 'Modify', actionId: 'tool-move' },
   { name: 'Rotate', label: msg({ context: 'tool', message: 'Rotate' }), group: 'Modify', actionId: 'tool-rotate' },
   { name: 'Scale', label: msg({ context: 'tool', message: 'Scale' }), group: 'Modify', actionId: 'tool-scale' },
   // Flip: SketchUp has no Flip tool key (Flip Along lives on the context
   // menu), so none here either.
   { name: 'Flip', label: msg({ context: 'tool', message: 'Flip' }), group: 'Modify', actionId: 'tool-flip' },
+  // Eraser: 'E' is SketchUp's real eraser key.
+  { name: 'Eraser', label: msg`Eraser`, group: 'Modify', actionId: 'tool-eraser' },
+  // Revolve, Deform, Array along Path, Shell and Project: SketchUp has no
+  // default key for any of them; menu, dock, and palette only. Deform's
+  // command is its Twist entry (the four mode entries all open the one tool).
+  { name: 'Revolve', label: msg`Revolve`, actionId: 'tool-revolve' },
+  { name: 'Deform', label: msg`Deform`, actionId: 'tool-deform-twist' },
+  { name: 'Array along Path', label: msg`Array along Path`, actionId: 'tool-path-array' },
+  { name: 'Shell', label: msg`Shell`, actionId: 'tool-shell' },
+  { name: 'Project', label: msg`Project`, actionId: 'tool-project' },
   // ---- Inspect ----
   { name: 'Tape Measure', label: msg`Tape Measure`, group: 'Inspect', actionId: 'tool-tape-measure' },
   { name: 'Dimension', label: msg({ context: 'tool', message: 'Dimension' }), group: 'Inspect', actionId: 'tool-dimension' },

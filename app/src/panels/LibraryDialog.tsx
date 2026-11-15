@@ -28,15 +28,18 @@ import {
 } from '../library/itemFiles'
 import {
   buildLibraryItem,
+  builtInProfileItem,
   collectionTreeFromPaths,
   erroredItem,
   filterItems,
+  isBuiltInItem,
   normalizeCollectionPath,
   sortListItems,
   type ListSortColumn,
   type ListSortDirection,
   type LibraryScope,
 } from '../library/libraryModel'
+import { bundledProfiles, profileShapeOfBytes, profileThumbnailPng } from '../library/profiles'
 import type { LibraryCategory, LibraryFileEntry, LibraryItem } from '../library/types'
 import { measureGridColumns } from './library/gridMeasure'
 import { GridViewGlyph, ListViewGlyph, CloseGlyph, SearchGlyph } from './library/icons'
@@ -191,6 +194,11 @@ export interface LibraryDialogProps {
   onAddToPalette(item: LibraryItem, bytes: Uint8Array): void
   /** Optional: which of this material item's palette entries already exist in the doc. */
   materialInPalette?(bytes: Uint8Array): Promise<boolean>
+  /** Profile primary action: arm the Fillet tool with this profile (closes the
+   * browser). `bytes` is null for a built-in, which App reads from the kernel. */
+  onUseProfile?(item: LibraryItem, bytes: Uint8Array | null): void
+  /** A built-in profile's "Save a copy": App opens the save prompt for it. */
+  onSaveProfileCopy?(item: LibraryItem): void
   /**
    * How the browser is hosted. `'modal'` (default): the web build's in-app
    * overlay — scrim, fixed size, z-2000 band. `'window'`: the content of a
@@ -211,6 +219,7 @@ const CATEGORIES: { value: LibraryCategory | 'all'; label: MessageDescriptor }[]
   { value: 'component', label: msg`Components` },
   { value: 'material', label: msg`Materials` },
   { value: 'model', label: msg`Models` },
+  { value: 'profile', label: msg`Profiles` },
 ]
 
 const SCOPES: { value: LibraryScope; label: MessageDescriptor }[] = [
@@ -224,6 +233,7 @@ const CATEGORY_LABEL: Record<LibraryCategory | 'all', MessageDescriptor> = {
   component: msg`Components`,
   material: msg`Materials`,
   model: msg`Models`,
+  profile: msg`Profiles`,
 }
 
 /** The empty-category sentence, whole per category so each language can
@@ -238,6 +248,8 @@ function emptyCategoryText(category: LibraryCategory | 'all'): string {
       return tCore`No materials here yet.`
     case 'model':
       return tCore`No models here yet.`
+    case 'profile':
+      return tCore`No profiles here yet.`
   }
 }
 
@@ -255,6 +267,7 @@ function deleteConfirmCopy(displayName: string): { title: string; message: strin
 function defaultActionLabel(item: LibraryItem): string {
   if (item.category === 'component') return tCore`Insert`
   if (item.category === 'model') return tCore`Open`
+  if (item.category === 'profile') return tCore`Use`
   return tCore`Paint`
 }
 
@@ -262,6 +275,7 @@ function defaultActionLabel(item: LibraryItem): string {
 function otherActionLabel(item: LibraryItem): string {
   if (item.category === 'component') return tCore`Open`
   if (item.category === 'model') return tCore`Insert`
+  if (item.category === 'profile') return isBuiltInItem(item) ? tCore`Save a copy` : tCore`Open for editing`
   return tCore`Add to Palette`
 }
 
@@ -269,9 +283,11 @@ function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-/** "1 item" / "N items" — the footer count. */
-function itemCountLabel(n: number): string {
-  return plural(n, { one: '# item', other: '# items' })
+/** "1 item" / "N items" — the footer count, with the built-ins among them
+ *  named ("9 items, 7 built-in") so an empty folder doesn't look full. */
+function itemCountLabel(n: number, builtIn = 0): string {
+  const total = plural(n, { one: '# item', other: '# items' })
+  return builtIn > 0 ? tCore`${total}, ${builtIn} built-in` : total
 }
 
 export function LibraryDialog({
@@ -283,6 +299,8 @@ export function LibraryDialog({
   onPaintWith,
   onAddToPalette,
   materialInPalette,
+  onUseProfile,
+  onSaveProfileCopy,
   variant = 'modal',
 }: LibraryDialogProps) {
   const { t } = useLingui()
@@ -421,7 +439,12 @@ export function LibraryDialog({
             built.push(erroredItem(file, '', err instanceof Error ? err.message : String(err)))
           }
         }
-        if (!cancelled) setItems(built)
+        if (!cancelled) {
+          // The built-in profiles ride at the end of the list: bundled with
+          // the app, never files in the folder.
+          const builtIns = (await bundledProfiles().catch(() => [])).map((p) => builtInProfileItem(p.id, p.name))
+          if (!cancelled) setItems([...built, ...builtIns])
+        }
       } catch (err) {
         // list()/webStorage() themselves rejected (storage failure, a lazy
         // backend that couldn't load) — an empty grid would misreport this
@@ -546,6 +569,39 @@ export function LibraryDialog({
       for (const item of items) {
         if (item.error || item.category === 'material') continue
         if (thumbUrlsRef.current.has(item.contentHash)) continue
+        if (item.category === 'profile') {
+          // A profile's thumbnail is the end-on section of an edge cut with it,
+          // rendered from its shape (and cached the same way).
+          let ppng = isBuiltInItem(item) ? null : await store.readThumbnail(item.contentHash)
+          if (cancelled) return
+          if (ppng === null) {
+            const shape = isBuiltInItem(item)
+              ? (await bundledProfiles()).find((b) => b.id === item.file.fileName)?.shape
+              : await (async () => {
+                  const b = bytesRef.current.get(item.file.fileName)
+                  return b ? (await profileShapeOfBytes(b))?.shape : undefined
+                })()
+            if (shape === undefined) continue
+            try {
+              ppng = await profileThumbnailPng(shape, 128)
+            } catch {
+              continue // an odd shape costs its own thumbnail, not the rest
+            }
+            if (cancelled) return
+            if (!isBuiltInItem(item)) {
+              try {
+                await store.writeThumbnail(item.contentHash, ppng)
+              } catch {
+                /* the thumbnail cache is optional */
+              }
+            }
+          }
+          if (!cancelled) {
+            thumbUrlsRef.current.set(item.contentHash, URL.createObjectURL(new Blob([new Uint8Array(ppng)], { type: 'image/png' })))
+            bumpVersion()
+          }
+          continue
+        }
         let png = await store.readThumbnail(item.contentHash)
         if (cancelled) return
         if (png === null) {
@@ -687,8 +743,12 @@ export function LibraryDialog({
     const itemPaths = items.map((i) => i.meta.collection).filter((c): c is string => c !== undefined)
     return collectionTreeFromPaths([...itemPaths, ...localCollections])
   }, [items, localCollections])
+  // The built-in profiles are Library items like any other: listed and
+  // counted under All and Profiles alike. Only the "get started" hint and
+  // the footer tell them apart from the folder's own files.
+  const userItemCount = useMemo(() => items.filter((i) => !isBuiltInItem(i)).length, [items])
   const categoryCounts = useMemo(() => {
-    const counts: Record<LibraryCategory | 'all', number> = { all: items.length, component: 0, material: 0, model: 0 }
+    const counts: Record<LibraryCategory | 'all', number> = { all: items.length, component: 0, material: 0, model: 0, profile: 0 }
     for (const item of items) counts[item.category] += 1
     return counts
   }, [items])
@@ -737,7 +797,7 @@ export function LibraryDialog({
           { id: 'delete', label: t`Delete from Library…` },
         ]
       : [
-          { id: 'open', label: t`Open as Document` },
+          { id: 'open', label: item.category === 'profile' ? t`Open for Editing` : t`Open as Document` },
           { id: 'rename', label: t`Rename` },
           { id: 'collection', label: t`Add to Collection` },
           { id: 'sep1', label: '', separator: true },
@@ -777,13 +837,20 @@ export function LibraryDialog({
     const bytes = bytesFor(item)
     if (bytes) onAddToPalette(item, bytes)
   }
+  function handleUseProfile(item: LibraryItem) {
+    onUseProfile?.(item, isBuiltInItem(item) ? null : (bytesFor(item) ?? null))
+  }
   function runDefaultAction(item: LibraryItem) {
-    if (item.category === 'component') handleInsert(item)
+    if (item.category === 'profile') handleUseProfile(item)
+    else if (item.category === 'component') handleInsert(item)
     else if (item.category === 'model') handleOpenAsDocument(item)
     else handlePaintWith(item)
   }
   function runOtherAction(item: LibraryItem) {
-    if (item.category === 'component') handleOpenAsDocument(item)
+    if (item.category === 'profile') {
+      if (isBuiltInItem(item)) onSaveProfileCopy?.(item)
+      else handleOpenAsDocument(item)
+    } else if (item.category === 'component') handleOpenAsDocument(item)
     else if (item.category === 'model') handleInsert(item)
     else handleAddToPalette(item)
   }
@@ -852,7 +919,13 @@ export function LibraryDialog({
     const bytes = bytesRef.current.get(item.file.fileName)
     if (!bytes) return
     try {
-      const png = await renderItemThumbnail(bytes, 256)
+      let png: Uint8Array | null
+      if (item.category === 'profile') {
+        const shape = (await profileShapeOfBytes(bytes))?.shape
+        png = shape === undefined ? null : await profileThumbnailPng(shape, 128)
+      } else {
+        png = await renderItemThumbnail(bytes, 256)
+      }
       if (png === null) return
       await libraryStore().writeThumbnail(item.contentHash, png)
       const old = thumbUrlsRef.current.get(item.contentHash)
@@ -1152,6 +1225,8 @@ export function LibraryDialog({
   }
 
   function openMenuFor(item: LibraryItem, anchor: HTMLElement) {
+    // Built-in profiles have nothing to manage: no rename, delete or move.
+    if (isBuiltInItem(item)) return
     if (variant === 'window') {
       void openNativeMenu(item)
       return
@@ -1358,11 +1433,13 @@ export function LibraryDialog({
                 </div>
               ) : loadError !== null ? (
                 <div className="hwlib__empty"><Trans>Couldn&rsquo;t read the library: {loadError}</Trans></div>
-              ) : items.length === 0 ? (
-                <div className="hwlib__empty"><Trans>Save a selection with &ldquo;Save to Library&rdquo; to get started.</Trans></div>
               ) : displayItems.length === 0 ? (
                 <div className="hwlib__empty">
-                  {query !== '' ? t`No items match your search.` : emptyCategoryText(category)}
+                  {query !== ''
+                    ? t`No items match your search.`
+                    : userItemCount === 0
+                      ? t`Save a selection with “Save to Library” to get started.`
+                      : emptyCategoryText(category)}
                 </div>
               ) : view === 'list' ? (
                 <>
@@ -1470,7 +1547,14 @@ export function LibraryDialog({
             {selectedItem ? otherActionLabel(selectedItem) : t`Open`} · <kbd><Trans>Esc</Trans></kbd> <Trans>Close</Trans>
           </div>
           <div className="hwlib__footer-path">
-            {!unavailable && (folderPath !== null ? `${folderPath} · ${itemCountLabel(items.length)}` : itemCountLabel(items.length))}
+            {/* While the folder waits for permission again, nothing was read
+                from it: name the folder without a count. */}
+            {!unavailable &&
+              (needsReconnect
+                ? folderPath
+                : folderPath !== null
+                  ? `${folderPath} · ${itemCountLabel(items.length, items.length - userItemCount)}`
+                  : itemCountLabel(items.length, items.length - userItemCount))}
           </div>
         </footer>
 
@@ -1853,7 +1937,7 @@ const LIBRARY_CSS = `
    it uses the LARGER of the two tracks (matching component/model) so a
    thumbnail tile never gets squeezed into a track sized for the smaller
    material swatch. */
-.hwlib__grid-inner--component, .hwlib__grid-inner--model, .hwlib__grid-inner--all {
+.hwlib__grid-inner--component, .hwlib__grid-inner--model, .hwlib__grid-inner--profile, .hwlib__grid-inner--all {
   grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
 }
 .hwlib__grid-inner--material {

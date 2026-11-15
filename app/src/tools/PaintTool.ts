@@ -5,7 +5,9 @@
  *
  * Gesture (single-click mode):
  *   1. Hover: pick_face() → highlight the face under the cursor
- *   2. Click: call scene.paint_face(object, face, currentMaterialId)
+ *   2. Click: call scene.paint_logical_face(object, face, currentMaterialId),
+ *      which paints the whole logical face (a whole fillet, a whole cylinder
+ *      wall) as one undo step
  *   3. Esc: cancel hover state
  *
  * Modifiers, read at pointerdown (the Viewport idiom Ctrl/Cmd already uses
@@ -344,7 +346,7 @@ export class PaintTool implements Tool {
 
   private _commit(objectHandle: bigint, faceHandle: bigint): void {
     try {
-      this.wasmScene.paint_face(objectHandle, faceHandle, this.currentMaterialId)
+      this.wasmScene.paint_logical_face(objectHandle, faceHandle, this.currentMaterialId)
       this.onCommit(objectHandle)
     } catch (err) {
       this._handleError(err)

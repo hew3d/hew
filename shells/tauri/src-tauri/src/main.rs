@@ -673,22 +673,33 @@ struct MenuHandles {
 /// clipboard, cleared on quit. `None` until the first copy.
 struct ClipboardState(Mutex<Option<Vec<u8>>>);
 
-/// Store `bytes` as the shared desktop clipboard (Copy/Cut).
+/// Store the request body as the shared desktop clipboard (Copy/Cut). The
+/// bytes ride the raw IPC body, like `write_file_bytes`: a JSON byte array
+/// costs about four bytes of IPC per byte and stalls the webview on a large
+/// selection.
 #[tauri::command]
-fn clipboard_set(app: tauri::AppHandle, bytes: Vec<u8>) -> Result<(), String> {
+fn clipboard_set(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes.clone(),
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err("clipboard_set expects a raw byte body".to_owned());
+        }
+    };
     let state = app.state::<ClipboardState>();
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     *guard = Some(bytes);
     Ok(())
 }
 
-/// Read the shared desktop clipboard (Paste/Paste In Place) — `None` if
-/// nothing has been copied yet in this process.
+/// Read the shared desktop clipboard (Paste/Paste In Place) as a raw IPC
+/// response. An empty response means nothing has been copied yet in this
+/// process (a real copy is never empty: `.hew` item bytes start with a
+/// header).
 #[tauri::command]
-fn clipboard_get(app: tauri::AppHandle) -> Result<Option<Vec<u8>>, String> {
+fn clipboard_get(app: tauri::AppHandle) -> Result<tauri::ipc::Response, String> {
     let state = app.state::<ClipboardState>();
     let guard = state.0.lock().map_err(|e| e.to_string())?;
-    Ok(guard.clone())
+    Ok(tauri::ipc::Response::new(guard.clone().unwrap_or_default()))
 }
 
 /// Monotonic counter for extra document windows ("main-2", "main-3", …).
@@ -1628,12 +1639,19 @@ fn menu_action_for(id: &str) -> Option<&'static str> {
         "edit-subtract" => "edit-subtract",
         "edit-intersect" => "edit-intersect",
         "object-make-solid" => "make-solid",
+        "object-smooth-off" => "smooth-off",
+        "object-smooth-1" => "smooth-1",
+        "object-smooth-2" => "smooth-2",
+        "object-smooth-3" => "smooth-3",
+        "object-bake-smooth" => "bake-smooth",
+        "object-soften-edges" => "soften-edges",
         "object-model-health" => "model-health",
         "view-axes" => "toggle-axes",
         "view-part-axes" => "toggle-part-axes",
         "view-reset-axes" => "reset-axes",
         "view-grid" => "toggle-grid",
         "view-guides" => "toggle-guides",
+        "view-tangent-edges" => "toggle-tangent-edges",
         "view-section-plane" => "toggle-section-active",
         "view-xray" => "toggle-xray",
         "view-wireframe" => "toggle-wireframe",
@@ -1658,7 +1676,19 @@ fn menu_action_for(id: &str) -> Option<&'static str> {
         "tool-flip" => "tool-flip",
         "tool-pushpull" => "tool-pushpull",
         "tool-follow-me" => "tool-follow-me",
+        "tool-revolve" => "tool-revolve",
+        "tool-loft" => "tool-loft",
+        "tool-deform-twist" => "tool-deform-twist",
+        "tool-deform-bend" => "tool-deform-bend",
+        "tool-deform-taper" => "tool-deform-taper",
+        "tool-deform-bend-path" => "tool-deform-bend-path",
         "tool-offset" => "tool-offset",
+        "tool-fillet" => "tool-fillet",
+        "tool-chamfer" => "tool-chamfer",
+        "tool-path-array" => "tool-path-array",
+        "tool-shell" => "tool-shell",
+        "tool-project" => "tool-project",
+        "tool-eraser" => "tool-eraser",
         "tool-tape-measure" => "tool-tape-measure",
         "tool-dimension" => "tool-dimension",
         "tool-protractor" => "tool-protractor",
@@ -2067,9 +2097,24 @@ struct RecoveryPayload {
 fn recovery_write(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
-    contents: Vec<u8>,
-    meta: String,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
+    // Raw IPC body (a JSON byte array costs about four bytes of IPC per
+    // snapshot byte and stalls the webview for seconds on a large model);
+    // the sidecar rides percent-encoded in the `meta` header.
+    let meta = request
+        .headers()
+        .get("meta")
+        .ok_or_else(|| "recovery_write: missing meta header".to_owned())?
+        .to_str()
+        .map_err(|_| "recovery_write: meta header is not valid ASCII".to_owned())?;
+    let meta = percent_decode(meta)?;
+    let contents = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes,
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err("recovery_write expects a raw byte body".to_owned());
+        }
+    };
     let Some(config_dir) = app.path().app_config_dir().ok() else {
         return Err("could not resolve app config dir".into());
     };
@@ -2077,7 +2122,7 @@ fn recovery_write(
     let slot = effective_own_slot(&app, window.label());
     let (hew_path, json_path) = slot_paths(&config_dir, &slot);
     write_atomic(&json_path, meta.as_bytes()).map_err(|e| e.to_string())?;
-    write_atomic(&hew_path, &contents).map_err(|e| e.to_string())?;
+    write_atomic(&hew_path, contents).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -3209,9 +3254,24 @@ fn library_read(name: String) -> Result<tauri::ipc::Response, String> {
 /// Write a library item, creating the library folder — and, for a
 /// two-segment name, its category subfolder — on first use.
 #[tauri::command]
-fn library_write(app: tauri::AppHandle, name: String, contents: Vec<u8>) -> Result<(), String> {
+fn library_write(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    // Raw IPC body, name in the percent-encoded `name` header — the same
+    // shape as `write_file_bytes`, since an item can be a large model.
+    let name = request
+        .headers()
+        .get("name")
+        .ok_or_else(|| "library_write: missing name header".to_owned())?
+        .to_str()
+        .map_err(|_| "library_write: name header is not valid ASCII".to_owned())?;
+    let name = percent_decode(name)?;
+    let contents = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes,
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err("library_write expects a raw byte body".to_owned());
+        }
+    };
     let dir = library::LibraryDir::resolve(None);
-    library::write(&dir, &name, &contents)
+    library::write(&dir, &name, contents)
         .map_err(|e| format!("library_write failed for {name:?}: {e}"))?;
     // Content changed: every window's listing (an open Library window, the
     // command palette's index in other document windows) refreshes off this.
@@ -4021,6 +4081,82 @@ fn main() {
             let object_model_health =
                 MenuItemBuilder::with_id("object-model-health", lbl!("object-model-health"))
                     .build(handle)?;
+            // Smooth ▸ Off / 1 / 2 / 3 (check items reflecting the selection's
+            // level) / Bake Smooth, and Soften Edges… — selection-gated like
+            // the booleans (docs/design/true-curves-ui-organization.md
+            // section 6). The levels are check items so `sync_menu_state`
+            // reaches them through `checks`.
+            let object_smooth_off = check_item(
+                handle,
+                &mut checks,
+                "object-smooth-off",
+                lbl!("object-smooth-off"),
+                None,
+                None,
+            )?;
+            let object_smooth_1 = check_item(
+                handle,
+                &mut checks,
+                "object-smooth-1",
+                lbl!("object-smooth-1"),
+                None,
+                None,
+            )?;
+            let object_smooth_2 = check_item(
+                handle,
+                &mut checks,
+                "object-smooth-2",
+                lbl!("object-smooth-2"),
+                None,
+                None,
+            )?;
+            let object_smooth_3 = check_item(
+                handle,
+                &mut checks,
+                "object-smooth-3",
+                lbl!("object-smooth-3"),
+                None,
+                None,
+            )?;
+            let object_bake_smooth = gated_item(
+                handle,
+                &mut gated,
+                "object-bake-smooth",
+                lbl!("object-bake-smooth"),
+                None,
+                None,
+            )?;
+            let object_soften_edges = gated_item(
+                handle,
+                &mut gated,
+                "object-soften-edges",
+                lbl!("object-soften-edges"),
+                None,
+                None,
+            )?;
+            for item in [
+                &object_smooth_off,
+                &object_smooth_1,
+                &object_smooth_2,
+                &object_smooth_3,
+            ] {
+                let _ = item.set_enabled(false);
+            }
+            for item in [&object_bake_smooth, &object_soften_edges] {
+                let _ = item.set_enabled(false);
+            }
+            let object_smooth_menu = SubmenuBuilder::with_id(
+                handle,
+                "submenu:object-smooth",
+                lbl!("submenu:object-smooth"),
+            )
+            .item(&object_smooth_off)
+            .item(&object_smooth_1)
+            .item(&object_smooth_2)
+            .item(&object_smooth_3)
+            .separator()
+            .item(&object_bake_smooth)
+            .build()?;
             let flip_along_menu =
                 SubmenuBuilder::with_id(handle, "submenu:flip-along", lbl!("submenu:flip-along"))
                     .item(&edit_flip_red)
@@ -4046,6 +4182,9 @@ fn main() {
                     .item(&edit_union)
                     .item(&edit_subtract)
                     .item(&edit_intersect)
+                    .separator()
+                    .item(&object_smooth_menu)
+                    .item(&object_soften_edges)
                     .separator()
                     .item(&object_make_solid)
                     .item(&object_model_health)
@@ -4092,6 +4231,14 @@ fn main() {
                 &mut checks,
                 "view-guides",
                 lbl!("view-guides"),
+                None,
+                None,
+            )?;
+            let view_tangent_edges = check_item(
+                handle,
+                &mut checks,
+                "view-tangent-edges",
+                lbl!("view-tangent-edges"),
                 None,
                 None,
             )?;
@@ -4308,6 +4455,7 @@ fn main() {
                 .item(&view_reset_axes)
                 .item(&view_grid)
                 .item(&view_guides)
+                .item(&view_tangent_edges)
                 .item(&view_section_plane)
                 .item(&view_xray)
                 .item(&view_wireframe)
@@ -4487,6 +4635,56 @@ fn main() {
                 None,
             )?;
 
+            let tool_revolve = check_item(
+                handle,
+                &mut checks,
+                "tool-revolve",
+                lbl!("tool-revolve"),
+                None,
+                None,
+            )?;
+            let tool_loft = check_item(
+                handle,
+                &mut checks,
+                "tool-loft",
+                lbl!("tool-loft"),
+                None,
+                None,
+            )?;
+            // Deform is one tool in four modes; each mode is its own radio
+            // item, and only the running mode is checked.
+            let tool_deform_twist = check_item(
+                handle,
+                &mut checks,
+                "tool-deform-twist",
+                lbl!("tool-deform-twist"),
+                None,
+                None,
+            )?;
+            let tool_deform_bend = check_item(
+                handle,
+                &mut checks,
+                "tool-deform-bend",
+                lbl!("tool-deform-bend"),
+                None,
+                None,
+            )?;
+            let tool_deform_taper = check_item(
+                handle,
+                &mut checks,
+                "tool-deform-taper",
+                lbl!("tool-deform-taper"),
+                None,
+                None,
+            )?;
+            let tool_deform_bend_path = check_item(
+                handle,
+                &mut checks,
+                "tool-deform-bend-path",
+                lbl!("tool-deform-bend-path"),
+                None,
+                None,
+            )?;
             let tool_offset = check_item(
                 handle,
                 &mut checks,
@@ -4494,6 +4692,48 @@ fn main() {
                 lbl!("tool-offset"),
                 None,
                 Some("F"),
+            )?;
+            let tool_fillet = check_item(
+                handle,
+                &mut checks,
+                "tool-fillet",
+                lbl!("tool-fillet"),
+                None,
+                Some("Shift+F"),
+            )?;
+            let tool_chamfer =
+                MenuItemBuilder::with_id("tool-chamfer", lbl!("tool-chamfer")).build(handle)?;
+            let tool_path_array = check_item(
+                handle,
+                &mut checks,
+                "tool-path-array",
+                lbl!("tool-path-array"),
+                None,
+                None,
+            )?;
+            let tool_shell = check_item(
+                handle,
+                &mut checks,
+                "tool-shell",
+                lbl!("tool-shell"),
+                None,
+                None,
+            )?;
+            let tool_project = check_item(
+                handle,
+                &mut checks,
+                "tool-project",
+                lbl!("tool-project"),
+                None,
+                None,
+            )?;
+            let tool_eraser = check_item(
+                handle,
+                &mut checks,
+                "tool-eraser",
+                lbl!("tool-eraser"),
+                None,
+                Some("E"),
             )?;
             let tool_tape_measure = check_item(
                 handle,
@@ -4560,13 +4800,33 @@ fn main() {
                 None,
             )?;
 
-            // Grouped by job, so future tools have an obvious slot: select,
-            // transform (mirror/array variants land here), shape geometry
-            // (chamfer/fillet land here), measure & annotate, materials,
-            // model-space utilities.
+            // SketchUp's Tools order (docs/design/true-curves-ui-organization.md
+            // section 4): select and eraser, transform, the everyday shaping
+            // tools, then two submenus — Shape (tools that make or reshape a
+            // whole solid) and Deform (its four modes) — then the measure,
+            // annotate, and model-space utilities. Mirrors the web MenuBar.
+            let shape_menu =
+                SubmenuBuilder::with_id(handle, "submenu:shape", lbl!("submenu:shape"))
+                    .item(&tool_revolve)
+                    .item(&tool_loft)
+                    .item(&tool_shell)
+                    .item(&tool_project)
+                    .separator()
+                    .item(&tool_path_array)
+                    .build()?;
+            let deform_menu =
+                SubmenuBuilder::with_id(handle, "submenu:deform", lbl!("submenu:deform"))
+                    .item(&tool_deform_twist)
+                    .item(&tool_deform_bend)
+                    .item(&tool_deform_taper)
+                    .item(&tool_deform_bend_path)
+                    .build()?;
             let tools_menu =
                 SubmenuBuilder::with_id(handle, "submenu:tools", lbl!("submenu:tools"))
                     .item(&tool_select)
+                    .item(&tool_eraser)
+                    .item(&tool_paint)
+                    .item(&tool_position_texture)
                     .separator()
                     .item(&tool_move)
                     .item(&tool_rotate)
@@ -4576,6 +4836,12 @@ fn main() {
                     .item(&tool_pushpull)
                     .item(&tool_follow_me)
                     .item(&tool_offset)
+                    .item(&tool_fillet)
+                    .item(&tool_chamfer)
+                    .separator()
+                    .item(&shape_menu)
+                    .item(&deform_menu)
+                    .separator()
                     .item(&tool_slice)
                     .item(&tool_edit_vertex)
                     .separator()
@@ -4583,9 +4849,6 @@ fn main() {
                     .item(&tool_protractor)
                     .item(&tool_dimension)
                     .item(&tool_text)
-                    .separator()
-                    .item(&tool_paint)
-                    .item(&tool_position_texture)
                     .separator()
                     .item(&tool_axes)
                     .item(&tool_section_plane)

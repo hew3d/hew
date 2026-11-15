@@ -28,6 +28,7 @@
  */
 
 import { i18n, type MessageDescriptor } from '@lingui/core'
+import { curveActionPaletteEntries, deformPaletteEntries, skinPaletteEntry } from './curveEntries'
 import { msg, t } from '@lingui/core/macro'
 import { MENU } from '../health/healthCopy'
 import { TOOL_REGISTRY, type ToolName } from '../tools/toolRegistry'
@@ -65,6 +66,8 @@ export type PaletteGate =
   /** Paste linked is the explicit form only while copies default to independent. */
   | 'canPasteLinked'
   | 'canBoolean'
+  /** A solid Object is selected directly — Soften Edges… lives in its Object Info section. */
+  | 'canSoften'
   /** One object, group, or instance selected, with a library backend. */
   | 'canSaveSelectionToLibrary'
   | 'canImport'
@@ -108,7 +111,15 @@ const TOOL_DESCRIPTIONS: Record<ToolName, MessageDescriptor> = {
   'Arc': msg`Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment. Ctrl detaches the shape from the face.`,
   'Push/Pull': msg`Extrude a face into a solid, or reshape one.`,
   'Follow Me': msg`Sweep a profile along a path into a solid.`,
+  'Revolve': msg`Spin a shape around an axis into a solid.`,
+  'Loft': msg`Blend a solid through two or more shapes, in order.`,
+  'Deform': msg`Twist, bend, or taper a whole solid.`,
   'Offset': msg`Copy a face or profile's boundary inward or outward at a set distance.`,
+  'Shell': msg`Hollow out a solid to a wall thickness, leaving the faces you click open.`,
+  'Project': msg`Draw a closed shape onto a curved or flat solid, then engrave or emboss it.`,
+  'Eraser': msg`Erase drawn lines, or crease the edges of a solid so they stay sharp when smoothed.`,
+  'Fillet': msg`Round or bevel the edges of a solid, or round a drawn corner.`,
+  'Array along Path': msg`Place evenly spaced copies of the selection along a line, curve, or face edge, optionally shrinking or growing.`,
   'Paint': msg`Apply the current material to a face or object.`,
   'Position Texture': msg`Move, scale, and rotate a textured face's texture about a fixed pin.`,
   'Move': msg`Translate the selection, with inference snapping.`,
@@ -151,7 +162,14 @@ export function toolActionId(name: string): string | undefined {
 function toolSynonyms(): Partial<Record<ToolName, string[]>> {
   return {
     'Push/Pull': [t`extrude`, t`pull`, t`push`],
-    'Follow Me': [t`sweep`, t`pipe`, t`molding`, t`lathe`, t`revolve`],
+    'Follow Me': [t`sweep`, t`pipe`, t`molding`],
+    'Revolve': [t`lathe`, t`turn`],
+    'Loft': [t`curviloft`, t`sweep sections`, t`blend`, t`transition`],
+    'Fillet': [t`roundover`, t`round over`, t`round`, t`ease edges`, t`cove`, t`bullnose`, t`ogee`, t`router`, t`round corner`, t`roundcorner`, t`fredocorner`],
+    'Array along Path': [t`path array`, t`copies along path`, t`follow path copies`],
+    'Shell': [t`hollow`, t`thicken`, t`wall`],
+    'Project': [t`drape`, t`project`, t`emboss`, t`engrave`],
+    'Eraser': [t`erase`, t`delete edge`, t`crease`],
     'Offset': [t`inset`, t`outset`, t`concentric`],
     'Rectangle': [t`rect`, t`box`],
     'Polygon': [t`polygon`, t`hexagon`, t`hex`, t`pentagon`, t`n-gon`, t`nut`, t`bolt`],
@@ -170,15 +188,19 @@ function toolSynonyms(): Partial<Record<ToolName, string[]>> {
 
 function toolEntries(): PaletteEntry[] {
   const synonyms = toolSynonyms()
-  return TOOL_REGISTRY.map((spec) => ({
-    id: TOOL_ACTION_ID[spec.name],
-    toolName: spec.name,
-    label: i18n._(spec.label),
-    description: i18n._(TOOL_DESCRIPTIONS[spec.name]),
-    // oxlint-disable-next-line lingui/no-unlocalized-strings -- group ID
-    group: 'Tools',
-    synonyms: synonyms[spec.name],
-  }))
+  return TOOL_REGISTRY.flatMap((spec): PaletteEntry[] => {
+    if (spec.name === 'Deform') return deformPaletteEntries()
+    const entry: PaletteEntry = {
+      id: TOOL_ACTION_ID[spec.name],
+      toolName: spec.name,
+      label: i18n._(spec.label),
+      description: i18n._(TOOL_DESCRIPTIONS[spec.name]),
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- group ID
+      group: 'Tools',
+      synonyms: synonyms[spec.name],
+    }
+    return spec.name === 'Loft' ? [entry, skinPaletteEntry()] : [entry]
+  })
 }
 
 /** Hand-authored: everything reachable via menuActionRef that isn't a tool.
@@ -187,6 +209,7 @@ function toolEntries(): PaletteEntry[] {
 // oxlint-disable lingui/no-unlocalized-strings -- group and gate values are identifiers; every label, description, and synonym is wrapped in t``
 function actionEntries(): PaletteEntry[] {
   return [
+    ...curveActionPaletteEntries(),
     { id: 'new', label: t`New`, description: t`Start a new, blank document.`, group: 'Actions' },
     { id: 'open', label: t`Open…`, description: t`Open a .hew file from disk.`, group: 'Actions' },
     { id: 'import', label: t`Import…`, description: t`Import a COLLADA (.dae), SketchUp (.skp), glTF, or STL model.`, group: 'Actions', gate: 'canImport' },

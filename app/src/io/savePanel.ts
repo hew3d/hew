@@ -281,7 +281,12 @@ export function svgScaleLabel(p: PrintScale, unit: LengthFormat): string {
 }
 
 /** Export's formats for the native panel, each with its options. */
-export function exportPanelFormats(unit: LengthFormat, current?: ExportFormat, compat = false): PanelFormat[] {
+export function exportPanelFormats(
+  unit: LengthFormat,
+  current?: ExportFormat,
+  compat = false,
+  hasSmoothed = false,
+): PanelFormat[] {
   const presets = scalePresetsFor(unit)
   const options: Partial<Record<ExportFormat, PanelOption[]>> = {
     skp: [compatOption(compat)],
@@ -318,7 +323,7 @@ export function exportPanelFormats(unit: LengthFormat, current?: ExportFormat, c
       id: f.format as string,
       label: f.label,
       extension: f.extension,
-      options: options[f.format] ?? [],
+      options: [...(options[f.format] ?? []), ...(hasSmoothed && CAGE_FORMATS.has(f.format) ? [cagesOption()] : [])],
     })),
     olderPanelFormat(olderReleaseFor(current !== undefined && isSkpStreamFormat(current) ? current : undefined)),
   ]
@@ -329,6 +334,15 @@ export function exportPanelIdFor(format: ExportFormat): string {
   return isSkpStreamFormat(format) ? SKP_OLDER_PICKER_ID : format
 }
 
+/** Formats that can carry a Smooth object's cage instead of its smooth surface. */
+export const CAGE_FORMATS: ReadonlySet<ExportFormat> = new Set<ExportFormat>(['glb', 'stl', '3mf', 'usdz'])
+
+/** The "Export cages instead" check, offered when the model has a Smooth object. */
+export function cagesOption(): PanelOption {
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- option id, an identifier
+  return { kind: 'check', id: 'cages', label: t`Export cages instead`, value: false }
+}
+
 /** What an export does, read back from the panel's answer. */
 export interface ExportChoice {
   format: ExportFormat
@@ -336,6 +350,8 @@ export interface ExportChoice {
   skpCompat: boolean
   stlSegmentsPerTurn: number
   svg?: SvgExportOptions
+  /** Smooth objects export their editable cage, not the smooth surface. */
+  cages?: boolean
 }
 
 /** Turn the panel's answer into an export; `null` for an unknown format. */
@@ -352,6 +368,7 @@ export function exportChoiceFrom(result: PanelResult, unit: LengthFormat): Expor
     skpCompat: format === 'skp' && o.compat === true,
     stlSegmentsPerTurn: Number.isFinite(segments) ? segments : DEFAULT_STL_SEGMENTS,
   }
+  if (o.cages === true && CAGE_FORMATS.has(format)) choice.cages = true
   if (format === 'svg') {
     const presets = scalePresetsFor(unit)
     const view = (typeof o.view === 'string' && o.view in VIEW_LABEL ? o.view : 'current') as PrintViewKind

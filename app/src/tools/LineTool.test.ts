@@ -106,6 +106,26 @@ describe('LineTool — editing-context scoping', () => {
   })
 })
 
+describe('LineTool — Space during an open chain', () => {
+  it('lets Space through to Select unless a length is being typed', () => {
+    const scene = makeWasmScene({ pick: () => makePick(7n, 3n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1, kind: 'face' }), rayThrough(0, 0))
+    expect(tool.capturingInput()).toBe(true)
+    expect(tool.capturesKey(' ')).toBe(false)
+    expect(tool.capturesKey('5')).toBe(true)
+    expect(tool.capturesKey('m')).toBe(true)
+    tool.onKey({ key: '5', preventDefault: () => {} } as unknown as KeyboardEvent)
+    expect(tool.capturesKey(' ')).toBe(true)
+  })
+
+  it('captures nothing with no chain open', () => {
+    const { tool } = makeTool(makeWasmScene({}))
+    expect(tool.capturesKey(' ')).toBe(false)
+    expect(tool.capturesKey('5')).toBe(false)
+  })
+})
+
 describe('LineTool — top-level plain-object policy (parity with RectangleTool)', () => {
   it('a plain object\'s face anchors a face chain directly (no edit context)', () => {
     const scene = makeWasmScene({ pick: () => makePick(7n, 3n) })
@@ -525,6 +545,35 @@ describe('LineTool — retype the segment just placed', () => {
     typeIn(tool, '2')
     expect(scene.scene_undo).not.toHaveBeenCalled()
     expect(segs(scene)).toEqual([[0, 0, 1, 0], [1, 0, 1, 2]])
+  })
+
+  it('a typed length that ends within the snap aperture of the chain start closes on that point exactly', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    clickAt(tool, 0, 0, 100, 100)
+    clickAt(tool, 1, 0, 200, 100)
+    clickAt(tool, 1, 1, 200, 40)
+    // Aim back toward the start, move on so the retype window closes, and type
+    // the diagonal to a few places: 1.4142 m ends 14 microns short of (0, 0).
+    tool.onPointerMove(makeSnap({ x: 0.5, y: 0.5, z: 0 }), rayThrough(0.5, 0.5))
+    tool.onPointerScreenMove(150, 70)
+    typeIn(tool, '1.4142')
+    const last = segs(scene).at(-1)!
+    expect(last).toEqual([1, 1, 0, 0])
+  })
+
+  it('a typed length that ends well away from the chain start is kept as typed', () => {
+    const scene = makeRetypeScene()
+    const { tool } = makeTool(scene)
+    clickAt(tool, 0, 0, 100, 100)
+    clickAt(tool, 1, 0, 200, 100)
+    clickAt(tool, 1, 1, 200, 40)
+    tool.onPointerMove(makeSnap({ x: 0.5, y: 0.5, z: 0 }), rayThrough(0.5, 0.5))
+    tool.onPointerScreenMove(150, 70)
+    typeIn(tool, '1.3')
+    const last = segs(scene).at(-1)!
+    expect(last[2]).not.toBe(0)
+    expect(Math.hypot(last[2] - 1, last[3] - 1)).toBeCloseTo(1.3, 9)
   })
 
   it('a typed (Enter) segment arms the window too, so a second value corrects it', () => {

@@ -19,7 +19,10 @@ describe('paletteEntries', () => {
 
   it('includes every tool, not just the rail-visible subset', () => {
     const toolLabels = entries.filter((e) => e.group === 'Tools').map((e) => e.label)
-    expect(toolLabels.sort()).toEqual([...TOOLS].sort())
+    // Deform is one tool with four palette entries, one per mode; Loft also
+    // answers to Skin; Chamfer is the Fillet tool's second entry.
+    const expected = TOOLS.flatMap((t) => (t === 'Deform' ? ['Twist', 'Bend', 'Taper', 'Bend to Path'] : t === 'Loft' ? ['Loft', 'Skin'] : [t]))
+    expect(toolLabels.sort()).toEqual([...expected, 'Chamfer'].sort())
   })
 
   it('every entry has a non-empty label and description', () => {
@@ -49,6 +52,30 @@ describe('paletteEntries', () => {
         'edit-intersect',
       ]),
     )
+  })
+})
+
+describe('palette search words', () => {
+  it("Fillet answers to SketchUp's RoundCorner words", () => {
+    const fillet = paletteEntries().find((e) => e.id === 'tool-fillet')
+    expect(fillet?.synonyms).toEqual(expect.arrayContaining(['round corner', 'roundcorner', 'fredocorner']))
+  })
+
+  it("every Deform mode answers to FredoScale's name", () => {
+    for (const id of ['tool-deform-twist', 'tool-deform-bend', 'tool-deform-taper']) {
+      expect(paletteEntries().find((e) => e.id === id)?.synonyms).toContain('fredoscale')
+    }
+  })
+
+  it('Soften Edges… is gated on a directly selected solid, the Smooth levels and Bake on any selection', () => {
+    const gate = (id: string) => paletteEntries().find((e) => e.id === id)?.gate
+    expect(gate('soften-edges')).toBe('canSoften')
+    for (const id of ['smooth-off', 'smooth-1', 'smooth-2', 'smooth-3', 'bake-smooth']) expect(gate(id)).toBe('selection')
+  })
+
+  it('every Object-menu Smooth action is in the palette (Smooth levels, Bake, Soften Edges)', () => {
+    const ids = paletteEntries().map((e) => e.id)
+    expect(ids).toEqual(expect.arrayContaining(['smooth-off', 'smooth-1', 'smooth-2', 'smooth-3', 'bake-smooth', 'soften-edges']))
   })
 })
 

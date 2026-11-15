@@ -171,6 +171,13 @@ export interface HewTestHarness {
   isReady(): boolean
   // modeling
   drawRectangle(p0: Vec3, p1: Vec3): { sketch: string; region: string }
+  /**
+   * Axis-aligned rectangle p0→p1 on p0's z plane with every corner rounded by
+   * a true arc of `radius`: four straight sides plus four curve chains, each
+   * carrying its analytic circle (as the Rectangle tool's rounded corners
+   * commit). `segmentsPerCorner` facets per quarter arc.
+   */
+  drawRoundedRectangle(p0: Vec3, p1: Vec3, radius: number, segmentsPerCorner?: number): { sketch: string; region: string }
   extrudeRegion(sketch: string, region: string, distance: number): string
   /** Convenience: rectangle on the ground from p0→p1, extruded `height`. */
   drawBox(p0: Vec3, p1: Vec3, height: number): string
@@ -180,6 +187,18 @@ export interface HewTestHarness {
    *  `pick_face`'s own `instance()` accessor returns. */
   pickFace(rayOrigin: Vec3, rayDir: Vec3): { object: string; face: string; instance: string | null } | null
   pushPull(object: string, face: string, distance: number): void
+  /**
+   * Blends the sharp edges of `object` nearest each of `points` (each point's
+   * whole smooth chain, like a click on it) with `profileJson`, a kernel
+   * `BlendProfile` (`{"kind":"round","radius":0.01,"segments":6}`), as one
+   * undo step. Returns the new blend ids. Edges are found by their segments'
+   * distance to the point — the harness' stand-in for hovering them.
+   */
+  filletEdges(object: string, points: Vec3[], profileJson: string): number[]
+  /** The blends on `object`: `{id, kind, faces, size, intact}` rows. */
+  blendFeatures(object: string): Array<{ id: number; kind: string; faces: string[]; size: number | null; intact: boolean }>
+  /** Removes blend `blendId` from `object` (one undo step). */
+  removeBlend(object: string, blendId: number): void
   boolean(op: number, a: string, b: string): string
   /**
    * Combine two tree nodes — plain solids or whole groups (`boolean_nodes`,
@@ -219,6 +238,19 @@ export interface HewTestHarness {
    * on the UI side.
    */
   getObjectBounds(id: string): [number, number, number, number, number, number]
+  /**
+   * The object's distinct vertex positions (world meters, f32 from the mesh,
+   * merged within 1e-6): for asserting what a shape tool (Revolve, Deform,
+   * Follow Me twist) actually built, e.g. that a top face turned by 90°.
+   */
+  getObjectVertices(id: string): [number, number, number][]
+  /**
+   * Every vertex of the object's tessellated mesh with the normal the
+   * tessellator emitted for it (not merged: faces meeting at a position each
+   * report their own). For asserting how a blend shades, e.g. that a strip
+   * meets a wall with the wall's normal.
+   */
+  getObjectVertexNormals(id: string): Array<{ p: Vec3; n: Vec3 }>
   /**
    * Deep-copy ANY tree node — object, group, or instance — offset by
    * `(dx, dy, dz)` meters: `duplicate_node` on the node's own kind, exactly
@@ -273,6 +305,24 @@ export interface HewTestHarness {
   setGridVisible(visible: boolean): void
   /** Show/hide all construction guides (View ▸ Guides). */
   setGuidesVisible(visible: boolean): void
+  /** Tangent-edge LineSegments in the viewport: how many exist, how many are
+   *  visible, and their total segment count (View ▸ Tangent Edges). */
+  getTangentEdgeInfo(): { lines: number; visible: number; segments: number }
+  /** Smooth cage wires in the viewport: how many objects have one, and how
+   *  many are showing (they show while any tool but Select is active). */
+  getCageOverlayInfo(): { objects: number; visible: number }
+  /** The volume (m³) enclosed by an object's displayed mesh, by the
+   *  divergence theorem; a closed solid reads positive. */
+  getObjectVolume(id: string): number
+  /** An object's Smooth level (0 = Off). */
+  getSmoothLevel(id: string): number
+  /** Softens every edge of an object whose faces meet within `degrees` (the
+   *  Soften command); returns how many edges changed. */
+  softenByAngle(id: string, degrees: number): number
+  /** How many of an object's sharp edges carry a crease flag. */
+  getCreasedEdgeCount(id: string): number
+  /** Sets an object's Smooth level (0–3) the way the Object Info row does. */
+  setSmoothLevel(id: string, level: number): void
 
   // -------- scenes (docs/design/scenes.md) --------
   /** Adds a Scene capturing every property (`Scene.add_scene`'s full
@@ -390,6 +440,10 @@ export interface HewTestHarness {
   takeRecording(): string
   // queries
   getStateHash(): string
+  /** The state hash with the saved view pinned to a fixed pose first: the
+   *  autosave tick writes the live (drifting) camera into the document, so
+   *  `getStateHash` can change between two reads with nothing edited. */
+  getModelStateHash(): string
   getObjectCount(): number
   getObjectIds(): string[]
   getSelection(): { kind: string; id: string; ctx?: string; key?: string }[]
@@ -550,8 +604,9 @@ export interface HewTestHarness {
    * viewed from +Z). With `close`, also adds the chord b→a so the arc closes
    * into a region. Equivalent to ArcTool's ground commit:
    * begin_ground_sketch → N × sketch_add_segment along `arcPolylineOnPlane`.
+   * `analytic: false` leaves the facets a plain curve chain with no circle.
    */
-  drawArc(a: Vec3, b: Vec3, sagitta: number, close?: boolean): { sketch: string; regions: string[] }
+  drawArc(a: Vec3, b: Vec3, sagitta: number, close?: boolean, analytic?: boolean): { sketch: string; regions: string[] }
 
   /**
    * Cut `face` of `object` along a faceted 2-point arc. `a`/`b` must
@@ -677,6 +732,8 @@ export interface HewTestHarness {
 
   /** True if there is a document action to undo. */
   canUndo(): boolean
+  /** The undo stack's depth (the net step count). */
+  getUndoDepth(): number
 
   /** True if there is a document action to redo. */
   canRedo(): boolean
@@ -1512,6 +1569,57 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         return { sketch: sketch.toString(), region: region.toString() }
       }),
 
+    drawRoundedRectangle: (p0, p1, radius, segmentsPerCorner = 8) =>
+      act((s) => {
+        const x0 = Math.min(p0[0], p1[0])
+        const x1 = Math.max(p0[0], p1[0])
+        const y0 = Math.min(p0[1], p1[1])
+        const y1 = Math.max(p0[1], p1[1])
+        const z = p0[2]
+        if (radius <= 0 || 2 * radius >= Math.min(x1 - x0, y1 - y0)) {
+          throw new Error('drawRoundedRectangle: radius must fit inside the rectangle')
+        }
+        const sketch = s.begin_ground_sketch()
+        // Counter-clockwise from the bottom side: side, corner arc, side, …
+        const corners: { c: [number, number]; from: number }[] = [
+          { c: [x1 - radius, y0 + radius], from: -Math.PI / 2 },
+          { c: [x1 - radius, y1 - radius], from: 0 },
+          { c: [x0 + radius, y1 - radius], from: Math.PI / 2 },
+          { c: [x0 + radius, y0 + radius], from: Math.PI },
+        ]
+        const arcPts = (c: [number, number], from: number): Vec3[] => {
+          const pts: Vec3[] = []
+          for (let i = 0; i <= segmentsPerCorner; i++) {
+            const t = from + ((Math.PI / 2) * i) / segmentsPerCorner
+            pts.push([c[0] + radius * Math.cos(t), c[1] + radius * Math.sin(t), z])
+          }
+          return pts
+        }
+        const arcs = corners.map((k) => arcPts(k.c, k.from))
+        s.sketch_begin_gesture(sketch)
+        try {
+          for (let k = 0; k < 4; k++) {
+            const arc = arcs[k]
+            const next = arcs[(k + 1) % 4]
+            s.sketch_begin_curve_with(sketch, corners[k].c[0], corners[k].c[1], z, radius)
+            for (let i = 0; i < arc.length - 1; i++) {
+              const a = arc[i]
+              const b = arc[i + 1]
+              s.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])
+            }
+            s.sketch_end_curve(sketch)
+            const a = arc[arc.length - 1]
+            const b = next[0]
+            s.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])
+          }
+        } finally {
+          s.sketch_end_gesture(sketch)
+        }
+        const regions = s.sketch_regions(sketch)
+        if (regions.length === 0) throw new Error('drawRoundedRectangle: no closed region formed')
+        return { sketch: sketch.toString(), region: regions[0].toString() }
+      }),
+
     extrudeRegion: (sketch, region, distance) =>
       act((s) =>
         s.extrude_region(BigInt(sketch), BigInt(region), distance).toString(),
@@ -1541,6 +1649,51 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     pushPull: (object, face, distance) => {
       act((s) => s.push_pull(BigInt(object), BigInt(face), distance))
+    },
+
+    filletEdges: (object, points, profileJson) =>
+      act((s) => {
+        const oid = BigInt(object)
+        const edges: bigint[] = []
+        for (const p of points) {
+          let best: { d: number; edge: bigint } | null = null
+          for (const e of s.object_sharp_edges(oid)) {
+            const chain = s.logical_edge(oid, e, false)
+            let seg: Float32Array
+            try {
+              seg = chain.segments()
+            } finally {
+              chain.free()
+            }
+            const a: Vec3 = [seg[0], seg[1], seg[2]]
+            const b: Vec3 = [seg[3], seg[4], seg[5]]
+            const ab: Vec3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+            const l2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]
+            const t = l2 > 0 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1] + (p[2] - a[2]) * ab[2]) / l2)) : 0
+            const d = Math.hypot(a[0] + ab[0] * t - p[0], a[1] + ab[1] * t - p[1], a[2] + ab[2] * t - p[2])
+            if (best === null || d < best.d) best = { d, edge: e }
+          }
+          if (best === null) throw new Error('filletEdges: the object has no sharp edge')
+          const chain = s.picked_edge(oid, best.edge, true)
+          try {
+            for (const e of chain.edges()) if (!edges.includes(e)) edges.push(e)
+          } finally {
+            chain.free()
+          }
+        }
+        const spec = JSON.stringify({ edges: edges.map(String), profile: JSON.parse(profileJson) })
+        const report = s.blend_edges(oid, spec)
+        try {
+          return Array.from(report.blend_ids())
+        } finally {
+          report.free()
+        }
+      }),
+
+    blendFeatures: (object) => query((s) => JSON.parse(s.blend_features_json(BigInt(object)))),
+
+    removeBlend: (object, blendId) => {
+      act((s) => s.remove_blend(BigInt(object), blendId))
     },
 
     boolean: (op, a, b) =>
@@ -1597,6 +1750,41 @@ export function installTestHarness(deps: HarnessDeps): () => void {
             if (z > maxZ) maxZ = z
           }
           return [minX, minY, minZ, maxX, maxY, maxZ]
+        } finally {
+          mesh.free()
+        }
+      }),
+
+    getObjectVertices: (id) =>
+      query((s) => {
+        const mesh = s.object_mesh(BigInt(id))
+        try {
+          const pos = mesh.positions()
+          const seen = new Set<string>()
+          const out: [number, number, number][] = []
+          for (let i = 0; i + 2 < pos.length; i += 3) {
+            const key = `${Math.round(pos[i] * 1e6)},${Math.round(pos[i + 1] * 1e6)},${Math.round(pos[i + 2] * 1e6)}`
+            if (seen.has(key)) continue
+            seen.add(key)
+            out.push([pos[i], pos[i + 1], pos[i + 2]])
+          }
+          return out
+        } finally {
+          mesh.free()
+        }
+      }),
+
+    getObjectVertexNormals: (id) =>
+      query((s) => {
+        const mesh = s.object_mesh(BigInt(id))
+        try {
+          const pos = mesh.positions()
+          const nor = mesh.normals()
+          const out: Array<{ p: Vec3; n: Vec3 }> = []
+          for (let i = 0; i + 2 < pos.length; i += 3) {
+            out.push({ p: [pos[i], pos[i + 1], pos[i + 2]], n: [nor[i], nor[i + 1], nor[i + 2]] })
+          }
+          return out
         } finally {
           mesh.free()
         }
@@ -1681,6 +1869,58 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       api.setGuidesVisible(visible)
+    },
+
+    getTangentEdgeInfo: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.getTangentEdgeInfo()
+    },
+
+    getCageOverlayInfo: () => {
+      const api = deps.getViewportApi()
+      if (api === null || api.getCageOverlayInfo === undefined) throw new Error('__hew_test: viewport not ready')
+      return api.getCageOverlayInfo()
+    },
+
+    getObjectVolume: (id) =>
+      query((s) => {
+        const mesh = s.object_mesh(BigInt(id))
+        try {
+          const p = mesh.positions()
+          const idx = mesh.indices()
+          let v = 0
+          for (let i = 0; i + 2 < idx.length; i += 3) {
+            const a = idx[i] * 3
+            const b = idx[i + 1] * 3
+            const c = idx[i + 2] * 3
+            // Signed tetrahedron volume against the origin.
+            v +=
+              (p[a] * (p[b + 1] * p[c + 2] - p[b + 2] * p[c + 1]) -
+                p[a + 1] * (p[b] * p[c + 2] - p[b + 2] * p[c]) +
+                p[a + 2] * (p[b] * p[c + 1] - p[b + 1] * p[c])) / 6
+          }
+          return v
+        } finally {
+          mesh.free()
+        }
+      }),
+
+    getSmoothLevel: (id) => query((s) => s.smooth_level(BigInt(id))),
+    softenByAngle: (id, degrees) => act((s) => s.soften_by_angle(BigInt(id), (degrees * Math.PI) / 180)),
+    getCreasedEdgeCount: (id) =>
+      query((s) => {
+        const oid = BigInt(id)
+        let n = 0
+        for (const e of s.object_sharp_edges(oid)) if (s.edge_is_creased(oid, e)) n++
+        return n
+      }),
+
+    setSmoothLevel: (id, level) => {
+      act((s) => {
+        s.set_smooth_level(BigInt(id), level).free()
+        return null
+      })
     },
 
     addScene: (name) => {
@@ -1836,6 +2076,18 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       buildSessionRecording(scene().take_recording(), inputRecorder.take()),
 
     getStateHash: () => query((s) => s.state_hash().toString()),
+    getModelStateHash: () =>
+      query((s) => {
+        s.set_camera_state(
+          'perspective',
+          45,
+          1,
+          new Float64Array([1, 1, 1]),
+          new Float64Array([0, 0, 0]),
+          new Float64Array([0, 0, 1]),
+        )
+        return s.state_hash().toString()
+      }),
     getObjectCount: () => query((s) => s.object_ids().length),
     getObjectIds: () => query((s) => Array.from(s.object_ids()).map(String)),
     getSelection: () =>
@@ -2012,7 +2264,7 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         return sub.over.face.toString()
       }),
 
-    drawArc: (a, b, sagitta, close = false) =>
+    drawArc: (a, b, sagitta, close = false, analytic = true) =>
       act((s) => {
         const pts = arcPolylineOnPlane(a, b, sagitta, [1, 0, 0], [0, 1, 0])
         if (pts === null) throw new Error('drawArc: degenerate chord or flat sagitta')
@@ -2025,8 +2277,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         }
         // The arc's facets are one curve chain carrying the analytic circle,
         // exactly as ArcTool commits; the closing chord stays a plain line.
-        if (arc !== null) {
+        // `analytic = false` leaves the chain a plain faceted curve (what an
+        // imported or boolean-cut round looks like), with no circle behind it.
+        if (arc !== null && analytic) {
           s.sketch_begin_curve_with(sketch, arc.center[0], arc.center[1], 0, arc.radius)
+        } else if (!analytic) {
+          s.sketch_begin_curve(sketch)
         }
         for (let i = 0; i < pts.length - 1; i++) addSeg(pts[i], pts[i + 1])
         s.sketch_end_curve(sketch)
@@ -2181,6 +2437,7 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     },
 
     canUndo: () => query((s) => s.can_scene_undo()),
+    getUndoDepth: () => query((s) => s.undo_depth()),
     canRedo: () => query((s) => s.can_scene_redo()),
 
     setLengthUnit: (format) => setLengthUnit(format as LengthFormat),

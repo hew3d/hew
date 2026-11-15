@@ -34,6 +34,7 @@ import {
   classifyRow,
   filterRows,
   groupRows,
+  isSolidRow,
   groupedRows,
   readHealthReport,
   openReason,
@@ -46,12 +47,13 @@ import {
   type HealthRow,
   type HealthScope,
 } from '../health/healthReport'
-import { ACTION, KIND_NAME, LOOK_ALIKE, MEND, PANEL, REASON_MEND_LINE, REASON_ON_PURPOSE, REASON_SENTENCE, TOOLTIP, UNDO_LABEL, distinctLabels, type KindKey } from '../health/healthCopy'
+import { ACTION, KIND_NAME, LOOK_ALIKE, MEND, PANEL, REASON_MEND_LINE, REASON_ON_PURPOSE, REASON_SENTENCE, TOOLTIP, UNDO_LABEL, ZERO_AREA, distinctLabels, removedFacesToast, type KindKey } from '../health/healthCopy'
 import {
   batchLabel,
   batchSummary,
   capOp,
   closableRows,
+  degenerateRows,
   failureLine,
   familyCascade,
   familyRejoinSolidOps,
@@ -59,6 +61,8 @@ import {
   groupBatchButtons,
   markOp,
   markableRows,
+  removeDegenerateOp,
+  removedCount,
   runBatch,
   thickenOp,
   type BatchKind,
@@ -474,7 +478,7 @@ export function ModelHealthPanel({
           setCurrent(null)
           onGeometryChanged()
         }
-        onToast?.(batchSummary(kind, result))
+        onToast?.(kind === 'degenerate' ? removedFacesToast(removedCount(result), result.failed.length) : batchSummary(kind, result))
       } catch (err) {
         const code = parseKernelErrorCode(err)
         const raw = err instanceof Error ? err.message : String(err)
@@ -499,7 +503,7 @@ export function ModelHealthPanel({
 
   /** Whether Mend is offered for `row` at all (before the census). */
   const mendEligible = (row: HealthRow): boolean =>
-    !row.accepted && (mendCandidate(row, inSplit(row)) || hasWarpedHoles(row))
+    !isSolidRow(row) && !row.accepted && (mendCandidate(row, inSplit(row)) || hasWarpedHoles(row))
 
   /** Hovering a Mend button: dots for the points it merges and splits, and the rims it fills. */
   const showMendPreview = (rows: readonly HealthRow[], planOf: MendPlan | ((row: HealthRow) => MendPlan)): void => {
@@ -613,6 +617,7 @@ export function ModelHealthPanel({
     const members = row.definition !== null && row.placements > 1
     const rim = row.rims[currentRim]
     const thisRimClosable = selected && canCloseRow(row) && rim !== undefined && rim.cappable
+    const solidRow = isSolidRow(row)
     const mendChoiceNow = selected && mendEligible(row) ? mendPlanFor(row) : null
     const censusRead =
       mendChoiceNow === null ? null : readMendCensusResult(scene, row.object, mendChoiceNow.plan, docRev)
@@ -700,14 +705,28 @@ export function ModelHealthPanel({
                 {ACTION.closeThis}
               </button>
             )}
-            <button
-              type="button"
-              title={row.accepted ? TOOLTIP.unkeep(rowPlacements(row)) : TOOLTIP.keep(rowPlacements(row))}
-              style={ACTION_BUTTON_STYLE}
-              onClick={(e) => { e.stopPropagation(); markRow(row, !row.accepted) }}
-            >
-              {row.accepted ? ACTION.unkeep : ACTION.keep}
-            </button>
+            {row.degenerateFaces > 0 && (
+              <button
+                type="button"
+                data-health-remove-degenerate
+                title={TOOLTIP.removeDegenerate(rowPlacements(row))}
+                style={ACTION_BUTTON_STYLE}
+                disabled={busy !== null}
+                onClick={(e) => { e.stopPropagation(); execute('degenerate', [removeDegenerateOp(row)], `degenerate:${row.object}`) }}
+              >
+                {ACTION.removeDegenerate}
+              </button>
+            )}
+            {!solidRow && (
+              <button
+                type="button"
+                title={row.accepted ? TOOLTIP.unkeep(rowPlacements(row)) : TOOLTIP.keep(rowPlacements(row))}
+                style={ACTION_BUTTON_STYLE}
+                onClick={(e) => { e.stopPropagation(); markRow(row, !row.accepted) }}
+              >
+                {row.accepted ? ACTION.unkeep : ACTION.keep}
+              </button>
+            )}
           </span>
         )}
         {selected && row.rims.length > 0 && (
@@ -743,7 +762,7 @@ export function ModelHealthPanel({
             </button>
           </span>
         )}
-        {selected && classifyRow(row, inSplit(row)) === 'closerLook' && (
+        {selected && !solidRow && classifyRow(row, inSplit(row)) === 'closerLook' && (
           <span data-health-reason style={{ flexBasis: '100%', fontSize: '11px', whiteSpace: 'normal', color: 'var(--text-secondary, #ccc)' }}>
             {REASON_SENTENCE[openReason(row)]} {mendAvailable ? `${i18n._(REASON_MEND_LINE)} ` : ''}{i18n._(REASON_ON_PURPOSE)}
           </span>
@@ -844,6 +863,7 @@ export function ModelHealthPanel({
     const buttons = groupBatchButtons(kind)
     const closable = closableRows(rows)
     const markable = markableRows(rows)
+    const degenerate = degenerateRows(rows)
     // Mend all takes the steps chosen, at each object's own default distance.
     const mendAllPlan: MendPlan = { weld: mendChoice.weld, folds: mendChoice.folds, split: mendChoice.split, fill: mendChoice.fill }
     // The census runs for each listed row once its group is open.
@@ -896,6 +916,13 @@ export function ModelHealthPanel({
             {distanceError}
           </span>
         )}
+        {degenerate.length > 0 &&
+          batchButton(
+            `degenerate:${key}`,
+            ACTION.removeDegenerate,
+            TOOLTIP.removeDegenerateAll(degenerate.length),
+            () => execute('degenerate', degenerate.map(removeDegenerateOp), `degenerate:${key}`),
+          )}
         {buttons.close && closable.length > 0 &&
           batchButton(
             `close:${key}`,
@@ -917,6 +944,18 @@ export function ModelHealthPanel({
           )}
       </>
     )
+  }
+
+  /** The zero-area group's header button: clear every listed object at once. */
+  const zeroAreaActions = (rows: HealthRow[]): React.ReactNode => {
+    const degenerate = degenerateRows(rows)
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- batch key, an identifier
+    const key = 'degenerate:zeroArea'
+    return degenerate.length === 0
+      ? null
+      : batchButton(key, ACTION.removeDegenerate, TOOLTIP.removeDegenerateAll(degenerate.length), () =>
+          execute('degenerate', degenerate.map(removeDegenerateOp), key),
+        )
   }
 
   /** A split shape's Rejoin button and its inside-wall choice. */
@@ -1078,6 +1117,8 @@ export function ModelHealthPanel({
             const g = grouped.groups.find((x) => x.key === kind)
             return g === undefined ? null : groupEl(g.key, g.label, g.rows, false, kindActions(g.key, g.key, g.rows))
           })}
+          {grouped.zeroArea.length > 0 &&
+            groupEl('zeroArea', ZERO_AREA.group, grouped.zeroArea, false, zeroAreaActions(grouped.zeroArea))}
         </div>
       )}
       {thickenRows !== null && (

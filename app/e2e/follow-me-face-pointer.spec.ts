@@ -166,7 +166,6 @@ test('Follow Me: a face too narrow for the folded profile is refused with face-s
 
   // Face-context copy, not the generic drawn-path wording.
   await expect(page.getByText('That face is thinner than the profile is deep', { exact: false })).toBeVisible()
-  await expect(page.getByText('[PathTooTight]')).toBeVisible()
   // Refused → the tabletop stands alone, untouched.
   expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(1)
 })

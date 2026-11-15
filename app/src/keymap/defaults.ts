@@ -45,6 +45,10 @@ export function defaultBindings({ isMac, isDesktop }: KeymapPlatform): Bindings 
     'tool-arc': ['A', ...mac('Mod+J')],
     'tool-pushpull': ['P', '3', ...mac('Mod+=')],
     'tool-offset': ['F'],
+    // Fillet has no SketchUp key; Shift+F sits beside Offset's F. Eraser's E is
+    // SketchUp's own.
+    'tool-fillet': ['Shift+F'],
+    'tool-eraser': ['E'],
     'tool-move': ['M', '4', ...mac('Mod+0')],
     'tool-rotate': ['Q', '5', ...mac('Mod+8')],
     'tool-scale': ['S', '6', ...mac('Mod+9')],

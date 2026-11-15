@@ -445,6 +445,18 @@ describe('freshness helpers', () => {
   })
 })
 
+describe('closed objects listed for zero-area faces', () => {
+  it('are not something to make solid', () => {
+    const r = report([
+      row({ object: '1' }),
+      row({ object: '2', name: 'Statue', verdict: { kind: 'solid' }, rims: [], degenerate_faces: 2 }),
+    ])
+    const plan = buildPlan(r)
+    expect(plan.fix).toBe(1)
+    expect(Object.values(plan.items).flat().map((i) => i.key)).toEqual(['1'])
+  })
+})
+
 describe('needs mending (Mend)', () => {
   const CENSUS = {
     weld: 0.000002,

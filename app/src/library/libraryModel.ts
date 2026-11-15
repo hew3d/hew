@@ -28,7 +28,7 @@ import type {
 // Meta parsing (type guards over an untrusted doc_attrs blob)
 // ---------------------------------------------------------------------------
 
-const VALID_CATEGORIES: readonly LibraryCategory[] = ['component', 'material', 'model']
+const VALID_CATEGORIES: readonly LibraryCategory[] = ['component', 'material', 'model', 'profile']
 
 function isValidCategory(v: unknown): v is LibraryCategory {
   return typeof v === 'string' && (VALID_CATEGORIES as readonly string[]).includes(v)
@@ -57,7 +57,7 @@ export function parseLibraryMeta(raw: unknown): LibraryItemMeta {
 }
 
 /** The bare file name minus any category subfolder (`Components/`,
- * `Materials/`, `Models/`) and its `.hew` extension — the last-resort
+ * `Materials/`, `Models/`, `Profiles/`) and its `.hew` extension — the last-resort
  * display name for an item with no metadata and no named definition/root.
  * `fileName` is otherwise treated as an opaque id throughout this module;
  * this is the one place that peels off its directory shape, purely for
@@ -76,6 +76,10 @@ function fileStem(fileName: string): string {
  * exactly one component definition and no top-level groups is a component;
  * everything else is a model. */
 function deriveCategory(summary: LibraryItemSummary): LibraryCategory {
+  // A profile: one open drawn chain and nothing else.
+  if (summary.objects === 0 && summary.components === 0 && summary.materials === 0 && summary.profile_chain_only === true) {
+    return 'profile'
+  }
   const materialOnly = summary.objects === 0 && summary.components === 0 && summary.materials > 0
   if (materialOnly) return 'material'
   const singleDefinition = summary.components === 1 && summary.groups === 0
@@ -117,6 +121,7 @@ const EMPTY_SUMMARY: LibraryItemSummary = {
   first_root_name: null,
   doc_attrs: {},
   material_entries: [],
+  profile_chain_only: false,
 }
 
 /** Builds the error-state tile for a file that failed to parse (a truncated
@@ -343,6 +348,8 @@ export function categoryTypeLabel(category: LibraryCategory): string {
       return t`Material`
     case 'model':
       return t({ context: 'library item type', message: 'Model' })
+    case 'profile':
+      return t`Profile`
   }
 }
 
@@ -364,6 +371,9 @@ function listSortKey(item: LibraryItem, column: ListSortColumn): string | number
 export function sortListItems(items: LibraryItem[], column: ListSortColumn, direction: ListSortDirection): LibraryItem[] {
   const sign = direction === 'asc' ? 1 : -1
   return [...items].sort((a, b) => {
+    // A built-in has no file, hence no size: it sorts after every real file
+    // either way rather than as the smallest.
+    if (column === 'size' && isBuiltInItem(a) !== isBuiltInItem(b)) return isBuiltInItem(a) ? 1 : -1
     const av = listSortKey(a, column)
     const bv = listSortKey(b, column)
     if (av < bv) return -1 * sign
@@ -455,4 +465,30 @@ export function savedLine(item: LibraryItem, nowMs: number): string {
   if (diffDays <= 30) return plural(diffDays, { one: 'Saved # day ago', other: 'Saved # days ago' })
   const date = formatAbsoluteDate(ts)
   return t`Saved ${date}`
+}
+
+// ---------------------------------------------------------------------------
+// Built-in profiles (bundled with the kernel, not files in the folder)
+// ---------------------------------------------------------------------------
+
+/** Prefix of a built-in profile's id and pseudo file name. */
+export const BUILT_IN_PREFIX = 'builtin:'
+
+/** True for a built-in profile row: bundled with the app, read-only (no
+ * rename, delete or move), usable and copyable. */
+export function isBuiltInItem(item: Pick<LibraryItem, 'file'>): boolean {
+  return item.file.fileName.startsWith(BUILT_IN_PREFIX)
+}
+
+/** The Library row for a built-in profile. `bytes` hash is the profile id
+ * (stable, so thumbnails cache under it). */
+export function builtInProfileItem(id: string, name: string): LibraryItem {
+  return {
+    file: { fileName: id, size: 0, mtimeMs: 0 },
+    summary: { ...EMPTY_SUMMARY, profile_chain_only: true },
+    meta: { id, name, category: 'profile' },
+    displayName: name,
+    category: 'profile',
+    contentHash: id,
+  }
 }

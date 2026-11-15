@@ -40,22 +40,6 @@ async function writeFileBytes(path: string, bytes: Uint8Array): Promise<void> {
   await invoke('write_file_bytes', bytes as never, { headers: { path: encodeURIComponent(path) } })
 }
 
-/**
- * Write a document's bytes to `path`. `.hew` keeps the original
- * `write_file` JSON-array route; a SketchUp file goes through the raw-body
- * route, because a real model is tens to hundreds of megabytes and the JSON
- * route costs about four bytes of IPC per file byte.
- */
-async function writeDocument(path: string, bytes: Uint8Array, format: DocFormat): Promise<void> {
-  if (format === 'hew') {
-    const { invoke } = await import('@tauri-apps/api/core')
-    // write_file expects Vec<u8>; pass Array.from so Tauri IPC sees a JSON array.
-    await invoke('write_file', { path, contents: Array.from(bytes) })
-    return
-  }
-  await writeFileBytes(path, bytes)
-}
-
 /** Extract the basename from a path that may use / or \ separators. */
 function basename(path: string): string {
   return path.replace(/[/\\]+/g, '/').split('/').filter(Boolean).pop() ?? path
@@ -199,7 +183,7 @@ export class TauriFileHost implements FileHost {
       return this.saveAs(bytes, 'Untitled.hew')
     }
     const path = ref.handle as string
-    await writeDocument(path, bytes, ref.format)
+    await writeFileBytes(path, bytes)
     return ref
   }
 
@@ -211,14 +195,13 @@ export class TauriFileHost implements FileHost {
     })
     if (path === null) return null
 
-    await writeDocument(path, bytes, format)
+    await writeFileBytes(path, bytes)
 
     return { name: basename(path), format, handle: path }
   }
 
   async writeTo(path: string, bytes: Uint8Array, format?: DocFormat): Promise<FileRef> {
-    if (format === undefined) await writeFileBytes(path, bytes)
-    else await writeDocument(path, bytes, format)
+    await writeFileBytes(path, bytes)
     return { name: basename(path), format: format ?? 'hew', handle: path }
   }
 

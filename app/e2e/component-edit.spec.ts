@@ -650,7 +650,8 @@ test('component-edit parity: Shift-selected members boolean through the Object m
   // Scoped + exact: a bare page-level 'Object' would also match the
   // tray's 'Object Info' section header.
   await page.getByTestId('menu-bar').getByRole('button', { name: 'Object', exact: true }).click()
-  await page.getByText('Union', { exact: true }).click()
+  // Scoped to the menu bar: the multi-selection dock has a Union chip too.
+  await page.getByTestId('menu-bar').getByText('Union', { exact: true }).click()
   await expect.poll(async () => page.evaluate(
     (id) => window.__hew_test!.getComponentMemberObjects(id).length,
     component,

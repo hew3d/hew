@@ -44,8 +44,8 @@ import type { LibraryFileEntry } from '../library/types'
 import type { LibraryStore } from './libraryStore'
 
 /* oxlint-disable lingui/no-unlocalized-strings -- on-disk folder names and storage keys, identifiers */
-/** The three category subfolders, identical to the desktop store's. */
-const CATEGORY_DIRS = ['Components', 'Materials', 'Models'] as const
+/** The category subfolders, identical to the desktop store's. */
+const CATEGORY_DIRS = ['Components', 'Materials', 'Models', 'Profiles'] as const
 
 const THUMB_DIR = '.thumbnails'
 

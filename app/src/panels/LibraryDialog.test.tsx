@@ -114,6 +114,8 @@ const fx = vi.hoisted(() => ({
   reconnectCalls: 0,
   // Forces list() itself to reject — the load-level (not per-item) failure.
   failList: false,
+  // The built-in profiles `bundledProfiles` reports (none by default).
+  builtIns: [] as { id: string; name: string }[],
 }))
 
 function bytesFor(marker: string): Uint8Array {
@@ -205,6 +207,15 @@ vi.mock('../library/nativeChrome', () => ({
   },
 }))
 
+// The built-in profiles and profile thumbnails come from the wasm kernel,
+// which these jsdom tests never load: built-ins only as `fx.builtIns` names,
+// no profile thumbnails.
+vi.mock('../library/profiles', () => ({
+  bundledProfiles: async () => fx.builtIns,
+  profileShapeOfBytes: async () => null,
+  profileThumbnailPng: async () => new Uint8Array(),
+}))
+
 vi.mock('../library/itemFiles', () => ({
   readItemSummary: async (bytes: Uint8Array) => {
     const s = fx.summaries.get(markerOf(bytes))
@@ -251,6 +262,7 @@ function summary(overrides: Partial<LibraryItemSummary> = {}): LibraryItemSummar
     first_root_name: null,
     doc_attrs: {},
     material_entries: [],
+    profile_chain_only: false,
     ...overrides,
   }
 }
@@ -329,6 +341,7 @@ beforeEach(() => {
   fx.reconnectResult = true
   fx.reconnectCalls = 0
   fx.failList = false
+  fx.builtIns = []
   gridMeasureFx.columns = 3
   localStorage.removeItem('hew.library.view')
   localStorage.removeItem('hew.library.listCols')
@@ -369,7 +382,8 @@ describe('LibraryDialog', () => {
     // All: every item = 5. Components: chair, hinge = 2. Materials: oak = 1.
     // Models: house + the errored "broken" fixture (erroredItem defaults to
     // 'model') = 2.
-    expect(counts).toEqual(['5', '2', '1', '2'])
+    // Profiles: none in this fixture library.
+    expect(counts).toEqual(['5', '2', '1', '2', '0'])
   })
 
   it('switches category', async () => {
@@ -486,6 +500,15 @@ describe('LibraryDialog', () => {
     expect(fx.reconnectCalls).toBe(1)
     // reconnect() cleared the flag — the reload lists the items again.
     await within(grid()).findByText('Theater Chair')
+  })
+
+  it('a folder waiting for permission shows no item count, built-ins or not', async () => {
+    fx.needsReconnect = true
+    fx.builtIns = [{ id: 'builtin:ogee', name: 'Ogee' }]
+    render(<LibraryDialog {...baseProps()} />)
+    await screen.findByText(/needs permission again/i)
+    expect(screen.queryByText(/built-in/)).toBeNull()
+    expect(screen.queryByText(/\d+ items?\b/)).toBeNull()
   })
 
   it('a denied Reconnect explains itself instead of silently no-oping', async () => {
@@ -1414,6 +1437,35 @@ describe('LibraryDialog', () => {
       // jsdom's no-op layout engine — every element measures 0 — must
       // degrade to plain min-flooring rather than collapsing the column.
       expect(clampColWidthLive(9999, 160, 236, 0, 10, 200)).toBe(9999)
+    })
+  })
+
+  // The built-in profiles are Library items: an empty folder still lists
+  // them, under All and Profiles alike, and every count agrees.
+  describe('the built-in profiles', () => {
+    it('show and count under All and Profiles even when the folder is empty', async () => {
+      fx.builtIns = [
+        { id: 'builtin:ogee', name: 'Ogee' },
+        { id: 'builtin:cove', name: 'Cove' },
+      ]
+      const { container } = render(<LibraryDialog {...baseProps()} />)
+      fireEvent.click(screen.getByRole('tab', { name: /profiles/i }))
+      await within(grid()).findByText('Ogee')
+      expect(within(grid()).getByText('Cove')).toBeInTheDocument()
+
+      const counts = Array.from(container.querySelectorAll('.hwlib__cat-count')).map((el) => el.textContent)
+      expect(counts).toEqual(['2', '0', '0', '0', '2'])
+      expect(screen.getByText(/2 items, 2 built-in/)).toBeInTheDocument()
+
+      fireEvent.click(screen.getByRole('tab', { name: ALL_TAB }))
+      await within(grid()).findByText('Ogee')
+      expect(within(grid()).getByText('Cove')).toBeInTheDocument()
+
+      // A category with nothing in it points at Save to Library, and the
+      // detail pane shows nothing the grid doesn't.
+      fireEvent.click(screen.getByRole('tab', { name: /components/i }))
+      await within(grid()).findByText(/to get started/)
+      expect(screen.queryByText('Ogee')).not.toBeInTheDocument()
     })
   })
 

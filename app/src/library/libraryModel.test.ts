@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildLibraryItem,
+  builtInProfileItem,
   categoryTypeLabel,
   collectionMatchesSubtree,
   collectionsOf,
@@ -9,6 +10,7 @@ import {
   erroredItem,
   filterItems,
   formatBytes,
+  isBuiltInItem,
   materialSubline,
   metadataLine,
   normalizeCollectionPath,
@@ -41,6 +43,7 @@ function summary(overrides: Partial<LibraryItemSummary> = {}): LibraryItemSummar
     first_root_name: null,
     doc_attrs: {},
     material_entries: [],
+    profile_chain_only: false,
     ...overrides,
   }
 }
@@ -609,6 +612,12 @@ describe('sortListItems', () => {
     expect(sortListItems(items, 'size', 'desc').map((i) => i.displayName)).toEqual(['apple bin', 'Banana Crate', 'Cherry Jar'])
   })
 
+  it('sorts a built-in profile after every real file by size, either way', () => {
+    const mixed = [builtInProfileItem('builtin:ogee', 'Ogee'), ...items]
+    expect(sortListItems(mixed, 'size', 'asc').map((i) => i.displayName)).toEqual(['Cherry Jar', 'Banana Crate', 'apple bin', 'Ogee'])
+    expect(sortListItems(mixed, 'size', 'desc').map((i) => i.displayName)).toEqual(['apple bin', 'Banana Crate', 'Cherry Jar', 'Ogee'])
+  })
+
   it('breaks ties by display name so equal values never jitter', () => {
     const tied = [listItem('Zed', 'component', 100), listItem('Alpha', 'component', 100)]
     expect(sortListItems(tied, 'size', 'asc').map((i) => i.displayName)).toEqual(['Alpha', 'Zed'])
@@ -918,5 +927,37 @@ describe('savedLine', () => {
   it('reports an unknown date when neither savedAt nor mtimeMs is usable', () => {
     const i = { ...item, file: file('x.hew', { mtimeMs: 0 }), meta: {} }
     expect(savedLine(i, NOW)).toBe('Saved date unknown')
+  })
+})
+
+describe('profile items', () => {
+  it('derives the profile category from one open drawn chain and nothing else', () => {
+    const chain = buildLibraryItem(file('Profiles/ogee-000000.hew'), summary({ profile_chain_only: true }), 'h')
+    expect(chain.category).toBe('profile')
+    // The chain flag alone is not enough: any object, component or material
+    // makes it an ordinary file again.
+    for (const extra of [{ objects: 1 }, { components: 1 }, { materials: 1 }]) {
+      const item = buildLibraryItem(file('a.hew'), summary({ profile_chain_only: true, ...extra }), 'h')
+      expect(item.category).not.toBe('profile')
+    }
+    // An old reader's view (no flag): a bare file is a model.
+    expect(buildLibraryItem(file('a.hew'), summary(), 'h').category).toBe('model')
+  })
+
+  it('honors the profile category in the metadata and labels it', () => {
+    const item = buildLibraryItem(
+      file('Profiles/x.hew'),
+      summary({ doc_attrs: withLibraryMeta({ category: 'profile', name: 'Edge' }) }),
+      'h',
+    )
+    expect(item.category).toBe('profile')
+    expect(categoryTypeLabel('profile')).toBe('Profile')
+  })
+
+  it('recognizes built-in rows', () => {
+    const b = builtInProfileItem('builtin:ogee', 'Ogee')
+    expect(isBuiltInItem(b)).toBe(true)
+    expect(b.category).toBe('profile')
+    expect(isBuiltInItem(buildLibraryItem(file('Profiles/x.hew'), summary(), 'h'))).toBe(false)
   })
 })

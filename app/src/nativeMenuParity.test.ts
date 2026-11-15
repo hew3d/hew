@@ -21,7 +21,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { TOOL_MENU_IDS } from './App'
+import { TOOL_MENU_IDS, DEFORM_MENU_IDS } from './App'
 import { TOOLS } from './tools/toolRegistry'
 import { dockVerbsFor } from './panels/dockLogic'
 import { paletteEntries } from './palette/registry'
@@ -92,6 +92,18 @@ describe('native menu parity', () => {
       }
     }
     expect(missing, 'menu items built but never attached to a SubmenuBuilder chain').toEqual([])
+  })
+
+  it("Deform's four mode entries are each built, attached to the Tools menu, and dispatched", () => {
+    // Deform is one tool (`TOOL_MENU_IDS.Deform` is its Twist entry) with a
+    // radio item per mode; the other three are not in TOOL_MENU_IDS, so the
+    // checks above would never notice one going missing.
+    for (const [mode, id] of Object.entries(DEFORM_MENU_IDS)) {
+      const binding = new RegExp(`let\\s+(\\w+)\\s*=\\s*check_item\\([^;]*?"${id}"`, 's').exec(source)
+      expect(binding, `no check_item binding for Deform ${mode} (${id})`).not.toBeNull()
+      expect(source.includes(`.item(&${(binding as RegExpExecArray)[1]})`), `${id} is never attached`).toBe(true)
+      expect(new RegExp(`"${id}"\\s*=>\\s*"`).test(source), `${id} has no dispatch arm`).toBe(true)
+    }
   })
 
   it('offers no standalone Field of View item on the native menu (camera-playtest2.md §2 — removed, not hidden)', () => {
@@ -229,6 +241,98 @@ describe('Revert to Saved menu item parity', () => {
     expect(menuBarSource.includes('Revert to Saved')).toBe(true)
     expect(appSource.includes("case 'revert-to-saved'")).toBe(true)
     expect(appSource.includes("'file-revert'")).toBe(true)
+  })
+})
+
+/**
+
+ * True Curves organization (docs/design/true-curves-ui-organization.md): the
+ * Tools menu's Shape and Deform submenus and the Object menu's Smooth
+ * submenu and Soften Edges… must exist on the native menu exactly as on the
+ * web one — same members, same order, every item attached and dispatched.
+ */
+describe('native menu parity — Tools and Object menu organization', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+
+  /** The `.item(&x)` / `.separator()` chain of the SubmenuBuilder bound to
+   *  `let <name> = SubmenuBuilder::with_id(handle, "<id>", ...)`, as variable names
+   *  with '-' for separators. */
+  function chainOf(variable: string): string[] {
+    const start = new RegExp(`let ${variable} =\\s*SubmenuBuilder::with_id\\(`).exec(source)?.index ?? -1
+    expect(start, `no SubmenuBuilder bound to ${variable}`).toBeGreaterThanOrEqual(0)
+    const end = source.indexOf('.build()?', start)
+    const chain = source.slice(start, end)
+    return [...chain.matchAll(/\.item\(&(\w+)\)|\.separator\(\)/g)].map((m) => m[1] ?? '-')
+  }
+
+  it('Tools menu: SketchUp order, with Shape and Deform as submenus', () => {
+    expect(chainOf('tools_menu')).toEqual([
+      'tool_select', 'tool_eraser', 'tool_paint', 'tool_position_texture', '-',
+      'tool_move', 'tool_rotate', 'tool_scale', 'tool_flip', '-',
+      'tool_pushpull', 'tool_follow_me', 'tool_offset', 'tool_fillet', 'tool_chamfer', '-',
+      'shape_menu', 'deform_menu', '-',
+      'tool_slice', 'tool_edit_vertex', '-',
+      'tool_tape_measure', 'tool_protractor', 'tool_dimension', 'tool_text', '-',
+      'tool_axes', 'tool_section_plane',
+    ])
+    expect(chainOf('shape_menu')).toEqual([
+      'tool_revolve', 'tool_loft', 'tool_shell', 'tool_project', '-', 'tool_path_array',
+    ])
+    expect(chainOf('deform_menu')).toEqual([
+      'tool_deform_twist', 'tool_deform_bend', 'tool_deform_taper', 'tool_deform_bend_path',
+    ])
+    expect(source).toContain('"submenu:shape"')
+    expect(source).toContain('"submenu:deform"')
+  })
+
+  it('Object menu: Smooth submenu and Soften Edges… come before Make Solid…', () => {
+    const object = chainOf('object_menu')
+    expect(object.slice(object.indexOf('edit_intersect'))).toEqual([
+      'edit_intersect', '-', 'object_smooth_menu', 'object_soften_edges', '-', 'object_make_solid', 'object_model_health',
+    ])
+    expect(chainOf('object_smooth_menu')).toEqual([
+      'object_smooth_off', 'object_smooth_1', 'object_smooth_2', 'object_smooth_3', '-', 'object_bake_smooth',
+    ])
+  })
+
+  it("the Smooth entries are check items (so the selection's level syncs) and dispatch the palette's action ids", () => {
+    const arms: Array<[string, string]> = [
+      ['object-smooth-off', 'smooth-off'],
+      ['object-smooth-1', 'smooth-1'],
+      ['object-smooth-2', 'smooth-2'],
+      ['object-smooth-3', 'smooth-3'],
+      ['object-bake-smooth', 'bake-smooth'],
+      ['object-soften-edges', 'soften-edges'],
+    ]
+    for (const [id, action] of arms) {
+      expect(new RegExp(`"${id}"\\s*=>\\s*"${action}"`).test(source), `${id} has no dispatch arm to ${action}`).toBe(true)
+    }
+    for (const id of ['object-smooth-off', 'object-smooth-1', 'object-smooth-2', 'object-smooth-3']) {
+      expect(new RegExp(`check_item\\([^;]*?"${id}"`, 's').test(source), `${id} is not a check item`).toBe(true)
+    }
+  })
+
+  it('App syncs the Smooth check marks and enabled state for those native ids', () => {
+    const appSource = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), './App.tsx'), 'utf8')
+    // The ids must be KEYS of the `enabled` map literal (a mention anywhere
+    // else in App.tsx, such as a comment or a dispatch case, must not count).
+    const enabledBody = /const enabled: Record<string, boolean> = \{([\s\S]*?)\n    \}\n/.exec(appSource)?.[1]
+    expect(enabledBody, 'App.tsx has no `enabled` map literal for sync_menu_state').toBeDefined()
+    for (const id of [
+      'object-smooth-off', 'object-smooth-1', 'object-smooth-2', 'object-smooth-3',
+      'object-bake-smooth', 'object-soften-edges',
+    ]) {
+      expect(
+        new RegExp(`^\\s*'${id}':\\s*menuGates\\?\\.\\w+`, 'm').test(enabledBody as string),
+        `${id} is not a key of the enabled map pushed by sync_menu_state`,
+      ).toBe(true)
+    }
+    // The four level ids are written to the `checked` map by one loop over
+    // exactly [0, 1, 2, 3]; dropping a level from the list drops its check.
+    expect(
+      /for \(const level of \[0, 1, 2, 3\]\) \{\s*checked\[`object-smooth-\$\{level === 0 \? 'off' : level\}`\]\s*=/.test(appSource),
+      'the Smooth levels (off, 1, 2, 3) are not all written into the checked map',
+    ).toBe(true)
   })
 })
 

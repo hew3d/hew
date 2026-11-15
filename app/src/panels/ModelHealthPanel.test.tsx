@@ -871,8 +871,12 @@ describe('ModelHealthPanel — search debounce and overlay granularity', () => {
     expect(rowEl('2')).not.toBeNull()
     expect(screen.getByRole('searchbox', { name: 'Search' })).toHaveValue('roo')
     expect(props.onOverlayChange.mock.calls.length).toBe(before)
-    await waitFor(() => expect(rowEl('2')).toBeNull())
-    expect(lastOverlay(props.onOverlayChange)!.ids).toEqual([1n])
+    // The overlay is reported from an effect after the filtered render, so
+    // wait for both (under load the effect can trail the DOM update).
+    await waitFor(() => {
+      expect(rowEl('2')).toBeNull()
+      expect(lastOverlay(props.onOverlayChange)!.ids).toEqual([1n])
+    })
   })
 
   it('stepping a rim keeps the listed ids and revision, changing only the current finding', () => {
@@ -988,6 +992,92 @@ describe("ModelHealthPanel — reasons for items that can't be closed", () => {
     expect(within(rowEl('9')).getByText('Open edges run along a lip')).toBeInTheDocument()
     fireEvent.click(rowEl('9'))
     expect(rowEl('9').querySelector('[data-health-reason]')).toHaveTextContent('They run along a flat lip')
+  })
+})
+
+describe('ModelHealthPanel — zero-area faces', () => {
+  /** A closed object with sliver faces, an open one that also has some, and a clean open one. */
+  const DEGENERATE_ROWS = [
+    row({ object: '10', name: 'Statue', verdict: { kind: 'solid' }, rims: [], degenerate_faces: 3 }),
+    row({ object: '11', name: 'Vent', verdict: { kind: 'cappable' }, degenerate_faces: 2 }),
+    row({ object: '12', name: 'Tile', verdict: { kind: 'cappable' } }),
+  ]
+
+  function degenerateScene(refuseIndex: number | null = null) {
+    const sent: Array<{ method: string; params: { label?: string; commands?: Array<{ method: string; params: Record<string, unknown> }> } }> = []
+    let transacts = 0
+    const scene = makeScene(DEGENERATE_ROWS, {
+      api_connection_open: vi.fn(() => 3),
+      api_connection_close: vi.fn(),
+      object_public_ids: vi.fn((ids: BigUint64Array) => Array.from(ids, (id) => `obj_${id}`)),
+      api_dispatch: vi.fn(taggedDispatch((_c: number, raw: string) => {
+        const req = JSON.parse(raw) as { id: number; method: string; params: (typeof sent)[number]['params'] }
+        sent.push(req)
+        if (req.method !== 'hew.doc.transact') return JSON.stringify({ jsonrpc: '2.0', id: req.id, result: {} })
+        const call = transacts++
+        if (refuseIndex !== null && call === 0) {
+          return JSON.stringify({
+            jsonrpc: '2.0',
+            id: req.id,
+            error: { code: -32000, message: 'refused', data: { refusal: 'nothing_to_remove', failed_index: refuseIndex, explanation: 'No degenerate faces found.' } },
+          })
+        }
+        const results = (req.params.commands ?? []).map((c) => ({ removed: c.params.object === 'obj_10' ? 3 : 2 }))
+        return JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { results, label: req.params.label } })
+      })),
+    })
+    return { scene, sent, transacts: () => sent.filter((s) => s.method === 'hew.doc.transact') }
+  }
+
+  const group = (key: string) => document.querySelector(`[data-health-group="${key}"]`) as HTMLElement
+
+  it('lists a closed object with zero-area faces in its own group, last, with the count', () => {
+    setup({ scene: degenerateScene().scene })
+    const headers = screen.getAllByRole('button', { expanded: true }).map((b) => b.textContent)
+    expect(headers[headers.length - 1]).toBe('▾Has zero-area faces (1)')
+    expect(within(rowEl('10')).getByText('3 zero-area faces')).toBeInTheDocument()
+    // It is not "Needs mending" and has no Keep button or reason.
+    fireEvent.click(rowEl('10'))
+    expect(within(rowEl('10')).queryByRole('button', { name: 'Keep as is' })).not.toBeInTheDocument()
+    expect(rowEl('10').querySelector('[data-health-reason]')).toBeNull()
+  })
+
+  it('shows the button only on rows that have zero-area faces', () => {
+    setup({ scene: degenerateScene().scene })
+    fireEvent.click(rowEl('11'))
+    expect(within(rowEl('11')).getByRole('button', { name: 'Remove degenerate faces' })).toBeInTheDocument()
+    fireEvent.click(rowEl('12'))
+    expect(within(rowEl('12')).queryByRole('button', { name: 'Remove degenerate faces' })).not.toBeInTheDocument()
+  })
+
+  it('the row button sends hew.solid.remove_degenerate_faces and toasts the count', async () => {
+    const { scene, transacts } = degenerateScene()
+    const { props } = setup({ scene })
+    fireEvent.click(rowEl('10'))
+    fireEvent.click(within(rowEl('10')).getByRole('button', { name: 'Remove degenerate faces' }))
+    await waitFor(() => expect(props.onGeometryChanged).toHaveBeenCalledTimes(1))
+    expect(transacts()).toHaveLength(1)
+    expect(transacts()[0].params.commands).toEqual([{ method: 'hew.solid.remove_degenerate_faces', params: { object: 'obj_10' } }])
+    expect(props.onToast).toHaveBeenLastCalledWith('Removed 3 zero-area faces.')
+  })
+
+  it('a group button clears every listed row in one transaction and adds up the faces', async () => {
+    const { scene, transacts } = degenerateScene()
+    const { props } = setup({ scene })
+    fireEvent.click(within(group('openings')).getByRole('button', { name: 'Remove degenerate faces' }))
+    await waitFor(() => expect(props.onGeometryChanged).toHaveBeenCalledTimes(1))
+    expect(transacts()[0].params.commands).toEqual([{ method: 'hew.solid.remove_degenerate_faces', params: { object: 'obj_11' } }])
+    expect(props.onToast).toHaveBeenLastCalledWith('Removed 2 zero-area faces.')
+  })
+
+  it('a refusal shows on the row', async () => {
+    const { scene } = degenerateScene(0)
+    const { props } = setup({ scene })
+    fireEvent.click(rowEl('10'))
+    fireEvent.click(within(rowEl('10')).getByRole('button', { name: 'Remove degenerate faces' }))
+    await waitFor(() => expect(props.onToast).toHaveBeenCalled())
+    expect(within(rowEl('10')).getByText("Couldn't remove the faces: No degenerate faces found.")).toBeInTheDocument()
+    expect(props.onToast).toHaveBeenLastCalledWith("Removed 0 zero-area faces. 1 object couldn't be cleaned; see the list.")
   })
 })
 

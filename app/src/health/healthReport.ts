@@ -11,9 +11,11 @@
  */
 import { plural, t } from '@lingui/core/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { KIND_NAME, PANEL, rowDetail, type KindKey, type OpenReason } from './healthCopy'
+import { KIND_NAME, PANEL, ZERO_AREA, rowDetail, type KindKey, type OpenReason } from './healthCopy'
 
 export type VerdictKind =
+  /** A closed object. Only listed when it has zero-area faces to remove. */
+  | 'solid'
   | 'flat_sheet'
   | 'bent_sheet'
   | 'cappable'
@@ -66,6 +68,8 @@ export interface HealthRow {
   islands: number
   /** How many faces the object has. */
   faces: number
+  /** Faces with no area that "Remove degenerate faces" would clear. */
+  degenerateFaces: number
 }
 
 export interface HealthFamily {
@@ -135,6 +139,7 @@ export function parseHealthReport(json: string): HealthReport {
     branchingVertices: r.branching_vertices ?? 0,
     islands: r.islands ?? 1,
     faces: r.faces ?? 0,
+    degenerateFaces: r.degenerate_faces ?? 0,
   }))
   const families: HealthFamily[] = (raw.families ?? []).map((f: any): HealthFamily => ({
     members: (f.members ?? []).map((m: string) => BigInt(m)),
@@ -329,8 +334,14 @@ export function openReason(row: HealthRow): OpenReason {
 }
 /* oxlint-enable lingui/no-unlocalized-strings */
 
+/** A closed object listed only because it has zero-area faces. */
+export function isSolidRow(row: HealthRow): boolean {
+  return row.verdict.kind === 'solid'
+}
+
 /** One-line detail under a row's name ("2 openings", "Flat panel", "Open edges branch"). */
 export function rowDetailText(row: HealthRow, inSplit?: boolean): string {
+  if (isSolidRow(row)) return ZERO_AREA.detail(row.degenerateFaces)
   return rowDetail(classifyRow(row, inSplit), row.rims.length, row.accepted, openReason(row))
 }
 
@@ -358,7 +369,7 @@ export function filterRows(rows: readonly HealthRow[], filter: HealthFilter): He
     if (row.accepted && !filter.showAccepted && filter.object == null) return false
     if (q === '') return true
     const hay = `${row.name ?? ''} ${row.definitionName ?? ''} ${rowDetailText(row)} ${
-      KIND_NAME[classifyRow(row)]
+      isSolidRow(row) ? ZERO_AREA.group : KIND_NAME[classifyRow(row)]
     }`.toLowerCase()
     return hay.includes(q)
   })
@@ -384,6 +395,8 @@ export interface GroupedHealth {
   groups: HealthGroup[]
   /** Split shapes, one group per family. */
   families: HealthFamilyGroup[]
+  /** Closed objects that have zero-area faces (listed after the kinds). */
+  zeroArea: HealthRow[]
 }
 
 /** Display order of the kinds (`KIND_NAME`'s order). */
@@ -393,7 +406,9 @@ export const KIND_ORDER = Object.keys(KIND_NAME) as KindKey[]
  * Group listed rows by kind (empty groups dropped), split shapes by family.
  * Every row is listed once.
  */
-export function groupRows(report: HealthReport, rows: readonly HealthRow[]): GroupedHealth {
+export function groupRows(report: HealthReport, listedRows: readonly HealthRow[]): GroupedHealth {
+  const zeroArea = listedRows.filter(isSolidRow)
+  const rows = listedRows.filter((r) => !isSolidRow(r))
   const splits = splitFamilySet(report.rows)
   const inSplit = (r: HealthRow): boolean => r.family !== null && splits.has(r.family)
   const groups: HealthGroup[] = []
@@ -420,12 +435,16 @@ export function groupRows(report: HealthReport, rows: readonly HealthRow[]): Gro
         rows: members,
       }
     })
-  return { groups, families }
+  return { groups, families, zeroArea }
 }
 
 /** Number of rows a grouping lists. */
 export function groupedRowCount(g: GroupedHealth): number {
-  return g.groups.reduce((n, x) => n + x.rows.length, 0) + g.families.reduce((n, x) => n + x.rows.length, 0)
+  return (
+    g.groups.reduce((n, x) => n + x.rows.length, 0) +
+    g.families.reduce((n, x) => n + x.rows.length, 0) +
+    g.zeroArea.length
+  )
 }
 
 /** Every listed row, in display order (the overlay and keyboard stepping). */
@@ -435,6 +454,7 @@ export function groupedRows(g: GroupedHealth): HealthRow[] {
     if (key === 'split') for (const f of g.families) out.push(...f.rows)
     else for (const x of g.groups) if (x.key === key) out.push(...x.rows)
   }
+  out.push(...g.zeroArea)
   return out
 }
 

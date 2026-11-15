@@ -22,7 +22,7 @@
 import { i18n, type MessageDescriptor } from '@lingui/core'
 import { msg, t } from '@lingui/core/macro'
 import type { ToolName } from '../tools/toolIcons'
-import { toolLabel } from '../tools/toolRegistry'
+import { TOOL_REGISTRY, toolLabel } from '../tools/toolRegistry'
 import { isSketchScopedKind, type NodeRef } from './treeModel'
 
 export type DockContext = 'empty' | 'object' | 'group' | 'instance' | 'multi' | 'sketch'
@@ -62,23 +62,12 @@ export function deriveDockContext(selectedIds: NodeRef[], selectedGuide: bigint 
   return kind
 }
 
-/* oxlint-disable lingui/no-unlocalized-strings -- tool registry names are identifiers; the display label is resolved with toolLabel() */
-const TOOL_VERB_NAME: Record<string, ToolName> = {
-  'tool-rectangle': 'Rectangle',
-  'tool-line': 'Line',
-  'tool-circle': 'Circle',
-  'tool-arc': 'Arc',
-  'tool-pushpull': 'Push/Pull',
-  'tool-move': 'Move',
-  'tool-paint': 'Paint',
-  'tool-position-texture': 'Position Texture',
-  'tool-scale': 'Scale',
-  'tool-rotate': 'Rotate',
-}
-/* oxlint-enable lingui/no-unlocalized-strings */
+/** Tool command id -> registry tool, from the registry itself (the dock
+ *  lists commands by id; the label and icon come from the tool). */
+const TOOL_VERB_NAME: ReadonlyMap<string, ToolName> = new Map(TOOL_REGISTRY.map((t) => [t.actionId, t.name]))
 
 function toolVerb(id: string): DockVerb {
-  return { id, toolName: TOOL_VERB_NAME[id] }
+  return { id, toolName: TOOL_VERB_NAME.get(id) }
 }
 
 const EMPTY_VERBS: DockVerb[] = [
@@ -94,19 +83,20 @@ const EMPTY_VERBS: DockVerb[] = [
 
 /** Spec's Face row (Push/Pull primary, then Offset · Move · Paint · Erase) is
  * the nearest analog for Hew's Object context — Offset is skipped because Hew
- * has no Offset tool (align only where the verb already exists). Make
+ * has no Offset tool (align only where the verb already exists). Fillet is
+ * second (the most-wanted True Curves tool: with an object selected it arms
+ * every sharp edge at once) and Shell is the other verb that takes a whole
+ * solid (docs/design/true-curves-ui-organization.md section 5). Make
  * Component rides along (gated by `DockGates.canMakeComponent`) so turning a
  * plain object into a reusable definition is one click, not a menu dive. */
 const OBJECT_VERBS: DockVerb[] = [
   toolVerb('tool-pushpull'),
+  toolVerb('tool-fillet'),
   toolVerb('tool-move'),
+  // Paint is the way to Position Texture (the tool stays in the Tools menu and
+  // the palette): the row is capped at eight chips.
   toolVerb('tool-paint'),
-  // Position Texture (paint-tool design §3): shown unconditionally, same
-  // posture as Paint — the dock has no per-face gate (no face-level
-  // selection model, see this module's doc comment), so the TOOL itself
-  // toasts on a click that misses a textured face rather than the dock
-  // hiding/disabling the verb.
-  toolVerb('tool-position-texture'),
+  toolVerb('tool-shell'),
   { id: 'edit-make-component', label: msg`Make Component` },
   // Library effort: saves the selection as a reusable `.hew` item (gated by
   // DockGates.canSaveToLibrary — hidden outright on a platform with no
@@ -159,25 +149,35 @@ const LINKED_COPY_VERBS: DockVerb[] = [
   { id: 'save-to-library', label: msg`Save to Library` },
 ]
 
-/** Group (gated by `DockGates.canGroup`) is the natural next step after
- * sweeping up several things — the same `edit-group` action as Object ▸ Group. */
+/** Move first (it works on any mix), then the three booleans (gated by
+ * `DockGates.canBoolean` — the Object menu's gate, so they appear only for a
+ * selection the kernel will take), then Group (gated by `DockGates.canGroup`)
+ * — the natural next step after sweeping up several things, the same
+ * `edit-group` action as Object ▸ Group. */
 const MULTI_VERBS: DockVerb[] = [
   toolVerb('tool-move'),
+  { id: 'edit-union', label: msg`Union` },
+  { id: 'edit-subtract', label: msg`Subtract` },
+  { id: 'edit-intersect', label: msg`Intersect` },
   { id: 'edit-group', label: msg`Group` },
   { id: 'edit-delete', label: msg`Erase` },
 ]
 
 /** A free-standing (not-yet-extruded) sketch's row: Push/Pull primary (it's
- * the verb that turns the sketch into a real Object), then the transform
- * trio Move/Rotate/Scale (MoveTool/RotateTool/ScaleTool all already handle
- * `NodeRef.kind === 'sketch'` — "sketches are first-class interactable"),
- * then Erase. Same verb ids as the other rows so `menuActionRef` dispatch
- * and `activeToolId` highlighting need no special-casing for this context. */
+ * the verb that turns the sketch into a real Object), then the other verbs
+ * that turn a drawing into a solid — Revolve and Loft — and Follow Me, the
+ * one SketchUp users expect. Move/Rotate follow (MoveTool/RotateTool both
+ * already handle `NodeRef.kind === 'sketch'` — "sketches are first-class
+ * interactable"); Scale stays one key away. Erase is last. Same verb ids as
+ * the other rows so `menuActionRef` dispatch and `activeToolId` highlighting
+ * need no special-casing for this context. */
 const SKETCH_VERBS: DockVerb[] = [
   toolVerb('tool-pushpull'),
+  toolVerb('tool-revolve'),
+  toolVerb('tool-loft'),
+  toolVerb('tool-follow-me'),
   toolVerb('tool-move'),
   toolVerb('tool-rotate'),
-  toolVerb('tool-scale'),
   { id: 'edit-delete', label: msg`Erase` },
 ]
 
@@ -185,13 +185,14 @@ const SKETCH_VERBS: DockVerb[] = [
  * Whether a verb is actually usable given how the dock arrived at its
  * context. When the dock shows the sketch row only because the cursor is
  * HOVERING a sketch region (nothing is selected — `hoverPreviewOnly`), the
- * only verb that genuinely acts on the hovered region from a click-through
- * is Push/Pull; Move/Rotate/Scale/Erase all need the sketch to actually be
- * selected first, so they render disabled in the preview. With a real
- * selection (hoverPreviewOnly = false) every verb is enabled.
+ * verbs that genuinely act on the hovered region from a click-through are
+ * Push/Pull, Revolve, and Loft (each starts by clicking a shape); Follow Me
+ * needs a path first, and Move/Rotate/Erase need the sketch to actually be
+ * selected, so they render disabled in the preview. With a real selection
+ * (hoverPreviewOnly = false) every verb is enabled.
  */
 export function isDockVerbEnabled(verb: DockVerb, hoverPreviewOnly: boolean): boolean {
-  return !hoverPreviewOnly || verb.id === 'tool-pushpull'
+  return !hoverPreviewOnly || verb.id === 'tool-pushpull' || verb.id === 'tool-revolve' || verb.id === 'tool-loft'
 }
 
 /**
@@ -206,6 +207,10 @@ export interface DockGates {
   canGroup: boolean
   /** ≥1 sibling object/group/instance, top level (Object ▸ Make Component). */
   canMakeComponent: boolean
+  /** The selection is a valid boolean operand set (Object ▸ Union / Subtract /
+   * Intersect). Optional so call sites that predate the multi row's boolean
+   * chips keep compiling; omitted is treated as false (hidden). */
+  canBoolean?: boolean
   /** Whether the platform has a working library backend
    * (`libraryStore().available()`) — hides Save to Library when false.
    * Optional (unlike the two gates above) so call sites that predate the
@@ -237,6 +242,7 @@ export function dockVerbsFor(context: DockContext, gates?: DockGates): DockVerb[
   return verbs.filter((v) => {
     if (v.id === 'edit-group') return gates.canGroup
     if (v.id === 'edit-make-component') return gates.canMakeComponent
+    if (v.id === 'edit-union' || v.id === 'edit-subtract' || v.id === 'edit-intersect') return gates.canBoolean ?? false
     if (v.id === 'save-to-library') return gates.canSaveToLibrary ?? false
     if (v.id === 'edit-unlink-all') return gates.canUnlinkAll ?? false
     return true

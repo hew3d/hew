@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { Fragment, useEffect, useState, useCallback, useRef, useMemo, useSyncExternalStore } from 'react'
 import { useClearSelectionOnDrawTool } from './useClearSelectionOnDrawTool'
 import { i18n } from '@lingui/core'
 import { ph, plural, t } from '@lingui/core/macro'
@@ -30,6 +30,7 @@ import { TitleBar } from './TitleBar'
 import { isCoarsePointer, isLinux, isMac, isWindows } from './platform'
 import { forwardToTextField, isTextFieldFocused, pasteTextIntoFocusedField } from './clipboard/textFieldPaste'
 import { nextPaint } from './paint'
+import { BUSY_REFUSED } from './busyCard'
 import { beginOpenAttempt, clearOpenAttempt, forgetSettledFailure, openAttemptFailed } from './log/failedOpen'
 import { getPanicCapture, recordKernelStop } from './log/panicCapture'
 import { kernelMemoryBytes } from './wasm/kernelMemory'
@@ -57,6 +58,9 @@ import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
 import { ChangesPanel } from './panels/ChangesPanel'
 import { ModelHealthPanel, selectionObjectIds } from './panels/ModelHealthPanel'
+import { bakeSmooth, setSmoothLevel, smoothDenseToasts, smoothLevels, smoothRefusal } from './panels/smoothActions'
+import { ACTION_TOAST_MS, toastActionFor, type ToastAction } from './toastActions'
+import { HISTORY_TRIM_NOTE_MS, HISTORY_TRIM_TOOLTIP, historyTrimNote, takeHistoryTrim } from './historyTrim'
 import { FloatingWindow } from './panels/FloatingWindow'
 import { MakeSolidWizard } from './panels/MakeSolidWizard'
 import { MakeSolidSketches, selectedSketchIds } from './panels/MakeSolidSketches'
@@ -82,7 +86,20 @@ import { pumpEvents } from './api/eventPump'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
 import { EDIT_CONTEXT_HINT_CODE } from './tools/faceDraw'
+import { getToolStageLabel, subscribeToolStageLabel } from './tools/stageLabel'
+import {
+  setFilletProfile,
+  getFilletSettings,
+  subscribeFilletSettings,
+  getFilletMeasurementLabelOverride,
+  subscribeFilletMeasurementLabel,
+} from './tools/filletSettings'
+import { profileSizeLabel } from './viewport/ProfileChip'
+import { panelsForTool } from './tools/toolPanels'
 import { outlinerDrawing, resolveDraft, setKernelHidden, type OutlinerDrawing, type PlaneUnitsScene } from './tools/planeUnits'
+import { setDeformMode, getDeformMode, subscribeDeformMode } from './tools/deformMode'
+import { runToolAction } from './tools/toolActions'
+import { smoothLevelFor } from './curveActions'
 import { makeFileHost, isTauri, FileReadError, type DocFormat, type ExportFileType, type FileHost, type FileRef, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
 import {
   panelIdFor,
@@ -127,7 +144,7 @@ import { BusyOverlay, ImportingOverlay, type OpenProgress, ensureSpinnerKeyframe
 import { RecoveryDialog } from './panels/RecoveryDialog'
 import { WelcomeScreen, type SampleEntry } from './panels/WelcomeScreen'
 import { getShowWelcome, setShowWelcome } from './settings/welcomeScreen'
-import { getLengthUnit, setLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit, type LengthFormat } from './settings/units'
+import { formatLength, getLengthUnit, setLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit, type LengthFormat } from './settings/units'
 import { StlExportDialog } from './panels/StlExportDialog'
 import { StlUnitsDialog } from './panels/StlUnitsDialog'
 import { RescaleConfirmDialog } from './panels/RescaleConfirmDialog'
@@ -153,7 +170,10 @@ import { libraryStore } from './io/libraryStore'
 import { buildItemGhost } from './library/ghostBuilder'
 import { readItemSummary, renderItemThumbnail, sha256Hex } from './library/itemFiles'
 import { loadThumbnails as loadSceneThumbnails, saveThumbnails as saveSceneThumbnails } from './scenes/sceneThumbnails'
-import { buildLibraryItem } from './library/libraryModel'
+import { buildLibraryItem, builtInProfileItem } from './library/libraryModel'
+import { builtInFilletProfile, builtInItemBytes, bundledProfiles, chainFirstFix, chainItemBytes, profileShapeOfBytes, shapeProfile } from './library/profiles'
+import { selectionChain } from './library/profileSelection'
+import { useProfileSections } from './library/useProfileSections'
 import { itemFileName } from './library/fileNaming'
 import type { LibraryCategory, LibraryItem } from './library/types'
 import type { LibraryPlacement } from './tools/LibraryPlaceTool'
@@ -196,6 +216,23 @@ import { TOOLS, isToolAction, toolLabel, type ToolName } from './tools/toolRegis
 /** Autosave tick interval (ms). Exported as a test seam (App.autosave.test.tsx
  *  drives fake timers by this exact value rather than hardcoding it). */
 export const AUTOSAVE_INTERVAL_MS = 12000
+
+/** Operands drawn with at least this many triangles get the busy card
+ *  before a boolean: a dense scan takes seconds to combine. */
+export const LARGE_BOOLEAN_TRIANGLES = 100_000
+/** The busy card's words for a boolean of kind `op` (0 Union, 1 Subtract, 2 Intersect). */
+function booleanBusyLabel(op: number): string {
+  switch (op) {
+    case 0:
+      return t`Combining…`
+    case 1:
+      return t`Subtracting…`
+    case 2:
+      return t`Intersecting…`
+    default:
+      return t`Working…`
+  }
+}
 /** Right-tray width: default/bounds (px) + localStorage persistence key.
  *  Default is sized so typical nested tag/outliner labels fit untruncated. */
 const TRAY_WIDTH_DEFAULT = 304
@@ -245,6 +282,8 @@ interface Toast {
    * it to edit the component"): drawn in the accent tint, larger, and kept
    * up longer, so the way in is not missed at the bottom of the window. */
   emphasis?: boolean
+  /** A button on the toast (the DegenerateInput toast offers Model Health). */
+  action?: ToastAction
 }
 
 let toastCounter = 0
@@ -258,6 +297,15 @@ const DRAW_TOOLS: ReadonlySet<string> = new Set(['Line', 'Rectangle', 'Circle', 
 /** Tool name → native menu item id, for the macOS menu's radio checks.
  * Exported for the native-menu parity test (`nativeMenuParity.test.ts`):
  * every id here must exist as a real item in the Tauri shell's menu. */
+/** Deform's four mode entries on the native menu, keyed by mode. They are
+ * radio items like the tools: only the running mode is checked. */
+export const DEFORM_MENU_IDS: Record<string, string> = {
+  'twist': 'tool-deform-twist',
+  'bend': 'tool-deform-bend',
+  'taper': 'tool-deform-taper',
+  'bend-to-path': 'tool-deform-bend-path',
+}
+
 export const TOOL_MENU_IDS: Record<string, string> = {
   Select: 'tool-select',
   Rectangle: 'draw-rectangle',
@@ -267,7 +315,17 @@ export const TOOL_MENU_IDS: Record<string, string> = {
   Line: 'draw-line',
   'Push/Pull': 'tool-pushpull',
   'Follow Me': 'tool-follow-me',
+  Revolve: 'tool-revolve',
+  Loft: 'tool-loft',
+  // Deform's menu item is its Twist entry; the four mode entries below it
+  // (Twist, Bend, Taper, Bend to Path) all open the one tool.
+  Deform: 'tool-deform-twist',
   Offset: 'tool-offset',
+  Fillet: 'tool-fillet',
+  'Array along Path': 'tool-path-array',
+  Shell: 'tool-shell',
+  Project: 'tool-project',
+  Eraser: 'tool-eraser',
   Paint: 'tool-paint',
   'Position Texture': 'tool-position-texture',
   Move: 'tool-move',
@@ -483,6 +541,11 @@ async function focusExistingWindowFor(path: string): Promise<boolean> {
   }
 }
 
+/** What to do about a drawing that cannot be a profile. */
+function profileRedrawHint(): string {
+  return t`Draw one open line or arc that runs from one side to the other without doubling back.`
+}
+
 export default function App() {
   const { t, i18n: activeI18n } = useLingui()
   /** Tray section titles: the heading text AND the key `toggleSection` uses
@@ -500,6 +563,16 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifier
   const [toolName, setToolName] = useState<string>('Select')
+  /** The Fillet tool's sticky profile, for its measurement label. */
+  const filletSettings = useSyncExternalStore(subscribeFilletSettings, getFilletSettings, getFilletSettings)
+  // A tool's stage can rename its value (the Arc tool's "Bulge").
+  const toolStageLabel = useSyncExternalStore(subscribeToolStageLabel, getToolStageLabel, getToolStageLabel)
+  // A held grip names its own value ("Stop", "Position", "Radius").
+  const filletGripLabel = useSyncExternalStore(
+    subscribeFilletMeasurementLabel,
+    getFilletMeasurementLabelOverride,
+    getFilletMeasurementLabelOverride,
+  )
   /** Live stage-aware guidance from the active tool (Tool.statusHint);
    *  null = fall back to the palette's static tool description. */
   const [toolStageHint, setToolStageHint] = useState<string | null>(null)
@@ -511,6 +584,13 @@ export default function App() {
   /** Precision snapping (the Ctrl/⌘+Alt chord held) — modal state, so it
    * gets a status-bar chip rather than living only in the viewport. */
   const [precisionSnap, setPrecisionSnap] = useState(false)
+  /** Undo steps kept by the last undo-memory trim (historyTrim.ts), shown
+   * as a status-bar note for a while; null when there is no note. */
+  const [historyTrimKept, setHistoryTrimKept] = useState<number | null>(null)
+  const historyTrimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => {
+    if (historyTrimTimerRef.current !== null) clearTimeout(historyTrimTimerRef.current)
+  }, [])
   const [snapKind, setSnapKind] = useState<string | null>(null)
   const [measurement, setMeasurement] = useState<string>('')
   /** True when `measurement` is a finished Tape Measure reading kept on
@@ -526,6 +606,8 @@ export default function App() {
   /** Tool driven from toolbar clicks */
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifier
   const [activeTool, setActiveTool] = useState<ToolName>('Select')
+  /** Which Deform mode (Twist, Bend, Taper, Bend to Path) the next or the running Deform tool is in. */
+  const deformMode = useSyncExternalStore(subscribeDeformMode, getDeformMode)
   /** Bumped on every EXPLICIT camera-tool selection (menu/native
    * menu/keyboard) — see `activateTool` below. Forces Viewport to re-apply
    * the tool even when `name` is unchanged from `activeTool`'s current
@@ -748,6 +830,9 @@ export default function App() {
   const toggleXray = useCallback(() => setRenderMode((m) => toggledRenderMode(m, 'xray')), [])
   const toggleWireframe = useCallback(() => setRenderMode((m) => toggledRenderMode(m, 'wireframe')), [])
   const [showGuides, setShowGuides] = useState(true)
+  /** View ▸ Tangent Edges: thin lines on fillet rails and other tangent
+   * joints. Default off; not captured by Scenes. */
+  const [tangentEdgesVisible, setTangentEdgesVisible] = useState(false)
   /** Camera ▸ Parallel Projection checkbox state (docs/design/camera.md §1)
    * — a RENDER CACHE of the rig's own truth, mirroring showAxes/showGrid's
    * pattern but populated from Viewport's `onProjectionChange` callback
@@ -1479,8 +1564,38 @@ export default function App() {
     setInferenceInfo(info)
   }, [])
 
-  const handleSceneChange = useCallback((wtMap: Map<bigint, boolean>) => {
+  // Objects already told their Smooth surface is off (once per object).
+  const smoothDenseWarnedRef = useRef(new Set<bigint>())
+
+  const handleSceneChange = useCallback((wtMap: Map<bigint, boolean>, touchedObjectIds?: readonly bigint[]) => {
     setWatertightMap(new Map(wtMap))
+    // A committed edit that names the objects it touched: say so once if one
+    // of them is smoothed and its surface can no longer be drawn. Only the
+    // touched objects are read, never the whole document.
+    const scene = sceneRef.current
+    if (scene !== null) {
+      // On a dense model the kernel may have let the oldest undo steps go
+      // to stay under its memory budget: say so once in the status bar.
+      const kept = takeHistoryTrim(scene)
+      if (kept !== null) {
+        setHistoryTrimKept(kept)
+        if (historyTrimTimerRef.current !== null) clearTimeout(historyTrimTimerRef.current)
+        historyTrimTimerRef.current = setTimeout(() => {
+          historyTrimTimerRef.current = null
+          setHistoryTrimKept(null)
+        }, HISTORY_TRIM_NOTE_MS)
+      }
+      // A commit names the objects it touched; a refresh that names none
+      // (an undo, a boolean) checks every smoothed object instead, a short
+      // list the kernel keeps.
+      const complete = touchedObjectIds === undefined
+      const ids = touchedObjectIds ?? Array.from(scene.smoothed_object_ids())
+      if (ids.length > 0 || complete) {
+        for (const t of smoothDenseToasts(scene, ids, smoothDenseWarnedRef.current, complete)) {
+          handleToastRef.current(t.message, t.code)
+        }
+      }
+    }
   }, [])
 
   const handleSelect = useCallback((node: NodeRef | null, mode: SelectMode) => {
@@ -1552,6 +1667,10 @@ export default function App() {
     setShowModelHealth(true)
     setHealthFocusNonce((n) => n + 1)
   }, [])
+
+  // The DegenerateInput toast (below) reaches Model Health through this ref.
+  const openModelHealthRef = useRef(openModelHealth)
+  openModelHealthRef.current = openModelHealth
 
   // The viewport draws ONE health overlay. The Model Health panel and the
   // Make Solid wizard both ask for one; while the wizard has something
@@ -2341,10 +2460,13 @@ export default function App() {
 
     const id = ++toastCounter
     const emphasis = code === EDIT_CONTEXT_HINT_CODE
-    setToasts((prev) => [...prev, { id, message, code, isError, emphasis }])
+    // A boolean refused for a zero-area face points at the repair: the
+    // selection is the operands, so Model Health lists them.
+    const action = toastActionFor(code, (view) => openModelHealthRef.current(view))
+    setToasts((prev) => [...prev, { id, message, code, isError, emphasis, action }])
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id))
-    }, emphasis ? 7000 : 4000)
+    }, action !== undefined ? ACTION_TOAST_MS : emphasis ? 7000 : 4000)
   }, [])
   const handleToastRef = useRef(handleToast)
   handleToastRef.current = handleToast
@@ -2698,9 +2820,33 @@ export default function App() {
     // while a component frame is open. `componentFrameOpen` itself is the
     // top-level derived const (shared with the import/3D-Text gates and the
     // native menu sync below).
+    // Object ▸ Smooth / Soften Edges…: enabled with one or more solids in
+    // the selection; the check mark follows the shared level (none when the
+    // selection mixes levels).
+    let smoothObjects: bigint[] = []
+    let smoothLevel: number | null = null
+    // Soften Edges… lives in Object Info's Smooth section, which renders only
+    // for direct solid Object nodes (groups and instances show no angle
+    // field), so its gate does not expand the selection the way canSmooth does.
+    let canSoften = false
+    try {
+      canSoften = selectedIds.some((n) => n.kind === 'object' && scene.object_solid(n.id))
+    } catch {
+      canSoften = false
+    }
+    try {
+      smoothObjects = selectionObjectIds(scene, selectedIds)
+      const levels = smoothLevels(scene, smoothObjects)
+      if (levels.length > 0 && levels.every((l) => l === levels[0])) smoothLevel = levels[0]
+    } catch {
+      smoothObjects = []
+    }
     const linkedSelection = linkedPlacementOf(scene, selectedIds) !== null
     return {
       booleanOperands,
+      canSmooth: smoothObjects.length > 0,
+      canSoften,
+      smoothLevel,
       // Same top-level rule the kernel enforces (GroupedOperand): a nested
       // node picked in the Outliner must not light the commands up only to
       // be refused on commit. Editing INSIDE a component instance's own
@@ -2940,6 +3086,7 @@ export default function App() {
   const applyLoadedBytes = useCallback((bytes: Uint8Array, file?: LoadedFile, opts?: { keepCamera?: boolean; announce?: boolean }): boolean => {
     const scene = sceneRef.current
     if (scene === null) return false
+    profileSourceRef.current = null
     // Revert to Saved reloads the document under the person's feet: the view
     // stays where it is, over the camera the file was saved with.
     const keptCamera = opts?.keepCamera === true ? viewportApi.current?.getCameraState() : undefined
@@ -4460,6 +4607,10 @@ export default function App() {
   }, [])
 
   // ---------------------------------------------------------------- glTF export
+  /** "Export cages instead" (a Smooth object's cage, not its smooth surface),
+   *  chosen in the Export dialog or panel and held across the solid-gating
+   *  confirmation step. */
+  const exportCagesRef = useRef<boolean | undefined>(undefined)
   const exportGltf = useCallback(async () => {
     const api = viewportApi.current
     if (api === null) {
@@ -4468,7 +4619,7 @@ export default function App() {
     }
     let bytes: Uint8Array | null
     try {
-      bytes = await api.exportGlb()
+      bytes = await api.exportGlb(exportCagesRef.current)
     } catch (err: unknown) {
       handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
@@ -4508,7 +4659,7 @@ export default function App() {
     }
     let bytes: Uint8Array | null
     try {
-      bytes = await api.exportUsdz()
+      bytes = await api.exportUsdz(exportCagesRef.current)
     } catch (err: unknown) {
       handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
@@ -4558,7 +4709,7 @@ export default function App() {
     }
     let bytes: Uint8Array | null
     try {
-      bytes = await api.exportStl(stlSegmentsRef.current)
+      bytes = await api.exportStl(stlSegmentsRef.current, exportCagesRef.current)
     } catch (err: unknown) {
       handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
@@ -4594,7 +4745,7 @@ export default function App() {
     }
     let bytes: Uint8Array | null
     try {
-      bytes = await api.export3mf()
+      bytes = await api.export3mf(exportCagesRef.current)
     } catch (err: unknown) {
       handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
@@ -4736,8 +4887,22 @@ export default function App() {
   const [saveToLibraryTarget, setSaveToLibraryTarget] = useState<
     | { kind: 'selection'; nodeKinds: Uint8Array; nodeIds: BigUint64Array; defaultName: string }
     | { kind: 'document'; defaultName: string }
+    | {
+        /** A profile item (Fillet's profile chip, a built-in's copy, or an
+         *  edited profile document). `build` makes the item bytes for the
+         *  `hew.library` metadata the save mints. */
+        kind: 'profile'
+        defaultName: string
+        build: (meta: Record<string, unknown>) => Promise<Uint8Array | null> | Uint8Array | null
+        rows: Array<{ label: string; value: string }>
+        /** The item an edited profile was opened from, to overwrite. */
+        replace?: { fileName: string; id: string; name: string }
+      }
     | null
   >(null)
+  /** The profile item this window's document was opened from ("Open for
+   *  editing"), for Library ▸ Save's "Replace" offer. Cleared on any load. */
+  const profileSourceRef = useRef<{ fileName: string; id: string; name: string } | null>(null)
 
   /** The linked copy being promoted to a component (Make component), awaiting
    * its name. `null` = prompt closed. */
@@ -4912,11 +5077,73 @@ export default function App() {
    * toast. Kernel refusals (an open component session, …) route through
    * kernelErrors.ts like every other call site. */
   const handleSaveToLibraryCommit = useCallback(
-    (name: string) => {
+    (name: string, opts?: { replace?: boolean }) => {
       const target = saveToLibraryTarget
       setSaveToLibraryTarget(null)
       const scene = sceneRef.current
       if (scene === null || target === null) return
+      if (target.kind === 'profile') {
+        // A profile item: no thumbnail pass (the Library renders one from
+        // its shape), no source stamping (nothing in the model came from it).
+        void (async () => {
+          const replacing = opts?.replace === true && target.replace !== undefined ? target.replace : null
+          const id = replacing?.id ?? crypto.randomUUID()
+          let bytes: Uint8Array | null
+          try {
+            bytes = await target.build({
+              id,
+              name,
+              category: 'profile',
+              savedAt: new Date().toISOString(),
+              sourceDoc: documentName(docSessionRef.current),
+            })
+          } catch (err) {
+            const code = parseKernelErrorCode(err)
+            handleToast(kernelErrorMessage(code ?? 'Unknown', err instanceof Error ? err.message : String(err)), code ?? undefined)
+            return
+          }
+          const redrawHint = profileRedrawHint()
+          const replacingName = replacing?.name ?? ''
+          if (bytes === null) {
+            // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code
+            handleToast(t`This drawing isn't a profile Hew can use. ${redrawHint}`, 'InvalidProfile')
+            return
+          }
+          // Only a shape the Fillet tool can read is worth keeping: a drawing
+          // that is not one (a chain that doubles back, say) must not take
+          // the place of a good saved profile, or become a blank one.
+          let readable: boolean
+          try {
+            readable = (await profileShapeOfBytes(bytes, { strict: true })) !== null
+          } catch {
+            // Not a verdict on the drawing: the check itself could not run.
+            handleToast(
+              replacing !== null
+                ? t`Hew couldn't check this drawing, so "${replacingName}" was left as it was. Try again; if it keeps happening, use Report Bug.`
+                : t`Hew couldn't check this drawing, so nothing was saved. Try again; if it keeps happening, use Report Bug.`,
+            )
+            return
+          }
+          if (!readable) {
+            handleToast(
+              replacing !== null
+                ? t`This drawing isn't a profile Hew can use, so "${replacingName}" was left as it was. ${redrawHint}`
+                : t`This drawing isn't a profile Hew can use, so nothing was saved. ${redrawHint}`,
+            )
+            return
+          }
+          const fileName = replacing?.fileName ?? itemFileName(name, id, 'profile')
+          try {
+            await libraryStore().write(fileName, bytes)
+          } catch (err) {
+            const reason = err instanceof Error ? err.message : String(err)
+            handleToast(t`Save profile failed: ${reason}`)
+            return
+          }
+          handleToast(replacing !== null ? t`Replaced profile "${name}".` : t`Saved profile "${name}".`)
+        })()
+        return
+      }
       const id = crypto.randomUUID()
       const meta = {
         id,
@@ -5173,7 +5400,14 @@ export default function App() {
         const pristine = isPristineDocument(docSessionRef.current, scene)
         if (pristine) {
           const ok = applyLoadedBytes(bytes, { name: `${item.displayName}.hew`, label: OPEN_FILE_LABELS.hew })
-          if (ok) setDocSession(afterImport(item.displayName, Date.now()))
+          if (ok) {
+            setDocSession(afterImport(item.displayName, Date.now()))
+            // An edited profile can replace the item it came from.
+            profileSourceRef.current =
+              item.category === 'profile'
+                ? { fileName: item.file.fileName, id: item.meta.id ?? '', name: item.displayName }
+                : null
+          }
           return
         }
         const cantRoute = () =>
@@ -5256,6 +5490,113 @@ export default function App() {
     },
     [handleToast, handleDocumentChanged],
   )
+
+  /** Library ▸ Use on a profile: arm the Fillet tool with it. */
+  const onLibraryUseProfile = useCallback(
+    (item: LibraryItem, bytes: Uint8Array | null) => {
+      void (async () => {
+        let profile: ReturnType<typeof shapeProfile> | null = null
+        if (bytes === null) {
+          profile = await builtInFilletProfile(item.file.fileName)
+        } else {
+          const parsed = await profileShapeOfBytes(bytes)
+          if (parsed !== null) profile = shapeProfile(item.meta.id ?? item.file.fileName, item.displayName, parsed.shape)
+        }
+        if (profile === null) {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code and empty detail
+          handleToast(kernelErrorMessage('InvalidProfile', ''), 'InvalidProfile')
+          return
+        }
+        setFilletProfile(profile)
+        setShowLibrary(false)
+        setActiveTool('Fillet')
+      })()
+    },
+    [handleToast],
+  )
+
+  /** The "Detected width" row of a profile save prompt, from the bytes it
+   *  would write. */
+  const profileWidthRows = useCallback(async (bytes: Uint8Array | null): Promise<Array<{ label: string; value: string }>> => {
+    const parsed = bytes === null ? null : await profileShapeOfBytes(bytes)
+    return parsed === null ? [] : [{ label: t`Detected width`, value: formatLength(parsed.width) }]
+  }, [t])
+
+  /** Library ▸ Save a copy on a built-in profile, and the profile chip's
+   *  "Save profile…" with a built-in chosen. */
+  const openSaveBuiltInCopy = useCallback(
+    (id: string, name: string) => {
+      void (async () => {
+        const build = (meta: Record<string, unknown>) => builtInItemBytes(id, meta)
+        const preview = await build({ id: 'preview', name, category: 'profile' })
+        setSaveToLibraryTarget({
+          kind: 'profile',
+          defaultName: `${name} copy`,
+          build,
+          rows: await profileWidthRows(preview),
+        })
+      })()
+    },
+    [profileWidthRows],
+  )
+  const onLibrarySaveProfileCopy = useCallback(
+    (item: LibraryItem) => {
+      setShowLibrary(false)
+      openSaveBuiltInCopy(item.file.fileName, item.displayName)
+    },
+    [openSaveBuiltInCopy],
+  )
+
+  /** The profile chip's "Save profile…": the selected drawn chain, else a
+   *  copy of the built-in profile that is current. */
+  const openSaveProfile = useCallback(() => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    const chain = selectionChain(scene, selectedIds)
+    if (chain !== null) {
+      const fix = chainFirstFix(chain.segments)
+      if (fix !== null) {
+        handleToast(fix)
+        return
+      }
+      void (async () => {
+        const build = (meta: Record<string, unknown>) => chainItemBytes(chain.segments, chain.normal, meta)
+        const preview = await build({ id: 'preview', name: 'Profile', category: 'profile' })
+        if (preview === null) {
+          const redrawHint = profileRedrawHint()
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code
+          handleToast(t`This drawing isn't a profile Hew can use. ${redrawHint}`, 'InvalidProfile')
+          return
+        }
+        setSaveToLibraryTarget({
+          kind: 'profile',
+          defaultName: t`My profile`,
+          build,
+          rows: await profileWidthRows(preview),
+        })
+      })()
+      return
+    }
+    const current = getFilletSettings().profile
+    if (current.kind === 'shape' && current.id.startsWith('builtin:')) {
+      openSaveBuiltInCopy(current.id, current.name)
+      return
+    }
+    handleToast(t`Select a drawn open line or arc first, then save it as a profile.`)
+  }, [selectedIds, handleToast, openSaveBuiltInCopy, profileWidthRows])
+
+  const profileCanSave = useMemo(() => {
+    const scene = sceneRef.current
+    const current = filletSettings.profile
+    if (current.kind === 'shape' && current.id.startsWith('builtin:')) return true
+    return scene !== null && selectedIds.length > 0 && selectionChain(scene, selectedIds) !== null
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIds, filletSettings.profile, docRev])
+  const profileSections = useProfileSections({
+    active: activeTool === 'Fillet',
+    canSave: profileCanSave,
+    onSave: openSaveProfile,
+  })
 
   const libraryMaterialInPalette = useCallback(
     async (bytes: Uint8Array): Promise<boolean> => {
@@ -5366,8 +5707,9 @@ export default function App() {
     }
   }, [handleToast, pushCameraStateToScene])
 
-  const handleExportFormat = useCallback((format: ExportFormat, stlSegmentsPerTurn: number, svg?: SvgExportOptions, skpCompat = false) => {
+  const handleExportFormat = useCallback((format: ExportFormat, stlSegmentsPerTurn: number, svg?: SvgExportOptions, skpCompat = false, cages?: boolean) => {
     setExportDialogOpen(false)
+    exportCagesRef.current = cages === true ? true : undefined
     if (isSkpExportFormat(format)) {
       void exportSkp(format, skpCompat)
     } else if (format === 'glb') {
@@ -5395,13 +5737,13 @@ export default function App() {
     const extension = isSkpExportFormat(initial) ? 'skp' : initial
     const name = `${documentBaseName(docSessionRef.current)}.${extension}`
     try {
-      const pick = await pickSaveTarget(t`Export`, name, exportPanelFormats(unit, initial, skpCompatRef.current), exportPanelIdFor(initial))
+      const pick = await pickSaveTarget(t`Export`, name, exportPanelFormats(unit, initial, skpCompatRef.current, sceneRef.current?.has_smoothed_objects() === true), exportPanelIdFor(initial))
       if (pick === null) return
       const choice = exportChoiceFrom(pick, unit)
       if (choice === null) return
       lastExportFormatRef.current = choice.format
       exportTargetRef.current = pick.path
-      handleExportFormat(choice.format, choice.stlSegmentsPerTurn, choice.svg, choice.skpCompat)
+      handleExportFormat(choice.format, choice.stlSegmentsPerTurn, choice.svg, choice.skpCompat, choice.cages)
     } catch (err: unknown) {
       handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
     }
@@ -5628,6 +5970,52 @@ export default function App() {
     viewportApi.current?.runDelete(selectedIds)
     setSelectedIds([])
     setDocRev((r) => r + 1)
+  }
+
+  /** Palette: Smooth Off / 1 / 2 / 3 and Bake Smooth on the selected objects
+   *  (the same calls Object Info's Smooth row makes). */
+  const smoothSelection = (what: number | 'bake') => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    const ids = selectionObjectIds(scene, selectedIds)
+    if (ids.length === 0) {
+      handleToast(t`Select an object first.`)
+      return
+    }
+    try {
+      if (what === 'bake') {
+        if (bakeSmooth(scene, ids) === 0) {
+          handleToast(t`Nothing selected is smooth. Set a Smooth level first.`)
+          setMenuSyncTick((t) => t + 1)
+          return
+        }
+      } else {
+        setSmoothLevel(scene, ids, what)
+      }
+    } catch (err) {
+      const level = typeof what === 'number' ? what : Math.max(0, ...ids.map((id) => scene.smooth_level(id)))
+      const r = smoothRefusal(err, level)
+      handleToast(r.message, r.code)
+      // muda already toggled the clicked native check item; re-push the real
+      // state so the refused level does not stay checked beside the true one.
+      setMenuSyncTick((t) => t + 1)
+      return
+    }
+    refreshAfterPanelMutation()
+  }
+
+  /** Object ▸ Soften Edges…: bring up Object Info and put the cursor in its
+   *  angle field, so the menu and the panel share one prompt. */
+  const revealSoftenAngle = () => {
+    if (menuGates?.canSoften !== true) return
+    setShowObjectInfo(true)
+    showTray()
+    // The field mounts once the pane opens; focus it on the next frame.
+    requestAnimationFrame(() => {
+      const field = document.querySelector<HTMLInputElement>('[data-soften-angle]')
+      field?.focus()
+      field?.select()
+    })
   }
 
   // ── Copy / Cut / Paste / Paste In Place (Lane D) ─────────────────────────
@@ -6020,6 +6408,17 @@ export default function App() {
         viewportApi.current?.invertSelection()
         break
       case 'edit-delete': deleteSelection(); break
+      // Object ▸ Smooth levels: curveActions.ts says which level each id sets.
+      case 'smooth-off':
+      case 'smooth-1':
+      case 'smooth-2':
+      case 'smooth-3': {
+        const level = smoothLevelFor(payload)
+        if (level !== undefined) smoothSelection(level)
+        break
+      }
+      case 'bake-smooth': smoothSelection('bake'); break
+      case 'soften-edges': revealSoftenAngle(); break
       case 'edit-copy':
         if (forwardToTextField('copy')) break
         handleCopy()
@@ -6063,36 +6462,53 @@ export default function App() {
         break
       // Tool activations from native menu
       /* oxlint-disable lingui/no-unlocalized-strings -- ToolName identifiers, not copy */
-      case 'tool-select':    setActiveTool('Select'); break
-      case 'tool-rectangle': setActiveTool('Rectangle'); break
-      case 'tool-circle':    setActiveTool('Circle'); break
-      case 'tool-polygon':   setActiveTool('Polygon'); break
-      case 'tool-arc':       setActiveTool('Arc'); break
-      case 'tool-line':      setActiveTool('Line'); break
-      case 'tool-pushpull':  setActiveTool('Push/Pull'); break
-      case 'tool-follow-me': setActiveTool('Follow Me'); break
-      case 'tool-offset':    setActiveTool('Offset'); break
-      case 'tool-paint':     setActiveTool('Paint'); break
-      case 'tool-position-texture': setActiveTool('Position Texture'); break
-      case 'tool-move':      setActiveTool('Move'); break
-      case 'tool-rotate':    setActiveTool('Rotate'); break
-      case 'tool-scale':     setActiveTool('Scale'); break
-      case 'tool-flip':      setActiveTool('Flip'); break
-      case 'tool-tape-measure': setActiveTool('Tape Measure'); break
-      case 'tool-dimension': setActiveTool('Dimension'); break
-      case 'tool-protractor': setActiveTool('Protractor'); break
-      case 'tool-slice':     setActiveTool('Slice'); break
-      case 'tool-section-plane': setActiveTool('Section Plane'); break
-      case 'tool-edit-vertex': setActiveTool('Edit Vertex'); break
-      case 'tool-axes':        setActiveTool('Drawing Axes'); break
-      case 'tool-text':      setActiveTool('Text'); break
-      case 'tool-orbit':     activateTool('Orbit'); break
-      case 'tool-pan':       activateTool('Pan'); break
-      case 'tool-zoom':      activateTool('Zoom'); break
-      case 'tool-position-camera': activateTool('Position Camera'); break
-      case 'tool-walk':      activateTool('Walk'); break
-      case 'tool-look-around': activateTool('Look Around'); break
-      case 'tool-zoom-window': activateTool('Zoom Window'); break
+      case 'tool-select':
+      case 'tool-rectangle':
+      case 'tool-circle':
+      case 'tool-polygon':
+      case 'tool-arc':
+      case 'tool-line':
+      case 'tool-pushpull':
+      case 'tool-follow-me':
+      case 'tool-revolve':
+      case 'tool-loft':
+      case 'tool-skin':
+      case 'tool-deform-twist':
+      case 'tool-deform-bend':
+      case 'tool-deform-taper':
+      case 'tool-deform-bend-path':
+      case 'tool-offset':
+      case 'tool-fillet':
+      case 'tool-chamfer':
+      case 'tool-path-array':
+      case 'tool-shell':
+      case 'tool-project':
+      case 'tool-eraser':
+      case 'tool-paint':
+      case 'tool-position-texture':
+      case 'tool-move':
+      case 'tool-rotate':
+      case 'tool-scale':
+      case 'tool-flip':
+      case 'tool-tape-measure':
+      case 'tool-dimension':
+      case 'tool-protractor':
+      case 'tool-slice':
+      case 'tool-section-plane':
+      case 'tool-edit-vertex':
+      case 'tool-axes':
+      case 'tool-text':
+      case 'tool-orbit':
+      case 'tool-pan':
+      case 'tool-zoom':
+      case 'tool-position-camera':
+      case 'tool-walk':
+      case 'tool-look-around':
+      case 'tool-zoom-window':
+        // Every tool command: the table in tools/toolActions.ts says which tool
+        // it opens and what mode it sets first.
+        runToolAction(payload, activateTool)
+        break
       /* oxlint-enable lingui/no-unlocalized-strings */
       case 'toggle-parallel-projection': viewportApi.current?.toggleProjection(); break
       // Camera ▸ Fly (docs/design/fly-navigation.md §10): the LATCHED fly
@@ -6117,6 +6533,7 @@ export default function App() {
       case 'toggle-xray':         toggleXray(); break
       case 'toggle-wireframe':    toggleWireframe(); break
       case 'toggle-guides':       setShowGuides((v) => !v); break
+      case 'toggle-tangent-edges': setTangentEdgesVisible((v) => !v); break
       case 'toggle-section-active': viewportApi.current?.toggleSectionActive(); break
       case 'edit-delete-guides':  viewportApi.current?.deleteAllGuides(); break
       case 'zoom-extents':        handleZoomExtentsRef.current(); break
@@ -6168,9 +6585,36 @@ export default function App() {
         })
         break
       }
-      case 'save-to-library-doc':
-        setSaveToLibraryTarget({ kind: 'document', defaultName: documentName(docSession) })
+      case 'save-to-library-doc': {
+        // A document that is just one drawn open chain saves as a profile
+        // item, and offers to replace the one it was opened from.
+        const defaultName = documentName(docSession)
+        const scene = sceneRef.current
+        void (async () => {
+          let asProfile: Uint8Array | null = null
+          if (scene !== null) {
+            try {
+              const bytes = scene.extract_document_item(JSON.stringify({ category: 'profile' }))
+              if ((await readItemSummary(bytes)).profile_chain_only) asProfile = bytes
+            } catch {
+              /* not a profile; the ordinary model save follows */
+            }
+          }
+          if (scene === null || asProfile === null) {
+            setSaveToLibraryTarget({ kind: 'document', defaultName })
+            return
+          }
+          const source = profileSourceRef.current
+          setSaveToLibraryTarget({
+            kind: 'profile',
+            defaultName: source?.name ?? defaultName,
+            build: (meta) => scene.extract_document_item(JSON.stringify(meta)),
+            rows: await profileWidthRows(asProfile),
+            replace: source !== null && source.id !== '' ? source : undefined,
+          })
+        })()
         break
+      }
       case 'open-palette':        openPalette(); break
       // Contextual dock only — these need the current selection, not
       // just a bare trigger, so unlike every case above they aren't also
@@ -6257,6 +6701,8 @@ export default function App() {
     onLibraryOpenAsDocument,
     onLibraryPaintWith,
     onLibraryAddToPalette,
+    onLibraryUseProfile,
+    onLibrarySaveProfileCopy,
     handleToast,
   })
   libraryBridgeRef.current = {
@@ -6264,6 +6710,8 @@ export default function App() {
     onLibraryOpenAsDocument,
     onLibraryPaintWith,
     onLibraryAddToPalette,
+    onLibraryUseProfile,
+    onLibrarySaveProfileCopy,
     handleToast,
   }
   useEffect(() => {
@@ -6282,6 +6730,15 @@ export default function App() {
           }
           const fileName = payload.fileName
           if (fileName === undefined) return
+          // A built-in profile is not a file: it is read from the kernel.
+          if (fileName.startsWith('builtin:')) {
+            const bundled = (await bundledProfiles()).find((p) => p.id === fileName)
+            if (bundled === undefined) return
+            const item = builtInProfileItem(bundled.id, bundled.name)
+            if (payload.action === 'use-profile') bridge.onLibraryUseProfile(item, null)
+            else if (payload.action === 'save-copy') bridge.onLibrarySaveProfileCopy(item)
+            return
+          }
           const store = libraryStore()
           if (!store.available()) return
           try {
@@ -6303,6 +6760,7 @@ export default function App() {
             else if (action === 'open') bridge.onLibraryOpenAsDocument(item, bytes)
             else if (action === 'paint') bridge.onLibraryPaintWith(item, bytes)
             else if (action === 'add-palette') bridge.onLibraryAddToPalette(item, bytes)
+            else if (action === 'use-profile') bridge.onLibraryUseProfile(item, bytes)
           } catch (err) {
             bridge.handleToast(
               t`Couldn't read library item: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`,
@@ -6681,6 +7139,7 @@ export default function App() {
   useEffect(() => { viewportApi.current?.setPartAxesVisible(showPartAxes) }, [showPartAxes])
   useEffect(() => { viewportApi.current?.setRenderMode(renderMode) }, [renderMode])
   useEffect(() => { viewportApi.current?.setGuidesVisible(showGuides) }, [showGuides])
+  useEffect(() => { viewportApi.current?.setTangentEdgesVisible(tangentEdgesVisible) }, [tangentEdgesVisible])
 
   // Undo/redo availability (queried from scene each render for menu state)
   const canUndo = sceneRef.current?.can_scene_undo() ?? false
@@ -6701,6 +7160,9 @@ export default function App() {
   // without this, switching from a window with a selection to one without
   // left the old window's check marks and Edit gates on the menu.
   const [menuFocusTick, setMenuFocusTick] = useState(0)
+  // Bumped when an action is refused after the native menu already toggled
+  // its check item (Smooth levels), so the effect below re-pushes the truth.
+  const [menuSyncTick, setMenuSyncTick] = useState(0)
   useEffect(() => {
     if (!isTauri || !isMac) return
     let unlisten: (() => void) | undefined
@@ -6721,6 +7183,7 @@ export default function App() {
       'view-xray': xrayOn,
       'view-wireframe': wireframeOn,
       'view-guides': showGuides,
+      'view-tangent-edges': tangentEdgesVisible,
       'view-section-plane': sectionPlaneMenuState.checked,
       // Sections read "on screen", as in the web MenuBar (see its props).
       'win-model-info': showModelInfo && !trayCollapsed,
@@ -6741,6 +7204,14 @@ export default function App() {
     }
     for (const [tool, id] of Object.entries(TOOL_MENU_IDS)) {
       checked[id] = tool === activeTool
+    }
+    // Deform's four modes are four radio items: only the running mode checks.
+    for (const [mode, id] of Object.entries(DEFORM_MENU_IDS)) {
+      checked[id] = activeTool === 'Deform' && deformMode === mode
+    }
+    // Object ▸ Smooth ▸ Off / 1 / 2 / 3: the selection's shared level.
+    for (const level of [0, 1, 2, 3]) {
+      checked[`object-smooth-${level === 0 ? 'off' : level}`] = menuGates?.smoothLevel === level
     }
     const enabled: Record<string, boolean> = {
       'edit-delete': selectedIds.length > 0 || selectedGuide !== null || selectedAnnotation !== null,
@@ -6763,6 +7234,12 @@ export default function App() {
       'edit-union': menuGates?.canBoolean ?? false,
       'edit-subtract': menuGates?.canBoolean ?? false,
       'edit-intersect': menuGates?.canBoolean ?? false,
+      'object-smooth-off': menuGates?.canSmooth ?? false,
+      'object-smooth-1': menuGates?.canSmooth ?? false,
+      'object-smooth-2': menuGates?.canSmooth ?? false,
+      'object-smooth-3': menuGates?.canSmooth ?? false,
+      'object-bake-smooth': menuGates?.canSmooth ?? false,
+      'object-soften-edges': menuGates?.canSoften ?? false,
       'edit-cut': menuGates?.hasStructuralSelection ?? false,
       'edit-copy': menuGates?.hasStructuralSelection ?? false,
       'edit-paste': menuGates?.clipboardHasContent ?? false,
@@ -6795,12 +7272,14 @@ export default function App() {
       .catch(() => { /* shell without the command (older build) — ignore */ })
   }, [
     activeTool,
+    deformMode,
     showAxes,
     showPartAxes,
     showGrid,
     xrayOn,
     wireframeOn,
     showGuides,
+    tangentEdgesVisible,
     sectionPlaneMenuState,
     showModelInfo,
     showMaterials,
@@ -6819,6 +7298,7 @@ export default function App() {
     selectedAnnotation,
     menuGates,
     menuFocusTick,
+    menuSyncTick,
     parallelProjection,
     fly.mode,
     componentFrameOpen,
@@ -7285,6 +7765,21 @@ export default function App() {
   const canExplode = menuGates?.canExplode ?? false
   const canUnique = menuGates?.canMakeUnique ?? false
   const runBooleanScoped = (op: number, nodes: NodeRef[], scope: 'all' | 'one') => {
+    // Another long change holds the busy card: say so instead of nothing.
+    if (busyRef.current) {
+      handleToast(i18n._(BUSY_REFUSED))
+      return
+    }
+    // A large boolean runs behind the busy card, the one card Mend's long
+    // changes use too.
+    if ((viewportApi.current?.operandTriangles?.(nodes) ?? 0) >= LARGE_BOOLEAN_TRIANGLES) {
+      if (!runBusy(booleanBusyLabel(op), () => finishBoolean(op, nodes, scope))) handleToast(i18n._(BUSY_REFUSED))
+      return
+    }
+    finishBoolean(op, nodes, scope)
+  }
+
+  const finishBoolean = (op: number, nodes: NodeRef[], scope: 'all' | 'one') => {
     // `scope` is passed only when the strip chose "Only this one", so a plain
     // run keeps the two-argument call.
     const api = viewportApi.current
@@ -7580,7 +8075,20 @@ export default function App() {
         undoLabel={undoLabel}
         redoLabel={redoLabel}
         activeTool={activeTool}
-        onSelectTool={(name) => activateTool(name as ToolName)}
+        onSelectTool={(name) => {
+          // Fillet and Chamfer are one tool entered in two modes (the menu
+          // actions set the mode, then activate it).
+          if (name === 'Fillet' || name === 'Chamfer') {
+            menuActionRef.current(name === 'Fillet' ? 'tool-fillet' : 'tool-chamfer')
+            return
+          }
+          activateTool(name as ToolName)
+        }}
+        onSelectDeformMode={(mode) => {
+          setDeformMode(mode as 'twist' | 'bend' | 'taper' | 'bend-to-path')
+          activateTool('Deform')
+        }}
+        deformMode={deformMode}
         // A section's check mark means "on screen": with the tray hidden
         // every section reads unchecked, and choosing one brings the tray
         // back with it open (toggleSection).
@@ -7619,6 +8127,7 @@ export default function App() {
         showAxes={showAxes}
         showGrid={showGrid}
         showGuides={showGuides}
+        showTangentEdges={tangentEdgesVisible}
         onToggleAxes={() => {
           // The axes flag is recorded in the document's view style, which a
           // running plugin command holds (docs/agents/PLUGINS.md "Compounds").
@@ -7634,6 +8143,7 @@ export default function App() {
         onToggleXray={toggleXray}
         onToggleWireframe={toggleWireframe}
         onToggleGuides={() => setShowGuides((v) => !v)}
+        onToggleTangentEdges={() => setTangentEdgesVisible((v) => !v)}
         onDeleteGuides={() => viewportApi.current?.deleteAllGuides()}
         sectionPlaneChecked={sectionPlaneMenuState.checked}
         sectionPlaneExists={sectionPlaneMenuState.exists}
@@ -7653,6 +8163,9 @@ export default function App() {
           canPromote: menuGates?.canPromote ?? false,
           canFlip: menuGates?.canFlip ?? false,
           canBoolean,
+          canSmooth: menuGates?.canSmooth ?? false,
+          canSoften: menuGates?.canSoften ?? false,
+          smoothLevel: menuGates?.smoothLevel ?? null,
           canSaveSelectionToLibrary: menuGates?.canSaveSelectionToLibrary ?? false,
           canImport: !componentFrameOpen,
           canDrawText: !componentFrameOpen,
@@ -7781,6 +8294,7 @@ export default function App() {
             onStatusChange={handleStatusChange}
             onSceneChange={handleSceneChange}
             onToast={handleToast}
+            onBusy={runBusy}
             onToolHint={setToolStageHint}
             onPrecisionChange={setPrecisionSnap}
             activeTool={activeTool}
@@ -7843,6 +8357,10 @@ export default function App() {
               can't see moves into its own children). display:contents keeps
               them out of the layout while still catching the bubbled events. */}
           <div style={{ display: 'contents' }} onPointerOver={() => setInferenceInfo(null)}>
+            {/* The active tool's floating panels (tools/toolPanels.tsx). */}
+            {panelsForTool(toolName).map((panel) => (
+              <Fragment key={panel.tool}>{panel.render({ profileSections })}</Fragment>
+            ))}
             {/* While flying with no tool reading live, the box shows the
                 flight speed instead (fly-navigation.md §3.4) — a tool's own
                 measurement (a Line's length mid-gesture) always wins, since
@@ -7850,7 +8368,19 @@ export default function App() {
             {measurement === '' && fly.mode !== 'off' ? (
               <MeasurementBox toolName={toolName} value={fly.speedText} label={t`Fly speed`} frozen position={measurementsPosition} />
             ) : (
-              <MeasurementBox toolName={toolName} value={measurement} frozen={measurementFrozen} position={measurementsPosition} />
+              <MeasurementBox
+                toolName={toolName}
+                value={measurement}
+                label={
+                  toolName === 'Fillet'
+                    ? (filletGripLabel ?? profileSizeLabel(filletSettings.profile))
+                    : toolName === 'Arc'
+                      ? (toolStageLabel ?? undefined)
+                      : undefined
+                }
+                frozen={measurementFrozen}
+                position={measurementsPosition}
+              />
             )}
             <ViewDie apiRef={viewportApi} />
           </div>
@@ -8030,7 +8560,7 @@ export default function App() {
               hidden={cameraDragging}
               activeToolId={toolActionId(activeTool)}
               hoveringSketchRegion={hoveringSketchRegion}
-              gates={{ canGroup: canGroupNow, canMakeComponent: canMakeComp || (menuGates?.canPromote ?? false), canSaveToLibrary: libraryStore().available(), canUnlink: menuGates?.canUnlink ?? false, canUnlinkAll: menuGates?.canUnlinkAll ?? false }}
+              gates={{ canGroup: canGroupNow, canMakeComponent: canMakeComp || (menuGates?.canPromote ?? false), canBoolean, canSaveToLibrary: libraryStore().available(), canUnlink: menuGates?.canUnlink ?? false, canUnlinkAll: menuGates?.canUnlinkAll ?? false }}
               onRun={(id) => menuActionRef.current(id)}
             />
           </div>
@@ -8106,18 +8636,34 @@ export default function App() {
                   {toast.state === 'done' && (
                     <span aria-hidden="true" style={{ color: 'var(--status-solid)', flexShrink: 0 }}>✓</span>
                   )}
-                  {/* One flex item for the code and the message, so a long
-                      message wraps under the code instead of in a narrow
-                      column beside it. */}
-                  <span>
-                    {/* A kernel code is worth showing (it is what a bug report
-                        quotes); a guidance toast's code is a styling tag, not
-                        something a person should read. */}
-                    {toast.code !== undefined && toast.emphasis !== true && (
-                      <strong style={{ marginRight: '6px', opacity: 0.8 }}>[{toast.code}]</strong>
-                    )}
-                    {toast.message}
-                  </span>
+                  {/* The toast reads as plain words. The machine code stays in
+                      the log line and the bug-report bundle (logMessage). */}
+                  <span>{toast.message}</span>
+                  {toast.action !== undefined && (
+                    <button
+                      type="button"
+                      data-toast-action
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        toast.action?.run()
+                        dismissToast(toast.id)
+                      }}
+                      style={{
+                        flexShrink: 0,
+                        background: 'transparent',
+                        border: '1px solid currentColor',
+                        borderRadius: '3px',
+                        color: 'inherit',
+                        cursor: 'pointer',
+                        fontFamily: 'inherit',
+                        fontSize: '12px',
+                        padding: '2px 8px',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {toast.action.label}
+                    </button>
+                  )}
                 </div>
               )
             })}
@@ -8412,6 +8958,22 @@ export default function App() {
             </span>
           </>
         )}
+        {/* Undo-memory note (historyTrim.ts): the oldest undo steps of a dense
+            model were let go. Pushed right, ahead of the health badge. */}
+        {historyTrimKept !== null && (
+          <span
+            data-testid="history-trim-note"
+            title={HISTORY_TRIM_TOOLTIP}
+            style={{
+              marginLeft: 'auto',
+              color: 'var(--text-secondary)',
+              fontSize: 'var(--font-size-dock-chip, 11px)',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {historyTrimNote(historyTrimKept)}
+          </span>
+        )}
         {/* Model health badge — aggregate solids feedback; no other single-glance
             home (per-object status lives in the Outliner). Right-aligned and
             neutral: not being solid is normal for a SketchUp model. All solid:
@@ -8420,7 +8982,7 @@ export default function App() {
         {objectCount > 0 && (notSolidCount === 0 ? (
           <span
             style={{
-              marginLeft: 'auto',
+              marginLeft: historyTrimKept !== null ? 8 : 'auto',
               padding: '2px 8px',
               fontSize: 'var(--font-size-dock-chip, 11px)',
               borderRadius: 4,
@@ -8437,7 +8999,7 @@ export default function App() {
             onClick={() => openModelHealth()}
             title={i18n._(BADGE_TOOLTIP_LIST)}
             style={{
-              marginLeft: 'auto',
+              marginLeft: historyTrimKept !== null ? 8 : 'auto',
               padding: '2px 8px',
               fontSize: 'var(--font-size-dock-chip, 11px)',
               fontFamily: 'inherit',
@@ -8662,6 +9224,7 @@ export default function App() {
           onExport={handleExportFormat}
           initialCompat={skpCompatRef.current}
           onCancel={() => setExportDialogOpen(false)}
+          hasSmoothed={sceneRef.current?.has_smoothed_objects() === true}
         />
       )}
 
@@ -8884,6 +9447,7 @@ export default function App() {
           canFlip: menuGates?.canFlip ?? false,
           canPasteLinked: (menuGates?.clipboardHasContent ?? false) && !copiesLinked,
           canBoolean: menuGates?.canBoolean ?? false,
+          canSoften: menuGates?.canSoften ?? false,
           canSaveSelectionToLibrary: menuGates?.canSaveSelectionToLibrary ?? false,
           canImport: !componentFrameOpen,
           canRevertToSaved: revertable,
@@ -8973,6 +9537,8 @@ export default function App() {
         onPaintWith={onLibraryPaintWith}
         onAddToPalette={onLibraryAddToPalette}
         materialInPalette={libraryMaterialInPalette}
+        onUseProfile={onLibraryUseProfile}
+        onSaveProfileCopy={onLibrarySaveProfileCopy}
       />
 
       {/* Save to Library name prompt (frame 1d) — the ContextualDock's
@@ -8998,7 +9564,11 @@ export default function App() {
       {saveToLibraryTarget !== null && (
         <SaveToLibraryPopover
           defaultName={saveToLibraryTarget.defaultName}
-          variant={saveToLibraryTarget.kind === 'document' ? 'modal' : 'dock'}
+          variant={saveToLibraryTarget.kind === 'selection' ? 'dock' : 'modal'}
+          title={saveToLibraryTarget.kind === 'profile' ? t`Save profile` : undefined}
+          rows={saveToLibraryTarget.kind === 'profile' ? saveToLibraryTarget.rows : undefined}
+          hideOriginHint={saveToLibraryTarget.kind === 'profile'}
+          replace={saveToLibraryTarget.kind === 'profile' ? saveToLibraryTarget.replace : undefined}
           onSave={handleSaveToLibraryCommit}
           onClose={() => setSaveToLibraryTarget(null)}
         />

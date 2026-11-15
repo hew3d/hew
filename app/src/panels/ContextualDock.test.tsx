@@ -26,6 +26,27 @@ describe('ContextualDock', () => {
     expect(screen.getByText('Paint')).toBeInTheDocument()
     expect(screen.getByText('Make Component')).toBeInTheDocument()
     expect(screen.getByText('Erase')).toBeInTheDocument()
+    expect(screen.getByText('Fillet')).toBeInTheDocument()
+    expect(screen.getByText('Shell')).toBeInTheDocument()
+    expect(screen.queryByText('Position Texture')).not.toBeInTheDocument()
+  })
+
+  it('Object row order is Push/Pull, Fillet, Move, Paint, Shell, Make Component, Save to Library, Erase, each with an icon', () => {
+    render(<ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} />)
+    const buttons = screen.getAllByRole('button')
+    expect(buttons.map((b) => b.getAttribute('title'))).toEqual([
+      'Push/Pull', 'Fillet', 'Move', 'Paint', 'Shell', 'Make Component', 'Save to Library', 'Erase',
+    ])
+    for (const b of buttons) expect(b.querySelector('svg'), b.getAttribute('title') ?? '').not.toBeNull()
+  })
+
+  it('clicking Fillet and Shell dispatches their tool ids', () => {
+    const onRun = vi.fn()
+    render(<ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={onRun} />)
+    fireEvent.click(screen.getByText('Fillet'))
+    expect(onRun).toHaveBeenLastCalledWith('tool-fillet')
+    fireEvent.click(screen.getByText('Shell'))
+    expect(onRun).toHaveBeenLastCalledWith('tool-shell')
   })
 
   it('shows the Group verb set for a single selected Group', () => {
@@ -50,6 +71,27 @@ describe('ContextualDock', () => {
     expect(screen.getByText('Group')).toBeInTheDocument()
     expect(screen.getByText('Erase')).toBeInTheDocument()
     expect(screen.queryByText('Paint')).not.toBeInTheDocument()
+  })
+
+  it('Multi row shows Union, Subtract, and Intersect (with icons) only when canBoolean is true, and dispatches them', () => {
+    const onRun = vi.fn()
+    const sel = [obj(1n), obj(2n)]
+    const { unmount } = render(
+      <ContextualDock selectedIds={sel} selectedGuide={null} onRun={onRun} gates={{ canGroup: true, canMakeComponent: true, canBoolean: false }} />,
+    )
+    for (const label of ['Union', 'Subtract', 'Intersect']) expect(screen.queryByText(label)).not.toBeInTheDocument()
+    unmount()
+    render(
+      <ContextualDock selectedIds={sel} selectedGuide={null} onRun={onRun} gates={{ canGroup: true, canMakeComponent: true, canBoolean: true }} />,
+    )
+    expect(screen.getAllByRole('button').map((b) => b.getAttribute('title'))).toEqual([
+      'Move', 'Union', 'Subtract', 'Intersect', 'Group', 'Erase',
+    ])
+    for (const [label, id] of [['Union', 'edit-union'], ['Subtract', 'edit-subtract'], ['Intersect', 'edit-intersect']]) {
+      expect(screen.getByRole('button', { name: label }).querySelector('svg')).not.toBeNull()
+      fireEvent.click(screen.getByText(label))
+      expect(onRun).toHaveBeenLastCalledWith(id)
+    }
   })
 
   // --- Structural verbs (Group / Make Component) dispatch + gating --------
@@ -104,10 +146,22 @@ describe('ContextualDock', () => {
     render(<ContextualDock selectedIds={[sketch(1n)]} selectedGuide={null} onRun={vi.fn()} />)
     expect(screen.getByText('SKETCH')).toBeInTheDocument()
     expect(screen.getByText('Push/Pull')).toBeInTheDocument()
+    expect(screen.getByText('Revolve')).toBeInTheDocument()
+    expect(screen.getByText('Loft')).toBeInTheDocument()
+    expect(screen.getByText('Follow Me')).toBeInTheDocument()
     expect(screen.getByText('Move')).toBeInTheDocument()
     expect(screen.getByText('Rotate')).toBeInTheDocument()
-    expect(screen.getByText('Scale')).toBeInTheDocument()
+    expect(screen.queryByText('Scale')).not.toBeInTheDocument()
     expect(screen.getByText('Erase')).toBeInTheDocument()
+  })
+
+  it('clicking Revolve, Loft, and Follow Me on a sketch dispatches their tool ids', () => {
+    const onRun = vi.fn()
+    render(<ContextualDock selectedIds={[sketch(1n)]} selectedGuide={null} onRun={onRun} />)
+    for (const [label, id] of [['Revolve', 'tool-revolve'], ['Loft', 'tool-loft'], ['Follow Me', 'tool-follow-me']]) {
+      fireEvent.click(screen.getByText(label))
+      expect(onRun).toHaveBeenLastCalledWith(id)
+    }
   })
 
   it('renders nothing when a construction guide is selected', () => {
@@ -289,12 +343,14 @@ describe('ContextualDock', () => {
 
   // --- Hover-preview disables everything except Push/Pull ------------------
 
-  it('hover-preview: only Push/Pull is enabled; the other sketch verbs render disabled', () => {
+  it('hover-preview: Push/Pull, Revolve, and Loft are enabled; the other sketch verbs render disabled', () => {
     render(
       <ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} hoveringSketchRegion />,
     )
-    expect(screen.getByRole('button', { name: 'Push/Pull' })).not.toBeDisabled()
-    for (const label of ['Move', 'Rotate', 'Scale', 'Erase']) {
+    for (const label of ['Push/Pull', 'Revolve', 'Loft']) {
+      expect(screen.getByRole('button', { name: label })).not.toBeDisabled()
+    }
+    for (const label of ['Follow Me', 'Move', 'Rotate', 'Erase']) {
       const btn = screen.getByRole('button', { name: label })
       expect(btn).toBeDisabled()
       expect(btn).toHaveAttribute('aria-disabled', 'true')
@@ -324,7 +380,7 @@ describe('ContextualDock', () => {
 
   it('a real sketch SELECTION keeps every sketch verb enabled', () => {
     render(<ContextualDock selectedIds={[sketch(1n)]} selectedGuide={null} onRun={vi.fn()} />)
-    for (const label of ['Push/Pull', 'Move', 'Rotate', 'Scale', 'Erase']) {
+    for (const label of ['Push/Pull', 'Revolve', 'Loft', 'Follow Me', 'Move', 'Rotate', 'Erase']) {
       const btn = screen.getByRole('button', { name: label })
       expect(btn).not.toBeDisabled()
       expect(btn).toHaveAttribute('aria-disabled', 'false')

@@ -71,9 +71,12 @@ describe('dockVerbsFor', () => {
   // Library effort: Save to Library rides along, ungated, when no `gates`
   // arg is passed at all (see dockVerbsFor's early return) — the gates
   // test below covers the hidden-when-unavailable case.
-  it('object: primary Push/Pull, then Move, Paint, Position Texture, Make Component, Save to Library, Erase', () => {
+  // True Curves organization: Fillet (second) and Shell join the row, and
+  // Position Texture leaves it (Paint is the way to it) to cap the row at eight.
+  it('object: primary Push/Pull, then Fillet, Move, Paint, Shell, Make Component, Save to Library, Erase', () => {
     const verbs = dockVerbsFor('object')
-    expect(verbs.map((v) => v.id)).toEqual(['tool-pushpull', 'tool-move', 'tool-paint', 'tool-position-texture', 'edit-make-component', 'save-to-library', 'edit-delete'])
+    expect(verbs.map((v) => v.id)).toEqual(['tool-pushpull', 'tool-fillet', 'tool-move', 'tool-paint', 'tool-shell', 'edit-make-component', 'save-to-library', 'edit-delete'])
+    expect(verbs.map((v) => v.id)).not.toContain('tool-position-texture')
   })
 
   it('group: primary Edit, then Move, Scale, Make Component, Ungroup, Save to Library, Erase', () => {
@@ -86,9 +89,22 @@ describe('dockVerbsFor', () => {
     expect(verbs.map((v) => v.id)).toEqual(['enter-context', 'tool-move', 'tool-scale', 'make-unique', 'explode-instance', 'save-to-library'])
   })
 
-  it('multi: primary Move, then Group, Erase', () => {
+  it('multi: primary Move, then Union, Subtract, Intersect, Group, Erase', () => {
     const verbs = dockVerbsFor('multi')
-    expect(verbs.map((v) => v.id)).toEqual(['tool-move', 'edit-group', 'edit-delete'])
+    expect(verbs.map((v) => v.id)).toEqual(['tool-move', 'edit-union', 'edit-subtract', 'edit-intersect', 'edit-group', 'edit-delete'])
+  })
+
+  it('the booleans follow canBoolean: hidden when false or omitted, shown when true', () => {
+    const booleans = ['edit-union', 'edit-subtract', 'edit-intersect']
+    for (const gates of [
+      { canGroup: true, canMakeComponent: true },
+      { canGroup: true, canMakeComponent: true, canBoolean: false },
+    ]) {
+      expect(dockVerbsFor('multi', gates).map((v) => v.id)).toEqual(['tool-move', 'edit-group', 'edit-delete'])
+    }
+    expect(
+      dockVerbsFor('multi', { canGroup: true, canMakeComponent: true, canBoolean: true }).map((v) => v.id),
+    ).toEqual(['tool-move', ...booleans, 'edit-group', 'edit-delete'])
   })
 
   it('gates hide Group / Make Component when the selection is ineligible', () => {
@@ -99,7 +115,7 @@ describe('dockVerbsFor', () => {
     // Object inside an editing context (canMakeComponent is top-level-only).
     expect(
       dockVerbsFor('object', { canGroup: false, canMakeComponent: false }).map((v) => v.id),
-    ).toEqual(['tool-pushpull', 'tool-move', 'tool-paint', 'tool-position-texture', 'edit-delete'])
+    ).toEqual(['tool-pushpull', 'tool-fillet', 'tool-move', 'tool-paint', 'tool-shell', 'edit-delete'])
     expect(
       dockVerbsFor('group', { canGroup: false, canMakeComponent: false }).map((v) => v.id),
     ).toEqual(['enter-context', 'tool-move', 'tool-scale', 'ungroup', 'edit-delete'])
@@ -130,11 +146,12 @@ describe('dockVerbsFor', () => {
     ).not.toContain('save-to-library')
   })
 
-  it('sketch: primary Push/Pull, then Move, Rotate, Scale, Erase', () => {
+  it('sketch: primary Push/Pull, then Revolve, Loft, Follow Me, Move, Rotate, Erase', () => {
     const verbs = dockVerbsFor('sketch')
     expect(verbs.map((v) => v.id)).toEqual([
-      'tool-pushpull', 'tool-move', 'tool-rotate', 'tool-scale', 'edit-delete',
+      'tool-pushpull', 'tool-revolve', 'tool-loft', 'tool-follow-me', 'tool-move', 'tool-rotate', 'edit-delete',
     ])
+    expect(verbs.map((v) => v.id)).not.toContain('tool-scale')
   })
 
   it('sketch verbs reuse the exact same ids as the other rows (menuActionRef/activeToolId compatibility)', () => {
@@ -148,22 +165,26 @@ describe('dockVerbsFor', () => {
     expect(objectIds.has('tool-pushpull')).toBe(true)
     expect(sketchIds.has('edit-delete')).toBe(true)
     expect(objectIds.has('edit-delete')).toBe(true)
-    expect(sketchIds.has('tool-scale')).toBe(true)
     expect(groupIds.has('tool-scale')).toBe(true)
+    // The True Curves verbs use the tool-menu ids the native menu dispatches.
+    for (const id of ['tool-revolve', 'tool-loft', 'tool-follow-me']) expect(sketchIds.has(id)).toBe(true)
+    for (const id of ['tool-fillet', 'tool-shell']) expect(objectIds.has(id)).toBe(true)
   })
 
-  it('every context stays within the spec cap (originally "4-6 items max, curated"; the Library effort added one more selection-only verb to Object/Group, deliberately raising the ungated ceiling to 7 — gated call sites still cap out at 6 when the library is unavailable)', () => {
+  it('every context stays within the spec cap (originally "4-6 items max, curated"; the Library effort raised the ungated ceiling to 7, and the True Curves organization gives the Object row eight — the other rows stay at seven or fewer)', () => {
     for (const ctx of ['empty', 'object', 'group', 'instance', 'multi', 'sketch'] as const) {
-      expect(dockVerbsFor(ctx).length).toBeLessThanOrEqual(7)
+      expect(dockVerbsFor(ctx).length).toBeLessThanOrEqual(ctx === 'object' ? 8 : 7)
       expect(dockVerbsFor(ctx).length).toBeGreaterThan(0)
     }
   })
 })
 
 describe('isDockVerbEnabled', () => {
-  it('hover-preview (sketch not selected): only Push/Pull is enabled', () => {
+  it('hover-preview (sketch not selected): only Push/Pull, Revolve, and Loft are enabled', () => {
+    // Each of the three starts by clicking a shape, so a click-through works;
+    // Follow Me needs a path first, and Move/Rotate/Erase need a selection.
     const enabled = dockVerbsFor('sketch').filter((v) => isDockVerbEnabled(v, true))
-    expect(enabled.map((v) => v.id)).toEqual(['tool-pushpull'])
+    expect(enabled.map((v) => v.id)).toEqual(['tool-pushpull', 'tool-revolve', 'tool-loft'])
   })
 
   it('with a real selection every verb is enabled, in every context', () => {

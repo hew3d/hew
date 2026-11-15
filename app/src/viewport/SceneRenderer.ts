@@ -91,6 +91,11 @@ const EDGE_COLOR = 0x1a1a1a
  *  all but vanishes; a light gray a step below the annotation ink
  *  (`ANNOTATION_COLOR.dark`) reads there and keeps dimensions distinct. */
 export const EDGE_COLOR_SEE_THROUGH_DARK = 0xc4c9d0
+/** Tangent edges (fillet rails) draw the edge color at half strength. */
+const TANGENT_EDGE_OPACITY = 0.5
+/** The cage wire of a Smooth object: a thin light-blue line over the surface. */
+const CAGE_COLOR = 0x4db8ff
+const CAGE_OPACITY = 0.7
 /** Orange highlight for selected object edges (kept for selection; face fill
  *  uses material color). Exported so other tools that want the SAME
  *  selection-highlight semantics (FollowMeTool's picked-path highlight) reuse
@@ -431,6 +436,13 @@ interface ObjectMeshGroup {
   objectId: bigint
   facesMesh: THREE.Mesh
   edgesLines: THREE.LineSegments
+  /** Thin tangent-edge lines (fillet rails); null when the object has none.
+   *  Visible only while View ▸ Tangent Edges is on. */
+  tangentLines: THREE.LineSegments | null
+  /** The cage of a Smooth object, drawn as thin wire while a tool other than
+   *  Select is active (setCageOverlay); null for an object with no Smooth
+   *  level. */
+  cageLines?: THREE.LineSegments | null
   group: THREE.Group
   /** The object's imprint overlay (imprints.ts): translucent fills over
    *  its drawn sub-faces plus fat sketch-blue lines over every drawn loop
@@ -458,6 +470,8 @@ interface InstanceMeshGroup {
   /** Face meshes, one per placement, in the same order as memberIds */
   facesMeshes: THREE.Mesh[]
   edgesLines: THREE.LineSegments[]
+  /** Tangent-edge lines parallel to edgesLines (null where a member has none). */
+  tangentLines: (THREE.LineSegments | null)[]
 }
 
 /**
@@ -499,6 +513,8 @@ interface MemberGeometry {
   /** Which groups draw painted backs (see `_buildMaterialArray`). */
   groupBacks: Uint8Array
   edgePositions: Float32Array
+  /** Tangent joints (fillet rails), drawn only with View ▸ Tangent Edges. */
+  tangentEdgePositions: Float32Array
   /** Whether the member object encloses a volume — drives double-sided
    * rendering for open (non-watertight) shells (see `_bucketTag`). */
   watertight: boolean
@@ -551,6 +567,8 @@ interface MemberBatch {
   side: THREE.Side
   mesh: THREE.InstancedMesh
   edges: THREE.LineSegments
+  /** Tangent-edge soup sharing the pose rows below; null when the member has none. */
+  tangent: THREE.LineSegments | null
   /** Per-instance pose rows for the edge shader, one vec4 per row. */
   edgeRows: [THREE.InstancedBufferAttribute, THREE.InstancedBufferAttribute, THREE.InstancedBufferAttribute]
   /** Slot ownership: slot i belongs to instance `slots[i].instanceId`'s
@@ -733,11 +751,27 @@ export class SceneRenderer {
   readonly instancesGroup: THREE.Group
   /** Parent group for construction guide geometry */
   readonly guidesGroup: THREE.Group
+  /** View ▸ Tangent Edges: whether tangent-edge lines draw. */
+  private tangentEdgesVisible = false
+  /** Whether a Smooth object's cage wire draws (any tool but Select). */
+  private cageOverlayVisible = false
   /** Parent group for dimension/leader-text annotation geometry
    * (docs/design/dimensions-text.md), beside `guidesGroup`. */
   readonly annotationsGroup: THREE.Group
 
   private objectGroups: Map<bigint, ObjectMeshGroup> = new Map()
+  /** Fillet preview masks: for each masked object, the original index
+   *  buffer and material groups to restore, and the face set the current
+   *  filtered buffer was built for (so a pointer move that keeps the same
+   *  faces masked costs nothing). */
+  private faceMasks: Map<
+    bigint,
+    {
+      index: THREE.BufferAttribute
+      groups: { start: number; count: number; materialIndex: number }[]
+      key: string
+    }
+  > = new Map()
   /** MATERIALIZED instances only (selected / isolation-lit / transform-preview
    * placements pulled out of their batch), keyed by instance id. All the
    * per-instance mutation paths (_applyInstanceColors, _setInstanceOpacity,
@@ -1493,6 +1527,7 @@ export class SceneRenderer {
           groupCounts: mesh.group_counts(),
           groupBacks: mesh.group_backs(),
           edgePositions: mesh.edge_positions(),
+          tangentEdgePositions: mesh.tangent_edge_positions(),
           watertight: mesh.watertight(),
         }
         variants.set(inherited, cached)
@@ -1658,6 +1693,31 @@ export class SceneRenderer {
       )
     }
 
+    let tangent: THREE.LineSegments | null = null
+    if (cached.tangentEdgePositions.length > 0) {
+      const tGeo = new THREE.InstancedBufferGeometry()
+      tGeo.setAttribute('position', new THREE.BufferAttribute(cached.tangentEdgePositions, 3))
+      tGeo.instanceCount = entries.length
+      tGeo.setAttribute('imRow0', edgeRows[0])
+      tGeo.setAttribute('imRow1', edgeRows[1])
+      tGeo.setAttribute('imRow2', edgeRows[2])
+      tGeo.computeBoundingBox = () => {
+        if (mesh.boundingBox === null) mesh.computeBoundingBox()
+        tGeo.boundingBox = (tGeo.boundingBox ?? new THREE.Box3()).copy(mesh.boundingBox as THREE.Box3)
+      }
+      tGeo.computeBoundingSphere = () => {
+        if (mesh.boundingSphere === null) mesh.computeBoundingSphere()
+        tGeo.boundingSphere = (tGeo.boundingSphere ?? new THREE.Sphere()).copy(mesh.boundingSphere as THREE.Sphere)
+      }
+      const tMat = this._makeInstancedEdgeMaterial()
+      tMat.transparent = true
+      tMat.opacity = TANGENT_EDGE_OPACITY
+      tangent = new THREE.LineSegments(tGeo, tMat)
+      tangent.name = `InstanceBatchTangentEdges_${memberId}_${tag}`
+      tangent.frustumCulled = false
+      tangent.visible = this.tangentEdgesVisible
+    }
+
     const slotOf = new Map<bigint, number[]>()
     entries.forEach((e, i) => {
       const arr = slotOf.get(e.rec.instanceId)
@@ -1669,6 +1729,7 @@ export class SceneRenderer {
       side,
       mesh,
       edges,
+      tangent,
       edgeRows,
       slots: entries.map((e) => ({ instanceId: e.rec.instanceId, placementIndex: e.placementIndex })),
       slotOf,
@@ -1712,6 +1773,7 @@ export class SceneRenderer {
 
     this.instancesGroup.add(mesh)
     this.instancesGroup.add(edges)
+    if (tangent !== null) this.instancesGroup.add(tangent)
     this.batches.set(`${memberId}|${tag}|${inherited}`, batch)
   }
 
@@ -1722,6 +1784,68 @@ export class SceneRenderer {
    * in the vertex shader. `customProgramCacheKey` keeps the patched program
    * from colliding with the stock line program in the shader cache.
    */
+  private _makeTangentEdgeMaterial(): THREE.LineBasicMaterial {
+    return new THREE.LineBasicMaterial({ color: EDGE_COLOR, transparent: true, opacity: TANGENT_EDGE_OPACITY })
+  }
+
+  private _makeCageMaterial(): THREE.LineBasicMaterial {
+    return new THREE.LineBasicMaterial({ color: CAGE_COLOR, transparent: true, opacity: CAGE_OPACITY, depthTest: false })
+  }
+
+  /** Show/hide the cage wire of Smooth objects (drawn whenever the active
+   *  tool is not Select, so the shape you are editing stays in view). */
+  setCageOverlay(visible: boolean): void {
+    this.cageOverlayVisible = visible
+    for (const g of this.objectGroups.values()) {
+      if (g.cageLines != null) g.cageLines.visible = visible
+    }
+  }
+
+  /** Test hook: how many Smooth objects have a cage, and how many draw it. */
+  getCageOverlayInfo(): { objects: number; visible: number } {
+    let objects = 0
+    let visible = 0
+    for (const g of this.objectGroups.values()) {
+      if (g.cageLines == null) continue
+      objects += 1
+      if (g.cageLines.visible && g.group.visible) visible += 1
+    }
+    return { objects, visible }
+  }
+
+  /** Show/hide the thin tangent-edge lines (View ▸ Tangent Edges). */
+  setTangentEdgesVisible(visible: boolean): void {
+    this.tangentEdgesVisible = visible
+    for (const g of this.objectGroups.values()) {
+      if (g.tangentLines !== null) g.tangentLines.visible = visible
+    }
+    for (const g of this.instanceGroups.values()) {
+      g.tangentLines.forEach((l, i) => {
+        if (l !== null) l.visible = visible && g.edgesLines[i].visible
+      })
+    }
+    for (const b of this.batches.values()) {
+      if (b.tangent !== null) b.tangent.visible = visible
+    }
+  }
+
+  /** Test hook: tangent-edge line counts and visibility (E2E). */
+  getTangentEdgeInfo(): { lines: number; visible: number; segments: number } {
+    let lines = 0
+    let visible = 0
+    let segments = 0
+    const note = (l: THREE.LineSegments | null): void => {
+      if (l === null) return
+      lines++
+      if (l.visible) visible++
+      segments += (l.geometry.getAttribute('position')?.count ?? 0) / 2
+    }
+    for (const g of this.objectGroups.values()) note(g.tangentLines)
+    for (const g of this.instanceGroups.values()) g.tangentLines.forEach(note)
+    for (const b of this.batches.values()) note(b.tangent)
+    return { lines, visible, segments }
+  }
+
   private _makeInstancedEdgeMaterial(): THREE.LineBasicMaterial {
     const mat = new THREE.LineBasicMaterial({ color: this._edgeColor() })
     mat.onBeforeCompile = (shader) => {
@@ -1779,6 +1903,10 @@ export class SceneRenderer {
     batch.mesh.boundingSphere = null
     batch.edges.geometry.boundingBox = null
     batch.edges.geometry.boundingSphere = null
+    if (batch.tangent !== null) {
+      batch.tangent.geometry.boundingBox = null
+      batch.tangent.geometry.boundingSphere = null
+    }
   }
 
   /** Re-write every batch slot owned by one instance — every placement of
@@ -1892,6 +2020,7 @@ export class SceneRenderer {
 
     const facesMeshes: THREE.Mesh[] = []
     const edgesLinesList: THREE.LineSegments[] = []
+    const tangentLinesList: (THREE.LineSegments | null)[] = []
     const placementMemberIds: bigint[] = []
     rec.placements.forEach((placement, pi) => {
       const memberId = placement.memberId
@@ -1950,6 +2079,19 @@ export class SceneRenderer {
       edgesLinesList.push(edgesLines)
       facesMesh.visible = placement.shown
       edgesLines.visible = placement.shown
+      let tangentLines: THREE.LineSegments | null = null
+      if (cached.tangentEdgePositions.length > 0) {
+        const tGeo = new THREE.BufferGeometry()
+        tGeo.setAttribute('position', new THREE.BufferAttribute(cached.tangentEdgePositions, 3))
+        tangentLines = new THREE.LineSegments(tGeo, this._makeTangentEdgeMaterial())
+        tangentLines.name = `InstanceTangentEdge_${instanceId}_${memberId}_${pi}`
+        tangentLines.matrixAutoUpdate = false
+        tangentLines.matrix.copy(placement.localMatrix)
+        tangentLines.matrixWorldNeedsUpdate = true
+        tangentLines.visible = placement.shown && this.tangentEdgesVisible
+        group.add(tangentLines)
+      }
+      tangentLinesList.push(tangentLines)
     })
 
     this.instancesGroup.add(group)
@@ -1959,6 +2101,7 @@ export class SceneRenderer {
       group,
       facesMeshes,
       edgesLines: edgesLinesList,
+      tangentLines: tangentLinesList,
     })
 
     // The batch keeps the slot but stops drawing it.
@@ -2013,6 +2156,11 @@ export class SceneRenderer {
       ;(lines.material as THREE.Material).dispose()
       lines.geometry.dispose()
     }
+    for (const lines of g.tangentLines) {
+      if (lines === null) continue
+      ;(lines.material as THREE.Material).dispose()
+      lines.geometry.dispose()
+    }
 
     this.instancesGroup.remove(g.group)
     this.instanceGroups.delete(instanceId)
@@ -2044,6 +2192,11 @@ export class SceneRenderer {
     batch.mesh.dispose() // frees the instanceMatrix GPU buffer
     batch.edges.geometry.dispose()
     ;(batch.edges.material as THREE.Material).dispose()
+    if (batch.tangent !== null) {
+      batch.tangent.geometry.dispose()
+      ;(batch.tangent.material as THREE.Material).dispose()
+      this.instancesGroup.remove(batch.tangent)
+    }
     this.instancesGroup.remove(batch.mesh)
     this.instancesGroup.remove(batch.edges)
     this.batches.delete(key)
@@ -2327,6 +2480,7 @@ export class SceneRenderer {
       const groupCounts = mesh.group_counts()
       const groupBacks = mesh.group_backs()
       const edgePositions = mesh.edge_positions()
+      const tangentEdgePositions = mesh.tangent_edge_positions()
 
       // Face mesh — multi-material: one BufferGeometry with addGroup per material.
       const faceGeo = new THREE.BufferGeometry()
@@ -2363,11 +2517,30 @@ export class SceneRenderer {
       group.name = `Object_${objectId}`
       group.add(facesMesh)
       group.add(edgesLines)
+      let tangentLines: THREE.LineSegments | null = null
+      if (tangentEdgePositions.length > 0) {
+        const tGeo = new THREE.BufferGeometry()
+        tGeo.setAttribute('position', new THREE.BufferAttribute(tangentEdgePositions, 3))
+        tangentLines = new THREE.LineSegments(tGeo, this._makeTangentEdgeMaterial())
+        tangentLines.visible = this.tangentEdgesVisible
+        group.add(tangentLines)
+      }
       const imprints = this._buildImprintOverlay(objectId)
       if (imprints !== null) group.add(imprints)
+      // Smooth: the cage the surface was made from, as thin wire.
+      let cageLines: THREE.LineSegments | null = null
+      const cagePositions = mesh.cage_edge_positions()
+      if (cagePositions.length > 0) {
+        const cGeo = new THREE.BufferGeometry()
+        cGeo.setAttribute('position', new THREE.BufferAttribute(cagePositions, 3))
+        cageLines = new THREE.LineSegments(cGeo, this._makeCageMaterial())
+        cageLines.name = `ObjectCage_${objectId}`
+        cageLines.visible = this.cageOverlayVisible
+        group.add(cageLines)
+      }
 
       this.objectsGroup.add(group)
-      this.objectGroups.set(objectId, { objectId, facesMesh, edgesLines, group, imprints })
+      this.objectGroups.set(objectId, { objectId, facesMesh, edgesLines, tangentLines, cageLines, group, imprints })
 
       // Re-apply the selection highlight to the rebuilt nodes, and put the
       // id back into the renderer's selected list (the removal above pruned
@@ -2385,6 +2558,7 @@ export class SceneRenderer {
     const g = this.objectGroups.get(objectId)
     if (g === undefined) return
 
+    this.faceMasks.delete(objectId)
     g.facesMesh.geometry.dispose()
     const mat = g.facesMesh.material
     if (Array.isArray(mat)) {
@@ -2396,6 +2570,14 @@ export class SceneRenderer {
     }
     g.edgesLines.geometry.dispose()
     ;(g.edgesLines.material as THREE.Material).dispose()
+    if (g.tangentLines !== null) {
+      g.tangentLines.geometry.dispose()
+      ;(g.tangentLines.material as THREE.Material).dispose()
+    }
+    if (g.cageLines != null) {
+      g.cageLines.geometry.dispose()
+      ;(g.cageLines.material as THREE.Material).dispose()
+    }
     if (g.imprints !== null) this._disposeImprintOverlay(g.imprints)
     this.objectsGroup.remove(g.group)
     this.objectGroups.delete(objectId)
@@ -4232,6 +4414,8 @@ export class SceneRenderer {
       })
       g.edgesLines.forEach((l, i) => {
         l.visible = shown[i]
+        const t = g.tangentLines[i]
+        if (t !== null) t.visible = shown[i] && this.tangentEdgesVisible
       })
     }
   }
@@ -4321,9 +4505,18 @@ export class SceneRenderer {
 
     // Native edges (replaced by the caller's fat overlay) and every
     // selection/hover overlay.
-    for (const g of this.objectGroups.values()) hideObj(g.edgesLines)
-    for (const g of this.instanceGroups.values()) for (const e of g.edgesLines) hideObj(e)
-    for (const b of this.batches.values()) hideObj(b.edges)
+    for (const g of this.objectGroups.values()) {
+      hideObj(g.edgesLines)
+      hideObj(g.tangentLines)
+    }
+    for (const g of this.instanceGroups.values()) {
+      for (const e of g.edgesLines) hideObj(e)
+      for (const t of g.tangentLines) hideObj(t)
+    }
+    for (const b of this.batches.values()) {
+      hideObj(b.edges)
+      hideObj(b.tangent)
+    }
     hideObj(this.guideHighlight)
     hideObj(this.annotationHighlight)
     hideObj(this.sketchHighlight)
@@ -4455,6 +4648,10 @@ export class SceneRenderer {
       if (!g.group.visible) continue
       const pos = positionsOf(g.edgesLines)
       if (pos !== null) pushTransformed(pos, g.edgesLines.matrixWorld)
+      if (this.tangentEdgesVisible && g.tangentLines !== null) {
+        const tpos = positionsOf(g.tangentLines)
+        if (tpos !== null) pushTransformed(tpos, g.tangentLines.matrixWorld)
+      }
     }
     for (const g of this.instanceGroups.values()) {
       if (!g.group.visible) continue
@@ -4464,17 +4661,24 @@ export class SceneRenderer {
         if (g.facesMeshes[i]?.visible === false) continue
         const pos = positionsOf(e)
         if (pos !== null) pushTransformed(pos, e.matrixWorld)
+        const t = g.tangentLines[i]
+        if (this.tangentEdgesVisible && t !== null) {
+          const tpos = positionsOf(t)
+          if (tpos !== null) pushTransformed(tpos, t.matrixWorld)
+        }
       }
     }
     const slotMatrix = new THREE.Matrix4()
     for (const b of this.batches.values()) {
       const pos = positionsOf(b.edges)
       if (pos === null) continue
+      const tpos = this.tangentEdgesVisible && b.tangent !== null ? positionsOf(b.tangent) : null
       const count = b.mesh.count
       for (let slot = 0; slot < count; slot++) {
         if (b.suppressedSlots.has(slot)) continue
         b.mesh.getMatrixAt(slot, slotMatrix)
         pushTransformed(pos, slotMatrix)
+        if (tpos !== null) pushTransformed(tpos, slotMatrix)
       }
     }
     const out = new Float32Array(total)
@@ -4903,14 +5107,17 @@ export class SceneRenderer {
     for (const g of this.objectGroups.values()) {
       touch(g.facesMesh.material)
       touch(g.edgesLines.material)
+      if (g.tangentLines !== null) touch(g.tangentLines.material)
     }
     for (const b of this.batches.values()) {
       touch(b.mesh.material)
       touch(b.edges.material)
+      if (b.tangent !== null) touch(b.tangent.material)
     }
     for (const g of this.instanceGroups.values()) {
       for (const mesh of g.facesMeshes) touch(mesh.material)
       for (const lines of g.edgesLines) touch(lines.material)
+      for (const lines of g.tangentLines) if (lines !== null) touch(lines.material)
     }
   }
 
@@ -5661,6 +5868,9 @@ export class SceneRenderer {
     const edgeMat = batch.edges.material as THREE.LineBasicMaterial
     edgeMat.opacity = opacity
     edgeMat.transparent = opacity < 1
+    if (batch.tangent !== null) {
+      ;(batch.tangent.material as THREE.LineBasicMaterial).opacity = opacity * TANGENT_EDGE_OPACITY
+    }
   }
 
   private _setInstanceOpacity(g: InstanceMeshGroup, opacity: number): void {
@@ -5680,6 +5890,8 @@ export class SceneRenderer {
       const edgeMat = g.edgesLines[i].material as THREE.LineBasicMaterial
       edgeMat.opacity = op
       edgeMat.transparent = op < 1
+      const tangent = g.tangentLines[i]
+      if (tangent !== null) (tangent.material as THREE.LineBasicMaterial).opacity = op * TANGENT_EDGE_OPACITY
     })
   }
 
@@ -5697,6 +5909,9 @@ export class SceneRenderer {
     const edgeMat = g.edgesLines.material as THREE.LineBasicMaterial
     edgeMat.opacity = opacity
     edgeMat.transparent = opacity < 1
+    if (g.tangentLines !== null) {
+      ;(g.tangentLines.material as THREE.LineBasicMaterial).opacity = opacity * TANGENT_EDGE_OPACITY
+    }
   }
 
   /**
@@ -5745,6 +5960,7 @@ export class SceneRenderer {
     const edgeColor = selected ? EDGE_COLOR_SELECTED : this._edgeColor()
     const edgeMat = g.edgesLines.material as THREE.LineBasicMaterial
     edgeMat.color.setHex(edgeColor)
+    if (g.tangentLines !== null) (g.tangentLines.material as THREE.LineBasicMaterial).color.setHex(edgeColor)
   }
 
   private _applyInstanceColors(instanceId: bigint, selected: boolean): void {
@@ -5760,6 +5976,9 @@ export class SceneRenderer {
     for (const lines of g.edgesLines) {
       ;(lines.material as THREE.LineBasicMaterial).color.setHex(edgeColor)
     }
+    for (const lines of g.tangentLines) {
+      if (lines !== null) (lines.material as THREE.LineBasicMaterial).color.setHex(edgeColor)
+    }
   }
 
   private _applyInstanceMemberColors(instanceId: bigint): void {
@@ -5774,6 +5993,8 @@ export class SceneRenderer {
       ;(g.edgesLines[i].material as THREE.LineBasicMaterial).color.setHex(
         highlighted ? EDGE_COLOR_SELECTED : this._edgeColor(),
       )
+      const t = g.tangentLines[i]
+      if (t !== null) (t.material as THREE.LineBasicMaterial).color.setHex(highlighted ? EDGE_COLOR_SELECTED : EDGE_COLOR)
     }
   }
 
@@ -5859,6 +6080,88 @@ export class SceneRenderer {
    * over `objectsGroup` (marquee hit-testing calls this per candidate). */
   getObjectGroup(objectId: bigint): THREE.Group | null {
     return this.objectGroups.get(objectId)?.group ?? null
+  }
+
+  /**
+   * Hides `faceIds` of a world object while the Fillet tool previews what
+   * replaces them. The object's index buffer is rebuilt without the
+   * triangles whose first vertex falls in a masked face's vertex range (the
+   * ranges come from `face_mesh_range`); the original buffer and groups are
+   * kept for `clearFaceMask`. The rebuild runs only when the masked set
+   * changes — it is constant while the size changes for one pick.
+   *
+   * Best-effort: returns false (nothing masked) for an object that is not a
+   * plain world object here, or when its index buffer holds more than
+   * `maxTriangles` triangles (the caller then draws its patch over the
+   * object with a depth offset instead). Returns true when the mask is in
+   * place.
+   */
+  setFaceMask(objectId: bigint, faceIds: readonly bigint[], maxTriangles: number): boolean {
+    const wg = this.objectGroups.get(objectId)
+    if (wg === undefined) return false
+    const geo = wg.facesMesh.geometry
+    let entry = this.faceMasks.get(objectId)
+    const current = geo.getIndex()
+    if (current === null) return false
+    if (entry === undefined && current.count / 3 > maxTriangles) return false
+    const key = faceIds.map((f) => f.toString()).join(',')
+    if (entry !== undefined && entry.key === key) return true
+    if (entry === undefined) {
+      entry = {
+        index: current,
+        groups: geo.groups.map((g) => ({ start: g.start, count: g.count, materialIndex: g.materialIndex ?? 0 })),
+        key,
+      }
+      this.faceMasks.set(objectId, entry)
+    }
+    const vertexCount = (geo.getAttribute('position') as THREE.BufferAttribute).count
+    const masked = new Uint8Array(vertexCount)
+    for (const f of faceIds) {
+      const range = this.wasmScene.face_mesh_range(objectId, f)
+      if (range === undefined) {
+        // A face the mesh does not know: leave everything unmasked so the
+        // caller draws its patch with the depth offset instead.
+        this.faceMasks.delete(objectId)
+        geo.setIndex(entry.index)
+        geo.clearGroups()
+        for (const g of entry.groups) geo.addGroup(g.start, g.count, g.materialIndex)
+        return false
+      }
+      masked.fill(1, range[0], Math.min(vertexCount, range[0] + range[1]))
+    }
+    const src = entry.index.array as ArrayLike<number>
+    const out = new Uint32Array(src.length)
+    let n = 0
+    const groups: { start: number; count: number; materialIndex: number }[] = []
+    for (const g of entry.groups) {
+      const start = n
+      const end = Math.min(src.length, g.start + g.count)
+      for (let i = g.start; i + 3 <= end; i += 3) {
+        if (masked[src[i]] === 1) continue
+        out[n++] = src[i]
+        out[n++] = src[i + 1]
+        out[n++] = src[i + 2]
+      }
+      groups.push({ start, count: n - start, materialIndex: g.materialIndex })
+    }
+    entry.key = key
+    geo.setIndex(new THREE.BufferAttribute(out.slice(0, n), 1))
+    geo.clearGroups()
+    for (const g of groups) geo.addGroup(g.start, g.count, g.materialIndex)
+    return true
+  }
+
+  /** Undoes `setFaceMask`: the object draws its full index buffer again. */
+  clearFaceMask(objectId: bigint): void {
+    const entry = this.faceMasks.get(objectId)
+    if (entry === undefined) return
+    this.faceMasks.delete(objectId)
+    const wg = this.objectGroups.get(objectId)
+    if (wg === undefined) return
+    const geo = wg.facesMesh.geometry
+    geo.setIndex(entry.index)
+    geo.clearGroups()
+    for (const g of entry.groups) geo.addGroup(g.start, g.count, g.materialIndex)
   }
 
   /**

@@ -358,7 +358,7 @@ test('Follow Me start cue: a corner seam beyond the corner sweeps clean; straddl
 
   // The kernel agrees: the click really is refused, and nothing new is built.
   await armAndCommit(page)
-  await expect(page.getByText('[PathTooTight]')).toBeVisible()
+  await expect(page.getByText('The path turns tighter than the profile is wide', { exact: false })).toBeVisible()
   expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(1)
 })
 

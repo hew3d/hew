@@ -80,6 +80,8 @@ export function buildPlan(report: HealthReport, census?: (row: HealthRow) => Men
   }
   let fix = 0
   for (const row of report.rows) {
+    // A closed object listed only for its zero-area faces is not something to make solid.
+    if (row.verdict.kind === 'solid') continue
     if (rowClass(row) === 'open') fix += 1
     const kind = classifyRow(row, row.family !== null && live.has(row.family))
     if (kind === 'split') {

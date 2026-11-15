@@ -10,7 +10,7 @@
  */
 
 import { useLingui } from '@lingui/react/macro'
-import { materialSubline } from '../../library/libraryModel'
+import { isBuiltInItem, materialSubline } from '../../library/libraryModel'
 import type { LibraryItem } from '../../library/types'
 import { CubeGlyph, WarningGlyph } from './icons'
 
@@ -119,18 +119,20 @@ export function LibraryTile({
           >
             {defaultActionLabel}
           </button>
-          <button
-            type="button"
-            className="hwlib__tile-menu-btn"
-            aria-label={t`${displayName} actions`}
-            onClick={(e) => {
-              e.stopPropagation()
-              onSelect()
-              onOpenMenu(e.currentTarget)
-            }}
-          >
-            ⋯
-          </button>
+          {!isBuiltInItem(item) && (
+            <button
+              type="button"
+              className="hwlib__tile-menu-btn"
+              aria-label={t`${displayName} actions`}
+              onClick={(e) => {
+                e.stopPropagation()
+                onSelect()
+                onOpenMenu(e.currentTarget)
+              }}
+            >
+              ⋯
+            </button>
+          )}
         </div>
       )}
 
@@ -138,7 +140,9 @@ export function LibraryTile({
       <div className="hwlib__tile-sub">
         {item.error
           ? t`Failed to load`
-          : isMaterial
+          : isBuiltInItem(item)
+            ? t`Built-in`
+            : isMaterial
             ? materialSubline(item.summary.material_entries[0] ?? emptyMaterial())
             : placementCount > 0
               ? t`${placementCount} in this model`

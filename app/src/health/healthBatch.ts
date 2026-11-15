@@ -22,7 +22,7 @@ import { parseDispatch } from '../api/dispatchResult'
 export interface BatchOp {
   object: bigint
   /** `hew.solid.cap` | `hew.solid.thicken` | `hew.solid.mark_surface` | `hew.solid.delete_faces`
-   *  | `hew.solid.rejoin` | `hew.solid.mend`. */
+   *  | `hew.solid.rejoin` | `hew.solid.remove_degenerate_faces` | `hew.solid.mend`. */
   method: string
   /** The command's params besides `object`. */
   params?: Record<string, unknown>
@@ -45,7 +45,8 @@ export interface BatchFailure {
 export interface BatchResult {
   done: BatchOp[]
   failed: BatchFailure[]
-  /** What each finished command returned (a Mend's report). */
+  /** What each finished command returned (a Mend's report, or `{removed}` for
+   *  a degenerate-face removal). */
   results?: Map<BatchOp, unknown>
 }
 
@@ -179,7 +180,7 @@ export function runBatch(
 // Plans: which ops a header button runs
 // ---------------------------------------------------------------------------
 
-export type BatchKind = 'close' | 'mark' | 'thicken' | 'repair' | 'rejoinSolid' | 'mend'
+export type BatchKind = 'close' | 'mark' | 'thicken' | 'repair' | 'rejoinSolid' | 'degenerate' | 'mend'
 
 /** Undo-entry label for each batch kind. */
 export function batchLabel(kind: BatchKind, n: number): string {
@@ -194,17 +195,20 @@ export function batchLabel(kind: BatchKind, n: number): string {
       return UNDO_LABEL.rejoin(n)
     case 'rejoinSolid':
       return UNDO_LABEL.rejoinSolid
+    case 'degenerate':
+      return UNDO_LABEL.removeDegenerate(n)
     case 'mend':
       return UNDO_LABEL.mend(n)
   }
 }
 
-const ACTION_ROW: Record<BatchKind, 'close' | 'thicken' | 'keep' | 'rejoin' | 'mend'> = {
+const ACTION_ROW: Record<BatchKind, 'close' | 'thicken' | 'keep' | 'rejoin' | 'degenerate' | 'mend'> = {
   close: 'close',
   mark: 'keep',
   thicken: 'thicken',
   repair: 'close',
   rejoinSolid: 'rejoin',
+  degenerate: 'degenerate',
   mend: 'mend',
 }
 
@@ -245,6 +249,23 @@ export const rejoinSolidOp = (rows: readonly HealthRow[]): BatchOp => {
   }
 }
 export const deleteFacesOp = (row: HealthRow): BatchOp => ({ object: row.object, method: 'hew.solid.delete_faces' })
+export const removeDegenerateOp = (row: HealthRow): BatchOp => ({
+  object: row.object,
+  method: 'hew.solid.remove_degenerate_faces',
+})
+
+/** Rows that carry zero-area faces to remove. */
+export const degenerateRows = (rows: readonly HealthRow[]): HealthRow[] => rows.filter((r) => r.degenerateFaces > 0)
+
+/** How many faces a finished batch removed (the sum of each command's `removed`). */
+export function removedCount(result: BatchResult): number {
+  let n = 0
+  for (const op of result.done) {
+    const r = result.results?.get(op) as { removed?: unknown } | undefined
+    if (typeof r?.removed === 'number') n += r.removed
+  }
+  return n
+}
 
 /** Rows a group's **Close all** caps: those with a flat opening to fill. */
 export const closableRows = (rows: readonly HealthRow[]): HealthRow[] => rows.filter(canCloseRow)

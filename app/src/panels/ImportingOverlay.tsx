@@ -270,8 +270,9 @@ export function ImportingOverlay({ fileName, opening = false, progress = null }:
   )
 }
 
-/** The same card for a long edit (a Mend) on a large object: painted
- *  before the blocking call so the pause reads as work, not a hang. */
+/** The same card for a long edit (a Mend, a Union, a Fillet) on a large
+ *  object: painted before the blocking call so the pause reads as work, not
+ *  a hang. */
 export function BusyOverlay({ message }: { message: string }) {
   ensureSpinnerKeyframes()
   return (

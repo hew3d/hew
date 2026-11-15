@@ -19,8 +19,12 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { i18n, type MessageDescriptor } from '@lingui/core'
+import { msg } from '@lingui/core/macro'
 import { Trans, useLingui } from '@lingui/react/macro'
 import { toolLabel, toolSpec, type ToolName } from '../tools/toolRegistry'
+import { DRAW_MENU, TOOLS_MENU, type MenuEntry } from './toolsMenuModel'
+import { BAKE_SMOOTH_ACTION, SMOOTH_LEVEL_ACTIONS, SOFTEN_EDGES_ACTION } from '../curveActions'
 import { shortcutLabel } from '../keymap/keymap'
 import { useKeymap } from '../keymap/useKeymap'
 import type { StandardView } from '../viewport/Viewport'
@@ -112,6 +116,11 @@ export interface MenuBarProps {
   activeTool?: string
   /** Called when the user picks a tool from the menu. */
   onSelectTool?: (name: string) => void
+  /** Called when the user picks one of Deform's four modes (twist, bend,
+   *  taper, bend-to-path) — all of them open the one Deform tool. */
+  onSelectDeformMode?: (mode: string) => void
+  /** The current Deform mode, for the check mark. */
+  deformMode?: string
   /** Whether the Model info pane is visible. */
   showModelInfo?: boolean
   /** Whether the Materials pane is visible. */
@@ -172,6 +181,8 @@ export interface MenuBarProps {
   wireframe?: boolean
   onToggleXray?: () => void
   onToggleWireframe?: () => void
+  /** Whether tangent edges (fillet rails) are drawn (View ▸ Tangent Edges). */
+  showTangentEdges?: boolean
   /** Toggle the world axes. */
   onToggleAxes?: () => void
   /** Whether part axes are drawn for the selected or edited component (View ▸ Part Axes). */
@@ -183,6 +194,8 @@ export interface MenuBarProps {
   onToggleGrid?: () => void
   /** Toggle construction-guide visibility. */
   onToggleGuides?: () => void
+  /** Toggle tangent-edge visibility. */
+  onToggleTangentEdges?: () => void
   /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
   onDeleteGuides?: () => void
   /** View ▸ Section Cut's check state: true only when a section is BOTH
@@ -229,6 +242,16 @@ export interface MenuBarProps {
     /** Something that can be mirrored is selected (Flip Along). */
     canFlip?: boolean
     canBoolean: boolean
+    /** One or more solids selected — Object ▸ Smooth ▸ … and Bake Smooth.
+     *  Defaults to disabled when omitted. */
+    canSmooth?: boolean
+    /** A solid Object is selected directly (Soften Edges… needs Object Info's
+     *  angle field, which groups and instances do not show). Defaults to
+     *  disabled when omitted. */
+    canSoften?: boolean
+    /** The selection's shared Smooth level (0 = Off), or null when it mixes
+     *  levels or nothing is selected — checks the matching Smooth entry. */
+    smoothLevel?: number | null
     /** One object, group, or instance selected, with a library backend —
      *  Object ▸ Save Selection to Library… (also the dock's verb). Defaults
      *  to disabled when omitted. */
@@ -329,33 +352,10 @@ type MenuId = 'file' | 'edit' | 'object' | 'view' | 'draw' | 'tools' | 'camera' 
 
 /* oxlint-disable lingui/no-unlocalized-strings -- tool IDs, never displayed: labels resolve through toolLabel() */
 const T = {
-  Arc: 'Arc' as ToolName,
-  Circle: 'Circle' as ToolName,
-  Dimension: 'Dimension' as ToolName,
-  DrawingAxes: 'Drawing Axes' as ToolName,
-  EditVertex: 'Edit Vertex' as ToolName,
-  FollowMe: 'Follow Me' as ToolName,
-  Line: 'Line' as ToolName,
   LookAround: 'Look Around' as ToolName,
-  Move: 'Move' as ToolName,
-  Offset: 'Offset' as ToolName,
   Orbit: 'Orbit' as ToolName,
-  Paint: 'Paint' as ToolName,
   Pan: 'Pan' as ToolName,
-  Polygon: 'Polygon' as ToolName,
   PositionCamera: 'Position Camera' as ToolName,
-  PositionTexture: 'Position Texture' as ToolName,
-  Protractor: 'Protractor' as ToolName,
-  PushPull: 'Push/Pull' as ToolName,
-  Rectangle: 'Rectangle' as ToolName,
-  Rotate: 'Rotate' as ToolName,
-  Scale: 'Scale' as ToolName,
-  Flip: 'Flip' as ToolName,
-  SectionPlane: 'Section Plane' as ToolName,
-  Select: 'Select' as ToolName,
-  Slice: 'Slice' as ToolName,
-  TapeMeasure: 'Tape Measure' as ToolName,
-  Text: 'Text' as ToolName,
   Walk: 'Walk' as ToolName,
   Zoom: 'Zoom' as ToolName,
   ZoomWindow: 'Zoom Window' as ToolName,
@@ -465,6 +465,14 @@ const MENU_ITEM_STYLE = (disabled: boolean): React.CSSProperties => ({
   // and long rows like "Command Palette…" fold onto two lines).
   whiteSpace: 'nowrap',
 })
+
+/** Deform's four modes as menu entries (they all open the one Deform tool). */
+const DEFORM_MENU_ENTRIES: readonly { mode: string; label: MessageDescriptor }[] = [
+  { mode: 'twist', label: msg`Twist` },
+  { mode: 'bend', label: msg`Bend` },
+  { mode: 'taper', label: msg`Taper` },
+  { mode: 'bend-to-path', label: msg`Bend to Path` },
+]
 
 const SEPARATOR_STYLE: React.CSSProperties = {
   height: '1px',
@@ -740,6 +748,8 @@ export function MenuBar({
   redoLabel,
   activeTool,
   onSelectTool,
+  onSelectDeformMode,
+  deformMode,
   showModelInfo = true,
   showMaterials = true,
   showComponents = false,
@@ -767,6 +777,7 @@ export function MenuBar({
   showAxes = true,
   showGrid = true,
   showGuides = true,
+  showTangentEdges = false,
   onToggleAxes,
   showPartAxes = false,
   onTogglePartAxes,
@@ -777,6 +788,7 @@ export function MenuBar({
   onToggleXray,
   onToggleWireframe,
   onToggleGuides,
+  onToggleTangentEdges,
   onDeleteGuides,
   sectionPlaneChecked = false,
   sectionPlaneExists = false,
@@ -858,6 +870,49 @@ export function MenuBar({
   }, [openMenu, close])
 
   const withClose = (fn: () => void) => () => { close(); fn() }
+
+  /** Render a declarative menu (`toolsMenuModel.ts`): check items for tools,
+   *  submenus, separators. */
+  const renderMenuEntries = (entries: readonly MenuEntry[]): React.ReactNode =>
+    entries.map((entry, i) => {
+      switch (entry.kind) {
+        case 'separator':
+          return <div key={i} style={SEPARATOR_STYLE} />
+        case 'tool':
+          return (
+            <CheckMenuItem
+              key={entry.tool}
+              label={toolLabel(entry.tool)}
+              shortcut={entry.showKey === false ? undefined : keyFor(entry.tool)}
+              checked={activeTool === entry.tool}
+              onClick={withClose(() => onSelectTool?.(entry.tool))}
+            />
+          )
+        case 'alias':
+          return (
+            <MenuItem
+              key={entry.actionId}
+              label={i18n._(entry.label)}
+              onClick={withClose(() => onSelectTool?.(entry.selectName))}
+            />
+          )
+        case 'deformMode':
+          return (
+            <CheckMenuItem
+              key={entry.actionId}
+              label={i18n._(entry.label)}
+              checked={activeTool === 'Deform' && deformMode === entry.mode}
+              onClick={withClose(() => onSelectDeformMode?.(entry.mode))}
+            />
+          )
+        case 'submenu':
+          return (
+            <SubMenu key={entry.id} label={i18n._(entry.label)}>
+              {renderMenuEntries(entry.items)}
+            </SubMenu>
+          )
+      }
+    })
 
   // Under Tauri the OS owns the menus AND the title bar shows the document
   // title (App.tsx calls the Tauri window setTitle) — so there is nothing
@@ -1169,6 +1224,29 @@ export function MenuBar({
               onClick={withClose(() => onEditAction?.('edit-intersect'))}
             />
             <div style={SEPARATOR_STYLE} />
+            <SubMenu label={t`Smooth`}>
+              {SMOOTH_LEVEL_ACTIONS.map(({ id, level }) => (
+                <CheckMenuItem
+                  key={id}
+                  label={level === 0 ? t`Off` : String(level)}
+                  checked={editGates?.smoothLevel === level}
+                  disabled={!(editGates?.canSmooth ?? false)}
+                  onClick={withClose(() => onEditAction?.(id))}
+                />
+              ))}
+              <div style={SEPARATOR_STYLE} />
+              <MenuItem
+                label={t`Bake Smooth`}
+                disabled={!(editGates?.canSmooth ?? false)}
+                onClick={withClose(() => onEditAction?.(BAKE_SMOOTH_ACTION))}
+              />
+            </SubMenu>
+            <MenuItem
+              label={t`Soften Edges…`}
+              disabled={!(editGates?.canSoften ?? false)}
+              onClick={withClose(() => onEditAction?.(SOFTEN_EDGES_ACTION))}
+            />
+            <div style={SEPARATOR_STYLE} />
             <MenuItem
               label={MENU.makeSolid}
               shortcut={sc('make-solid')}
@@ -1215,6 +1293,11 @@ export function MenuBar({
               shortcut={sc('toggle-guides')}
               checked={showGuides}
               onClick={withClose(() => onToggleGuides?.())}
+            />
+            <CheckMenuItem
+              label={t`Tangent Edges`}
+              checked={showTangentEdges}
+              onClick={withClose(() => onToggleTangentEdges?.())}
             />
             {/* "Section Cut", not "Section Plane": the TOOL that places the
                 plane keeps that name under Tools; this toggle clips/unclips
@@ -1455,39 +1538,9 @@ export function MenuBar({
         <MenuTrigger id="draw" label={t`Draw`} openMenu={openMenu} onToggle={toggle} onActivate={activate} />
         {openMenu === 'draw' && (
           <div style={DROPDOWN_STYLE}>
-            {/* Stroke tools (open paths), then closed shapes — future curve
-                tools join the first group, new primitives the second. */}
-            <CheckMenuItem
-              label={toolLabel(T.Line)}
-              shortcut={keyFor(T.Line)}
-              checked={activeTool === T.Line}
-              onClick={withClose(() => onSelectTool?.(T.Line))}
-            />
-            <CheckMenuItem
-              label={toolLabel(T.Arc)}
-              shortcut={keyFor(T.Arc)}
-              checked={activeTool === T.Arc}
-              onClick={withClose(() => onSelectTool?.(T.Arc))}
-            />
-            <div style={SEPARATOR_STYLE} />
-            <CheckMenuItem
-              label={toolLabel(T.Rectangle)}
-              shortcut={keyFor(T.Rectangle)}
-              checked={activeTool === T.Rectangle}
-              onClick={withClose(() => onSelectTool?.(T.Rectangle))}
-            />
-            <CheckMenuItem
-              label={toolLabel(T.Circle)}
-              shortcut={keyFor(T.Circle)}
-              checked={activeTool === T.Circle}
-              onClick={withClose(() => onSelectTool?.(T.Circle))}
-            />
-            <CheckMenuItem
-              label={toolLabel(T.Polygon)}
-              shortcut={keyFor(T.Polygon)}
-              checked={activeTool === T.Polygon}
-              onClick={withClose(() => onSelectTool?.(T.Polygon))}
-            />
+            {/* The tool entries are `DRAW_MENU` (toolsMenuModel.ts): stroke
+                tools (open paths), then closed shapes. */}
+            {renderMenuEntries(DRAW_MENU)}
             <div style={SEPARATOR_STYLE} />
             <MenuItem
               label={t`3D Text…`}
@@ -1504,121 +1557,10 @@ export function MenuBar({
         <MenuTrigger id="tools" label={t`Tools`} openMenu={openMenu} onToggle={toggle} onActivate={activate} />
         {openMenu === 'tools' && (
           <div style={DROPDOWN_STYLE}>
-            {/* Grouped by job (mirrors the native menu): select, transform,
-                shape geometry, measure & annotate, materials, model-space
-                utilities — future tools slot into their group. */}
-            <CheckMenuItem
-              label={toolLabel(T.Select)}
-              shortcut={keyFor(T.Select)}
-              checked={activeTool === T.Select}
-              onClick={withClose(() => onSelectTool?.(T.Select))}
-            />
-            <div style={SEPARATOR_STYLE} />
-            <CheckMenuItem
-              label={toolLabel(T.Move)}
-              shortcut={keyFor(T.Move)}
-              checked={activeTool === T.Move}
-              onClick={withClose(() => onSelectTool?.(T.Move))}
-            />
-            <CheckMenuItem
-              label={toolLabel(T.Rotate)}
-              shortcut={keyFor(T.Rotate)}
-              checked={activeTool === T.Rotate}
-              onClick={withClose(() => onSelectTool?.(T.Rotate))}
-            />
-            <CheckMenuItem
-              label={toolLabel(T.Scale)}
-              shortcut={keyFor(T.Scale)}
-              checked={activeTool === T.Scale}
-              onClick={withClose(() => onSelectTool?.(T.Scale))}
-            />
-            <CheckMenuItem
-              label={toolLabel(T.Flip)}
-              checked={activeTool === T.Flip}
-              onClick={withClose(() => onSelectTool?.(T.Flip))}
-            />
-            <div style={SEPARATOR_STYLE} />
-            <CheckMenuItem
-              label={toolLabel(T.PushPull)}
-              shortcut={keyFor(T.PushPull)}
-              checked={activeTool === T.PushPull}
-              onClick={withClose(() => onSelectTool?.(T.PushPull))}
-            />
-            <CheckMenuItem
-              label={toolLabel(T.FollowMe)}
-              shortcut={keyFor(T.FollowMe)}
-              checked={activeTool === T.FollowMe}
-              onClick={withClose(() => onSelectTool?.(T.FollowMe))}
-            />
-            <CheckMenuItem
-              label={toolLabel(T.Offset)}
-              shortcut={keyFor(T.Offset)}
-              checked={activeTool === T.Offset}
-              onClick={withClose(() => onSelectTool?.(T.Offset))}
-            />
-            <CheckMenuItem
-              label={toolLabel(T.Slice)}
-              shortcut={keyFor(T.Slice)}
-              checked={activeTool === T.Slice}
-              onClick={withClose(() => onSelectTool?.(T.Slice))}
-            />
-            <CheckMenuItem
-              label={toolLabel(T.EditVertex)}
-              shortcut={keyFor(T.EditVertex)}
-              checked={activeTool === T.EditVertex}
-              onClick={withClose(() => onSelectTool?.(T.EditVertex))}
-            />
-            <div style={SEPARATOR_STYLE} />
-            <CheckMenuItem
-              label={toolLabel(T.TapeMeasure)}
-              shortcut={keyFor(T.TapeMeasure)}
-              checked={activeTool === T.TapeMeasure}
-              onClick={withClose(() => onSelectTool?.(T.TapeMeasure))}
-            />
-            <CheckMenuItem
-              label={toolLabel(T.Protractor)}
-              shortcut={keyFor(T.Protractor)}
-              checked={activeTool === T.Protractor}
-              onClick={withClose(() => onSelectTool?.(T.Protractor))}
-            />
-            <CheckMenuItem
-              label={toolLabel(T.Dimension)}
-              shortcut={keyFor(T.Dimension)}
-              checked={activeTool === T.Dimension}
-              onClick={withClose(() => onSelectTool?.(T.Dimension))}
-            />
-            <CheckMenuItem
-              label={toolLabel(T.Text)}
-              shortcut={keyFor(T.Text)}
-              checked={activeTool === T.Text}
-              onClick={withClose(() => onSelectTool?.(T.Text))}
-            />
-            <div style={SEPARATOR_STYLE} />
-            <CheckMenuItem
-              label={toolLabel(T.Paint)}
-              shortcut={keyFor(T.Paint)}
-              checked={activeTool === T.Paint}
-              onClick={withClose(() => onSelectTool?.(T.Paint))}
-            />
-            <CheckMenuItem
-              label={toolLabel(T.PositionTexture)}
-              shortcut={keyFor(T.PositionTexture)}
-              checked={activeTool === T.PositionTexture}
-              onClick={withClose(() => onSelectTool?.(T.PositionTexture))}
-            />
-            <div style={SEPARATOR_STYLE} />
-            <CheckMenuItem
-              label={toolLabel(T.DrawingAxes)}
-              shortcut={keyFor(T.DrawingAxes)}
-              checked={activeTool === T.DrawingAxes}
-              onClick={withClose(() => onSelectTool?.(T.DrawingAxes))}
-            />
-            <CheckMenuItem
-              label={toolLabel(T.SectionPlane)}
-              shortcut={keyFor(T.SectionPlane)}
-              checked={activeTool === T.SectionPlane}
-              onClick={withClose(() => onSelectTool?.(T.SectionPlane))}
-            />
+            {/* `TOOLS_MENU` (toolsMenuModel.ts) mirrors the native menu: select and
+                eraser, transform, the everyday shaping tools, the Shape and
+                Deform submenus, then measure & annotate and utilities. */}
+            {renderMenuEntries(TOOLS_MENU)}
           </div>
         )}
       </div>

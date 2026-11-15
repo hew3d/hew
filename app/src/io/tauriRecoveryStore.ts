@@ -47,10 +47,9 @@ function parseMeta(raw: string | null, modifiedMs: number): RecoveryMeta {
 export class TauriRecoveryStore implements RecoveryStore {
   async write(bytes: Uint8Array, meta: RecoveryMeta): Promise<void> {
     const { invoke } = await import('@tauri-apps/api/core')
-    await invoke('recovery_write', {
-      contents: Array.from(bytes),
-      meta: JSON.stringify(meta),
-    })
+    // Raw-body IPC: a JSON byte array stalls the webview for seconds on a
+    // large model, and this runs after every edit.
+    await invoke('recovery_write', bytes as never, { headers: { meta: encodeURIComponent(JSON.stringify(meta)) } })
   }
 
   async writeSource(source: Uint8Array | null): Promise<void> {

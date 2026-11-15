@@ -39,7 +39,7 @@ interface PlacementsPush {
  *  (`library_dispatch` → `library-action`). Bytes are NOT sent — the
  *  document window re-reads the item from the shared store by name. */
 export interface LibraryActionPayload {
-  action: 'insert' | 'open' | 'paint' | 'add-palette'
+  action: 'insert' | 'open' | 'paint' | 'add-palette' | 'use-profile' | 'save-copy'
   fileName: string
   displayName: string
   sourceId: string | null
@@ -118,6 +118,8 @@ export function LibraryWindow() {
       onOpenAsDocument={(item) => dispatch('open', item, true)}
       onPaintWith={(item) => dispatch('paint', item, true)}
       onAddToPalette={(item) => dispatch('add-palette', item, false)}
+      onUseProfile={(item) => dispatch('use-profile', item, true)}
+      onSaveProfileCopy={(item) => dispatch('save-copy', item, true)}
       // The badge compares kernel content hashes: the document window
       // pushes its palette's hashes; the item's ride in its own summary.
       materialInPalette={async (bytes) => {

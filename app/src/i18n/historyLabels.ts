@@ -173,6 +173,10 @@ export function historyKindLabel(k: HistoryKind): string | null {
       const n = count(k, 'count')
       return plural(n, { one: 'Close an opening', other: 'Close # openings' })
     }
+    case 'remove-degenerate': {
+      const n = count(k, 'count')
+      return plural(n, { one: 'Remove a degenerate face', other: 'Remove # degenerate faces' })
+    }
     case 'delete-faces': {
       const n = count(k, 'count')
       return plural(n, { one: 'Delete # face', other: 'Delete # faces' })

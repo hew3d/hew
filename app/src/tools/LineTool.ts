@@ -1509,11 +1509,14 @@ export class LineTool implements Tool {
     return !this._dragDone && this.capturingInput()
   }
 
-  /** Per-key capture (Tool.capturesKey): an anchored chain keeps the whole
-   *  keyboard; after a dragged line (`_dragDone`) only the retype buffer's
-   *  keys are taken, as for a closed shape's idle retype window. */
+  /** Per-key capture (Tool.capturesKey): an anchored chain keeps the
+   *  keyboard for a typed length, but Space still goes to Select unless a
+   *  length is being typed (an imperial length such as `5' 2"` holds one).
+   *  After a dragged line (`_dragDone`) only the retype buffer's keys are
+   *  taken, as for a closed shape's idle retype window. */
   capturesKey(key: string): boolean {
     if (this._dragDone) return this.retype.isOpen && idleRetypeCapturesKey(key, this.typed, isLengthInputKey)
+    if (key === ' ') return this.capturingInput() && this.typed !== ''
     return this.capturingInput()
   }
 
@@ -1979,6 +1982,17 @@ export class LineTool implements Tool {
   }
 
   /**
+   * A typed length whose end lands within the snap aperture of the chain's
+   * first point closes the chain on that point exactly, as a click there
+   * would: the typed length is the length to the START, give or take what a
+   * hand could not hit. `first` is null while the chain is too short to close.
+   */
+  private _closeOnChainStart(first: V3 | null, endpoint: V3): V3 {
+    if (first === null) return endpoint
+    return segmentLength(first, endpoint) <= this.refs.tolerance(first) ? first : endpoint
+  }
+
+  /**
    * Commit a segment of the exact typed length from the last placed point,
    * along normalize(cursor - last). With no direction at all (the cursor
    * never moved off the anchor) it says so rather than doing nothing.
@@ -2001,7 +2015,8 @@ export class LineTool implements Tool {
         this.onToast(noDirectionMessage())
         return
       }
-      const endpoint = pointAlong(anchor, dir, distance)
+      const first = this._chainVertices.length >= 3 ? this._chainVertices[0].point : null
+      const endpoint = this._closeOnChainStart(first, pointAlong(anchor, dir, distance))
       this._commitPlaneSegment(plane, target, anchor, endpoint)
     } else if (this.faceStage.kind === 'anchored') {
       const { points } = this.faceStage
@@ -2012,7 +2027,8 @@ export class LineTool implements Tool {
         this.onToast(noDirectionMessage())
         return
       }
-      const endpoint = pointAlong(last, dir, distance)
+      const first = points.length >= 3 ? points[0] : null
+      const endpoint = this._closeOnChainStart(first, pointAlong(last, dir, distance))
       this._appendFacePoint(endpoint)
     }
   }

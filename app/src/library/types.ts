@@ -6,7 +6,7 @@
  * categories: every item is a `.hew` file; the category only decides where
  * it lists and which action is primary (Insert for components/materials,
  * Open for models). */
-export type LibraryCategory = 'component' | 'material' | 'model'
+export type LibraryCategory = 'component' | 'material' | 'model' | 'profile'
 
 /** The `hew.library` metadata carried in an item file's own document
  * attribute dictionary — the single source of truth (no separate database).
@@ -64,6 +64,8 @@ export interface LibraryItemSummary {
   /** namespace → key → JSON value; `hew.library` metadata lives here. */
   doc_attrs: Record<string, Record<string, unknown>>
   material_entries: LibraryMaterialSummary[]
+  /** The file is one open drawn chain and nothing else: a profile. */
+  profile_chain_only: boolean
 }
 
 /** A file in the library folder, as the storage seam lists it. */

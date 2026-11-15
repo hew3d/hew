@@ -58,7 +58,7 @@ function makeWasmScene(opts: {
   return {
     pick_face: vi.fn(() => opts.facePick),
     face_material: vi.fn(() => opts.faceMaterial),
-    paint_face: vi.fn(() => {
+    paint_logical_face: vi.fn(() => {
       if (opts.paintFaceThrows !== undefined) throw new Error(opts.paintFaceThrows)
     }),
     set_object_material: vi.fn(),
@@ -90,7 +90,7 @@ describe('PaintTool — plain paint and whole-object (pre-existing behavior)', (
 
     tool.onPointerDown(makeSnap(), RAY)
 
-    expect(scene.paint_face).toHaveBeenCalledWith(3n, 4n, 7n)
+    expect(scene.paint_logical_face).toHaveBeenCalledWith(3n, 4n, 7n)
     expect(scene.set_object_material).not.toHaveBeenCalled()
     expect(scene.replace_material).not.toHaveBeenCalled()
     expect(onCommit).toHaveBeenCalledWith(3n)
@@ -104,12 +104,12 @@ describe('PaintTool — plain paint and whole-object (pre-existing behavior)', (
 
     tool.onPointerDown(makeSnap(), RAY)
     expect(scene.set_object_material).toHaveBeenCalledWith(3n, 7n)
-    expect(scene.paint_face).not.toHaveBeenCalled()
+    expect(scene.paint_logical_face).not.toHaveBeenCalled()
     expect(onCommit).toHaveBeenCalledWith(3n)
 
     // Auto-reset: a second click without re-arming paints the face again.
     tool.onPointerDown(makeSnap(), RAY)
-    expect(scene.paint_face).toHaveBeenCalledTimes(1)
+    expect(scene.paint_logical_face).toHaveBeenCalledTimes(1)
   })
 
   it('a stale pick (pick_face misses) is a silent no-op', () => {
@@ -118,12 +118,12 @@ describe('PaintTool — plain paint and whole-object (pre-existing behavior)', (
 
     tool.onPointerDown(makeSnap(), RAY)
 
-    expect(scene.paint_face).not.toHaveBeenCalled()
+    expect(scene.paint_logical_face).not.toHaveBeenCalled()
     expect(onCommit).not.toHaveBeenCalled()
     expect(onToast).not.toHaveBeenCalled()
   })
 
-  it('a refused paint_face reports through onToast, not a thrown exception', () => {
+  it('a refused paint_logical_face reports through onToast, not a thrown exception', () => {
     const scene = makeWasmScene({
       facePick: makeFacePick(3n, 4n),
       paintFaceThrows: 'UnknownMaterial: material handle is not in the palette',
@@ -154,7 +154,7 @@ describe('PaintTool — eyedropper (Alt-sample, design §1)', () => {
     expect(tool.getCurrentMaterial()).toBe(9n)
     expect(onSample).toHaveBeenCalledWith(9n)
     // Sampling never paints/commits a document mutation.
-    expect(scene.paint_face).not.toHaveBeenCalled()
+    expect(scene.paint_logical_face).not.toHaveBeenCalled()
     expect(scene.set_object_material).not.toHaveBeenCalled()
     expect(onCommit).not.toHaveBeenCalled()
   })
@@ -244,7 +244,7 @@ describe('PaintTool — replace everywhere (Shift/Ctrl+Shift, design §2)', () =
 
     expect(scene.replace_material).toHaveBeenCalledWith(true, 3n, 9n, 2n)
     expect(onReplace).toHaveBeenCalledWith('document', 3n)
-    expect(scene.paint_face).not.toHaveBeenCalled()
+    expect(scene.paint_logical_face).not.toHaveBeenCalled()
     expect(onCommit).not.toHaveBeenCalled()
   })
 
@@ -290,7 +290,7 @@ describe('PaintTool — replace everywhere (Shift/Ctrl+Shift, design §2)', () =
 
     tool.onPointerDown(makeSnap(), RAY)
     expect(scene.replace_material).toHaveBeenCalledTimes(1)
-    expect(scene.paint_face).toHaveBeenCalledTimes(1)
+    expect(scene.paint_logical_face).toHaveBeenCalledTimes(1)
   })
 
   it('a refused replace_material reports through onToast, not a thrown exception', () => {
@@ -342,7 +342,7 @@ describe('PaintTool — component placements', () => {
     tool.setCurrentMaterial(7n)
     tool.onPointerDown(makeSnap(), RAY)
     expect(scene.set_instance_material).toHaveBeenCalledWith(9n, 7n)
-    expect(scene.paint_face).not.toHaveBeenCalled()
+    expect(scene.paint_logical_face).not.toHaveBeenCalled()
     expect(onInstanceCommit).toHaveBeenCalledWith([9n], [])
     expect(onToast).toHaveBeenCalledWith(
       'Painting a component colors this placement. Edit the component to paint its faces.',
@@ -387,7 +387,7 @@ describe('PaintTool — component placements', () => {
     const { tool, onCommit } = makeInstanceTool(scene, [{ kind: 'instance', id: 9n }])
     tool.setCurrentMaterial(7n)
     tool.onPointerDown(makeSnap(), RAY)
-    expect(scene.paint_face).toHaveBeenCalledWith(3n, 4n, 7n)
+    expect(scene.paint_logical_face).toHaveBeenCalledWith(3n, 4n, 7n)
     expect(scene.set_instance_material).not.toHaveBeenCalled()
     expect(onCommit).toHaveBeenCalledWith(3n)
   })

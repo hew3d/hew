@@ -33,6 +33,9 @@ import linkOffSvg from '@material-symbols/svg-400/outlined/link_off.svg?raw'
 import layersClearSvg from '@material-symbols/svg-400/outlined/layers_clear.svg?raw'
 import textFieldsSvg from '@material-symbols/svg-400/outlined/text_fields.svg?raw'
 import bookmarkAddSvg from '@material-symbols/svg-400/outlined/bookmark_add.svg?raw'
+import joinSvg from '@material-symbols/svg-400/outlined/join.svg?raw'
+import joinLeftSvg from '@material-symbols/svg-400/outlined/join_left.svg?raw'
+import joinInnerSvg from '@material-symbols/svg-400/outlined/join_inner.svg?raw'
 import { deriveDockContext, dockVerbsFor, dockChipLabel, dockVerbLabel, isDockVerbEnabled, type DockContext, type DockGates, type DockVerb } from './dockLogic'
 import type { NodeRef } from './treeModel'
 
@@ -48,6 +51,10 @@ const NON_TOOL_ICON_SVG: Record<string, string> = {
   'explode-instance': callSplitSvg,
   'draw-3d-text': textFieldsSvg,
   'save-to-library': bookmarkAddSvg,
+  // Two overlapping circles: the whole, the left-only part, the shared lens.
+  'edit-union': joinSvg,
+  'edit-subtract': joinLeftSvg,
+  'edit-intersect': joinInnerSvg,
 }
 
 const CHIP_COLOR: Record<DockContext, string> = {
@@ -140,8 +147,8 @@ export interface ContextualDockProps {
    * primary) as a preview of what a click there would do. */
   hoveringSketchRegion?: boolean
   /** Selection-dependent applicability for the structural verbs (Group /
-   * Make Component) — derived in App.tsx from the same `menuGates` memo the
-   * Edit menu uses. Omitted (tests, storybook-style mounts) = ungated. */
+   * Make Component) and the booleans — derived in App.tsx from the same
+   * `menuGates` memo the Object menu uses. Omitted (tests, storybook-style mounts) = ungated. */
   gates?: DockGates
 }
 

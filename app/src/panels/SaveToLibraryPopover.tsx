@@ -28,15 +28,23 @@ export interface SaveToLibraryPopoverProps {
    * over the viewport, for File ▸ Save to Library…, which has no dock verb
    * to anchor from. */
   variant?: 'dock' | 'modal'
-  onSave: (name: string) => void
+  onSave: (name: string, opts?: { replace?: boolean }) => void
   onClose: () => void
-  /** The same prompt asks for other names too (Make component). Each of
-   *  these defaults to the Save to Library wording; `hint` of `null` drops
-   *  the footer that explains the insertion point. */
+  /** Heading, default "Save to Library" (a profile says "Save profile"; Make
+   *  component asks for other names too). Each of `title`, `inputLabel` and
+   *  `buttonLabel` defaults to the Save to Library wording; `hint` of `null`
+   *  drops the footer that explains the insertion point. */
   title?: string
   inputLabel?: string
   buttonLabel?: string
   hint?: string | null
+  /** Read-only facts shown under the name (a profile's detected width). */
+  rows?: Array<{ label: string; value: string }>
+  /** Drop the "inserts by its bottom center" note (profiles are not placed). */
+  hideOriginHint?: boolean
+  /** An item this document was opened from: offers "Replace '{name}'" to
+   *  overwrite it in place instead of saving a new item. */
+  replace?: { name: string }
 }
 
 /** The placement tool's origin-marker yellow (`LibraryPlaceTool.ts`'s
@@ -55,8 +63,13 @@ export function SaveToLibraryPopover({
   inputLabel,
   buttonLabel,
   hint,
+  rows = [],
+  hideOriginHint = false,
+  replace,
 }: SaveToLibraryPopoverProps) {
   const { t } = useLingui()
+  const heading = title ?? t`Save to Library`
+  const replaceName = replace?.name ?? ''
   const [name, setName] = useState(defaultName)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -105,7 +118,7 @@ export function SaveToLibraryPopover({
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label={title ?? t`Save to Library`}
+        aria-label={heading}
         style={{
           width: '280px',
           display: 'flex',
@@ -155,6 +168,36 @@ export function SaveToLibraryPopover({
             outline: 'none',
           }}
         />
+        {rows.map((r) => (
+          <div
+            key={r.label}
+            style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: 'var(--text-secondary)' }}
+          >
+            <span>{r.label}</span>
+            <span style={{ fontFamily: 'var(--font-family-mono)' }}>{r.value}</span>
+          </div>
+        ))}
+        {replace !== undefined && (
+          <button
+            type="button"
+            onClick={() => {
+              const trimmed = name.trim()
+              onSave(trimmed !== '' ? trimmed : defaultName, { replace: true })
+            }}
+            style={{
+              padding: '7px 12px',
+              background: 'var(--surface-input)',
+              border: '1px solid var(--border-strong)',
+              borderRadius: 'var(--radius-control)',
+              color: 'var(--text-primary)',
+              fontFamily: 'var(--font-family-ui)',
+              fontSize: 'var(--font-size-tool-row)',
+              cursor: 'pointer',
+            }}
+          >
+            <Trans>Replace “{replaceName}”</Trans>
+          </button>
+        )}
         <button
           type="button"
           onClick={commit}
@@ -172,7 +215,7 @@ export function SaveToLibraryPopover({
         >
           {buttonLabel ?? <Trans>Save</Trans>}
         </button>
-        {hint !== null && (
+        {hint !== null && !hideOriginHint && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '10px', color: 'var(--text-faint)' }}>
             {hint === undefined && (
               <span

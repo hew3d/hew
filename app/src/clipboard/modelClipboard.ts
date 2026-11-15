@@ -23,7 +23,7 @@
  *
  * Held at module scope (survives tool switches/re-renders within one tab).
  * Under Tauri, also mirrored into the Rust app-state clipboard
- * (`clipboard_set`/`clipboard_get`, shared across every open document
+ * (`clipboard_set`/`clipboard_get`, raw IPC bodies like the file saves, shared across every open document
  * window) so a copy in one window pastes in another — `refreshFromShell`
  * pulls the shared state in whenever this window regains focus, treating
  * the shell as the cross-window source of truth at that moment while
@@ -172,7 +172,7 @@ async function pushToShell(bytes: Uint8Array): Promise<void> {
   if (!isTauri) return
   try {
     const { invoke } = await import('@tauri-apps/api/core')
-    await invoke('clipboard_set', { bytes: Array.from(bytes) })
+    await invoke('clipboard_set', bytes as never)
   } catch {
     /* shell without the command (older build) — the local copy still works */
   }
@@ -190,8 +190,9 @@ export async function refreshClipboardFromShell(): Promise<void> {
   if (!isTauri) return
   try {
     const { invoke } = await import('@tauri-apps/api/core')
-    const raw = await invoke<number[] | null>('clipboard_get')
-    if (raw === null || raw.length === 0) {
+    // A raw IPC response resolves to an ArrayBuffer; empty means nothing copied.
+    const raw = await invoke<ArrayBuffer | null>('clipboard_get')
+    if (raw === null || raw === undefined || raw.byteLength === 0) {
       current = null
       return
     }

@@ -18,7 +18,7 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
 import init, { Scene } from '../wasm/pkg/wasm_api.js'
-import { runBooleanCore } from './Viewport'
+import { runBooleanCore, unionPiecesNote } from './Viewport'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
@@ -395,7 +395,7 @@ describe('runBooleanCore — the mutated-failed accounting itself (delta-review 
     expect(scene.undo_depth()).toBe(undoDepth)
   })
 
-  it('a Union of solids that do not overlap leaves a group of pieces', () => {
+  it('a Union of solids that do not overlap leaves a group of pieces, and the note says why', () => {
     const scene = new Scene()
     const a = makeBox(scene, 0, 1, 0, 1, 1)
     const b = makeBox(scene, 2, 3, 0, 1, 1)
@@ -404,6 +404,10 @@ describe('runBooleanCore — the mutated-failed accounting itself (delta-review 
     if (outcome.kind !== 'ok') return
     expect(outcome.node.kind).toBe('group')
     expect(scene.group_members(outcome.node.id)).toHaveLength(2)
+    expect(unionPiecesNote(2)).toBe(
+      "They don't overlap, so Union kept them as 2 separate pieces in a group. Undo, move one a little into the other, and Union again.",
+    )
+    expect(unionPiecesNote(3)).toMatch(/don't all overlap/)
   })
 
   it('three overlapping solids union into one object in one undo step, and a subtract keeps the first', () => {

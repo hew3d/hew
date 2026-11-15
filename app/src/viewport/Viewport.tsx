@@ -58,17 +58,13 @@ import { SectionManager, rescaleSectionPlane } from './sectionManager'
 import { isVisiblePartSnap, isClearFaceSnap, classifyTapeHold } from './tapePartsGate'
 import * as inputRecorder from '../recording/inputRecorder'
 import { ToolController } from '../tools/ToolController'
+import type { ToolContext, ToolRegistration } from '../tools/toolRegistration'
+import { toolRegistration } from '../tools/registrations'
 import { draftEdgesToErase, inHistoryBracket } from '../tools/transformSelection'
 import { routeBooleanMany, subtractThroughPlacement, opLabel, OP_SUBTRACT } from './placementBoolean'
 import { unlinkedLabel, unlinkedToJoin, cutOnlyThisOne, cutOneSolidAtATime } from '../linkedCopyCopy'
-import { RectangleTool } from '../tools/RectangleTool'
-import { CircleTool } from '../tools/CircleTool'
-import { PolygonTool, DEFAULT_POLYGON_SIDES } from '../tools/PolygonTool'
-import { ArcTool } from '../tools/ArcTool'
-import { LineTool } from '../tools/LineTool'
-import { PushPullTool } from '../tools/PushPullTool'
-import { FollowMeTool } from '../tools/FollowMeTool'
-import { OffsetTool } from '../tools/OffsetTool'
+import { DEFAULT_POLYGON_SIDES } from '../tools/PolygonTool'
+import type { TouchedIds } from '../tools/offsetShared'
 import { PaintTool, MATERIAL_SENTINEL } from '../tools/PaintTool'
 import { PositionTextureTool } from '../tools/PositionTextureTool'
 import { MoveTool } from '../tools/MoveTool'
@@ -162,6 +158,7 @@ import { CleanModifierTap } from './cleanModifierTap'
 import { MultiClickTracker } from './multiClick'
 import { highlightSetsFor, type HighlightDeps } from './highlightSets'
 import { resolveSelectableRef, selectionScopeActive, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
+import { SMOOTH_BOOLEAN_NOTE, operandsHaveSmooth } from '../panels/smoothActions'
 import {
   draftRef,
   geometryOf,
@@ -415,9 +412,12 @@ interface Props {
    * work itself. */
   onInferenceChange?: (info: InferenceInfo | null) => void
   /** Called after any scene mutation with new watertight state per object */
-  onSceneChange?: (watertightMap: Map<bigint, boolean>) => void
+  onSceneChange?: (watertightMap: Map<bigint, boolean>, touchedObjectIds?: readonly bigint[]) => void
   /** Called when an error toast should be shown */
   onToast?: (message: string, code?: string) => void
+  /** Run a long edit behind the busy card: shows `message`, waits for it to
+   *  paint, then runs `work` (App's `runBusy`). Without it, `work` runs at once. */
+  onBusy?: (message: string, work: () => void) => boolean | void
   /** Called when the active tool's live status-bar guidance changes.
    * `null` = the tool has no stage hint; the status bar falls back to the
    * palette's static tool description. */
@@ -721,6 +721,9 @@ export interface ViewportApi {
    * steps restore the pre-explode state) is already shown before this
    * returns. */
   runBoolean: (op: number, nodes: NodeRef[], scope?: 'all' | 'one') => NodeRef | null | 'mutated-failed'
+  /** Triangles drawn for these nodes (a group counts its members): how
+   *  large a boolean's operands are, read from the meshes already built. */
+  operandTriangles: (nodes: NodeRef[]) => number
   /** Group the given nodes into a merge group. */
   runGroup: (nodes: NodeRef[]) => bigint | null
   /** Dissolve a group. */
@@ -1296,6 +1299,12 @@ export interface ViewportApi {
   getRenderMode: () => RenderMode
   /** Show/hide all construction guides (View ▸ Guides). */
   setGuidesVisible: (visible: boolean) => void
+  /** Show/hide thin tangent-edge lines (View ▸ Tangent Edges). */
+  setTangentEdgesVisible: (visible: boolean) => void
+  /** Test hook: tangent-edge line counts and visibility. */
+  getTangentEdgeInfo: () => { lines: number; visible: number; segments: number }
+  /** Test hook: how many Smooth objects have a cage wire, and how many show it. */
+  getCageOverlayInfo?: () => { objects: number; visible: number }
   /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
   deleteAllGuides: () => void
   /** Reset the movable drawing axes (tool-parity §4) to world identity
@@ -1379,21 +1388,21 @@ export interface ViewportApi {
    * `wasmScene.export`). Resolves null when nothing exports (an empty
    * document, or everything collapsing to degenerate triangles).
    */
-  exportGlb: () => Promise<Uint8Array | null>
+  exportGlb: (cages?: boolean) => Promise<Uint8Array | null>
   /**
    * Serialize the current scene (objects + instances) to a binary STL
    * buffer via `crates/mesh-export` — millimeter scale, Z-up, cylinder
    * walls re-faceted at `segmentsPerTurn` (0 = stored facets). Resolves
    * null when nothing exports.
    */
-  exportStl: (segmentsPerTurn: number) => Promise<Uint8Array | null>
+  exportStl: (segmentsPerTurn: number, cages?: boolean) => Promise<Uint8Array | null>
   /**
    * Serialize the current scene (objects + instances) to a 3MF container
    * via `crates/mesh-export` — meter unit, Z-up, one named colored mesh
    * per part, colors via core-spec `<basematerials>`. Resolves null when
    * nothing exports.
    */
-  export3mf: () => Promise<Uint8Array | null>
+  export3mf: (cages?: boolean) => Promise<Uint8Array | null>
   /**
    * Serialize the current scene (objects + instances) to a USDZ container
    * via `crates/mesh-export` (docs/design/shop-mode.md §5) — meter unit,
@@ -1401,7 +1410,7 @@ export interface ViewportApi {
    * materials, for AR Quick Look and USD pipelines. Resolves null when
    * nothing exports.
    */
-  exportUsdz: () => Promise<Uint8Array | null>
+  exportUsdz: (cages?: boolean) => Promise<Uint8Array | null>
   /**
    * Camera ▸ Parallel Projection (docs/design/camera.md §1): toggles between
    * perspective and parallel projection, visually stable at the orbit
@@ -2388,6 +2397,14 @@ export type BooleanCoreOutcome =
       message: string
     }
 
+/** The note after a Union of plain objects that left separate pieces: they
+ *  only touched or did not meet, so the kernel grouped them instead. */
+export function unionPiecesNote(operands: number): string {
+  return operands === 2
+    ? t`They don't overlap, so Union kept them as 2 separate pieces in a group. Undo, move one a little into the other, and Union again.`
+    : t`They don't all overlap, so Union kept the separate pieces in a group. Undo, move them a little into each other, and Union again.`
+}
+
 export function runBooleanCore(
   wasmScene: WasmScene,
   op: number,
@@ -2612,6 +2629,7 @@ export function mapUndoRedoError(err: unknown): { code: string; message: string 
 }
 
 export default function Viewport({
+  onBusy,
   wasmScene,
   background = 'editor-default',
   readOnly = false,
@@ -2671,8 +2689,12 @@ export default function Viewport({
   onSceneChangeRef.current = onSceneChange
   const onToastRef = useRef(onToast)
   onToastRef.current = onToast
+  const onBusyRef = useRef(onBusy)
+  onBusyRef.current = onBusy
   const onToolHintRef = useRef(onToolHint)
   onToolHintRef.current = onToolHint
+  /** Re-poll the active tool's status hint (set by the scene effect). */
+  const reportToolHintRef = useRef<(() => void) | null>(null)
   const onPrecisionChangeRef = useRef(onPrecisionChange)
   onPrecisionChangeRef.current = onPrecisionChange
   const onSelectRef = useRef(onSelect)
@@ -3482,6 +3504,7 @@ export default function Viewport({
       refreshAcquireHover()
     })
     reportToolHint()
+    reportToolHintRef.current = reportToolHint
 
     // ------------------------------------------------- select-all + marquee
     /**
@@ -5264,7 +5287,7 @@ export default function Viewport({
       const wtMap = touched !== undefined
         ? sceneRenderer.refreshTouched(touched)
         : sceneRenderer.refresh()
-      onSceneChangeRef.current?.(wtMap)
+      onSceneChangeRef.current?.(wtMap, touched?.objectIds)
       onDocumentChangedRef.current?.()
       // Every kernel-mutating path funnels through here (tool commits,
       // boolean/group/delete, undo, redo, harness ops) — a transform/
@@ -5397,6 +5420,8 @@ export default function Viewport({
     // toast), which is exactly the part testing the accounting itself
     // doesn't need to exercise.
     function runBoolean(op: number, nodes: NodeRef[], scope: 'all' | 'one' = 'all'): NodeRef | null | 'mutated-failed' {
+      // Smooth operands combine through their cages: say so before the cut.
+      if (operandsHaveSmooth(wasmScene, nodes)) handleToast(SMOOTH_BOOLEAN_NOTE)
       const editCtx = computeEditContext(wasmScene, activeContextRef.current)
       if (editCtx.kind === 'instance') {
         let result: NodeRef
@@ -5541,6 +5566,11 @@ export default function Viewport({
       sceneRenderer.refreshGuides()
       onSelectRef.current?.(outcome.node, 'replace')
       scheduleRender()
+      // Plain solids that come back as a group never all overlapped (a group
+      // operand's own separate members leave pieces for another reason).
+      if (op === 0 && nodes.every((n) => n.kind === 'object') && outcome.node.kind === 'group') {
+        handleToast(unionPiecesNote(nodes.length))
+      }
       if (outcome.autoExploded) {
         handleToast(
           nodes.filter((n) => n.kind === 'instance').length > 1
@@ -5549,6 +5579,24 @@ export default function Viewport({
         )
       }
       return outcome.node
+    }
+
+    function operandTriangles(nodes: NodeRef[]): number {
+      let total = 0
+      const visit = (n: NodeRef): void => {
+        if (n.kind === 'group') {
+          for (const m of wasmScene.group_members(n.id)) visit(nodeRefFromJs(m))
+          return
+        }
+        if (n.kind !== 'object') return
+        sceneRenderer.getObjectGroup(n.id)?.traverse((o) => {
+          const g = (o as THREE.Mesh).isMesh ? (o as THREE.Mesh).geometry : null
+          if (g === null) return
+          total += (g.index?.count ?? g.getAttribute('position')?.count ?? 0) / 3
+        })
+      }
+      nodes.forEach(visit)
+      return total
     }
 
     function runGroup(nodes: NodeRef[]): bigint | null {
@@ -7464,6 +7512,11 @@ export default function Viewport({
       scheduleRender()
     }
 
+    function setTangentEdgesVisible(visible: boolean): void {
+      sceneRenderer.setTangentEdgesVisible(visible)
+      scheduleRender()
+    }
+
     function setGuidesVisible(visible: boolean): void {
       sceneRenderer.setGuidesVisible(visible)
       // Hidden guides must not snap or flash a cue — gate inference too.
@@ -7629,20 +7682,20 @@ export default function Viewport({
     // (`crates/mesh-export`, exposed as `Scene.export`) rather than the
     // app's own retired TypeScript exporters — the three.js scene is not
     // involved for any of them anymore.
-    async function exportGlb(): Promise<Uint8Array | null> {
-      return wasmScene.export('glb', 0) ?? null
+    async function exportGlb(cages?: boolean): Promise<Uint8Array | null> {
+      return wasmScene.export('glb', 0, cages) ?? null
     }
 
-    async function exportStl(segmentsPerTurn: number): Promise<Uint8Array | null> {
-      return wasmScene.export('stl', segmentsPerTurn) ?? null
+    async function exportStl(segmentsPerTurn: number, cages?: boolean): Promise<Uint8Array | null> {
+      return wasmScene.export('stl', segmentsPerTurn, cages) ?? null
     }
 
-    async function export3mf(): Promise<Uint8Array | null> {
-      return wasmScene.export('3mf', 0) ?? null
+    async function export3mf(cages?: boolean): Promise<Uint8Array | null> {
+      return wasmScene.export('3mf', 0, cages) ?? null
     }
 
-    async function exportUsdz(): Promise<Uint8Array | null> {
-      return wasmScene.export('usdz', 0) ?? null
+    async function exportUsdz(cages?: boolean): Promise<Uint8Array | null> {
+      return wasmScene.export('usdz', 0, cages) ?? null
     }
 
     if (apiRefRef.current !== undefined) {
@@ -7795,260 +7848,97 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runFlipAlong, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setViewDirection, orbitDrag, endOrbitDrag, subscribeCameraOrientation, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => {
+      apiRefRef.current.current = { runBoolean, operandTriangles, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runFlipAlong, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setViewDirection, orbitDrag, endOrbitDrag, subscribeCameraOrientation, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => {
         const isolation = isolationCtl.state()
         return isolation === null ? null : [...isolation.targets]
-      }, collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, getHoverHighlight: () => sceneRenderer.getHoverHighlight(), rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setPartAxesVisible, getPartAxesInfo, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getInstanceRenderedInherited: (id: bigint) => sceneRenderer.debugInstanceInherited(id), getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
+      }, collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, getHoverHighlight: () => sceneRenderer.getHoverHighlight(), rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setPartAxesVisible, getPartAxesInfo, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, setTangentEdgesVisible, getTangentEdgeInfo: () => sceneRenderer.getTangentEdgeInfo(), deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getInstanceRenderedInherited: (id: bigint) => sceneRenderer.debugInstanceInherited(id), getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
+      apiRefRef.current.current.getCageOverlayInfo = () => sceneRenderer.getCageOverlayInfo()
     }
 
-    // ------------------------------------------------------------------ tool factories
-    function makeRectTool(): RectangleTool {
-      const tool = new RectangleTool(
-        wasmScene,
-        previewGroup,
-        (result) => {
-          sceneRenderer.refreshAllSketches()
-          sceneRenderer.refreshGuides()
-          onDocumentChangedRef.current?.()
-          scheduleRender()
-        },
-        handleToast,
-        (objectId) => {
-          handleSceneRefresh({ objectIds: [objectId] })
-        },
-        (text: string) => { onMeasurementRef.current?.(text) },
-        // Detached mode → badge the cursor with a `+`, the same cursorFor
-        // pipeline as Push/Pull's extrude-as-new. A new tool starts off, and
-        // the tool-switch path re-sets the plain cursor.
-        (on: boolean) => {
-          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
-          renderer.domElement.style.cursor = cursorFor('Rectangle', on)
-        },
-      )
-      // Scope the tool to the current editing context (component-edit-
-      // parity.md phase A1 — the single channel every tool consults).
-      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
-      // Plain objects are directly drawable — context-path-aware eligibility.
-      tool.setFaceEligibility(faceDrawEligible)
-      return tool
+    // ------------------------------------------------------------------ tool factories (Viewport-local tools)
+    // Registered tools' refresh after a commit that touched objects,
+    // instances, or components (Shell, Project, Eraser's crease).
+    function refreshTouched(touched: TouchedIds): void {
+      handleSceneRefresh({
+        objectIds: touched.objectIds,
+        instanceIds: touched.instanceIds,
+        componentIds: touched.componentIds,
+      })
+      sceneRenderer.refreshAllSketches()
+      sceneRenderer.refreshGuides()
+      scheduleRender()
     }
 
-    function makeCircleTool(): CircleTool {
-      const tool = new CircleTool(
-        wasmScene,
-        previewGroup,
-        (result) => {
-          sceneRenderer.refreshAllSketches()
-          sceneRenderer.refreshGuides()
-          onDocumentChangedRef.current?.()
-          scheduleRender()
-        },
-        handleToast,
-        (objectId) => {
-          handleSceneRefresh({ objectIds: [objectId] })
-        },
-        (text: string) => { onMeasurementRef.current?.(text) },
-        // Detached mode → badge the cursor with a `+`, the same cursorFor
-        // pipeline as Push/Pull's extrude-as-new. A new tool starts off, and
-        // the tool-switch path re-sets the plain cursor.
-        (on: boolean) => {
-          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
-          renderer.domElement.style.cursor = cursorFor('Circle', on)
-        },
-      )
-      // Scope the tool to the current editing context (component-edit-
-      // parity.md phase A1 — the single channel every tool consults).
-      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
-      // Plain objects are directly drawable — context-path-aware eligibility.
-      tool.setFaceEligibility(faceDrawEligible)
-      return tool
+    // ------------------------------------------------------------------ tool registrations
+    // The tools in `tools/registrations/` are built from this explicit
+    // context rather than from closures over this effect: a registration can
+    // only reach what is listed on `ToolContext`.
+    const toolContext: ToolContext = {
+      scene: wasmScene,
+      previewGroup,
+      objectsGroup: sceneRenderer.objectsGroup,
+      getInstanceGroup: (id) => sceneRenderer.getInstanceGroup(id),
+      selection: () => [...selectedIdsRef.current],
+      select: (node) => { onSelectRef.current?.(node, 'replace') },
+      refreshScene: handleSceneRefresh,
+      refreshTouched,
+      refreshSketches: () => { sceneRenderer.refreshAllSketches() },
+      refreshGuides: () => { sceneRenderer.refreshGuides() },
+      documentChanged: () => { onDocumentChangedRef.current?.() },
+      scheduleRender,
+      reportToolHint,
+      toast: handleToast,
+      measurement: (text) => { onMeasurementRef.current?.(text) },
+      busy: (message, work) => {
+        const run = onBusyRef.current
+        if (run === undefined) {
+          work()
+          return true
+        }
+        return run(message, work)
+      },
+      // Scope to the current editing context (component-edit-parity.md phase
+      // A1 — the single channel every tool consults).
+      scopeToEditContext: (tool) => { applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current)) },
+      faceEligibility: faceDrawEligible,
+      resolveSelectable: (snap, ray) => resolveSelectableRef(snap, ray, selectionDeps()),
+      deleteNodes: runDelete,
+      acquireTransformTargets,
+      setToolCursor: (name, badge) => { renderer.domElement.style.cursor = cursorFor(name, badge) },
+      isActiveTool: (tool) => toolController.activeTool === tool,
+      polygonSides: {
+        get: () => polygonSidesRef.current,
+        set: (sides) => { polygonSidesRef.current = sides },
+      },
+      faceMask: {
+        set: (objectId, faceIds, maxTriangles) => sceneRenderer.setFaceMask(objectId, faceIds, maxTriangles),
+        clear: (objectId) => { sceneRenderer.clearFaceMask(objectId) },
+      },
     }
-
-    function makePolygonTool(): PolygonTool {
-      const tool = new PolygonTool(
-        wasmScene,
-        previewGroup,
-        (result) => {
-          sceneRenderer.refreshAllSketches()
-          sceneRenderer.refreshGuides()
-          onDocumentChangedRef.current?.()
-          scheduleRender()
-        },
-        handleToast,
-        (objectId) => {
-          handleSceneRefresh({ objectIds: [objectId] })
-        },
-        (text: string) => { onMeasurementRef.current?.(text) },
-        // Side count persists across tool re-selection for the session
-        // (design §1), the same way Paint's current material does.
-        (sides) => { polygonSidesRef.current = sides },
-        // Detached mode → badge the cursor with a `+`, the same cursorFor
-        // pipeline as Push/Pull's extrude-as-new. A new tool starts off, and
-        // the tool-switch path re-sets the plain cursor.
-        (on: boolean) => {
-          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
-          renderer.domElement.style.cursor = cursorFor('Polygon', on)
-        },
-      )
-      tool.setSideCount(polygonSidesRef.current)
-      // Scope the tool to the current editing context (component-edit-
-      // parity.md phase A1 — the single channel every tool consults).
-      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
-      // Plain objects are directly drawable — context-path-aware eligibility.
-      tool.setFaceEligibility(faceDrawEligible)
-      return tool
+    // Each registered tool instance maps back to its registration, so the
+    // input handlers below reach a tool's hooks by the instance that is
+    // actually active (a drag-move handoff replaces it without a switch).
+    const registrationOfTool = new WeakMap<Tool, ToolRegistration>()
+    /** The registration of the tool currently receiving input, if any. */
+    function activeRegistration(): { reg: ToolRegistration; tool: Tool } | null {
+      const tool = toolController.activeTool
+      const reg = registrationOfTool.get(tool)
+      return reg === undefined ? null : { reg, tool }
     }
-
-    function makeArcTool(): ArcTool {
-      const tool = new ArcTool(
-        wasmScene,
-        previewGroup,
-        (result) => {
-          sceneRenderer.refreshAllSketches()
-          sceneRenderer.refreshGuides()
-          onDocumentChangedRef.current?.()
-          scheduleRender()
-        },
-        handleToast,
-        (objectId) => {
-          handleSceneRefresh({ objectIds: [objectId] })
-        },
-        (text: string) => { onMeasurementRef.current?.(text) },
-        // Detached mode → badge the cursor with a `+`, the same cursorFor
-        // pipeline as Push/Pull's extrude-as-new. A new tool starts off, and
-        // the tool-switch path re-sets the plain cursor.
-        (on: boolean) => {
-          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
-          renderer.domElement.style.cursor = cursorFor('Arc', on)
-        },
-      )
-      // Scope the tool to the current editing context (component-edit-
-      // parity.md phase A1 — the single channel every tool consults).
-      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
-      // Plain objects are directly drawable — context-path-aware eligibility.
-      tool.setFaceEligibility(faceDrawEligible)
-      return tool
+    /** Build and activate a registered tool. False when `name` has none. */
+    function activateRegisteredTool(name: string): boolean {
+      const reg = toolRegistration(name)
+      if (reg === undefined) return false
+      const tool = reg.create(toolContext)
+      registrationOfTool.set(tool, reg)
+      toolController.setTool(tool)
+      reg.onActivate?.(tool, toolContext)
+      return true
     }
-
-    function makeLineTool(): LineTool {
-      const tool = new LineTool(
-        wasmScene,
-        previewGroup,
-        (sketchHandle) => {
-          sceneRenderer.refreshAllSketches()
-          sceneRenderer.refreshGuides()
-          onDocumentChangedRef.current?.()
-          scheduleRender()
-        },
-        handleToast,
-        (objectId) => {
-          handleSceneRefresh({ objectIds: [objectId] })
-        },
-        (text: string) => { onMeasurementRef.current?.(text) },
-        // Detached mode → badge the cursor with a `+`, the same cursorFor
-        // pipeline as Push/Pull's extrude-as-new. A new tool starts off, and
-        // the tool-switch path re-sets the plain cursor.
-        (on: boolean) => {
-          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
-          renderer.domElement.style.cursor = cursorFor('Line', on)
-        },
-      )
-      // Scope the tool to the current editing context (component-edit-
-      // parity.md phase A1 — the single channel every tool consults).
-      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
-      // Plain objects are directly drawable — context-path-aware eligibility.
-      tool.setFaceEligibility(faceDrawEligible)
-      return tool
-    }
-
-    function makePushPullTool(): PushPullTool {
-      const tool = new PushPullTool(
-        wasmScene,
-        previewGroup,
-        // Targeted refresh: the committed object (a world object OR a def
-        // member for push_pull_in_component — refreshTouched rebuilds every
-        // placement of a touched member). A through-cut's extra result
-        // objects / consumed source are caught by refreshTouched's id diff.
-        (objectId) => {
-          handleSceneRefresh({ objectIds: [objectId] })
-          sceneRenderer.refreshAllSketches()
-          sceneRenderer.refreshGuides()
-        },
-        handleToast,
-        (text: string) => { onMeasurementRef.current?.(text) },
-        // Durable extrude-as-new toggle → badge the Push/Pull cursor with a
-        // `+` (the same cursorFor pipeline as Move's copy toggle).
-        (on: boolean) => {
-          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
-          renderer.domElement.style.cursor = cursorFor('Push/Pull', on)
-        },
-      )
-      // Scope it to the current editing context (component-edit-parity.md
-      // phase A1 — the single channel every tool consults; internally
-      // derives the object/instance/component-scoped id checks the old
-      // four-channel wiring used to compute here by hand).
-      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
-      // Same context-path-aware eligibility as the draw tools: plain objects
-      // are directly push/pullable; group/instance members only from inside
-      // their container's editing context, except a linked copy's face.
-      tool.setFaceEligibility(pushPullEligible)
-      return tool
-    }
-
-    function makeFollowMeTool(): FollowMeTool {
-      const tool = new FollowMeTool(
-        wasmScene,
-        previewGroup,
-        // A sweep births one new object and consumes its profile sketch's
-        // outline; refresh the object plus all sketch line buffers, then
-        // select the result so the highlight lands on the new solid.
-        (objectId) => {
-          handleSceneRefresh({ objectIds: [objectId] })
-          sceneRenderer.refreshAllSketches()
-          onSelectRef.current?.({ kind: 'object', id: objectId }, 'replace')
-        },
-        handleToast,
-        (text: string) => { onMeasurementRef.current?.(text) },
-        // The path may be preselected (SketchUp's primary Follow Me idiom).
-        [...selectedIdsRef.current],
-      )
-      // Put Follow Me's FACE path/profile on the same face-eligibility system
-      // as every other face tool (`faceDrawEligible` already understands the
-      // full group/instance context path — see the tool's FACE FRAME GUARD
-      // doc). The single editing-context channel (component-edit-parity.md
-      // phase A1) also carries Follow-Me-specific behavior: an INSTANCE
-      // context now routes through the `_in_instance` follow-me family
-      // instead of refusing wholesale (phase A2); a GROUP context births the
-      // sweep inside the group being edited instead of at top level.
-      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
-      tool.setFaceEligibility(faceDrawEligible)
-      return tool
-    }
-
-    function makeOffsetTool(): OffsetTool {
-      const tool = new OffsetTool(
-        wasmScene,
-        previewGroup,
-        // Region offset: new sketch geometry — rebuild sketch lines/fills.
-        () => {
-          sceneRenderer.refreshAllSketches()
-          sceneRenderer.refreshGuides()
-          onDocumentChangedRef.current?.()
-          scheduleRender()
-        },
-        handleToast,
-        // Face offset: an imprint on one object — targeted refresh.
-        (objectId) => {
-          handleSceneRefresh({ objectIds: [objectId] })
-        },
-        (text: string) => { onMeasurementRef.current?.(text) },
-      )
-      // Scope the tool to the current editing context (component-edit-
-      // parity.md phase A1).
-      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
-      // Same context-path-aware face eligibility as the draw tools.
-      tool.setFaceEligibility(faceDrawEligible)
-      return tool
+    /** Let the outgoing registered tool release what it holds. */
+    function disposeActiveRegisteredTool(): void {
+      const active = activeRegistration()
+      if (active !== null) active.reg.dispose?.(active.tool)
     }
 
     function makePaintTool(): PaintTool {
@@ -8758,47 +8648,11 @@ export default function Viewport({
       ctrlTap.reset()
       modeModifierTap.reset()
       multiClick.reset()
+      // A Smooth object shows its cage whenever a tool other than Select is active.
+      sceneRenderer.setCageOverlay(toolName !== 'Select')
+      // The outgoing tool (if registered) releases what it holds.
+      disposeActiveRegisteredTool()
       switch (toolName) {
-        case 'Rectangle':
-          cameraModeRef.current = false
-          controls.mouseButtons.LEFT = null
-          toolController.setTool(makeRectTool())
-          break
-        case 'Circle':
-          cameraModeRef.current = false
-          controls.mouseButtons.LEFT = null
-          toolController.setTool(makeCircleTool())
-          break
-        case 'Polygon':
-          cameraModeRef.current = false
-          controls.mouseButtons.LEFT = null
-          toolController.setTool(makePolygonTool())
-          break
-        case 'Arc':
-          cameraModeRef.current = false
-          controls.mouseButtons.LEFT = null
-          toolController.setTool(makeArcTool())
-          break
-        case 'Line':
-          cameraModeRef.current = false
-          controls.mouseButtons.LEFT = null
-          toolController.setTool(makeLineTool())
-          break
-        case 'Push/Pull':
-          cameraModeRef.current = false
-          controls.mouseButtons.LEFT = null
-          toolController.setTool(makePushPullTool())
-          break
-        case 'Follow Me':
-          cameraModeRef.current = false
-          controls.mouseButtons.LEFT = null
-          toolController.setTool(makeFollowMeTool())
-          break
-        case 'Offset':
-          cameraModeRef.current = false
-          controls.mouseButtons.LEFT = null
-          toolController.setTool(makeOffsetTool())
-          break
         case 'Paint': {
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
@@ -8918,7 +8772,8 @@ export default function Viewport({
         default:
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
-          toolController.resetToSelect()
+          // Registered tools (tools/registrations/) are built from the table.
+          if (!activateRegisteredTool(toolName)) toolController.resetToSelect()
       }
       // Reflect the REQUESTED tool name immediately so the status bar doesn't
       // lag until the next pointer-move. Camera tools (Orbit/Pan/Zoom) call
@@ -9695,6 +9550,7 @@ export default function Viewport({
     // THIS handler is the one that changed the cursor.
     let paintEyedropperActive = false
     function onAltKeyDown(ev: KeyboardEvent): void {
+      if ((ev.key === 'Control' || ev.key === 'Meta') && ev.altKey) return
       if (ev.key !== 'Alt') return
       const at = toolController.activeTool
       if (!(at instanceof PaintTool)) return
@@ -9725,6 +9581,18 @@ export default function Viewport({
     }
     window.addEventListener('keydown', onAltKeyDown)
     window.addEventListener('keyup', onAltKeyUp)
+    // Registered tools' own modifier holds (Fillet's Alt tap and Ctrl hold):
+    // the active tool's registration reads the real key events.
+    function onRegisteredToolKeyDown(ev: KeyboardEvent): void {
+      const active = activeRegistration()
+      active?.reg.onKeyDown?.(active.tool, ev, toolContext)
+    }
+    function onRegisteredToolKeyUp(ev: KeyboardEvent): void {
+      const active = activeRegistration()
+      active?.reg.onKeyUp?.(active.tool, ev, toolContext)
+    }
+    window.addEventListener('keydown', onRegisteredToolKeyDown)
+    window.addEventListener('keyup', onRegisteredToolKeyUp)
 
     // A blur (Cmd-Tab, devtools, another window) swallows the keyup that
     // would otherwise release Alt — without this, `paintEyedropperActive`
@@ -9736,6 +9604,9 @@ export default function Viewport({
     // here too, for the same reason.
     function onWindowBlurClearsEyedropper(): void {
       const at = toolController.activeTool
+      // A blur swallows a registered tool's modifier keyup: forget the hold.
+      const active = activeRegistration()
+      active?.reg.onWindowBlur?.(active.tool)
       if (at instanceof PaintTool) at.setEyedropper(false)
       if (!paintEyedropperActive) return
       paintEyedropperActive = false
@@ -10459,6 +10330,9 @@ export default function Viewport({
       // for every other tool/name, including Tape Measure, which keeps the
       // full on-axis snap here and only loses the rendered guide LINE below.
       const snap = toolController.activeToolName === 'Select' ? excludeAxisSnapForSelect(rawSnap) : rawSnap
+      // Registered tools read their live modifiers off each event (Eraser's
+      // Ctrl/Cmd crease).
+      activeRegistration()?.reg.onPointer?.(activeTool, ev, 'move')
       activeTool.onPointerMove(snap, ray)
       refreshAcquireHover(ray)
       if (isRawDragTool) {
@@ -10927,16 +10801,12 @@ export default function Viewport({
           activeTool.setWholeObject(ev.metaKey || ev.ctrlKey)
         }
       }
-      // ⌘/Ctrl-click on Follow Me's profile commits the MERGED sweep (design
-      // §3b) — a live read of the real event, same precedent as Paint's
-      // whole-object fill above; Move's own copy modifier is a durable TAP
-      // with no live "held right now" signal to reuse (see FollowMeTool's
-      // MERGE GESTURE doc note). Also read at the drag RELEASE (`onPointerUp`
-      // below) so a press-drag-release commit sees the modifier at commit
-      // time, not whatever was held at the arming press.
-      if (activeTool instanceof FollowMeTool) {
-        activeTool.setMergeModifier(ev.metaKey || ev.ctrlKey)
-      }
+      // Registered tools' live modifier reads at the press: Follow Me's
+      // ⌘/Ctrl-click merged sweep (also read at the drag RELEASE below, so a
+      // press-drag-release commit sees the modifier held at commit time),
+      // Eraser's crease, Loft's Alt-click rail. Move's own copy modifier is a
+      // durable TAP with no live "held right now" signal to reuse.
+      activeRegistration()?.reg.onPointer?.(activeTool, ev, 'down')
       // (Move's/Rotate's copy mode is a durable Option/Ctrl TOGGLE handled in
       // MoveTool.onKey/onCtrlKeyUp (see `toggleCopyMode`) — no live
       // Alt/Ctrl-modifier tracking here.)
@@ -11342,6 +11212,16 @@ export default function Viewport({
         }
       }
 
+      // A registered tool may take Cmd/Ctrl+A (Fillet arms every sharp edge
+      // of the solid under the cursor).
+      if (isMod && !ev.shiftKey && !ev.altKey && ev.key.toLowerCase() === 'a' && !isTyping) {
+        const active = activeRegistration()
+        if (active?.reg.onSelectAllChord?.(active.tool) === true) {
+          reportToolHint()
+          scheduleRender()
+        }
+      }
+
       // Mod-combos never reach the tool: tools' onKey treats bare letters
       // as VCB length input, so an unhandled chord like Ctrl+K (palette) or
       // Ctrl+C would otherwise append its letter to a mid-entry buffer
@@ -11491,9 +11371,7 @@ export default function Viewport({
         // A live read at the RELEASE too (see the onPointerDown wiring's doc)
         // — a press-drag-release's merge decision is whatever is held at the
         // commit, not the arming press.
-        if (activeTool instanceof FollowMeTool) {
-          activeTool.setMergeModifier(ev.metaKey || ev.ctrlKey)
-        }
+        activeRegistration()?.reg.onPointer?.(activeTool, ev, 'up')
         if ('onPointerUp' in activeTool) {
           const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
           const ray = makeWorldRay(ndcX, ndcY, camera)
@@ -12352,6 +12230,8 @@ export default function Viewport({
       window.removeEventListener('blur', onWindowBlurClearsGuideSuppress)
       window.removeEventListener('keydown', onAltKeyDown)
       window.removeEventListener('keyup', onAltKeyUp)
+      window.removeEventListener('keydown', onRegisteredToolKeyDown)
+      window.removeEventListener('keyup', onRegisteredToolKeyUp)
       window.removeEventListener('blur', onWindowBlurClearsEyedropper)
       window.removeEventListener('keydown', onPrecisionKey)
       window.removeEventListener('keyup', onPrecisionKey)
@@ -12564,6 +12444,9 @@ export default function Viewport({
     const activeToolForSelection = toolControllerRef.current?.activeTool
     if (activeToolForSelection !== undefined && 'setSelection' in activeToolForSelection) {
       (activeToolForSelection as { setSelection(nodes: NodeRef[]): void }).setSelection([...selectedIds])
+      // A hint that depends on the selection ("Select what to copy first.")
+      // must follow it without waiting for the next pointer event.
+      reportToolHintRef.current?.()
     }
     // Collect leaf object ids, instance ids, and sketch ids for highlighting
     // (`highlightSetsFor`, shared with the transform tools' hover highlight).

@@ -81,6 +81,26 @@ describe('the native save panel\'s formats', () => {
   })
 })
 
+describe('Export cages instead', () => {
+  it('adds the check to the mesh formats only when the model has a Smooth object', () => {
+    const plain = Object.fromEntries(exportPanelFormats('mm').map((f) => [f.id, f.options ?? []]))
+    expect(plain.glb).toEqual([])
+    const smooth = Object.fromEntries(exportPanelFormats('mm', undefined, false, true).map((f) => [f.id, f.options ?? []]))
+    for (const id of ['glb', 'stl', '3mf', 'usdz']) {
+      expect(smooth[id].map((o) => [o.kind, o.id])).toContainEqual(['check', 'cages'])
+    }
+    expect(smooth.svg.map((o) => o.id)).not.toContain('cages')
+    expect(smooth.skp.map((o) => o.id)).not.toContain('cages')
+  })
+
+  it('reads the choice back from the panel', () => {
+    expect(exportChoiceFrom({ path: '/m.stl', format: 'stl', options: { segments: '48', cages: true } }, 'mm')?.cages).toBe(true)
+    expect(exportChoiceFrom({ path: '/m.stl', format: 'stl', options: { segments: '48', cages: false } }, 'mm')?.cages).toBeUndefined()
+    // A format with no cages ignores the flag.
+    expect(exportChoiceFrom({ path: '/m.skp', format: 'skp', options: { cages: true } }, 'mm')?.cages).toBeUndefined()
+  })
+})
+
 describe('an export from the panel\'s answer', () => {
   it('carries the STL resolution picked', () => {
     const choice = exportChoiceFrom({ path: '/m.stl', format: 'stl', options: { segments: '96' } }, 'mm')

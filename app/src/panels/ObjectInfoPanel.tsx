@@ -81,6 +81,7 @@ import { selectionMaterials } from './selectionMaterials'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { MIN_SEGMENTS_PER_TURN } from '../tools/arcMath'
 import { isComposingKey } from '../input/keyboard'
+import { SmoothSection } from './SmoothSection'
 import { copiesRow, unlinkLabel, makeComponentLabel, selectAllCopiesLabel } from '../linkedCopyCopy'
 
 /**
@@ -1001,6 +1002,13 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
           {plural(selectedCount, { one: '# selected', other: '# selected' })}
         </div>
         {bounds !== null && <BoundingBoxRow bounds={bounds} />}
+        <SmoothSection
+          scene={scene}
+          docRev={docRev}
+          objects={selectedIds.filter((n) => n.kind === 'object').map((n) => n.id)}
+          onGeometryChanged={onGeometryChanged}
+          onToast={onToast}
+        />
         {measure !== null && <MeasureRows measure={measure} display={lengthDisplay} />}
         {multi !== null && (
           <div>
@@ -1388,6 +1396,11 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
             )}
           </div>
         </div>
+      )}
+
+      {/* Smooth and Soften — objects only. */}
+      {nodeInfo.kind === 'object' && (
+        <SmoothSection scene={scene} docRev={docRev} objects={[nodeInfo.id]} onGeometryChanged={onGeometryChanged} onToast={onToast} />
       )}
 
       {/* Bounding Box — world AABB extents; hidden for a mesh-less selection

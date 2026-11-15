@@ -58,6 +58,15 @@ const VCB_LABEL: Record<string, MessageDescriptor> = {
   'Tape Measure': msg`Distance`,
   'Protractor': msg`Angle`,
   'Follow Me': msg`Swept length`,
+  'Revolve': msg`Angle`,
+  'Loft': msg`Steps`,
+  'Deform': msg`Amount`,
+  // The label follows the picked profile (Distance for a chamfer, Width for
+  // a profile) — App passes the exact label; this is the Round default.
+  'Fillet': msg`Radius`,
+  'Array along Path': msg`Count or scale`,
+  'Shell': msg`Wall thickness`,
+  'Project': msg`Depth`,
   // Camera ▸ Field of View activates the same 'Zoom' camera mode as
   // Camera ▸ Zoom / the Z shortcut (docs/design/camera.md §2) — the label
   // only ever shows while a value is present (MeasurementBox returns null

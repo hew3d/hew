@@ -49,6 +49,8 @@ describe('default bindings', () => {
     expect(b['tool-arc']).toEqual(['A'])
     expect(b['tool-pushpull']).toEqual(['P', '3'])
     expect(b['tool-offset']).toEqual(['F'])
+    expect(b['tool-fillet']).toEqual(['Shift+F'])
+    expect(b['tool-eraser']).toEqual(['E'])
     expect(b['tool-move']).toEqual(['M', '4'])
     expect(b['tool-rotate']).toEqual(['Q', '5'])
     expect(b['tool-scale']).toEqual(['S', '6'])

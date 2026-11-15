@@ -107,8 +107,9 @@ export function makeTauriLibraryStore(): LibraryStore {
 
     async write(fileName: string, bytes: Uint8Array): Promise<void> {
       const { invoke } = await import('@tauri-apps/api/core')
-      // library_write expects Vec<u8>; Array.from so Tauri IPC sees a JSON array.
-      await invoke('library_write', { name: fileName, contents: Array.from(bytes) })
+      // Raw-body IPC (an item can be a large model); the name rides
+      // percent-encoded in a header.
+      await invoke('library_write', bytes as never, { headers: { name: encodeURIComponent(fileName) } })
     },
 
     async remove(fileName: string): Promise<void> {

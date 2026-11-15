@@ -14,16 +14,16 @@ describe('toolRegistry', () => {
     expect(toolSpec('Select').actionId).toBe('tool-select')
   })
 
-  it('groups the 03_tool_rail.md tools plus Arc, Polygon, Follow Me, Flip, Dimension, and Section Plane', () => {
+  it('groups the 03_tool_rail.md tools plus Arc, Polygon, Follow Me, Fillet, Loft, Flip, Eraser, Dimension, and Section Plane', () => {
     expect(toolsInGroup('Draw').map((t) => t.name)).toEqual(['Select', 'Line', 'Rectangle', 'Circle', 'Polygon', 'Arc'])
-    expect(toolsInGroup('Modify').map((t) => t.name)).toEqual(['Push/Pull', 'Follow Me', 'Offset', 'Move', 'Rotate', 'Scale', 'Flip'])
+    expect(toolsInGroup('Modify').map((t) => t.name)).toEqual(['Push/Pull', 'Follow Me', 'Offset', 'Fillet', 'Loft', 'Move', 'Rotate', 'Scale', 'Flip', 'Eraser'])
     expect(toolsInGroup('Inspect').map((t) => t.name)).toEqual(['Tape Measure', 'Dimension', 'Paint', 'Section Plane'])
   })
 
-  it('leaves Protractor/Slice/Edit Vertex/Drawing Axes/Text/Position Texture/camera tools off the rail (no group)', () => {
+  it('leaves Revolve/Deform/Array along Path/Protractor/Slice/Edit Vertex/Drawing Axes/Text/Position Texture/camera tools off the rail (no group)', () => {
     const ungrouped = TOOL_REGISTRY.filter((t) => t.group === undefined).map((t) => t.name)
     expect(ungrouped).toEqual([
-      'Protractor', 'Slice', 'Edit Vertex', 'Drawing Axes', 'Text', 'Position Texture',
+      'Revolve', 'Deform', 'Array along Path', 'Shell', 'Project', 'Protractor', 'Slice', 'Edit Vertex', 'Drawing Axes', 'Text', 'Position Texture',
       'Orbit', 'Pan', 'Zoom', 'Zoom Window',
       'Position Camera', 'Look Around', 'Walk',
     ])

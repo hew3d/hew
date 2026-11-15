@@ -23,7 +23,7 @@
 import { resetHealthReportCache } from './health/healthReport'
 import { BANNED_RE, readableText } from './health/bannedWords'
 import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react'
-import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
 
 /**
  * Scope a query to the top menu bar. Tool/panel names (e.g. "Select",
@@ -72,6 +72,8 @@ const mockScene = {
   node_user_hidden: () => false,
   set_node_user_hidden: vi.fn(),
   object_solid: () => true,
+  has_smoothed_objects: () => false,
+  smoothed_object_ids: () => new BigUint64Array(0),
   // Model Health (status badge / Outliner icons): an all-solid, empty summary.
   // (The full health_report_json is the panel's, read only while its window is open.)
   health_summary_json: () =>
@@ -201,8 +203,9 @@ vi.mock('./io/fileHost', async (importOriginal) => {
   return {
     ...actual,
     makeFileHost: vi.fn(actual.makeFileHost),
+    // The native-menu sync block below also flips the desktop flags on for one test.
     get isTauri() {
-      return tauriMode.on || actual.isTauri
+      return tauriMode.on || nativeMenu.on || actual.isTauri
     },
   }
 })
@@ -211,7 +214,6 @@ vi.mock('./io/fileHost', async (importOriginal) => {
 const tauriCore = vi.hoisted(() => ({
   invoke: vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => undefined),
 }))
-vi.mock('@tauri-apps/api/core', () => ({ invoke: tauriCore.invoke }))
 
 // The live bridge is a no-op outside Tauri; the spy keeps the operation
 // runner App hands it, so a test can drive a live `revert` the way the shell does.
@@ -230,6 +232,41 @@ vi.mock('./api/liveBridge', async (importOriginal) => {
     }),
   }
 })
+
+// platform + the Tauri bridge — only the native-menu sync test turns these on
+// (the effect that pushes check marks to the macOS menu bar needs isTauri &&
+// isMac and an `invoke` to observe).
+const nativeMenu = vi.hoisted(() => ({
+  on: false,
+  invoke: vi.fn(async (..._args: unknown[]) => undefined),
+  menuAction: null as ((event: { payload: string }) => void) | null,
+}))
+vi.mock('./platform', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./platform')>()
+  return { ...actual, get isMac() { return nativeMenu.on || actual.isMac } }
+})
+vi.mock('@tauri-apps/api/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@tauri-apps/api/core')>()
+  // One mock for both blocks: the native-menu block observes `invoke` while it
+  // is on; everywhere else the Revert block's spy answers.
+  return {
+    ...actual,
+    invoke: (cmd: string, args?: unknown) =>
+      nativeMenu.on ? nativeMenu.invoke(cmd, args) : tauriCore.invoke(cmd, args),
+  }
+})
+vi.mock('@tauri-apps/api/event', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@tauri-apps/api/event')>()
+  return { ...actual, listen: async () => () => {} }
+})
+vi.mock('@tauri-apps/api/webviewWindow', () => ({
+  getCurrentWebviewWindow: () => ({
+    listen: async (event: string, cb: (e: { payload: string }) => void) => {
+      if (event === 'menu-action') nativeMenu.menuAction = cb
+      return () => {}
+    },
+  }),
+}))
 
 // io/savePanel — the desktop's native save panel. Off by default (every
 // other test here runs the browser path); the native-panel block below
@@ -2822,6 +2859,44 @@ describe('App — toast severity', () => {
     const bubble = screen.getByText(/nothing to undo/).closest('div')!
     expect(bubble.style.background).toBe('var(--surface-overlay)')
   })
+
+  it('shows plain words only: the machine code never appears in the bubble', async () => {
+    await renderAndLoad()
+    act(() => latestOnToast()('nothing to undo', 'NothingToUndo'))
+    const bubble = screen.getByText(/nothing to undo/).closest('div')!
+    expect(bubble.textContent).not.toContain('NothingToUndo')
+    expect(bubble.textContent).not.toContain('[')
+  })
+})
+
+describe('App — Smooth surface that can no longer be drawn', () => {
+  it('toasts once per object after a commit that touched it, and stays quiet for untouched ones', async () => {
+    const m = mockScene as unknown as Record<string, unknown>
+    const prior = { smooth_level: m.smooth_level, smooth_surface_available: m.smooth_surface_available, object_name: m.object_name }
+    m.smooth_level = vi.fn((id: bigint) => (id === 5n ? 2 : 0))
+    m.smooth_surface_available = vi.fn(() => false)
+    m.object_name = vi.fn(() => 'Vase')
+    try {
+      await renderAndLoad()
+      const calls = vi.mocked(Viewport).mock.calls
+      const sceneChange = () =>
+        (calls[calls.length - 1][0] as { onSceneChange: (w: Map<bigint, boolean>, t?: readonly bigint[]) => void }).onSceneChange
+      act(() => sceneChange()(new Map(), [5n]))
+      const copy = 'Smooth 2 on Vase is off for now: the shape grew too dense for it. Lower the level or simplify the shape.'
+      expect(screen.getAllByText(copy)).toHaveLength(1)
+      act(() => sceneChange()(new Map(), [5n]))
+      expect(screen.getAllByText(copy)).toHaveLength(1)
+      // A commit that touched nothing smoothed adds nothing.
+      act(() => sceneChange()(new Map(), [6n]))
+      expect(screen.getAllByText(copy)).toHaveLength(1)
+      // A full refresh (no touched hint) reads nothing per object.
+      const levelCalls = vi.mocked(m.smooth_level as (id: bigint) => number).mock.calls.length
+      act(() => sceneChange()(new Map()))
+      expect(vi.mocked(m.smooth_level as (id: bigint) => number).mock.calls.length).toBe(levelCalls)
+    } finally {
+      Object.assign(m, prior)
+    }
+  })
 })
 
 describe('App — boolean auto-explode failure surfacing (finding 2)', () => {
@@ -2861,7 +2936,7 @@ describe('App — boolean auto-explode failure surfacing (finding 2)', () => {
       const callsBeforeClick = canUndoMock.mock.calls.length
 
       fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
-      fireEvent.mouseDown(screen.getByText('Union'))
+      fireEvent.mouseDown(menubar().getByText('Union'))
 
       // A re-render happened — `setDocRev` fired, exactly as the success
       // path already did, instead of the failure silently doing nothing.
@@ -2884,7 +2959,7 @@ describe('App — boolean auto-explode failure surfacing (finding 2)', () => {
       }
       const runBoolean = vi.fn(() => null)
       act(() => {
-        if (apiRef !== undefined) apiRef.current = { runBoolean }
+        if (apiRef !== undefined) apiRef.current = { runBoolean, operandTriangles: vi.fn(() => 0) }
       })
       fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
       fireEvent.mouseDown(menubar().getByText('Subtract'))
@@ -2899,6 +2974,37 @@ describe('App — boolean auto-explode failure surfacing (finding 2)', () => {
     }
   })
 
+  it('runs a boolean on large operands behind the busy card, painted before the work starts', async () => {
+    const priorObjectIds = mockScene.object_ids
+    mockScene.object_ids = vi.fn(() => BigUint64Array.from([1n, 2n]))
+    try {
+      await renderAndLoad()
+      act(() => window.__hew_test!.selectObjects(['1', '2']))
+      const calls = vi.mocked(Viewport).mock.calls
+      const { apiRef } = calls[calls.length - 1][0] as unknown as {
+        apiRef?: { current: Record<string, unknown> | null }
+      }
+      const runBoolean = vi.fn(() => null)
+      act(() => {
+        if (apiRef !== undefined) apiRef.current = { runBoolean, operandTriangles: vi.fn(() => 480_000) }
+      })
+      fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+      fireEvent.mouseDown(menubar().getByText('Union'))
+      // The card is up and the boolean has not run yet.
+      expect(screen.getByText('Combining…')).toBeTruthy()
+      expect(screen.getByText('This can take a while on a large object.')).toBeTruthy()
+      expect(runBoolean).not.toHaveBeenCalled()
+      // A second Union while the card paints is ignored.
+      fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+      fireEvent.mouseDown(menubar().getByText('Union'))
+      await waitFor(() => expect(runBoolean).toHaveBeenCalledTimes(1))
+      await new Promise((r) => setTimeout(r, 100))
+      expect(runBoolean).toHaveBeenCalledTimes(1)
+      await waitFor(() => expect(screen.queryByText('Combining…')).toBeNull())
+    } finally {
+      mockScene.object_ids = priorObjectIds
+    }
+  })
 })
 
 describe('App — session-stack menu gating (docs/design/group-session.md)', () => {
@@ -4532,6 +4638,89 @@ describe('App — revealInTray (Object Info tag chips and Materials row)', () =>
     expect(screen.getByTitle('Rectangle (R)')).toBeInTheDocument()
     expect(vi.mocked(Viewport).mock.calls.at(-1)?.[0]).toMatchObject({ activeTool: 'Select' })
   })
+})
+
+describe('App — native Smooth check marks after a refused level', () => {
+  // The effects under test load `invoke` with a dynamic import. Under load,
+  // vitest intermittently hands those imports the REAL @tauri-apps/api/core
+  // module instead of the mocked one (the mock factory above is async), and
+  // the real invoke goes to `window.__TAURI_INTERNALS__.invoke`. Providing
+  // that bridge as well routes either module to the same recorder, so no
+  // sync is lost whichever one a given import resolves to.
+  beforeAll(() => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
+      invoke: (cmd: string, args?: unknown) => nativeMenu.invoke(cmd, args),
+    }
+  })
+  afterAll(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  afterEach(() => {
+    nativeMenu.on = false
+    nativeMenu.menuAction = null
+    nativeMenu.invoke.mockClear()
+  })
+
+  it('re-pushes the menu state with the previous level checked when Smooth is refused', async () => {
+    const m = mockScene as unknown as Record<string, unknown>
+    const prior = { object_ids: m.object_ids, smooth_level: m.smooth_level, set_smooth_level: m.set_smooth_level }
+    m.object_ids = vi.fn(() => BigUint64Array.from([1n]))
+    m.smooth_level = vi.fn(() => 1)
+    m.set_smooth_level = vi.fn(() => { throw new Error('AmountOutOfRange: cage too dense') })
+    nativeMenu.on = true
+    try {
+      await renderAndLoad()
+      act(() => window.__hew_test!.selectObjects(['1']))
+      const syncs = () => nativeMenu.invoke.mock.calls.filter((c) => c[0] === 'sync_menu_state')
+      await waitFor(() => expect(syncs().length).toBeGreaterThan(0), { timeout: 15_000 })
+      const before = syncs().length
+
+      // The native item arrives as a menu-action event, after muda has
+      // already toggled the clicked check mark.
+      await waitFor(() => expect(nativeMenu.menuAction).not.toBeNull(), { timeout: 15_000 })
+      act(() => nativeMenu.menuAction!({ payload: 'smooth-3' }))
+
+      await waitFor(() => expect(syncs().length).toBeGreaterThan(before), { timeout: 15_000 })
+      const last = syncs()[syncs().length - 1][1] as { checked: Record<string, boolean> }
+      expect(last.checked['object-smooth-1']).toBe(true)
+      expect(last.checked['object-smooth-3']).toBe(false)
+    } finally {
+      Object.assign(m, prior)
+    }
+    // A full render plus three round trips through the native menu: under
+    // a loaded machine the default 5 s is not enough.
+  }, 20_000)
+
+  it('enables Soften Edges… only for a directly selected solid, while Smooth stays open for any object', async () => {
+    const m = mockScene as unknown as Record<string, unknown>
+    const prior = { object_ids: m.object_ids, smooth_level: m.smooth_level, object_solid: m.object_solid, health_report_json: m.health_report_json }
+    m.object_ids = vi.fn(() => BigUint64Array.from([1n]))
+    m.smooth_level = vi.fn(() => 0)
+    // Object Info's Geometry row reads the health report for a non-solid object.
+    m.health_report_json = () => '{"rows":[],"families":[],"counts":{}}'
+    nativeMenu.on = true
+    try {
+      for (const solid of [true, false]) {
+        m.object_solid = vi.fn(() => solid)
+        nativeMenu.invoke.mockClear()
+        const { unmount } = render(<App />)
+        await waitFor(() => screen.getByTitle('Rectangle (R)'), { timeout: 2000 })
+        act(() => window.__hew_test!.selectObjects(['1']))
+        await waitFor(() => {
+          const calls = nativeMenu.invoke.mock.calls.filter((c) => c[0] === 'sync_menu_state')
+          const last = calls[calls.length - 1]?.[1] as { enabled: Record<string, boolean> } | undefined
+          expect(last?.enabled['object-smooth-2']).toBe(true)
+          expect(last?.enabled['object-soften-edges']).toBe(solid)
+        }, { timeout: 15_000 })
+        unmount()
+      }
+    } finally {
+      Object.assign(m, prior)
+    }
+    // Two full renders in a loop: the default 5 s test timeout and the
+    // 1 s waitFor are too tight on a loaded machine.
+  }, 20_000)
 })
 
 describe('App — the bus enters and leaves the user context (hew.view.enter / exit / exit_all)', () => {

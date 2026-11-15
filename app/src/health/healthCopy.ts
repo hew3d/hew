@@ -43,6 +43,14 @@ export const KIND_NAME = {
 
 export type KindKey = keyof typeof KIND_NAME
 
+/** Objects that are solid but carry faces with no area (an import can). */
+export const ZERO_AREA = {
+  get group() {
+    return t`Has zero-area faces`
+  },
+  detail: (n: number) => plural(n, { one: '# zero-area face', other: '# zero-area faces' }),
+}
+
 /** Why Hew can't close an object (`openReason` in healthReport.ts). */
 export type OpenReason = 'branches' | 'notFlat' | 'lip'
 
@@ -175,6 +183,9 @@ export const ACTION = {
   get showInList() {
     return t`Show in list`
   },
+  get removeDegenerate() {
+    return t`Remove degenerate faces`
+  },
   get mend() {
     return t`Mend`
   },
@@ -204,6 +215,18 @@ export const TOOLTIP = {
       : plural(objects, { one: 'Mend # object in one step', other: 'Mend # objects in one step' })
     return distance ? t`${base}. The distance you typed is used where it fits; other objects use their own.` : base
   },
+  removeDegenerate: (placements: number) =>
+    placements > 1
+      ? plural(placements, {
+          one: 'Delete the faces that have no area. They can stop an object from combining with others in all # copy',
+          other: 'Delete the faces that have no area. They can stop an object from combining with others in all # copies',
+        })
+      : t`Delete the faces that have no area. They can stop an object from combining with others`,
+  removeDegenerateAll: (objects: number) =>
+    plural(objects, {
+      one: 'Delete the zero-area faces of # object in one step',
+      other: 'Delete the zero-area faces of # objects in one step',
+    }),
   close: (placements: number) =>
     placements > 1
       ? plural(placements, {
@@ -336,10 +359,15 @@ export const LOOK_ALIKE = {
 }
 
 /** The line under a row an action refused. */
-export function rowWarning(action: 'close' | 'thicken' | 'keep' | 'rejoin' | 'mend', reason: string): string {
+export function rowWarning(
+  action: 'close' | 'thicken' | 'keep' | 'rejoin' | 'degenerate' | 'mend',
+  reason: string,
+): string {
   switch (action) {
     case 'mend':
       return t`Couldn't mend: ${reason}`
+    case 'degenerate':
+      return t`Couldn't remove the faces: ${reason}`
     case 'close':
       return t`Couldn't close: ${reason}`
     case 'thicken':
@@ -366,13 +394,18 @@ export const UNDO_LABEL = {
     return t`Rejoin as one solid`
   },
   mend: (objects: number) => plural(objects, { one: 'Mend # object', other: 'Mend # objects' }),
+  removeDegenerate: (objects: number) =>
+    plural(objects, {
+      one: 'Remove zero-area faces from # object',
+      other: 'Remove zero-area faces from # objects',
+    }),
   get makeSolid() {
     return t`Make Solid`
   },
 }
 
 /** What a batch did, for its toast. */
-export type ToastKind = 'close' | 'mark' | 'thicken' | 'repair' | 'rejoinSolid' | 'mend'
+export type ToastKind = 'close' | 'mark' | 'thicken' | 'repair' | 'rejoinSolid' | 'degenerate' | 'mend'
 
 /**
  * A batch's toast: "Closed 11 objects." / "Closed 11 objects. 1 couldn't be
@@ -416,6 +449,13 @@ export function batchToast(kind: ToastKind, ok: number, failed: number): string 
           : t`Nothing was mended.`
       tail = plural(failed, { one: "# couldn't be mended; see the list.", other: "# couldn't be mended; see the list." })
       break
+    case 'degenerate':
+      head =
+        ok > 0
+          ? plural(ok, { one: 'Cleaned # object.', other: 'Cleaned # objects.' })
+          : t`Nothing was cleaned.`
+      tail = plural(failed, { one: "# couldn't be cleaned; see the list.", other: "# couldn't be cleaned; see the list." })
+      break
     case 'repair':
       head =
         ok > 0
@@ -425,6 +465,16 @@ export function batchToast(kind: ToastKind, ok: number, failed: number): string 
       break
   }
   return failed === 0 ? head : `${head} ${tail}`
+}
+
+/**
+ * "Removed 12 zero-area faces." / with refusals: "Removed 12 zero-area faces.
+ * 1 object couldn't be cleaned; see the list."
+ */
+export function removedFacesToast(removed: number, failed: number): string {
+  const head = plural(removed, { one: 'Removed # zero-area face.', other: 'Removed # zero-area faces.' })
+  if (failed === 0) return head
+  return `${head} ${plural(failed, { one: "# object couldn't be cleaned; see the list.", other: "# objects couldn't be cleaned; see the list." })}`
 }
 
 // -------------------------------------------------------------------- mend

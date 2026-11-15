@@ -79,6 +79,12 @@ export const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   'sent-reports',
   'edit-flip-blue', 'edit-flip-green', 'edit-flip-red', 'edit-link-identical-copies',
   'edit-paste-independent', 'edit-paste-linked', 'edit-select-all-copies',
+  // True Curves: the Tools ▸ Shape / Deform tools, Fillet and Chamfer, the
+  // Eraser, Object ▸ Smooth and View ▸ Tangent Edges.
+  'bake-smooth', 'smooth-1', 'smooth-2', 'smooth-3', 'smooth-off', 'soften-edges',
+  'toggle-tangent-edges', 'tool-chamfer', 'tool-deform-bend', 'tool-deform-bend-path',
+  'tool-deform-taper', 'tool-deform-twist', 'tool-eraser', 'tool-fillet', 'tool-loft',
+  'tool-path-array', 'tool-project', 'tool-revolve', 'tool-shell',
   'edit-unlink', 'edit-unlink-all', 'toggle-part-axes', 'tool-flip',
   'toggle-axes', 'toggle-changes', 'toggle-compact-rail', 'toggle-components',
   'toggle-debug-log', 'toggle-dock', 'toggle-fly', 'toggle-grid',

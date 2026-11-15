@@ -245,6 +245,32 @@ describe('segmentBounds', () => {
   })
 })
 
+describe('zero-area faces', () => {
+  const statue = () => row({ object: '30', name: 'Statue', verdict: { kind: 'solid' }, rims: [], degenerate_faces: 3 })
+
+  it('reads the count, and 0 when the field is missing', () => {
+    const r = report([statue(), row({ object: '31' })])
+    expect(r.rows[0].degenerateFaces).toBe(3)
+    expect(r.rows[0].verdict.kind).toBe('solid')
+    expect(r.rows[1].degenerateFaces).toBe(0)
+  })
+
+  it('a closed object with zero-area faces gets its own group, after the kinds, and is not a "can\'t be closed"', () => {
+    const r = report([row({ object: '31' }), statue()])
+    const g = groupRows(r, r.rows)
+    expect(g.groups.map((x) => x.key)).toEqual(['openings'])
+    expect(g.zeroArea.map((x) => x.object)).toEqual([30n])
+    expect(groupedRows(g).map((x) => x.object)).toEqual([31n, 30n])
+    expect(rowDetailText(r.rows[1])).toBe('3 zero-area faces')
+  })
+
+  it('search finds it by its group words', () => {
+    const r = report([statue(), row({ object: '31' })])
+    const hit = filterRows(r.rows, { query: 'zero-area', showAccepted: false })
+    expect(hit.map((x) => x.object)).toEqual([30n])
+  })
+})
+
 describe('canCloseRow', () => {
   const one = (over: Record<string, unknown>): HealthRow => report([row(over)]).rows[0]
   const WARPED = { ...RIM, planar: false, cappable: false }
