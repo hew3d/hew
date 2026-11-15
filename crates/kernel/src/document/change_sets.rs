@@ -320,6 +320,22 @@ impl Document {
                     b.parent(*parent);
                 }
             }
+            DocAction::Reshaped {
+                object,
+                split_off,
+                parent,
+                ..
+            } => {
+                b.object(Modified, *object);
+                b.objects(Added, split_off.iter().copied());
+                if !split_off.is_empty() {
+                    b.parent(*parent);
+                }
+            }
+            DocAction::Generated { result, .. } => {
+                b.object(Added, *result);
+                b.owner_defs(&[*result], &[], &[]);
+            }
             DocAction::PushThrough {
                 source,
                 results,

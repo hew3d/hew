@@ -57,21 +57,23 @@ impl Object {
         )
     }
 
-    /// Like [`Object::from_polygons`], but assigns each face the material and
-    /// per-face [`UvFrame`] at the same index in the parallel `materials` /
-    /// `uv_frames` slices ( + the UV-frame extension). Crate-internal: the
-    /// boolean assembler uses it so result faces carry their material and UV
-    /// frame. Uses the strict [`tol::PLANE_DIST`] gate (kernel-built f64
-    /// geometry is exact). Every slice must be parallel to `faces`; `attrs`
-    /// holds each face's attribute dictionary (empty = none), interned into
-    /// the new Object's own table.
-    pub(crate) fn from_polygons_with_materials_and_frames(
+    /// Like [`Object::from_polygons`], but assigns each face the material,
+    /// per-face [`UvFrame`], analytic surface and attribute dictionary at
+    /// the same index in the parallel slices (`attrs` empty = none, interned
+    /// into the new Object's own table), at planarity gate `plane_tol`
+    /// (never below [`tol::PLANE_DIST`]), recorded as the built object's
+    /// planarity tolerance: the boolean assembler builds a result at its
+    /// loosest operand's tolerance, so sub-faces of an imported face (flat
+    /// only to [`tol::IMPORT_PLANE_DIST`]) are not refused as non-planar.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_polygons_with_attrs_tol(
         positions: &[Point3],
         faces: &[Vec<usize>],
         materials: &[FaceMaterial],
         uv_frames: &[Option<UvFrame>],
         surfaces: &[Option<SurfaceRef>],
         attrs: &[AttrDict],
+        plane_tol: f64,
     ) -> Result<Object, TopologyError> {
         Object::from_polygons_impl(
             positions,
@@ -80,12 +82,12 @@ impl Object {
             Some(uv_frames),
             Some(surfaces),
             Some(attrs),
-            tol::PLANE_DIST,
+            plane_tol.max(tol::PLANE_DIST),
             None,
         )
     }
 
-    /// Like [`Object::from_polygons_with_materials_and_frames`], but for
+    /// Like [`Object::from_polygons_with_attrs_tol`], but for
     /// *imported* foreign geometry: uses the wider [`tol::IMPORT_PLANE_DIST`]
     /// planarity gate so f32-quantized SketchUp/COLLADA faces (flat to ~0.1 mm
     /// but past the nanometer [`tol::PLANE_DIST`]) are accepted as the single
@@ -252,6 +254,16 @@ impl Object {
         let mut directed: BTreeMap<(VertexId, VertexId), HalfEdgeId> = BTreeMap::new();
 
         let no_holes: Vec<Vec<usize>> = Vec::new();
+        // An imported mesh may carry faces below the area cutoff (Model Health
+        // lists and removes them), but only beside a real face: a mesh in which
+        // no face has a plane of its own is not an object, so it is refused as
+        // it always was.
+        let lenient = plane_tol > crate::tol::PLANE_DIST
+            && faces.iter().any(|polygon| {
+                let pts: Option<Vec<Point3>> =
+                    polygon.iter().map(|&i| positions.get(i).copied()).collect();
+                pts.is_some_and(|p| p.len() >= 3 && Plane::from_polygon(&p).is_ok())
+            });
         for (face_index, polygon) in faces.iter().enumerate() {
             if polygon.len() < 3 {
                 return Err(TopologyError::DegenerateFace { face: face_index });
@@ -275,11 +287,21 @@ impl Object {
                         })
                 })
                 .collect::<Result<_, _>>()?;
+            // An imported face may be a ring smaller than the area cutoff
+            // (D-70): the plane the file format accepts for it is its plane.
+            let imported = lenient;
             let plane = Plane::from_polygon(&pts)
+                .or_else(|e| {
+                    if imported {
+                        crate::serialize::outer_ring_plane(&pts, true)
+                    } else {
+                        Err(e)
+                    }
+                })
                 .map_err(|_| TopologyError::DegenerateFace { face: face_index })?;
             // The plane a saved file recomputes for this face must exist too
             // (the validator holds every live face to it).
-            if crate::serialize::outer_ring_plane(&pts).is_err() {
+            if crate::serialize::outer_ring_plane(&pts, imported).is_err() {
                 return Err(TopologyError::DegenerateFace { face: face_index });
             }
             let on_plane = |i: usize| {
@@ -307,6 +329,7 @@ impl Object {
                 back_material: None,
                 uv_frame: uv_frames.and_then(|f| f.get(face_index).copied()).flatten(),
                 surface: surfaces.and_then(|s| s.get(face_index).copied()).flatten(),
+                blend: None,
                 attrs: AttrSlot::NONE,
             });
             if let Some(dict) = attrs.and_then(|a| a.get(face_index)) {
@@ -366,6 +389,7 @@ impl Object {
                             twin_half_edge: Some(t),
                             curve: None,
                             soft: false,
+                            crease: false,
                             polygon: None,
                             attrs: AttrSlot::NONE,
                         });
@@ -381,6 +405,7 @@ impl Object {
                         twin_half_edge: None,
                         curve: None,
                         soft: false,
+                        crease: false,
                         polygon: None,
                         attrs: AttrSlot::NONE,
                     });
@@ -407,6 +432,16 @@ impl Object {
     pub(crate) fn set_built_back_materials(&mut self, backs: &[FaceMaterial]) {
         for ((_, f), &b) in self.faces.iter_mut().zip(backs) {
             f.back_material = b;
+        }
+    }
+
+    /// Assigns blend tags to a freshly built object's faces, in build order
+    /// (the order of the builder's `faces` input; a fresh slotmap iterates in
+    /// insertion order). The builders take no blend column, exactly as with
+    /// back materials ([`Object::set_built_back_materials`]).
+    pub(crate) fn set_built_blends(&mut self, blends: &[Option<crate::topo::BlendTag>]) {
+        for ((_, f), &b) in self.faces.iter_mut().zip(blends) {
+            f.blend = b;
         }
     }
 
@@ -464,6 +499,7 @@ impl Object {
                 back_material: None,
                 uv_frame: *uv_frame,
                 surface: *surface,
+                blend: None,
                 attrs: AttrSlot::NONE,
             });
             if !attrs.is_empty() {
@@ -510,6 +546,7 @@ impl Object {
                             twin_half_edge: Some(t),
                             curve: None,
                             soft: false,
+                            crease: false,
                             polygon: None,
                             attrs: AttrSlot::NONE,
                         });
@@ -525,6 +562,7 @@ impl Object {
                         twin_half_edge: None,
                         curve: None,
                         soft: false,
+                        crease: false,
                         polygon: None,
                         attrs: AttrSlot::NONE,
                     });
@@ -934,11 +972,15 @@ impl Object {
             let fids: Vec<FaceId> = self.faces.keys().collect();
             for f in fids {
                 let fits = |s: &SurfaceRef| -> bool {
+                    // Import extras carry cylinders only.
                     let SurfaceRef::Cylinder {
                         axis_point,
                         axis,
                         radius,
-                    } = *s;
+                    } = *s
+                    else {
+                        return false;
+                    };
                     let face = &self.faces[f];
                     if (axis.length() - 1.0).abs() > crate::tol::NORMAL_DIRECTION
                         || radius <= crate::tol::POINT_MERGE

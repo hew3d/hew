@@ -13,10 +13,14 @@
 //! implemented `sketch`, `ops`, `history`, and `serialize`. Executable
 //! specs live in `tests/op_specs.rs`.
 
+mod blend;
 mod boolean;
 mod build;
 mod geom2d;
+mod offset3d;
+mod rederive;
 mod retrace;
+mod sketch_corner;
 mod validate;
 
 pub mod annotation;
@@ -24,6 +28,7 @@ pub mod attr;
 pub mod axes;
 pub mod camera;
 pub mod changes;
+pub mod deform;
 pub mod document;
 pub mod error;
 pub mod geo;
@@ -32,23 +37,46 @@ pub mod health;
 pub mod history;
 pub mod ids;
 pub mod import;
+pub mod loft;
 pub mod material;
 pub mod math;
 pub mod offset;
 pub mod ops;
+/// The patch primitive and its guards. Crate-internal API; public only so
+/// the executable specs can drive it through the `…_for_test` hooks.
+#[doc(hidden)]
+pub mod patch;
+pub mod project;
 pub mod repair;
 pub mod scenes;
 pub mod serialize;
+pub mod shape_error;
+pub mod shared;
+pub mod shell;
 pub mod sketch;
+pub mod smooth;
+/// The skin builder shared by generated sweeps. Crate-internal API; public
+/// only so the executable specs can drive it through the `…_for_test` hooks.
+#[doc(hidden)]
+pub mod station;
 pub mod style;
+pub mod subdiv;
+pub mod surface;
 pub mod tol;
 pub mod topo;
 pub mod transform;
+pub mod triangulate;
 pub mod unit_key;
 
 pub use annotation::{Anchor, Annotation, CapturedCurve, RadialKind};
 pub use attr::{AttrDict, AttrValue, AttrValueError};
 pub use axes::{AxesFrame, AxesFrameError};
+pub use blend::{
+    BlendError, BlendFeature, BlendLimit, BlendProfile, BlendReport, BlendSpec, BlendStops,
+    Convexity, CornerStyle, LimitFeature, ProfileSample, ProfileSeg, ProfileShape, RadiusHandle,
+    bundled as bundled_profiles, limit_probes_for_test, limit_searches_for_test,
+    same_geometry_for_test,
+};
 pub use camera::{CameraProjection, CameraState};
 pub use changes::{
     AttrChange, AttrScope, CHANGE_RING_CAP, ChangeKind, ChangeRecord, ChangeRef, ChangeSet,
@@ -63,6 +91,11 @@ pub use document::{
     MAX_COMPONENT_DEPTH, MAX_OCCURRENCES, MaterialScope, NodeId, Occurrence, OpenEdges,
     PendingActionKind, PlaneListing, PlaneUnits, PurgeReport, Remap, RenderRoot, WRAPPED_DEF_SID,
 };
+pub use document::{
+    DEFAULT_HISTORY_BUDGET_BYTES, DEFAULT_HISTORY_MIN_STEPS, HistoryBudget, HistoryMemory,
+    HistoryTrim,
+};
+pub use document::{MAX_ARRAY_COUNT, PathArraySpec};
 pub use error::TopologyError;
 pub use geo::{GeoReference, GeoReferenceError};
 pub use guide::{Guide, GuideDash, GuideSpan};
@@ -87,7 +120,7 @@ pub use offset::{
 pub use ops::{
     BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceAttrsAt,
     FaceMergeInnerReport, FaceMergeReport, FaceSplitInnerReport, FaceSplitReport, FollowMeError,
-    LoopImprintPlan, Operand, PushPullError, PushPullReport, SliceError, StickyError,
+    LoopImprintPlan, Operand, PushPullError, PushPullReport, SliceError, StickyError, SweepOptions,
     TransformSubFaceReport,
 };
 pub use retrace::{FaceRetraceReport, RetracePath};
@@ -97,6 +130,7 @@ pub use serialize::{
     MaterialSummary, NO_MATERIAL, read_item_asset, read_item_summary,
     read_item_summary_from_reader,
 };
+pub use shape_error::ShapeError;
 pub use sketch::{
     CurveAnalytic, CurveGeom, CurveRefaceted, EdgeRemoved, MAX_CIRCLE_SEGMENTS,
     MIN_CIRCLE_SEGMENTS, Profile, ProfileError, RegionOffsetAdded, SegmentAdded, Sketch,
@@ -104,7 +138,12 @@ pub use sketch::{
     SketchIsland, SketchIslandId, SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,
     VertexMoved,
 };
+pub use sketch_corner::{CornerBlendReport, CornerProfile};
 pub use style::{SectionLook, ViewStyle};
-pub use topo::{AnalyticRim, AttrSlot, FaceAttrs, Object, SurfaceRef, WatertightState};
+pub use surface::EdgeSmoothness;
+pub use topo::{
+    AnalyticRim, AttrSlot, BlendId, BlendKind, BlendRole, BlendTag, FaceAttrs, Object, SurfaceRef,
+    WatertightState,
+};
 pub use transform::{Transform, TransformError};
 pub use unit_key::{SketchUnitKeys, chain_key, curve_key, edge_key, region_key};

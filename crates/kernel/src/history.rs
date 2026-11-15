@@ -94,7 +94,8 @@ pub enum KernelOp {
         /// The cut path, boundary to boundary.
         path: Vec<Point3>,
         /// Attribute snapshots to restore onto the result faces (undo path).
-        restore: Option<[Option<FaceAttrsAt>; 2]>,
+        /// Boxed: two attribute snapshots dwarf every other variant.
+        restore: Option<Box<[Option<FaceAttrsAt>; 2]>>,
         /// Per path edge (`path[k]` → `path[k+1]`), the analytic circle it is
         /// a chord facet of, stamped onto the cut's edges so an arc drawn
         /// edge to edge keeps its circle on the solid; empty claims nothing.
@@ -330,6 +331,32 @@ struct RedoEntry {
 }
 
 impl History {
+    /// An estimate of the heap each undo-stack entry holds (its rule-9
+    /// proof, its anchor and its ops), oldest first — what the document's
+    /// undo-memory budget attributes to the matching document step.
+    pub(crate) fn applied_bytes(&self) -> Vec<usize> {
+        self.applied
+            .iter()
+            .map(|rec| {
+                std::mem::size_of::<AppliedEntry>()
+                    + rec.prior.heap_bytes()
+                    + rec.anchor.heap_bytes()
+            })
+            .collect()
+    }
+
+    /// How many entries the undo stack holds.
+    pub(crate) fn applied_len(&self) -> usize {
+        self.applied.len()
+    }
+
+    /// Forgets the `n` oldest undo-stack entries (the document trimmed the
+    /// steps that would have reached them). The newer entries, the redo
+    /// stack and the object are untouched; undo pops from the newest end,
+    /// so every entry still reachable stays exactly as it was.
+    pub(crate) fn drop_oldest(&mut self, n: usize) {
+        self.applied.drain(..n.min(self.applied.len()));
+    }
     /// An empty history.
     pub fn new() -> History {
         History::default()
@@ -563,6 +590,24 @@ struct StateProof {
     edges: Vec<EdgeClaimProof>,
 }
 
+impl StateProof {
+    /// An estimate of the heap the proof holds (its face rings and claims).
+    fn heap_bytes(&self) -> usize {
+        let p = std::mem::size_of::<Point3>();
+        self.faces.capacity() * std::mem::size_of::<FaceProof>()
+            + self
+                .faces
+                .iter()
+                .map(|f| {
+                    f.outer.capacity() * p
+                        + f.holes.capacity() * std::mem::size_of::<Vec<Point3>>()
+                        + f.holes.iter().map(|h| h.capacity() * p).sum::<usize>()
+                })
+                .sum::<usize>()
+            + self.edges.capacity() * std::mem::size_of::<EdgeClaimProof>()
+    }
+}
+
 /// One claimed or soft edge of a [`StateProof`].
 #[derive(Debug, Clone)]
 struct EdgeClaimProof {
@@ -571,6 +616,7 @@ struct EdgeClaimProof {
     curve: Option<CurveGeom>,
     soft: bool,
     polygon: Option<CurveGeom>,
+    crease: bool,
     /// The edge's attribute dictionary (empty = none), by value: the
     /// candidate a proof aligns may intern it at a different slot.
     attrs: crate::attr::AttrDict,
@@ -611,6 +657,8 @@ struct FaceProof {
     material: crate::material::FaceMaterial,
     back_material: crate::material::FaceMaterial,
     uv_frame: Option<crate::material::UvFrame>,
+    /// The blend tag, restored on alignment like `surface`.
+    blend: Option<crate::topo::BlendTag>,
     /// The face's attribute dictionary (empty = none), restored on
     /// alignment like the paint. Not part of the match: two faces of equal
     /// geometry and different dictionaries match greedily by order, so a
@@ -651,6 +699,7 @@ impl StateProof {
                     material: face.material,
                     back_material: face.back_material,
                     uv_frame: face.uv_frame,
+                    blend: face.blend,
                     attrs: object.attr_dict(face.attrs).cloned().unwrap_or_default(),
                 })
                 .collect(),
@@ -662,6 +711,7 @@ impl StateProof {
                     if edge.curve.is_none()
                         && !edge.soft
                         && edge.polygon.is_none()
+                        && !edge.crease
                         && edge.attrs.is_none()
                     {
                         return None;
@@ -673,6 +723,7 @@ impl StateProof {
                         curve: edge.curve,
                         soft: edge.soft,
                         polygon: edge.polygon,
+                        crease: edge.crease,
                         attrs: object.attr_dict(edge.attrs).cloned().unwrap_or_default(),
                     })
                 })
@@ -841,16 +892,16 @@ impl StateProof {
             candidate.faces[f].material = rec.material;
             candidate.faces[f].back_material = rec.back_material;
             candidate.faces[f].uv_frame = rec.uv_frame;
+            candidate.faces[f].blend = rec.blend;
             candidate.set_face_attrs(f, rec.attrs.clone());
         }
         // Fast path: neither the recorded state nor the candidate carries a
         // single claimed, soft, or dictionary-carrying edge (the common case
         // for objects with no drawn circles, sweeps, or edge dictionaries),
         // so there is nothing to restore or clear.
-        let candidate_has_claims = candidate
-            .edges()
-            .values()
-            .any(|e| e.curve.is_some() || e.soft || e.polygon.is_some() || !e.attrs.is_none());
+        let candidate_has_claims = candidate.edges().values().any(|e| {
+            e.curve.is_some() || e.soft || e.polygon.is_some() || e.crease || !e.attrs.is_none()
+        });
         if !self.edges.is_empty() || candidate_has_claims {
             // Restore every edge's circle claim, soft flag, and dictionary to
             // the recorded state (see `StateProof::edges`): claimed edges get
@@ -862,6 +913,7 @@ impl StateProof {
                 Option<CurveGeom>,
                 bool,
                 Option<CurveGeom>,
+                bool,
                 &'a crate::attr::AttrDict,
                 bool,
             );
@@ -872,7 +924,7 @@ impl StateProof {
                 .map(|e| {
                     (
                         edge_bits_key(e.a, e.b),
-                        (e.curve, e.soft, e.polygon, &e.attrs, false),
+                        (e.curve, e.soft, e.polygon, e.crease, &e.attrs, false),
                     )
                 })
                 .collect();
@@ -881,19 +933,21 @@ impl StateProof {
                 let Some((a, b)) = candidate.edge_endpoints(e) else {
                     continue;
                 };
-                let (curve, soft, polygon, attrs) = match recorded.get_mut(&edge_bits_key(a, b)) {
-                    Some(entry) => {
-                        entry.4 = true;
-                        (entry.0, entry.1, entry.2, entry.3)
-                    }
-                    None => (None, false, None, &no_attrs),
-                };
+                let (curve, soft, polygon, crease, attrs) =
+                    match recorded.get_mut(&edge_bits_key(a, b)) {
+                        Some(entry) => {
+                            entry.5 = true;
+                            (entry.0, entry.1, entry.2, entry.3, entry.4)
+                        }
+                        None => (None, false, None, false, &no_attrs),
+                    };
                 candidate.edges[e].curve = curve;
                 candidate.edges[e].soft = soft;
                 candidate.edges[e].polygon = polygon;
+                candidate.edges[e].crease = crease;
                 candidate.set_edge_attrs(e, attrs.clone());
             }
-            if recorded.values().any(|entry| !entry.4) {
+            if recorded.values().any(|entry| !entry.5) {
                 return false;
             }
         }
@@ -957,6 +1011,21 @@ impl FaceAnchor {
     /// The live face of `object` with this fingerprint, if any.
     pub(crate) fn resolve(&self, object: &Object) -> Option<FaceId> {
         object.faces().keys().find(|&fid| self.matches(object, fid))
+    }
+
+    /// An estimate of the heap the fingerprint holds.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.verts.capacity() * std::mem::size_of::<Point3>()
+    }
+}
+
+impl Anchor {
+    /// An estimate of the heap the anchor holds.
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Anchor::Face(fa) => fa.heap_bytes(),
+            Anchor::Edge { .. } => 0,
+        }
     }
 }
 
@@ -1050,7 +1119,7 @@ fn re_anchor(object: &Object, op: &KernelOp, anchor: &Anchor) -> Result<KernelOp
         } => Ok(KernelOp::SplitFace {
             face: face(unknown_face_sticky)?,
             path: path.clone(),
-            restore: *restore,
+            restore: restore.clone(),
             curves: curves.clone(),
         }),
         KernelOp::SplitFaceInner {
@@ -1149,7 +1218,7 @@ fn dispatch(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport, Kernel
             restore,
             curves,
         } => object
-            .split_face_impl(*face, path, *restore, curves)
+            .split_face_impl(*face, path, restore.as_deref().copied(), curves)
             .map(KernelOpReport::FaceSplit)
             .map_err(KernelOpError::Sticky),
         KernelOp::MergeFaces { edge } => object
@@ -1269,7 +1338,7 @@ fn derive_inverse(
                 // report snapshotted — never re-derived from the merged face —
                 // and the run's edges their circle claims (a dissolved arc
                 // comes back an arc).
-                restore: Some(r.prior_attrs),
+                restore: Some(Box::new(r.prior_attrs)),
                 curves,
             }
         }

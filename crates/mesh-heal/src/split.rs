@@ -129,79 +129,11 @@ pub fn split_non_manifold(
             face_ids.iter().map(|&f| face_holes[f].clone()).collect();
         let mut extra_positions: Vec<Point3> = Vec::new(); // appended past globals
 
-        // Pinch fallback: re-scan for duplicate directed edges within the
-        // component; detach the repeat use by re-indexing ONE endpoint of
-        // that specific edge occurrence onto a fresh coincident duplicate.
-        // Loop until clean — each detach strictly reduces duplicate uses
-        // (the rewritten occurrence gains a brand-new vertex id, so its
-        // edges can collide with nothing).
-        //
-        // The cut is minimal: re-labelling a ring corner necessarily also
-        // renames the ONE neighbouring ring edge at that corner, so the
-        // endpoint whose neighbouring edge is NOT a shared connection (a
-        // boundary edge — only this use) is preferred, leaving clean paired
-        // edges elsewhere in the ring untouched. Only when both neighbours
-        // are shared does one of them get severed — never both, and never
-        // unrelated occurrences of the same vertex ids elsewhere in the
-        // ring or its holes.
-        loop {
-            let mut seen: std::collections::BTreeSet<(usize, usize)> =
-                std::collections::BTreeSet::new();
-            // Undirected use counts decide which neighbouring edge is safe
-            // to rename (count 1 = boundary, nothing else uses it).
-            let mut undirected: BTreeMap<(usize, usize), usize> = BTreeMap::new();
-            // First duplicate found: (local face, hole index, corner slot).
-            let mut dup: Option<(usize, Option<usize>, usize)> = None;
-            for (lf, ring) in rings.iter().enumerate() {
-                for k in 0..ring.len() {
-                    let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
-                    *undirected.entry((a.min(b), a.max(b))).or_default() += 1;
-                    if !seen.insert((a, b)) && dup.is_none() {
-                        dup = Some((lf, None, k));
-                    }
-                }
-                for (hi, hole) in holes[lf].iter().enumerate() {
-                    for k in 0..hole.len() {
-                        let (a, b) = (hole[k], hole[(k + 1) % hole.len()]);
-                        *undirected.entry((a.min(b), a.max(b))).or_default() += 1;
-                        if !seen.insert((a, b)) && dup.is_none() {
-                            dup = Some((lf, Some(hi), k));
-                        }
-                    }
-                }
-            }
-            let Some((lf, hole_idx, k)) = dup else {
-                break;
-            };
-            let uses = |x: usize, y: usize| -> usize {
-                undirected.get(&(x.min(y), x.max(y))).copied().unwrap_or(0)
-            };
-            let ring: &mut Vec<usize> = match hole_idx {
-                None => &mut rings[lf],
-                Some(hi) => &mut holes[lf][hi],
-            };
-            let n = ring.len();
-            let (a, b) = (ring[k], ring[(k + 1) % n]);
-            let prev = ring[(k + n - 1) % n];
-            let next = ring[(k + 2) % n];
-            // Duplicating b renames neighbouring edge {b, next}; duplicating
-            // a renames {prev, a}. Prefer the endpoint whose neighbour is a
-            // boundary edge (a single use — this ring's own), so no paired
-            // connection is severed as collateral.
-            let (slot, old) = if uses(b, next) <= 1 || uses(prev, a) > 1 {
-                ((k + 1) % n, b)
-            } else {
-                (k, a)
-            };
-            let base = positions.len() + extra_positions.len();
-            let dup_pos = if old < positions.len() {
-                positions[old]
-            } else {
-                extra_positions[old - positions.len()]
-            };
-            extra_positions.push(dup_pos); // coincident duplicate, not welded
-            ring[slot] = base;
-        }
+        // Pinch fallback: detach every repeat use of a directed edge within
+        // the component by re-indexing ONE endpoint of that specific edge
+        // occurrence onto a fresh coincident duplicate (see
+        // [`detach_pinches`]: the minimal cut, one forward pass).
+        detach_pinches(&mut rings, &mut holes, positions, &mut extra_positions);
 
         // Compact: global/extra indices → piece-local, keeping only
         // referenced positions, in first-use order (deterministic).
@@ -266,6 +198,186 @@ pub fn split_non_manifold(
     }
 
     Some(pieces)
+}
+
+/// The pinch fallback of [`split_non_manifold`]: within one component's
+/// rings (outer rings, each followed by its holes, in order), detach every
+/// repeat use of a directed edge by re-indexing ONE endpoint of that edge
+/// occurrence onto a fresh coincident duplicate appended to `extra`
+/// (numbered past `positions`).
+///
+/// The cut is minimal: re-labelling a ring corner necessarily also renames
+/// the ONE neighbouring ring edge at that corner, so the endpoint whose
+/// neighbouring edge is NOT a shared connection (a boundary edge, only this
+/// use) is preferred, leaving clean paired edges elsewhere in the ring
+/// untouched. Only when both neighbours are shared does one of them get
+/// severed, never both, and never unrelated occurrences of the same vertex
+/// ids elsewhere in the ring or its holes.
+///
+/// The repeats are taken in scan order, the first repeat of the current
+/// state each time, exactly as re-scanning the whole component after each
+/// detach would take them: a detach only renames edges to fresh ids (which
+/// repeat nothing) and removes uses (which makes no earlier edge a repeat),
+/// so the next repeat always lies past the one just fixed. One pass keeps
+/// the directed edges seen so far and the undirected use counts current
+/// instead of rebuilding both per repeat, which was quadratic in the
+/// number of pinches on a large scan.
+fn detach_pinches(
+    rings: &mut [Vec<usize>],
+    holes: &mut [Vec<Vec<usize>>],
+    positions: &[Point3],
+    extra: &mut Vec<Point3>,
+) {
+    let edge = |r: &[usize], q: usize| (r[q], r[(q + 1) % r.len()]);
+    let undirected_key = |(a, b): (usize, usize)| (a.min(b), a.max(b));
+    let mut undirected: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    for (lf, ring) in rings.iter().enumerate() {
+        for r in std::iter::once(ring).chain(holes[lf].iter()) {
+            for q in 0..r.len() {
+                *undirected.entry(undirected_key(edge(r, q))).or_default() += 1;
+            }
+        }
+    }
+    let mut seen: std::collections::BTreeSet<(usize, usize)> = std::collections::BTreeSet::new();
+    let mut fix_ring =
+        |ring: &mut Vec<usize>,
+         undirected: &mut BTreeMap<(usize, usize), usize>,
+         seen: &mut std::collections::BTreeSet<(usize, usize)>| {
+            let n = ring.len();
+            for k in 0..n {
+                let e = edge(ring, k);
+                if seen.insert(e) {
+                    continue;
+                }
+                // A repeat at position k: every position before it is unique.
+                let uses = |m: &BTreeMap<(usize, usize), usize>, x: usize, y: usize| -> usize {
+                    m.get(&(x.min(y), x.max(y))).copied().unwrap_or(0)
+                };
+                let (a, b) = e;
+                let prev = ring[(k + n - 1) % n];
+                let next = ring[(k + 2) % n];
+                // Duplicating b renames neighbouring edge {b, next}; duplicating
+                // a renames {prev, a}. Prefer the endpoint whose neighbour is a
+                // boundary edge (a single use — this ring's own), so no paired
+                // connection is severed as collateral.
+                let (slot, old) = if uses(undirected, b, next) <= 1 || uses(undirected, prev, a) > 1
+                {
+                    ((k + 1) % n, b)
+                } else {
+                    (k, a)
+                };
+                let base = positions.len() + extra.len();
+                let dup_pos = if old < positions.len() {
+                    positions[old]
+                } else {
+                    extra[old - positions.len()]
+                };
+                extra.push(dup_pos); // coincident duplicate, not welded
+                // The two positions whose edge the rename touches.
+                let mut touched = [(slot + n - 1) % n, slot];
+                if touched[0] == touched[1] {
+                    touched[1] = usize::MAX;
+                }
+                for &q in touched.iter().filter(|&&q| q != usize::MAX) {
+                    let old_e = edge(ring, q);
+                    if let Some(c) = undirected.get_mut(&undirected_key(old_e)) {
+                        *c -= 1;
+                        if *c == 0 {
+                            undirected.remove(&undirected_key(old_e));
+                        }
+                    }
+                    // Positions before k hold their edge in `seen`; position k's
+                    // edge is the repeat, which `seen` holds for its first use.
+                    if q < k {
+                        seen.remove(&old_e);
+                    }
+                }
+                ring[slot] = base;
+                for &q in touched.iter().filter(|&&q| q != usize::MAX) {
+                    let new_e = edge(ring, q);
+                    *undirected.entry(undirected_key(new_e)).or_default() += 1;
+                    if q <= k {
+                        seen.insert(new_e);
+                    }
+                }
+            }
+        };
+    for (lf, ring) in rings.iter_mut().enumerate() {
+        fix_ring(ring, &mut undirected, &mut seen);
+        for hole in holes[lf].iter_mut() {
+            fix_ring(hole, &mut undirected, &mut seen);
+        }
+    }
+}
+
+/// The pinch fallback as first written: re-scan the whole component after
+/// every detach. Kept as the reference [`detach_pinches`] must match
+/// exactly (the property test below).
+#[cfg(test)]
+fn detach_pinches_reference(
+    rings: &mut [Vec<usize>],
+    holes: &mut [Vec<Vec<usize>>],
+    positions: &[Point3],
+    extra_positions: &mut Vec<Point3>,
+) {
+    loop {
+        let mut seen: std::collections::BTreeSet<(usize, usize)> =
+            std::collections::BTreeSet::new();
+        // Undirected use counts decide which neighbouring edge is safe
+        // to rename (count 1 = boundary, nothing else uses it).
+        let mut undirected: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        // First duplicate found: (local face, hole index, corner slot).
+        let mut dup: Option<(usize, Option<usize>, usize)> = None;
+        for (lf, ring) in rings.iter().enumerate() {
+            for k in 0..ring.len() {
+                let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
+                *undirected.entry((a.min(b), a.max(b))).or_default() += 1;
+                if !seen.insert((a, b)) && dup.is_none() {
+                    dup = Some((lf, None, k));
+                }
+            }
+            for (hi, hole) in holes[lf].iter().enumerate() {
+                for k in 0..hole.len() {
+                    let (a, b) = (hole[k], hole[(k + 1) % hole.len()]);
+                    *undirected.entry((a.min(b), a.max(b))).or_default() += 1;
+                    if !seen.insert((a, b)) && dup.is_none() {
+                        dup = Some((lf, Some(hi), k));
+                    }
+                }
+            }
+        }
+        let Some((lf, hole_idx, k)) = dup else {
+            break;
+        };
+        let uses = |x: usize, y: usize| -> usize {
+            undirected.get(&(x.min(y), x.max(y))).copied().unwrap_or(0)
+        };
+        let ring: &mut Vec<usize> = match hole_idx {
+            None => &mut rings[lf],
+            Some(hi) => &mut holes[lf][hi],
+        };
+        let n = ring.len();
+        let (a, b) = (ring[k], ring[(k + 1) % n]);
+        let prev = ring[(k + n - 1) % n];
+        let next = ring[(k + 2) % n];
+        // Duplicating b renames neighbouring edge {b, next}; duplicating
+        // a renames {prev, a}. Prefer the endpoint whose neighbour is a
+        // boundary edge (a single use — this ring's own), so no paired
+        // connection is severed as collateral.
+        let (slot, old) = if uses(b, next) <= 1 || uses(prev, a) > 1 {
+            ((k + 1) % n, b)
+        } else {
+            (k, a)
+        };
+        let base = positions.len() + extra_positions.len();
+        let dup_pos = if old < positions.len() {
+            positions[old]
+        } else {
+            extra_positions[old - positions.len()]
+        };
+        extra_positions.push(dup_pos); // coincident duplicate, not welded
+        ring[slot] = base;
+    }
 }
 
 /// One cheap scan: does any directed edge (over outer rings AND hole rings)
@@ -605,6 +717,28 @@ mod specs {
                 let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); faces.len()];
                 prop_assert!(!has_duplicate_directed_edge(&faces, &holes));
             }
+        });
+    }
+
+    /// The one-pass pinch detach takes exactly the cuts the re-scan-per-
+    /// repeat reference takes, on arbitrary soups with holes (property).
+    #[test]
+    fn property_one_pass_detach_matches_rescan() {
+        use proptest::prelude::*;
+        let ring = proptest::collection::vec(0usize..7, 1..6);
+        let face = (ring.clone(), proptest::collection::vec(ring, 0..2));
+        let mesh = proptest::collection::vec(face, 1..10);
+        proptest!(ProptestConfig::with_cases(2048), |(faces in mesh)| {
+            let positions: Vec<Point3> = (0..7).map(|i| p(i as f64, 0.0, 0.0)).collect();
+            let mut rings: Vec<Vec<usize>> = faces.iter().map(|f| f.0.clone()).collect();
+            let mut holes: Vec<Vec<Vec<usize>>> = faces.iter().map(|f| f.1.clone()).collect();
+            let (mut rings_ref, mut holes_ref) = (rings.clone(), holes.clone());
+            let (mut extra, mut extra_ref) = (Vec::new(), Vec::new());
+            detach_pinches(&mut rings, &mut holes, &positions, &mut extra);
+            detach_pinches_reference(&mut rings_ref, &mut holes_ref, &positions, &mut extra_ref);
+            prop_assert_eq!(rings, rings_ref);
+            prop_assert_eq!(holes, holes_ref);
+            prop_assert_eq!(extra.len(), extra_ref.len());
         });
     }
 

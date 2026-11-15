@@ -79,7 +79,10 @@ fn extruded_circle_walls_carry_their_cylinder() {
         axis_point,
         axis,
         radius,
-    } = distinct[0];
+    } = distinct[0]
+    else {
+        panic!("expected cylinder")
+    };
     assert!(axis_point.approx_eq(Point3::new(1.0, 2.0, 0.0), tol::POINT_MERGE));
     assert!(axis.approx_eq(Vec3::new(0.0, 0.0, 1.0), tol::NORMAL_DIRECTION));
     assert_eq!(radius, 0.5, "the exact drawn radius, not a chord measure");
@@ -179,7 +182,9 @@ fn hole_walls_carry_the_hole_curves_cylinder() {
     let (distinct, carrying) = surface_census(&obj);
     assert_eq!(carrying, 16);
     assert_eq!(distinct.len(), 1);
-    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0] else {
+        panic!("expected cylinder")
+    };
     assert_eq!(radius, 1.0);
 }
 
@@ -378,7 +383,10 @@ fn transform_maps_or_drops_attribution() {
     assert_eq!(carrying, 12);
     let SurfaceRef::Cylinder {
         axis_point, radius, ..
-    } = distinct[0];
+    } = distinct[0]
+    else {
+        panic!("expected cylinder")
+    };
     assert!(axis_point.approx_eq(Point3::new(10.0, 0.0, 0.0), 1e-9));
     assert!((radius - 2.0).abs() < 1e-12, "radius scales uniformly");
 
@@ -549,7 +557,9 @@ fn wall_offset_outward_grows_the_whole_cylinder() {
     let (distinct, carrying) = surface_census(&obj);
     assert_eq!(carrying, 24);
     assert_eq!(distinct.len(), 1);
-    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0] else {
+        panic!("expected cylinder")
+    };
     assert_eq!(radius, 0.75, "surface reference maps to the offset radius");
 
     // And the carrier agrees: every wall vertex sits on the new cylinder.
@@ -583,7 +593,9 @@ fn wall_offset_inward_then_outward_is_the_identity() {
         );
     }
     let (distinct, _) = surface_census(&obj);
-    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0] else {
+        panic!("expected cylinder")
+    };
     assert!((radius - 1.0).abs() <= tol::POINT_MERGE);
 }
 
@@ -606,7 +618,9 @@ fn wall_offset_to_nothing_refuses_typed() {
         assert!(b.approx_eq(*a, 0.0_f64.max(tol::POINT_MERGE)));
     }
     let (distinct, _) = surface_census(&obj);
-    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0] else {
+        panic!("expected cylinder")
+    };
     assert_eq!(radius, 0.5);
 }
 
@@ -655,7 +669,9 @@ fn hole_wall_offset_resizes_the_hole() {
     let (distinct, carrying) = surface_census(&obj);
     assert_eq!(carrying, 16);
     assert_eq!(distinct.len(), 1);
-    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0] else {
+        panic!("expected cylinder")
+    };
     assert_eq!(radius, 0.75, "positive distance shrinks a hole");
     // The block's outer corners never moved.
     assert!(
@@ -697,7 +713,9 @@ fn d_profile_chord_wall_translates_with_the_arc() {
     assert_eq!(obj.watertight(), kernel::WatertightState::Watertight);
     let (distinct, carrying) = surface_census(&obj);
     assert_eq!(carrying, n);
-    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0] else {
+        panic!("expected cylinder")
+    };
     assert_eq!(radius, 1.5);
     // The chord wall stretched to the new seam positions but stayed a
     // plane — and gained no claim it never had.
@@ -759,7 +777,9 @@ fn rounded_corner_tangent_walls_pivot_with_the_fillet() {
     obj.validate().unwrap();
     assert_eq!(obj.watertight(), kernel::WatertightState::Watertight);
     let (distinct, _) = surface_census(&obj);
-    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0] else {
+        panic!("expected cylinder")
+    };
     assert_eq!(radius, 1.2, "fillet radius offsets");
 
     // The fillet's seam vertex moved radially: (2,1) -> (2.2,1).
@@ -850,7 +870,9 @@ fn boolean_cut_face_follows_the_radial_offset() {
     // Every attributed fragment claims the offset radius.
     let (distinct, _) = surface_census(&obj);
     assert_eq!(distinct.len(), 1);
-    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0] else {
+        panic!("expected cylinder")
+    };
     assert_eq!(radius, 1.2);
 
     // The cut face followed the cross-section scale: x = 0.55·1.2 = 0.66.
@@ -900,7 +922,9 @@ fn drilled_cylinder_offsets_outer_and_hole_walls_independently() {
         let (d, _) = surface_census(&obj);
         d.iter()
             .map(|s| {
-                let SurfaceRef::Cylinder { radius, .. } = s;
+                let SurfaceRef::Cylinder { radius, .. } = s else {
+                    panic!("expected cylinder")
+                };
                 *radius
             })
             .collect()
@@ -924,7 +948,9 @@ fn drilled_cylinder_offsets_outer_and_hole_walls_independently() {
         let (d, _) = surface_census(&obj);
         d.iter()
             .map(|s| {
-                let SurfaceRef::Cylinder { radius, .. } = s;
+                let SurfaceRef::Cylinder { radius, .. } = s else {
+                    panic!("expected cylinder")
+                };
                 *radius
             })
             .collect()
@@ -994,7 +1020,9 @@ fn wall_offset_undoes_and_redoes_through_history() {
         )
         .unwrap();
     let (d, _) = surface_census(&obj);
-    let SurfaceRef::Cylinder { radius, .. } = d[0];
+    let SurfaceRef::Cylinder { radius, .. } = d[0] else {
+        panic!("expected cylinder")
+    };
     assert_eq!(radius, 1.3);
 
     history.undo(&mut obj).unwrap();
@@ -1003,7 +1031,9 @@ fn wall_offset_undoes_and_redoes_through_history() {
         assert!(b.approx_eq(*a, tol::POINT_MERGE), "undo restores geometry");
     }
     let (d, _) = surface_census(&obj);
-    let SurfaceRef::Cylinder { radius, .. } = d[0];
+    let SurfaceRef::Cylinder { radius, .. } = d[0] else {
+        panic!("expected cylinder")
+    };
     assert!(
         (radius - 1.0).abs() <= tol::POINT_MERGE,
         "undo restores the claim"
@@ -1011,7 +1041,9 @@ fn wall_offset_undoes_and_redoes_through_history() {
 
     history.redo(&mut obj).unwrap();
     let (d, _) = surface_census(&obj);
-    let SurfaceRef::Cylinder { radius, .. } = d[0];
+    let SurfaceRef::Cylinder { radius, .. } = d[0] else {
+        panic!("expected cylinder")
+    };
     assert!((radius - 1.3).abs() <= tol::POINT_MERGE);
 }
 
@@ -1039,7 +1071,9 @@ proptest::proptest! {
         let (distinct, carrying) = surface_census(&obj);
         proptest::prop_assert_eq!(carrying, n);
         proptest::prop_assert_eq!(distinct.len(), 1);
-        let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+        let SurfaceRef::Cylinder { radius, .. } = distinct[0] else {
+ panic!("expected cylinder")
+ };
         proptest::prop_assert!((radius - (r + d)).abs() <= 1e-9 * (1.0 + r));
 
         obj.push_pull(report.face, -d).unwrap();
@@ -1116,7 +1150,9 @@ fn wall_grow_that_would_engulf_a_disjoint_shell_refuses() {
     assert_eq!(before_verts, now);
     assert_eq!(before_faces, obj.faces().len());
     let (distinct, _) = surface_census(&obj);
-    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0] else {
+        panic!("expected cylinder")
+    };
     assert_eq!(radius, 1.0, "the claim still says the old radius");
 }
 
@@ -1147,7 +1183,9 @@ fn wall_grow_with_clearance_still_succeeds() {
     assert_eq!(obj.shells().len(), 2, "still two shells");
     let (distinct, carrying) = surface_census(&obj);
     assert_eq!(carrying, 24);
-    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0] else {
+        panic!("expected cylinder")
+    };
     assert_eq!(radius, 3.0);
     // The box never moved.
     assert!(
@@ -1522,7 +1560,10 @@ fn imprinted_circle_pushed_through_stamps_the_tunnel_walls() {
         axis_point,
         axis,
         radius,
-    } = distinct[0];
+    } = distinct[0]
+    else {
+        panic!("expected cylinder")
+    };
     assert!(
         axis_point.approx_eq(Point3::new(0.0, 0.0, h), tol::POINT_MERGE),
         "axis passes through the drawn center"
@@ -1547,7 +1588,9 @@ fn tunnel_wall_offsets_the_hole_radius_and_undoes_exactly() {
     let report = drilled.push_pull(wall, 0.2).unwrap();
     drilled.validate().unwrap();
     let (distinct, _) = surface_census(&drilled);
-    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0] else {
+        panic!("expected cylinder")
+    };
     assert!(
         (radius - 0.3).abs() <= tol::POINT_MERGE,
         "hole radius shrank by the push distance (0.5 → 0.3)"
@@ -1589,7 +1632,9 @@ fn imprint_curve_maps_under_similarity_drops_under_shear() {
     let drilled = obj.push_through(disk, -(2.0 * h + 1.0)).unwrap();
     let (distinct, carrying) = surface_census(&drilled);
     assert_eq!(carrying, 24, "similarity keeps the claim");
-    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0] else {
+        panic!("expected cylinder")
+    };
     assert!((radius - 1.0).abs() <= tol::POINT_MERGE, "radius scaled ×2");
 
     // Non-similarity (non-uniform scale): the section is an ellipse, so the
@@ -1782,7 +1827,10 @@ fn bossing_an_imprinted_circle_stamps_the_boss_walls() {
         axis_point,
         axis,
         radius,
-    } = distinct[0];
+    } = distinct[0]
+    else {
+        panic!("expected cylinder")
+    };
     assert!(
         axis_point.approx_eq(Point3::new(0.0, 0.0, h), tol::POINT_MERGE),
         "axis passes through the drawn center on the base plane"
@@ -1813,7 +1861,9 @@ fn bossed_wall_push_offsets_the_radius_not_a_single_facet() {
         "still 24 attributed walls — no facet was split off"
     );
     assert_eq!(distinct.len(), 1, "still one cylinder");
-    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0] else {
+        panic!("expected cylinder")
+    };
     assert!(
         (radius - 0.6).abs() <= tol::POINT_MERGE,
         "the boss radius grew by the push distance (0.5 → 0.6)"
@@ -2051,7 +2101,9 @@ fn a_bossed_wall_offset_round_trips_through_history() {
         carrying, 24,
         "the replayed boss walls carry the cylinder again"
     );
-    let SurfaceRef::Cylinder { radius, .. } = distinct[0];
+    let SurfaceRef::Cylinder { radius, .. } = distinct[0] else {
+        panic!("expected cylinder")
+    };
     assert!(
         (radius - 0.6).abs() <= tol::POINT_MERGE,
         "and at the offset radius (0.5 → 0.6)"

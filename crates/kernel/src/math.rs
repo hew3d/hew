@@ -238,6 +238,11 @@ impl Plane {
         })
     }
 
+    /// The plane's offset: `normal · p` for every point `p` on it.
+    pub fn offset(&self) -> f64 {
+        self.offset
+    }
+
     /// The same plane facing the other way: the normal and the offset
     /// negated, exactly (no renormalization).
     pub fn flipped(&self) -> Plane {
@@ -282,6 +287,34 @@ impl Plane {
             return Err(MathError::DegenerateVector);
         }
         Ok(Plane { normal, offset })
+    }
+}
+
+// Serde as a plain `[x, y, z]` array — the shape every JSON spec at the
+// wasm and API boundaries uses for a point or a vector.
+impl serde::Serialize for Vec3 {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        [self.x, self.y, self.z].serialize(s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Vec3 {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Vec3, D::Error> {
+        let [x, y, z] = <[f64; 3]>::deserialize(d)?;
+        Ok(Vec3::new(x, y, z))
+    }
+}
+
+impl serde::Serialize for Point3 {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        [self.x, self.y, self.z].serialize(s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Point3 {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Point3, D::Error> {
+        let [x, y, z] = <[f64; 3]>::deserialize(d)?;
+        Ok(Point3::new(x, y, z))
     }
 }
 

@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `29`**, and **geometry buffer format version `9`**. Both are covered
+version `31`**, and **geometry buffer format version `10`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,8 +59,8 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 29,
-  "geometry_version": 9,
+  "format_version": 31,
+  "geometry_version": 10,
   "app": "hew",
   "app_version": "1.2.1",
   "document_id": "3f2c9107-5ed4-40a8-806b-1ec297405d83", // v29+, optional;
@@ -83,7 +83,12 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "tags": [["Architecture", "Walls"], ["Level", "L1"]],
       "attrs": {                     // v14+; omitted entirely when empty
         "com.example.shelving": { "part_no": "SHLF-204", "load_kg": 35.5 }
-      } }
+      },
+      "blends": [ { "id": 1, "seq": 0, "spec": { /* ... */ },
+                    "trimmed": [ /* ... */ ], "marks": [ /* ... */ ] } ]
+                                     // v31+; what each fillet on the object
+                                     // replaced (§4.3); omitted when none
+    }
   ],
   "groups": [
     { "id": 0, "sid": 4, "members": [ {"kind":"object","id":0}, {"kind":"group","id":1} ],
@@ -192,9 +197,9 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `29`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `31`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
-  used by every entry under `geometry/` in this file. Current: `9`.
+  used by every entry under `geometry/` in this file. Current: `10`.
   Redundant with the per-buffer version in each buffer's own header (),
   but lets a reader reject a whole file up front without opening buffers.
 - **`app`**, **`app_version`** (`string`, required) — free-form writer
@@ -251,11 +256,17 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   fatal, typed error, as is a value nested more than 64 levels deep
   (lists and objects count one level each). Omitted entirely when empty, so an attribute-free
   document is byte-identical to one written before the field existed. The
-  kernel stores and round-trips dictionaries verbatim and interprets one
-  first-party key only: `hew.health` → `surface: true` on an object (a
+  kernel stores and round-trips dictionaries verbatim and interprets two
+  first-party keys only. `hew.health` → `surface: true` on an object (a
   definition member included) marks it as a surface someone accepted
   (Model Health); it is an ordinary attribute in the file, and any other
-  value means "not marked".
+  value means "not marked". `hew.smooth` → `level` on an object is its
+  Smooth level: an integer 1 to 3 makes the object's stored faces the cage
+  of a subdivision surface of that many steps, drawn and exported as the
+  smoothed mesh; absent, or any other value, means Off. The attribute is
+  the whole of the feature in the file: the cage is the object's ordinary
+  geometry, and the per-edge crease flag that keeps an edge sharp under
+  Smooth is in the geometry buffer (§3).
 
   Hew reserves the attribute `hew` / `linked` (a boolean) on a component
   definition to mark a linked set: a definition created by copying an
@@ -351,10 +362,18 @@ of the manifest:
 | `materials[].pbr` | 26 | absent: a plain material (no metal, fully rough, no maps), the only possibility before v26 |
 | `instances[].material` | 27 | absent: the placement has no material of its own, the only possibility before v27 |
 | `document_id` (top-level string) | 29 | absent: the document has no id yet; the next save mints one |
+| `sketches[].curves[].kind = "smooth"` (an entry with no `center` and no `radius`) | 30 | no chain is marked smooth; a chain without a `curves[]` entry is identity-only |
+| `objects[].blends` | 31 | empty list: every blend on the object restores by derivation from its tagged faces (§4.3), as every blend did before v31 |
 
 Manifest v28 adds no manifest field: it marks geometry buffer v9 (face
 and edge attribute dictionaries, §3), so a v28 manifest names
 `geometry_version` 9.
+
+Manifest v30 also marks geometry buffer v10 (sphere, torus and cone
+surface claims, crease flags and blend tags, §3), so a v30 or v31 manifest
+names `geometry_version` 10. A manifest at v27 to v29 never carries a
+smooth chain entry or blend records, and its geometry buffers are at most
+v9, whatever a reader of a newer version expects.
 
 `document_id` (v29) is version-gated the usual single direction: a file
 declaring a version older than 29 that carries it is malformed for its own
@@ -387,6 +406,9 @@ with any subset of them, or none, is perfectly ordinary.
   same reason: a file declaring a version older than 13 that still carries
   `annotations` is malformed for its own declared version and MUST be
   rejected rather than silently loaded.
+- `objects[].blends` (v31) likewise: a file declaring a version older than
+  31 that carries one is malformed for its own declared version and MUST be
+  rejected.
 - **`sid` (v14) is gated in both directions.** A file declaring a version
   older than 14 that carries any `sid` field is malformed for its own
   declared version and MUST be rejected (no pre-v14 writer ever emitted
@@ -452,7 +474,7 @@ All multi-byte integers and all floats are **little-endian**. Material ids
 inside a buffer are the same dense ids used by `manifest.json`'s `materials`
 array — one shared id space, not a buffer-local one.
 
-### 3.1 Layout (current version, `9`)
+### 3.1 Layout (current version, `10`)
 
 ```
 offset  type                field
@@ -469,9 +491,13 @@ offset  type                field
         u8                  uv_frame flag: 0 = no UV frame, 1 = UV frame follows
         f64[8]              uv_frame, present only when the flag above is 1:
                              s.x s.y s.z  t.x t.y t.z  u0 v0
-        u8                  surface flag: 0 = plain planar face, 1 = cylinder reference follows
-        f64[7]              surface, present only when the flag above is 1:
-                             axis_point.x .y .z  axis.x .y .z  radius
+        u8                  surface kind: 0 = plain planar face, 1 = cylinder, 2 = sphere (v10),
+                             3 = torus (v10), 4 = cone (v10); the class's payload follows
+        f64[n]              surface payload, by kind (absent for 0):
+                             1 cylinder, n = 7: axis_point.x .y .z  axis.x .y .z  radius
+                             2 sphere,   n = 4: center.x .y .z  radius
+                             3 torus,    n = 8: center.x .y .z  axis.x .y .z  major_radius  minor_radius
+                             4 cone,     n = 7: apex.x .y .z  axis.x .y .z  half_angle (radians)
         u32                 outer_count (K)
         u32[K]              outer-loop vertex indices (0-based into the vertex table, in loop order)
         u32                 hole_count (H)
@@ -505,6 +531,14 @@ offset  type                field
         u8                  edge dictionary flag: 0 = none, 1 = a dictionary follows
         u32                 byte length (L), present only when the flag above is 1
         u8[L]               the edge's attribute dictionary as UTF-8 JSON, present only when the flag above is 1
+        u8                  creases flag (v10): 0 = no edge of this face is creased, 1 = per-edge flags follow
+        --- present only when the creases flag is 1: ---
+        --- one entry per outer edge (K entries), then per hole edge (J per hole, in hole order): ---
+        u8                  crease flag: 0 = not creased, 1 = creased (kept sharp under Smooth)
+        u8                  blend flag (v10): 0 = the face belongs to no blend, 1 = a blend tag follows
+        u32                 blend id, present only when the flag above is 1
+        u8                  blend kind: 0 = fillet, 1 = chamfer, 2 = profile
+        u8                  blend role: 0 = strip, 1 = corner, 2 = run-out
 ```
 
 A face or edge **attribute dictionary** (v9) is the same shape as the
@@ -518,6 +552,24 @@ the other per-edge blocks, an edge's dictionary is written by every face
 the edge bounds, at the entry for that edge, and the two entries of a
 shared edge must be identical: both absent, or equal dictionaries. A plain
 solid grows by the two flag bytes per face.
+
+
+A **crease** (v10) is the user's mark that an edge stays sharp under Smooth.
+It is only ever on an interior edge and never on a soft edge (the validator
+rejects either). Both faces of a shared edge store its flag, and the two
+MUST agree; unlike soft, a disagreement is corruption, not OR'd.
+
+A **blend tag** (v10) groups the faces of one fillet, chamfer or profile on
+one object: every face with the same id belongs to the same blend, and the
+role says which part of it the face is (a strip along an edge, a corner
+where blends meet, the run-out fan of a stopped blend). The tag stores no
+size and no original edge: what the blend replaced is the manifest's
+`objects[].blends[]` record for the id (v31+, §4.3), and a tag with no
+record re-derives it from the geometry. Either way the edit is verified, so
+a tag on geometry that has since been cut through refuses edits instead of
+editing wrongly. A reader that ignores it loses only the grouping, never
+shape. A face carrying neither a crease nor a tag grows by two zero bytes
+over v9.
 
 A face's back paint (v8) is the material on its back side: a `.skp` face
 can be painted on each side. Renderers draw it where the back can be seen
@@ -561,19 +613,25 @@ order over the raw f64 bit patterns (IEEE 754 `totalOrder`; Rust
 - faces are sorted by their rotated outer-ring position sequence, then hole
   count, then hole sequences, then material id, then UV frame (frameless
   faces first; frames compared elementwise `s.x s.y s.z t.x t.y t.z u0 v0`
-  under the same f64 total order), then the per-face analytic surface (v4;
-  surface-less faces first, then by `axis_point.x y z axis.x y z radius`
-  under the f64 total order), then the per-edge circle claims (v5; the outer
-  loop's claim sequence in canonical vertex order, then each hole's, each
-  compared by length then entry — claim-less before claim-bearing, then by
-  `center.x y z radius`), then the per-edge polygon claims (v7; compared
-  the same way), then the face's attribute dictionary (v9; absent before
-  present, present compared as its emitted JSON bytes, lexicographically),
-  then the per-edge dictionaries (the outer loop's entry sequence, then
-  each hole's, absent before present, present by bytes). Coincident faces
-  on disjoint shells can tie on geometry alone, so every emitted payload —
-  ring, holes, material, UV frame, surface, edge claims, and dictionaries
-  — participates in the key;
+  under the same f64 total order), then the back material id (v8), then the
+  per-face analytic surface (v4; surface-less faces first, then by the kind
+  byte, then the kind's payload f64s in wire order under the f64 total
+  order), then the per-edge circle claims of the outer loop (v5; the
+  claim sequence in canonical vertex order, compared by length then entry —
+  claim-less before claim-bearing, then by `center.x y z radius`), then the
+  outer loop's soft flags (v6) and then each hole's, then each hole's circle
+  claims, then the per-edge polygon claims (v7; outer, then holes, compared
+  like circle claims), then the face's attribute dictionary (v9; absent
+  before present, present compared as its emitted JSON bytes,
+  lexicographically), then the per-edge dictionaries (the outer loop's
+  entry sequence, then each hole's, absent before present, present by
+  bytes), then the crease flags (v10; outer, then holes), then the blend
+  tag (v10; untagged first, then by id, kind, role). Each version's keys
+  come after the older ones, so a buffer without the newer payloads sorts
+  exactly as it did. Coincident faces on disjoint shells can tie on
+  geometry alone, so every emitted payload — ring, holes, material, UV
+  frame, surface, edge claims, dictionaries, creases and blend tags —
+  participates in the key;
 - vertices are numbered by first appearance while walking the faces in that
   order (each face's outer loop, then its holes); a vertex several loops
   share (a touching hole) takes the number of its first appearance and is
@@ -594,16 +652,34 @@ are scalar offsets. A face with no `uv_frame` instead uses its material's
 paths, selected by this flag.
 
 `surface` (v4+), when present, is the face's **analytic surface
-reference**: the face is a planar chord facet of the infinite right
-circular cylinder through `axis_point` along unit `axis` with the given
-`radius` — durable metadata over the faceted geometry (the extruded side
-walls of arc/circle profiles carry it), never a replacement for the
-polygonal face itself. The face's plane is parallel to `axis`, at most
-`radius` from it, and every face vertex lies within `radius` of the axis
-line; angular/axial extent is derived from the vertices, never stored. A
-reader that ignores the field loses only analytic metadata (exact
-center/axis/radius for snapping, smooth shading, re-export), never shape
-or watertightness.
+reference**: the face is a planar chord facet of an analytic surface —
+durable metadata over the faceted geometry, never a replacement for the
+polygonal face itself. Angular and axial extent are derived from the
+vertices, never stored. A reader that ignores the field loses only analytic
+metadata (exact centers, axes and radii for snapping, smooth shading,
+re-export), never shape or watertightness. Each class names the weak
+conditions every chord facet of it satisfies, which the validator enforces
+(tolerances are the object's planarity tolerance, `PLANE_DIST` or
+`IMPORT_PLANE_DIST`):
+
+- **cylinder** (kind 1, v4+): the infinite right circular cylinder through
+  `axis_point` along unit `axis` with the given `radius` (the extruded side
+  walls of arc and circle profiles carry it). The face's plane is parallel
+  to `axis` and at most `radius` from it, and every vertex lies within
+  `radius` of the axis line.
+- **sphere** (kind 2, v10+): the sphere about `center` with `radius`. The
+  plane lies within `radius` of the center and every vertex within `radius`
+  of it.
+- **torus** (kind 3, v10+): the surface swept by a circle of `minor_radius`
+  whose center travels the circle of `major_radius` about unit `axis`
+  through `center` (both radii strictly positive; a zero-major torus is
+  written as a sphere). Every vertex lies within `minor_radius + σ(ρ)` of the
+  center circle, where `ρ` is the vertex's distance from the axis and
+  `σ(ρ) = ρ·(sec(π/24) − 1)` allows for a chord across the ring.
+- **cone** (kind 4, v10+): one nappe of the right circular cone with `apex`,
+  unit `axis` pointing into the nappe, and `half_angle` in `(0, π/2)`. The
+  plane passes through the apex, and every vertex has axial coordinate
+  `t ≥ 0` and lies within `t·tan(half_angle)` of the axis.
 
 The per-face **edge-curve claims** (v5+) are the solid-edge mirror of the
 sketch-edge curve chains: an edge marked with a circle is a chord facet of
@@ -635,6 +711,8 @@ present at every version:
 | per-face `edge_polygons` flag + payload | 7 | flag byte and payload are not present at all — the next face's material id (or the buffer's end) follows the `edge_curves` block directly | no edge is a polygon's side |
 | per-face back paint flag + id | 8 | flag byte and id are not present at all — the next face's material id (or the buffer's end) follows the `edge_polygons` block directly | no face has a painted back |
 | per-face `face_attrs` and `edge_attrs` blocks | 9 | neither flag byte nor any payload is present — the next face's material id (or the buffer's end) follows the back paint block directly | no face or edge carries a dictionary |
+| per-face surface kinds 2–4 (sphere, torus, cone) | 10 | a kind byte other than 0 or 1 is malformed | only cylinder claims |
+| per-face creases flag + payload and blend flag + tag | 10 | neither flag byte nor any payload is present — the next face's material id (or the buffer's end) follows the `edge_attrs` block directly | no edge is creased, no face belongs to a blend |
 
 All gates shift subsequent byte offsets, so a reader must branch on the
 buffer's own `version` at each gated point rather than assume fixed offsets
@@ -651,15 +729,22 @@ contents do not describe valid geometry.
 - **Truncation** (buffer ends before its own announced counts are
   satisfied) is a fatal error, distinct from corruption.
 - **Structural corruption** — an out-of-range vertex index, a loop under 3
-  vertices (`outer_count`/`hole_vertex_count < 3`), a `watertight`/
-  `uv_frame`/`imported`/`surface`/`edge_curves` byte outside its 0-1 range,
-  a `surface` payload whose `axis` is not unit length or whose `radius` is
-  not finite and strictly positive, or an edge-curve payload whose `radius`
-  is not finite and strictly positive — is a fatal error reported with the
-  byte offset and what was wrong. Never a panic, never best-effort
+  vertices (`outer_count`/`hole_vertex_count < 3`), any flag byte outside
+  its 0-1 range (`watertight`, `imported`, `uv_frame`, `soft_edges` and each
+  soft flag, `edge_curves` and each edge-curve flag, `edge_polygons` and each
+  polygon flag, back paint, `creases` and each crease flag, blend), a
+  surface kind outside 0-1 below v10 or outside 0-4 at v10, a surface payload
+  whose axis is not unit length (within 1e-9) or whose radius is not finite
+  and strictly positive (cylinder and sphere radius; both torus radii), a
+  cone half-angle outside `(0, π/2)`, a blend kind or role outside 0-2, an
+  edge-curve or polygon payload whose `radius` is not finite and strictly
+  positive, two faces of a shared edge that store different circle or
+  polygon claims or different crease flags — is a fatal error reported with
+  the byte offset and what was wrong. Never a panic, never best-effort
   recovery. (After rebuild, the validator additionally rejects an edge-curve
   claim whose endpoints are not within tolerance of `radius` from `center`,
-  exactly as it rejects a lying `surface`.)
+  a lying `surface` by the per-class conditions above, a crease on a
+  boundary edge, and an edge both soft and creased.)
 - **Attribute dictionaries (v9).** A `face_attrs`, `edge_attrs`, or
   per-edge dictionary flag outside 0-1, a length running past the end of
   the buffer (truncation), or a present dictionary that is not valid
@@ -676,7 +761,11 @@ contents do not describe valid geometry.
   recompute each face's best-fit plane from its outer-loop vertices (Newell's
   method over the loop in the order the writer emits it, rotated to its
   canonical start) and reject a loop that doesn't span a plane — a Newell
-  vector (twice the enclosed area) shorter than 1e-12 m² — or whose vertices
+  vector `n` (twice the enclosed area) shorter than 1e-12 m², unless the
+  object is `imported` and every edge of the loop is at least 1e-8 m long
+  and `n`, accumulated about the loop's first vertex, is at least 1e-6
+  times the perimeter squared (a small loop of a scan that is no sliver;
+  normalized after scaling by its largest component) — or whose vertices
   stray from it beyond tolerance (gated by `imported`). The kernel's
   validator holds every live face to the same predicate, so no operation
   commits a face, however small, that a saved file could not reopen. This is safe because a baked reflection reverses every
@@ -760,6 +849,74 @@ optional `name`, and optional `tags` ().
 An object's faces and edges may each carry an attribute dictionary
 (geometry buffer v9, §3.1), stored with the geometry rather than in the
 manifest because faces and edges have no stable id there.
+
+**`blends`** (v31+, optional, omitted when empty) holds, for every fillet,
+chamfer or profile blend whose faces carry a blend tag in the object's
+geometry buffer (§3.1), what that blend replaced, ascending `id`:
+
+```jsonc
+{ "id": 1,                 // the blend id the faces carry
+  "seq": 0,                // the order the object's blends were made in
+  "spec": {                // the blend as it was asked for
+    "edges": [ [[0,0,1],[1,0,1]] ],     // each picked edge's two ends
+    "profile": { "kind": "round", "radius": 0.1, "segments": 6 },
+                                        // as hew.solid.fillet spells it:
+                                        // round | chamfer | cove | bullnose | custom
+    "primary": { "normal": [0,0,1], "offset": 1.0 },    // asymmetric chamfer only
+    "corners": "default",               // default | mitered | flat
+    "stops": { "start": 0.0, "end": 0.2 },              // stopped blends only
+    "handles": [ { "at": 0.3, "radius": 0.03 } ] },     // variable radius only
+  "trimmed": [             // each loop of a face the blend trimmed
+    { "after":  [[0,0.1,1], [1,0.1,1], [1,1,1], [0,1,1]],  // the ring it left
+      "before": [[0,0,1],   [1,0,1],   [1,1,1], [0,1,1]] } ], // the ring it replaced
+  "consumed": [            // faces the blend replaced whole (consumed, or cut
+                           // into `pieces`), with their attributes
+    { "outer": [[/*...*/]], "holes": [], "material": 0, "back_material": 0,
+      "uv_frame": { "s": [1,0,0], "t": [0,1,0], "u0": 0, "v0": 0 },
+      "surface": { "kind": "cylinder", "axis_point": [0,0,0], "axis": [0,0,1], "radius": 0.5 },
+      "blend": { "id": 2, "kind": "fillet", "role": "strip" },
+      "attrs": { "com.example": { "part": "A-1" } } } ],
+  "pieces": [              // untagged faces the blend left that go away
+                           // whole, each as its rings, outer loop first
+    [ [[0.1,0,0.2], [0.12,0,0.2], [0.12,0.01,0.25]] ] ],
+  "marks": [               // the marks of every edge the blend removed
+    { "a": [0,0,1], "b": [1,0,1], "soft": false, "crease": true,
+      "curve": { "center": [0,0,1], "radius": 0.5 }, "polygon": null } ] }
+```
+
+Lengths are meters and points `[x, y, z]` in the object's own frame, like
+its geometry buffer; a transform baked into the buffer is baked into the
+record too. Removing or resizing the blend removes its tagged faces and
+the faces it trimmed, splices each `before` ring into the face whose loop
+still holds the `after` ring's changed stretches (so an edit elsewhere on
+that face since, a pocket say, survives), removes every face whose rings
+are exactly one entry of `pieces` (matched cyclically, winding kept, holes
+in any order, within 1e-9), adds the `consumed` faces back, and gives the
+edges it makes their `marks`. A face a blend trimmed into exactly one
+piece with as many loops is written as `trimmed` loops; any other face it
+replaced is written whole in `consumed`, its pieces in `pieces` (a swept
+blend cuts each facet it rolls across into pieces). `pieces` is
+optional and absent means empty: a record written without it names no
+piece. A piece that is
+no longer exactly a face of the object makes the record not fit, as a ring
+that no longer fits does. A record that does not fit is not applied: the
+edit falls back to deriving the sharp geometry
+from the faces around the blend and verifying it, and refuses when that
+fails too. A later blend that trimmed this one is taken off
+ahead of it by its own record and put back afterwards, `seq` deciding the
+order. A `surface` entry follows the per-class rules of §3.1 and is
+checked the same way; `material` and `back_material` are dense palette
+ids like `base_material`; `attrs` (optional, absent = none) is the face's
+attribute dictionary in the shape of `objects[].attrs`, given back to the
+face when the record puts it back, and a present one MUST hold at least
+one key; every number MUST be finite, every ring MUST
+have three points or more, every `pieces` entry MUST have one ring or
+more, `spec.edges` MUST be non-empty, sizes MUST be
+positive, facet counts MUST be 2 to 96 (`arc_segments` 1 to 96), `seq`
+MUST be at most 2^30, a `primary` normal MUST be unit length (within
+1e-9), and `kind`/`role` MUST be among the names above — a reader rejects
+anything else with a typed error (reject-not-repair). A record for an id
+no face carries is dropped on save, and one in a file is dropped on load.
 
 An object needs no stored relationship to the sketch it was extruded from:
 extrusion deletes the profile's scaffolding from the sketch (the outline
@@ -916,7 +1073,7 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   one of its edges gives it its face, and a region a drawing step brings
   about has one. A manifest declaring `format_version < 21` that sets
   `faceless` MUST be rejected.
-- `curves[]` (v10+, optional) — `{id, center, radius, kind?}`: the
+- `curves[]` (v10+, optional) — `{id, center, radius, kind?}` (or `{id, kind: "smooth"}`, v30+): the
   **analytic definition** of one curve chain — the exact circle, in the
   sketch plane, that the chain's edges relate to. `id` is the same dense
   per-sketch curve id `edges[].curve` references. Sparse: a chain with no
@@ -952,6 +1109,19 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   would hand a shape an analytic identity it does not have. A v11 reader
   handed a v12 file loses the distinction (it reads a polygon as a circle),
   which is why the manifest version moves.
+
+  - `"smooth"` (v30+) — an entry with **no** `center` and **no** `radius`:
+    the chain was drawn as a circle or arc and lost its circle to a
+    non-uniform scale (an ellipse is no circle), but its facet seams are
+    still seams of one smooth curve. Extruding or sweeping it marks those
+    seams soft, so the stretched curve keeps shading smooth. No analytic
+    point (center, quadrant, tangent) is derived from it. A regular
+    polygon's chain is never marked smooth (its sides stay hard), and
+    neither is a chain drawn without a circle in the first place.
+
+  A reader MUST reject a `"smooth"` entry in a manifest declaring
+  `format_version < 30`, a `"smooth"` entry that carries a `center` or a
+  `radius`, and any other entry that lacks either.
 
 - `owner` (v13+, optional) — the dense `components[]` id of the component
   definition whose shared geometry this sketch belongs to, in DEFINITION-

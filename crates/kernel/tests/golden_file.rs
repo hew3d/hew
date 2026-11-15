@@ -241,6 +241,51 @@ fn build_representative_doc() -> Document {
     )
     .unwrap();
 
+    // ── v9 content: a sphere claim, a blend tag and a crease on object A ──
+    // (set through the test hooks: no operation stamps them on a box). The
+    // top face claims a sphere centered under it; the bottom face carries a
+    // fillet strip tag; one top edge is creased.
+    {
+        let a = doc.object(obj_a).unwrap();
+        let face_at = |nz: f64| {
+            a.faces()
+                .iter()
+                .find(|(_, f)| (f.plane.normal().z - nz).abs() < 1e-9)
+                .map(|(id, _)| id)
+                .unwrap()
+        };
+        let (top, bottom) = (face_at(1.0), face_at(-1.0));
+        let edge = a
+            .edges()
+            .iter()
+            .find(|(_, e)| {
+                let he = &a.half_edges()[e.half_edge];
+                let p = a.vertices()[he.origin].position;
+                let q = a.vertices()[a.half_edges()[he.next].origin].position;
+                p.z == 1.0 && q.z == 1.0
+            })
+            .map(|(id, _)| id)
+            .unwrap();
+        doc.set_face_surface_for_test(
+            obj_a,
+            top,
+            Some(kernel::SurfaceRef::Sphere {
+                center: Point3::new(0.5, 0.5, 0.0),
+                radius: 2.0,
+            }),
+        );
+        doc.set_face_blend_for_test(
+            obj_a,
+            bottom,
+            Some(kernel::BlendTag {
+                id: kernel::BlendId(1),
+                kind: kernel::BlendKind::Fillet,
+                role: kernel::BlendRole::Strip,
+            }),
+        );
+        doc.set_edge_crease_for_test(obj_a, edge, true);
+        doc.object(obj_a).unwrap().validate().unwrap();
+    }
     doc
 }
 

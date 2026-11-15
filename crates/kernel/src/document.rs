@@ -35,13 +35,23 @@ use std::num::NonZeroU32;
 
 mod cells;
 mod change_sets;
+mod curves;
 mod draft;
+mod history_budget;
 mod member_ops;
 mod occurrences;
 pub use cells::{CellDecline, CellDeclineReason, CellOutcome, CellScope, CellSeed, OpenEdges};
+pub use curves::{
+    BlendPreview, LoftSource, MAX_ARRAY_COUNT, PathArraySpec, ReshapeReport, ReshapeSpec,
+    RevolveProfile, RevolveSpec,
+};
 pub use draft::{
     ClosingEdge, DraftCurveRun, DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore,
     DraftUnit, PlaneListing, PlaneUnits,
+};
+pub use history_budget::{
+    DEFAULT_HISTORY_BUDGET_BYTES, DEFAULT_HISTORY_MIN_STEPS, HistoryBudget, HistoryMemory,
+    HistoryTrim,
 };
 pub use occurrences::{MAX_OCCURRENCES, Occurrence, RenderRoot};
 
@@ -63,6 +73,7 @@ use crate::material::{FaceMaterial, Material, Pbr, UvFrame};
 use crate::math::{MathError, Plane, Point3, Vec3};
 use crate::ops::{
     BooleanError, BooleanOp, ExtrudeError, FollowMeError, Operand, SliceError, StickyError,
+    SweepOptions,
 };
 use crate::serialize::{
     DocSaveData, LoadError, NodeRefDto, RawAnchor, RawAnnotation, decode_document_raw,
@@ -1028,6 +1039,13 @@ pub fn render_history_label(kind: &HistoryKind) -> String {
         "delete-faces" => format!("Delete {}", count_label(count("count"), "face")),
         "add-thickness" => "Add thickness".to_string(),
         "mend" => "Mend object".to_string(),
+        "remove-degenerate" => {
+            if count("count") == 1 {
+                "Remove a degenerate face".to_string()
+            } else {
+                format!("Remove {} degenerate faces", count("count"))
+            }
+        }
         "transform" => format!("{verb} {}", count_label(count("count"), text("noun"))),
         "transform-sketch" => format!("{verb} sketch"),
         "transform-instance" => format!("{verb} instance"),
@@ -1143,6 +1161,8 @@ enum RepairKind {
     DeleteFaces { faces: usize },
     /// [`Document::thicken_sheet`] pulled a flat sheet into a solid.
     Thicken,
+    /// [`Document::remove_degenerate_faces`] removed `removed` faces.
+    RemoveDegenerate { removed: usize },
     /// [`Document::mend`] merged `welded` points, split `split` points,
     /// filled `filled` gaps and cut `pieces` islands loose.
     #[allow(dead_code)] // the counts are for a richer label later
@@ -1376,6 +1396,21 @@ enum DocAction {
         after: Object,
         split_off: Vec<ObjectId>,
         /// The group the object (and so every split-off piece) sits in.
+        parent: Option<GroupId>,
+    },
+    /// An in-place geometric change of the true-curves effort
+    /// (true-curves.md §3.5): blend, resize, remove, deform, shell,
+    /// project, crease, soften, bake. Undo restores `before` verbatim and
+    /// hides `split_off`; redo re-runs `spec` on a clone of `before`
+    /// (deterministic kernel, so bit-for-bit the original result) and
+    /// re-materializes the split-off pieces. Never a `KernelOp` and never
+    /// touches the object's History: LIFO keeps it valid, exactly the
+    /// `Repaired` argument.
+    Reshaped {
+        object: ObjectId,
+        before: Object,
+        spec: curves::ReshapeSpec,
+        split_off: Vec<ObjectId>,
         parent: Option<GroupId>,
     },
     /// A push-through subtract removed material from one solid, replacing
@@ -2454,6 +2489,13 @@ enum DocAction {
     /// result exactly as a boolean operand; `extrude_face_as_new_object`
     /// never merges, so its `merged_base` is always `None`. Undo hides the
     /// result and restores the base; redo re-applies both.
+    /// A generated operation (Loft, Revolve of a face profile) made one new
+    /// object and touched nothing else: undo hides it, redo shows it (the
+    /// hide-not-delete convention). `label` names the history entry.
+    Generated {
+        result: ObjectId,
+        label: &'static str,
+    },
     FollowMeFace {
         result: ObjectId,
         merged_base: Option<ObjectId>,
@@ -2758,6 +2800,9 @@ impl DocAction {
             DocAction::GrewObjectFromFaces { from, to, .. } => vec![*from, *to],
             DocAction::Repaired {
                 object, split_off, ..
+            }
+            | DocAction::Reshaped {
+                object, split_off, ..
             } => {
                 let mut v = vec![*object];
                 v.extend(split_off.iter().copied());
@@ -2887,6 +2932,7 @@ impl DocAction {
                 v.extend(*merged_base);
                 v
             }
+            DocAction::Generated { result, .. } => vec![*result],
             DocAction::Imported { objects, .. } => objects.clone(),
             DocAction::DeletedDefMember { object, .. } => vec![*object],
             DocAction::ConsumedScaffolding { .. } => Vec::new(),
@@ -2925,7 +2971,8 @@ impl DocAction {
             | DocAction::PushThrough { .. }
             | DocAction::CreatedObjectFromFaces { .. }
             | DocAction::GrewObjectFromFaces { .. }
-            | DocAction::Repaired { .. } => Vec::new(),
+            | DocAction::Repaired { .. }
+            | DocAction::Reshaped { .. } => Vec::new(),
             // A transformed object's owned sketches ride with it.
             DocAction::Transform { sketches, .. } => sketches.iter().map(|&(id, _)| id).collect(),
             DocAction::TransformSketch { sketch, .. } => vec![*sketch],
@@ -2993,6 +3040,7 @@ impl DocAction {
             | DocAction::TagDeleted { .. }
             | DocAction::TagRenamed { .. }
             | DocAction::FollowMeFace { .. }
+            | DocAction::Generated { .. }
             | DocAction::Imported { .. }
             | DocAction::DeletedDefMember { .. } => Vec::new(),
             DocAction::ConsumedScaffolding { sketch, .. } => vec![*sketch],
@@ -3046,7 +3094,9 @@ impl DocAction {
             DocAction::PushThrough { results, .. } => (results.clone(), Vec::new()),
             DocAction::CreatedObjectFromFaces { id } => (vec![*id], Vec::new()),
             DocAction::GrewObjectFromFaces { to, .. } => (vec![*to], Vec::new()),
-            DocAction::Repaired { split_off, .. } => (split_off.clone(), Vec::new()),
+            DocAction::Repaired { split_off, .. } | DocAction::Reshaped { split_off, .. } => {
+                (split_off.clone(), Vec::new())
+            }
             DocAction::DetachedSketchIsland { detached, .. } => (Vec::new(), vec![*detached]),
             DocAction::CopiedSketchIslands { copy } => (Vec::new(), vec![*copy]),
             DocAction::SketchGesture {
@@ -3081,7 +3131,9 @@ impl DocAction {
                 }
                 (objs, sks)
             }
-            DocAction::FollowMeFace { result, .. } => (vec![*result], Vec::new()),
+            DocAction::FollowMeFace { result, .. } | DocAction::Generated { result, .. } => {
+                (vec![*result], Vec::new())
+            }
             DocAction::Imported { objects, .. } => (objects.clone(), Vec::new()),
             _ => (Vec::new(), Vec::new()),
         }
@@ -3110,8 +3162,12 @@ impl DocAction {
             DocAction::PushThrough { results, .. } => objects_only(results),
             DocAction::CreatedObjectFromFaces { id } => vec![NodeId::Object(*id)],
             DocAction::GrewObjectFromFaces { to, .. } => vec![NodeId::Object(*to)],
-            DocAction::Repaired { split_off, .. } => objects_only(split_off),
-            DocAction::FollowMeFace { result, .. } => vec![NodeId::Object(*result)],
+            DocAction::Repaired { split_off, .. } | DocAction::Reshaped { split_off, .. } => {
+                objects_only(split_off)
+            }
+            DocAction::FollowMeFace { result, .. } | DocAction::Generated { result, .. } => {
+                vec![NodeId::Object(*result)]
+            }
             DocAction::Exploded {
                 created,
                 created_groups,
@@ -3642,6 +3698,15 @@ pub enum DocumentError {
     /// A Model Health repair ([`Document::cap_rims`],
     /// [`Document::delete_faces`]) refused.
     Repair(crate::repair::RepairError),
+    /// A shape operation of the true-curves effort refused (Deform, Loft,
+    /// Shell, Project, Revolve, the path array, Soften, Bake, creases).
+    Shape(crate::shape_error::ShapeError),
+    /// A fillet or chamfer refused ([`Object::blend_edges`]).
+    Blend(crate::blend::BlendError),
+    /// Redoing an in-place reshape did not reproduce its result: the
+    /// recorded spec refused on the recorded snapshot. A kernel bug channel;
+    /// the model is unchanged.
+    ReshapeRedoDiverged,
     /// Undo with an empty document undo stack.
     NothingToUndo,
     /// Redo with an empty document redo stack.
@@ -3950,6 +4015,11 @@ impl std::fmt::Display for DocumentError {
             DocumentError::Transform(e) => write!(f, "{e}"),
             DocumentError::Op(e) => write!(f, "{e}"),
             DocumentError::Repair(e) => write!(f, "{e}"),
+            DocumentError::Shape(e) => write!(f, "{e}"),
+            DocumentError::Blend(e) => write!(f, "{e}"),
+            DocumentError::ReshapeRedoDiverged => {
+                write!(f, "redoing the change did not reproduce it (kernel bug)")
+            }
             DocumentError::NothingToUndo => write!(f, "nothing to undo"),
             DocumentError::NothingToRedo => write!(f, "nothing to redo"),
             DocumentError::InverseFailed(e) => write!(f, "inverse op failed (kernel bug): {e}"),
@@ -4423,6 +4493,20 @@ pub struct Document {
     /// surfaces at the exact op instead of as a downstream glitch. Session-only
     /// debug state — never serialized (like the undo log), defaults off.
     torture: bool,
+    /// The undo-memory budget [`Document::enforce_history_budget`] keeps
+    /// the stacks under (`history_budget.rs`). Session-only, never
+    /// serialized.
+    history_budget: HistoryBudget,
+    /// Undo steps [`Document::enforce_history_budget`] has dropped since
+    /// the document was created or loaded.
+    history_trimmed: u64,
+    /// Brackets ([`Document::begin_transaction`]) open on this document:
+    /// a trim never runs inside one, whose commit drains the entries
+    /// recorded since by stack position. A [`RingHolds`] counter (an
+    /// atomic) because opening a bracket borrows the document shared and
+    /// the document must stay `Send + Sync`; the bracket's own snapshot
+    /// holds the count from before, so an abort restores it.
+    open_brackets: RingHolds,
     /// The open compounds ([`Document::begin_compound`]), innermost last.
     /// Session-only, never serialized; a snapshot restore keeps them.
     compounds: Vec<OpenCompound>,
@@ -4671,6 +4755,7 @@ impl Document {
             _ => DocumentError::NonFiniteAttrValue,
         })?;
         let prior = self.apply_attr_set(&target, ns, key, value.clone());
+        let change = curves::attr_display_change(&target, ns);
         self.undo.push(DocAction::AttrSet {
             target,
             ns: ns.to_string(),
@@ -4680,7 +4765,7 @@ impl Document {
         });
         self.commit_new_action();
         self.debug_validate();
-        Ok(DocChange::default())
+        Ok(change)
     }
 
     /// The target's dictionaries: namespace → key → value, or `None` when
@@ -4719,6 +4804,7 @@ impl Document {
             return Err(DocumentError::UnknownAttr);
         }
         let removed = self.apply_attr_remove(&target, ns, key);
+        let change = curves::attr_display_change(&target, ns);
         self.undo.push(DocAction::AttrDeleted {
             target,
             ns: ns.to_string(),
@@ -4727,7 +4813,7 @@ impl Document {
         });
         self.commit_new_action();
         self.debug_validate();
-        Ok(DocChange::default())
+        Ok(change)
     }
 
     // ------------------------------- face and edge attribute dictionaries
@@ -5698,6 +5784,17 @@ impl Document {
                 .copied()
                 .flatten()
                 .and_then(dense_to_mat);
+            // The blend records (manifest v31+): what each blend replaced,
+            // so Remove and Resize replay it.
+            if let Some(dtos) = raw.obj_blends.get(i)
+                && !dtos.is_empty()
+            {
+                obj.set_blend_records(crate::serialize::blend_records_from_dtos(
+                    i as u32,
+                    dtos,
+                    &dense_to_mat,
+                )?);
+            }
 
             // Ownership starts World; the definition-subtree pass below
             // (6b) re-owns every def-subtree node from the member lists —
@@ -9608,6 +9705,9 @@ impl Document {
                     back_faces.push((oid, fid));
                 }
             }
+            // A face a blend consumed keeps its paint in the blend's record;
+            // it comes back unpainted rather than carrying a deleted id.
+            rec.object.clear_blend_record_material(id);
         }
         let mut instances = Vec::new();
         for (iid, rec) in self.instances.iter_mut() {
@@ -9760,6 +9860,7 @@ impl Document {
                 referenced.extend(face.material);
                 referenced.extend(face.back_material);
             }
+            referenced.extend(rec.object.blend_record_materials());
         }
         // An instance's own material is a reference too, tombstoned rows
         // included for the same undo reason.
@@ -12209,6 +12310,46 @@ impl Document {
         }
     }
 
+    /// Test support only: overwrites one face's analytic surface claim on a
+    /// live object, bypassing every invariant and the undo history (see
+    /// [`Object::set_face_surface_for_test`]). Never call from product code.
+    #[doc(hidden)]
+    pub fn set_face_surface_for_test(
+        &mut self,
+        object: ObjectId,
+        face: FaceId,
+        surface: Option<crate::topo::SurfaceRef>,
+    ) {
+        if let Some(rec) = self.objects.get_mut(object) {
+            rec.object.set_face_surface_for_test(face, surface);
+        }
+    }
+
+    /// Test support only: overwrites one face's blend tag on a live object
+    /// (see [`Object::set_face_blend_for_test`]). Never call from product
+    /// code.
+    #[doc(hidden)]
+    pub fn set_face_blend_for_test(
+        &mut self,
+        object: ObjectId,
+        face: FaceId,
+        blend: Option<crate::topo::BlendTag>,
+    ) {
+        if let Some(rec) = self.objects.get_mut(object) {
+            rec.object.set_face_blend_for_test(face, blend);
+        }
+    }
+
+    /// Test support only: overwrites one edge's crease flag on a live object
+    /// (see [`Object::set_edge_crease_for_test`]). Never call from product
+    /// code.
+    #[doc(hidden)]
+    pub fn set_edge_crease_for_test(&mut self, object: ObjectId, edge: EdgeId, crease: bool) {
+        if let Some(rec) = self.objects.get_mut(object) {
+            rec.object.set_edge_crease_for_test(edge, crease);
+        }
+    }
+
     /// Whether `id` is a currently visible **world** object (top-level or
     /// grouped), as opposed to a definition member or a hidden/stale object.
     /// The shim uses this to decide whether a touched object is a direct
@@ -12218,6 +12359,13 @@ impl Document {
         self.objects
             .get(id)
             .is_some_and(|r| !r.hidden && r.is_world())
+    }
+
+    /// Every face of every object record the document holds (hidden ones
+    /// and definition members included): a cheap gauge of how much a
+    /// [`Document::save`] has to encode.
+    pub fn geometry_face_count(&self) -> usize {
+        self.objects.values().map(|r| r.object.faces().len()).sum()
     }
 
     /// Handles of all currently visible **world** Objects (undone creations are
@@ -13314,7 +13462,23 @@ impl Document {
         region: SketchRegionId,
         path: &FollowMePath,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
-        self.follow_me_impl(sketch, region, path, None, None)
+        self.follow_me_impl(sketch, region, path, None, None, SweepOptions::default())
+    }
+
+    /// [`Document::follow_me`] with an optional partial-sweep stop and twist
+    /// and end scale (true-curves.md §5.2; [`Object::from_follow_me_with`]).
+    /// Default options are exactly [`Document::follow_me`] /
+    /// [`Document::follow_me_to`]. Same errors, plus
+    /// [`FollowMeError::TwistNeedsOpenPath`](crate::ops::FollowMeError).
+    pub fn follow_me_with(
+        &mut self,
+        sketch: SketchId,
+        region: SketchRegionId,
+        path: &FollowMePath,
+        stop_len: Option<f64>,
+        opts: SweepOptions,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
+        self.follow_me_impl(sketch, region, path, stop_len, None, opts)
     }
 
     /// [`Document::follow_me`] stopped after `stop_len` of arc length from
@@ -13328,7 +13492,14 @@ impl Document {
         path: &FollowMePath,
         stop_len: f64,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
-        self.follow_me_impl(sketch, region, path, Some(stop_len), None)
+        self.follow_me_impl(
+            sketch,
+            region,
+            path,
+            Some(stop_len),
+            None,
+            SweepOptions::default(),
+        )
     }
 
     /// [`Document::follow_me`] whose result is born INSIDE `group`
@@ -13343,7 +13514,29 @@ impl Document {
         stop_len: Option<f64>,
         group: GroupId,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
-        self.follow_me_impl(sketch, region, path, stop_len, Some(group))
+        self.follow_me_impl(
+            sketch,
+            region,
+            path,
+            stop_len,
+            Some(group),
+            SweepOptions::default(),
+        )
+    }
+
+    /// [`Document::follow_me_grouped`] with twist and end scale
+    /// (true-curves.md §5.2). Default options are exactly
+    /// [`Document::follow_me_grouped`].
+    pub fn follow_me_grouped_with(
+        &mut self,
+        sketch: SketchId,
+        region: SketchRegionId,
+        path: &FollowMePath,
+        stop_len: Option<f64>,
+        group: GroupId,
+        opts: SweepOptions,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
+        self.follow_me_impl(sketch, region, path, stop_len, Some(group), opts)
     }
 
     fn follow_me_impl(
@@ -13353,6 +13546,7 @@ impl Document {
         path: &FollowMePath,
         stop_len: Option<f64>,
         parent_group: Option<GroupId>,
+        opts: SweepOptions,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
         if let Some(gid) = parent_group {
             // Birth into a group the user is editing (design §2f): the
@@ -13382,11 +13576,9 @@ impl Document {
             .map_err(DocumentError::Sketch)?;
 
         let (points, closed, curves) = self.resolve_follow_me_path(path)?;
-        let object = match stop_len {
-            None => Object::from_follow_me(&profile, &points, closed, &curves),
-            Some(stop) => Object::from_follow_me_to(&profile, &points, closed, &curves, stop),
-        }
-        .map_err(DocumentError::FollowMe)?;
+        let object =
+            Object::from_follow_me_with(&profile, &points, closed, &curves, stop_len, opts)
+                .map_err(DocumentError::FollowMe)?;
 
         // Everything that can fail has succeeded; commit.
         Ok(self.commit_region_object(sketch, &scaffolding, object, None, parent_group))
@@ -13408,6 +13600,20 @@ impl Document {
         region: SketchRegionId,
         path: &FollowMePath,
         stop_len: Option<f64>,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
+        self.follow_me_merged_with(sketch, region, path, stop_len, SweepOptions::default())
+    }
+
+    /// [`Document::follow_me_merged`] with twist and end scale
+    /// (true-curves.md §5.2). Default options are exactly
+    /// [`Document::follow_me_merged`].
+    pub fn follow_me_merged_with(
+        &mut self,
+        sketch: SketchId,
+        region: SketchRegionId,
+        path: &FollowMePath,
+        stop_len: Option<f64>,
+        opts: SweepOptions,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "follow_me_merged");
         self.explode_scope_sketch(sketch)?;
@@ -13435,11 +13641,8 @@ impl Document {
             .region_scaffolding(region)
             .map_err(DocumentError::Sketch)?;
         let (points, closed, curves) = self.resolve_follow_me_path(path)?;
-        let swept = match stop_len {
-            None => Object::from_follow_me(&profile, &points, closed, &curves),
-            Some(stop) => Object::from_follow_me_to(&profile, &points, closed, &curves, stop),
-        }
-        .map_err(DocumentError::FollowMe)?;
+        let swept = Object::from_follow_me_with(&profile, &points, closed, &curves, stop_len, opts)
+            .map_err(DocumentError::FollowMe)?;
 
         let base_rec = self
             .objects
@@ -13480,6 +13683,20 @@ impl Document {
         path: &FollowMePath,
         stop_len: Option<f64>,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
+        self.follow_me_face_with(object, face, path, stop_len, SweepOptions::default())
+    }
+
+    /// [`Document::follow_me_face`] with twist and end scale
+    /// (true-curves.md §5.2; [`Object::from_follow_me_with`]). Default
+    /// options are exactly [`Document::follow_me_face`].
+    pub fn follow_me_face_with(
+        &mut self,
+        object: ObjectId,
+        face: FaceId,
+        path: &FollowMePath,
+        stop_len: Option<f64>,
+        opts: SweepOptions,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "follow_me_face");
         self.explode_scope_object(object)?;
         self.explode_scope_follow_path(path)?;
@@ -13493,11 +13710,8 @@ impl Document {
             .profile_from_face(face)
             .ok_or(DocumentError::UnknownFace)?;
         let (points, closed, curves) = self.resolve_follow_me_path(path)?;
-        let swept = match stop_len {
-            None => Object::from_follow_me(&profile, &points, closed, &curves),
-            Some(stop) => Object::from_follow_me_to(&profile, &points, closed, &curves, stop),
-        }
-        .map_err(DocumentError::FollowMe)?;
+        let swept = Object::from_follow_me_with(&profile, &points, closed, &curves, stop_len, opts)
+            .map_err(DocumentError::FollowMe)?;
 
         let merges = matches!(path, FollowMePath::FaceLoop { object: po, .. } if *po == object);
         if !merges {
@@ -13620,8 +13834,33 @@ impl Document {
         path: &FollowMePath,
         stop_len: Option<f64>,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
+        self.follow_me_in_instance_with(
+            instance,
+            sketch,
+            region,
+            path,
+            stop_len,
+            SweepOptions::default(),
+        )
+    }
+
+    /// [`Document::follow_me_in_instance`] with twist and end scale
+    /// (true-curves.md §5.2). The twist is a world-space angle; under a
+    /// reflecting pose it turns the other way in the definition's frame so
+    /// it reads the same in the world. Default options are exactly
+    /// [`Document::follow_me_in_instance`].
+    pub fn follow_me_in_instance_with(
+        &mut self,
+        instance: InstanceId,
+        sketch: SketchId,
+        region: SketchRegionId,
+        path: &FollowMePath,
+        stop_len: Option<f64>,
+        opts: SweepOptions,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "follow_me_in_instance");
         let (component, pose) = self.instance_component(instance)?;
+        let opts = curves::local_sweep_options(&pose, opts);
         let local_stop = stop_len
             .map(|stop| self.map_world_distance_through_pose(pose, stop))
             .transpose()?;
@@ -13640,11 +13879,9 @@ impl Document {
             .region_scaffolding(region)
             .map_err(DocumentError::Sketch)?;
         let (points, closed, curves) = self.resolve_follow_me_path_in_component(component, path)?;
-        let object = match local_stop {
-            None => Object::from_follow_me(&profile, &points, closed, &curves),
-            Some(stop) => Object::from_follow_me_to(&profile, &points, closed, &curves, stop),
-        }
-        .map_err(DocumentError::FollowMe)?;
+        let object =
+            Object::from_follow_me_with(&profile, &points, closed, &curves, local_stop, opts)
+                .map_err(DocumentError::FollowMe)?;
 
         // Everything that can fail has succeeded; commit.
         Ok(self.commit_region_object_in_definition(component, sketch, &scaffolding, object))
@@ -13667,6 +13904,27 @@ impl Document {
         path: &FollowMePath,
         stop_len: Option<f64>,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
+        self.follow_me_merged_in_instance_with(
+            instance,
+            sketch,
+            region,
+            path,
+            stop_len,
+            SweepOptions::default(),
+        )
+    }
+
+    /// [`Document::follow_me_merged_in_instance`] with twist and end scale,
+    /// mapped as [`Document::follow_me_in_instance_with`] maps them.
+    pub fn follow_me_merged_in_instance_with(
+        &mut self,
+        instance: InstanceId,
+        sketch: SketchId,
+        region: SketchRegionId,
+        path: &FollowMePath,
+        stop_len: Option<f64>,
+        opts: SweepOptions,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "follow_me_merged_in_instance");
         let FollowMePath::FaceLoop {
             object: base_id, ..
@@ -13675,6 +13933,7 @@ impl Document {
             return Err(DocumentError::UnknownObject);
         };
         let (component, pose) = self.instance_component(instance)?;
+        let opts = curves::local_sweep_options(&pose, opts);
         let local_stop = stop_len
             .map(|stop| self.map_world_distance_through_pose(pose, stop))
             .transpose()?;
@@ -13693,11 +13952,9 @@ impl Document {
             .region_scaffolding(region)
             .map_err(DocumentError::Sketch)?;
         let (points, closed, curves) = self.resolve_follow_me_path_in_component(component, path)?;
-        let swept = match local_stop {
-            None => Object::from_follow_me(&profile, &points, closed, &curves),
-            Some(stop) => Object::from_follow_me_to(&profile, &points, closed, &curves, stop),
-        }
-        .map_err(DocumentError::FollowMe)?;
+        let swept =
+            Object::from_follow_me_with(&profile, &points, closed, &curves, local_stop, opts)
+                .map_err(DocumentError::FollowMe)?;
 
         let base_rec = self
             .objects
@@ -13746,8 +14003,30 @@ impl Document {
         path: &FollowMePath,
         stop_len: Option<f64>,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
+        self.follow_me_face_in_instance_with(
+            instance,
+            object,
+            face,
+            path,
+            stop_len,
+            SweepOptions::default(),
+        )
+    }
+
+    /// [`Document::follow_me_face_in_instance`] with twist and end scale,
+    /// mapped as [`Document::follow_me_in_instance_with`] maps them.
+    pub fn follow_me_face_in_instance_with(
+        &mut self,
+        instance: InstanceId,
+        object: ObjectId,
+        face: FaceId,
+        path: &FollowMePath,
+        stop_len: Option<f64>,
+        opts: SweepOptions,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "follow_me_face_in_instance");
         let (component, pose) = self.instance_component(instance)?;
+        let opts = curves::local_sweep_options(&pose, opts);
         let local_stop = stop_len
             .map(|stop| self.map_world_distance_through_pose(pose, stop))
             .transpose()?;
@@ -13764,11 +14043,9 @@ impl Document {
             .profile_from_face(face)
             .ok_or(DocumentError::UnknownFace)?;
         let (points, closed, curves) = self.resolve_follow_me_path_in_component(component, path)?;
-        let swept = match local_stop {
-            None => Object::from_follow_me(&profile, &points, closed, &curves),
-            Some(stop) => Object::from_follow_me_to(&profile, &points, closed, &curves, stop),
-        }
-        .map_err(DocumentError::FollowMe)?;
+        let swept =
+            Object::from_follow_me_with(&profile, &points, closed, &curves, local_stop, opts)
+                .map_err(DocumentError::FollowMe)?;
 
         let merges = matches!(path, FollowMePath::FaceLoop { object: po, .. } if *po == object);
         if !merges {
@@ -14555,10 +14832,13 @@ impl Document {
             tags,
         });
         self.copy_identity_attrs(&EntityRef::Object(a), EntityRef::Object(id));
+        self.drop_copied_smooth_level(id);
         self.objects[a].hidden = true;
         self.objects[b].hidden = true;
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(a), NodeId::Object(b)]);
-        let carried = self.carry_owned_sketches(&[a, b], &[id]);
+        let mut carried = self.carry_owned_sketches(&[a, b], &[id]);
+        // Operand A's Smooth level carries to the result (true-curves.md §6.2).
+        carried.extend(self.carry_smooth_level(&[a], &[id]));
         let carried_sketches: Vec<SketchId> = carried
             .iter()
             .flat_map(DocAction::touched_sketches)
@@ -14702,6 +14982,7 @@ impl Document {
             tags,
         });
         self.copy_identity_attrs(&EntityRef::Object(operands[0]), EntityRef::Object(id));
+        self.drop_copied_smooth_level(id);
         for &o in operands {
             self.objects[o].hidden = true;
         }
@@ -14711,7 +14992,10 @@ impl Document {
         self.components[component].members.push(NodeId::Object(id));
         let nodes: Vec<NodeId> = operands.iter().map(|&o| NodeId::Object(o)).collect();
         let reanchored = self.reevaluate_liveness_recorded(&nodes);
-        let carried = self.carry_owned_sketches(operands, &[id]);
+        let mut carried = self.carry_owned_sketches(operands, &[id]);
+        // The first operand's Smooth level carries to the result
+        // (true-curves.md §6.2).
+        carried.extend(self.carry_smooth_level(&operands[..1], &[id]));
         let carried_sketches: Vec<SketchId> = carried
             .iter()
             .flat_map(DocAction::touched_sketches)
@@ -14946,6 +15230,7 @@ impl Document {
         }
         if let Some(o) = a_identity {
             self.copy_identity_attrs(&EntityRef::Object(o), EntityRef::Object(result_objects[0]));
+            self.drop_copied_smooth_level(result_objects[0]);
         }
         if let Some(g) = result_group {
             self.groups[g].members = result_objects.iter().map(|&o| NodeId::Object(o)).collect();
@@ -14963,7 +15248,9 @@ impl Document {
                 _ => None,
             })
             .collect();
-        let carried = self.carry_owned_sketches(&consumed, &result_objects);
+        let mut carried = self.carry_owned_sketches(&consumed, &result_objects);
+        // The first operand's Smooth level carries to the result.
+        carried.extend(self.carry_smooth_level(&leaves[0], &result_objects));
         let carried_sketches: Vec<SketchId> = carried
             .iter()
             .flat_map(DocAction::touched_sketches)
@@ -15314,7 +15601,9 @@ impl Document {
         }
         self.objects[object].hidden = true;
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
-        let carried = self.carry_owned_sketches(&[object], &results);
+        let mut carried = self.carry_owned_sketches(&[object], &results);
+        // Every piece keeps the source's Smooth level (true-curves.md §6.2).
+        carried.extend(self.carry_smooth_level(&[object], &results));
         let carried_sketches: Vec<SketchId> = carried
             .iter()
             .flat_map(DocAction::touched_sketches)
@@ -15410,7 +15699,9 @@ impl Document {
         }
         self.objects[object].hidden = true;
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
-        let carried = self.carry_owned_sketches(&[object], &results);
+        let mut carried = self.carry_owned_sketches(&[object], &results);
+        // Every piece keeps the source's Smooth level (true-curves.md §6.2).
+        carried.extend(self.carry_smooth_level(&[object], &results));
         let carried_sketches: Vec<SketchId> = carried
             .iter()
             .flat_map(DocAction::touched_sketches)
@@ -15527,6 +15818,30 @@ impl Document {
             }
             Err(e) => Err(DocumentError::Repair(e)),
         }
+    }
+
+    /// Removes an object's degenerate faces (Model Health;
+    /// [`Object::remove_degenerate_faces`] has the geometry), one undo step
+    /// ("Remove Degenerate Faces"). The object keeps its id.
+    ///
+    /// # Errors
+    /// `UnknownObject`, `UnknownComponent`, or `Repair(NothingToRemove /
+    /// Invalid)`; on `Err` nothing changed.
+    pub fn remove_degenerate_faces(
+        &mut self,
+        object: ObjectId,
+    ) -> Result<(crate::repair::DegenerateReport, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "remove_degenerate_faces");
+        self.repair_target(object)?;
+        let mut after = self.objects[object].object.clone();
+        let report = after
+            .remove_degenerate_faces()
+            .map_err(DocumentError::Repair)?;
+        let kind = RepairKind::RemoveDegenerate {
+            removed: report.removed,
+        };
+        let change = self.commit_repair(object, kind, after, Vec::new());
+        Ok((report, change))
     }
 
     /// Pull a visible flat sheet into a solid (Model Health, the
@@ -18506,7 +18821,11 @@ impl Document {
     /// - [`DocumentError::ComponentExpansionExceeded`] — the placement
     ///   would push the expanded placement count past the bound.
     /// - [`DocumentError::NotIdentical`] — the set's shape at `pose` is not
-    ///   the joiner's, or the set holds more than one solid.
+    ///   the joiner's, the set holds more than one solid, or the two differ
+    ///   in a mark or claim the shared solid would lose (a crease, a blend
+    ///   tag or record, any face's surface claim, an edge's circle or
+    ///   polygon claim, the Smooth level). Two identically drawn circles
+    ///   or polygons carry identical claims and still link.
     ///
     /// On `Err` the document is untouched.
     pub fn join_linked(
@@ -18560,7 +18879,9 @@ impl Document {
             .collect();
         let rec = &self.objects[joiner];
         let target: Vec<Point3> = rec.object.vertices().values().map(|v| v.position).collect();
-        if !same_point_set(&posed, &target, tol::LINK_POSE_MATCH) {
+        if !same_point_set(&posed, &target, tol::LINK_POSE_MATCH)
+            || !self.same_curve_marks(keeper, joiner, &pose)
+        {
             return Err(DocumentError::NotIdentical);
         }
         let (name, tags) = (rec.name.clone(), rec.tags.clone());
@@ -24116,8 +24437,14 @@ impl Document {
                 RepairKind::Cap { rims } => k("close-openings").count("count", rims),
                 RepairKind::DeleteFaces { faces } => k("delete-faces").count("count", faces),
                 RepairKind::Thicken => k("add-thickness"),
+                RepairKind::RemoveDegenerate { removed } => {
+                    k("remove-degenerate").count("count", removed)
+                }
                 RepairKind::Mend { .. } => k("mend"),
             },
+            DocAction::Reshaped { spec, .. } => {
+                k("labeled").text("label", spec.label().to_string())
+            }
             DocAction::Transform {
                 objects, forward, ..
             } => k("transform")
@@ -24267,6 +24594,7 @@ impl Document {
             }
             DocAction::TagRenamed { .. } => k("rename-tag"),
             DocAction::FollowMeFace { .. } => k("follow-me"),
+            DocAction::Generated { label, .. } => k("labeled").text("label", *label),
             DocAction::Imported {
                 objects, instances, ..
             } => k("import").count("count", objects.len() + instances.len()),
@@ -24419,6 +24747,7 @@ impl Document {
         // A restore keeps the live ring, so the snapshot needs none.
         snapshot.change_ring = crate::changes::ChangeRing::default();
         self.ring_holds.hold();
+        self.open_brackets.hold();
         DocTransaction { snapshot }
     }
 
@@ -24566,6 +24895,9 @@ impl Document {
         meta: CompoundMeta,
     ) -> Result<bool, DocumentError> {
         let start_len = txn.snapshot.undo.actions.len();
+        // The bracket closes whatever happens below: a refusal restores the
+        // snapshot, whose count predates the bracket; a commit counts down.
+        self.open_brackets.release();
         self.ring_holds.release();
         if let Some(e) = self.bracket_disturbance(&txn.snapshot, start_len) {
             self.restore_snapshot(txn.snapshot);
@@ -25531,7 +25863,7 @@ impl Document {
                         self.apply_attr_remove(target, ns, Some(key));
                     }
                 }
-                DocChange::default()
+                curves::attr_display_change(target, ns)
             }
             DocAction::AttrDeleted {
                 target,
@@ -25540,7 +25872,7 @@ impl Document {
                 ..
             } => {
                 self.apply_attr_restore(target, ns, removed);
-                DocChange::default()
+                curves::attr_display_change(target, ns)
             }
             // Dispatched to their dedicated helpers before this match.
             DocAction::CreatedObject { .. } => {
@@ -25601,6 +25933,23 @@ impl Document {
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                    linked: Vec::new(),
+                }
+            }
+            DocAction::Generated { result, .. } => {
+                // Undo a generated object: hide it.
+                let result = *result;
+                if let Some(rec) = self.objects.get_mut(result) {
+                    rec.hidden = true;
+                }
+                let (components_touched, instances_touched) = self.def_owner_change(result);
+                DocChange {
+                    objects_touched: vec![result],
+                    sketches_touched: Vec::new(),
+                    groups_touched: Vec::new(),
+                    instances_touched,
+                    components_touched,
                     guides_touched: Vec::new(),
                     linked: Vec::new(),
                 }
@@ -25906,6 +26255,24 @@ impl Document {
                 }
             }
             DocAction::Repaired {
+                object,
+                before,
+                split_off,
+                parent,
+                ..
+            } => {
+                self.objects[*object].object = before.clone();
+                for &o in split_off {
+                    self.objects[o].hidden = true;
+                }
+                if let Some(g) = *parent {
+                    self.groups[g]
+                        .members
+                        .retain(|n| !matches!(n, NodeId::Object(o) if split_off.contains(o)));
+                }
+                self.repair_change(*object, split_off, *parent)
+            }
+            DocAction::Reshaped {
                 object,
                 before,
                 split_off,
@@ -27431,7 +27798,7 @@ impl Document {
                 ..
             } => {
                 self.apply_attr_set(target, ns, key, value.clone());
-                DocChange::default()
+                curves::attr_display_change(target, ns)
             }
             DocAction::AttrDeleted {
                 target,
@@ -27447,7 +27814,7 @@ impl Document {
                         self.apply_attr_remove(target, ns, Some(&k));
                     }
                 }
-                DocChange::default()
+                curves::attr_display_change(target, ns)
             }
             // Dispatched to their dedicated helpers before this match.
             DocAction::CreatedObject { .. } => {
@@ -27506,6 +27873,23 @@ impl Document {
                     groups_touched: Vec::new(),
                     instances_touched: Vec::new(),
                     components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                    linked: Vec::new(),
+                }
+            }
+            DocAction::Generated { result, .. } => {
+                // Redo a generated object: show it again.
+                let result = *result;
+                if let Some(rec) = self.objects.get_mut(result) {
+                    rec.hidden = false;
+                }
+                let (components_touched, instances_touched) = self.def_owner_change(result);
+                DocChange {
+                    objects_touched: vec![result],
+                    sketches_touched: Vec::new(),
+                    groups_touched: Vec::new(),
+                    instances_touched,
+                    components_touched,
                     guides_touched: Vec::new(),
                     linked: Vec::new(),
                 }
@@ -27830,6 +28214,33 @@ impl Document {
             } => {
                 self.objects[*object].object = after.clone();
                 for &o in split_off {
+                    self.objects[o].hidden = false;
+                }
+                if let Some(g) = *parent {
+                    self.groups[g]
+                        .members
+                        .extend(split_off.iter().map(|&o| NodeId::Object(o)));
+                }
+                self.repair_change(*object, split_off, *parent)
+            }
+            DocAction::Reshaped {
+                object,
+                before,
+                spec,
+                split_off,
+                parent,
+            } => {
+                // Re-run the recorded spec on the recorded snapshot: the
+                // kernel is deterministic, so this is the original result.
+                let out = spec
+                    .run(before)
+                    .map_err(|_| DocumentError::ReshapeRedoDiverged)?;
+                if out.pieces.len() != split_off.len() {
+                    return Err(DocumentError::ReshapeRedoDiverged);
+                }
+                self.objects[*object].object = out.after;
+                for (&o, piece) in split_off.iter().zip(out.pieces) {
+                    self.objects[o].object = piece;
                     self.objects[o].hidden = false;
                 }
                 if let Some(g) = *parent {
@@ -30052,6 +30463,7 @@ fn library_copy_object(
     if let Some(m) = obj.default_material() {
         referenced.push(m);
     }
+    referenced.extend(obj.blend_record_materials());
     for mid in referenced {
         library_remap_material(dst, src, mid, ctx);
     }

@@ -468,7 +468,7 @@ fn a_document_without_instance_materials_writes_no_material_key() {
     for inst in manifest["instances"].as_array().unwrap() {
         assert!(inst.get("material").is_none());
     }
-    assert_eq!(manifest["format_version"], 29);
+    assert_eq!(manifest["format_version"], 31);
 }
 
 #[test]

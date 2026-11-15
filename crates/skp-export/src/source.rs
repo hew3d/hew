@@ -545,6 +545,45 @@ pub fn geometry_hash(doc: &Document, obj: &Object) -> u64 {
                     h.f(c);
                 }
             }
+            // The other classes (never in a source file, so never part of a
+            // pre-existing hash) still distinguish an edited face: a kind
+            // marker, then the payload in the geometry buffer's order.
+            let other: Option<(u64, Vec<f64>)> = match f.surface {
+                Some(kernel::SurfaceRef::Sphere { center, radius }) => {
+                    Some((2, vec![center.x, center.y, center.z, radius]))
+                }
+                Some(kernel::SurfaceRef::Torus {
+                    center,
+                    axis,
+                    major_radius,
+                    minor_radius,
+                }) => Some((
+                    3,
+                    vec![
+                        center.x,
+                        center.y,
+                        center.z,
+                        axis.x,
+                        axis.y,
+                        axis.z,
+                        major_radius,
+                        minor_radius,
+                    ],
+                )),
+                Some(kernel::SurfaceRef::Cone {
+                    apex,
+                    axis,
+                    half_angle,
+                }) => Some((
+                    4,
+                    vec![apex.x, apex.y, apex.z, axis.x, axis.y, axis.z, half_angle],
+                )),
+                Some(kernel::SurfaceRef::Cylinder { .. }) | None => None,
+            };
+            if let Some((kind, payload)) = other {
+                h.u64(u64::MAX - kind);
+                payload.into_iter().for_each(|c| h.f(c));
+            }
             h.0
         })
         .collect();
@@ -561,6 +600,9 @@ pub fn geometry_hash(doc: &Document, obj: &Object) -> u64 {
             ends.sort();
             ends.iter().flatten().for_each(|&c| h.u64(c));
             h.u64(u64::from(e.soft));
+            if e.crease {
+                h.u64(u64::MAX);
+            }
             if let Some(g) = e.curve {
                 for c in [g.center.x, g.center.y, g.center.z, g.radius] {
                     h.f(c);

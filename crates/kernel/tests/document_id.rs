@@ -221,7 +221,7 @@ fn encode_omits_the_member_when_absent() {
         manifest.as_object().unwrap().get("document_id").is_none(),
         "no key without an id"
     );
-    assert_eq!(manifest["format_version"], 29);
+    assert_eq!(manifest["format_version"], 31);
 }
 
 #[test]

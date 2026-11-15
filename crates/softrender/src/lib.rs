@@ -696,6 +696,25 @@ pub fn document_items(doc: &kernel::Document) -> Vec<DocumentItem> {
     document_items_hiding(doc, &HiddenLeaves::of_document(doc))
 }
 
+/// What the viewport shows for an object: its Smooth surface when it has a
+/// Smooth level (falling back to the cage if the surface cannot be built),
+/// else its faces — so a snapshot or print matches the screen.
+fn display_mesh(
+    doc: &kernel::Document,
+    id: kernel::ObjectId,
+    obj: &kernel::Object,
+    inherited: Option<kernel::MaterialId>,
+) -> Result<tessellate::RenderMesh, tessellate::TessellateError> {
+    let level = doc.smooth_level(id);
+    if level > 0
+        && let Ok(mesh) =
+            tessellate::tessellate_smoothed_with(obj, doc.materials(), level, inherited)
+    {
+        return Ok(mesh);
+    }
+    tessellate::tessellate_with(obj, doc.materials(), inherited)
+}
+
 /// [`document_items`] with an explicit hidden set — a Scene's resolved
 /// leaf sets (docs/design/scenes.md §7) instead of the document's own.
 pub fn document_items_hiding(doc: &kernel::Document, hidden: &HiddenLeaves) -> Vec<DocumentItem> {
@@ -706,7 +725,7 @@ pub fn document_items_hiding(doc: &kernel::Document, hidden: &HiddenLeaves) -> V
             continue;
         }
         let Some(obj) = doc.object(id) else { continue };
-        let Ok(mesh) = tessellate::tessellate(obj, doc.materials()) else {
+        let Ok(mesh) = display_mesh(doc, id, obj, None) else {
             continue;
         };
         let Some(sid) = doc.sid_of(&kernel::EntityRef::Object(id)) else {
@@ -753,7 +772,7 @@ pub fn document_items_hiding(doc: &kernel::Document, hidden: &HiddenLeaves) -> V
             let Some(obj) = doc.object(member) else {
                 continue;
             };
-            let Ok(mesh) = tessellate::tessellate_with(obj, doc.materials(), inherited) else {
+            let Ok(mesh) = display_mesh(doc, member, obj, inherited) else {
                 continue;
             };
             items.push(DocumentItem {
@@ -1483,7 +1502,9 @@ mod perspective_tests {
             }],
             edge_positions: vec![],
             soft_edge_positions: vec![],
+            tangent_edge_positions: vec![],
             face_ranges: vec![],
+            cage_edge_positions: vec![],
         }
     }
 

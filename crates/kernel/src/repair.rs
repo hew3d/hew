@@ -22,6 +22,7 @@ use crate::geom2d::{boundaries_contact, point_inside_polygon, polygon_is_simple}
 use crate::health::{Finding, Rim, diagnose};
 use crate::ids::{FaceId, HalfEdgeId, LoopId, ShellId, VertexId};
 use crate::math::{Plane, Point3, Vec3};
+use crate::tol;
 use crate::topo::{AttrSlot, Face, HalfEdge, Loop, LoopKind, Object, WatertightState};
 
 /// The thinnest solid [`Object::thicken_sheet`] makes: a micron, far above
@@ -72,6 +73,8 @@ pub enum RepairError {
     /// The result failed validation (the violation is logged). A kernel
     /// bug, surfaced instead of committed.
     Invalid,
+    /// Remove degenerate faces found none.
+    NothingToRemove,
     /// Mend found nothing to do: no points to merge, nothing pinched, one
     /// island, no gap it could fill.
     NothingToMend,
@@ -127,6 +130,7 @@ impl std::fmt::Display for RepairError {
                 write!(f, "the surface has a seam whose faces do not share edges")
             }
             RepairError::Invalid => write!(f, "the repair produced invalid topology"),
+            RepairError::NothingToRemove => write!(f, "no degenerate faces found"),
             RepairError::NothingToMend => write!(f, "there is nothing to mend"),
             RepairError::WeldDistanceOutOfRange => {
                 write!(f, "the distance for merging points is out of range")
@@ -421,6 +425,7 @@ impl Object {
                 back_material: None,
                 uv_frame: None,
                 surface: None,
+                blend: None,
                 attrs: AttrSlot::NONE,
             });
             let outer = obj.add_cap_loop(&rim.half_edges, face, LoopKind::Outer);
@@ -485,7 +490,6 @@ impl Object {
             components.swap_remove(keep);
             for comp in &components {
                 let mut piece = obj.rebuild_component(comp);
-                piece.carry_edge_claims(&obj);
                 piece.orient_closed_islands();
                 piece.validate().map_err(invalid)?;
                 pieces.push(piece);
@@ -867,27 +871,64 @@ impl Object {
         true
     }
 
-    /// Give this object's edges the curve claims and soft flags of the
-    /// edges of `source` they coincide with — a piece rebuilt from
-    /// `source`'s faces (which rebuilds edges bare) keeps what its edges
-    /// were. A soft flag needs an interior edge, so it only carries onto
-    /// one.
-    fn carry_edge_claims(&mut self, source: &Object) {
-        type Key = ([u64; 3], [u64; 3]);
-        let key = |a: Point3, b: Point3| -> Key {
-            let k = |p: Point3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
-            let (ka, kb) = (k(a), k(b));
-            if ka <= kb { (ka, kb) } else { (kb, ka) }
-        };
-        let claims: BTreeMap<Key, (Option<crate::sketch::CurveGeom>, bool)> = source
-            .edges
+    /// Give this object's edges the curve and polygon claims and the soft
+    /// and crease flags of the edges of `source` they coincide with — a
+    /// piece rebuilt from `source`'s faces (which rebuilds edges bare)
+    /// keeps what its edges were. A soft or crease flag needs an interior
+    /// edge, so it only carries onto one.
+    pub(crate) fn carry_edge_claims(&mut self, source: &Object) {
+        self.apply_edge_claims(&source.edge_claims());
+    }
+
+    /// This object's marked edges keyed by their exact endpoint positions:
+    /// what [`Object::apply_edge_claims`] gives back to rebuilt pieces.
+    /// Built once when several pieces come from one object.
+    pub(crate) fn edge_claims(&self) -> EdgeClaims {
+        self.edges
             .keys()
             .filter_map(|e| {
-                let (a, b) = source.edge_endpoints(e)?;
-                let edge = &source.edges[e];
-                (edge.curve.is_some() || edge.soft).then(|| (key(a, b), (edge.curve, edge.soft)))
+                let (a, b) = self.edge_endpoints(e)?;
+                let edge = &self.edges[e];
+                (edge.curve.is_some() || edge.polygon.is_some() || edge.soft || edge.crease).then(
+                    || {
+                        (
+                            claim_key(a, b),
+                            (edge.curve, edge.polygon, edge.soft, edge.crease),
+                        )
+                    },
+                )
             })
+            .collect()
+    }
+
+    /// [`Object::edge_claims`] split by piece: `pieces[i]`'s faces' marked
+    /// edges in table `i`, so pieces touching along an edge never trade
+    /// marks. One pass over the edges.
+    pub(crate) fn edge_claims_by_piece(&self, pieces: &[Vec<FaceId>]) -> Vec<EdgeClaims> {
+        let piece_of: BTreeMap<FaceId, usize> = pieces
+            .iter()
+            .enumerate()
+            .flat_map(|(i, fs)| fs.iter().map(move |&f| (f, i)))
             .collect();
+        let mut out: Vec<EdgeClaims> = vec![BTreeMap::new(); pieces.len()];
+        for (e, edge) in &self.edges {
+            if !(edge.curve.is_some() || edge.polygon.is_some() || edge.soft || edge.crease) {
+                continue;
+            }
+            let face = self.loops[self.half_edges[edge.half_edge].loop_id].face;
+            let (Some(&i), Some((a, b))) = (piece_of.get(&face), self.edge_endpoints(e)) else {
+                continue;
+            };
+            out[i].insert(
+                claim_key(a, b),
+                (edge.curve, edge.polygon, edge.soft, edge.crease),
+            );
+        }
+        out
+    }
+
+    /// Mark each edge whose endpoints match a claim in `claims`.
+    pub(crate) fn apply_edge_claims(&mut self, claims: &EdgeClaims) {
         if claims.is_empty() {
             return;
         }
@@ -896,10 +937,12 @@ impl Object {
             let Some((a, b)) = self.edge_endpoints(e) else {
                 continue;
             };
-            if let Some(&(curve, soft)) = claims.get(&key(a, b)) {
+            if let Some(&(curve, polygon, soft, crease)) = claims.get(&claim_key(a, b)) {
                 let edge = &mut self.edges[e];
                 edge.curve = curve;
+                edge.polygon = polygon;
                 edge.soft = soft && edge.twin_half_edge.is_some();
+                edge.crease = crease && edge.twin_half_edge.is_some();
             }
         }
     }
@@ -1042,8 +1085,9 @@ impl Object {
                 let b = self.half_edges[h];
                 debug_assert!(b.twin.is_none(), "a rim half-edge is boundary");
                 debug_assert_eq!(self.edges[b.edge].half_edge, h);
+                let origin = self.half_edges[b.next].origin;
                 self.half_edges.insert(HalfEdge {
-                    origin: self.half_edges[b.next].origin,
+                    origin,
                     twin: Some(h),
                     next: HalfEdgeId::default(),
                     prev: HalfEdgeId::default(),
@@ -1108,6 +1152,7 @@ impl Object {
                             edge.half_edge = t;
                             edge.twin_half_edge = None;
                             edge.soft = false;
+                            edge.crease = false;
                         }
                         None => {
                             self.edges.remove(he.edge);
@@ -1222,4 +1267,172 @@ mod tests {
         // And the kept island's too (x = 1).
         assert_eq!(obj.edges().values().filter(|e| e.soft).count(), 1);
     }
+}
+
+// ==== true-curves: imports ====
+
+/// What [`Object::remove_degenerate_faces`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DegenerateReport {
+    /// How many faces were removed.
+    pub removed: usize,
+}
+
+impl Object {
+    /// Removes the degenerate faces ([`ring_is_degenerate`]), keeping the
+    /// object closed: an explicit repair the user asks for, never run on
+    /// import. A short edge of a degenerate face collapses onto its
+    /// lower-numbered end (that vertex keeps its position; the other moves
+    /// at most `POINT_MERGE`); a sliver's other vertices move into the loop
+    /// of the face across its longest edge, and the sliver goes. Faces left
+    /// with fewer than three points go too.
+    ///
+    /// # Errors
+    /// `NothingToRemove` when no face is degenerate; `Invalid` when the
+    /// result does not rebuild (with the input's watertightness).
+    pub fn remove_degenerate_faces(&mut self) -> Result<DegenerateReport, RepairError> {
+        let bad = crate::health::degenerate_faces(self);
+        if bad.is_empty() {
+            return Err(RepairError::NothingToRemove);
+        }
+        let mut patch = self.to_patch();
+        let face_order: Vec<FaceId> = self.faces().keys().collect();
+        let slot: BTreeMap<FaceId, usize> = face_order
+            .iter()
+            .enumerate()
+            .map(|(i, &f)| (f, i))
+            .collect();
+        let pos = |i: usize| match patch.verts[i] {
+            crate::patch::PVert::Existing(v) => self.vertices()[v].position,
+            crate::patch::PVert::New(p) => p,
+        };
+        // 1. Short edges of degenerate faces: merge into the lower index.
+        let mut merge: Vec<usize> = (0..patch.verts.len()).collect();
+        fn root(m: &mut [usize], mut x: usize) -> usize {
+            while m[x] != x {
+                m[x] = m[m[x]];
+                x = m[x];
+            }
+            x
+        }
+        for &f in &bad {
+            let ring = &patch.add[slot[&f]].outer;
+            for k in 0..ring.len() {
+                let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
+                if pos(a).approx_eq(pos(b), tol::POINT_MERGE) {
+                    let (ra, rb) = (root(&mut merge, a), root(&mut merge, b));
+                    if ra != rb {
+                        merge[ra.max(rb)] = ra.min(rb);
+                    }
+                }
+            }
+        }
+        let mut drop: BTreeSet<usize> = BTreeSet::new();
+        // 2. Slivers with no short edge: hand their other vertices to the
+        // face across the longest edge.
+        for &f in &bad {
+            let s = slot[&f];
+            let ring = patch.add[s].outer.clone();
+            let n = ring.len();
+            let short =
+                (0..n).any(|k| pos(ring[k]).approx_eq(pos(ring[(k + 1) % n]), tol::POINT_MERGE));
+            if short {
+                continue;
+            }
+            let k = (0..n)
+                .max_by(|&i, &j| {
+                    let li = (pos(ring[(i + 1) % n]) - pos(ring[i])).length();
+                    let lj = (pos(ring[(j + 1) % n]) - pos(ring[j])).length();
+                    li.total_cmp(&lj)
+                })
+                .expect("a ring of three or more");
+            let (a, b) = (ring[k], ring[(k + 1) % n]);
+            // The rest of the sliver's loop, from b back round to a.
+            let path: Vec<usize> = (2..n).map(|j| ring[(k + j) % n]).collect();
+            // The neighbor runs b→a.
+            let Some(ni) = patch.add.iter().enumerate().position(|(i, pf)| {
+                i != s
+                    && !drop.contains(&i)
+                    && (0..pf.outer.len())
+                        .any(|j| pf.outer[j] == b && pf.outer[(j + 1) % pf.outer.len()] == a)
+            }) else {
+                return Err(RepairError::Invalid);
+            };
+            let nb = &mut patch.add[ni].outer;
+            let j = (0..nb.len())
+                .find(|&j| nb[j] == b && nb[(j + 1) % nb.len()] == a)
+                .expect("found above");
+            for (off, &v) in path.iter().enumerate() {
+                nb.insert(j + 1 + off, v);
+            }
+            patch.add[ni].plane = None;
+            drop.insert(s);
+        }
+        // 3. Rewrite every loop through the merges; drop collapsed faces.
+        for (i, pf) in patch.add.iter_mut().enumerate() {
+            if drop.contains(&i) {
+                continue;
+            }
+            for ring in std::iter::once(&mut pf.outer).chain(pf.holes.iter_mut()) {
+                for v in ring.iter_mut() {
+                    *v = root(&mut merge, *v);
+                }
+                ring.dedup();
+                while ring.len() > 1 && ring.first() == ring.last() {
+                    ring.pop();
+                }
+            }
+            if pf.outer.len() < 3 || pf.holes.iter().any(|h| h.len() < 3) {
+                drop.insert(i);
+            } else if bad.contains(&face_order[i]) {
+                // A degenerate face that survived its merges keeps its
+                // place only if it is no longer degenerate.
+                let ring: Vec<Point3> = pf.outer.iter().map(|&v| pos(v)).collect();
+                if crate::health::ring_is_degenerate(&ring) {
+                    drop.insert(i);
+                }
+            }
+            pf.plane = None;
+        }
+        let removed = drop.len();
+        patch.add = patch
+            .add
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !drop.contains(i))
+            .map(|(_, f)| f)
+            .collect();
+        // Edge metadata keyed by merged-away vertices no longer applies.
+        let roots: Vec<usize> = (0..merge.len()).map(|x| root(&mut merge, x)).collect();
+        patch.edge_meta = patch
+            .edge_meta
+            .into_iter()
+            .filter(|((a, b), _)| roots[*a] == *a && roots[*b] == *b)
+            .collect();
+        let out = self.apply_patch(&patch).map_err(|_| RepairError::Invalid)?;
+        *self = out.object;
+        Ok(DegenerateReport { removed })
+    }
+}
+
+// ==== end true-curves: imports ====
+
+/// An edge's endpoints as exact position bits, order-free.
+type ClaimKey = ([u64; 3], [u64; 3]);
+
+/// Marked edges by endpoints: curve claim, polygon claim, soft, crease.
+pub(crate) type EdgeClaims = BTreeMap<
+    ClaimKey,
+    (
+        Option<crate::sketch::CurveGeom>,
+        Option<crate::sketch::CurveGeom>,
+        bool,
+        bool,
+    ),
+>;
+
+fn claim_key(a: Point3, b: Point3) -> ClaimKey {
+    let k = |p: Point3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+    let (ka, kb) = (k(a), k(b));
+    if ka <= kb { (ka, kb) } else { (kb, ka) }
 }

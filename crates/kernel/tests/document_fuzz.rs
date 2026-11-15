@@ -207,6 +207,45 @@ enum DocOp {
         obj_sel: usize,
         factors: (f64, f64, f64),
     },
+    /// An in-place reshape (`DocAction::Reshaped`, the snapshot undo the
+    /// true-curves operations share), driven by its test spec: a uniform
+    /// scale about the origin. The fingerprint cycle covers its undo/redo.
+    Reshape {
+        obj_sel: usize,
+        scale: f64,
+    },
+    /// Fillet the `pick`-th sharp edge of the `obj_sel`-th visible object
+    /// (`Document::blend_edges`, a `Reshaped` step); the radius is
+    /// `radius_frac × 0.3 ×` the shortest edge at either end of it. With
+    /// `logical`, the pick expands to its logical edge (a whole rim, a
+    /// line–arc chain), as the Fillet tool picks.
+    Blend {
+        obj_sel: usize,
+        pick: usize,
+        radius_frac: f64,
+        logical: bool,
+    },
+    /// Remove the `pick`-th blend of the `obj_sel`-th visible object.
+    RemoveBlend {
+        obj_sel: usize,
+        pick: usize,
+    },
+    /// Resize the `pick`-th blend by `factor`.
+    ResizeBlend {
+        obj_sel: usize,
+        pick: usize,
+        factor: f64,
+    },
+    /// Deform the `obj_sel`-th visible object about its bounding box along
+    /// world z (`Document::deform`, a `Reshaped` step): mode 0 twists by
+    /// `amount_frac × 90°`, 1 bends by `amount_frac × 60°`, 2 tapers to
+    /// `1 − amount_frac / 2`. A refusal (self-intersection, an open
+    /// object) leaves the document as it was.
+    Deform {
+        obj_sel: usize,
+        mode: u8,
+        amount_frac: f64,
+    },
     /// Draw a small triangle on the plane of the `face_sel`-th face of the
     /// `obj_sel`-th visible object — a loose drawing strictly inside the
     /// face, around its interior point — and own it by that object
@@ -960,6 +999,21 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         // A reflection baked into a visible object (negative x factor).
         1 => (any::<usize>(), (0.2..3.0f64, 0.2..3.0f64, 0.2..3.0f64)).prop_map(
             |(obj_sel, f)| DocOp::NonUniformScale { obj_sel, factors: (-f.0, f.1, f.2) }
+        ),
+        2 => (any::<usize>(), 0.5..2.0f64).prop_map(
+            |(obj_sel, scale)| DocOp::Reshape { obj_sel, scale }
+        ),
+        2 => (any::<usize>(), any::<usize>(), 0.05..1.0f64, any::<bool>()).prop_map(
+            |(obj_sel, pick, radius_frac, logical)| DocOp::Blend { obj_sel, pick, radius_frac, logical }
+        ),
+        1 => (any::<usize>(), any::<usize>()).prop_map(
+            |(obj_sel, pick)| DocOp::RemoveBlend { obj_sel, pick }
+        ),
+        1 => (any::<usize>(), any::<usize>(), 0.3..1.5f64).prop_map(
+            |(obj_sel, pick, factor)| DocOp::ResizeBlend { obj_sel, pick, factor }
+        ),
+        2 => (any::<usize>(), 0u8..3, 0.05..1.0f64).prop_map(
+            |(obj_sel, mode, amount_frac)| DocOp::Deform { obj_sel, mode, amount_frac }
         ),
         4 => (any::<usize>(), any::<usize>(), 0.0..std::f64::consts::TAU).prop_map(
             |(obj_sel, face_sel, turn)| DocOp::OwnSketch { obj_sel, face_sel, turn }
@@ -3890,6 +3944,142 @@ fn apply_doc_op(
             };
             let t = Transform::scale(Vec3::new(factors.0, factors.1, factors.2));
             let _ = doc.transform_object(oid, &t);
+        }
+        DocOp::Reshape { obj_sel, scale } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let _ = doc.reshape_scale_for_test(oid, *scale);
+        }
+        DocOp::Blend {
+            obj_sel,
+            pick,
+            radius_frac,
+            logical,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let obj = doc.object(oid).expect("visible object");
+            let Some(edge) = nth(&obj.sharp_edges(), *pick) else {
+                return Ok(true);
+            };
+            let (a, b) = obj.edge_endpoints(edge).expect("live edge");
+            let shortest = obj
+                .edges()
+                .keys()
+                .filter_map(|e| obj.edge_endpoints(e))
+                .filter(|(p, q)| {
+                    [*p, *q]
+                        .iter()
+                        .any(|x| x.approx_eq(a, 1e-12) || x.approx_eq(b, 1e-12))
+                })
+                .map(|(p, q)| (q - p).length())
+                .fold(f64::INFINITY, f64::min);
+            let edges = if *logical {
+                obj.logical_edge(edge, true)
+            } else {
+                vec![edge]
+            };
+            let spec = kernel::BlendSpec {
+                edges,
+                profile: kernel::BlendProfile::Round {
+                    radius: radius_frac * 0.3 * shortest,
+                    segments: 4,
+                },
+                primary: None,
+                corners: kernel::CornerStyle::Default,
+                stops: None,
+                handles: Vec::new(),
+            };
+            let _ = doc.blend_edges(oid, &spec);
+        }
+        DocOp::RemoveBlend { obj_sel, pick } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let Ok(feats) = doc.blend_features(oid) else {
+                return Ok(true);
+            };
+            let Some(f) = (!feats.is_empty()).then(|| feats[*pick % feats.len()].clone()) else {
+                return Ok(true);
+            };
+            let _ = doc.remove_blend(oid, f.id);
+        }
+        DocOp::ResizeBlend {
+            obj_sel,
+            pick,
+            factor,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let Ok(feats) = doc.blend_features(oid) else {
+                return Ok(true);
+            };
+            let Some(f) = (!feats.is_empty()).then(|| feats[*pick % feats.len()].clone()) else {
+                return Ok(true);
+            };
+            if let (Some(size), true) = (f.size, f.intact) {
+                let profile = match f.kind {
+                    kernel::BlendKind::Chamfer => kernel::BlendProfile::Chamfer {
+                        setback_a: size * factor,
+                        setback_b: size * factor,
+                    },
+                    _ => kernel::BlendProfile::Round {
+                        radius: size * factor,
+                        segments: 4,
+                    },
+                };
+                let _ = doc.resize_blend(oid, f.id, &profile);
+            }
+        }
+        DocOp::Deform {
+            obj_sel,
+            mode,
+            amount_frac,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let obj = doc.object(oid).expect("visible object");
+            let (mut lo, mut hi) = (
+                Vec3::new(f64::MAX, f64::MAX, f64::MAX),
+                Vec3::new(f64::MIN, f64::MIN, f64::MIN),
+            );
+            for v in obj.vertices().values() {
+                let p = v.position.to_vec();
+                lo = Vec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+                hi = Vec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+            }
+            let length = hi.z - lo.z;
+            if length <= 1e-6 {
+                return Ok(true);
+            }
+            let frame = kernel::deform::DeformFrame {
+                origin: Point3::new(0.5 * (lo.x + hi.x), 0.5 * (lo.y + hi.y), lo.z),
+                axis: Vec3::new(0.0, 0.0, 1.0),
+                u: Vec3::new(1.0, 0.0, 0.0),
+                length,
+            };
+            let spec = match mode {
+                0 => kernel::deform::DeformSpec::Twist {
+                    frame,
+                    angle: amount_frac * std::f64::consts::FRAC_PI_2,
+                    stations: None,
+                },
+                1 => kernel::deform::DeformSpec::Bend {
+                    frame,
+                    angle: amount_frac * std::f64::consts::FRAC_PI_3,
+                    stations: None,
+                },
+                _ => kernel::deform::DeformSpec::Taper {
+                    frame,
+                    ratio: 1.0 - amount_frac / 2.0,
+                    stations: None,
+                },
+            };
+            let _ = doc.deform(oid, &spec);
         }
         DocOp::Delete { node_sel } => {
             let Some(node) = nth(&doc.top_level_nodes(), *node_sel) else {

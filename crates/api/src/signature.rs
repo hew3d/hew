@@ -110,7 +110,7 @@ fn candidate_hashes(
             Some(kernel::SurfaceRef::Cylinder { axis, radius, .. }) => pose
                 .similarity_scale()
                 .map(|s| (pose.apply_vector(axis), radius * s)),
-            None => None,
+            _ => None,
         };
         faces.push(WorldFace { loops, surface });
     }

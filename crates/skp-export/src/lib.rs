@@ -1298,18 +1298,21 @@ impl<'d> Author<'d> {
             let face = obj.loops()[he[h].loop_id].face;
             obj.faces()[face].surface
         };
-        for (_, e) in obj.edges().iter() {
+        for (eid, e) in obj.edges().iter() {
             let h = he[e.half_edge];
             let a = vi(run, h.origin);
             let b = vi(run, he[h.next].origin);
             let (pa, pb) = (verts[h.origin].position, verts[he[h.next].origin].position);
             let near = surface_of(e.half_edge);
             let far = e.twin_half_edge.and_then(surface_of);
-            // A seam between two facets of one curved surface is what
-            // SketchUp draws soft and smooth — the tessellator smooths
-            // across exactly these.
+            // A seam between two facets of one curved surface, or a tangent
+            // joint between two surfaces (a fillet rail), is what SketchUp
+            // draws soft and smooth — the tessellator classifies through the
+            // same predicate, so the two never disagree. A creased edge is
+            // the user's "keep this sharp" and reads Hard here.
+            let smooth = obj.edge_smoothness(eid) != kernel::EdgeSmoothness::Hard;
             let seam = matches!((near, far), (Some(x), Some(y)) if x.same_surface(&y));
-            let Some(idx) = run.edge(a, b, e.soft || seam) else {
+            let Some(idx) = run.edge(a, b, smooth) else {
                 continue;
             };
             // The circle the edge is a chord of: its own claim, else the
@@ -2237,7 +2240,10 @@ fn rim_circle(wall: &kernel::SurfaceRef, pa: Point3, pb: Point3) -> Option<kerne
         axis_point,
         axis,
         radius,
-    } = *wall;
+    } = *wall
+    else {
+        return None;
+    };
     let ha = (pa - axis_point).dot(axis);
     let hb = (pb - axis_point).dot(axis);
     let tol = 1e-6 * radius.max(1.0);

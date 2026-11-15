@@ -67,84 +67,14 @@ impl Object {
 
         // Half-edge link integrity.
         for (h, he) in &self.half_edges {
-            if !self.vertices.contains_key(he.origin) {
-                return Err(TopologyError::DanglingHandle {
-                    context: "half-edge origin",
-                });
-            }
             is_origin.insert(he.origin, ());
-            let next = self
-                .half_edges
-                .get(he.next)
-                .ok_or(TopologyError::DanglingHandle {
-                    context: "half-edge next",
-                })?;
-            let prev = self
-                .half_edges
-                .get(he.prev)
-                .ok_or(TopologyError::DanglingHandle {
-                    context: "half-edge prev",
-                })?;
-            if next.prev != h || prev.next != h {
-                return Err(TopologyError::BrokenLink { half_edge: h });
-            }
-            if !self.loops.contains_key(he.loop_id) {
-                return Err(TopologyError::DanglingHandle {
-                    context: "half-edge loop",
-                });
-            }
-            let edge = self
-                .edges
-                .get(he.edge)
-                .ok_or(TopologyError::DanglingHandle {
-                    context: "half-edge edge",
-                })?;
-            if edge.half_edge != h && edge.twin_half_edge != Some(h) {
-                return Err(TopologyError::EdgeHalfEdgeMismatch { edge: he.edge });
-            }
-            if let Some(t) = he.twin {
-                let twin = self
-                    .half_edges
-                    .get(t)
-                    .ok_or(TopologyError::DanglingHandle {
-                        context: "half-edge twin",
-                    })?;
-                if t == h || twin.twin != Some(h) || twin.edge != he.edge {
-                    return Err(TopologyError::BrokenTwin { half_edge: h });
-                }
-                // The twin runs the opposite direction: it must start where
-                // this half-edge ends.
-                if twin.origin != next.origin {
-                    return Err(TopologyError::BrokenTwin { half_edge: h });
-                }
-            }
+            self.validate_half_edge(h, he)?;
         }
 
         // Every half-edge lies in exactly one loop, and loops close.
         let mut seen: SecondaryMap<_, ()> = SecondaryMap::new();
         for (l, lp) in &self.loops {
-            if !self.half_edges.contains_key(lp.first_half_edge) {
-                return Err(TopologyError::DanglingHandle {
-                    context: "loop first half-edge",
-                });
-            }
-            let mut current = lp.first_half_edge;
-            for _ in 0..=self.half_edges.len() {
-                let he = &self.half_edges[current];
-                if he.loop_id != l {
-                    return Err(TopologyError::LoopMembership { half_edge: current });
-                }
-                if seen.insert(current, ()).is_some() {
-                    return Err(TopologyError::LoopMembership { half_edge: current });
-                }
-                current = he.next;
-                if current == lp.first_half_edge {
-                    break;
-                }
-            }
-            if current != lp.first_half_edge {
-                return Err(TopologyError::BrokenLink { half_edge: current });
-            }
+            self.validate_loop_closes(l, lp, &mut seen)?;
         }
         if seen.len() != self.half_edges.len() {
             let orphan = self
@@ -176,208 +106,15 @@ impl Object {
 
         // Edges agree with their half-edges.
         for (e, edge) in &self.edges {
-            let primary =
-                self.half_edges
-                    .get(edge.half_edge)
-                    .ok_or(TopologyError::DanglingHandle {
-                        context: "edge half-edge",
-                    })?;
-            if primary.edge != e || primary.twin != edge.twin_half_edge {
-                return Err(TopologyError::EdgeHalfEdgeMismatch { edge: e });
-            }
-            if let Some(t) = edge.twin_half_edge {
-                let twin = self
-                    .half_edges
-                    .get(t)
-                    .ok_or(TopologyError::DanglingHandle {
-                        context: "edge twin half-edge",
-                    })?;
-                if twin.edge != e || twin.twin != Some(edge.half_edge) {
-                    return Err(TopologyError::EdgeHalfEdgeMismatch { edge: e });
-                }
-            }
-            // The two sides of an edge lie on two different faces: loops of
-            // one face never share an edge.
-            if let Some(t) = edge.twin_half_edge {
-                let face_of = |h: crate::ids::HalfEdgeId| {
-                    self.half_edges
-                        .get(h)
-                        .and_then(|he| self.loops.get(he.loop_id))
-                        .map(|lp| lp.face)
-                };
-                if face_of(edge.half_edge).is_some() && face_of(edge.half_edge) == face_of(t) {
-                    return Err(TopologyError::EdgeWithinOneFace { edge: e });
-                }
-            }
-            // A SOFT mark (design §7b) claims the edge is an interior facet
-            // seam — a boundary edge cannot be one.
-            if edge.soft && edge.twin_half_edge.is_none() {
-                return Err(TopologyError::EdgeHalfEdgeMismatch { edge: e });
-            }
-            // A present analytic circle claim must agree with the geometry it
-            // describes (map-or-drop's enforcement half): both endpoints are
-            // chord facets of the circle, so each lies within tolerance of
-            // `radius` from `center`, and the radius is non-degenerate.
-            if let Some(crate::sketch::CurveGeom { center, radius }) = edge.curve {
-                let mismatch = TopologyError::EdgeCurveMismatch { edge: e };
-                if !radius.is_finite()
-                    || !(center.x.is_finite() && center.y.is_finite() && center.z.is_finite())
-                    || radius <= crate::tol::POINT_MERGE
-                {
-                    return Err(mismatch);
-                }
-                let a = self.vertices[primary.origin].position;
-                let b = self.vertices[self.half_edges[primary.next].origin].position;
-                for p in [a, b] {
-                    if ((p - center).length() - radius).abs() > self.planarity_tol {
-                        return Err(mismatch);
-                    }
-                }
-            }
+            self.validate_edge(e, edge)?;
         }
 
         // Loops and faces agree; face boundaries are planar.
         for (f, face) in &self.faces {
-            let outer = self
-                .loops
-                .get(face.outer_loop)
-                .ok_or(TopologyError::DanglingHandle {
-                    context: "face outer loop",
-                })?;
-            if outer.face != f || outer.kind != LoopKind::Outer {
-                return Err(TopologyError::LoopFaceMismatch {
-                    loop_id: face.outer_loop,
-                });
-            }
-            for &inner_id in &face.inner_loops {
-                let inner = self
-                    .loops
-                    .get(inner_id)
-                    .ok_or(TopologyError::DanglingHandle {
-                        context: "face inner loop",
-                    })?;
-                if inner.face != f || inner.kind != LoopKind::Inner {
-                    return Err(TopologyError::LoopFaceMismatch { loop_id: inner_id });
-                }
-            }
-            let loop_ids = std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied());
-            for loop_id in loop_ids {
-                for p in self.loop_positions(loop_id) {
-                    if face.plane.signed_distance(p).abs() > self.planarity_tol {
-                        return Err(TopologyError::FaceGeometryNotPlanar { face: f });
-                    }
-                }
-            }
-            // Hole containment: a hole loop must lie inside its face's outer
-            // boundary. Checked conservatively — the hole is invalid only if
-            // NONE of its vertices are inside the outer ring or on it —
-            // because a fully displaced hole is what a wrong ownership
-            // assignment produces, while a vertex grazing the outer boundary
-            // within tolerance must not fail legitimate geometry. (A
-            // partially displaced hole cannot arise from valid operations at
-            // all: cut paths are refused if they cross hole territory; the
-            // proper-crossing test in `hole_leaves_outer` below catches the
-            // one that slips through.) The
-            // on-ring clause matters: an imported hole whose every vertex
-            // sits on the outer ring (SketchUp draws them) is a boundary
-            // case for the strict ray test, whose verdict on such points
-            // differs between native and wasm float rounding — the same
-            // document must load everywhere.
-            if !face.inner_loops.is_empty() {
-                let outer_pts: Vec<crate::math::Point3> =
-                    self.loop_positions(face.outer_loop).collect();
-                let normal = face.plane.normal();
-                let on_ring = |p: crate::math::Point3| {
-                    let n = outer_pts.len();
-                    (0..n).any(|i| {
-                        crate::geom2d::point_near_segment(
-                            p,
-                            outer_pts[i],
-                            outer_pts[(i + 1) % n],
-                            crate::tol::POINT_MERGE,
-                        )
-                    })
-                };
-                for &inner_id in &face.inner_loops {
-                    let hole_pts: Vec<crate::math::Point3> =
-                        self.loop_positions(inner_id).collect();
-                    let any_inside = hole_pts.iter().any(|&p| {
-                        crate::geom2d::point_inside_polygon(p, &outer_pts, normal) || on_ring(p)
-                    });
-                    // No stretch of a hole edge leaves the face: no proper
-                    // crossing, and each piece of a hole edge between the
-                    // outer vertices on it lies inside the outer ring or on
-                    // it (within the object's planarity tolerance, so
-                    // imported rings that graze it still load). A native
-                    // object's hole never runs along an outer edge (two
-                    // loops never share an edge, and drafting makes such a
-                    // run one edge); an imported hole may (SketchUp draws
-                    // them).
-                    let imported = self.planarity_tol > crate::tol::PLANE_DIST;
-                    let leaves = crate::geom2d::hole_leaves_outer(
-                        &outer_pts,
-                        &hole_pts,
-                        normal,
-                        self.planarity_tol.max(crate::tol::POINT_MERGE),
-                        imported,
-                    );
-                    if !any_inside || leaves {
-                        return Err(TopologyError::HoleOutsideFace {
-                            face: f,
-                            loop_id: inner_id,
-                        });
-                    }
-                }
-            }
-            // A present analytic surface must agree with the geometry it
-            // claims to describe (map-or-drop's enforcement half): a chord
-            // facet of a cylinder has its plane parallel to the axis, at
-            // most one radius away, with every vertex inside the cylinder.
-            if let Some(crate::topo::SurfaceRef::Cylinder {
-                axis_point,
-                axis,
-                radius,
-            }) = face.surface
-            {
-                let mismatch = TopologyError::FaceSurfaceMismatch { face: f };
-                if (axis.length() - 1.0).abs() > crate::tol::NORMAL_DIRECTION
-                    || !radius.is_finite()
-                    || radius <= crate::tol::POINT_MERGE
-                {
-                    return Err(mismatch);
-                }
-                if axis.dot(face.plane.normal()).abs() > crate::tol::NORMAL_DIRECTION {
-                    return Err(mismatch);
-                }
-                if face.plane.signed_distance(axis_point).abs() > radius + self.planarity_tol {
-                    return Err(mismatch);
-                }
-                let dist_to_axis = |p: crate::math::Point3| {
-                    let d = p - axis_point;
-                    (d - axis * d.dot(axis)).length()
-                };
-                let loop_ids =
-                    std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied());
-                for loop_id in loop_ids {
-                    for p in self.loop_positions(loop_id) {
-                        if dist_to_axis(p) > radius + self.planarity_tol {
-                            return Err(mismatch);
-                        }
-                    }
-                }
-            }
+            self.validate_face(f, face)?;
         }
         for (l, lp) in &self.loops {
-            let face = self
-                .faces
-                .get(lp.face)
-                .ok_or(TopologyError::DanglingHandle {
-                    context: "loop face",
-                })?;
-            let belongs = face.outer_loop == l || face.inner_loops.contains(&l);
-            if !belongs {
-                return Err(TopologyError::LoopFaceMismatch { loop_id: l });
-            }
+            self.validate_loop_face(l, lp)?;
         }
 
         // Vertices agree with their outgoing half-edges, no orphan vertices.
@@ -431,13 +168,492 @@ impl Object {
         // recompute would make the saved document unopenable — so the
         // loader's own predicate holds for every live face.
         for (f, face) in &self.faces {
-            let outer_ring: Vec<crate::math::Point3> =
-                self.loop_positions(face.outer_loop).collect();
-            if crate::serialize::outer_ring_plane(&outer_ring).is_err() {
-                return Err(TopologyError::FaceTooSmallToReopen { face: f });
-            }
+            self.validate_reopens(f, face)?;
         }
 
+        Ok(())
+    }
+
+    /// [`Object::validate`] restricted to what an edit of `faces` can have
+    /// broken, for an object that was valid before the edit and changed
+    /// only there: each listed face, its loops, their half-edges and the
+    /// twins across them (the neighbours' sides of the seams), the edges of
+    /// both, the vertices on the loops, the face's shell membership, and
+    /// the watertight flag of a closed object. The same per-element checks
+    /// as the whole-object pass, in the same order per element, so a
+    /// violation there is reported with the same error. Callers that edited
+    /// anything beyond `faces` and their seams must run the full pass.
+    pub(crate) fn validate_local(&self, faces: &[crate::ids::FaceId]) -> Result<(), TopologyError> {
+        use crate::ids::{EdgeId, FaceId, HalfEdgeId};
+        let mut hes: Vec<HalfEdgeId> = Vec::new();
+        for &f in faces {
+            let face = self.faces.get(f).ok_or(TopologyError::DanglingHandle {
+                context: "local validation face",
+            })?;
+            for l in std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied()) {
+                let lp = self.loops.get(l).ok_or(TopologyError::DanglingHandle {
+                    context: "face loop",
+                })?;
+                let mut h = lp.first_half_edge;
+                for _ in 0..=self.half_edges.len() {
+                    let Some(he) = self.half_edges.get(h) else {
+                        break;
+                    };
+                    hes.push(h);
+                    h = he.next;
+                    if h == lp.first_half_edge {
+                        break;
+                    }
+                }
+            }
+        }
+        for &h in &hes {
+            let he = self
+                .half_edges
+                .get(h)
+                .ok_or(TopologyError::DanglingHandle {
+                    context: "half-edge",
+                })?;
+            let p = self
+                .vertices
+                .get(he.origin)
+                .ok_or(TopologyError::DanglingHandle {
+                    context: "half-edge origin",
+                })?
+                .position;
+            if !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite() {
+                return Err(TopologyError::VertexNotFinite { vertex: he.origin });
+            }
+        }
+        // Half-edges of the faces and their twins across each seam.
+        let mut twins: Vec<HalfEdgeId> = Vec::new();
+        for &h in &hes {
+            let he = &self.half_edges[h];
+            self.validate_half_edge(h, he)?;
+            match he.twin {
+                Some(t) => twins.push(t),
+                None if self.watertight == WatertightState::Watertight => {
+                    return Err(TopologyError::WatertightFlagMismatch {
+                        expected: WatertightState::Open,
+                    });
+                }
+                None => {}
+            }
+        }
+        for &t in &twins {
+            self.validate_half_edge(t, &self.half_edges[t])?;
+        }
+        // Loops close and own their half-edges.
+        let mut seen: SecondaryMap<HalfEdgeId, ()> = SecondaryMap::new();
+        for &f in faces {
+            let face = &self.faces[f];
+            for l in std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied()) {
+                self.validate_loop_closes(l, &self.loops[l], &mut seen)?;
+            }
+        }
+        // Each of those loops is simple: no vertex twice in one loop.
+        let mut visited_in: SecondaryMap<crate::ids::VertexId, crate::ids::LoopId> =
+            SecondaryMap::new();
+        for &f in faces {
+            let face = &self.faces[f];
+            for l in std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied()) {
+                let first = self.loops[l].first_half_edge;
+                let mut current = first;
+                loop {
+                    let he = &self.half_edges[current];
+                    if visited_in.insert(he.origin, l) == Some(l) {
+                        return Err(TopologyError::LoopNotSimple { loop_id: l });
+                    }
+                    current = he.next;
+                    if current == first {
+                        break;
+                    }
+                }
+            }
+        }
+        // Edges of both sides.
+        let mut edges: Vec<EdgeId> = hes
+            .iter()
+            .chain(&twins)
+            .map(|&h| self.half_edges[h].edge)
+            .collect();
+        edges.sort_unstable();
+        edges.dedup();
+        for e in edges {
+            let edge = self.edges.get(e).ok_or(TopologyError::DanglingHandle {
+                context: "half-edge edge",
+            })?;
+            self.validate_edge(e, edge)?;
+        }
+        for &f in faces {
+            self.validate_face(f, &self.faces[f])?;
+        }
+        for &f in faces {
+            let face = &self.faces[f];
+            for l in std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied()) {
+                self.validate_loop_face(l, &self.loops[l])?;
+            }
+        }
+        // Vertices on the loops agree with their outgoing half-edges (which
+        // also makes each an origin, so none is orphaned).
+        let mut verts: Vec<crate::ids::VertexId> =
+            hes.iter().map(|&h| self.half_edges[h].origin).collect();
+        verts.sort_unstable();
+        verts.dedup();
+        for v in verts {
+            let outgoing = self.half_edges.get(self.vertices[v].outgoing).ok_or(
+                TopologyError::DanglingHandle {
+                    context: "vertex outgoing",
+                },
+            )?;
+            if outgoing.origin != v {
+                return Err(TopologyError::VertexOutgoingMismatch { vertex: v });
+            }
+        }
+        // Each face lies in exactly one shell.
+        let mut count: SecondaryMap<FaceId, u32> = SecondaryMap::new();
+        for &f in faces {
+            count.insert(f, 0);
+        }
+        for shell in self.shells.values() {
+            for &f in &shell.faces {
+                if let Some(c) = count.get_mut(f) {
+                    *c += 1;
+                }
+            }
+        }
+        for &f in faces {
+            if count[f] != 1 {
+                return Err(TopologyError::FaceShellMembership { face: f });
+            }
+        }
+        for &f in faces {
+            self.validate_reopens(f, &self.faces[f])?;
+        }
+        Ok(())
+    }
+
+    /// One half-edge's links: origin, next/prev, loop, edge and twin
+    /// (the per-element half of [`Object::validate`]).
+    fn validate_half_edge(
+        &self,
+        h: crate::ids::HalfEdgeId,
+        he: &crate::topo::HalfEdge,
+    ) -> Result<(), TopologyError> {
+        if !self.vertices.contains_key(he.origin) {
+            return Err(TopologyError::DanglingHandle {
+                context: "half-edge origin",
+            });
+        }
+        let next = self
+            .half_edges
+            .get(he.next)
+            .ok_or(TopologyError::DanglingHandle {
+                context: "half-edge next",
+            })?;
+        let prev = self
+            .half_edges
+            .get(he.prev)
+            .ok_or(TopologyError::DanglingHandle {
+                context: "half-edge prev",
+            })?;
+        if next.prev != h || prev.next != h {
+            return Err(TopologyError::BrokenLink { half_edge: h });
+        }
+        if !self.loops.contains_key(he.loop_id) {
+            return Err(TopologyError::DanglingHandle {
+                context: "half-edge loop",
+            });
+        }
+        let edge = self
+            .edges
+            .get(he.edge)
+            .ok_or(TopologyError::DanglingHandle {
+                context: "half-edge edge",
+            })?;
+        if edge.half_edge != h && edge.twin_half_edge != Some(h) {
+            return Err(TopologyError::EdgeHalfEdgeMismatch { edge: he.edge });
+        }
+        if let Some(t) = he.twin {
+            let twin = self
+                .half_edges
+                .get(t)
+                .ok_or(TopologyError::DanglingHandle {
+                    context: "half-edge twin",
+                })?;
+            if t == h || twin.twin != Some(h) || twin.edge != he.edge {
+                return Err(TopologyError::BrokenTwin { half_edge: h });
+            }
+            // The twin runs the opposite direction: it must start where
+            // this half-edge ends.
+            if twin.origin != next.origin {
+                return Err(TopologyError::BrokenTwin { half_edge: h });
+            }
+        }
+        Ok(())
+    }
+
+    /// One loop closes through `next` and every half-edge on it names it;
+    /// `seen` collects the half-edges visited (each in exactly one loop).
+    fn validate_loop_closes(
+        &self,
+        l: crate::ids::LoopId,
+        lp: &crate::topo::Loop,
+        seen: &mut SecondaryMap<crate::ids::HalfEdgeId, ()>,
+    ) -> Result<(), TopologyError> {
+        if !self.half_edges.contains_key(lp.first_half_edge) {
+            return Err(TopologyError::DanglingHandle {
+                context: "loop first half-edge",
+            });
+        }
+        let mut current = lp.first_half_edge;
+        for _ in 0..=self.half_edges.len() {
+            let he = &self.half_edges[current];
+            if he.loop_id != l {
+                return Err(TopologyError::LoopMembership { half_edge: current });
+            }
+            if seen.insert(current, ()).is_some() {
+                return Err(TopologyError::LoopMembership { half_edge: current });
+            }
+            current = he.next;
+            if current == lp.first_half_edge {
+                break;
+            }
+        }
+        if current != lp.first_half_edge {
+            return Err(TopologyError::BrokenLink { half_edge: current });
+        }
+        Ok(())
+    }
+
+    /// One edge agrees with its half-edges, and its marks and claim hold.
+    fn validate_edge(
+        &self,
+        e: crate::ids::EdgeId,
+        edge: &crate::topo::Edge,
+    ) -> Result<(), TopologyError> {
+        let primary = self
+            .half_edges
+            .get(edge.half_edge)
+            .ok_or(TopologyError::DanglingHandle {
+                context: "edge half-edge",
+            })?;
+        if primary.edge != e || primary.twin != edge.twin_half_edge {
+            return Err(TopologyError::EdgeHalfEdgeMismatch { edge: e });
+        }
+        if let Some(t) = edge.twin_half_edge {
+            let twin = self
+                .half_edges
+                .get(t)
+                .ok_or(TopologyError::DanglingHandle {
+                    context: "edge twin half-edge",
+                })?;
+            if twin.edge != e || twin.twin != Some(edge.half_edge) {
+                return Err(TopologyError::EdgeHalfEdgeMismatch { edge: e });
+            }
+        }
+        // The two sides of an edge lie on two different faces: loops of
+        // one face never share an edge.
+        if let Some(t) = edge.twin_half_edge {
+            let face_of = |h: crate::ids::HalfEdgeId| {
+                self.half_edges
+                    .get(h)
+                    .and_then(|he| self.loops.get(he.loop_id))
+                    .map(|lp| lp.face)
+            };
+            if face_of(edge.half_edge).is_some() && face_of(edge.half_edge) == face_of(t) {
+                return Err(TopologyError::EdgeWithinOneFace { edge: e });
+            }
+        }
+        // A SOFT mark (design §7b) claims the edge is an interior facet
+        // seam — a boundary edge cannot be one.
+        if edge.soft && edge.twin_half_edge.is_none() {
+            return Err(TopologyError::EdgeHalfEdgeMismatch { edge: e });
+        }
+        // A CREASE is the user's keep-sharp mark on an interior edge, and a
+        // soft seam can never be one (true-curves.md §6.1).
+        if edge.crease && edge.twin_half_edge.is_none() {
+            return Err(TopologyError::EdgeHalfEdgeMismatch { edge: e });
+        }
+        if edge.crease && edge.soft {
+            return Err(TopologyError::EdgeCreaseConflict { edge: e });
+        }
+        // A present analytic circle claim must agree with the geometry it
+        // describes (map-or-drop's enforcement half): both endpoints are
+        // chord facets of the circle, so each lies within tolerance of
+        // `radius` from `center`, and the radius is non-degenerate.
+        if let Some(crate::sketch::CurveGeom { center, radius }) = edge.curve {
+            let mismatch = TopologyError::EdgeCurveMismatch { edge: e };
+            if !radius.is_finite()
+                || !(center.x.is_finite() && center.y.is_finite() && center.z.is_finite())
+                || radius <= crate::tol::POINT_MERGE
+            {
+                return Err(mismatch);
+            }
+            let a = self.vertices[primary.origin].position;
+            let b = self.vertices[self.half_edges[primary.next].origin].position;
+            for p in [a, b] {
+                if ((p - center).length() - radius).abs() > self.planarity_tol {
+                    return Err(mismatch);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One face: its loops agree with it, its boundary is planar, its holes
+    /// lie inside it and its surface claim holds.
+    fn validate_face(
+        &self,
+        f: crate::ids::FaceId,
+        face: &crate::topo::Face,
+    ) -> Result<(), TopologyError> {
+        let outer = self
+            .loops
+            .get(face.outer_loop)
+            .ok_or(TopologyError::DanglingHandle {
+                context: "face outer loop",
+            })?;
+        if outer.face != f || outer.kind != LoopKind::Outer {
+            return Err(TopologyError::LoopFaceMismatch {
+                loop_id: face.outer_loop,
+            });
+        }
+        for &inner_id in &face.inner_loops {
+            let inner = self
+                .loops
+                .get(inner_id)
+                .ok_or(TopologyError::DanglingHandle {
+                    context: "face inner loop",
+                })?;
+            if inner.face != f || inner.kind != LoopKind::Inner {
+                return Err(TopologyError::LoopFaceMismatch { loop_id: inner_id });
+            }
+        }
+        let loop_ids = std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied());
+        for loop_id in loop_ids {
+            for p in self.loop_positions(loop_id) {
+                if face.plane.signed_distance(p).abs() > self.planarity_tol {
+                    return Err(TopologyError::FaceGeometryNotPlanar { face: f });
+                }
+            }
+        }
+        // Hole containment: a hole loop must lie inside its face's outer
+        // boundary. Checked conservatively — the hole is invalid only if
+        // NONE of its vertices are inside the outer ring or on it —
+        // because a fully displaced hole is what a wrong ownership
+        // assignment produces, while a vertex grazing the outer boundary
+        // within tolerance must not fail legitimate geometry. (A
+        // partially displaced hole cannot arise from valid operations at
+        // all: cut paths are refused if they cross hole territory; the
+        // proper-crossing test below catches the one that slips through.) The
+        // on-ring clause matters: an imported hole whose every vertex
+        // sits on the outer ring (SketchUp draws them) is a boundary
+        // case for the strict ray test, whose verdict on such points
+        // differs between native and wasm float rounding — the same
+        // document must load everywhere.
+        if !face.inner_loops.is_empty() {
+            let outer_pts: Vec<crate::math::Point3> =
+                self.loop_positions(face.outer_loop).collect();
+            let normal = face.plane.normal();
+            let on_ring = |p: crate::math::Point3| {
+                let n = outer_pts.len();
+                (0..n).any(|i| {
+                    crate::geom2d::point_near_segment(
+                        p,
+                        outer_pts[i],
+                        outer_pts[(i + 1) % n],
+                        crate::tol::POINT_MERGE,
+                    )
+                })
+            };
+            for &inner_id in &face.inner_loops {
+                let hole_pts: Vec<crate::math::Point3> = self.loop_positions(inner_id).collect();
+                let any_inside = hole_pts.iter().any(|&p| {
+                    crate::geom2d::point_inside_polygon(p, &outer_pts, normal) || on_ring(p)
+                });
+                // No stretch of a hole edge leaves the face: no proper
+                // crossing, and each piece of a hole edge between the
+                // outer vertices on it lies inside the outer ring or on
+                // it (within the object's planarity tolerance, so
+                // imported rings that graze it still load). A native
+                // object's hole never runs along an outer edge (two
+                // loops never share an edge, and drafting makes such a
+                // run one edge); an imported hole may (SketchUp draws
+                // them). Crossings are decided in the face's plane, with
+                // contact within `POINT_MERGE` metres of an end a touch
+                // (DEVELOPMENT.md rule 6), whatever the edge lengths.
+                let imported = self.planarity_tol > crate::tol::PLANE_DIST;
+                let leaves = crate::geom2d::hole_leaves_outer(
+                    &outer_pts,
+                    &hole_pts,
+                    normal,
+                    self.planarity_tol.max(crate::tol::POINT_MERGE),
+                    imported,
+                );
+                if !any_inside || leaves {
+                    return Err(TopologyError::HoleOutsideFace {
+                        face: f,
+                        loop_id: inner_id,
+                    });
+                }
+            }
+        }
+        // A present analytic surface must agree with the geometry it
+        // claims to describe (map-or-drop's enforcement half): the weak
+        // per-class conditions every chord facet satisfies
+        // (`surface::validate_face_claim`).
+        if let Some(claim) = face.surface {
+            let points: Vec<crate::math::Point3> = std::iter::once(face.outer_loop)
+                .chain(face.inner_loops.iter().copied())
+                .flat_map(|l| self.loop_positions(l))
+                .collect();
+            if !crate::surface::validate_face_claim(
+                &claim,
+                &face.plane,
+                &points,
+                self.planarity_tol,
+            ) {
+                return Err(TopologyError::FaceSurfaceMismatch { face: f });
+            }
+        }
+        Ok(())
+    }
+
+    /// One loop belongs to the face it names.
+    fn validate_loop_face(
+        &self,
+        l: crate::ids::LoopId,
+        lp: &crate::topo::Loop,
+    ) -> Result<(), TopologyError> {
+        let face = self
+            .faces
+            .get(lp.face)
+            .ok_or(TopologyError::DanglingHandle {
+                context: "loop face",
+            })?;
+        let belongs = face.outer_loop == l || face.inner_loops.contains(&l);
+        if !belongs {
+            return Err(TopologyError::LoopFaceMismatch { loop_id: l });
+        }
+        Ok(())
+    }
+
+    /// The plane a saved file recomputes for one face exists.
+    fn validate_reopens(
+        &self,
+        f: crate::ids::FaceId,
+        face: &crate::topo::Face,
+    ) -> Result<(), TopologyError> {
+        let outer_ring: Vec<crate::math::Point3> = self.loop_positions(face.outer_loop).collect();
+        if crate::serialize::outer_ring_plane(
+            &outer_ring,
+            self.planarity_tol > crate::tol::PLANE_DIST,
+        )
+        .is_err()
+        {
+            return Err(TopologyError::FaceTooSmallToReopen { face: f });
+        }
         Ok(())
     }
 
@@ -941,6 +1157,20 @@ pub(crate) mod tests {
         tri.half_edges[hes[2]].origin = first;
         assert_eq!(
             tri.validate(),
+            Err(TopologyError::LoopNotSimple { loop_id: l })
+        );
+    }
+
+    #[test]
+    fn local_validation_catches_a_loop_visiting_a_vertex_twice() {
+        let mut tri = Object::triangle();
+        let l = tri.loops.keys().next().unwrap();
+        let f = tri.faces.keys().next().unwrap();
+        let hes: Vec<HalfEdgeId> = tri.loop_half_edges(l).collect();
+        let first = tri.half_edges[hes[0]].origin;
+        tri.half_edges[hes[2]].origin = first;
+        assert_eq!(
+            tri.validate_local(&[f]),
             Err(TopologyError::LoopNotSimple { loop_id: l })
         );
     }

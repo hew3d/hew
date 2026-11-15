@@ -89,23 +89,29 @@
 //! refused as a bogus `DegenerateContact`. [`collect_faces`] imprints such
 //! in-plane partner edges as authoritative seams, exactly like coplanar rims.
 
-use slotmap::SecondaryMap;
-
 use crate::attr::AttrDict;
 use crate::geom2d::{plane_axes, point_inside_polygon};
-use crate::ids::FaceId;
+use crate::ids::{EdgeId, FaceId, VertexId};
 use crate::material::{FaceMaterial, UvFrame};
 use crate::math::{Plane, Point3, Vec3};
 use crate::ops::{BooleanError, BooleanOp, Operand};
 use crate::sketch::Sketch;
 use crate::tol;
-use crate::topo::{Object, Shell, SurfaceRef, WatertightState};
+use std::collections::BTreeMap;
+
+use crate::rederive::Provenance;
+use crate::topo::{BlendTag, Object, SurfaceRef, WatertightState};
 use crate::transform::Transform;
 
 /// A face flattened to position lists for geometric queries: the outer boundary,
 /// any hole boundaries, the supporting (oriented) plane, its material,
 /// and its UV frame ( extension).
 struct FacePoly {
+    /// The owning operand's planarity tolerance: how far this face's own
+    /// vertices may lie from its plane (`PLANE_DIST` native,
+    /// `IMPORT_PLANE_DIST` imported). Every "is this point on the plane"
+    /// test against this face uses it; points are never projected.
+    plane_tol: f64,
     outer: Vec<Point3>,
     holes: Vec<Vec<Point3>>,
     plane: Plane,
@@ -113,9 +119,39 @@ struct FacePoly {
     back_material: FaceMaterial,
     uv_frame: Option<UvFrame>,
     surface: Option<SurfaceRef>,
+    blend: Option<BlendTag>,
     /// The operand face's attribute dictionary (empty = none), carried by
     /// value: the result is a new Object with its own slot table.
     attrs: AttrDict,
+    /// The operand face this came from (re-derivation's provenance).
+    source: Provenance,
+    /// The face's own vertices by exact position, sorted: which operand
+    /// vertex a sub-face corner is when the arrangement kept it.
+    ids: Vec<([u64; 3], VertexId)>,
+    /// A face of its operand the other operand's box does not reach: it
+    /// is kept or dropped whole, never arranged (see [`execute`]).
+    far: bool,
+}
+
+/// An operand vertex a result corner is: `(side, vertex)` (side 0 = A,
+/// 1 = B), or `None` for a point the boolean made (a seam point). Corners
+/// that are the same operand vertex stay one vertex in the result, and two
+/// distinct vertices of one operand never merge (a mended scan keeps
+/// coincident copies at a pinch apart on purpose).
+type Ident = Option<(u8, VertexId)>;
+
+fn pos_key(p: Point3) -> [u64; 3] {
+    [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]
+}
+
+impl FacePoly {
+    fn ident(&self, p: Point3) -> Ident {
+        let k = pos_key(p);
+        self.ids
+            .binary_search_by(|(q, _)| q.cmp(&k))
+            .ok()
+            .map(|i| (self.source.side, self.ids[i].1))
+    }
 }
 
 /// A sub-face produced by the arrangement: oriented loops in the face's plane.
@@ -134,8 +170,14 @@ struct OrientedFace {
     back_material: FaceMaterial,
     uv_frame: Option<UvFrame>,
     surface: Option<SurfaceRef>,
+    blend: Option<BlendTag>,
     /// The source face's attribute dictionary (empty = none).
     attrs: AttrDict,
+    /// The operand face this came from (re-derivation's provenance).
+    source: Provenance,
+    /// The operand vertex each outer / hole corner is, parallel to the loops.
+    outer_ids: Vec<Ident>,
+    hole_ids: Vec<Vec<Ident>>,
 }
 
 /// Which operand a batch of faces comes from (selection rules differ for
@@ -153,6 +195,35 @@ pub(crate) fn execute(
     b: &Object,
     b_to_a: &Transform,
 ) -> Result<Object, BooleanError> {
+    execute_region(op, a, b, b_to_a).map(|(o, _)| o)
+}
+
+/// What a boolean rebuilt when it kept one operand's untouched faces as
+/// they were ([`execute_region`]): the result's new faces, and the faces of
+/// each operand it arranged (the "near" faces, which the other operand's
+/// box reaches). The document's seam cleanup looks only there.
+pub(crate) struct BooleanTouch {
+    pub new_faces: Vec<FaceId>,
+    pub near: [Vec<FaceId>; 2],
+}
+
+/// [`execute`], also returning what it rebuilt when it kept an operand's
+/// untouched faces in place.
+///
+/// Large models: a face of one operand whose (padded) box misses the other
+/// operand's box cannot meet it, so it lies wholly inside or outside the
+/// result (outside the other solid: kept by union, by subtract on A,
+/// dropped otherwise) and is never arranged. When some are kept, the
+/// operand with more of them is the base: the result is that operand with
+/// its arranged faces swapped for the new ones ([`Object::splice_closed`]),
+/// so its untouched faces, their edges, vertices, ids and marks stay as
+/// they were, and the cost follows the touched region, not the model.
+pub(crate) fn execute_region(
+    op: BooleanOp,
+    a: &Object,
+    b: &Object,
+    b_to_a: &Transform,
+) -> Result<(Object, Option<BooleanTouch>), BooleanError> {
     if a.watertight() != WatertightState::Watertight {
         return Err(BooleanError::OperandNotSolid { which: Operand::A });
     }
@@ -165,17 +236,54 @@ pub(crate) fn execute(
 
     // Everything happens in `a`'s frame.
     let b_in_a = transformed_object(b, b_to_a)?;
-    let a_polys = face_polys(a);
-    let b_polys = face_polys(&b_in_a);
+    let operands: [&Object; 2] = [a, &b_in_a];
+    let blend_offset = a.max_blend_id().map_or(0, |m| m.0);
+    let solids = [RaySolid::new(a), RaySolid::new(&b_in_a)];
+    let reach = [solids[0].bounds(), solids[1].bounds()];
+    // near[s][i]: face i of operand s meets the other operand's box.
+    let near: [Vec<bool>; 2] = [0, 1].map(|s| {
+        solids[s]
+            .faces
+            .iter()
+            .map(|f| reach[1 - s].is_some_and(|r| boxes_overlap(f.2, r)))
+            .collect()
+    });
+    let far_count = |s: usize| near[s].iter().filter(|&&n| !n).count();
+    // Far faces lie outside the other solid: union keeps both sides',
+    // subtract keeps A's, intersect none.
+    let far_kept = |s: usize| match op {
+        BooleanOp::Union => true,
+        BooleanOp::Subtract => s == 0,
+        BooleanOp::Intersect => false,
+    };
+    let base: Option<usize> = match op {
+        BooleanOp::Union if far_count(0) >= far_count(1) && far_count(0) > 0 => Some(0),
+        BooleanOp::Union if far_count(1) > 0 => Some(1),
+        BooleanOp::Subtract if far_count(0) > 0 => Some(0),
+        _ => None,
+    };
+
+    // The faces each side processes, in face order: its near faces, plus
+    // (off the base) its kept far faces, passed through whole.
+    let polys: [Vec<FacePoly>; 2] = [0, 1].map(|s| {
+        let obj = operands[s];
+        solids[s]
+            .faces
+            .iter()
+            .zip(&near[s])
+            .filter(|&(_, &n)| n || (far_kept(s) && base != Some(s)))
+            .map(|(&(fid, _, _), &n)| {
+                face_poly(obj, fid, s as u8, if s == 1 { blend_offset } else { 0 }, !n)
+            })
+            .collect()
+    });
+    let near_polys: [Vec<&FacePoly>; 2] =
+        [0, 1].map(|s| polys[s].iter().filter(|p| !p.far).collect());
 
     let mut faces = Vec::new();
-    let a_dropped = collect_faces(op, Side::A, &a_polys, &b_polys, &mut faces)?;
+    let a_dropped = collect_faces(op, Side::A, &polys[0], &near_polys[1], &solids, &mut faces)?;
     let a_kept = faces.len();
-    collect_faces(op, Side::B, &a_polys, &b_polys, &mut faces)?;
-
-    if faces.is_empty() {
-        return Err(BooleanError::EmptyResult);
-    }
+    collect_faces(op, Side::B, &polys[1], &near_polys[0], &solids, &mut faces)?;
     // A Subtract removes volume exactly when the arrangement changes `a`'s
     // skin: it drops a sub-face of `a` (that patch of `a`'s boundary lies
     // inside `b`, so the material behind it goes — a whole swallowed shell
@@ -189,15 +297,138 @@ pub(crate) fn execute(
     // nothing here.) This reads the arrangement's own classification, so it
     // adds no tolerance beyond the arrangement's (`tol::PLANE_DIST`,
     // `tol::POINT_MERGE`) and does not depend on where the operands sit.
-    if op == BooleanOp::Subtract && a_dropped == 0 && faces.len() == a_kept {
+    // (Faces of `a` that miss `b`'s box are never arranged, so they are
+    // neither dropped nor counted among the kept ones above.)
+    if op == BooleanOp::Subtract
+        && a_dropped == 0
+        && faces.len() == a_kept
+        && !(faces.is_empty() && base.is_none())
+    {
         return Err(BooleanError::NothingRemoved);
     }
-    let mut result = assemble(faces, a.planarity_tol.max(b.planarity_tol))?;
-    // The result inherits operand A's base material ( follow-up), so a
-    // subtract's carved walls from an unpainted cutter resolve to the carved
-    // solid's color, and a union keeps the primary operand's base.
+
+    let planarity_tol = a.planarity_tol.max(b.planarity_tol);
+    let Some(base) = base else {
+        if faces.is_empty() {
+            return Err(BooleanError::EmptyResult);
+        }
+        let (mut result, prov) = assemble(faces, planarity_tol, operands)?;
+        // Booleans rebuild edges bare; re-derive the soft seams, creases and
+        // circle claims the operands' geometry still supports (true-curves.md
+        // §3.3 rule 1), then hold the result to the validator again.
+        crate::rederive::rederive_after_boolean(&mut result, a, &b_in_a, &prov);
+        result.check_invariants();
+        result
+            .validate()
+            .map_err(|_| BooleanError::DegenerateContact)?;
+        // The result inherits operand A's base material ( follow-up), so a
+        // subtract's carved walls from an unpainted cutter resolve to the carved
+        // solid's color, and a union keeps the primary operand's base.
+        result.default_material = a.default_material;
+        return Ok((result, None));
+    };
+
+    let near_ids: [Vec<FaceId>; 2] = [0, 1].map(|s| {
+        solids[s]
+            .faces
+            .iter()
+            .zip(&near[s])
+            .filter(|&(_, &n)| n)
+            .map(|(f, _)| f.0)
+            .collect()
+    });
+    let (mut result, new_faces, new_prov) = assemble_onto(
+        base,
+        &near_ids[base],
+        faces,
+        planarity_tol,
+        operands,
+        blend_offset,
+    )?;
+
+    // Re-derive the marks of the new faces' edges (as the full build does
+    // for every edge), and of the kept faces' edges where a surface claim
+    // could change the answer; the full build also drops every polygon
+    // claim, which the kept faces' edges follow.
+    let new_set: BTreeMap<FaceId, Provenance> = new_faces.iter().copied().zip(new_prov).collect();
+    let base_side = base as u8;
+    let prov = |f: FaceId| {
+        new_set.get(&f).copied().or(Some(Provenance {
+            side: base_side,
+            face: f,
+        }))
+    };
+    let mut edges: Vec<EdgeId> = Vec::new();
+    for &f in &new_faces {
+        for l in result.face_loops(f) {
+            edges.extend(
+                result
+                    .loop_half_edges(l)
+                    .map(|h| result.half_edges()[h].edge),
+            );
+        }
+    }
+    let claimed: Vec<FaceId> = result
+        .faces()
+        .iter()
+        .filter(|(f, face)| face.surface.is_some() && !new_set.contains_key(f))
+        .map(|(f, _)| f)
+        .collect();
+    for &f in &claimed {
+        for l in result.face_loops(f) {
+            edges.extend(
+                result
+                    .loop_half_edges(l)
+                    .map(|h| result.half_edges()[h].edge),
+            );
+        }
+    }
+    edges.sort_unstable();
+    edges.dedup();
+    let mut sources = near_ids.clone();
+    sources[base].extend(claimed.iter().copied());
+    let before: Vec<(bool, bool, Option<crate::sketch::CurveGeom>)> = edges
+        .iter()
+        .map(|&e| {
+            let x = result.edges()[e];
+            (x.soft, x.crease, x.curve)
+        })
+        .collect();
+    crate::rederive::rederive_edges_after_boolean(
+        &mut result,
+        operands,
+        [&sources[0], &sources[1]],
+        &edges,
+        &prov,
+    );
+    let mut check: Vec<FaceId> = new_faces.clone();
+    for (&e, was) in edges.iter().zip(&before) {
+        let x = result.edges()[e];
+        if (x.soft, x.crease, x.curve) != *was {
+            for h in std::iter::once(x.half_edge).chain(x.twin_half_edge) {
+                check.push(result.loops()[result.half_edges()[h].loop_id].face);
+            }
+        }
+    }
+    if result.edges().values().any(|e| e.polygon.is_some()) {
+        for e in result.edges.values_mut() {
+            e.polygon = None;
+        }
+    }
+    check.sort_unstable();
+    check.dedup();
+    result
+        .validate_local(&check)
+        .map_err(|_| BooleanError::DegenerateContact)?;
+    result.check_invariants();
     result.default_material = a.default_material;
-    Ok(result)
+    Ok((
+        result,
+        Some(BooleanTouch {
+            new_faces,
+            near: near_ids,
+        }),
+    ))
 }
 
 /// A copy of `obj` with `t` baked into every vertex position and face plane.
@@ -214,25 +445,88 @@ fn transformed_object(obj: &Object, t: &Transform) -> Result<Object, BooleanErro
     Ok(out)
 }
 
-/// Flattens every face of `obj` to a [`FacePoly`].
-fn face_polys(obj: &Object) -> Vec<FacePoly> {
-    obj.faces()
-        .values()
-        .map(|f| FacePoly {
-            outer: obj.loop_positions(f.outer_loop).collect(),
-            holes: f
-                .inner_loops
-                .iter()
-                .map(|&l| obj.loop_positions(l).collect())
-                .collect(),
-            plane: f.plane,
-            material: f.material,
-            back_material: f.back_material,
-            uv_frame: f.uv_frame,
-            surface: f.surface,
-            attrs: obj.attr_dict(f.attrs).cloned().unwrap_or_default(),
+/// Flattens one face of `obj` to a [`FacePoly`].
+fn face_poly(obj: &Object, fid: FaceId, side: u8, blend_offset: u32, far: bool) -> FacePoly {
+    let f = &obj.faces()[fid];
+    let mut ids: Vec<([u64; 3], VertexId)> = std::iter::once(f.outer_loop)
+        .chain(f.inner_loops.iter().copied())
+        .flat_map(|l| obj.loop_half_edges(l).collect::<Vec<_>>())
+        .map(|h| {
+            let v = obj.half_edges()[h].origin;
+            (pos_key(obj.vertices()[v].position), v)
         })
-        .collect()
+        .collect();
+    ids.sort_unstable();
+    FacePoly {
+        plane_tol: obj.planarity_tol,
+        outer: obj.loop_positions(f.outer_loop).collect(),
+        holes: f
+            .inner_loops
+            .iter()
+            .map(|&l| obj.loop_positions(l).collect())
+            .collect(),
+        plane: f.plane,
+        material: f.material,
+        back_material: f.back_material,
+        uv_frame: f.uv_frame,
+        surface: f.surface,
+        // Operand B's blend ids move past A's largest, so two blends
+        // never share an id on the result.
+        blend: f.blend.map(|t| BlendTag {
+            id: crate::topo::BlendId(t.id.0 + blend_offset),
+            ..t
+        }),
+        attrs: obj.attr_dict(f.attrs).cloned().unwrap_or_default(),
+        source: Provenance { side, face: fid },
+        ids,
+        far,
+    }
+}
+
+/// An operand as a ray-cast target: every face's plane and padded box, in
+/// face order, its loops read from the object only for the faces a ray
+/// lands in the box of ([`ray_cast`]).
+struct RaySolid<'a> {
+    obj: &'a Object,
+    faces: Vec<(FaceId, Plane, (Point3, Point3))>,
+}
+
+impl<'a> RaySolid<'a> {
+    fn new(obj: &'a Object) -> RaySolid<'a> {
+        let pad = 2.0 * obj.planarity_tol + 16.0 * tol::POINT_MERGE;
+        let faces = obj
+            .faces()
+            .iter()
+            .map(|(fid, f)| {
+                let mut pts = std::iter::once(f.outer_loop)
+                    .chain(f.inner_loops.iter().copied())
+                    .flat_map(|l| obj.loop_positions(l));
+                let first = pts.next().unwrap_or(Point3::ORIGIN);
+                let (mut lo, mut hi) = (first, first);
+                for p in pts {
+                    lo = Point3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+                    hi = Point3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+                }
+                let bx = (
+                    Point3::new(lo.x - pad, lo.y - pad, lo.z - pad),
+                    Point3::new(hi.x + pad, hi.y + pad, hi.z + pad),
+                );
+                (fid, f.plane, bx)
+            })
+            .collect();
+        RaySolid { obj, faces }
+    }
+
+    /// The union of the face boxes, `None` for no faces.
+    fn bounds(&self) -> Option<(Point3, Point3)> {
+        let mut it = self.faces.iter().map(|f| f.2);
+        let (mut lo, mut hi) = it.next()?;
+        for (a, b) in it {
+            lo = Point3::new(lo.x.min(a.x), lo.y.min(a.y), lo.z.min(a.z));
+            hi = Point3::new(hi.x.max(b.x), hi.y.max(b.y), hi.z.max(b.z));
+        }
+        Some((lo, hi))
+    }
 }
 
 /// Arranges each face of one operand against the other, classifies every
@@ -247,14 +541,11 @@ fn face_polys(obj: &Object) -> Vec<FacePoly> {
 fn collect_faces(
     op: BooleanOp,
     this_side: Side,
-    a_polys: &[FacePoly],
-    b_polys: &[FacePoly],
+    these: &[FacePoly],
+    others: &[&FacePoly],
+    solids: &[RaySolid; 2],
     out: &mut Vec<OrientedFace>,
 ) -> Result<usize, BooleanError> {
-    let (these, others) = match this_side {
-        Side::A => (a_polys, b_polys),
-        Side::B => (b_polys, a_polys),
-    };
     // Points where a face of this operand holds two rings through one
     // vertex (a hole touching its outer ring, or another hole).
     let touch_points: Vec<Point3> = these
@@ -279,11 +570,39 @@ fn collect_faces(
     // them equally in or out of the result): for a subtract, the patches of
     // `a`'s skin that lie inside `b`.
     let mut dropped = 0usize;
+    // Coincidence candidates by the grid cells of their outer vertices: a
+    // face coinciding with `f` has a vertex within POINT_MERGE of
+    // `f.outer[0]`, so only faces listed in that point's 27 cells can match
+    // — the same answer as scanning every kept face, without the quadratic
+    // cost (KB-25).
+    let mut kept_cells: BTreeMap<[i64; 3], Vec<usize>> = BTreeMap::new();
+    for (i, f) in out.iter().enumerate() {
+        index_face_cells(&mut kept_cells, f, i);
+    }
+    let other_boxes: Vec<(Point3, Point3)> = others.iter().map(|o| padded_box(o)).collect();
     for fp in these {
         let na = fp.plane.normal();
+        if fp.far {
+            // Untouched by the other operand and kept: passed through whole.
+            let face = OrientedFace::new(
+                Region {
+                    outer: fp.outer.clone(),
+                    holes: fp.holes.clone(),
+                },
+                fp,
+                false,
+            )?;
+            index_face_cells(&mut kept_cells, &face, out.len());
+            out.push(face);
+            continue;
+        }
 
         // Partner faces of the other operand lying in this face's plane.
-        let coplanar: Vec<&FacePoly> = others.iter().filter(|o| coplanar_planes(fp, o)).collect();
+        let coplanar: Vec<&FacePoly> = others
+            .iter()
+            .copied()
+            .filter(|o| coplanar_planes(fp, o))
+            .collect();
 
         // Imprint: transversal seams (empty for parallel planes) plus coplanar
         // partner boundaries and partner edges lying in this face's plane, minus
@@ -329,7 +648,7 @@ fn collect_faces(
         // touch point — a ridge pressed into a face — stays imprinted and
         // refuses at the weld, as before.)
         let mut tangent_only: Vec<(Point3, Point3)> = Vec::new();
-        for ofp in others {
+        for &ofp in others {
             if coplanar_planes(fp, ofp) {
                 continue; // its edges are already collected above
             }
@@ -357,7 +676,13 @@ fn collect_faces(
         }
 
         let mut seams: Vec<(Point3, Point3)> = Vec::new();
-        for ofp in others {
+        let fp_box = padded_box(fp);
+        for (ofp, ob) in others.iter().zip(&other_boxes) {
+            // A seam lies on both faces, so faces whose padded boxes are
+            // disjoint have none — skipping them changes nothing (KB-25).
+            if !boxes_overlap(fp_box, *ob) {
+                continue;
+            }
             for seg in seam_segments(fp, ofp) {
                 // A partner face perpendicular to `fp` that meets it exactly along a
                 // coplanar partner's rim — a cylinder's side wall meeting this face
@@ -381,11 +706,18 @@ fn collect_faces(
             push_unique_segment(&mut seams, seg, fp);
         }
 
-        for region in arrange_face(fp, &seams)? {
-            // Off any line the partner only touches: a point there sits on
-            // the partner's boundary, where its membership is undecidable.
-            // No such point (every candidate on such a line) is no decidable
-            // classification: refused, never guessed.
+        // Nothing crosses the face: it is its own one region (the region
+        // tracer would trace back the same loops), unless a loop has two
+        // corners closer than the tracer merges.
+        let regions = if seams.is_empty() && !has_merged_corner(fp) {
+            vec![Region {
+                outer: fp.outer.clone(),
+                holes: fp.holes.clone(),
+            }]
+        } else {
+            arrange_face(fp, &seams)?
+        };
+        for region in regions {
             let c = interior_point(&region, na, &tangent_only)
                 .ok_or(BooleanError::DegenerateContact)?;
             // Coplanar partner boundaries can trace regions outside the original
@@ -393,24 +725,17 @@ fn collect_faces(
             if !region_contains(fp, c) {
                 continue;
             }
-            let Some(flip) = classify(op, this_side, na, c, a_polys, b_polys, &coplanar) else {
+            let Some(flip) = classify(op, this_side, na, c, solids, &coplanar) else {
                 dropped += 1;
                 continue;
             };
             {
-                let face = OrientedFace::new(
-                    region,
-                    fp.plane,
-                    flip,
-                    (fp.material, fp.back_material),
-                    fp.uv_frame,
-                    fp.surface,
-                    &fp.attrs,
-                )?;
+                let face = OrientedFace::new(region, fp, flip)?;
                 // A coincident shared patch is produced by both operands (e.g.
                 // a shared ground for union, or A's top vs B's flipped bottom for
                 // subtract). Both describe one boundary face — keep the first.
-                if !out.iter().any(|f| faces_coincide(f, &face)) {
+                if !coincides_with_kept(&kept_cells, out, &face) {
+                    index_face_cells(&mut kept_cells, &face, out.len());
                     out.push(face);
                 }
             }
@@ -434,13 +759,12 @@ fn classify(
     this_side: Side,
     na: Vec3,
     c: Point3,
-    a_polys: &[FacePoly],
-    b_polys: &[FacePoly],
+    solids: &[RaySolid; 2],
     coplanar: &[&FacePoly],
 ) -> Option<bool> {
     let others = match this_side {
-        Side::A => b_polys,
-        Side::B => a_polys,
+        Side::A => &solids[1],
+        Side::B => &solids[0],
     };
     let (other_in, other_out) = match cover_normal(coplanar, c) {
         Some(no) => (na.dot(no) > 0.0, na.dot(no) < 0.0),
@@ -476,7 +800,7 @@ fn op_member(op: BooleanOp, a: bool, b: bool) -> bool {
 fn cover_normal(coplanar: &[&FacePoly], c: Point3) -> Option<Vec3> {
     coplanar
         .iter()
-        .find(|cp| region_contains(cp, c))
+        .find(|cp| region_contains(**cp, c))
         .map(|cp| cp.plane.normal())
 }
 
@@ -484,10 +808,10 @@ fn cover_normal(coplanar: &[&FacePoly], c: Point3) -> Option<Vec3> {
 /// `fp`'s plane) lies strictly on one side of that plane away from the edge:
 /// every other vertex farther than [`tol::PLANE_DIST`], all on one side. The
 /// partner then touches `fp`'s plane along the edge without crossing it.
-fn partner_only_touches_along(fp: &FacePoly, others: &[FacePoly], p: Point3, q: Point3) -> bool {
+fn partner_only_touches_along(fp: &FacePoly, others: &[&FacePoly], p: Point3, q: Point3) -> bool {
     let mut side = 0.0f64;
     let mut faces = 0;
-    for o in others {
+    for &o in others {
         let holds = std::iter::once(&o.outer)
             .chain(o.holes.iter())
             .any(|r| loop_edges(r).any(|(a, b)| seg_eq(a, b, p, q)));
@@ -583,16 +907,53 @@ fn faces_coincide(f: &OrientedFace, g: &OrientedFace) -> bool {
             .all(|p| g.outer.iter().any(|q| p.approx_eq(*q, tol::POINT_MERGE)))
 }
 
+/// Lists face `i` under the grid cell of each of its outer vertices.
+fn index_face_cells(cells: &mut BTreeMap<[i64; 3], Vec<usize>>, f: &OrientedFace, i: usize) {
+    for &p in &f.outer {
+        let list = cells.entry(Interner::cell(p)).or_default();
+        if list.last() != Some(&i) {
+            list.push(i);
+        }
+    }
+}
+
+/// Whether a kept face coincides with `face` (see [`faces_coincide`]).
+fn coincides_with_kept(
+    cells: &BTreeMap<[i64; 3], Vec<usize>>,
+    out: &[OrientedFace],
+    face: &OrientedFace,
+) -> bool {
+    let Some(&p) = face.outer.first() else {
+        return out.iter().any(|f| faces_coincide(f, face));
+    };
+    let [cx, cy, cz] = Interner::cell(p);
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                if let Some(list) = cells.get(&[cx + dx, cy + dy, cz + dz])
+                    && list.iter().any(|&i| faces_coincide(&out[i], face))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 impl OrientedFace {
-    fn new(
-        region: Region,
-        plane: Plane,
-        flip: bool,
-        (material, back_material): (FaceMaterial, FaceMaterial),
-        uv_frame: Option<UvFrame>,
-        surface: Option<SurfaceRef>,
-        attrs: &AttrDict,
-    ) -> Result<OrientedFace, BooleanError> {
+    fn new(region: Region, fp: &FacePoly, flip: bool) -> Result<OrientedFace, BooleanError> {
+        let (plane, material, back_material, uv_frame) =
+            (fp.plane, fp.material, fp.back_material, fp.uv_frame);
+        let (surface, blend, source) = (fp.surface, fp.blend, fp.source);
+        let attrs = &fp.attrs;
+        let source_tol = fp.plane_tol;
+        let mut outer_ids: Vec<Ident> = region.outer.iter().map(|&p| fp.ident(p)).collect();
+        let mut hole_ids: Vec<Vec<Ident>> = region
+            .holes
+            .iter()
+            .map(|h| h.iter().map(|&p| fp.ident(p)).collect())
+            .collect();
         if !flip {
             return Ok(OrientedFace {
                 outer: region.outer,
@@ -602,8 +963,17 @@ impl OrientedFace {
                 back_material,
                 uv_frame,
                 surface,
+                blend,
                 attrs: attrs.clone(),
+                source,
+                outer_ids,
+                hole_ids,
             });
+        }
+        let source_degenerate = crate::health::ring_is_degenerate(&fp.outer);
+        outer_ids.reverse();
+        for h in &mut hole_ids {
+            h.reverse();
         }
         // Reverse every loop and refit the plane so its normal matches the new
         // winding (the subtracted solid's walls face into the removed volume).
@@ -617,7 +987,27 @@ impl OrientedFace {
                 h
             })
             .collect();
-        let plane = Plane::from_polygon(&outer).map_err(|_| BooleanError::DegenerateContact)?;
+        // An imported operand's cut can leave a ring under the area cutoff
+        // the file format accepts (D-70). Otherwise a sliver is the
+        // operand's fault only when its source face was degenerate itself;
+        // cut from a sound face it is a grazing contact (as in `assemble`).
+        let plane = Plane::from_polygon(&outer)
+            .or_else(|e| {
+                if source_tol > tol::PLANE_DIST {
+                    crate::serialize::outer_ring_plane(&outer, true)
+                } else {
+                    Err(e)
+                }
+            })
+            .map_err(|_| {
+                if source_degenerate {
+                    BooleanError::DegenerateInput {
+                        at: centroid(&outer),
+                    }
+                } else {
+                    BooleanError::DegenerateContact
+                }
+            })?;
         Ok(OrientedFace {
             outer,
             holes,
@@ -630,13 +1020,42 @@ impl OrientedFace {
             // orientation-free).
             uv_frame,
             surface,
+            blend,
             // The face's dictionary rides with it, like its paint.
             attrs: attrs.clone(),
+            source,
+            outer_ids,
+            hole_ids,
         })
     }
 }
 
 // ─────────────────────────────────────────────────────────── seam computation
+
+/// `fp`'s bounding box, padded past every point a seam on it can have: its
+/// loops lie within `plane_tol` of its plane, and a seam point lies inside
+/// the loops' projection onto it.
+fn padded_box(fp: &FacePoly) -> (Point3, Point3) {
+    let pad = 2.0 * fp.plane_tol + 16.0 * tol::POINT_MERGE;
+    let (mut lo, mut hi) = (fp.outer[0], fp.outer[0]);
+    for &p in fp.outer.iter().chain(fp.holes.iter().flatten()) {
+        lo = Point3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+        hi = Point3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+    }
+    (
+        Point3::new(lo.x - pad, lo.y - pad, lo.z - pad),
+        Point3::new(hi.x + pad, hi.y + pad, hi.z + pad),
+    )
+}
+
+fn boxes_overlap(a: (Point3, Point3), b: (Point3, Point3)) -> bool {
+    a.0.x <= b.1.x
+        && b.0.x <= a.1.x
+        && a.0.y <= b.1.y
+        && b.0.y <= a.1.y
+        && a.0.z <= b.1.z
+        && b.0.z <= a.1.z
+}
 
 /// The intersection segments of two non-coplanar faces: the line of their planes
 /// clipped to both face regions. Empty if the planes are parallel or the regions
@@ -653,11 +1072,63 @@ fn seam_segments(fa: &FacePoly, fb: &FacePoly) -> Vec<(Point3, Point3)> {
             let lo = a0.max(b0);
             let hi = a1.min(b1);
             if hi - lo > tol::POINT_MERGE {
-                out.push((p0 + dir * lo, p0 + dir * hi));
+                out.push((seam_end(p0, dir, lo, fa, fb), seam_end(p0, dir, hi, fa, fb)));
             }
         }
     }
     out
+}
+
+/// The seam point at parameter `t`. On native faces it is the point of the
+/// planes' line. Where `t` is a crossing of an IMPORTED face's own boundary
+/// edge (a face flat only to its object's tolerance, so the edge lies off the
+/// fitted plane), the seam must end ON that edge, at the same point the face
+/// across the edge computes: the edge meets the other face's plane there,
+/// computed from the edge's endpoints in canonical order so both faces get
+/// identical bits (KB-25; shared by construction, never welded).
+fn seam_end(p0: Point3, dir: Vec3, t: f64, fa: &FacePoly, fb: &FacePoly) -> Point3 {
+    let on_line = p0 + dir * t;
+    for (this, other) in [(fa, fb), (fb, fa)] {
+        if this.plane_tol <= tol::PLANE_DIST {
+            continue;
+        }
+        let normal = this.plane.normal();
+        let loops = std::iter::once(&this.outer).chain(this.holes.iter());
+        for lp in loops {
+            let n = lp.len();
+            for i in 0..n {
+                let (v0, v1) = (lp[i], lp[(i + 1) % n]);
+                let Some(s) = line_segment_param(p0, dir, v0, v1, normal) else {
+                    continue;
+                };
+                if (s - t).abs() > tol::POINT_MERGE {
+                    continue;
+                }
+                let (a, b) = if pos_order(v0, v1) {
+                    (v0, v1)
+                } else {
+                    (v1, v0)
+                };
+                let (da, db) = (
+                    other.plane.signed_distance(a),
+                    other.plane.signed_distance(b),
+                );
+                if (da - db).abs() <= tol::NORMALIZE_MIN_LENGTH {
+                    continue;
+                }
+                return a + (b - a) * (da / (da - db));
+            }
+        }
+    }
+    on_line
+}
+
+/// Whether `a` sorts before (or equals) `b` lexicographically by f64 total order.
+fn pos_order(a: Point3, b: Point3) -> bool {
+    a.x.total_cmp(&b.x)
+        .then(a.y.total_cmp(&b.y))
+        .then(a.z.total_cmp(&b.z))
+        .is_le()
 }
 
 /// A point on, and the unit direction of, the line where two planes meet, or
@@ -741,7 +1212,7 @@ fn line_segment_param(p0: Point3, dir: Vec3, v0: Point3, v1: Point3, normal: Vec
 /// Partitions `fp` into sub-faces by imprinting its boundary and `seams` onto a
 /// fresh sketch on its plane and reading back the traced regions.
 fn arrange_face(fp: &FacePoly, seams: &[(Point3, Point3)]) -> Result<Vec<Region>, BooleanError> {
-    let mut sketch = Sketch::on_plane(fp.plane);
+    let mut sketch = Sketch::on_plane_with_tol(fp.plane, fp.plane_tol);
     add_loop(&mut sketch, &fp.outer)?;
     for h in &fp.holes {
         add_loop(&mut sketch, h)?;
@@ -749,9 +1220,7 @@ fn arrange_face(fp: &FacePoly, seams: &[(Point3, Point3)]) -> Result<Vec<Region>
     for &(p, q) in seams {
         // A zero-length seam carries no information; skip rather than error.
         if !p.approx_eq(q, tol::POINT_MERGE) {
-            sketch
-                .add_segment(p, q)
-                .map_err(|_| BooleanError::DegenerateContact)?;
+            sketch.add_segment(p, q).map_err(|e| sketch_cause(e, p))?;
         }
     }
     Ok(sketch
@@ -772,6 +1241,15 @@ fn arrange_face(fp: &FacePoly, seams: &[(Point3, Point3)]) -> Result<Vec<Region>
         .collect())
 }
 
+/// Whether a loop of `fp` has consecutive corners within `POINT_MERGE`
+/// (which [`add_loop`] would close up).
+fn has_merged_corner(fp: &FacePoly) -> bool {
+    std::iter::once(&fp.outer).chain(fp.holes.iter()).any(|lp| {
+        let n = lp.len();
+        (0..n).any(|i| lp[i].approx_eq(lp[(i + 1) % n], tol::POINT_MERGE))
+    })
+}
+
 /// Adds a closed loop of positions to `sketch` as edges.
 fn add_loop(sketch: &mut Sketch, loop_pts: &[Point3]) -> Result<(), BooleanError> {
     let n = loop_pts.len();
@@ -780,11 +1258,20 @@ fn add_loop(sketch: &mut Sketch, loop_pts: &[Point3]) -> Result<(), BooleanError
         if p.approx_eq(q, tol::POINT_MERGE) {
             continue;
         }
-        sketch
-            .add_segment(p, q)
-            .map_err(|_| BooleanError::DegenerateContact)?;
+        sketch.add_segment(p, q).map_err(|e| sketch_cause(e, p))?;
     }
     Ok(())
+}
+
+/// The typed cause of an arrangement refusal at `at` (KB-25): a point off
+/// its face's plane is a non-planar operand face, a zero-length piece a
+/// degenerate one; anything else is the genuine degenerate contact.
+fn sketch_cause(e: crate::sketch::SketchError, at: Point3) -> BooleanError {
+    match e {
+        crate::sketch::SketchError::PointOffPlane { .. } => BooleanError::NonPlanarInput { at },
+        crate::sketch::SketchError::DegenerateSegment => BooleanError::DegenerateInput { at },
+        _ => BooleanError::DegenerateContact,
+    }
 }
 
 /// A point strictly inside the region, robust to holes (annular regions, where
@@ -868,9 +1355,48 @@ fn centroid(pts: &[Point3]) -> Point3 {
 
 /// True if `p` is strictly inside the face region: inside the outer boundary and
 /// outside every hole.
-fn region_contains(fp: &FacePoly, p: Point3) -> bool {
-    let n = fp.plane.normal();
-    point_inside_polygon(p, &fp.outer, n) && !fp.holes.iter().any(|h| point_inside_polygon(p, h, n))
+/// A face's plane and loops, as the containment queries read them.
+trait Outline {
+    fn plane(&self) -> &Plane;
+    fn outer(&self) -> &[Point3];
+    fn holes(&self) -> &[Vec<Point3>];
+}
+
+impl Outline for FacePoly {
+    fn plane(&self) -> &Plane {
+        &self.plane
+    }
+    fn outer(&self) -> &[Point3] {
+        &self.outer
+    }
+    fn holes(&self) -> &[Vec<Point3>] {
+        &self.holes
+    }
+}
+
+/// One face's loops, read for a ray hit ([`ray_cast`]).
+struct FaceLoops {
+    plane: Plane,
+    outer: Vec<Point3>,
+    holes: Vec<Vec<Point3>>,
+}
+
+impl Outline for FaceLoops {
+    fn plane(&self) -> &Plane {
+        &self.plane
+    }
+    fn outer(&self) -> &[Point3] {
+        &self.outer
+    }
+    fn holes(&self) -> &[Vec<Point3>] {
+        &self.holes
+    }
+}
+
+fn region_contains(fp: &impl Outline, p: Point3) -> bool {
+    let n = fp.plane().normal();
+    point_inside_polygon(p, fp.outer(), n)
+        && !fp.holes().iter().any(|h| point_inside_polygon(p, h, n))
 }
 
 /// A few non-axis-aligned ray directions; the first one whose cast grazes no
@@ -884,25 +1410,30 @@ const RAY_DIRS: [Vec3; 4] = [
 
 /// Point-in-solid by ray-cast parity against a watertight face set. Tries each
 /// candidate direction until one casts cleanly (no boundary graze).
-fn point_in_solid(polys: &[FacePoly], p: Point3) -> bool {
+fn point_in_solid(solid: &RaySolid, p: Point3) -> bool {
     for d in RAY_DIRS {
-        let (count, ambiguous) = ray_cast(polys, p, d);
+        let (count, ambiguous) = ray_cast(solid, p, d);
         if !ambiguous {
             return count % 2 == 1;
         }
     }
-    ray_cast(polys, p, RAY_DIRS[0]).0 % 2 == 1
+    ray_cast(solid, p, RAY_DIRS[0]).0 % 2 == 1
 }
 
 /// Counts forward crossings of the ray `p + t·d` (t > 0) through the face set,
 /// flagging the cast ambiguous if a hit grazes a face boundary or the ray lies
 /// in a face's plane through `p`.
-fn ray_cast(polys: &[FacePoly], p: Point3, d: Vec3) -> (usize, bool) {
+///
+/// A hit outside a face's padded box (which holds every point of the face,
+/// and every point of its plane inside its outline, with margin) is neither
+/// inside the face nor near its boundary, so only faces whose box the hit
+/// lands in read their loops: the same count as testing every face.
+fn ray_cast(solid: &RaySolid, p: Point3, d: Vec3) -> (usize, bool) {
     let mut count = 0;
     let mut ambiguous = false;
-    for fp in polys {
-        let denom = d.dot(fp.plane.normal());
-        let signed = fp.plane.signed_distance(p);
+    for &(fid, plane, (lo, hi)) in &solid.faces {
+        let denom = d.dot(plane.normal());
+        let signed = plane.signed_distance(p);
         if denom.abs() < tol::NORMALIZE_MIN_LENGTH {
             if signed.abs() <= tol::PLANE_DIST {
                 ambiguous = true;
@@ -914,11 +1445,31 @@ fn ray_cast(polys: &[FacePoly], p: Point3, d: Vec3) -> (usize, bool) {
             continue;
         }
         let hit = p + d * t;
-        if near_polygon_boundary(hit, fp) {
+        if hit.x < lo.x
+            || hit.x > hi.x
+            || hit.y < lo.y
+            || hit.y > hi.y
+            || hit.z < lo.z
+            || hit.z > hi.z
+        {
+            continue;
+        }
+        let obj = solid.obj;
+        let f = &obj.faces()[fid];
+        let fp = FaceLoops {
+            plane,
+            outer: obj.loop_positions(f.outer_loop).collect(),
+            holes: f
+                .inner_loops
+                .iter()
+                .map(|&l| obj.loop_positions(l).collect())
+                .collect(),
+        };
+        if near_polygon_boundary(hit, &fp) {
             ambiguous = true;
             continue;
         }
-        if region_contains(fp, hit) {
+        if region_contains(&fp, hit) {
             count += 1;
         }
     }
@@ -926,13 +1477,13 @@ fn ray_cast(polys: &[FacePoly], p: Point3, d: Vec3) -> (usize, bool) {
 }
 
 /// True if `p` lies within [`tol::POINT_MERGE`] of any boundary segment of `fp`.
-fn near_polygon_boundary(p: Point3, fp: &FacePoly) -> bool {
+fn near_polygon_boundary(p: Point3, fp: &impl Outline) -> bool {
     let near = |poly: &[Point3]| {
         (0..poly.len()).any(|i| {
             point_segment_distance(p, poly[i], poly[(i + 1) % poly.len()]) <= tol::POINT_MERGE
         })
     };
-    near(&fp.outer) || fp.holes.iter().any(|h| near(h))
+    near(fp.outer()) || fp.holes().iter().any(|h| near(h))
 }
 
 /// Distance from `p` to the segment `a`–`b`.
@@ -950,35 +1501,66 @@ fn point_segment_distance(p: Point3, a: Point3, b: Point3) -> f64 {
 
 /// Welds the kept faces into a watertight Object, then splits a disconnected
 /// result into one shell per connected component.
-fn assemble(mut faces: Vec<OrientedFace>, planarity_tol: f64) -> Result<Object, BooleanError> {
+/// Builds the result object from the kept faces, and maps each result face
+/// to the operand face it came from (both builders insert faces in input
+/// order, and a fresh slotmap iterates in insertion order).
+fn assemble(
+    mut faces: Vec<OrientedFace>,
+    planarity_tol: f64,
+    operands: [&Object; 2],
+) -> Result<(Object, BTreeMap<FaceId, Provenance>), BooleanError> {
     split_edges_at_vertices(&mut faces);
-    let mut positions: Vec<Point3> = Vec::new();
+    let mut interner = Interner::new();
     let has_holes = faces.iter().any(|f| !f.holes.is_empty());
 
     let mut obj = if !has_holes {
         let polys: Vec<Vec<usize>> = faces
             .iter()
-            .map(|f| f.outer.iter().map(|&p| intern(p, &mut positions)).collect())
+            .map(|f| {
+                f.outer
+                    .iter()
+                    .zip(&f.outer_ids)
+                    .map(|(&p, &id)| interner.intern_id(p, id))
+                    .collect()
+            })
             .collect();
+        let positions = std::mem::take(&mut interner.positions);
         // Result faces inherit their source face's material, UV frame, and
         // analytic surface.
         let materials: Vec<FaceMaterial> = faces.iter().map(|f| f.material).collect();
         let uv_frames: Vec<Option<UvFrame>> = faces.iter().map(|f| f.uv_frame).collect();
         let surfaces: Vec<Option<SurfaceRef>> = faces.iter().map(|f| f.surface).collect();
         let attrs: Vec<AttrDict> = faces.iter().map(|f| f.attrs.clone()).collect();
-        Object::from_polygons_with_materials_and_frames(
-            &positions, &polys, &materials, &uv_frames, &surfaces, &attrs,
+        Object::from_polygons_with_attrs_tol(
+            &positions,
+            &polys,
+            &materials,
+            &uv_frames,
+            &surfaces,
+            &attrs,
+            planarity_tol,
         )
-        .map_err(|_| BooleanError::DegenerateContact)?
+        .map_err(|e| build_error(e, &faces, operands))?
     } else {
         let with_holes: Vec<_> = faces
             .iter()
             .map(|f| {
-                let outer = f.outer.iter().map(|&p| intern(p, &mut positions)).collect();
+                let outer = f
+                    .outer
+                    .iter()
+                    .zip(&f.outer_ids)
+                    .map(|(&p, &id)| interner.intern_id(p, id))
+                    .collect();
                 let holes = f
                     .holes
                     .iter()
-                    .map(|h| h.iter().map(|&p| intern(p, &mut positions)).collect())
+                    .zip(&f.hole_ids)
+                    .map(|(h, ids)| {
+                        h.iter()
+                            .zip(ids)
+                            .map(|(&p, &id)| interner.intern_id(p, id))
+                            .collect()
+                    })
                     .collect();
                 (
                     outer,
@@ -991,10 +1573,31 @@ fn assemble(mut faces: Vec<OrientedFace>, planarity_tol: f64) -> Result<Object, 
                 )
             })
             .collect();
-        Object::from_faces_with_holes(&positions, &with_holes)
+        Object::from_faces_with_holes(&interner.positions, &with_holes)
     };
     let backs: Vec<FaceMaterial> = faces.iter().map(|f| f.back_material).collect();
     obj.set_built_back_materials(&backs);
+    // Sub-faces inherit their source face's blend tag, like its claim.
+    let blends: Vec<Option<BlendTag>> = faces.iter().map(|f| f.blend).collect();
+    obj.set_built_blends(&blends);
+    // And the records of the blends that survive: B's behind A's, as its
+    // tags are.
+    let [a, b_in_a] = operands;
+    let blend_offset = a.max_blend_id().map_or(0, |m| m.0);
+    let seq_offset = a
+        .blend_records()
+        .values()
+        .map(|r| r.seq.saturating_add(1))
+        .max()
+        .unwrap_or(0);
+    let mut records = a.blend_records().clone();
+    for (id, rec) in b_in_a.blend_records() {
+        records.insert(
+            crate::topo::BlendId(id.0.saturating_add(blend_offset)),
+            rec.with_ids_offset(blend_offset, seq_offset),
+        );
+    }
+    obj.set_blend_records(records);
 
     // The result is no more planar than its loosest operand: imported
     // geometry is flat only to `IMPORT_PLANE_DIST`, and boolean faces
@@ -1008,7 +1611,7 @@ fn assemble(mut faces: Vec<OrientedFace>, planarity_tol: f64) -> Result<Object, 
     if obj.watertight() != WatertightState::Watertight {
         return Err(BooleanError::DegenerateContact);
     }
-    resplit_shells(&mut obj);
+    crate::patch::resplit_shells(&mut obj);
     obj.check_invariants();
     // Always-on backstop (generalized in): release WASM compiles out
     // check_invariants(), so re-validate the result and refuse a boolean that
@@ -1016,7 +1619,219 @@ fn assemble(mut faces: Vec<OrientedFace>, planarity_tol: f64) -> Result<Object, 
     // "no manifold result" channel, matching the watertight check above).
     obj.validate()
         .map_err(|_| BooleanError::DegenerateContact)?;
-    Ok(obj)
+    if obj.faces().len() != faces.len() {
+        return Err(BooleanError::DegenerateContact);
+    }
+    let prov = obj
+        .faces()
+        .keys()
+        .zip(faces.iter().map(|f| f.source))
+        .collect();
+    Ok((obj, prov))
+}
+
+/// The boolean's refusal for a result the builder rejected, naming the
+/// cause where the builder names a face (KB-25).
+fn build_error(
+    e: crate::error::TopologyError,
+    faces: &[OrientedFace],
+    operands: [&Object; 2],
+) -> BooleanError {
+    let at = |face: usize| faces.get(face).map_or(Point3::ORIGIN, |f| f.outer[0]);
+    // A degenerate result face is the operand's fault only when the
+    // operand face it came from is itself degenerate; a sliver cut
+    // from a sound face is a grazing contact between the operands
+    // (two equal pipes whose walls graze along a facet row).
+    let source_degenerate = |face: usize| {
+        faces.get(face).is_some_and(|f| {
+            let obj = operands[usize::from(f.source.side)];
+            obj.faces().get(f.source.face).is_some_and(|sf| {
+                let ring: Vec<Point3> = obj.loop_positions(sf.outer_loop).collect();
+                crate::health::ring_is_degenerate(&ring)
+            })
+        })
+    };
+    match e {
+        crate::error::TopologyError::NonPlanarFace { face } => {
+            BooleanError::NonPlanarInput { at: at(face) }
+        }
+        crate::error::TopologyError::DegenerateFace { face } if source_degenerate(face) => {
+            BooleanError::DegenerateInput { at: at(face) }
+        }
+        _ => BooleanError::DegenerateContact,
+    }
+}
+
+/// [`assemble`] onto a kept operand (`operands[base]`): its faces in
+/// `removed` (the ones the boolean arranged) give way to the kept sub-faces
+/// `faces`, welded to its untouched faces through the vertices they share
+/// (an operand corner stays that vertex) and spliced in place
+/// ([`Object::splice_closed`]). Faces, planes and refusals are as the full
+/// build makes them; returns the result, its new faces (parallel to
+/// `faces`) and their provenance.
+fn assemble_onto(
+    base: usize,
+    removed: &[FaceId],
+    mut faces: Vec<OrientedFace>,
+    planarity_tol: f64,
+    operands: [&Object; 2],
+    blend_offset: u32,
+) -> Result<(Object, Vec<FaceId>, Vec<Provenance>), BooleanError> {
+    use crate::patch::{PVert, PatchFace};
+    let base_obj = operands[base];
+    split_edges_at_vertices(&mut faces);
+    let mut interner = Interner::new();
+    let rings: Vec<(Vec<usize>, Vec<Vec<usize>>)> = faces
+        .iter()
+        .map(|f| {
+            let outer = f
+                .outer
+                .iter()
+                .zip(&f.outer_ids)
+                .map(|(&p, &id)| interner.intern_id(p, id))
+                .collect();
+            let holes = f
+                .holes
+                .iter()
+                .zip(&f.hole_ids)
+                .map(|(h, ids)| {
+                    h.iter()
+                        .zip(ids)
+                        .map(|(&p, &id)| interner.intern_id(p, id))
+                        .collect()
+                })
+                .collect();
+            (outer, holes)
+        })
+        .collect();
+    let verts: Vec<PVert> = interner
+        .positions
+        .iter()
+        .zip(&interner.sides)
+        .map(|(&p, sides)| match sides[base] {
+            Some(v) => PVert::Existing(v),
+            None => PVert::New(p),
+        })
+        .collect();
+    let pos = |i: usize| match verts[i] {
+        PVert::Existing(v) => base_obj.vertices()[v].position,
+        PVert::New(p) => p,
+    };
+
+    // Planes as the full build fits them: Newell from the outer ring, the
+    // arrangement's plane once any face of the result has a hole.
+    let mut removing: BTreeMap<FaceId, ()> = BTreeMap::new();
+    for &f in removed {
+        removing.insert(f, ());
+    }
+    let has_holes = faces.iter().any(|f| !f.holes.is_empty())
+        || base_obj
+            .faces()
+            .iter()
+            .any(|(f, face)| !face.inner_loops.is_empty() && !removing.contains_key(&f));
+    let plane_tol = planarity_tol.max(tol::PLANE_DIST);
+    let imported = plane_tol > tol::PLANE_DIST;
+    let mut add: Vec<PatchFace> = Vec::with_capacity(faces.len());
+    for (fi, (f, (outer, holes))) in faces.iter().zip(rings).enumerate() {
+        let plane = if has_holes {
+            f.plane
+        } else {
+            let pts: Vec<Point3> = outer.iter().map(|&i| pos(i)).collect();
+            let degenerate = || crate::error::TopologyError::DegenerateFace { face: fi };
+            if pts.len() < 3 {
+                return Err(build_error(degenerate(), &faces, operands));
+            }
+            let plane = Plane::from_polygon(&pts)
+                .or_else(|e| {
+                    if imported {
+                        crate::serialize::outer_ring_plane(&pts, true)
+                    } else {
+                        Err(e)
+                    }
+                })
+                .map_err(|_| build_error(degenerate(), &faces, operands))?;
+            if crate::serialize::outer_ring_plane(&pts, imported).is_err() {
+                return Err(build_error(degenerate(), &faces, operands));
+            }
+            plane
+        };
+        add.push(PatchFace {
+            outer,
+            holes,
+            attrs: crate::topo::FaceAttrs {
+                material: f.material,
+                back_material: f.back_material,
+                uv_frame: f.uv_frame,
+                surface: f.surface,
+                blend: f.blend,
+                // Interned into the result's own table after the splice.
+                attrs: crate::topo::AttrSlot::NONE,
+            },
+            plane: Some(plane),
+        });
+    }
+    let (mut obj, new_faces) = base_obj
+        .splice_closed(removed, &verts, &add, planarity_tol)
+        .map_err(|e| match e {
+            // The full build leaves a hole-mode face's planarity to the
+            // final validation, which refuses as a contact.
+            crate::error::TopologyError::NonPlanarFace { .. } if has_holes => {
+                BooleanError::DegenerateContact
+            }
+            e => build_error(e, &faces, operands),
+        })?;
+
+    // Each new face takes its source face's dictionary, as the full build
+    // gives it; and, as there, no edge of the result keeps one (the kept
+    // operand's untouched edges included), so both paths agree.
+    for (&nf, f) in new_faces.iter().zip(&faces) {
+        if !f.attrs.is_empty() {
+            obj.set_face_attrs(nf, f.attrs.clone());
+        }
+    }
+    let dict_edges: Vec<EdgeId> = obj
+        .edges()
+        .iter()
+        .filter(|(_, e)| !e.attrs.is_none())
+        .map(|(e, _)| e)
+        .collect();
+    for e in dict_edges {
+        obj.set_edge_attrs(e, AttrDict::new());
+    }
+
+    // The blend records of both operands, B's behind A's, as `assemble`
+    // keeps them; a kept B's own faces move their tags past A's ids too.
+    let [a, b_in_a] = operands;
+    let seq_offset = a
+        .blend_records()
+        .values()
+        .map(|r| r.seq.saturating_add(1))
+        .max()
+        .unwrap_or(0);
+    let mut records = a.blend_records().clone();
+    for (id, rec) in b_in_a.blend_records() {
+        records.insert(
+            crate::topo::BlendId(id.0.saturating_add(blend_offset)),
+            rec.with_ids_offset(blend_offset, seq_offset),
+        );
+    }
+    obj.set_blend_records(records);
+    if base == 1 && blend_offset > 0 {
+        let fresh: BTreeMap<FaceId, ()> = new_faces.iter().map(|&f| (f, ())).collect();
+        let tagged: Vec<FaceId> = obj
+            .faces()
+            .iter()
+            .filter(|(f, face)| face.blend.is_some() && !fresh.contains_key(f))
+            .map(|(f, _)| f)
+            .collect();
+        for f in tagged {
+            if let Some(t) = obj.faces[f].blend.as_mut() {
+                t.id = crate::topo::BlendId(t.id.0 + blend_offset);
+            }
+        }
+    }
+    let prov = faces.iter().map(|f| f.source).collect();
+    Ok((obj, new_faces, prov))
 }
 
 /// Splits every kept-face edge at any kept-face vertex lying in its interior,
@@ -1035,19 +1850,63 @@ fn assemble(mut faces: Vec<OrientedFace>, planarity_tol: f64) -> Result<Object, 
 /// vertices are collinear with the edge they split, so no face leaves its
 /// plane, and a genuine non-manifold contact still fails the watertight check
 /// below because the extra vertices never invent a missing twin face.
+///
+/// An operand's own vertex never splits that operand's own edge (both ends
+/// its vertices): the operand was valid as it was, and a vertex of its own
+/// within `POINT_MERGE` of one of its edges is part of its shape (a mended
+/// scan's sliver), not a T-junction the boolean made.
 fn split_edges_at_vertices(faces: &mut [OrientedFace]) {
-    let mut vertices: Vec<Point3> = Vec::new();
+    let mut interner = Interner::new();
+    let mut cand_ids: Vec<[Option<VertexId>; 2]> = Vec::new();
     for f in faces.iter() {
-        for &p in f.outer.iter().chain(f.holes.iter().flatten()) {
-            intern(p, &mut vertices);
+        let ids = f.outer_ids.iter().chain(f.hole_ids.iter().flatten());
+        for (&p, &id) in f.outer.iter().chain(f.holes.iter().flatten()).zip(ids) {
+            let i = interner.intern(p);
+            if i == cand_ids.len() {
+                cand_ids.push([None, None]);
+            }
+            if let Some((side, v)) = id
+                && cand_ids[i][usize::from(side)].is_none()
+            {
+                cand_ids[i][usize::from(side)] = Some(v);
+            }
         }
     }
-    let split = |ring: &mut Vec<Point3>| {
+    let vertices = interner.positions;
+    // A coarse grid over the kept vertices (cell = the mean edge length):
+    // each edge visits only the cells its padded bounding box covers, and
+    // candidates are visited in ascending index — the scan order — so the
+    // splits are bit-identical to scanning every vertex (KB-25).
+    let (mut total, mut count) = (0.0f64, 0usize);
+    for f in faces.iter() {
+        for ring in std::iter::once(&f.outer).chain(f.holes.iter()) {
+            for i in 0..ring.len() {
+                total += (ring[(i + 1) % ring.len()] - ring[i]).length();
+                count += 1;
+            }
+        }
+    }
+    let cell = (total / count.max(1) as f64).max(4.0 * tol::POINT_MERGE);
+    let key = |x: f64| (x / cell).floor().clamp(-4.0e18, 4.0e18) as i64;
+    let mut grid: BTreeMap<[i64; 3], Vec<usize>> = BTreeMap::new();
+    for (i, v) in vertices.iter().enumerate() {
+        grid.entry([key(v.x), key(v.y), key(v.z)])
+            .or_default()
+            .push(i);
+    }
+    let split = |ring: &mut Vec<Point3>, ids: &mut Vec<Ident>| {
         let n = ring.len();
         let mut out: Vec<Point3> = Vec::with_capacity(n);
+        let mut out_ids: Vec<Ident> = Vec::with_capacity(n);
         for i in 0..n {
             let (p, q) = (ring[i], ring[(i + 1) % n]);
             out.push(p);
+            out_ids.push(ids[i]);
+            // Both ends one operand's vertices: its own vertices stay off.
+            let own = match (ids[i], ids[(i + 1) % n]) {
+                (Some((s, _)), Some((t, _))) if s == t => Some(usize::from(s)),
+                _ => None,
+            };
             let len2 = (q - p).length_squared();
             if len2 < tol::NORMALIZE_MIN_LENGTH * tol::NORMALIZE_MIN_LENGTH {
                 continue;
@@ -1067,9 +1926,38 @@ fn split_edges_at_vertices(faces: &mut [OrientedFace]) {
                     p.z.max(q.z) + tol::POINT_MERGE,
                 ),
             );
-            let mut inside: Vec<(f64, Point3)> = vertices
+            let mut candidates: Vec<usize> = Vec::new();
+            let (k0, k1) = (
+                [key(lo.x), key(lo.y), key(lo.z)],
+                [key(hi.x), key(hi.y), key(hi.z)],
+            );
+            let span = (0..3).fold(1u128, |n, i| n.saturating_mul((k1[i] - k0[i]) as u128 + 1));
+            if span > grid.len() as u128 {
+                // A long edge over a fine grid (a cutter across a scan's
+                // facets) would visit more empty cells than there are
+                // occupied ones: walk the occupied cells instead.
+                for (k, list) in &grid {
+                    if (0..3).all(|i| k[i] >= k0[i] && k[i] <= k1[i]) {
+                        candidates.extend_from_slice(list);
+                    }
+                }
+            } else {
+                for gx in k0[0]..=k1[0] {
+                    for gy in k0[1]..=k1[1] {
+                        for gz in k0[2]..=k1[2] {
+                            if let Some(list) = grid.get(&[gx, gy, gz]) {
+                                candidates.extend_from_slice(list);
+                            }
+                        }
+                    }
+                }
+            }
+            candidates.sort_unstable();
+            let mut inside: Vec<(f64, Point3, Ident)> = candidates
                 .iter()
-                .filter(|&&r| {
+                .filter(|&&i| own.is_none_or(|s| cand_ids[i][s].is_none()))
+                .map(|&i| (&vertices[i], i))
+                .filter(|&(&r, _)| {
                     r.x >= lo.x
                         && r.x <= hi.x
                         && r.y >= lo.y
@@ -1080,76 +1968,120 @@ fn split_edges_at_vertices(faces: &mut [OrientedFace]) {
                         && !r.approx_eq(q, tol::POINT_MERGE)
                         && point_segment_distance(r, p, q) <= tol::POINT_MERGE
                 })
-                .map(|&r| ((r - p).dot(q - p) / len2, r))
+                .map(|(&r, i)| {
+                    let id = cand_ids[i][0]
+                        .map(|v| (0u8, v))
+                        .or(cand_ids[i][1].map(|v| (1u8, v)));
+                    ((r - p).dot(q - p) / len2, r, id)
+                })
                 .collect();
             inside.sort_by(|a, b| a.0.total_cmp(&b.0));
-            out.extend(inside.into_iter().map(|(_, r)| r));
+            for (_, r, id) in inside {
+                out.push(r);
+                out_ids.push(id);
+            }
         }
         *ring = out;
+        *ids = out_ids;
     };
     for f in faces.iter_mut() {
-        split(&mut f.outer);
-        for h in f.holes.iter_mut() {
-            split(h);
+        split(&mut f.outer, &mut f.outer_ids);
+        for (h, ids) in f.holes.iter_mut().zip(f.hole_ids.iter_mut()) {
+            split(h, ids);
         }
     }
 }
 
-/// Replaces the object's shells with one per connected component of the
-/// face-adjacency graph (faces linked by a shared, twinned edge). The builders
-/// emit a single shell; a boolean result can be disconnected (a subtract that
-/// cuts a solid in two, or a disjoint union).
-fn resplit_shells(obj: &mut Object) {
-    let mut adjacency: SecondaryMap<FaceId, Vec<FaceId>> = SecondaryMap::new();
-    for f in obj.faces.keys() {
-        adjacency.insert(f, Vec::new());
-    }
-    for edge in obj.edges.values() {
-        if let Some(twin) = edge.twin_half_edge {
-            let fa = obj.loops[obj.half_edges[edge.half_edge].loop_id].face;
-            let fb = obj.loops[obj.half_edges[twin].loop_id].face;
-            adjacency[fa].push(fb);
-            adjacency[fb].push(fa);
+/// Interns points, merging within [`tol::POINT_MERGE`]. Welding is what
+/// pairs seam half-edges into twins, so the result is watertight.
+///
+/// A uniform grid of `4·POINT_MERGE` cells indexes the points: a point
+/// within `POINT_MERGE` of `p` lies in `p`'s cell or one of its 26
+/// neighbors, and the SMALLEST matching index is returned — exactly the
+/// first match of a linear scan in insertion order, so results are
+/// bit-identical to the scan while the cost stops being quadratic (KB-25).
+///
+/// [`Interner::intern_id`] also keeps operand vertices apart: a corner that
+/// is an operand vertex ([`Ident`]) joins the entry that vertex already has,
+/// and never one holding a different vertex of the same operand.
+struct Interner {
+    positions: Vec<Point3>,
+    cells: BTreeMap<[i64; 3], Vec<usize>>,
+    ids: BTreeMap<(u8, VertexId), usize>,
+    /// Per entry, the vertex of each operand it is (if any).
+    sides: Vec<[Option<VertexId>; 2]>,
+}
+
+impl Interner {
+    fn new() -> Interner {
+        Interner {
+            positions: Vec::new(),
+            cells: BTreeMap::new(),
+            ids: BTreeMap::new(),
+            sides: Vec::new(),
         }
     }
 
-    let mut component: SecondaryMap<FaceId, ()> = SecondaryMap::new();
-    let mut shells: Vec<Vec<FaceId>> = Vec::new();
-    for start in obj.faces.keys() {
-        if component.contains_key(start) {
-            continue;
+    /// [`Interner::intern`] for a corner that may be an operand vertex.
+    fn intern_id(&mut self, p: Point3, id: Ident) -> usize {
+        if let Some(key) = id
+            && let Some(&i) = self.ids.get(&key)
+        {
+            return i;
         }
-        let mut group = Vec::new();
-        let mut stack = vec![start];
-        component.insert(start, ());
-        while let Some(f) = stack.pop() {
-            group.push(f);
-            for &nb in &adjacency[f] {
-                if component.insert(nb, ()).is_none() {
-                    stack.push(nb);
+        let i = self.intern_where(p, |sides| {
+            id.is_none_or(|(s, v)| sides[usize::from(s)].is_none_or(|w| w == v))
+        });
+        if let Some((s, v)) = id {
+            self.sides[i][usize::from(s)] = Some(v);
+            self.ids.insert((s, v), i);
+        }
+        i
+    }
+
+    fn cell(p: Point3) -> [i64; 3] {
+        let c = |x: f64| {
+            (x / (4.0 * tol::POINT_MERGE))
+                .floor()
+                .clamp(-4.0e18, 4.0e18) as i64
+        };
+        [c(p.x), c(p.y), c(p.z)]
+    }
+
+    fn intern(&mut self, p: Point3) -> usize {
+        self.intern_where(p, |_| true)
+    }
+
+    /// The smallest entry within `POINT_MERGE` of `p` that `fits`, else a
+    /// new one.
+    fn intern_where(&mut self, p: Point3, fits: impl Fn(&[Option<VertexId>; 2]) -> bool) -> usize {
+        let [cx, cy, cz] = Interner::cell(p);
+        let mut best: Option<usize> = None;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    if let Some(list) = self.cells.get(&[cx + dx, cy + dy, cz + dz]) {
+                        for &i in list {
+                            if best.is_none_or(|b| i < b)
+                                && p.approx_eq(self.positions[i], tol::POINT_MERGE)
+                                && fits(&self.sides[i])
+                            {
+                                best = Some(i);
+                            }
+                        }
+                    }
                 }
             }
         }
-        shells.push(group);
+        if let Some(i) = best {
+            return i;
+        }
+        let i = self.positions.len();
+        self.positions.push(p);
+        self.sides.push([None, None]);
+        self.cells.entry([cx, cy, cz]).or_default().push(i);
+        i
     }
-
-    obj.shells.clear();
-    for faces in shells {
-        obj.shells.insert(Shell { faces });
-    }
-}
-
-/// Interns `p` into `positions`, merging within [`tol::POINT_MERGE`]. Welding is
-/// what pairs seam half-edges into twins, so the result is watertight.
-fn intern(p: Point3, positions: &mut Vec<Point3>) -> usize {
-    if let Some(i) = positions
-        .iter()
-        .position(|&q| p.approx_eq(q, tol::POINT_MERGE))
-    {
-        return i;
-    }
-    positions.push(p);
-    positions.len() - 1
 }
 
 #[cfg(test)]

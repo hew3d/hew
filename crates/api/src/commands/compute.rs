@@ -476,10 +476,18 @@ fn world_circle(
     if let Some(t) = e.twin_half_edge {
         faces.push(object.loops()[object.half_edges()[t].loop_id].face);
     }
-    let cylinder = faces.iter().find_map(|f| object.faces()[*f].surface);
+    // Only a cylinder claim has an axis a rim turns about.
+    let cylinder = faces.iter().find_map(|f| match object.faces()[*f].surface {
+        Some(kernel::SurfaceRef::Cylinder {
+            axis_point,
+            axis,
+            radius,
+        }) => Some((axis_point, axis, radius)),
+        _ => None,
+    });
     if let Some(c) = e.curve {
         let axis = cylinder
-            .map(|kernel::SurfaceRef::Cylinder { axis, .. }| pose.apply_vector(axis))
+            .map(|(_, axis, _)| pose.apply_vector(axis))
             .unwrap_or_else(|| pose.apply_normal(object.faces()[faces[0]].plane.normal()));
         return Some((
             pose.apply_point(c.center),
@@ -489,11 +497,7 @@ fn world_circle(
     }
     // A wall facet's seam runs along the axis and is no chord of anything;
     // only an edge across the axis (a rim) is.
-    let kernel::SurfaceRef::Cylinder {
-        axis_point,
-        axis,
-        radius,
-    } = cylinder?;
+    let (axis_point, axis, radius) = cylinder?;
     let (a, b) = (
         object.vertices()[he.origin].position,
         object.vertices()[object.half_edges()[he.next].origin].position,

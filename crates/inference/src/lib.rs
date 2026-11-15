@@ -1379,7 +1379,8 @@ pub(crate) struct DefMember {
     /// every removal/replace path stays automatic.
     pub(crate) rims: Vec<AnalyticRim>,
     /// Definition-space centers of polygons drawn on the member's faces
-    /// ([`Object::edge_polygon_centers`]), offered like rim centers.
+    /// ([`Object::edge_polygon_centers`]) and of its sphere and torus claims
+    /// ([`Object::analytic_centers`]), offered like rim centers.
     pub(crate) polygon_centers: Vec<(Point3, kernel::FaceId)>,
     /// The member's candidates and trees, once extracted.
     geometry: OnceCell<DefGeometry>,
@@ -1419,7 +1420,11 @@ impl DefMember {
         DefMember {
             bounds: DefBounds::of(object),
             rims,
-            polygon_centers: object.edge_polygon_centers(),
+            polygon_centers: object
+                .edge_polygon_centers()
+                .into_iter()
+                .chain(object.analytic_centers())
+                .collect(),
             geometry,
         }
     }
@@ -2295,8 +2300,13 @@ impl InferenceScene {
         // and a tangent rim — a drawn circle on a face snaps like one on the
         // ground.
         let similarity = placement.similarity_scale();
-        // Polygons drawn on a face offer their centers, as on the ground.
-        for (c, face) in object.edge_polygon_centers() {
+        // Polygons drawn on a face offer their centers, as on the ground;
+        // so do sphere and torus claims (a revolved canopy, a rim fillet).
+        for (c, face) in object
+            .edge_polygon_centers()
+            .into_iter()
+            .chain(object.analytic_centers())
+        {
             self.centers.push(ScenePoint {
                 position: placement.apply_point(c),
                 source: SnapSource {

@@ -35,9 +35,53 @@ pub const LINK_POSE_MATCH: f64 = 2.0 * SIGNATURE_QUANTUM;
 /// Vectors shorter than this cannot be meaningfully normalized (meters).
 pub const NORMALIZE_MIN_LENGTH: f64 = 1e-12;
 
+/// The shortest edge a ring under the area cutoff may have and still give a
+/// face its plane (meters; `serialize::outer_ring_plane`): ten times
+/// [`POINT_MERGE`]. Far above the rounding of any coordinate Hew models at
+/// (2e-12 m at 10 km), so the ring's shape, and the verdict, do not depend
+/// on where it sits.
+pub const SMALL_RING_MIN_EDGE: f64 = 10.0 * POINT_MERGE;
+
+/// How far from a sliver a ring under the area cutoff must be to give a face
+/// its plane (dimensionless; `serialize::outer_ring_plane`): its Newell
+/// vector (twice its area, taken about its own first vertex) must be at
+/// least this times its perimeter squared — a triangle at least a
+/// millionth as tall as it is wide.
+pub const SMALL_RING_MIN_SHAPE: f64 = 1e-6;
+
 /// Two unit normals whose difference is shorter than this are considered the
 /// same direction (dimensionless).
 pub const NORMAL_DIRECTION: f64 = 1e-9;
+
+/// Largest difference between two unit normals (dimensionless; a chord of
+/// the unit circle, here `2·sin(20°)`, a 40° angle) for which an edge where
+/// a rolling-ball fillet's facet strip meets a face outside the fillet still
+/// counts as the fillet's tangent rail (`Object::edge_smoothness`). The
+/// strip's facets are flat and unclaimed, so at the rail a facet's normal
+/// leans off the true tangent by up to half a segment step, which a swept
+/// ball's widest sweep at the fewest segments brings near this. The strip's
+/// end caps meet the faces they stop against at about a right angle, far
+/// past it, and stay creases.
+pub const BLEND_RAIL_NORMAL: f64 = 0.684_040_286_651_337_4;
+
+/// The sine of the largest angle between two claimed faces' outward
+/// normals at a refused blend vertex for them to count as meeting flush
+/// there (`BlendError::BlendFacesFlush`, D-234): 2°, well under any corner
+/// a ball could not roll into for another reason, and above the error of a
+/// claimed surface's normal evaluated at a faceted vertex.
+pub const BLEND_FLUSH_SIN: f64 = 0.034_899_496_702_500_97;
+
+/// The allowance for a fillet strip that claims its surface (a torus or
+/// cylinder piece; dimensionless, `2·sin(0.5°)`, a 1° angle), measured
+/// ACROSS the edge: the strip's claimed normal against the neighbor's facet
+/// plane, each with its component along the edge removed. The strip rolls on
+/// the neighbor's flat facets, so where the neighbor claims a curved surface
+/// (a revolved dome's sphere) the claimed normals differ by facet error, but
+/// that error turns about the edge's own direction; across it the strip
+/// meets the facet within a few hundredths of a degree (about 0.2° on a
+/// 4 × 24 dome). A crease a later cut or a side face makes runs across the
+/// edge and stays a crease down to 1°.
+pub const BLEND_CLAIMED_RAIL_NORMAL: f64 = 0.017_453_070_996_747_87;
 
 /// Maximum ratio of an offset miter join's vertex displacement to the
 /// offset distance (dimensionless) — the classic 2D stroke miter limit,
@@ -181,6 +225,149 @@ pub const SCENE_CAMERA_FOV_DEG: f64 = 1e-2;
 /// normal originates in the app's double-precision normalization of a face
 /// normal, not in exact kernel construction.
 pub const SECTION_NORMAL_UNIT: f64 = 1e-6;
+
+/// Agreement required between a blend's current faces and a forward re-blend
+/// of its measured section before removal or resize may act: looser than
+/// [`POINT_MERGE`] because the comparison spans a restore and a re-blend,
+/// each with its own rounding; far below any visible or printable size.
+pub const BLEND_VERIFY: f64 = 1e-7;
+
+/// Coplanarity gate used when regrouping triangles into polygons after a
+/// deformation (`planarize`). Equal to [`PLANE_DIST`]; named for intent.
+pub const PLANARIZE_COPLANAR: f64 = PLANE_DIST;
+
+/// How near a Loft rail must pass to a profile vertex to touch it: looser
+/// than [`POINT_MERGE`] because a rail is a separate drawing snapped to each
+/// profile, and one drawn and then offset or rotated may drift further.
+pub const LOFT_RAIL_TOUCH: f64 = 1e-6;
+
+/// How far a swept blend's rail point may sit off a facet edge or seam and
+/// still be moved onto it exactly (meters; [`POINT_MERGE`] × 1e3, the "D-55
+/// slack"). The station solve leaves rail points nanometers off the edges
+/// they belong on; this is wider than that noise, far below any visible size.
+pub const SWEPT_SLACK: f64 = POINT_MERGE * 1e3;
+
+/// How far a swept blend's rail point may sit off a facet's plane (or a rail
+/// off its seam segment) and still count as on it (meters; [`PLANE_DIST`] ×
+/// 1e3). The plane analogue of [`SWEPT_SLACK`].
+pub const SWEPT_PLANE_SLACK: f64 = PLANE_DIST * 1e3;
+
+/// Fraction of an object's `planarity_tol` within which two swept-blend
+/// points on imported (f32-noisy) facets are the same point (dimensionless).
+pub const IMPORT_MERGE_REL: f64 = 1e-4;
+
+/// Residual (meters) at or below which a swept-blend ball counts as touching
+/// both side surfaces at its solved center.
+pub const BLEND_CONTACT_RESIDUAL: f64 = 1e-13;
+
+/// Residual (meters) at or below which the Newton solve of a ball corner
+/// against two surfaces stops.
+pub const BLEND_CORNER_RESIDUAL: f64 = 1e-14;
+
+/// First step (meters) of the search along a facet line for where the second
+/// side is touched too; it doubles until it brackets the crossing.
+pub const BLEND_BRACKET_START: f64 = 1e-9;
+
+/// How far (meters) the corner ball found by bisection may lie from the one
+/// solved from the three facet planes before the corner is refused.
+pub const BLEND_CORNER_AGREE: f64 = 1e-6;
+
+/// The smallest blend size the limit search tries, as a fraction of the
+/// requested size (dimensionless).
+pub const BLEND_LIMIT_FLOOR_REL: f64 = 1e-6;
+
+/// Two seam angles closer than this (radians) are the same seam when a
+/// blend is restored.
+pub const BLEND_SEAM_ANGLE: f64 = 1e-9;
+
+/// How far the dot product of a strip facet's rail edge and the candidate
+/// edge may fall short of 1 for them to count as parallel (dimensionless;
+/// flat strips and rims, whose chords are exactly homothetic).
+pub const BLEND_RAIL_PARALLEL_DEFECT: f64 = 1e-9;
+
+/// How far, as a fraction of the chain's length, a radius handle may land
+/// past or short of a chain end and still mean that end (dimensionless).
+/// The Fillet tool measures its chain from segments that crossed the wasm
+/// boundary in single precision, so an end handle it places at "the end"
+/// arrives within about 1e-7 of it; 1e-6 covers that with margin and is
+/// still far below any handle a person would place on purpose.
+pub const BLEND_HANDLE_END_SLACK: f64 = 1e-6;
+
+/// Least dot product of a rail edge and the candidate edge to count as
+/// parallel on a tapered (cone) strip (dimensionless).
+pub const BLEND_RAIL_PARALLEL_TAPERED: f64 = 0.99;
+
+/// Cross-product tolerance (dimensionless in the profile's own units) of the
+/// segment-meets-segment test on a custom blend profile.
+pub const PROFILE_SEGMENT_EPS: f64 = 1e-12;
+
+/// Smallest arc radius (profile units) a custom blend profile may have.
+pub const PROFILE_ARC_MIN_RADIUS: f64 = 1e-6;
+
+/// Relative difference of an arc's start and end radii a custom blend
+/// profile tolerates (dimensionless).
+pub const PROFILE_ARC_RADIUS_REL: f64 = 1e-9;
+
+/// How far a custom blend profile's last point may lie from its closing
+/// point on the axis (profile units).
+pub const PROFILE_CLOSURE: f64 = 1e-12;
+
+/// How far a custom blend profile's samples may stray outside its unit box
+/// (profile units).
+pub const PROFILE_BOX_SLACK: f64 = 1e-9;
+
+/// Cross-product length (sine of the angle, dimensionless) at or below which
+/// two unit vectors count as parallel when finding the minimal rotation
+/// between them (`deform`).
+pub const ROTATION_PARALLEL_SIN: f64 = 1e-15;
+
+/// How far the length of a projection direction may differ from 1
+/// (dimensionless; `project`).
+pub const PROJECT_DIR_UNIT: f64 = 1e-9;
+
+/// Slack on the 0..1 parameter of a point along a source edge for it to
+/// count as within the edge (dimensionless; `project`).
+pub const SPAN_PARAM_SLACK: f64 = 1e-9;
+
+/// The least fold (dimensionless: the difference between the two band
+/// faces' unit normals, here `2·sin(0.5°)`, a 1° angle) by which a Loft
+/// column that is a corner in one profile of a span (or the fan diagonal
+/// beside it) must stand out from the surface beside it to draw as a
+/// crease: it creases where its fold angle exceeds both the reference's
+/// plus this angle and twice the reference's (D-126). Below a degree over flat neighbors it
+/// is no visible crease, and a hard edge there would break the rim it
+/// meets into slivers.
+pub const LOFT_CREASE_FOLD: f64 = 0.017_453_070_996_747_87;
+
+/// Floor on the chord-length knot spacing of a Loft's Catmull–Rom path
+/// (square-root-of-meters), so coincident rows do not repeat a knot.
+pub const LOFT_KNOT_MIN: f64 = 1e-12;
+
+/// Relative difference of two enclosed-region areas that still counts as a
+/// tie when picking the unbounded cycle (dimensionless; `sketch`).
+pub const AREA_TIE_REL: f64 = 1e-9;
+
+/// Least vertical extent (parameter-plane units) a polygon edge needs to be
+/// crossed by the horizontal ray that finds a hole's bridge; a flatter edge is
+/// treated as horizontal and skipped (`triangulate`).
+pub const TRIANGULATE_FLAT_EDGE: f64 = 1e-14;
+
+/// How near (parameter-plane units, in each coordinate) a hole-bridge ray's
+/// crossing must be to an edge end to snap to that vertex (`triangulate`).
+pub const TRIANGULATE_VERTEX_HIT: f64 = 1e-12;
+
+/// Cross-product tolerance per unit of (segment length + 1) for a point to
+/// count as collinear with a segment in the triangulator (`triangulate`).
+pub const TRIANGULATE_COLLINEAR: f64 = 1e-12;
+
+/// Slack, in angular steps (dimensionless), subtracted before rounding up the
+/// station count of a twisted sweep, so a whole number of steps (to rounding)
+/// is not one more (`ops`).
+pub const TWIST_STEP_ROUNDING: f64 = 1e-9;
+
+/// Floor (meters; [`POINT_MERGE`] × 1e3) on the median object extent that
+/// scales the patch tolerances, so a degenerate patch does not collapse them.
+pub const PATCH_MIN_EXTENT: f64 = POINT_MERGE * 1e3;
 
 /// Mend's default weld distance as a fraction of the object's diameter
 /// (dimensionless; `repair::mend`): about 2 µm on a 63 mm print — past

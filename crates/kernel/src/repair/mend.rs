@@ -1089,7 +1089,7 @@ impl Patch {
 /// every ring, imported or not.
 fn buildable(points: &[Point3]) -> bool {
     !ring_is_degenerate(points)
-        && crate::serialize::outer_ring_plane(points).is_ok()
+        && crate::serialize::outer_ring_plane(points, false).is_ok()
         && Plane::from_polygon(points).is_ok()
 }
 

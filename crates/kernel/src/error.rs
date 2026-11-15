@@ -73,6 +73,12 @@ pub enum TopologyError {
         /// The offending edge.
         edge: EdgeId,
     },
+    /// An edge is marked both soft and creased: a soft seam can never be a
+    /// crease (true-curves.md §6.1).
+    EdgeCreaseConflict {
+        /// The offending edge.
+        edge: EdgeId,
+    },
     /// A loop and its face disagree about each other.
     LoopFaceMismatch {
         /// The offending loop.
@@ -199,6 +205,9 @@ impl std::fmt::Display for TopologyError {
             }
             EdgeHalfEdgeMismatch { edge } => {
                 write!(f, "edge {edge:?} disagrees with its half-edges")
+            }
+            EdgeCreaseConflict { edge } => {
+                write!(f, "edge {edge:?} is marked both soft and creased")
             }
             LoopFaceMismatch { loop_id } => {
                 write!(f, "loop {loop_id:?} disagrees with its face")

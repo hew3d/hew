@@ -3842,7 +3842,10 @@ fn replay_edges_mapped(
                         dst.begin_curve_with_kind(a.geom, a.kind)?;
                     }
                     None => {
-                        dst.begin_curve();
+                        let d = dst.begin_curve();
+                        if src.curve_is_smooth(c) {
+                            dst.mark_curve_smooth(d);
+                        }
                     }
                 }
                 for &m in edges.iter().filter(|&&m| src.edges()[m].curve == Some(c)) {
@@ -4382,7 +4385,16 @@ impl Document {
                 }
             }
         }
-        // The frame's objects by the planes of their faces.
+        if groups.is_empty() && detached.is_empty() {
+            return Vec::new();
+        }
+        // The frame's objects by the planes of their faces, only for the
+        // buckets a free sketch's plane probes: a dense imported mesh has
+        // hundreds of thousands of face planes, none of them wanted.
+        let wanted: BTreeSet<[i64; 4]> = groups
+            .iter()
+            .flat_map(|(plane, _)| around(key_of(plane)))
+            .collect();
         let mut objects_by_plane: BTreeMap<[i64; 4], Vec<ObjectId>> = BTreeMap::new();
         for (id, rec) in self.objects.iter() {
             let drawable = !rec.hidden
@@ -4396,7 +4408,11 @@ impl Document {
                 continue;
             }
             for face in rec.object.faces().values() {
-                let on = objects_by_plane.entry(key_of(&face.plane)).or_default();
+                let key = key_of(&face.plane);
+                if !wanted.contains(&key) {
+                    continue;
+                }
+                let on = objects_by_plane.entry(key).or_default();
                 if !on.contains(&id) {
                     on.push(id);
                 }
@@ -4822,6 +4838,113 @@ impl Document {
             .iter()
             .find(|(_, v)| v.position.approx_eq(at, tol::POINT_MERGE))
             .map(|(id, _)| id)
+    }
+
+    /// The corners of the drawing on `plane` (in `frame`, with `objects`
+    /// taking part) that a corner blend can act on: [`Sketch::blendable_corners`]
+    /// of the lifted drawing, without those whose edge lies along a solid's
+    /// own boundary (a drafting blend never trims it:
+    /// [`Document::draft_check_corner`] refuses them). Positions, in vertex
+    /// slot order. Read-only; opens no draft.
+    ///
+    /// # Errors
+    /// Whatever [`Document::lift_plane`] refuses.
+    pub fn plane_blendable_corners(
+        &self,
+        plane: Plane,
+        frame: Option<ComponentId>,
+        objects: &[ObjectId],
+    ) -> Result<Vec<Point3>, DocumentError> {
+        let lifted = self.lift_plane(plane, frame, objects)?;
+        let sk = &lifted.before;
+        let on_fixed = |e: SketchEdgeId| {
+            let ed = sk.edges()[e];
+            let (a, b) = (
+                sk.vertices()[ed.from].position,
+                sk.vertices()[ed.to].position,
+            );
+            lifted.fixed.iter().any(|&(c, d)| along(a, b, c, d))
+        };
+        Ok(sk
+            .blendable_corners()
+            .into_iter()
+            .filter(|&v| {
+                !sk.edges()
+                    .iter()
+                    .any(|(id, e)| (e.from == v || e.to == v) && on_fixed(id))
+            })
+            .map(|v| sk.vertices()[v].position)
+            .collect())
+    }
+
+    /// Checks that blending the open draft's corner at `at` (a vertex within
+    /// [`tol::POINT_MERGE`]) keeps the drawing on its face, and returns the
+    /// vertex for [`Sketch::blend_corner`] on the working sketch.
+    ///
+    /// A draft over solids' faces holds the faces' own boundary as fixed
+    /// edges. The blend refuses with [`SketchError::CornerLeavesFace`] when
+    /// either edge of the corner lies along a fixed edge (the corner is the
+    /// solid's own boundary, which drafting never trims), or when the corner
+    /// is drawn over a face and any point of the new arc or chamfer segment
+    /// falls outside every face of the draft's objects on the plane. A
+    /// corner drawn off every face (free drawing) is not checked.
+    ///
+    /// Blend errors (`CornerNotBlendable`, `CornerIsStraight`,
+    /// `CornerRadiusTooLarge`, the segment-count errors) come first, as
+    /// [`Sketch::blend_corner`] would give them.
+    ///
+    /// # Errors
+    /// [`SketchError::UnknownVertex`] — no draft is open or no vertex is at
+    /// `at`; otherwise as above. Nothing is changed.
+    pub fn draft_check_corner(
+        &self,
+        at: Point3,
+        profile: &crate::sketch_corner::CornerProfile,
+    ) -> Result<SketchVertexId, SketchError> {
+        let pending = self.current_draft().ok_or(SketchError::UnknownVertex)?;
+        let work = &pending.work;
+        let vertex = self.draft_vertex_at(at).ok_or(SketchError::UnknownVertex)?;
+        let plan = work.corner_plan(vertex, *profile)?;
+        let lifted = &pending.lifted;
+        let on_fixed = |a: Point3, b: Point3| lifted.fixed.iter().any(|&(c, d)| along(a, b, c, d));
+        let v = work.vertices()[vertex].position;
+        if on_fixed(v, plan.far_end(0)) || on_fixed(v, plan.far_end(1)) {
+            return Err(SketchError::CornerLeavesFace);
+        }
+        let faces: Vec<(&Object, FaceId)> = lifted
+            .objects
+            .iter()
+            .filter_map(|&o| self.objects.get(o).map(|r| &r.object))
+            .flat_map(|obj| {
+                obj.faces()
+                    .keys()
+                    .filter(|&f| face_on_plane(obj, f, &lifted.plane))
+                    .map(move |f| (obj, f))
+            })
+            .collect();
+        let held = |p: Point3| {
+            faces.iter().any(|&(obj, f)| {
+                let face = &obj.faces()[f];
+                obj.face_contains_point(f, p)
+                    || std::iter::once(face.outer_loop)
+                        .chain(face.inner_loops.iter().copied())
+                        .any(|l| {
+                            let ring: Vec<Point3> = obj.loop_positions(l).collect();
+                            (0..ring.len()).any(|i| {
+                                point_near_segment(
+                                    p,
+                                    ring[i],
+                                    ring[(i + 1) % ring.len()],
+                                    tol::POINT_MERGE,
+                                )
+                            })
+                        })
+            })
+        };
+        if held(v) && !plan.new_points().into_iter().all(held) {
+            return Err(SketchError::CornerLeavesFace);
+        }
+        Ok(vertex)
     }
 
     /// The open draft's region whose key ([`DraftRegion::key`]) is `key`.

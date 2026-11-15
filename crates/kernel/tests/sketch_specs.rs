@@ -102,6 +102,65 @@ fn closing_a_rectangle_creates_one_region() {
 }
 
 #[test]
+fn inner_circuit_makes_a_hole_at_millimeter_scale() {
+    // The same nesting at millimeter size, inner ring drawn first and last:
+    // every cycle's area is a few square millimeters, so finding the
+    // unbounded face must not lean on an absolute area slack.
+    for inner_first in [true, false] {
+        let mut s = xy_sketch();
+        let outer = rect_segments(0.0, 0.0, 0.004, 0.004);
+        let inner = rect_segments(0.001, 0.001, 0.003, 0.003);
+        let order = if inner_first {
+            [inner, outer]
+        } else {
+            [outer, inner]
+        };
+        for ring in order {
+            for (from, to) in ring {
+                s.add_segment(from, to).unwrap();
+            }
+        }
+        assert_eq!(s.regions().len(), 2, "inner first: {inner_first}");
+        let mut holes: Vec<usize> = s.regions().values().map(|r| r.holes.len()).collect();
+        holes.sort_unstable();
+        assert_eq!(holes, vec![0, 1], "inner first: {inner_first}");
+    }
+}
+
+#[test]
+fn inner_circuit_makes_a_hole_at_millimeter_scale_far_from_the_origin() {
+    // A millimeter ring with a hole, kilometers out: the cycle areas must
+    // not lose their precision to the world coordinates.
+    for inner_first in [true, false] {
+        let mut s = xy_sketch();
+        let (x, y) = (12_345.678, -9_876.543);
+        let ring = |r: f64| -> Vec<(Point3, Point3)> {
+            let at = |k: usize| {
+                let a = std::f64::consts::TAU * (k as f64 + 0.3) / 13.0;
+                Point3::new(x + r * a.cos(), y + r * a.sin(), 0.0)
+            };
+            (0..13).map(|k| (at(k), at(k + 1))).collect()
+        };
+        let outer = ring(0.002);
+        let inner = ring(0.001);
+        let order = if inner_first {
+            [inner, outer]
+        } else {
+            [outer, inner]
+        };
+        for ring in order {
+            for (from, to) in ring {
+                s.add_segment(from, to).unwrap();
+            }
+        }
+        assert_eq!(s.regions().len(), 2, "inner first: {inner_first}");
+        let mut holes: Vec<usize> = s.regions().values().map(|r| r.holes.len()).collect();
+        holes.sort_unstable();
+        assert_eq!(holes, vec![0, 1], "inner first: {inner_first}");
+    }
+}
+
+#[test]
 fn inner_circuit_makes_a_hole() {
     let mut s = xy_sketch();
     for (from, to) in rect_segments(0.0, 0.0, 4.0, 4.0) {

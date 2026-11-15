@@ -832,7 +832,10 @@ fn face_description(ctx: &Ctx, face: locate::FaceRef) -> Result<Value, CmdError>
             axis_point,
             axis,
             radius,
-        } = s;
+        } = s
+        else {
+            return serde_json::Value::Null;
+        };
         json!({ "axis_point": point_json(axis_point), "axis": vec3_json(axis), "radius": radius })
     });
     Ok(json!({

@@ -127,7 +127,9 @@ fn assert_manifold(soup: &[f64]) {
         assert_eq!(
             directed.get(&(b, a)).copied().unwrap_or(0),
             1,
-            "unmatched directed edge — the soup is not closed/manifold"
+            "unmatched directed edge {:?} -> {:?} — the soup is not closed/manifold",
+            a.map(f64::from_bits),
+            b.map(f64::from_bits)
         );
     }
 }
@@ -971,6 +973,81 @@ fn a_band_tangent_to_any_edge_of_its_face_refacets() {
     }
 }
 
+/// A hand-built facet of each new analytic class shades with the class's
+/// own normal at every vertex, oriented to the side the facet faces
+/// (true-curves.md §3.1). The tessellator computes in f64 and stores f32,
+/// so the comparison is against the f64 class normal cast to f32, exactly.
+#[test]
+fn sphere_and_torus_facets_shade_with_analytic_normals() {
+    use kernel::{SurfaceRef, Vec3};
+    let d = 15f64.to_radians();
+    let sphere_pt =
+        |lat: f64, lon: f64| Point3::new(lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin());
+    let torus_pt = |phi: f64, psi: f64| {
+        let rho = 2.0 + 0.5 * psi.cos();
+        Point3::new(rho * phi.cos(), rho * phi.sin(), 0.5 * psi.sin())
+    };
+    let cases = [
+        (
+            [
+                sphere_pt(0.0, 0.0),
+                sphere_pt(0.0, d),
+                sphere_pt(d, d),
+                sphere_pt(d, 0.0),
+            ],
+            SurfaceRef::Sphere {
+                center: Point3::new(0.0, 0.0, 0.0),
+                radius: 1.0,
+            },
+        ),
+        (
+            [
+                torus_pt(0.0, 0.0),
+                torus_pt(d, 0.0),
+                torus_pt(d, 2.0 * d),
+                torus_pt(0.0, 2.0 * d),
+            ],
+            SurfaceRef::Torus {
+                center: Point3::new(0.0, 0.0, 0.0),
+                axis: Vec3::new(0.0, 0.0, 1.0),
+                major_radius: 2.0,
+                minor_radius: 0.5,
+            },
+        ),
+    ];
+    for (corners, claim) in cases {
+        for ring in [corners.to_vec(), corners.iter().rev().copied().collect()] {
+            let mut obj = Object::from_polygons(&ring, &[vec![0, 1, 2, 3]]).unwrap();
+            let f = obj.faces().keys().next().unwrap();
+            obj.set_face_surface_for_test(f, Some(claim));
+            obj.validate().unwrap();
+            let face_n = obj.faces()[f].plane.normal();
+            let mesh = tessellate::tessellate(&obj, &kernel::MaterialPalette::default()).unwrap();
+            assert_eq!(mesh.positions.len(), 12, "one quad, four vertices");
+            for (p, n) in mesh
+                .positions
+                .chunks_exact(3)
+                .zip(mesh.normals.chunks_exact(3))
+            {
+                let q = ring
+                    .iter()
+                    .copied()
+                    .find(|q| [q.x as f32, q.y as f32, q.z as f32] == [p[0], p[1], p[2]])
+                    .expect("mesh vertex is a facet corner");
+                let mut a = claim.normal_at(q).unwrap();
+                if a.dot(face_n) < 0.0 {
+                    a = -a;
+                }
+                assert_eq!(
+                    [n[0], n[1], n[2]],
+                    [a.x as f32, a.y as f32, a.z as f32],
+                    "{claim:?}: vertex normal is the oriented class normal"
+                );
+            }
+        }
+    }
+}
+
 /// Two circles touching inside the top, one pushed into a band and the other
 /// left drawn, leave the top with two holes sharing a vertex. The band
 /// re-facets beside the drawn circle on any side. (Pushing both is refused:
@@ -1002,5 +1079,339 @@ fn a_band_touching_a_drawn_circle_refacets_on_any_side() {
                 soup_volume(&refined)
             );
         }
+    }
+}
+
+/// A 1 × 0.6 rounded rectangle (corner radius 0.1, 6 facets per arc),
+/// extruded 0.3, built the way the Rectangle-with-arcs drawing does.
+fn rounded_rect_prism() -> Object {
+    let (hx, hy, r, n) = (0.5, 0.3, 0.1, 6usize);
+    let mut s = Sketch::on_plane(ground());
+    let corners = [
+        (hx - r, hy - r, 0.0),
+        (-hx + r, hy - r, std::f64::consts::FRAC_PI_2),
+        (-hx + r, -hy + r, std::f64::consts::PI),
+        (hx - r, -hy + r, 3.0 * std::f64::consts::FRAC_PI_2),
+    ];
+    let at = |cx: f64, cy: f64, a: f64| Point3::new(cx + r * a.cos(), cy + r * a.sin(), 0.0);
+    for (i, &(cx, cy, a0)) in corners.iter().enumerate() {
+        s.begin_curve_with(CurveGeom {
+            center: Point3::new(cx, cy, 0.0),
+            radius: r,
+        })
+        .unwrap();
+        for k in 0..n {
+            let (a, b) = (
+                a0 + std::f64::consts::FRAC_PI_2 * k as f64 / n as f64,
+                a0 + std::f64::consts::FRAC_PI_2 * (k + 1) as f64 / n as f64,
+            );
+            s.add_segment(at(cx, cy, a), at(cx, cy, b)).unwrap();
+        }
+        s.end_curve();
+        let (nx, ny, na) = corners[(i + 1) % 4];
+        s.add_segment(at(cx, cy, a0 + std::f64::consts::FRAC_PI_2), at(nx, ny, na))
+            .unwrap();
+    }
+    extrude(&s, 0.3)
+}
+
+fn segments(buf: &[f32]) -> Vec<[f32; 6]> {
+    buf.chunks_exact(6)
+        .map(|c| [c[0], c[1], c[2], c[3], c[4], c[5]])
+        .collect()
+}
+
+#[test]
+fn tangent_rails_go_to_the_tangent_buffer() {
+    let obj = rounded_rect_prism();
+    let mesh = tessellate(&obj, &MaterialPalette::default()).unwrap();
+    let tangent = segments(&mesh.tangent_edge_positions);
+    // The eight wall-to-arc joints (two per corner), all vertical.
+    assert_eq!(tangent.len(), 8, "{tangent:?}");
+    for t in &tangent {
+        assert!(
+            (t[2] - t[5]).abs() > 0.2,
+            "tangent joints are the vertical seams"
+        );
+    }
+    // No hard segment sits on a tangent joint.
+    let key = |s: &[f32; 6]| {
+        let (a, b) = ([s[0], s[1], s[2]], [s[3], s[4], s[5]]);
+        let (a, b) = if a.map(f32::to_bits) <= b.map(f32::to_bits) {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        [a, b]
+            .concat()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>()
+    };
+    let hard: Vec<Vec<u32>> = segments(&mesh.edge_positions).iter().map(key).collect();
+    for t in &tangent {
+        assert!(!hard.contains(&key(t)));
+    }
+    // The 4 × 5 arc facet seams are soft; the rims and caps are hard.
+    assert_eq!(segments(&mesh.soft_edge_positions).len(), 20);
+    assert_eq!(segments(&mesh.edge_positions).len(), 2 * (4 * 6 + 4));
+}
+
+#[test]
+fn non_uniformly_scaled_cylinder_seams_stay_in_the_soft_buffer() {
+    let mut obj = extrude(&circle_sketch(Point3::new(0.0, 0.0, 0.0), 0.5, 48), 1.0);
+    obj.apply_transform(&kernel::Transform::scale(kernel::Vec3::new(2.0, 1.0, 1.0)))
+        .unwrap();
+    assert!(obj.faces().values().all(|f| f.surface.is_none()));
+    let mesh = tessellate(&obj, &MaterialPalette::default()).unwrap();
+    assert_eq!(segments(&mesh.soft_edge_positions).len(), 48);
+    assert!(mesh.tangent_edge_positions.is_empty());
+    assert_eq!(segments(&mesh.edge_positions).len(), 2 * 48);
+}
+
+// ------------------------------------------------- blend bands (WP08 §7)
+
+fn unit_box() -> Object {
+    let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+    let pts = [
+        p(0.0, 0.0, 0.0),
+        p(1.0, 0.0, 0.0),
+        p(1.0, 1.0, 0.0),
+        p(0.0, 1.0, 0.0),
+        p(0.0, 0.0, 1.0),
+        p(1.0, 0.0, 1.0),
+        p(1.0, 1.0, 1.0),
+        p(0.0, 1.0, 1.0),
+    ];
+    let faces = vec![
+        vec![0, 3, 2, 1],
+        vec![4, 5, 6, 7],
+        vec![0, 1, 5, 4],
+        vec![1, 2, 6, 5],
+        vec![2, 3, 7, 6],
+        vec![3, 0, 4, 7],
+    ];
+    Object::from_polygons(&pts, &faces).unwrap()
+}
+
+fn round(edges: Vec<kernel::EdgeId>, r: f64, n: u32) -> kernel::BlendSpec {
+    kernel::BlendSpec {
+        edges,
+        profile: kernel::BlendProfile::Round {
+            radius: r,
+            segments: n,
+        },
+        primary: None,
+        corners: kernel::CornerStyle::Default,
+        stops: None,
+        handles: Vec::new(),
+    }
+}
+
+#[test]
+fn straight_fillet_strip_refacets() {
+    let obj = unit_box();
+    let e = obj
+        .edges()
+        .keys()
+        .find(|&e| {
+            let (a, b) = obj.edge_endpoints(e).unwrap();
+            a.y.abs() < 1e-12 && b.y.abs() < 1e-12 && a.z > 0.5 && b.z > 0.5
+        })
+        .unwrap();
+    let (filleted, _) = obj.blend_edges(&round(vec![e], 0.1, 6)).unwrap();
+    let soup = export_triangles(&filleted, 96).unwrap();
+    assert_manifold(&soup);
+    // A quarter turn at 96 per turn: 24 rows across the fillet, two
+    // triangles each (one row spans the edge's whole length).
+    let strip_tris = soup
+        .chunks(9)
+        .filter(|t| {
+            let ys = [t[1], t[4], t[7]];
+            let zs = [t[2], t[5], t[8]];
+            ys.iter().all(|&y| y > -1e-9 && y < 0.1 + 1e-9)
+                && zs.iter().all(|&z| z > 0.9 - 1e-9)
+                && ys
+                    .iter()
+                    .zip(&zs)
+                    .any(|(&y, &z)| y > 1e-6 && z < 1.0 - 1e-6)
+                && (t[0] - t[3]).abs().max((t[3] - t[6]).abs()) > 0.5
+        })
+        .count();
+    assert_eq!(strip_tris, 24 * 2);
+}
+
+fn rim_edges(obj: &Object, z: f64) -> Vec<kernel::EdgeId> {
+    obj.edges()
+        .keys()
+        .filter(|&e| {
+            let (a, b) = obj.edge_endpoints(e).unwrap();
+            (a.z - z).abs() < 1e-12 && (b.z - z).abs() < 1e-12
+        })
+        .collect()
+}
+
+fn torus_soup_points(soup: &[f64], z_min: f64) -> Vec<Point3> {
+    soup.chunks(3)
+        .map(|c| Point3::new(c[0], c[1], c[2]))
+        .filter(|p| p.z > z_min)
+        .collect()
+}
+
+#[test]
+fn filleted_box_refacets_watertight() {
+    let obj = unit_box();
+    let all: Vec<kernel::EdgeId> = obj.edges().keys().collect();
+    let (f, _) = obj.blend_edges(&round(all, 0.1, 6)).unwrap();
+    let stored = export_triangles(&f, 0).unwrap();
+    let soup = export_triangles(&f, 96).unwrap();
+    assert_manifold(&soup);
+    let (v_stored, v) = (soup_volume(&stored), soup_volume(&soup));
+    // Inscribed refinement: no less than the stored mesh, no more than the
+    // true rounded box.
+    let r: f64 = 0.1;
+    let pi = std::f64::consts::PI;
+    let true_volume = 1.0
+        - (12.0 * (1.0 - 2.0 * r) * (r * r - pi * r * r / 4.0))
+        - 8.0 * (r * r * r - pi * r * r * r / 6.0);
+    assert!(v >= v_stored - 1e-12, "{v} vs stored {v_stored}");
+    assert!(v <= true_volume + 1e-12, "{v} vs true {true_volume}");
+}
+
+#[test]
+fn cylinder_rim_torus_refacets_sharing_the_wall_stations() {
+    let obj = extrude(&circle_sketch(Point3::new(0.0, 0.0, 0.0), 0.5, 48), 1.0);
+    let (f, _) = obj
+        .blend_edges(&round(rim_edges(&obj, 1.0), 0.1, 6))
+        .unwrap();
+    let soup = export_triangles(&f, 96).unwrap();
+    assert_manifold(&soup);
+    // Refined: more points around the rail circle than the 48 stored.
+    let on_rail: BTreeMap<u64, ()> = torus_soup_points(&soup, 0.85)
+        .iter()
+        .filter(|p| (p.z - 0.9).abs() < 1e-12 && (p.x.hypot(p.y) - 0.5).abs() < 1e-9)
+        .map(|p| (p.x.to_bits() ^ p.y.to_bits().rotate_left(17), ()))
+        .collect();
+    assert!(on_rail.len() >= 96, "{} rail points", on_rail.len());
+}
+
+#[test]
+fn cone_chamfer_band_refacets() {
+    let obj = extrude(&circle_sketch(Point3::new(0.0, 0.0, 0.0), 0.5, 48), 1.0);
+    let spec = kernel::BlendSpec {
+        profile: kernel::BlendProfile::Chamfer {
+            setback_a: 0.05,
+            setback_b: 0.05,
+        },
+        ..round(rim_edges(&obj, 1.0), 0.1, 6)
+    };
+    let (f, _) = obj.blend_edges(&spec).unwrap();
+    let soup = export_triangles(&f, 96).unwrap();
+    assert_manifold(&soup);
+    let top_ring = torus_soup_points(&soup, 0.99)
+        .iter()
+        .filter(|p| (p.z - 1.0).abs() < 1e-12 && (p.x.hypot(p.y) - 0.45).abs() < 1e-9)
+        .count();
+    assert!(top_ring > 48 * 3, "{top_ring}");
+}
+
+#[test]
+fn non_pristine_torus_demotes() {
+    let obj = extrude(&circle_sketch(Point3::new(0.0, 0.0, 0.0), 0.5, 48), 1.0);
+    let (f, _) = obj
+        .blend_edges(&round(rim_edges(&obj, 1.0), 0.1, 6))
+        .unwrap();
+    // A notch through the torus band.
+    let mut cutter = unit_box();
+    cutter
+        .apply_transform(&kernel::Transform::scale(kernel::Vec3::new(0.1, 0.2, 0.2)))
+        .unwrap();
+    cutter
+        .apply_transform(&kernel::Transform::translation(kernel::Vec3::new(
+            -0.05, 0.4, 0.88,
+        )))
+        .unwrap();
+    let notched = Object::boolean(
+        kernel::BooleanOp::Subtract,
+        &f,
+        &cutter,
+        &kernel::Transform::IDENTITY,
+    )
+    .unwrap();
+    let soup = export_triangles(&notched, 96).unwrap();
+    assert_manifold(&soup);
+}
+
+#[test]
+fn seams_inside_one_fillet_draw_only_with_the_tangent_edges() {
+    // A box with only its top rim rounded: at each corner the two strips
+    // meet over the still-sharp vertical edge. That crease is part of the
+    // rounding, so it is drawn with the tangent edges, not as a hard line.
+    let mut s = Sketch::on_plane(ground());
+    let c = [(0.0, 0.0), (0.3, 0.0), (0.3, 0.2), (0.0, 0.2)];
+    for i in 0..4 {
+        let (a, b) = (c[i], c[(i + 1) % 4]);
+        s.add_segment(Point3::new(a.0, a.1, 0.0), Point3::new(b.0, b.1, 0.0))
+            .unwrap();
+    }
+    let obj = extrude(&s, 0.1);
+    let rim: Vec<kernel::EdgeId> = obj
+        .sharp_edges()
+        .into_iter()
+        .filter(|&e| {
+            let (p, q) = obj.edge_endpoints(e).unwrap();
+            (p.z - 0.1).abs() < 1e-12 && (q.z - 0.1).abs() < 1e-12
+        })
+        .collect();
+    assert_eq!(rim.len(), 4);
+    let (rounded, _) = obj
+        .blend_edges(&kernel::BlendSpec {
+            edges: rim,
+            profile: kernel::BlendProfile::Round {
+                radius: 0.01,
+                segments: 6,
+            },
+            primary: None,
+            corners: kernel::CornerStyle::Default,
+            stops: None,
+            handles: Vec::new(),
+        })
+        .unwrap();
+    let seams: Vec<kernel::EdgeId> = rounded
+        .edges()
+        .keys()
+        .filter(|&e| {
+            rounded.edge_is_inside_one_blend(e)
+                && rounded.edge_smoothness(e) == kernel::EdgeSmoothness::Hard
+        })
+        .collect();
+    assert_eq!(seams.len(), 4 * 6, "one six-segment seam per corner");
+    let mesh = tessellate(&rounded, &MaterialPalette::default()).unwrap();
+    let key = |p: Point3, q: Point3| {
+        let k = |p: Point3| [p.x as f32, p.y as f32, p.z as f32];
+        let (a, b) = (k(p), k(q));
+        if a <= b { [a, b] } else { [b, a] }
+    };
+    let set = |buf: &[f32]| -> Vec<[[f32; 3]; 2]> {
+        segments(buf)
+            .into_iter()
+            .map(|s| {
+                let (a, b) = ([s[0], s[1], s[2]], [s[3], s[4], s[5]]);
+                if a <= b { [a, b] } else { [b, a] }
+            })
+            .collect()
+    };
+    let hard = set(&mesh.edge_positions);
+    let tangent = set(&mesh.tangent_edge_positions);
+    for e in seams {
+        let (p, q) = rounded.edge_endpoints(e).unwrap();
+        assert!(
+            !hard.contains(&key(p, q)),
+            "an in-fillet seam is not a hard line"
+        );
+        assert!(
+            tangent.contains(&key(p, q)),
+            "it draws with the tangent edges"
+        );
     }
 }

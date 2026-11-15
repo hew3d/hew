@@ -1383,6 +1383,34 @@ fn cap_center_snaps_as_center() {
     assert!(matches!(source.element, ElementRef::Face(_)));
 }
 
+/// A sphere claim's center snaps as `SnapKind::Center`, with provenance on a
+/// claiming face. The claim is planted through the kernel's test hook (no
+/// operation stamps a sphere yet) with its center in free space above a cube.
+#[test]
+fn sphere_claim_center_snaps_as_center() {
+    let c = Point3::new(0.5, 0.5, 3.0);
+    let mut cube = unit_cube();
+    let top = cube.faces().keys().nth(1).unwrap();
+    cube.set_face_surface_for_test(
+        top,
+        Some(kernel::SurfaceRef::Sphere {
+            center: c,
+            radius: 5.0,
+        }),
+    );
+    cube.validate().expect("claim is valid");
+
+    let mut scene = InferenceScene::new();
+    scene.add_object(ObjectId::default(), &cube, &Transform::IDENTITY);
+    let snap = scene
+        .resolve(&query(ray_at(Point3::new(0.5, 0.5, 8.0), c), NARROW))
+        .expect("sphere center resolves");
+    assert_eq!(snap.kind, SnapKind::Center);
+    assert!(snap.position.approx_eq(c, tol::POINT_MERGE));
+    let source = snap.source.expect("centers carry object provenance");
+    assert_eq!(source.element, ElementRef::Face(top));
+}
+
 /// The bottom cap's center is occluded by the solid when viewed from above:
 /// only the visible center snaps (the same only-what-you-see rule as every
 /// other candidate).

@@ -15,11 +15,12 @@ pub enum Category {
     Component,
     Material,
     Model,
+    Profile,
 }
 
 impl Category {
     /// Parses the wire/JSON spelling (`"component"` | `"material"` |
-    /// `"model"`); `None` for anything else. Named `parse` rather than
+    /// `"model"` | `"profile"`); `None` for anything else. Named `parse` rather than
     /// `from_str` to avoid the inherent-method/`FromStr`-trait-method
     /// name clash clippy flags (`should_implement_trait`).
     pub fn parse(s: &str) -> Option<Category> {
@@ -27,6 +28,7 @@ impl Category {
             "component" => Category::Component,
             "material" => Category::Material,
             "model" => Category::Model,
+            "profile" => Category::Profile,
             _ => return None,
         })
     }
@@ -36,6 +38,7 @@ impl Category {
             Category::Component => "component",
             Category::Material => "material",
             Category::Model => "model",
+            Category::Profile => "profile",
         }
     }
 }
@@ -118,6 +121,14 @@ pub fn parse_item_meta(raw: &serde_json::Value) -> ItemMeta {
 /// file holding exactly one component definition and no top-level groups
 /// is a component; everything else is a model.
 pub fn derive_category(summary: &ItemSummary) -> Category {
+    // A profile file: one open drawn chain and nothing else.
+    if summary.objects == 0
+        && summary.components == 0
+        && summary.materials == 0
+        && summary.profile_chain_only
+    {
+        return Category::Profile;
+    }
     let material_only = summary.objects == 0 && summary.components == 0 && summary.materials > 0;
     if material_only {
         return Category::Material;
@@ -167,6 +178,26 @@ pub fn display_name(meta: &ItemMeta, summary: &ItemSummary, rel_path: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A profile item's bytes: one bundled shape as an open drawn chain.
+    fn profile_summary() -> ItemSummary {
+        let (_, _, make) = kernel::bundled_profiles()[0];
+        let doc = kernel::Document::profile_document_from_shape(&make(), 0.05).unwrap();
+        kernel::read_item_summary(&doc.save()).unwrap()
+    }
+
+    #[test]
+    fn profile_is_a_category_and_derives_from_one_open_chain() {
+        assert_eq!(Category::parse("profile"), Some(Category::Profile));
+        assert_eq!(Category::Profile.as_str(), "profile");
+        let mut summary = profile_summary();
+        assert!(summary.profile_chain_only);
+        assert_eq!(derive_category(&summary), Category::Profile);
+        // What an old reader computes: ignoring the new flag, a file with
+        // no objects, components or materials is a plain model.
+        summary.profile_chain_only = false;
+        assert_eq!(derive_category(&summary), Category::Model);
+    }
 
     #[test]
     fn parse_item_meta_reads_every_field_of_a_well_formed_dict() {
@@ -235,6 +266,7 @@ mod tests {
             first_root_name: None,
             doc_attrs: serde_json::json!({}),
             material_entries: Vec::new(),
+            profile_chain_only: false,
         }
     }
 

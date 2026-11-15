@@ -89,7 +89,7 @@ pub const MAX_CIRCLE_SEGMENTS: usize = 1024;
 /// never stored. This is the durable form of what the drawing tool computed
 /// and, before this existed, immediately discarded — the foundation the
 /// true-curves plan builds on.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CurveGeom {
     /// Circle center, on the sketch plane (within
     /// [`tol::PLANE_DIST`](crate::tol::PLANE_DIST)).
@@ -374,7 +374,7 @@ pub struct VertexMoved {
 }
 
 /// Typed failures of sketch operations. Nothing is repaired silently.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SketchError {
     /// An input point is farther than [`tol::PLANE_DIST`](crate::tol::PLANE_DIST) from the sketch
     /// plane. The kernel does not project; the caller decides.
@@ -453,7 +453,31 @@ pub enum SketchError {
     /// the offset loops cross themselves or each other. The sketch is
     /// untouched — no silent repair (rule 4).
     OffsetCollapsed,
+    /// [`Sketch::blend_corner`] was pointed at a vertex that is not a corner
+    /// of exactly two straight lines: it has some other number of incident
+    /// edges, or one of its two edges belongs to a curve chain (an arc or
+    /// circle facet, or a polygon side).
+    CornerNotBlendable,
+    /// The two edges of the corner are collinear (the interior angle is
+    /// within [`tol::NORMAL_DIRECTION`] of a half turn), so there is no corner
+    /// to round or chamfer.
+    CornerIsStraight,
+    /// A corner blend is too large: a tangent point would reach or pass the
+    /// far end of one of the two edges.
+    CornerRadiusTooLarge {
+        /// The largest radius (for a round) or the largest uniform scale of
+        /// both setbacks (for a chamfer) that fits; the blend succeeds for
+        /// any smaller positive value.
+        max: f64,
+    },
+    /// A corner blend on a drafted face drawing would leave the face: the
+    /// corner lies along the solid's own boundary, or a point of the new arc
+    /// or chamfer segment falls outside the face.
+    CornerLeavesFace,
 }
+
+// `DocumentError` is `Eq`; every f64 payload is finite by construction.
+impl Eq for SketchError {}
 
 impl std::fmt::Display for SketchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -514,6 +538,24 @@ impl std::fmt::Display for SketchError {
             SketchError::OffsetCollapsed => {
                 write!(f, "the offset distance collapses the boundary")
             }
+            SketchError::CornerNotBlendable => {
+                write!(
+                    f,
+                    "only a corner where two straight lines meet can be rounded"
+                )
+            }
+            SketchError::CornerIsStraight => {
+                write!(
+                    f,
+                    "the lines are in a straight line; there is no corner to round"
+                )
+            }
+            SketchError::CornerRadiusTooLarge { max } => {
+                write!(f, "the radius is too large for this corner (at most {max})")
+            }
+            SketchError::CornerLeavesFace => {
+                write!(f, "the rounded corner would leave the face")
+            }
         }
     }
 }
@@ -542,6 +584,14 @@ pub struct Sketch {
     /// committed before geometry capture existed (pre-v10 files) or through
     /// the plain [`Sketch::begin_curve`].
     curves: SlotMap<SketchCurveId, Option<CurveAnalytic>>,
+    /// Chains that were drawn as circles or arcs and lost their analytic
+    /// record to a non-similarity transform (true-curves.md §3.3 rule 2,
+    /// E1): extrusion and Follow Me shade their facet seams smooth.
+    /// Invariant: a curve id is here only if its slot exists and its
+    /// analytic record is `None`. A regular polygon's chain never is (its
+    /// sides are its geometry), and an analytic-less chain drawn as such
+    /// (a too-flat arc's chord) never was. Persisted in manifest v30.
+    smooth_curves: std::collections::BTreeSet<SketchCurveId>,
     /// Current connected components (derived; see [`SketchIsland`]).
     islands: SlotMap<SketchIslandId, SketchIsland>,
     /// Curve id applied to edges inserted by `add_segment` while a
@@ -567,6 +617,13 @@ pub struct Sketch {
     /// ([`Sketch::apply_transform_edges`], [`Sketch::copy_edges_transformed`]),
     /// so the drafting engine can heal a seam moved off the boundary.
     seams: Vec<Point3>,
+    /// Transient (never saved, ignored by equality): how far an inserted
+    /// point may lie from the plane. [`tol::PLANE_DIST`] for every sketch a
+    /// user draws in; a boolean's arrangement sketch over an IMPORTED face
+    /// (flat only to its object's planarity tolerance) takes that tolerance
+    /// ([`Sketch::on_plane_with_tol`]). Points are stored as given, never
+    /// projected.
+    plane_tol: f64,
     /// Transient drafting state (never saved, ignored by equality): lines a
     /// drafting lift holds from elsewhere (another plane's or sketch's
     /// drawing lying in this plane) that new drawing must not bend. A
@@ -601,6 +658,32 @@ pub(crate) struct RemovedScaffolding {
 }
 
 impl Sketch {
+    /// An estimate of the heap this sketch holds, for the undo-memory
+    /// budget ([`crate::Document::history_memory`]): each table at its
+    /// capacity plus the rings and edge lists its regions and islands own.
+    pub(crate) fn heap_bytes_estimate(&self) -> usize {
+        use crate::shared::slotmap_heap_bytes as table;
+        let ids = std::mem::size_of::<SketchVertexId>();
+        let rings: usize = self
+            .regions
+            .values()
+            .map(|r| (r.outer.capacity() + r.holes.iter().map(Vec::capacity).sum::<usize>()) * ids)
+            .sum();
+        let island_lists: usize = self
+            .islands
+            .values()
+            .map(|i| i.edges.capacity() * std::mem::size_of::<SketchEdgeId>())
+            .sum();
+        table(&self.vertices)
+            + table(&self.edges)
+            + table(&self.regions)
+            + rings
+            + table(&self.curves)
+            + table(&self.islands)
+            + island_lists
+            + self.seams.capacity() * std::mem::size_of::<Point3>()
+    }
+
     /// An empty sketch on `plane` (not detached).
     pub fn on_plane(plane: Plane) -> Sketch {
         Self::blank(plane, false)
@@ -641,12 +724,24 @@ impl Sketch {
             edges: SlotMap::with_key(),
             regions: SlotMap::with_key(),
             curves: SlotMap::with_key(),
+            smooth_curves: std::collections::BTreeSet::new(),
             active_curve: None,
             islands: SlotMap::with_key(),
             bulk_vertex_cells: None,
             snap_to_existing: false,
             seams: Vec::new(),
+            plane_tol: tol::PLANE_DIST,
             rigid: Vec::new(),
+        }
+    }
+
+    /// An empty sketch on `plane` whose inserted points may lie up to `tol`
+    /// from it (see the field `plane_tol`): the arrangement sketch a boolean
+    /// builds over a face of an imported object. Crate-internal.
+    pub(crate) fn on_plane_with_tol(plane: Plane, tol: f64) -> Sketch {
+        Sketch {
+            plane_tol: tol.max(crate::tol::PLANE_DIST),
+            ..Sketch::on_plane(plane)
         }
     }
 
@@ -824,6 +919,34 @@ impl Sketch {
         self.curve_analytic(curve)
             .filter(|a| a.kind == SketchCurveKind::Circle)
             .map(|a| a.geom)
+    }
+
+    /// Whether `curve`'s facet seams shade smooth when it is extruded or swept:
+    /// it carries a [`SketchCurveKind::Circle`] record, or it lost one to a
+    /// non-similarity transform (`smooth_curves`, E1).
+    pub fn curve_is_smooth(&self, curve: SketchCurveId) -> bool {
+        matches!(
+            self.curves.get(curve).copied().flatten(),
+            Some(CurveAnalytic {
+                kind: SketchCurveKind::Circle,
+                ..
+            })
+        ) || self.smooth_curves.contains(&curve)
+    }
+
+    /// Marks an analytic-less chain smooth (E1). A no-op for a stale id or a
+    /// chain that still carries an analytic record (the invariant on
+    /// `smooth_curves`).
+    pub(crate) fn mark_curve_smooth(&mut self, curve: SketchCurveId) {
+        if matches!(self.curves.get(curve), Some(None)) {
+            self.smooth_curves.insert(curve);
+        }
+    }
+
+    /// [`Sketch::mark_curve_smooth`] for the executable specs.
+    #[doc(hidden)]
+    pub fn mark_curve_smooth_for_test(&mut self, curve: SketchCurveId) {
+        self.mark_curve_smooth(curve);
     }
 
     /// The full analytic record of `curve` — circle *and* what it claims —
@@ -1344,7 +1467,19 @@ impl Sketch {
             if inside == 0 {
                 continue; // untouched chain
             }
-            s.curves[cid] = match (s.curves[cid], scale, inside == members.len()) {
+            let whole = inside == members.len();
+            // A whole drawn circle stretched by a non-similarity stays a
+            // smooth curve (E1); a polygon's sides stay hard.
+            let stretched_circle = whole
+                && scale.is_none()
+                && matches!(
+                    s.curves[cid],
+                    Some(CurveAnalytic {
+                        kind: SketchCurveKind::Circle,
+                        ..
+                    })
+                );
+            s.curves[cid] = match (s.curves[cid], scale, whole) {
                 (Some(a), Some(sc), true) => Some(CurveAnalytic {
                     geom: CurveGeom {
                         center: t.apply_point(a.geom.center),
@@ -1354,6 +1489,9 @@ impl Sketch {
                 }),
                 _ => None,
             };
+            if stretched_circle {
+                s.mark_curve_smooth(cid);
+            }
         }
 
         // Containment may have changed even though nothing touched (a shape
@@ -1508,8 +1646,19 @@ impl Sketch {
                                 a.kind,
                             )?;
                         }
-                        _ => {
-                            target.begin_curve();
+                        (None, _) => {
+                            let c = target.begin_curve();
+                            if self.smooth_curves.contains(&cid) {
+                                target.mark_curve_smooth(c);
+                            }
+                        }
+                        (Some(a), None) => {
+                            // A circle copied through a non-similarity keeps
+                            // its smooth shading (E1); a polygon does not.
+                            let c = target.begin_curve();
+                            if a.kind == SketchCurveKind::Circle {
+                                target.mark_curve_smooth(c);
+                            }
                         }
                     }
                     for &member in edges.iter().filter(|&&m| self.edges[m].curve == Some(cid)) {
@@ -1877,6 +2026,27 @@ impl Sketch {
         // stops claiming an analytic ancestry it no longer has
         // (the true-curves design). Chain identity always survives.
         let scale = in_plane_similarity_scale(transform, self.plane.normal());
+        // E1: a circle chain whose record is about to drop stays smooth.
+        if scale.is_none() {
+            let circles: Vec<SketchCurveId> = self
+                .curves
+                .iter()
+                .filter(|(_, a)| {
+                    matches!(
+                        a,
+                        Some(CurveAnalytic {
+                            kind: SketchCurveKind::Circle,
+                            ..
+                        })
+                    )
+                })
+                .map(|(id, _)| id)
+                .collect();
+            for cid in circles {
+                self.curves[cid] = None;
+                self.smooth_curves.insert(cid);
+            }
+        }
         for analytic in self.curves.values_mut() {
             *analytic = match (*analytic, scale) {
                 (Some(a), Some(s)) => Some(CurveAnalytic {
@@ -2464,8 +2634,18 @@ impl Sketch {
                 }
                 let ef = proj(s.vertices[oth.from].position);
                 let et = proj(s.vertices[oth.to].position);
-                let events =
-                    seg_seg_intersections_2d(nf, nt, ef, et, &s.vertices, *oth, u_ax, v_ax, anchor);
+                let events = seg_seg_intersections_2d(
+                    nf,
+                    nt,
+                    ef,
+                    et,
+                    &s.vertices,
+                    *oth,
+                    u_ax,
+                    v_ax,
+                    anchor,
+                    None,
+                );
                 for ev in events {
                     let bad = match ev {
                         Intersection2D::Proper { .. }
@@ -2951,6 +3131,30 @@ impl Sketch {
         let hole_curves: Vec<Vec<Option<CurveGeom>>> =
             r.holes.iter().map(|h| loop_geoms(h)).collect();
         profile.set_curve_attribution(outer_curves, hole_curves);
+
+        // Smooth-chain keys (E1): an analytic-less chain that still shades
+        // smooth, keyed densely in first-appearance order over the outer
+        // loop, then the holes.
+        let mut keys: std::collections::BTreeMap<SketchCurveId, u32> =
+            std::collections::BTreeMap::new();
+        let mut loop_keys = |cycle: &[SketchVertexId]| -> Vec<Option<u32>> {
+            (0..cycle.len())
+                .map(|k| {
+                    let cid = self
+                        .edge_between(cycle[k], cycle[(k + 1) % cycle.len()])
+                        .and_then(|eid| self.edges[eid].curve)?;
+                    (self.smooth_curves.contains(&cid) && self.curves.get(cid) == Some(&None)).then(
+                        || {
+                            let next = keys.len() as u32;
+                            *keys.entry(cid).or_insert(next)
+                        },
+                    )
+                })
+                .collect()
+        };
+        let outer_smooth = loop_keys(&r.outer);
+        let hole_smooth: Vec<Vec<Option<u32>>> = r.holes.iter().map(|h| loop_keys(h)).collect();
+        profile.set_smooth_attribution(outer_smooth, hole_smooth);
         Ok(profile)
     }
 
@@ -3118,6 +3322,7 @@ impl PartialEq for Sketch {
             && slotmaps_eq(&self.edges, &other.edges)
             && slotmaps_eq(&self.regions, &other.regions)
             && slotmaps_eq(&self.curves, &other.curves)
+            && self.smooth_curves == other.smooth_curves
     }
 }
 
@@ -3177,10 +3382,10 @@ impl Sketch {
             return Err(SketchError::PointOffPlane { which: 1 });
         }
         // ── Step 1: validate planarity ────────────────────────────────────────
-        if self.plane.signed_distance(from).abs() > tol::PLANE_DIST {
+        if self.plane.signed_distance(from).abs() > self.plane_tol {
             return Err(SketchError::PointOffPlane { which: 0 });
         }
-        if self.plane.signed_distance(to).abs() > tol::PLANE_DIST {
+        if self.plane.signed_distance(to).abs() > self.plane_tol {
             return Err(SketchError::PointOffPlane { which: 1 });
         }
 
@@ -3257,8 +3462,18 @@ impl Sketch {
 
             // Find all intersections between the new segment [fp,tp] and this
             // existing edge [ep,eq_].
-            let intersections =
-                seg_seg_intersections_2d(fp, tp, ep, eq_, &self.vertices, edge, u_ax, v_ax, anchor);
+            let intersections = seg_seg_intersections_2d(
+                fp,
+                tp,
+                ep,
+                eq_,
+                &self.vertices,
+                edge,
+                u_ax,
+                v_ax,
+                anchor,
+                (self.plane_tol > tol::PLANE_DIST).then_some((from_pos, to_pos)),
+            );
 
             for isect in intersections {
                 match isect {
@@ -3867,12 +4082,20 @@ impl Sketch {
 
         // Compute signed area for each cycle.  Positive = CCW (candidate region
         // outer boundary); negative = CW (hole boundary or outer face).
+        // Areas are taken about one point of the drawing, not the world
+        // origin: far from the origin the shoelace terms are large and
+        // cancel, and the unbounded face's match below is relative.
+        let origin = cycles
+            .iter()
+            .find_map(|c| c.first())
+            .map(|&vid| self.vertices[vid].position)
+            .unwrap_or(Point3::ORIGIN);
         let cycle_areas: Vec<f64> = cycles
             .iter()
             .map(|cycle| {
                 let pts: Vec<Point3> = cycle
                     .iter()
-                    .map(|&vid| self.vertices[vid].position)
+                    .map(|&vid| Point3::ORIGIN + (self.vertices[vid].position - origin))
                     .collect();
                 signed_area_on_plane(&pts, normal)
             })
@@ -3892,10 +4115,18 @@ impl Sketch {
             .iter()
             .map(|a| a.abs())
             .fold(f64::NEG_INFINITY, f64::max);
+        // The match is relative to the largest area: an absolute slack lets
+        // every cycle of a small drawing (millimeter parts, under a few
+        // square centimeters) qualify, and the first CW hole cycle listed
+        // was then taken for the unbounded face, leaving the ring around
+        // it without its hole. The largest qualifying CW cycle wins, the
+        // first on a tie.
         let unbounded_idx = cycle_areas
             .iter()
             .enumerate()
-            .filter(|&(_, a)| *a < 0.0 && (a.abs() - max_abs_area).abs() < tol::POINT_MERGE * 1e6)
+            .filter(|&(_, a)| {
+                *a < 0.0 && (a.abs() - max_abs_area).abs() <= max_abs_area * tol::AREA_TIE_REL
+            })
             // The most negative of them: a cycle split off a pinched walk
             // (a hole touching the outer ring) may come first and lie
             // within that window of the true outside.
@@ -4126,11 +4357,24 @@ fn seg_seg_intersections_2d(
     u_ax: Vec3,
     v_ax: Vec3,
     anchor: Point3,
+    keep_3d: Option<(Point3, Point3)>,
 ) -> Vec<Intersection2D> {
     // Reconstruct 3D position from 2D plane coords. `anchor` carries the
     // out-of-plane component (the plane need not pass through the origin); the
     // 2D coords supply the in-plane displacement.
     let pos_from_2d = |p: (f64, f64)| -> Point3 { anchor + u_ax * p.0 + v_ax * p.1 };
+    // A sketch whose points may lie off its plane (`plane_tol`, a boolean's
+    // arrangement over an imported face) keeps contact points in 3D instead:
+    // a touching endpoint is the new segment's own point and a crossing is
+    // read along the new segment, so no point is moved onto the plane and
+    // every face sharing an edge computes the same point.
+    let new_3d = |p2d: (f64, f64)| -> Point3 {
+        match keep_3d {
+            Some((a, _)) if p2d == nf => a,
+            Some((_, b)) if p2d == nt => b,
+            _ => pos_from_2d(p2d),
+        }
+    };
     let eps = tol::POINT_MERGE;
 
     let sub = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0, a.1 - b.1);
@@ -4180,7 +4424,7 @@ fn seg_seg_intersections_2d(
             let s = param(np2d, ef, d_ext, ext_len2);
             if interior(s, ext_len) {
                 s_params_on_existing.push(s);
-                points_on_existing.push(pos_from_2d(np2d));
+                points_on_existing.push(new_3d(np2d));
             }
         }
         if t_params_on_new.is_empty() && s_params_on_existing.is_empty() {
@@ -4201,7 +4445,7 @@ fn seg_seg_intersections_2d(
         if on_line && interior(s, ext_len) {
             events.push(Intersection2D::NewEndpointOnExisting {
                 s_existing: s,
-                point: pos_from_2d(np2d),
+                point: new_3d(np2d),
             });
         }
     }
@@ -4233,7 +4477,10 @@ fn seg_seg_intersections_2d(
         let w = sub(ef, nf);
         let t = (cross(w, d_ext) / denom).clamp(0.0, 1.0);
         let s = (cross(w, d_new) / denom).clamp(0.0, 1.0);
-        let point = pos_from_2d((ef.0 + d_ext.0 * s, ef.1 + d_ext.1 * s));
+        let point = match keep_3d {
+            Some((a, b)) => a + (b - a) * t,
+            None => pos_from_2d((ef.0 + d_ext.0 * s, ef.1 + d_ext.1 * s)),
+        };
         return vec![Intersection2D::Proper {
             t_new: t,
             s_existing: s,
@@ -4333,6 +4580,14 @@ pub struct Profile {
     outer_curves: Vec<Option<CurveGeom>>,
     /// Same, per hole boundary edge. Parallel to `holes` when non-empty.
     hole_curves: Vec<Vec<Option<CurveGeom>>>,
+    /// Smooth-chain keys per outer boundary edge (E1): `Some(key)` when the
+    /// edge belongs to a chain that shades smooth but carries no analytic
+    /// record (a circle that lost its circle to a non-uniform scale). Keys
+    /// are dense per profile in first-appearance order, so the edges of one
+    /// chain share a key. Parallel to `outer`; empty ⇒ none.
+    outer_smooth: Vec<Option<u32>>,
+    /// Same, per hole boundary edge.
+    hole_smooth: Vec<Vec<Option<u32>>>,
 }
 
 /// Typed reasons a would-be [`Profile`] is rejected. The kernel never fixes
@@ -4479,6 +4734,8 @@ impl Profile {
             holes,
             outer_curves: Vec::new(),
             hole_curves: Vec::new(),
+            outer_smooth: Vec::new(),
+            hole_smooth: Vec::new(),
         })
     }
 
@@ -4500,6 +4757,34 @@ impl Profile {
         );
         self.outer_curves = outer_curves;
         self.hole_curves = hole_curves;
+    }
+
+    /// Attaches per-edge smooth-chain keys (see the field docs). Lengths
+    /// must be parallel to the boundaries.
+    pub(crate) fn set_smooth_attribution(
+        &mut self,
+        outer_smooth: Vec<Option<u32>>,
+        hole_smooth: Vec<Vec<Option<u32>>>,
+    ) {
+        debug_assert_eq!(outer_smooth.len(), self.outer.len());
+        debug_assert_eq!(hole_smooth.len(), self.holes.len());
+        self.outer_smooth = outer_smooth;
+        self.hole_smooth = hole_smooth;
+    }
+
+    /// The smooth-chain key of outer edge `k` (E1), or `None` (no chain, a
+    /// chain with an analytic record, or one that shades hard).
+    pub fn outer_smooth(&self, k: usize) -> Option<u32> {
+        self.outer_smooth.get(k).copied().flatten()
+    }
+
+    /// The smooth-chain key of hole `i`'s edge `k` (E1), or `None`.
+    pub fn hole_smooth(&self, i: usize, k: usize) -> Option<u32> {
+        self.hole_smooth
+            .get(i)
+            .and_then(|h| h.get(k))
+            .copied()
+            .flatten()
     }
 
     /// The supporting plane.

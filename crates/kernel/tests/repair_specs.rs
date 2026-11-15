@@ -1120,3 +1120,188 @@ fn a_solid_resting_on_the_opening_does_not_stop_the_lid() {
     assert!(report.closed);
     assert!((signed_volume(&doc, id) - (1.0 + 0.125)).abs() < 1e-9);
 }
+
+// ==== true-curves: imports ====
+// Remove degenerate faces (true-curves WP20 Part 2).
+
+/// A 1 m cube whose top front edge carries a sliver: a triangle 0.1 nm
+/// high between that edge and a vertex `c` just below it, which the front
+/// face also passes through. Valid (its plane fits), but of no width.
+fn cube_with_sliver() -> kernel::Object {
+    cube_with_sliver_at(kernel::Point3::new(0.5, 0.0, 1.0 - 1e-10))
+}
+
+/// [`cube_with_sliver`] with the sliver's tip at `c`.
+fn cube_with_sliver_at(c: kernel::Point3) -> kernel::Object {
+    use kernel::Point3;
+    let pts = vec![
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(1.0, 1.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+        Point3::new(0.0, 0.0, 1.0),
+        Point3::new(1.0, 0.0, 1.0),
+        Point3::new(1.0, 1.0, 1.0),
+        Point3::new(0.0, 1.0, 1.0),
+        c,
+    ];
+    let faces = vec![
+        vec![0, 3, 2, 1],
+        vec![4, 5, 6, 7],
+        vec![0, 1, 5, 8, 4],
+        vec![4, 8, 5],
+        vec![1, 2, 6, 5],
+        vec![2, 3, 7, 6],
+        vec![3, 0, 4, 7],
+    ];
+    kernel::Object::from_polygons(&pts, &faces).expect("the sliver cube builds")
+}
+
+#[test]
+fn removes_collinear_sliver_keeps_watertight() {
+    let mut o = cube_with_sliver();
+    assert_eq!(o.faces().len(), 7);
+    let d = kernel::health::diagnose(&o);
+    assert!(
+        d.findings
+            .contains(&kernel::health::Finding::DegenerateFaces { count: 1 }),
+        "the health check names it: {:?}",
+        d.findings
+    );
+    let report = o.remove_degenerate_faces().unwrap();
+    assert_eq!(report.removed, 1);
+    assert_eq!(o.faces().len(), 6);
+    o.validate().unwrap();
+    assert_eq!(o.watertight(), kernel::WatertightState::Watertight);
+    assert!(kernel::health::diagnose(&o).findings.is_empty());
+    // The top took the sliver's vertex.
+    let top = o
+        .faces()
+        .values()
+        .find(|f| f.plane.normal().z > 0.5)
+        .unwrap();
+    assert_eq!(o.loop_positions(top.outer_loop).count(), 5);
+}
+
+#[test]
+fn nothing_to_remove() {
+    let mut o = kernel::Object::from_polygons(
+        &[
+            kernel::Point3::new(0.0, 0.0, 0.0),
+            kernel::Point3::new(1.0, 0.0, 0.0),
+            kernel::Point3::new(0.0, 1.0, 0.0),
+            kernel::Point3::new(0.0, 0.0, 1.0),
+        ],
+        &[vec![0, 2, 1], vec![0, 1, 3], vec![1, 2, 3], vec![2, 0, 3]],
+    )
+    .unwrap();
+    assert_eq!(
+        o.remove_degenerate_faces().err(),
+        Some(kernel::repair::RepairError::NothingToRemove)
+    );
+}
+
+#[test]
+fn collapses_short_edge() {
+    // The sliver's tip half a nanometer from the corner: its edge to the
+    // corner is under POINT_MERGE, so it collapses and the sliver goes.
+    let mut o = cube_with_sliver_at(kernel::Point3::new(1.0 - 5e-10, 0.0, 1.0 - 1e-10));
+    assert_eq!(o.faces().len(), 7);
+    let report = o.remove_degenerate_faces().unwrap();
+    assert_eq!(report.removed, 1);
+    o.validate().unwrap();
+    assert_eq!(o.watertight(), kernel::WatertightState::Watertight);
+    assert_eq!(o.faces().len(), 6);
+    assert_eq!(o.vertices().len(), 8, "the tip merged into the corner");
+}
+
+#[test]
+fn after_repair_union_succeeds() {
+    let mut o = cube_with_sliver();
+    o.remove_degenerate_faces().unwrap();
+    let mut b = kernel::Object::from_polygons(
+        &[
+            kernel::Point3::new(0.0, 0.0, 0.0),
+            kernel::Point3::new(1.0, 0.0, 0.0),
+            kernel::Point3::new(1.0, 1.0, 0.0),
+            kernel::Point3::new(0.0, 1.0, 0.0),
+            kernel::Point3::new(0.0, 0.0, 1.0),
+            kernel::Point3::new(1.0, 0.0, 1.0),
+            kernel::Point3::new(1.0, 1.0, 1.0),
+            kernel::Point3::new(0.0, 1.0, 1.0),
+        ],
+        &[
+            vec![0, 3, 2, 1],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ],
+    )
+    .unwrap();
+    b.apply_transform(&kernel::Transform::translation(kernel::Vec3::new(
+        0.5, 0.5, 0.5,
+    )))
+    .unwrap();
+    let r = kernel::Object::boolean(
+        kernel::BooleanOp::Union,
+        &o,
+        &b,
+        &kernel::Transform::IDENTITY,
+    )
+    .expect("the repaired cube unions");
+    r.validate().unwrap();
+}
+
+#[test]
+fn document_remove_degenerate_undo_restores() {
+    let mut doc = kernel::Document::new();
+    let sliver = cube_with_sliver();
+    let positions: Vec<Point3> = sliver.vertices().values().map(|v| v.position).collect();
+    let index: std::collections::BTreeMap<_, usize> = sliver
+        .vertices()
+        .keys()
+        .enumerate()
+        .map(|(i, v)| (v, i))
+        .collect();
+    let faces: Vec<Vec<usize>> = sliver
+        .faces()
+        .values()
+        .map(|f| {
+            sliver
+                .loop_half_edges(f.outer_loop)
+                .map(|h| index[&sliver.half_edges()[h].origin])
+                .collect()
+        })
+        .collect();
+    ingest(
+        &mut doc,
+        vec![ImportNode::Mesh(mesh("Sliver", positions, faces))],
+    );
+    let id = only_object(&doc);
+    assert_eq!(
+        doc.object(id).unwrap().faces().len(),
+        7,
+        "the import keeps the sliver"
+    );
+    let h0 = doc.state_hash();
+    let (report, change) = doc.remove_degenerate_faces(id).unwrap();
+    assert_eq!(report.removed, 1);
+    assert!(change.objects_touched.contains(&id));
+    assert_eq!(doc.object(id).unwrap().faces().len(), 6);
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), h0);
+    assert_eq!(doc.object(id).unwrap().faces().len(), 7);
+    // The health report lists the solid only while it has degenerate faces.
+    let report = doc.health_report(None);
+    assert_eq!(report.rows.len(), 1);
+    // Listed, but still one object and one solid.
+    let counts = report.counts();
+    assert_eq!((counts.objects, counts.solids), (1, 1));
+    doc.redo().unwrap();
+    assert!(doc.health_report(None).rows.is_empty());
+    let counts = doc.health_report(None).counts();
+    assert_eq!((counts.objects, counts.solids), (1, 1));
+}
+// ==== end true-curves: imports ====

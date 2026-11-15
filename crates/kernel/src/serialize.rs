@@ -54,6 +54,12 @@ use crate::transform::Transform;
 /// 4×f64 center xyz + radius when present). Absent in v1-v4 files → all
 /// `Edge::curve = None`. An imprinted circle awaiting its push-through
 /// persists its identity here (the true-curves design, playtest fix C3).
+/// v5 → v6: per-face optional SOFT flags ([`crate::topo::Edge::soft`])
+/// appended after each face's hole loops and BEFORE the edge-curve block —
+/// a `u8` "any" flag (0 = no soft edge on this face; 1 = one `u8` per outer
+/// edge then per hole edge follows). A shared edge's two flags are OR'd on
+/// load. Absent in v1-v5 files → no soft edges. Sweep facet seams persist
+/// here.
 /// v6 → v7: per-face optional regular-polygon claims
 /// ([`crate::topo::Edge::polygon`]) appended AFTER each face's edge-curve
 /// block, in the same shape (a `u8` "any" flag; when 1, for every outer
@@ -74,19 +80,35 @@ use crate::transform::Transform;
 /// face's edges and, when 1, one (flag + optional length + JSON) entry per
 /// outer edge then per hole edge. A face without dictionaries grows by the
 /// two flag bytes. Absent in v1-v8 buffers → no dictionaries.
-pub const GEOMETRY_FORMAT_VERSION: u32 = 9;
+/// v9 → v10: three more analytic surface classes, the blend tag and the
+/// crease flag (the true-curves design). The per-face surface byte becomes a
+/// kind (0 none, 1 cylinder, 2 sphere + 4×f64 center xyz radius, 3 torus +
+/// 8×f64 center xyz axis xyz major minor, 4 cone + 7×f64 apex xyz axis xyz
+/// half-angle); after the dictionary blocks each face appends its CREASE
+/// flags (the soft block's shape: a `u8` "any" flag, then a `u8` per outer
+/// edge then per hole edge) and its blend tag (`u8` flag, then `u32` id,
+/// `u8` kind 0 fillet / 1 chamfer / 2 profile, `u8` role 0 strip / 1 corner
+/// / 2 runout). A face carrying neither grows by two zero bytes. A shared
+/// edge's two crease flags must agree. Absent in v1-v9 buffers → no
+/// creases, no blend tags, and only cylinder claims.
+pub const GEOMETRY_FORMAT_VERSION: u32 = 10;
 
 /// The geometry buffer version [`Document::state_hash`](crate::Document::state_hash)
 /// encodes an Object with when that Object carries no face or edge
-/// dictionary (and the manifest's `geometry_version` it hashes): the
-/// [`HASHED_FORMAT_VERSION`] rule applied to the geometry buffer, so the
-/// v9 bump moves only the hashes of documents whose solids carry
-/// dictionaries. An Object that carries one hashes as v9.
+/// dictionary and no v10 curve data (and the manifest's `geometry_version`
+/// it hashes): the [`HASHED_FORMAT_VERSION`] rule applied to the geometry
+/// buffer, so the v9 and v10 bumps move only the hashes of documents whose
+/// solids carry what those versions added. An Object that carries a
+/// dictionary hashes as v9, one that carries curve data as v10.
 pub(crate) const HASHED_GEOMETRY_VERSION: u32 = 8;
 
 /// The geometry buffer version at which face and edge attribute
 /// dictionaries were introduced.
 pub(crate) const ELEMENT_ATTRS_GEOMETRY_VERSION: u32 = 9;
+
+/// The geometry buffer version at which sphere, torus and cone surface
+/// claims, crease flags and blend tags were introduced.
+pub(crate) const CURVES_GEOMETRY_VERSION: u32 = 10;
 
 /// Version of the `.hew` container / `manifest.json` shape (independent of the
 /// geometry buffer version). Bump on any manifest-shape change and extend
@@ -317,7 +339,23 @@ pub(crate) const ELEMENT_ATTRS_GEOMETRY_VERSION: u32 = 9;
 /// same manifest as v28 apart from the version. Gated by
 /// [`DOCUMENT_ID_MIN_VERSION`]; `Document::state_hash` never writes it.
 /// Geometry buffer unchanged.
-pub const MANIFEST_FORMAT_VERSION: u32 = 29;
+/// **v30**: `sketches[].curves[].kind = "smooth"` — an entry with no
+/// `center` and no `radius` for a chain drawn as a circle or arc that lost
+/// its circle to a non-similarity transform and still shades smooth when
+/// extruded or swept (E1, the true-curves design). Every other entry keeps
+/// its center and radius, so a document with no such chain writes the same
+/// manifest as v29 apart from the version. Gated by
+/// [`SMOOTH_CHAIN_MIN_VERSION`]. Geometry buffer v10 (surface kinds 2–4,
+/// crease flags, blend tags).
+/// **v31**: `objects[].blends[]` — what each blend on the object replaced
+/// ([`crate::blend::BlendRecord`]: the blend's spec with its edges as
+/// segments, the loops it trimmed as the ring it left and the ring it
+/// replaced, the faces it consumed, the untagged pieces it left that replay
+/// takes away whole, the marks of the edges it removed), so Remove and
+/// Resize replay stored geometry. Omitted for an object with no blend, so
+/// such a document writes the same manifest as v30 apart from the version.
+/// Gated by [`BLEND_RECORDS_MIN_VERSION`]. Geometry buffer unchanged.
+pub const MANIFEST_FORMAT_VERSION: u32 = 31;
 
 /// The manifest version at which `materials[].pbr` was introduced. A file
 /// declaring an older version that carries one is rejected
@@ -439,6 +477,20 @@ pub(crate) const GUIDE_TAGS_MIN_VERSION: u32 = 21;
 /// introduced. A file declaring an older version that carries either is
 /// malformed for its own declared version and rejected (reject-not-repair).
 pub(crate) const GUIDE_SPAN_MIN_VERSION: u32 = 22;
+/// First manifest version whose `sketches[].curves[]` may hold a
+/// `kind: "smooth"` entry (no center, no radius): a chain drawn as a circle
+/// or arc that lost its circle to a non-similarity transform and still
+/// shades smooth when extruded (E1, the true-curves design).
+pub(crate) const SMOOTH_CHAIN_MIN_VERSION: u32 = 30;
+/// First manifest version whose `objects[]` entries may carry `blends[]`
+/// (the stored restoration of each blend). A file declaring an older
+/// version that carries one is malformed for its own declared version and
+/// rejected (reject-not-repair).
+pub(crate) const BLEND_RECORDS_MIN_VERSION: u32 = 31;
+/// The largest `seq` a blend record may carry in a file (2^30): the order
+/// counter has room for every later blend and every boolean's offset
+/// without reaching `u32::MAX`.
+pub(crate) const MAX_BLEND_SEQ: u32 = 1 << 30;
 
 /// The manifest version at which `camera.parallel_height` (the height a
 /// parallel view spans at its target, `camera.rs`), the top-level
@@ -811,6 +863,121 @@ fn ring_cmp(a: &[Point3], b: &[Point3]) -> std::cmp::Ordering {
 /// faces first, then frames compared elementwise (`s`, `t`, `u0`, `v0`) by
 /// `total_cmp` — the same bit-exact order positions use, so `-0.0`/`0.0` and
 /// NaN payloads cannot make the sort non-total.
+/// A surface claim as the geometry buffer writes it (v10 face block): the
+/// kind byte (1 cylinder, 2 sphere, 3 torus, 4 cone) and the payload f64s in
+/// wire order. One table, shared by the encoder and the canonical sort.
+fn surface_wire(s: &crate::topo::SurfaceRef) -> (u8, Vec<f64>) {
+    use crate::topo::SurfaceRef;
+    match *s {
+        SurfaceRef::Cylinder {
+            axis_point: p,
+            axis: a,
+            radius,
+        } => (1, vec![p.x, p.y, p.z, a.x, a.y, a.z, radius]),
+        SurfaceRef::Sphere { center: c, radius } => (2, vec![c.x, c.y, c.z, radius]),
+        SurfaceRef::Torus {
+            center: c,
+            axis: a,
+            major_radius,
+            minor_radius,
+        } => (
+            3,
+            vec![c.x, c.y, c.z, a.x, a.y, a.z, major_radius, minor_radius],
+        ),
+        SurfaceRef::Cone {
+            apex: p,
+            axis: a,
+            half_angle,
+        } => (4, vec![p.x, p.y, p.z, a.x, a.y, a.z, half_angle]),
+    }
+}
+
+/// Number of payload f64s a surface kind byte carries (v10), `None` for a
+/// kind outside 1..=4.
+fn surface_payload_len(kind: u8) -> Option<usize> {
+    match kind {
+        1 => Some(7),
+        2 => Some(4),
+        3 => Some(8),
+        4 => Some(7),
+        _ => None,
+    }
+}
+
+/// Rebuilds and checks a decoded surface claim from its kind byte and
+/// payload: the parameter invariants that need no geometry (unit axes within
+/// [`tol::NORMAL_DIRECTION`], finite radii, sphere radius and both torus
+/// radii `> POINT_MERGE`, cone half-angle in `(0, π/2)`). The face-level
+/// invariants run in `validate()` after the rebuild.
+fn surface_from_wire(kind: u8, c: &[f64]) -> Result<crate::topo::SurfaceRef, &'static str> {
+    use crate::topo::SurfaceRef;
+    let unit = |x: f64, y: f64, z: f64| {
+        let v = Vec3::new(x, y, z);
+        ((v.length() - 1.0).abs() <= crate::tol::NORMAL_DIRECTION).then_some(v)
+    };
+    match kind {
+        1 => Ok(SurfaceRef::Cylinder {
+            axis_point: Point3::new(c[0], c[1], c[2]),
+            axis: Vec3::new(c[3], c[4], c[5]),
+            radius: c[6],
+        }),
+        2 => {
+            if !(c[3].is_finite() && c[3] > crate::tol::POINT_MERGE) {
+                return Err("sphere radius out of range");
+            }
+            Ok(SurfaceRef::Sphere {
+                center: Point3::new(c[0], c[1], c[2]),
+                radius: c[3],
+            })
+        }
+        3 => {
+            let axis = unit(c[3], c[4], c[5]).ok_or("torus axis is not a unit vector")?;
+            if !(c[6].is_finite() && c[6] > crate::tol::POINT_MERGE) {
+                return Err("torus major radius out of range");
+            }
+            if !(c[7].is_finite() && c[7] > crate::tol::POINT_MERGE) {
+                return Err("torus minor radius out of range");
+            }
+            Ok(SurfaceRef::Torus {
+                center: Point3::new(c[0], c[1], c[2]),
+                axis,
+                major_radius: c[6],
+                minor_radius: c[7],
+            })
+        }
+        4 => {
+            let axis = unit(c[3], c[4], c[5]).ok_or("cone axis is not a unit vector")?;
+            if !(c[6] > 0.0 && c[6] < std::f64::consts::FRAC_PI_2) {
+                return Err("cone half-angle out of range");
+            }
+            Ok(SurfaceRef::Cone {
+                apex: Point3::new(c[0], c[1], c[2]),
+                axis,
+                half_angle: c[6],
+            })
+        }
+        _ => Err("surface kind out of range"),
+    }
+}
+
+/// Wire value of a [`crate::topo::BlendKind`] (v10).
+fn blend_kind_wire(k: crate::topo::BlendKind) -> u8 {
+    match k {
+        crate::topo::BlendKind::Fillet => 0,
+        crate::topo::BlendKind::Chamfer => 1,
+        crate::topo::BlendKind::Profile => 2,
+    }
+}
+
+/// Wire value of a [`crate::topo::BlendRole`] (v10).
+fn blend_role_wire(r: crate::topo::BlendRole) -> u8 {
+    match r {
+        crate::topo::BlendRole::Strip => 0,
+        crate::topo::BlendRole::Corner => 1,
+        crate::topo::BlendRole::Runout => 2,
+    }
+}
+
 fn uv_frame_cmp(a: &Option<UvFrame>, b: &Option<UvFrame>) -> std::cmp::Ordering {
     fn key(f: &UvFrame) -> [f64; 8] {
         [f.s.x, f.s.y, f.s.z, f.t.x, f.t.y, f.t.z, f.u0, f.v0]
@@ -850,18 +1017,82 @@ fn canonical_rotation(ring: &[Point3]) -> usize {
 }
 
 /// The plane a face's outer loop gets when a file is opened: Newell's
-/// best-fit plane ([`Plane::from_polygon`]) through the ring in the order
-/// the writer emits it (rotated to its canonical start). It fails when the
-/// ring encloses too little area for a normal — twice the area under
-/// [`crate::tol::NORMALIZE_MIN_LENGTH`] m². The loader decodes every face
-/// with it and [`Object::validate`] requires every live face to pass it, so
-/// one predicate decides both and no committed state can be one the file
-/// format cannot reopen.
-pub(crate) fn outer_ring_plane(ring: &[Point3]) -> Result<Plane, crate::math::MathError> {
+/// best-fit plane through the ring in the order the writer emits it
+/// (rotated to its canonical start). The Newell vector `n` is twice the
+/// enclosed area; the ring spans a plane when `|n|` is at least
+/// [`crate::tol::NORMALIZE_MIN_LENGTH`] m², or, on an `imported` object
+/// (one held to the import planarity tolerance), for a smaller ring when
+/// every edge is at least [`crate::tol::SMALL_RING_MIN_EDGE`] and `n`, taken
+/// about the ring's first vertex, is at least
+/// [`crate::tol::SMALL_RING_MIN_SHAPE`] times the perimeter squared. Both
+/// tests read the ring's own shape, so moving a face never changes the
+/// verdict beyond rounding. (A boolean cutting a dense scan's facets can
+/// leave a sub-micron triangle whose normal is perfectly well defined. On
+/// native geometry the area cutoff stands: a drawn corner that small stays
+/// drawing.)
+/// The loader decodes every face with it and [`Object::validate`] requires
+/// every live face to pass it, so one predicate decides both and no
+/// committed state can be one the file format cannot reopen.
+pub(crate) fn outer_ring_plane(
+    ring: &[Point3],
+    imported: bool,
+) -> Result<Plane, crate::math::MathError> {
+    let rotated = canonically_rotated(ring);
+    Plane::from_polygon(&rotated).or_else(|e| {
+        if imported {
+            small_ring_plane(&rotated).ok_or(e)
+        } else {
+            Err(e)
+        }
+    })
+}
+
+/// [`outer_ring_plane`] without the small-ring allowance: the plane only
+/// when the ring encloses at least the area cutoff. The blend planner uses
+/// it to judge a shrinking cap collapsed to a point (closed by a pole),
+/// which is a question of size, not of what a file can reopen.
+pub(crate) fn outer_ring_area_plane(ring: &[Point3]) -> Result<Plane, crate::math::MathError> {
+    Plane::from_polygon(&canonically_rotated(ring))
+}
+
+fn canonically_rotated(ring: &[Point3]) -> Vec<Point3> {
     let start = canonical_rotation(ring);
     let n = ring.len();
-    let rotated: Vec<Point3> = (0..n).map(|k| ring[(start + k) % n]).collect();
-    Plane::from_polygon(&rotated)
+    (0..n).map(|k| ring[(start + k) % n]).collect()
+}
+
+/// [`outer_ring_plane`]'s plane for a ring under the area cutoff, when its
+/// edges and shape allow one (Newell's accumulation as in
+/// [`Plane::from_polygon`], about the first vertex, scaled before
+/// normalizing).
+fn small_ring_plane(ring: &[Point3]) -> Option<Plane> {
+    if ring.len() < 3 {
+        return None;
+    }
+    let o = ring[0];
+    let mut nv = crate::math::Vec3::ZERO;
+    let mut centroid = crate::math::Vec3::ZERO;
+    let mut perimeter = 0.0;
+    for (i, &p) in ring.iter().enumerate() {
+        let q = ring[(i + 1) % ring.len()];
+        let edge = (q - p).length();
+        if edge.is_nan() || edge < crate::tol::SMALL_RING_MIN_EDGE {
+            return None;
+        }
+        let (a, b) = (p - o, q - o);
+        nv.x += (a.y - b.y) * (a.z + b.z);
+        nv.y += (a.z - b.z) * (a.x + b.x);
+        nv.z += (a.x - b.x) * (a.y + b.y);
+        centroid = centroid + a;
+        perimeter += edge;
+    }
+    let len = nv.length();
+    if len.is_nan() || len < crate::tol::SMALL_RING_MIN_SHAPE * perimeter * perimeter {
+        return None;
+    }
+    let largest = nv.x.abs().max(nv.y.abs()).max(nv.z.abs());
+    let centroid = o + centroid / (ring.len() as f64);
+    Plane::from_point_normal(centroid, nv / largest).ok()
 }
 
 impl Object {
@@ -876,17 +1107,38 @@ impl Object {
         self.encode_version(material_dense, GEOMETRY_FORMAT_VERSION)
     }
 
+    /// True when the Object carries anything only a v10 buffer can hold: a
+    /// sphere, torus or cone claim, a crease flag, or a blend tag. Such an
+    /// Object is always written at v10 or later, so nothing is ever dropped.
+    fn has_curve_geometry(&self) -> bool {
+        self.faces.values().any(|f| {
+            f.blend.is_some()
+                || matches!(
+                    f.surface,
+                    Some(
+                        crate::topo::SurfaceRef::Sphere { .. }
+                            | crate::topo::SurfaceRef::Torus { .. }
+                            | crate::topo::SurfaceRef::Cone { .. }
+                    )
+                )
+        }) || self.edges.values().any(|e| e.crease)
+    }
+
     /// [`Object::encode`] at a given buffer `version`: the current one for a
     /// save, or [`HASHED_GEOMETRY_VERSION`] for a `state_hash` of an Object
-    /// without dictionaries (the v8 layout is the v9 layout without the
-    /// dictionary blocks). An Object that carries a dictionary is always
-    /// written at v9 or later, so nothing is ever dropped.
+    /// without dictionaries or curve data (the v8 layout is the v9 layout
+    /// without the dictionary blocks, and v9 is v10 without the crease and
+    /// blend blocks). An Object that carries a dictionary is always written
+    /// at v9 or later, and one that carries curve data at v10 or later, so
+    /// nothing is ever dropped.
     pub(crate) fn encode_version(
         &self,
         material_dense: &impl Fn(MaterialId) -> u32,
         version: u32,
     ) -> Vec<u8> {
-        let version = if self.has_element_attrs() {
+        let version = if self.has_curve_geometry() {
+            version.max(CURVES_GEOMETRY_VERSION)
+        } else if self.has_element_attrs() {
             version.max(ELEMENT_ATTRS_GEOMETRY_VERSION)
         } else {
             version
@@ -986,6 +1238,13 @@ impl Object {
             outer_attrs: Vec<Option<Vec<u8>>>,
             /// Per-hole-edge dictionaries (v9), paired like `hole_curves`.
             hole_attrs: Vec<Vec<Option<Vec<u8>>>>,
+            /// Per-outer-edge CREASE flags (v10), canonical order as
+            /// `outer_soft`. Participates in the sort key (appended last).
+            outer_crease: Vec<bool>,
+            /// Per-hole-edge CREASE flags (v10), paired like `hole_soft`.
+            hole_crease: Vec<Vec<bool>>,
+            /// The blend tag (v10). Participates in the sort key (last).
+            blend: Option<crate::topo::BlendTag>,
             /// Ordinal of the owning connected component (derived from twin
             /// adjacency, NOT the stored shell list, which may lump
             /// disconnected components together); replaced by the
@@ -994,39 +1253,39 @@ impl Object {
         }
 
         // Ordering over an analytic surface claim (present sorts after absent,
-        // then by axis_point, axis, radius) — another emitted payload, so a
-        // coincident face differing only in its surface must not tie.
+        // then by the wire kind byte, then the payload f64s in wire order) —
+        // another emitted payload, so a coincident face differing only in its
+        // surface must not tie. Cylinders compare exactly as before v9.
         fn surface_cmp(
             a: &Option<crate::topo::SurfaceRef>,
             b: &Option<crate::topo::SurfaceRef>,
         ) -> std::cmp::Ordering {
-            fn key(s: &crate::topo::SurfaceRef) -> [f64; 7] {
-                let crate::topo::SurfaceRef::Cylinder {
-                    axis_point,
-                    axis,
-                    radius,
-                } = s;
-                [
-                    axis_point.x,
-                    axis_point.y,
-                    axis_point.z,
-                    axis.x,
-                    axis.y,
-                    axis.z,
-                    *radius,
-                ]
-            }
             match (a, b) {
                 (None, None) => std::cmp::Ordering::Equal,
                 (None, Some(_)) => std::cmp::Ordering::Less,
                 (Some(_), None) => std::cmp::Ordering::Greater,
-                (Some(sa), Some(sb)) => key(sa)
-                    .iter()
-                    .zip(key(sb))
-                    .map(|(x, y)| x.total_cmp(&y))
-                    .find(|o| *o != std::cmp::Ordering::Equal)
-                    .unwrap_or(std::cmp::Ordering::Equal),
+                (Some(sa), Some(sb)) => {
+                    let (ka, pa) = surface_wire(sa);
+                    let (kb, pb) = surface_wire(sb);
+                    ka.cmp(&kb).then_with(|| {
+                        pa.iter()
+                            .zip(&pb)
+                            .map(|(x, y)| x.total_cmp(y))
+                            .find(|o| *o != std::cmp::Ordering::Equal)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                }
             }
+        }
+        // Ordering over a blend tag: absent first, then id, kind, role.
+        fn blend_cmp(
+            a: &Option<crate::topo::BlendTag>,
+            b: &Option<crate::topo::BlendTag>,
+        ) -> std::cmp::Ordering {
+            let key = |t: &Option<crate::topo::BlendTag>| {
+                t.map(|t| (t.id.0, blend_kind_wire(t.kind), blend_role_wire(t.role)))
+            };
+            key(a).cmp(&key(b))
         }
         // Ordering over a per-edge circle-claim sequence: length, then each
         // entry (present sorts after absent, then center xyz, radius).
@@ -1108,6 +1367,11 @@ impl Object {
                 .then_with(|| a.attrs.cmp(&b.attrs))
                 .then_with(|| a.outer_attrs.cmp(&b.outer_attrs))
                 .then_with(|| a.hole_attrs.cmp(&b.hole_attrs))
+                // v10 payloads, appended at the END of the key so every v9
+                // buffer sorts exactly as it did.
+                .then_with(|| a.outer_crease.cmp(&b.outer_crease))
+                .then_with(|| a.hole_crease.cmp(&b.hole_crease))
+                .then_with(|| blend_cmp(&a.blend, &b.blend))
         }
 
         // Connected components over faces, via twin adjacency (union-find).
@@ -1216,6 +1480,17 @@ impl Object {
                     })
                     .collect()
             };
+        let loop_edge_crease =
+            |loop_id: crate::ids::LoopId, verts: &[crate::ids::VertexId]| -> Vec<bool> {
+                verts
+                    .iter()
+                    .map(|&v| {
+                        self.loop_half_edges(loop_id)
+                            .find(|&h| self.half_edges[h].origin == v)
+                            .is_some_and(|h| self.edges[self.half_edges[h].edge].crease)
+                    })
+                    .collect()
+            };
 
         let mut canonical_faces: Vec<CanonicalFace> = self
             .faces
@@ -1225,6 +1500,7 @@ impl Object {
                 let outer_curves = loop_edge_curves(face.outer_loop, &outer_verts);
                 let outer_soft = loop_edge_soft(face.outer_loop, &outer_verts);
                 let outer_polys = loop_edge_polys(face.outer_loop, &outer_verts);
+                let outer_crease = loop_edge_crease(face.outer_loop, &outer_verts);
                 let outer_attrs = loop_edge_attrs(face.outer_loop, &outer_verts);
                 // Build each hole with its edge-curves, then sort the whole
                 // triple by ring so the curves stay paired with their hole.
@@ -1234,6 +1510,7 @@ impl Object {
                     Vec<Option<crate::sketch::CurveGeom>>,
                     Vec<bool>,
                     Vec<Option<crate::sketch::CurveGeom>>,
+                    Vec<bool>,
                     Vec<Option<Vec<u8>>>,
                 );
                 let mut holes_full: Vec<HoleFull> = face
@@ -1244,8 +1521,9 @@ impl Object {
                         let hc = loop_edge_curves(il, &hv);
                         let hs = loop_edge_soft(il, &hv);
                         let hp = loop_edge_polys(il, &hv);
+                        let hk = loop_edge_crease(il, &hv);
                         let ha = loop_edge_attrs(il, &hv);
-                        (hv, hr, hc, hs, hp, ha)
+                        (hv, hr, hc, hs, hp, hk, ha)
                     })
                     .collect();
                 holes_full.sort_by(|a, b| ring_cmp(&a.1, &b.1));
@@ -1257,13 +1535,17 @@ impl Object {
                     holes_full.iter().map(|(_, _, c, ..)| c.clone()).collect();
                 let hole_polys: Vec<Vec<Option<crate::sketch::CurveGeom>>> = holes_full
                     .iter()
-                    .map(|(_, _, _, _, p, _)| p.clone())
+                    .map(|(_, _, _, _, p, ..)| p.clone())
+                    .collect();
+                let hole_crease: Vec<Vec<bool>> = holes_full
+                    .iter()
+                    .map(|(_, _, _, _, _, k, _)| k.clone())
                     .collect();
                 let hole_attrs: Vec<Vec<Option<Vec<u8>>>> =
                     holes_full.iter().map(|(.., a)| a.clone()).collect();
                 let hole_soft: Vec<Vec<bool>> = holes_full
                     .into_iter()
-                    .map(|(_, _, _, sflags, _, _)| sflags)
+                    .map(|(_, _, _, sflags, ..)| sflags)
                     .collect();
                 CanonicalFace {
                     outer_verts,
@@ -1285,6 +1567,9 @@ impl Object {
                     hole_polys,
                     outer_soft,
                     hole_soft,
+                    outer_crease,
+                    hole_crease,
+                    blend: face.blend,
                     attrs: self.attr_dict(face.attrs).map(attr_dict_json),
                     outer_attrs,
                     hole_attrs,
@@ -1406,23 +1691,17 @@ impl Object {
                 }
             }
 
-            // per-face analytic surface (v4): u8 flag (0=none, 1=cylinder)
-            // + 7×f64 LE (axis_point xyz, unit axis xyz, radius).
+            // per-face analytic surface (v4; kinds 2–4 v10): u8 kind
+            // (0 none, 1 cylinder, 2 sphere, 3 torus, 4 cone) + the class's
+            // f64 payload, LE, in `surface_wire` order.
             match cf.surface {
                 None => buf.push(0u8),
-                Some(crate::topo::SurfaceRef::Cylinder {
-                    axis_point,
-                    axis,
-                    radius,
-                }) => {
-                    buf.push(1u8);
-                    buf.extend_from_slice(&axis_point.x.to_le_bytes());
-                    buf.extend_from_slice(&axis_point.y.to_le_bytes());
-                    buf.extend_from_slice(&axis_point.z.to_le_bytes());
-                    buf.extend_from_slice(&axis.x.to_le_bytes());
-                    buf.extend_from_slice(&axis.y.to_le_bytes());
-                    buf.extend_from_slice(&axis.z.to_le_bytes());
-                    buf.extend_from_slice(&radius.to_le_bytes());
+                Some(sr) => {
+                    let (kind, payload) = surface_wire(&sr);
+                    buf.push(kind);
+                    for c in payload {
+                        buf.extend_from_slice(&c.to_le_bytes());
+                    }
                 }
             }
 
@@ -1572,6 +1851,41 @@ impl Object {
                     write_dict(&mut buf, d);
                 }
             }
+
+            if version < CURVES_GEOMETRY_VERSION {
+                continue;
+            }
+            // per-face CREASE flags (v10): the soft block's shape — a u8
+            // "any" flag, and when 1 one u8 per outer edge then per hole edge.
+            let any_crease = cf
+                .outer_crease
+                .iter()
+                .chain(cf.hole_crease.iter().flatten())
+                .any(|&f| f);
+            if !any_crease {
+                buf.push(0u8);
+            } else {
+                buf.push(1u8);
+                for &f in cf
+                    .outer_crease
+                    .iter()
+                    .chain(cf.hole_crease.iter().flatten())
+                {
+                    buf.push(u8::from(f));
+                }
+            }
+
+            // per-face blend tag (v10): u8 flag, and when 1 the u32 id, u8
+            // kind, u8 role.
+            match cf.blend {
+                None => buf.push(0u8),
+                Some(t) => {
+                    buf.push(1u8);
+                    buf.extend_from_slice(&t.id.0.to_le_bytes());
+                    buf.push(blend_kind_wire(t.kind));
+                    buf.push(blend_role_wire(t.role));
+                }
+            }
         }
 
         buf
@@ -1682,6 +1996,9 @@ impl Object {
         let mut edge_curves: Vec<FaceCurves> = Vec::with_capacity(face_count);
         let mut edge_polys: Vec<FaceCurves> = Vec::with_capacity(face_count);
         let mut backs: Vec<crate::material::FaceMaterial> = Vec::with_capacity(face_count);
+        // v10 per-face crease flags and blend tags, parallel to `face_specs`.
+        let mut edge_crease: Vec<FaceFlags> = Vec::with_capacity(face_count);
+        let mut blends: Vec<Option<crate::topo::BlendTag>> = Vec::with_capacity(face_count);
 
         for _ in 0..face_count {
             let mat_raw = r.read_u32()?;
@@ -1756,6 +2073,23 @@ impl Object {
                     })
                 } else if flag == 0 {
                     None
+                } else if version >= CURVES_GEOMETRY_VERSION {
+                    // v10: kinds 2–4 (sphere, torus, cone).
+                    let len = surface_payload_len(flag).ok_or(DecodeError::Corrupt {
+                        offset: r.pos - 1,
+                        what: "surface kind out of range",
+                    })?;
+                    let start = r.pos;
+                    let mut payload = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        payload.push(r.read_f64()?);
+                    }
+                    Some(surface_from_wire(flag, &payload).map_err(|what| {
+                        DecodeError::Corrupt {
+                            offset: start,
+                            what,
+                        }
+                    })?)
                 } else {
                     return Err(DecodeError::Corrupt {
                         offset: r.pos - 1,
@@ -1787,10 +2121,11 @@ impl Object {
 
             // Recompute face plane from outer-loop vertices (HEW_FILE_FORMAT.md).
             let outer_pts: Vec<Point3> = outer.iter().map(|&i| positions[i]).collect();
-            let plane = outer_ring_plane(&outer_pts).map_err(|_| DecodeError::Corrupt {
-                offset: r.pos,
-                what: "outer loop vertices do not span a plane",
-            })?;
+            let plane = outer_ring_plane(&outer_pts, planarity_tol > crate::tol::PLANE_DIST)
+                .map_err(|_| DecodeError::Corrupt {
+                    offset: r.pos,
+                    what: "outer loop vertices do not span a plane",
+                })?;
 
             let hole_count = r.read_u32()? as usize;
             let mut holes = Vec::with_capacity(hole_count);
@@ -1980,6 +2315,91 @@ impl Object {
             };
             edge_dicts.push(dicts);
 
+            // v10: per-face CREASE flags (the soft block's shape) then the
+            // blend tag (u8 flag [+ u32 id, u8 kind, u8 role]).
+            let (outer_crease, hole_crease) = if version >= CURVES_GEOMETRY_VERSION {
+                let any = r.read_u8()?;
+                if any == 0 {
+                    (Vec::new(), Vec::new())
+                } else if any == 1 {
+                    let read_flag = |r: &mut ByteReader<'_>| -> Result<bool, DecodeError> {
+                        match r.read_u8()? {
+                            0 => Ok(false),
+                            1 => Ok(true),
+                            _ => Err(DecodeError::Corrupt {
+                                offset: r.pos - 1,
+                                what: "crease flag must be 0 or 1",
+                            }),
+                        }
+                    };
+                    let mut os = Vec::with_capacity(outer.len());
+                    for _ in 0..outer.len() {
+                        os.push(read_flag(&mut r)?);
+                    }
+                    let mut hs = Vec::with_capacity(holes.len());
+                    for hole in &holes {
+                        let mut this = Vec::with_capacity(hole.len());
+                        for _ in 0..hole.len() {
+                            this.push(read_flag(&mut r)?);
+                        }
+                        hs.push(this);
+                    }
+                    (os, hs)
+                } else {
+                    return Err(DecodeError::Corrupt {
+                        offset: r.pos - 1,
+                        what: "crease flag must be 0 or 1",
+                    });
+                }
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            edge_crease.push((outer_crease, hole_crease));
+            let blend = if version >= CURVES_GEOMETRY_VERSION {
+                match r.read_u8()? {
+                    0 => None,
+                    1 => {
+                        let id = r.read_u32()?;
+                        let kind = match r.read_u8()? {
+                            0 => crate::topo::BlendKind::Fillet,
+                            1 => crate::topo::BlendKind::Chamfer,
+                            2 => crate::topo::BlendKind::Profile,
+                            _ => {
+                                return Err(DecodeError::Corrupt {
+                                    offset: r.pos - 1,
+                                    what: "blend kind out of range",
+                                });
+                            }
+                        };
+                        let role = match r.read_u8()? {
+                            0 => crate::topo::BlendRole::Strip,
+                            1 => crate::topo::BlendRole::Corner,
+                            2 => crate::topo::BlendRole::Runout,
+                            _ => {
+                                return Err(DecodeError::Corrupt {
+                                    offset: r.pos - 1,
+                                    what: "blend role out of range",
+                                });
+                            }
+                        };
+                        Some(crate::topo::BlendTag {
+                            id: crate::topo::BlendId(id),
+                            kind,
+                            role,
+                        })
+                    }
+                    _ => {
+                        return Err(DecodeError::Corrupt {
+                            offset: r.pos - 1,
+                            what: "blend flag must be 0 or 1",
+                        });
+                    }
+                }
+            } else {
+                None
+            };
+            blends.push(blend);
+
             face_specs.push((
                 outer,
                 holes,
@@ -1994,6 +2414,7 @@ impl Object {
         // Rebuild topology via the existing builder path.
         let mut obj = Object::from_faces_with_holes(&positions, &face_specs);
         obj.set_built_back_materials(&backs);
+        obj.set_built_blends(&blends);
         obj.default_material = base_material;
         // Restore the per-object planarity gate before validating, so an imported
         // object's near-planar faces are held to IMPORT_PLANE_DIST, not the
@@ -2122,6 +2543,45 @@ impl Object {
             for (e, d) in seen {
                 if let Some(d) = d {
                     obj.set_edge_attrs(e, d);
+                }
+            }
+        }
+
+        // Restore per-edge CREASE flags (v10), positionally. Unlike soft (OR'd
+        // for compatibility), the two faces of a shared edge must agree: a
+        // face with no crease block states "no crease" for each of its edges.
+        if version >= CURVES_GEOMETRY_VERSION {
+            let mut seen: SecondaryMap<crate::ids::EdgeId, bool> = SecondaryMap::new();
+            for (fid, (outer_crease, hole_crease)) in face_ids.iter().copied().zip(&edge_crease) {
+                let outer_loop = obj.faces[fid].outer_loop;
+                let inner_loops = obj.faces[fid].inner_loops.clone();
+                let empty: Vec<bool> = Vec::new();
+                let loops = std::iter::once((outer_loop, outer_crease)).chain(
+                    inner_loops
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .map(|(i, l)| (l, hole_crease.get(i).unwrap_or(&empty))),
+                );
+                for (loop_id, flags) in loops {
+                    let hes: Vec<_> = obj.loop_half_edges(loop_id).collect();
+                    for (k, h) in hes.into_iter().enumerate() {
+                        let flag = flags.get(k).copied().unwrap_or(false);
+                        let e = obj.half_edges[h].edge;
+                        if let Some(&prior) = seen.get(e) {
+                            if prior != flag {
+                                return Err(DecodeError::Corrupt {
+                                    offset: r.pos,
+                                    what: "shared edge has disagreeing crease flags",
+                                });
+                            }
+                        } else {
+                            seen.insert(e, flag);
+                        }
+                        if flag {
+                            obj.edges[e].crease = true;
+                        }
+                    }
                 }
             }
         }
@@ -2827,6 +3287,697 @@ pub(crate) struct ObjectDto {
     /// USER-hidden view state (manifest v6+). Absent in v1-v5 → visible.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// What each blend on the object replaced (manifest v31+), ascending
+    /// blend id. Absent/empty → every blend restores by derivation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blends: Vec<BlendRecordDto>,
+}
+
+/// What one blend replaced on its object (`objects[].blends[]`, manifest
+/// v31+; [`crate::blend::BlendRecord`]). Lengths are meters, points are
+/// `[x, y, z]` in the object's frame.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BlendRecordDto {
+    /// The blend id its faces carry in the geometry buffer.
+    pub id: u32,
+    /// The order the object's blends were made in.
+    pub seq: u32,
+    /// The blend as it was asked for.
+    pub spec: StoredSpecDto,
+    /// The loops the blend trimmed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trimmed: Vec<LoopEditDto>,
+    /// The faces the blend replaced whole (consumed, or cut into `pieces`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumed: Vec<StoredFaceDto>,
+    /// The untagged faces the blend left that replay takes away whole, each
+    /// as its rings, outer first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pieces: Vec<Vec<Vec<[f64; 3]>>>,
+    /// The marks of the edges the blend removed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub marks: Vec<MarkDto>,
+}
+
+/// A blend's spec with its edges as segments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StoredSpecDto {
+    /// Each picked edge's two ends.
+    pub edges: Vec<[[f64; 3]; 2]>,
+    /// The cross-section, as the Hew API spells it.
+    pub profile: crate::blend::BlendProfile,
+    /// The plane of an asymmetric chamfer's primary face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary: Option<PlaneDto>,
+    /// How three-way corners are built.
+    #[serde(default)]
+    pub corners: crate::blend::CornerStyle,
+    /// Stopped blends: distances from each chain end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stops: Option<crate::blend::BlendStops>,
+    /// Variable radius handles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handles: Vec<crate::blend::RadiusHandle>,
+}
+
+/// A plane as its unit normal and offset (`normal · p = offset` on it),
+/// the kernel's own representation, so it round-trips exactly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PlaneDto {
+    pub normal: [f64; 3],
+    pub offset: f64,
+}
+
+/// One loop a blend trimmed: the ring it left and the ring it replaced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct LoopEditDto {
+    pub after: Vec<[f64; 3]>,
+    pub before: Vec<[f64; 3]>,
+}
+
+/// A face a blend consumed whole, with the attributes it had.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StoredFaceDto {
+    pub outer: Vec<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holes: Vec<Vec<[f64; 3]>>,
+    /// Dense material id, as `base_material`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_material: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uv_frame: Option<UvFrameDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<SurfaceDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<BlendTagDto>,
+    /// The face's attribute dictionary (namespace → key → value, the
+    /// shape of `objects[].attrs`); omitted for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attrs: Option<AttrsDto>,
+}
+
+/// A face's UV frame (§3.1's `uv_frame`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct UvFrameDto {
+    pub s: [f64; 3],
+    pub t: [f64; 3],
+    pub u0: f64,
+    pub v0: f64,
+}
+
+/// An analytic surface claim (§3.1's `surface`), by kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum SurfaceDto {
+    Cylinder {
+        axis_point: [f64; 3],
+        axis: [f64; 3],
+        radius: f64,
+    },
+    Sphere {
+        center: [f64; 3],
+        radius: f64,
+    },
+    Torus {
+        center: [f64; 3],
+        axis: [f64; 3],
+        major_radius: f64,
+        minor_radius: f64,
+    },
+    Cone {
+        apex: [f64; 3],
+        axis: [f64; 3],
+        half_angle: f64,
+    },
+}
+
+/// A blend tag (§3.1): `kind` is `fillet`, `chamfer` or `profile`; `role`
+/// is `strip`, `corner` or `runout`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BlendTagDto {
+    pub id: u32,
+    pub kind: String,
+    pub role: String,
+}
+
+/// The marks of one edge a blend removed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MarkDto {
+    pub a: [f64; 3],
+    pub b: [f64; 3],
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub soft: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub crease: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve: Option<CircleDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polygon: Option<CircleDto>,
+}
+
+/// A circle claim: center and radius.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CircleDto {
+    pub center: [f64; 3],
+    pub radius: f64,
+}
+
+fn arr(p: Point3) -> [f64; 3] {
+    [p.x, p.y, p.z]
+}
+
+fn varr(v: Vec3) -> [f64; 3] {
+    [v.x, v.y, v.z]
+}
+
+fn pt(a: [f64; 3]) -> Point3 {
+    Point3::new(a[0], a[1], a[2])
+}
+
+fn surface_to_dto(s: &crate::topo::SurfaceRef) -> SurfaceDto {
+    use crate::topo::SurfaceRef;
+    match *s {
+        SurfaceRef::Cylinder {
+            axis_point,
+            axis,
+            radius,
+        } => SurfaceDto::Cylinder {
+            axis_point: arr(axis_point),
+            axis: varr(axis),
+            radius,
+        },
+        SurfaceRef::Sphere { center, radius } => SurfaceDto::Sphere {
+            center: arr(center),
+            radius,
+        },
+        SurfaceRef::Torus {
+            center,
+            axis,
+            major_radius,
+            minor_radius,
+        } => SurfaceDto::Torus {
+            center: arr(center),
+            axis: varr(axis),
+            major_radius,
+            minor_radius,
+        },
+        SurfaceRef::Cone {
+            apex,
+            axis,
+            half_angle,
+        } => SurfaceDto::Cone {
+            apex: arr(apex),
+            axis: varr(axis),
+            half_angle,
+        },
+    }
+}
+
+/// The surface's kind byte and payload in wire order, so the decode checks
+/// of the geometry buffer (`surface_from_wire`) apply to the manifest's
+/// copy too.
+fn surface_dto_wire(s: &SurfaceDto) -> (u8, Vec<f64>) {
+    match *s {
+        SurfaceDto::Cylinder {
+            axis_point: p,
+            axis: a,
+            radius,
+        } => (1, vec![p[0], p[1], p[2], a[0], a[1], a[2], radius]),
+        SurfaceDto::Sphere { center: c, radius } => (2, vec![c[0], c[1], c[2], radius]),
+        SurfaceDto::Torus {
+            center: c,
+            axis: a,
+            major_radius,
+            minor_radius,
+        } => (
+            3,
+            vec![
+                c[0],
+                c[1],
+                c[2],
+                a[0],
+                a[1],
+                a[2],
+                major_radius,
+                minor_radius,
+            ],
+        ),
+        SurfaceDto::Cone {
+            apex: p,
+            axis: a,
+            half_angle,
+        } => (4, vec![p[0], p[1], p[2], a[0], a[1], a[2], half_angle]),
+    }
+}
+
+fn blend_kind_name(k: crate::topo::BlendKind) -> &'static str {
+    match k {
+        crate::topo::BlendKind::Fillet => "fillet",
+        crate::topo::BlendKind::Chamfer => "chamfer",
+        crate::topo::BlendKind::Profile => "profile",
+    }
+}
+
+fn blend_role_name(r: crate::topo::BlendRole) -> &'static str {
+    match r {
+        crate::topo::BlendRole::Strip => "strip",
+        crate::topo::BlendRole::Corner => "corner",
+        crate::topo::BlendRole::Runout => "runout",
+    }
+}
+
+fn circle_to_dto(c: &crate::sketch::CurveGeom) -> CircleDto {
+    CircleDto {
+        center: arr(c.center),
+        radius: c.radius,
+    }
+}
+
+/// The records of the blends `obj`'s faces carry, ascending id, as manifest
+/// entries; `material_dense` maps a live material id to its dense id.
+pub(crate) fn blend_records_to_dtos(
+    obj: &Object,
+    material_dense: &impl Fn(MaterialId) -> u32,
+) -> Vec<BlendRecordDto> {
+    let present: std::collections::BTreeSet<crate::topo::BlendId> = obj
+        .faces()
+        .values()
+        .filter_map(|f| f.blend.map(|t| t.id))
+        .collect();
+    let dense = |m: crate::material::FaceMaterial| m.map(material_dense);
+    obj.blend_records()
+        .iter()
+        .filter(|(id, _)| present.contains(id))
+        .map(|(id, rec)| BlendRecordDto {
+            id: id.0,
+            seq: rec.seq,
+            spec: StoredSpecDto {
+                edges: rec
+                    .spec
+                    .edges
+                    .iter()
+                    .map(|&(a, b)| [arr(a), arr(b)])
+                    .collect(),
+                profile: rec.spec.profile.clone(),
+                primary: rec.spec.primary.map(|p| PlaneDto {
+                    normal: varr(p.normal()),
+                    offset: p.offset(),
+                }),
+                corners: rec.spec.corners,
+                stops: rec.spec.stops,
+                handles: rec.spec.handles.clone(),
+            },
+            trimmed: rec
+                .trimmed
+                .iter()
+                .map(|e| LoopEditDto {
+                    after: e.after.iter().copied().map(arr).collect(),
+                    before: e.before.iter().copied().map(arr).collect(),
+                })
+                .collect(),
+            consumed: rec
+                .consumed
+                .iter()
+                .map(|f| StoredFaceDto {
+                    outer: f.outer.iter().copied().map(arr).collect(),
+                    holes: f
+                        .holes
+                        .iter()
+                        .map(|h| h.iter().copied().map(arr).collect())
+                        .collect(),
+                    material: dense(f.attrs.material),
+                    back_material: dense(f.attrs.back_material),
+                    uv_frame: f.attrs.uv_frame.map(|u| UvFrameDto {
+                        s: varr(u.s),
+                        t: varr(u.t),
+                        u0: u.u0,
+                        v0: u.v0,
+                    }),
+                    surface: f.attrs.surface.as_ref().map(surface_to_dto),
+                    blend: f.attrs.blend.map(|t| BlendTagDto {
+                        id: t.id.0,
+                        kind: blend_kind_name(t.kind).to_string(),
+                        role: blend_role_name(t.role).to_string(),
+                    }),
+                    attrs: (!f.dict.is_empty()).then(|| attrs_to_dto(&f.dict)),
+                })
+                .collect(),
+            pieces: rec
+                .pieces
+                .iter()
+                .map(|f| {
+                    f.iter()
+                        .map(|r| r.iter().copied().map(arr).collect())
+                        .collect()
+                })
+                .collect(),
+            marks: rec
+                .marks
+                .iter()
+                .map(|m| MarkDto {
+                    a: arr(m.a),
+                    b: arr(m.b),
+                    soft: m.meta.soft,
+                    crease: m.meta.crease,
+                    curve: m.meta.curve.as_ref().map(circle_to_dto),
+                    polygon: m.meta.polygon.as_ref().map(circle_to_dto),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Checks one manifest blend record for `object` against its own shape:
+/// finite numbers, loops of three points or more, at least one edge,
+/// sizes that are positive, material ids inside the palette, a surface that
+/// passes the geometry buffer's own checks, tag names that exist. Whether
+/// the record still fits its geometry is decided when it is used.
+fn check_blend_record_dto(
+    object: u32,
+    dto: &BlendRecordDto,
+    mat_count: usize,
+) -> Result<(), LoadError> {
+    let bad = |what: String| LoadError::MalformedManifest {
+        what: format!("object {object} blend {}: {what}", dto.id),
+    };
+    let finite3 = |a: &[f64; 3]| a.iter().all(|x| x.is_finite());
+    let ring = |r: &[[f64; 3]], name: &str| -> Result<(), LoadError> {
+        if r.len() < 3 {
+            return Err(bad(format!("{name} has fewer than 3 points")));
+        }
+        if !r.iter().all(finite3) {
+            return Err(bad(format!("{name} has a non-finite coordinate")));
+        }
+        Ok(())
+    };
+    let len = |x: f64, name: &str| -> Result<(), LoadError> {
+        if !(x.is_finite() && x > 0.0) {
+            return Err(bad(format!("{name} is not a positive finite length")));
+        }
+        Ok(())
+    };
+    let mat = |m: Option<u32>, name: &str| -> Result<(), LoadError> {
+        if let Some(m) = m
+            && m as usize >= mat_count
+        {
+            return Err(bad(format!("{name} id {m} out of range")));
+        }
+        Ok(())
+    };
+    // Room for every later blend and every boolean's offset.
+    if dto.seq > MAX_BLEND_SEQ {
+        return Err(bad(format!("seq {} is past {MAX_BLEND_SEQ}", dto.seq)));
+    }
+    if dto.spec.edges.is_empty() {
+        return Err(bad("spec names no edges".to_string()));
+    }
+    if !dto.spec.edges.iter().all(|[a, b]| finite3(a) && finite3(b)) {
+        return Err(bad("spec edge has a non-finite coordinate".to_string()));
+    }
+    {
+        use crate::blend::{BlendProfile, ProfileSeg};
+        let facets = |n: u32, lo: u32, name: &str| -> Result<(), LoadError> {
+            if !(lo..=96).contains(&n) {
+                return Err(bad(format!("{name} {n} outside {lo} to 96")));
+            }
+            Ok(())
+        };
+        match &dto.spec.profile {
+            BlendProfile::Round { radius, segments } | BlendProfile::Cove { radius, segments } => {
+                len(*radius, "radius")?;
+                facets(*segments, 2, "segments")?;
+            }
+            BlendProfile::Chamfer {
+                setback_a,
+                setback_b,
+            } => {
+                len(*setback_a, "setback_a")?;
+                len(*setback_b, "setback_b")?;
+            }
+            BlendProfile::Bullnose { segments } => facets(*segments, 2, "segments")?,
+            BlendProfile::Custom {
+                shape,
+                width,
+                arc_segments,
+            } => {
+                len(*width, "width")?;
+                facets(*arc_segments, 1, "arc_segments")?;
+                len(shape.b, "profile b")?;
+                for seg in &shape.segs {
+                    let ok = match seg {
+                        ProfileSeg::Line { to } => to.iter().all(|x| x.is_finite()),
+                        ProfileSeg::Arc { to, center, .. } => {
+                            to.iter().chain(center.iter()).all(|x| x.is_finite())
+                        }
+                    };
+                    if !ok {
+                        return Err(bad(
+                            "profile segment has a non-finite coordinate".to_string()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(p) = &dto.spec.primary
+        && !(finite3(&p.normal)
+            && p.offset.is_finite()
+            && (Vec3::new(p.normal[0], p.normal[1], p.normal[2]).length() - 1.0).abs()
+                <= crate::tol::NORMAL_DIRECTION)
+    {
+        return Err(bad(
+            "primary plane needs a unit normal and a finite offset".to_string()
+        ));
+    }
+    if let Some(s) = &dto.spec.stops
+        && !(s.start.is_finite() && s.start >= 0.0 && s.end.is_finite() && s.end >= 0.0)
+    {
+        return Err(bad("stops are not finite and non-negative".to_string()));
+    }
+    for h in &dto.spec.handles {
+        if !(h.at.is_finite() && h.at >= 0.0) {
+            return Err(bad(
+                "handle position is not finite and non-negative".to_string()
+            ));
+        }
+        len(h.radius, "handle radius")?;
+    }
+    for e in &dto.trimmed {
+        ring(&e.after, "trimmed loop (after)")?;
+        ring(&e.before, "trimmed loop (before)")?;
+    }
+    for f in &dto.consumed {
+        ring(&f.outer, "consumed face outer loop")?;
+        for h in &f.holes {
+            ring(h, "consumed face hole")?;
+        }
+        mat(f.material, "consumed face material")?;
+        mat(f.back_material, "consumed face back material")?;
+        if let Some(u) = &f.uv_frame
+            && !(finite3(&u.s) && finite3(&u.t) && u.u0.is_finite() && u.v0.is_finite())
+        {
+            return Err(bad("consumed face uv_frame is not finite".to_string()));
+        }
+        if let Some(s) = &f.surface {
+            let (kind, payload) = surface_dto_wire(s);
+            if !payload.iter().all(|x| x.is_finite()) {
+                return Err(bad("consumed face surface is not finite".to_string()));
+            }
+            surface_from_wire(kind, &payload)
+                .map_err(|what| bad(format!("consumed face surface: {what}")))?;
+        }
+        if let Some(t) = &f.blend {
+            if !matches!(t.kind.as_str(), "fillet" | "chamfer" | "profile") {
+                return Err(bad(format!("consumed face blend kind {:?}", t.kind)));
+            }
+            if !matches!(t.role.as_str(), "strip" | "corner" | "runout") {
+                return Err(bad(format!("consumed face blend role {:?}", t.role)));
+            }
+        }
+    }
+    for f in &dto.pieces {
+        if f.is_empty() {
+            return Err(bad("piece has no loops".to_string()));
+        }
+        for r in f {
+            ring(r, "piece loop")?;
+        }
+    }
+    for m in &dto.marks {
+        if !(finite3(&m.a) && finite3(&m.b)) {
+            return Err(bad("mark has a non-finite coordinate".to_string()));
+        }
+        for (c, name) in [(&m.curve, "mark curve"), (&m.polygon, "mark polygon")] {
+            if let Some(c) = c {
+                if !finite3(&c.center) {
+                    return Err(bad(format!("{name} center is not finite")));
+                }
+                if !(c.radius.is_finite() && c.radius > crate::tol::POINT_MERGE) {
+                    return Err(bad(format!("{name} radius out of range")));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The manifest's blend records for one object as the kernel's, with live
+/// material ids; `dense_material` maps a dense id back to the live one.
+///
+/// # Errors
+/// `MalformedManifest` for a material id the palette lacks or a duplicate
+/// blend id (the shape checks ran at decode).
+pub(crate) fn blend_records_from_dtos(
+    object: u32,
+    dtos: &[BlendRecordDto],
+    dense_material: &impl Fn(u32) -> Option<MaterialId>,
+) -> Result<BTreeMap<crate::topo::BlendId, crate::blend::BlendRecord>, LoadError> {
+    use crate::blend::{BlendRecord, LoopEdit, StoredFace, StoredMark, StoredSpec};
+    use crate::topo::{BlendId, BlendKind, BlendRole, BlendTag, FaceAttrs, SurfaceRef};
+    let mut out = BTreeMap::new();
+    for dto in dtos {
+        let bad = |what: String| LoadError::MalformedManifest {
+            what: format!("object {object} blend {}: {what}", dto.id),
+        };
+        let mat = |m: Option<u32>| -> Result<crate::material::FaceMaterial, LoadError> {
+            match m {
+                None => Ok(None),
+                Some(d) => dense_material(d)
+                    .map(Some)
+                    .ok_or_else(|| bad(format!("material id {d} out of range"))),
+            }
+        };
+        let circle = |c: &Option<CircleDto>| {
+            c.as_ref().map(|c| crate::sketch::CurveGeom {
+                center: pt(c.center),
+                radius: c.radius,
+            })
+        };
+        let surface = |s: &SurfaceDto| -> Result<SurfaceRef, LoadError> {
+            let (kind, payload) = surface_dto_wire(s);
+            surface_from_wire(kind, &payload).map_err(|what| bad(what.to_string()))
+        };
+        let primary = match &dto.spec.primary {
+            None => None,
+            Some(p) => Some(
+                Plane::from_unit_normal_offset(
+                    Vec3::new(p.normal[0], p.normal[1], p.normal[2]),
+                    p.offset,
+                )
+                .map_err(|_| bad("primary plane normal is not a unit vector".to_string()))?,
+            ),
+        };
+        let mut consumed = Vec::with_capacity(dto.consumed.len());
+        for f in &dto.consumed {
+            let blend = match &f.blend {
+                None => None,
+                Some(t) => Some(BlendTag {
+                    id: BlendId(t.id),
+                    kind: match t.kind.as_str() {
+                        "fillet" => BlendKind::Fillet,
+                        "chamfer" => BlendKind::Chamfer,
+                        "profile" => BlendKind::Profile,
+                        other => return Err(bad(format!("blend kind {other:?}"))),
+                    },
+                    role: match t.role.as_str() {
+                        "strip" => BlendRole::Strip,
+                        "corner" => BlendRole::Corner,
+                        "runout" => BlendRole::Runout,
+                        other => return Err(bad(format!("blend role {other:?}"))),
+                    },
+                }),
+            };
+            // A present dictionary holds something: the writer omits an
+            // empty one (reject-not-repair).
+            let dict = match &f.attrs {
+                None => crate::attr::AttrDict::new(),
+                Some(d) => {
+                    let dict = attrs_from_dto(d, &format!("object {object} blend {}", dto.id))?;
+                    if dict.is_empty() || d.values().any(|e| e.is_empty()) {
+                        return Err(bad("consumed face attrs holds no key".to_string()));
+                    }
+                    dict
+                }
+            };
+            consumed.push(StoredFace {
+                outer: f.outer.iter().copied().map(pt).collect(),
+                holes: f
+                    .holes
+                    .iter()
+                    .map(|h| h.iter().copied().map(pt).collect())
+                    .collect(),
+                attrs: FaceAttrs {
+                    material: mat(f.material)?,
+                    back_material: mat(f.back_material)?,
+                    uv_frame: f.uv_frame.as_ref().map(|u| UvFrame {
+                        s: Vec3::new(u.s[0], u.s[1], u.s[2]),
+                        t: Vec3::new(u.t[0], u.t[1], u.t[2]),
+                        u0: u.u0,
+                        v0: u.v0,
+                    }),
+                    surface: f.surface.as_ref().map(&surface).transpose()?,
+                    blend,
+                    // The dictionary rides by value in `dict`.
+                    attrs: crate::topo::AttrSlot::NONE,
+                },
+                dict,
+            });
+        }
+        let rec = BlendRecord {
+            seq: dto.seq,
+            spec: StoredSpec {
+                edges: dto
+                    .spec
+                    .edges
+                    .iter()
+                    .map(|[a, b]| (pt(*a), pt(*b)))
+                    .collect(),
+                profile: dto.spec.profile.clone(),
+                primary,
+                corners: dto.spec.corners,
+                stops: dto.spec.stops,
+                handles: dto.spec.handles.clone(),
+            },
+            trimmed: dto
+                .trimmed
+                .iter()
+                .map(|e| LoopEdit {
+                    after: e.after.iter().copied().map(pt).collect(),
+                    before: e.before.iter().copied().map(pt).collect(),
+                })
+                .collect(),
+            consumed,
+            pieces: dto
+                .pieces
+                .iter()
+                .map(|f| {
+                    f.iter()
+                        .map(|r| r.iter().copied().map(pt).collect())
+                        .collect()
+                })
+                .collect(),
+            marks: dto
+                .marks
+                .iter()
+                .map(|m| StoredMark {
+                    a: pt(m.a),
+                    b: pt(m.b),
+                    meta: crate::patch::EdgeMeta {
+                        soft: m.soft,
+                        crease: m.crease,
+                        curve: circle(&m.curve),
+                        polygon: circle(&m.polygon),
+                    },
+                })
+                .collect(),
+        };
+        if out.insert(BlendId(dto.id), rec).is_some() {
+            return Err(bad("duplicate blend id".to_string()));
+        }
+    }
+    Ok(out)
 }
 
 /// A merge group entry.
@@ -3027,10 +4178,13 @@ pub(crate) struct SketchRegionDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SketchCurveDto {
     pub id: u32,
-    /// Circle center, on the sketch plane.
-    pub center: [f64; 3],
-    /// Circle radius in meters (> 0).
-    pub radius: f64,
+    /// Circle center, on the sketch plane. Absent exactly for a `"smooth"`
+    /// entry (manifest v30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub center: Option<[f64; 3]>,
+    /// Circle radius in meters (> 0). Absent exactly for a `"smooth"` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
     /// What the circle claims about the chain (manifest v12+): absent or
     /// `"circle"` — the chain's edges are chord facets approximating it — or
     /// `"polygon"` — the edges ARE the geometry and the circle is only their
@@ -3045,6 +4199,10 @@ pub(crate) struct SketchCurveDto {
 /// Circles write no token at all, so v12 files are byte-identical to v11 for
 /// every document that contains no polygon.
 pub(crate) const CURVE_KIND_POLYGON: &str = "polygon";
+/// The `SketchCurveDto::kind` token for a chain with no analytic record that
+/// shades smooth (E1, manifest v30): drawn as a circle or arc, it lost its
+/// circle to a non-similarity transform. Carries no center and no radius.
+pub(crate) const CURVE_KIND_SMOOTH: &str = "smooth";
 /// The explicit token for [`crate::sketch::SketchCurveKind::Circle`]. Never
 /// written (absence means circle), but accepted on load so a hand-written or
 /// third-party manifest can be explicit.
@@ -3374,7 +4532,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
     let obj_dtos: Vec<ObjectDto> = all_objects
         .iter()
         .enumerate()
-        .map(|(i, (oid, _))| {
+        .map(|(i, (oid, obj))| {
             // Find base_material: check world_objects first, then def_objects.
             let base_mat = data
                 .world_objects
@@ -3397,6 +4555,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 name: data.obj_names.get(oid).cloned().flatten(),
                 tags: data.obj_tags.get(oid).cloned().unwrap_or_default(),
                 hidden: data.obj_hidden.contains(oid),
+                blends: blend_records_to_dtos(obj, &material_dense),
             }
         })
         .collect();
@@ -3729,15 +4888,27 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
             // `curve_analytic`, NOT `curve_geom`: the latter is circle-only
             // by contract, and a polygon's center is exactly what this record
             // has to carry across a save/load.
-            sk.curve_analytic(cid).map(|a| SketchCurveDto {
-                id: dense,
-                center: [a.geom.center.x, a.geom.center.y, a.geom.center.z],
-                radius: a.geom.radius,
-                kind: match a.kind {
-                    crate::sketch::SketchCurveKind::Circle => None,
-                    crate::sketch::SketchCurveKind::Polygon => Some(CURVE_KIND_POLYGON.to_string()),
-                },
-            })
+            match sk.curve_analytic(cid) {
+                Some(a) => Some(SketchCurveDto {
+                    id: dense,
+                    center: Some([a.geom.center.x, a.geom.center.y, a.geom.center.z]),
+                    radius: Some(a.geom.radius),
+                    kind: match a.kind {
+                        crate::sketch::SketchCurveKind::Circle => None,
+                        crate::sketch::SketchCurveKind::Polygon => {
+                            Some(CURVE_KIND_POLYGON.to_string())
+                        }
+                    },
+                }),
+                // An analytic-less chain marked smooth (E1, manifest v30).
+                None if sk.curve_is_smooth(cid) => Some(SketchCurveDto {
+                    id: dense,
+                    center: None,
+                    radius: None,
+                    kind: Some(CURVE_KIND_SMOOTH.to_string()),
+                }),
+                None => None,
+            }
         })
         .collect();
     curve_dtos.sort_by_key(|c| c.id);
@@ -3904,6 +5075,9 @@ pub(crate) struct DocLoadRaw {
     pub geom_buffers: Vec<Vec<u8>>,
     /// base_material dense id for each object (None = no base material).
     pub obj_base_materials: Vec<Option<u32>>,
+    /// Each object's blend records (manifest v31+), parallel to
+    /// `geom_buffers`; empty for an object with none or a pre-v31 file.
+    pub obj_blends: Vec<Vec<BlendRecordDto>>,
     pub groups: Vec<Vec<NodeRefDto>>,
     /// v15+: full member NodeRefs per definition (validated shapes; a
     /// pre-v15 file's bare-int members arrive here as object refs — the
@@ -4125,17 +5299,39 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     let mut geom_buffers: Vec<Vec<u8>> = Vec::with_capacity(obj_count);
     let mut obj_base_materials: Vec<Option<u32>> = Vec::with_capacity(obj_count);
     let mut obj_names: Vec<Option<String>> = Vec::with_capacity(obj_count);
+    let mut obj_blends: Vec<Vec<BlendRecordDto>> = Vec::with_capacity(obj_count);
     for obj_dto in &manifest.objects {
         let buf = zip_read_entry(&mut zip, &obj_dto.geometry)?;
         geom_buffers.push(buf);
         obj_base_materials.push(obj_dto.base_material);
         obj_names.push(obj_dto.name.clone());
+        // Blend records (manifest v31+): version-gated like every sibling
+        // field, and checked for shape here; whether a record still fits
+        // its geometry is decided when it is used, never at load.
+        if !obj_dto.blends.is_empty() && manifest.format_version < BLEND_RECORDS_MIN_VERSION {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "object {} carries blend records in a v{} manifest (introduced at v{})",
+                    obj_dto.id, manifest.format_version, BLEND_RECORDS_MIN_VERSION
+                ),
+            });
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for rec in &obj_dto.blends {
+            check_blend_record_dto(obj_dto.id, rec, mat_count)?;
+            if !ids.insert(rec.id) {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("object {} blend {}: duplicate blend id", obj_dto.id, rec.id),
+                });
+            }
+        }
+        obj_blends.push(obj_dto.blends.clone());
     }
 
     // Decode sketches.
     let mut sketches: Vec<Sketch> = Vec::with_capacity(manifest.sketches.len());
     for sk_dto in &manifest.sketches {
-        let sk = decode_sketch(sk_dto, mat_count)?;
+        let sk = decode_sketch(sk_dto, mat_count, manifest.format_version)?;
         sketches.push(sk);
     }
     // `SketchOwner` (manifest v13+; absent/`None` in older files → world).
@@ -4546,6 +5742,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     let doc_attrs = take_attrs("document", 0, &manifest.attrs)?;
 
     Ok(DocLoadRaw {
+        obj_blends,
         format_version: manifest.format_version,
         document_id,
         materials,
@@ -5019,7 +6216,11 @@ fn materials_count_validate(manifest: &Manifest) -> Result<usize, LoadError> {
 /// Structural sketch reconstruction: inserts vertices, edges, and regions
 /// directly without re-tracing the geometry (which would churn region ids
 /// and break the `consumed` mapping).
-pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch, LoadError> {
+pub(crate) fn decode_sketch(
+    dto: &SketchDto,
+    _mat_count: usize,
+    format_version: u32,
+) -> Result<Sketch, LoadError> {
     let [nx, ny, nz, offset] = dto.plane;
     let normal = Vec3::new(nx, ny, nz);
     // Reconstructed verbatim (not via `from_point_normal`, which renormalizes
@@ -5047,14 +6248,49 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
     // Analytic curve definitions (manifest v10+), keyed by dense curve id.
     // Validated up front: a non-positive radius, or an entry for a dense id
     // no edge references (checked after the edge pass), is a malformed file.
+    // A `"smooth"` entry (v30) carries no geometry: the chain inserts with
+    // no analytic record and joins the sketch's smooth set (E1).
     let mut curve_geoms: std::collections::BTreeMap<u32, crate::sketch::CurveAnalytic> =
         std::collections::BTreeMap::new();
+    let mut smooth_ids: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     for c in &dto.curves {
-        if !c.radius.is_finite() || c.radius <= crate::tol::POINT_MERGE {
+        if c.kind.as_deref() == Some(CURVE_KIND_SMOOTH) {
+            if format_version < SMOOTH_CHAIN_MIN_VERSION {
+                return Err(LoadError::MalformedManifest {
+                    what: format!(
+                        "sketch {} curve {}: smooth curve entry in a pre-v30 manifest",
+                        dto.id, c.id
+                    ),
+                });
+            }
+            if c.center.is_some() || c.radius.is_some() {
+                return Err(LoadError::MalformedManifest {
+                    what: format!(
+                        "sketch {} curve {}: a smooth curve entry carries no center or radius",
+                        dto.id, c.id
+                    ),
+                });
+            }
+            if curve_geoms.contains_key(&c.id) || !smooth_ids.insert(c.id) {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("sketch {} curve {} appears twice", dto.id, c.id),
+                });
+            }
+            continue;
+        }
+        let (Some(center), Some(radius)) = (c.center, c.radius) else {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "sketch {} curve {} is missing its center or radius",
+                    dto.id, c.id
+                ),
+            });
+        };
+        if !radius.is_finite() || radius <= crate::tol::POINT_MERGE {
             return Err(LoadError::MalformedManifest {
                 what: format!(
                     "sketch {} curve {} has degenerate radius {}",
-                    dto.id, c.id, c.radius
+                    dto.id, c.id, radius
                 ),
             });
         }
@@ -5075,18 +6311,19 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
                 });
             }
         };
-        if curve_geoms
-            .insert(
-                c.id,
-                crate::sketch::CurveAnalytic {
-                    geom: crate::sketch::CurveGeom {
-                        center: Point3::new(c.center[0], c.center[1], c.center[2]),
-                        radius: c.radius,
+        if smooth_ids.contains(&c.id)
+            || curve_geoms
+                .insert(
+                    c.id,
+                    crate::sketch::CurveAnalytic {
+                        geom: crate::sketch::CurveGeom {
+                            center: Point3::new(center[0], center[1], center[2]),
+                            radius,
+                        },
+                        kind,
                     },
-                    kind,
-                },
-            )
-            .is_some()
+                )
+                .is_some()
         {
             return Err(LoadError::MalformedManifest {
                 what: format!("sketch {} curve {} appears twice", dto.id, c.id),
@@ -5132,7 +6369,11 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
                 }
                 if ci == curve_ids.len() {
                     let geom = curve_geoms.get(&(ci as u32)).copied();
-                    curve_ids.push(sk.insert_curve_raw(geom));
+                    let cid = sk.insert_curve_raw(geom);
+                    if smooth_ids.contains(&(ci as u32)) {
+                        sk.mark_curve_smooth(cid);
+                    }
+                    curve_ids.push(cid);
                 }
                 Some(curve_ids[ci])
             }
@@ -5150,6 +6391,7 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
     // ids are precisely 0..curve_ids.len().
     if let Some(dangling) = curve_geoms
         .keys()
+        .chain(smooth_ids.iter())
         .copied()
         .find(|&id| id as usize >= curve_ids.len())
     {
@@ -5994,6 +7236,10 @@ pub struct ItemSummary {
     pub doc_attrs: serde_json::Value,
     /// Per-material swatch rows, in manifest (dense-id) order.
     pub material_entries: Vec<MaterialSummary>,
+    /// The file is a profile: exactly one world sketch with no regions
+    /// whose edges form one open chain (every interior vertex of degree 2,
+    /// two ends of degree 1). Drives the `profile` library category.
+    pub profile_chain_only: bool,
 }
 
 /// Reads an [`ItemSummary`] from `.hew` bytes — `manifest.json` (plus, for
@@ -6118,6 +7364,7 @@ fn read_item_summary_impl<R: Read + Seek>(
         })
         .collect();
 
+    let profile_chain_only = manifest_is_profile_chain(&manifest);
     Ok(ItemSummary {
         format_version: manifest.format_version,
         objects: manifest.objects.len(),
@@ -6142,7 +7389,75 @@ fn read_item_summary_impl<R: Read + Seek>(
         doc_attrs: serde_json::to_value(&manifest.attrs)
             .expect("attribute dictionaries are JSON by construction"),
         material_entries,
+        profile_chain_only,
     })
+}
+
+/// Whether the manifest holds exactly one world sketch, with no regions,
+/// whose edges make one open chain.
+fn manifest_is_profile_chain(m: &Manifest) -> bool {
+    let mut world = m
+        .sketches
+        .iter()
+        .filter(|s| s.owner.is_none() && s.owner_object.is_none() && s.owner_group.is_none());
+    let (Some(sk), None) = (world.next(), world.next()) else {
+        return false;
+    };
+    // Nothing else in the file: no objects, components, instances, groups,
+    // guides or annotations.
+    if !m.objects.is_empty()
+        || !m.components.is_empty()
+        || !m.instances.is_empty()
+        || !m.groups.is_empty()
+        || !m.guides.is_empty()
+        || !m.annotations.is_empty()
+    {
+        return false;
+    }
+    if !sk.regions.is_empty() || sk.edges.is_empty() {
+        return false;
+    }
+    let mut degree: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+    for e in &sk.edges {
+        if e.from == e.to {
+            return false;
+        }
+        *degree.entry(e.from).or_default() += 1;
+        *degree.entry(e.to).or_default() += 1;
+    }
+    let ends = degree.values().filter(|&&d| d == 1).count();
+    if ends != 2 || degree.values().any(|&d| d > 2) {
+        return false;
+    }
+    // One connected chain: walking from an end reaches every edge.
+    let start = *degree
+        .iter()
+        .find(|&(_, &d)| d == 1)
+        .map(|(v, _)| v)
+        .unwrap_or(&0);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut at = start;
+    let mut used = std::collections::BTreeSet::new();
+    seen.insert(at);
+    loop {
+        let next = sk.edges.iter().enumerate().find_map(|(i, e)| {
+            if used.contains(&i) {
+                return None;
+            }
+            if e.from == at {
+                Some((i, e.to))
+            } else if e.to == at {
+                Some((i, e.from))
+            } else {
+                None
+            }
+        });
+        let Some((i, to)) = next else { break };
+        used.insert(i);
+        at = to;
+        seen.insert(at);
+    }
+    used.len() == sk.edges.len()
 }
 
 /// Reads one named zip entry from `.hew` bytes verbatim — the on-demand
@@ -6311,4 +7626,66 @@ fn read_claim_block(
         hc.push(this);
     }
     Ok((oc, hc))
+}
+
+#[cfg(test)]
+mod small_ring_tests {
+    use super::*;
+
+    fn tri(o: [f64; 3], s: f64) -> Vec<Point3> {
+        vec![
+            Point3::new(o[0], o[1], o[2]),
+            Point3::new(o[0] + s, o[1], o[2]),
+            Point3::new(o[0], o[1] + 2.0 * s, o[2] + 0.5 * s),
+        ]
+    }
+
+    #[test]
+    fn a_sub_micron_triangle_spans_a_plane() {
+        let ring = tri([0.0127, 0.0126, 0.0045], 4e-7);
+        let p = outer_ring_plane(&ring, true).expect("well defined");
+        for q in &ring {
+            assert!(p.signed_distance(*q).abs() <= crate::tol::PLANE_DIST);
+        }
+        let expect = Plane::from_polygon(&tri([0.0, 0.0, 0.0], 1.0)).unwrap();
+        assert!((p.normal() - expect.normal()).length() < 1e-6);
+    }
+
+    #[test]
+    fn a_collinear_ring_does_not() {
+        let ring = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1e-7, 0.0, 0.0),
+            Point3::new(3e-7, 0.0, 0.0),
+        ];
+        assert!(outer_ring_plane(&ring, true).is_err());
+    }
+
+    #[test]
+    fn moving_a_small_ring_keeps_its_verdict() {
+        for s in [4e-7, 2e-8] {
+            assert!(outer_ring_plane(&tri([0.0127, 0.0126, 0.0045], s), true).is_ok());
+            assert!(outer_ring_plane(&tri([1700.0, -2300.0, 900.0], s), true).is_ok());
+        }
+        for s in [3e-9, 5e-10] {
+            assert!(outer_ring_plane(&tri([0.0127, 0.0126, 0.0045], s), true).is_err());
+            assert!(outer_ring_plane(&tri([1700.0, -2300.0, 900.0], s), true).is_err());
+        }
+    }
+
+    #[test]
+    fn native_geometry_keeps_the_area_cutoff() {
+        assert!(outer_ring_plane(&tri([0.0127, 0.0126, 0.0045], 4e-7), false).is_err());
+        assert!(outer_ring_plane(&tri([0.0127, 0.0126, 0.0045], 2e-6), false).is_ok());
+    }
+
+    #[test]
+    fn a_small_sliver_does_not_span_a_plane() {
+        let ring = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1e-6, 0.0, 0.0),
+            Point3::new(5e-7, 1e-13, 0.0),
+        ];
+        assert!(outer_ring_plane(&ring, true).is_err());
+    }
 }

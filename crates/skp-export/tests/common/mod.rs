@@ -376,7 +376,10 @@ fn effective_claims(obj: &Object) -> [usize; 3] {
                 axis_point,
                 axis,
                 radius,
-            } = w;
+            } = w
+            else {
+                panic!("expected cylinder")
+            };
             let (pa, pb) = (
                 v[he[e.half_edge].origin].position,
                 v[he[he[e.half_edge].next].origin].position,

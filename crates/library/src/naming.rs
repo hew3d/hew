@@ -9,7 +9,7 @@ use crate::meta::Category;
 
 /// The category subfolders a two-segment item name's first segment may
 /// name — mirrors `LIBRARY_CATEGORY_DIRS` (`main.rs`).
-pub const CATEGORY_DIRS: [&str; 3] = ["Components", "Materials", "Models"];
+pub const CATEGORY_DIRS: [&str; 4] = ["Components", "Materials", "Models", "Profiles"];
 
 impl Category {
     /// This category's subfolder name.
@@ -18,6 +18,7 @@ impl Category {
             Category::Component => "Components",
             Category::Material => "Materials",
             Category::Model => "Models",
+            Category::Profile => "Profiles",
         }
     }
 }
@@ -117,6 +118,17 @@ fn slugify(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profiles_have_their_own_subfolder() {
+        assert_eq!(Category::Profile.dir_name(), "Profiles");
+        assert!(CATEGORY_DIRS.contains(&"Profiles"));
+        assert!(valid_item_name("Profiles/ogee-3f2a1b.hew"));
+        assert_eq!(
+            item_file_name("My Ogee", "3f2a1bc0-0000", Category::Profile),
+            "Profiles/my-ogee-3f2a1b.hew"
+        );
+    }
 
     #[test]
     fn valid_item_name_accepts_legacy_flat_names() {

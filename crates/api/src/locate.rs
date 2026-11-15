@@ -324,9 +324,21 @@ fn resolve_center(ctx: &Ctx, of: &serde_json::Value) -> Result<Point3, CmdError>
             "That face is not a stamped curved wall; it has no analytic center.",
         )));
     };
-    let kernel::SurfaceRef::Cylinder {
-        axis_point, axis, ..
-    } = surface;
+    let (axis_point, axis) = match surface {
+        kernel::SurfaceRef::Cylinder {
+            axis_point, axis, ..
+        } => (axis_point, axis),
+        // A sphere's or torus's center is the claim's own center.
+        kernel::SurfaceRef::Sphere { center, .. } | kernel::SurfaceRef::Torus { center, .. } => {
+            return Ok(center);
+        }
+        kernel::SurfaceRef::Cone { .. } => {
+            return Err(CmdError::Refusal(Refusal::api(
+                "no_such_point",
+                "A cone has no center point; use its apex.",
+            )));
+        }
+    };
     // Project the face's ring centroid onto the cylinder axis.
     let ring: Vec<Point3> = object.loop_positions(f.outer_loop).collect();
     let c = geom::face_centroid(&ring, &[]);

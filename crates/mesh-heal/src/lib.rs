@@ -134,7 +134,7 @@ pub fn weld(positions: &[Point3]) -> (Vec<Point3>, Vec<usize>) {
 /// Weld positions, merging any two within `weld_tol` (Euclidean). See [`weld`].
 pub fn weld_with_tol(positions: &[Point3], weld_tol: f64) -> (Vec<Point3>, Vec<usize>) {
     // Map (bucket_key) → index in the representative list.
-    let mut cell_to_rep: BTreeMap<(i64, i64, i64), usize> = BTreeMap::new();
+    let mut cell_to_rep = CellIndex::with_capacity(positions.len() / 3);
     let mut unique: Vec<Point3> = Vec::new();
     let mut old_to_new: Vec<usize> = Vec::with_capacity(positions.len());
 
@@ -153,7 +153,7 @@ pub fn weld_with_tol(positions: &[Point3], weld_tol: f64) -> (Vec<Point3>, Vec<u
                         key.1.saturating_add(dk1),
                         key.2.saturating_add(dk2),
                     );
-                    if let Some(&rep_idx) = cell_to_rep.get(&probe) {
+                    if let Some(rep_idx) = cell_to_rep.get(probe) {
                         let rep = unique[rep_idx];
                         let dx = p.x - rep.x;
                         let dy = p.y - rep.y;
@@ -177,6 +177,83 @@ pub fn weld_with_tol(positions: &[Point3], weld_tol: f64) -> (Vec<Point3>, Vec<u
     }
 
     (unique, old_to_new)
+}
+
+/// One slot of [`CellIndex`]: a cell key and its representative.
+type CellSlot = Option<((i64, i64, i64), usize)>;
+
+/// Cell key → representative index for [`weld_with_tol`]: an open-addressing
+/// table with a fixed hash (no random state, nothing iterated), so lookups
+/// and overwrites answer exactly as the ordered map they replace while
+/// costing one probe instead of a tree walk on a dense scan's ~10⁶ cells.
+struct CellIndex {
+    slots: Vec<CellSlot>,
+    len: usize,
+}
+
+impl CellIndex {
+    fn with_capacity(n: usize) -> Self {
+        let cap = (n.max(8) * 2).next_power_of_two();
+        CellIndex {
+            slots: vec![None; cap],
+            len: 0,
+        }
+    }
+
+    fn slot_of(&self, k: (i64, i64, i64)) -> usize {
+        // splitmix64 finalizer folded over the three components, so keys
+        // that differ only in high bits still spread across the table.
+        #[inline]
+        fn mix(mut z: u64) -> u64 {
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        let mut h = mix((k.0 as u64).wrapping_add(0x9E37_79B9_7F4A_7C15));
+        h = mix(h ^ (k.1 as u64).wrapping_add(0x9E37_79B9_7F4A_7C15));
+        h = mix(h ^ (k.2 as u64).wrapping_add(0x9E37_79B9_7F4A_7C15));
+        (h as usize) & (self.slots.len() - 1)
+    }
+
+    fn get(&self, k: (i64, i64, i64)) -> Option<usize> {
+        let mask = self.slots.len() - 1;
+        let mut i = self.slot_of(k);
+        loop {
+            match self.slots[i] {
+                None => return None,
+                Some((key, v)) if key == k => return Some(v),
+                Some(_) => i = (i + 1) & mask,
+            }
+        }
+    }
+
+    /// Inserts or overwrites.
+    fn insert(&mut self, k: (i64, i64, i64), v: usize) {
+        if (self.len + 1) * 2 > self.slots.len() {
+            let old = std::mem::take(&mut self.slots);
+            self.slots = vec![None; old.len() * 2];
+            self.len = 0;
+            for (key, val) in old.into_iter().flatten() {
+                self.insert(key, val);
+            }
+        }
+        let mask = self.slots.len() - 1;
+        let mut i = self.slot_of(k);
+        loop {
+            match self.slots[i] {
+                None => {
+                    self.slots[i] = Some((k, v));
+                    self.len += 1;
+                    return;
+                }
+                Some((key, _)) if key == k => {
+                    self.slots[i] = Some((k, v));
+                    return;
+                }
+                Some(_) => i = (i + 1) & mask,
+            }
+        }
+    }
 }
 
 /// Remap face indices through `old_to_new`, dropping degenerate faces (where
@@ -602,7 +679,17 @@ impl CandidateGrid {
     /// would visit more cells than the grid has falls back to gathering
     /// every occupied cell — never worse than the full scan, and the same
     /// superset guarantee holds trivially.
-    fn gather(&mut self, pa: Point3, pb: Point3, out: &mut Vec<usize>) {
+    ///
+    /// Only candidates `keep` accepts are collected (a pure filter: the
+    /// caller's cheap box test), so a large neighbourhood is scanned in
+    /// place rather than copied, sorted and deduplicated whole.
+    fn gather(
+        &mut self,
+        pa: Point3,
+        pb: Point3,
+        keep: impl Fn(usize) -> bool,
+        out: &mut Vec<usize>,
+    ) {
         out.clear();
 
         let ab = pb - pa;
@@ -614,7 +701,7 @@ impl CandidateGrid {
             // key order with ascending ids inside; a global sort restores
             // ascending vertex-id order across cells.
             for ids in self.cells.values() {
-                out.extend_from_slice(ids);
+                out.extend(ids.iter().copied().filter(|&v| keep(v)));
             }
             out.sort_unstable();
             return;
@@ -638,11 +725,12 @@ impl CandidateGrid {
             }
             prev_base = Some(base);
             sampled_cells += 1;
-            out.extend_from_slice(Self::neighborhood(
-                &self.cells,
-                &mut self.neighborhoods,
-                base,
-            ));
+            out.extend(
+                Self::neighborhood(&self.cells, &mut self.neighborhoods, base)
+                    .iter()
+                    .copied()
+                    .filter(|&v| keep(v)),
+            );
         }
         // A single sampled cell yields its memoized union verbatim — already
         // sorted and unique. Multiple cells' unions can overlap: sort to
@@ -801,15 +889,42 @@ fn split_t_junctions_impl(
             // stable sort below breaks equal-t ties identically.
             let pa = positions[a];
             let pb = positions[b];
+            // A point within `on_tol` of the open segment lies inside the
+            // segment's box grown by `on_tol`; the box test (with a margin
+            // over that bound) only skips the exact predicate where it
+            // cannot pass, so the hits are unchanged.
+            let pad = 2.0 * on_tol;
+            let (lo, hi) = (
+                [
+                    pa.x.min(pb.x) - pad,
+                    pa.y.min(pb.y) - pad,
+                    pa.z.min(pb.z) - pad,
+                ],
+                [
+                    pa.x.max(pb.x) + pad,
+                    pa.y.max(pb.y) + pad,
+                    pa.z.max(pb.z) + pad,
+                ],
+            );
+            let in_box = |v: usize| {
+                let q = positions[v];
+                q.x >= lo[0]
+                    && q.x <= hi[0]
+                    && q.y >= lo[1]
+                    && q.y <= hi[1]
+                    && q.z >= lo[2]
+                    && q.z <= hi[2]
+            };
             let edge_candidates: &[usize] = match grid.as_mut() {
                 Some(g) => {
-                    g.gather(pa, pb, &mut near);
+                    g.gather(pa, pb, in_box, &mut near);
                     &near
                 }
                 None => &candidates,
             };
             let mut hits: Vec<(f64, usize)> = edge_candidates
                 .iter()
+                .filter(|&&v| in_box(v))
                 .filter(|&&v| !boundary.contains(&v))
                 .filter_map(|&v| {
                     point_on_open_segment(positions[v], pa, pb, on_tol).map(|t| (t, v))

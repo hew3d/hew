@@ -733,7 +733,12 @@ impl Object {
         // 7. Faces: each result face takes over a region face it came from.
         let mut reused: BTreeSet<FaceId> = BTreeSet::new();
         let mut result_faces: Vec<FaceId> = Vec::with_capacity(outers.len());
-        let mut assignments: Vec<(FaceId, Option<crate::topo::SurfaceRef>, bool)> = Vec::new();
+        let mut assignments: Vec<(
+            FaceId,
+            Option<crate::topo::SurfaceRef>,
+            Option<crate::topo::BlendTag>,
+            bool,
+        )> = Vec::new();
         for (k, (cycle, _)) in outers.iter().enumerate() {
             let origins: BTreeSet<FaceId> = cycle
                 .iter()
@@ -750,8 +755,16 @@ impl Object {
                 .iter()
                 .all(|&f| obj.faces[f].surface == first_surface);
             let surface = if agree { first_surface } else { None };
+            // The blend tag follows the same rule: kept only when every
+            // origin face agrees on it.
+            let first_blend = obj.faces[survivor].blend;
+            let blend = origins
+                .iter()
+                .all(|&f| obj.faces[f].blend == first_blend)
+                .then_some(first_blend)
+                .flatten();
             let reuse = reused.insert(survivor);
-            assignments.push((survivor, surface, reuse));
+            assignments.push((survivor, surface, blend, reuse));
         }
         // Old loops go; every cycle gets a fresh loop.
         let old_faces: Vec<FaceId> = region.clone();
@@ -763,7 +776,7 @@ impl Object {
             obj.loops.remove(l);
         }
         for (k, (cycle, _)) in outers.iter().enumerate() {
-            let (survivor, surface, reuse) = assignments[k];
+            let (survivor, surface, blend, reuse) = assignments[k];
             let template = &templates[&survivor];
             let fid = if reuse {
                 survivor
@@ -776,6 +789,7 @@ impl Object {
                     back_material: template.back_material,
                     uv_frame: template.uv_frame,
                     surface: template.surface,
+                    blend: template.blend,
                     attrs: template.attrs,
                 });
                 for shell in obj.shells.values_mut() {
@@ -811,6 +825,7 @@ impl Object {
             f.uv_frame = template.uv_frame;
             f.attrs = template.attrs;
             f.surface = surface;
+            f.blend = blend;
             result_faces.push(fid);
         }
         for &f in &old_faces {

@@ -827,10 +827,11 @@ pub(crate) fn topology_block(
             (Some(c), Some(s)) => {
                 let axis = adjacent
                     .iter()
-                    .find_map(|f| {
-                        obj.faces()[*f].surface.map(
-                            |kernel::SurfaceRef::Cylinder { axis, .. }| pose.apply_vector(axis),
-                        )
+                    .find_map(|f| match obj.faces()[*f].surface {
+                        Some(kernel::SurfaceRef::Cylinder { axis, .. }) => {
+                            Some(pose.apply_vector(axis))
+                        }
+                        _ => None,
                     })
                     .unwrap_or_else(|| pose.apply_normal(obj.faces()[adjacent[0]].plane.normal()));
                 json!({

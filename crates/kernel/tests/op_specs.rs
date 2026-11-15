@@ -15,7 +15,8 @@
 
 use kernel::{
     BooleanError, BooleanOp, FaceId, History, HistoryError, KernelOp, KernelOpReport, Object,
-    Plane, Point3, Profile, PushPullError, Transform, TransformError, Vec3, WatertightState, tol,
+    Plane, Point3, Profile, PushPullError, SurfaceRef, Transform, TransformError, Vec3,
+    WatertightState, tol,
 };
 use proptest::prelude::*;
 
@@ -4170,6 +4171,62 @@ fn split_connected_components_separates_two_disjoint_solids() {
     assert!((total - signed_volume(&merged)).abs() < VOLUME_TOL);
 }
 
+#[test]
+fn splitting_into_solids_keeps_the_soft_and_creased_edges() {
+    // A softened scan and its base, left as two pieces by a Union whose
+    // operands only touched: the pieces keep the marks their edges carried.
+    let mut merged = two_box_object(
+        Point3::ORIGIN,
+        Point3::new(1.0, 1.0, 1.0),
+        Point3::new(3.0, 0.0, 0.0),
+        Point3::new(4.0, 1.0, 1.0),
+    );
+    let edges: Vec<_> = merged.edges().keys().collect();
+    let in_first = |o: &Object, e| {
+        o.edge_endpoints(e)
+            .is_some_and(|(a, b)| a.x < 2.0 && b.x < 2.0)
+    };
+    let first: Vec<_> = edges
+        .iter()
+        .copied()
+        .filter(|&e| in_first(&merged, e))
+        .collect();
+    let (soft, crease) = (first[0], first[1]);
+    merged.set_edge_soft_for_test(soft, true);
+    merged.set_edge_crease_for_test(crease, true);
+    merged.validate().unwrap();
+    let ends = |o: &Object, e| o.edge_endpoints(e).unwrap();
+    let (soft_ends, crease_ends) = (ends(&merged, soft), ends(&merged, crease));
+
+    for parts in [merged.split_solids(), merged.split_connected_components()] {
+        assert_eq!(parts.len(), 2);
+        let marks = |pick: fn(&Object, kernel::EdgeId) -> bool| -> Vec<(Point3, Point3)> {
+            parts
+                .iter()
+                .flat_map(|p| {
+                    p.edges()
+                        .keys()
+                        .filter(|&e| pick(p, e))
+                        .map(|e| ends(p, e))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        let same = |a: (Point3, Point3), b: (Point3, Point3)| {
+            (a.0 == b.0 && a.1 == b.1) || (a.0 == b.1 && a.1 == b.0)
+        };
+        let softs = marks(|p, e| p.edges()[e].soft);
+        let creases = marks(|p, e| p.edges()[e].crease);
+        assert_eq!(softs.len(), 1, "the soft edge survives the split");
+        assert!(same(softs[0], soft_ends));
+        assert_eq!(creases.len(), 1, "the crease survives the split");
+        assert!(same(creases[0], crease_ends));
+        for p in &parts {
+            p.validate().unwrap();
+        }
+    }
+}
+
 proptest! {
     /// Splitting a single connected box is a volume- and watertightness-
     /// preserving pass-through (exactly one component).
@@ -5055,7 +5112,8 @@ fn follow_me_softens_the_profile_circumference_on_turns() {
     // "latitude" lines) are soft wherever the profile edges share the
     // drawn circle — including toroidal turn walls where no cylinder
     // stamp can apply. A torus (circle profile around a circle path) is
-    // smooth in BOTH directions.
+    // smooth in BOTH directions — and every wall is stamped with the one
+    // torus it is a chord facet of (true-curves.md §5.1).
     let profile = circle_profile_yz(2.0, 0.0, 0.4);
     let (path, curves) = attributed_ground_circle(2.0, 24, 0.0);
     let torus = Object::from_follow_me(&profile, &path, true, &curves).unwrap();
@@ -5070,6 +5128,24 @@ fn follow_me_softens_the_profile_circumference_on_turns() {
         soft, interior,
         "every interior edge of a smooth torus is soft ({soft}/{interior})"
     );
+    let claims: Vec<SurfaceRef> = torus.faces().values().filter_map(|f| f.surface).collect();
+    assert_eq!(
+        claims.len(),
+        torus.faces().len(),
+        "every torus wall is stamped"
+    );
+    for c in &claims {
+        let SurfaceRef::Torus {
+            major_radius,
+            minor_radius,
+            ..
+        } = *c
+        else {
+            panic!("expected a torus claim, got {c:?}")
+        };
+        assert!((major_radius - 2.0).abs() <= 1e-9 && (minor_radius - 0.4).abs() <= 1e-9);
+        assert!(c.same_surface(&claims[0]), "one torus");
+    }
 
     // A rectangle profile on the same path keeps its own edges hard in
     // the longitudinal direction (a real cross-section crease), while the
@@ -5093,7 +5169,8 @@ fn follow_me_softens_the_profile_circumference_on_turns() {
 fn follow_me_sphere_is_smooth_in_both_directions() {
     // design §7c through the pole split: the half-profile keeps its
     // parent circle's identity, so a sphere's latitude seams soften
-    // exactly like a torus's — every interior edge is soft.
+    // exactly like a torus's — every interior edge is soft, and every
+    // facet (pole triangles included) claims the sphere.
     let profile = axis_circle_profile(1.0, 1.0, 24, 0.0);
     let (path, curves) = attributed_ground_circle(1.0, 24, 0.0);
     let sphere = Object::from_follow_me(&profile, &path, true, &curves).unwrap();
@@ -5108,6 +5185,17 @@ fn follow_me_sphere_is_smooth_in_both_directions() {
         soft, interior,
         "every interior edge of a sphere is soft ({soft}/{interior})"
     );
+    let first = sphere.faces().values().next().unwrap().surface;
+    for f in sphere.faces().values() {
+        let Some(SurfaceRef::Sphere { radius, .. }) = f.surface else {
+            panic!("expected a sphere claim, got {:?}", f.surface)
+        };
+        assert!((radius - 1.0).abs() <= 1e-9);
+        assert!(
+            f.surface.unwrap().same_surface(&first.unwrap()),
+            "one sphere"
+        );
+    }
 }
 
 // ------------------------------------------- push/pull of corner-touching sub-faces

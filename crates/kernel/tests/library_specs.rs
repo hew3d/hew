@@ -1907,3 +1907,156 @@ fn move_copy_and_clipboard_paste_both_place_the_original_definition() {
     assert_eq!(doc.component_ids().len(), 1);
     assert_eq!(doc.definition_usage(cid), 3);
 }
+// ---------------------------------------------------- profile documents
+
+fn shapes_close(a: &kernel::ProfileShape, b: &kernel::ProfileShape) -> bool {
+    use kernel::ProfileSeg::{Arc, Line};
+    let near = |x: f64, y: f64| (x - y).abs() < 1e-6;
+    let p = |x: [f64; 2], y: [f64; 2]| near(x[0], y[0]) && near(x[1], y[1]);
+    near(a.b, b.b)
+        && a.segs.len() == b.segs.len()
+        && a.segs.iter().zip(&b.segs).all(|pair| match pair {
+            (Line { to: t1 }, Line { to: t2 }) => p(*t1, *t2),
+            (
+                Arc {
+                    to: t1,
+                    center: c1,
+                    ccw: w1,
+                },
+                Arc {
+                    to: t2,
+                    center: c2,
+                    ccw: w2,
+                },
+            ) => p(*t1, *t2) && p(*c1, *c2) && w1 == w2,
+            _ => false,
+        })
+}
+
+/// Every bundled shape survives shape -> document -> bytes -> shape: the
+/// same shape and the same width, and the summary calls it a profile.
+#[test]
+fn profile_document_round_trips_every_bundled_shape() {
+    for (id, _name, make) in kernel::bundled_profiles() {
+        let shape = make();
+        let doc = Document::profile_document_from_shape(&shape, 0.037).expect(id);
+        let bytes = doc.save();
+        let summary = kernel::read_item_summary(&bytes).unwrap();
+        assert!(summary.profile_chain_only, "{id}: one open chain");
+        assert_eq!(
+            (summary.objects, summary.components, summary.materials),
+            (0, 0, 0)
+        );
+        let loaded = Document::load(&bytes).unwrap();
+        let (back, width) = loaded.profile_shape_of().expect(id);
+        assert!((width - 0.037).abs() < 1e-9, "{id}: width {width}");
+        assert!(shapes_close(&shape, &back), "{id}: {shape:?} vs {back:?}");
+    }
+}
+
+/// A chain drawn by hand (a quarter arc with its circle, then a line) becomes
+/// a profile document with the same shape the chain reads as.
+#[test]
+fn profile_document_from_a_drawn_chain() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    doc.begin_sketch_gesture(s).unwrap();
+    let center = Point3::new(0.1, 0.1, 0.0);
+    let mut ids = Vec::new();
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        sk.begin_curve_with(CurveGeom {
+            center,
+            radius: 0.1,
+        })
+        .unwrap();
+        let n = 6;
+        let at = |k: usize| {
+            let a = std::f64::consts::FRAC_PI_2 * (k as f64) / (n as f64);
+            Point3::new(0.1 + 0.1 * a.cos(), 0.1 + 0.1 * a.sin(), 0.0)
+        };
+        for k in 0..n {
+            sk.add_segment(at(k), at(k + 1)).unwrap();
+        }
+        sk.end_curve();
+        sk.add_segment(at(n), Point3::new(0.1, 0.3, 0.0)).unwrap();
+        ids.extend(sk.edges().keys());
+    }
+    doc.end_sketch_gesture(s).unwrap();
+    let edges = ids;
+    let item = doc
+        .profile_document_from_chain(s, &edges)
+        .expect("a valid chain");
+    let (shape, width) = Document::load(&item.save())
+        .unwrap()
+        .profile_shape_of()
+        .unwrap();
+    assert!(width > 0.0);
+    assert!(
+        shape
+            .segs
+            .iter()
+            .any(|s| matches!(s, kernel::ProfileSeg::Arc { .. }))
+    );
+    // Edges that are not one chain are refused.
+    assert!(
+        doc.profile_document_from_chain(s, &[edges[0], edges[2]])
+            .is_err()
+    );
+    assert!(doc.profile_document_from_chain(s, &[]).is_err());
+}
+
+/// A model with a box is not a profile; neither is a closed shape.
+#[test]
+fn only_an_open_chain_is_a_profile() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    doc.begin_sketch_gesture(s).unwrap();
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        let c = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+        for i in 0..4 {
+            let (a, b) = (c[i], c[(i + 1) % 4]);
+            sk.add_segment(Point3::new(a.0, a.1, 0.0), Point3::new(b.0, b.1, 0.0))
+                .unwrap();
+        }
+    }
+    doc.end_sketch_gesture(s).unwrap();
+    assert!(
+        !kernel::read_item_summary(&doc.save())
+            .unwrap()
+            .profile_chain_only
+    );
+    assert!(doc.profile_shape_of().is_err());
+}
+
+#[test]
+fn a_model_with_a_stray_open_chain_is_not_a_profile() {
+    // A box plus one open line in a world sketch is a model, not a profile.
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        let c = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+        for i in 0..4 {
+            let (a, b) = (c[i], c[(i + 1) % 4]);
+            sk.add_segment(Point3::new(a.0, a.1, 0.0), Point3::new(b.0, b.1, 0.0))
+                .unwrap();
+        }
+    }
+    let regions = doc.extrudable_regions(s).unwrap();
+    doc.extrude_region(s, regions[0], 1.0).unwrap();
+    let line = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(line).unwrap();
+        sk.add_segment(Point3::new(3.0, 0.0, 0.0), Point3::new(4.0, 0.0, 0.0))
+            .unwrap();
+        sk.add_segment(Point3::new(4.0, 0.0, 0.0), Point3::new(4.0, 1.0, 0.0))
+            .unwrap();
+    }
+    assert!(
+        !kernel::read_item_summary(&doc.save())
+            .unwrap()
+            .profile_chain_only
+    );
+}

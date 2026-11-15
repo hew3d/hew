@@ -228,11 +228,14 @@ pub fn offset_face_boundary(
             // A cap rim edge: the neighboring wall carries the cylinder.
             let twin = he.twin?;
             let neighbor = object.loops()[object.half_edges()[twin].loop_id].face;
-            let SurfaceRef::Cylinder {
+            let Some(SurfaceRef::Cylinder {
                 axis_point,
                 axis,
                 radius,
-            } = object.faces()[neighbor].surface?;
+            }) = object.faces()[neighbor].surface
+            else {
+                return None;
+            };
             // The cap circle only exists where the axis meets this plane
             // perpendicularly.
             let along = axis.dot(normal);

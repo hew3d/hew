@@ -319,6 +319,20 @@ mod tests {
     }
 
     #[test]
+    fn list_scans_profiles_and_derives_their_category() {
+        let dir = scratch_dir("profiles");
+        let (_, _, make) = kernel::bundled_profiles()[0];
+        let bytes = Document::profile_document_from_shape(&make(), 0.05)
+            .unwrap()
+            .save();
+        write(&dir, "Profiles/ogee-000000.hew", &bytes).unwrap();
+        let items = list(&dir);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].category, Some(meta::Category::Profile));
+        let _ = std::fs::remove_dir_all(dir.root());
+    }
+
+    #[test]
     fn sha256_hex_matches_a_known_vector() {
         // SHA-256("") — the empty-string test vector.
         assert_eq!(

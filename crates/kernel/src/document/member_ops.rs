@@ -607,6 +607,7 @@ impl Document {
             tags,
         });
         self.copy_identity_attrs(&EntityRef::Object(host), EntityRef::Object(id));
+        self.drop_copied_smooth_level(id);
         self.objects[host].hidden = true;
         let mut consumed = vec![NodeId::Object(host)];
         if let Some(tool) = tool_id {
@@ -617,7 +618,9 @@ impl Document {
         // as `boolean_in_component` leaves its operands.
         self.components[component].members.push(NodeId::Object(id));
         let reanchored = self.reevaluate_liveness_recorded(&consumed);
-        let carried = self.carry_owned_sketches(&[host], &[id]);
+        let mut carried = self.carry_owned_sketches(&[host], &[id]);
+        // The host's Smooth level carries to the result (true-curves.md §6.2).
+        carried.extend(self.carry_smooth_level(&[host], &[id]));
         let carried_sketches: Vec<SketchId> = carried
             .iter()
             .flat_map(DocAction::touched_sketches)
