@@ -38,6 +38,8 @@ is not guaranteed: releases that change the `.hew` format say so under
 - **Drawing:** Tangent lines, such as where a rounded rectangle's straight walls meet its corner arcs, are hidden by default. View ▸ Tangent Edges brings them back.
 - **Paint:** Painting a face paints its whole curved surface, not one facet.
 - **Combine:** A union, subtract, or intersect against a very large imported mesh no longer refuses with a wrong reason.
+- **Tools menu:** Eraser, Paint, and Position Texture now sit with Select at the top of the menu, ahead of Move, Rotate, and Scale.
+- **Selection dock:** With several solids selected, the dock offers Union, Subtract, and Intersect. With a drawn shape selected it offers Follow Me, and Scale is no longer on that row (press `S`, or use the Tools menu). Position Texture is no longer on a solid's row; it is in the Tools menu.
 - **Development:** Features that take more than one release to finish are now built behind a preview wall. They are compiled out of release builds and exist only in preview builds made for testing, so nothing changes in the Hew you install. Developers: see "Preview features" in `docs/dev/DEVELOPMENT.md`.
 
 ### Fixed

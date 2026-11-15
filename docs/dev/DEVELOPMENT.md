@@ -552,7 +552,9 @@ Preview command, so their diff shows what became public. Remove the
 feature's `GATED_PARAMS`, `GATED_VALUES` and `GATED_API_COPY` rows, if it
 has any, and its `cfg(hew_preview)` and
 `requiresPreview` marks. Removing a feature that will not ship is the same
-deletion, with its code.
+deletion, with its code. Every entry ends one of those two ways. The
+registry is read through at each release, and an entry nobody is
+working toward releasing is removed.
 
 **Commits and the changelog.** A commit whose work can only be reached
 in a preview build takes the type `preview` in place of `feat`, with the

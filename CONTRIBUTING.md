@@ -49,6 +49,11 @@ makes coordination before large changes essential.
 - Use [Conventional Commits](https://www.conventionalcommits.org/) titles
   (`feat(kernel): …`, `docs: …`) and write the body for a human reader:
   what the change does and why, not a file-by-file narration.
+- Work that can only be reached in a preview build takes the type
+  `preview` in place of `feat` (`preview(app): …`), and stays out of
+  `CHANGELOG.md` until the feature is released. `feat` is for what a
+  production build gains. See "Preview features" in
+  `docs/dev/DEVELOPMENT.md`.
 - Small, reviewable PRs merge fast. A PR that mixes a kernel change with
   UI work will usually be asked to split.
 - Expect review to focus on invariants: watertightness, validator
