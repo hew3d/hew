@@ -125,6 +125,13 @@ if lane web; then
   # being carried past under set -e (typecheck errors logged, gate still
   # printed "all green" — cause not reproduced). Separate simple commands
   # leave errexit nothing to misjudge, and each step gets its own header.
+  # Typecheck and lint read the kernel's generated types from
+  # app/src/wasm/pkg, which is untracked: a clean checkout (CI's web job)
+  # has nothing there until a flavor is copied in. Both flavors have the same
+  # types; the preview module is the dev default.
+  echo "=== kernel types (preview flavor into app/src/wasm/pkg) ==="
+  scripts/wasm-flavors.sh use preview
+
   echo "=== pnpm --dir app typecheck ==="
   pnpm --dir app typecheck
 
