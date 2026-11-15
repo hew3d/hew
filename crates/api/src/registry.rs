@@ -450,7 +450,7 @@ fn library_item_meta_schema() -> serde_json::Value {
         "properties": {
             "id": { "type": "string" },
             "name": { "type": "string" },
-            "category": { "type": "string", "enum": ["component", "material", "model"] },
+            "category": { "type": "string", "enum": ["component", "material", "model", "profile"] },
             "keywords": { "type": "array", "items": { "type": "string" } },
             "collection": { "type": "string" },
             "saved_at": { "type": "string" }
@@ -468,7 +468,7 @@ fn library_item_schema() -> serde_json::Value {
             "path": { "type": "string" },
             "id": { "type": "string" },
             "name": { "type": "string" },
-            "category": { "type": "string", "enum": ["component", "material", "model"] },
+            "category": { "type": "string", "enum": ["component", "material", "model", "profile"] },
             "keywords": { "type": "array", "items": { "type": "string" } },
             "collection": { "type": "string" },
             "saved_at": { "type": "string" },
@@ -833,6 +833,13 @@ impl Registry {
             "Mend an open object: merge nearby points, remove zero-width folds, separate pinched parts and fill small gaps, as one undo step.",
         );
         add(
+            "hew.solid.remove_degenerate_faces",
+            M,
+            Kernel,
+            Std,
+            "Remove an object's zero-width and sub-tolerance faces, keeping it closed.",
+        );
+        add(
             "hew.solid.delete_faces",
             M,
             Kernel,
@@ -1142,7 +1149,7 @@ impl Registry {
             M,
             Kernel,
             Std,
-            "Paint a face or entity.",
+            "Paint a face (by default its whole logical face: a fillet, a cylinder wall; `logical: false` paints one facet) or an entity.",
         );
         add(
             "hew.material.set_default",
@@ -1540,6 +1547,115 @@ impl Registry {
             "Edit a library item's name, keywords, or collection in place.",
         );
 
+        // ==== true-curves: blend ====
+        add(
+            "hew.solid.fillet",
+            M,
+            Kernel,
+            Std,
+            "Round, cove, bullnose or profile the edges of a solid, or round a 2D corner, as the Fillet tool does.",
+        );
+        add(
+            "hew.solid.chamfer",
+            M,
+            Kernel,
+            Std,
+            "Chamfer the edges of a solid, or chamfer a 2D corner, as the Fillet tool's Chamfer mode does.",
+        );
+        add(
+            "hew.solid.resize_blend",
+            M,
+            Kernel,
+            Std,
+            "Resize a fillet or chamfer (or switch it between round and chamfer) by naming any face of it.",
+        );
+        add(
+            "hew.solid.remove_blend",
+            M,
+            Kernel,
+            Std,
+            "Remove a fillet or chamfer, restoring the sharp edges, by naming any face of it.",
+        );
+        // ==== end true-curves: blend ====
+        // ==== true-curves: shapes ====
+        add(
+            "hew.solid.revolve",
+            M,
+            Kernel,
+            Std,
+            "Turn a profile about an axis in its plane into a solid, as the Revolve tool does.",
+        );
+        add(
+            "hew.solid.deform",
+            M,
+            Kernel,
+            Std,
+            "Twist, bend or taper a solid along its bounding box, or bend it along a path, as the Deform tool does.",
+        );
+        add(
+            "hew.solid.loft",
+            M,
+            Kernel,
+            Std,
+            "Skin a new solid through closed shapes in order, optionally to an apex and along rails, as the Loft tool does.",
+        );
+        add(
+            "hew.array.path",
+            M,
+            Kernel,
+            Std,
+            "Copy nodes along a sketch curve or face loop, with an optional scale ramp.",
+        );
+        // ==== end true-curves: shapes ====
+        // ==== true-curves: smooth ====
+        // ==== true-curves: offset ====
+        add(
+            "hew.solid.shell",
+            M,
+            Kernel,
+            Std,
+            "Hollow a solid to a wall of one thickness, leaving chosen faces open.",
+        );
+        add(
+            "hew.solid.project",
+            M,
+            Kernel,
+            Std,
+            "Drape a sketch's shape onto an object's faces, then engrave or emboss it.",
+        );
+        // ==== end true-curves: offset ====
+        add(
+            "hew.object.smooth",
+            M,
+            Kernel,
+            Std,
+            "Set an object's Smooth level (0 = Off, 1–3): its faces become the cage of a subdivision surface.",
+        );
+        add(
+            "hew.object.crease",
+            M,
+            Kernel,
+            Std,
+            "Set or clear the crease on edges, which keeps them sharp under Smooth.",
+        );
+        add(
+            "hew.solid.bake",
+            M,
+            Kernel,
+            Std,
+            "Replace a smoothed object's cage with its Smooth surface and clear the level.",
+        );
+        // ==== end true-curves: smooth ====
+        // ==== true-curves: imports ====
+        add(
+            "hew.solid.soften",
+            M,
+            Kernel,
+            Std,
+            "Soften the edges of an object that bend less than an angle, so faceted walls read as smooth.",
+        );
+        // ==== end true-curves: imports ====
+
         // The connection-lifecycle commands the dispatcher already
         // implements: the burn-down flag must tell the truth, and their
         // refusal inventories are honestly empty (their failures are
@@ -1899,7 +2015,31 @@ impl Registry {
                 "type": "object",
                 "properties": {
                     "object": { "type": "string" },
-                    "faces": { "type": "array", "description": "per face: object, plane, area, centroid, outer, holes, material, surface, texture_pins, attrs (the face's attribute dictionary, namespace -> key -> value, {} for none), and material_effective when asked through a path" }
+                    "faces": { "type": "array", "description": "per face: object, plane, area, centroid, outer, holes, material, surface, texture_pins, attrs (the face's attribute dictionary, namespace -> key -> value, {} for none), and material_effective when asked through a path",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "blend": {
+                                    "type": "object",
+                                    "description": "present on a face of a fillet, chamfer or profile blend: `id` (per object), `kind` (\"fillet\", \"chamfer\" or \"profile\") and `role` (\"strip\", \"corner\" or \"runout\")",
+                                    "properties": {
+                                        "id": { "type": "integer" },
+                                        "kind": { "type": "string", "enum": ["fillet", "chamfer", "profile"] },
+                                        "role": { "type": "string", "enum": ["strip", "corner", "runout"] }
+                                    },
+                                    "required": ["id", "kind", "role"]
+                                },
+                                "surface": {
+                                    "type": ["object", "null"],
+                                    "description": "the analytic surface the face is a chord facet of, or null. `kind` is \"cylinder\" (axis_point, axis, radius), \"sphere\" (center, radius), \"torus\" (center, axis, major_radius, minor_radius) or \"cone\" (apex, axis, half_angle in radians); lengths in meters",
+                                    "properties": {
+                                        "kind": { "type": "string", "enum": ["cylinder", "sphere", "torus", "cone"] }
+                                    },
+                                    "required": ["kind"]
+                                }
+                            }
+                        }
+                    }
                 },
                 "required": ["object", "faces"]
             });
@@ -2465,6 +2605,11 @@ impl Registry {
                     "compat": {
                         "type": "boolean",
                         "description": "Format \"skp\" only: write revision 17 of the container, leaving out what only newer SketchUp versions hold (see hew.doc.save). Absent or false: the lowest revision that holds the content."
+                    },
+                    "cages": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Mesh formats: export smoothed objects' cages instead of their Smooth surfaces."
                     }
                 },
                 "required": ["format"],
@@ -2595,6 +2740,7 @@ impl Registry {
                                 },
                                 "branching_vertices": { "type": "integer" },
                                 "islands": { "type": "integer" },
+                                "degenerate_faces": { "type": "integer", "description": "zero-width or sub-tolerance faces hew.solid.remove_degenerate_faces would remove; a solid is listed only when it has some" },
                                 "faces": { "type": "integer", "description": "how many faces the object has" }
                             },
                             "required": ["object", "verdict", "rims", "accepted", "placements"]
@@ -2717,6 +2863,27 @@ impl Registry {
                 "non_manifold_rim",
                 "rim_not_planar",
             ];
+
+            let cmd = commands
+                .get_mut("hew.solid.remove_degenerate_faces")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "obj_ id (a world object or a component member)" }
+                },
+                "required": ["object"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "removed": { "type": "integer", "description": "faces removed" }
+                },
+                "required": ["removed"]
+            });
+            cmd.refusals = repair_refusals(&["nothing_to_remove"]);
 
             let cmd = commands
                 .get_mut("hew.solid.rejoin")
@@ -3166,7 +3333,7 @@ impl Registry {
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "category": { "type": "string", "enum": ["component", "material", "model"] },
+                    "category": { "type": "string", "enum": ["component", "material", "model", "profile"] },
                     "query": { "type": "string", "description": "case-insensitive substring match against name and keywords" },
                     "collection": { "type": "string", "description": "matches this collection path and its subtree" }
                 },
@@ -3248,6 +3415,7 @@ impl Registry {
                 "singular",
                 "degenerate_axis",
                 "explode_session_scope",
+                "profile_not_insertable",
             ];
         }
         {
@@ -3262,7 +3430,9 @@ impl Registry {
                     "selection": { "type": "array", "items": { "type": "string" }, "description": "node ids to save as a component item; omitted saves the whole document as a model item" },
                     "name": { "type": "string" },
                     "material": { "type": "string", "description": "one palette material to save alone as a material item, as the palette's Save to Library does — not with selection" },
-                    "category": { "type": "string", "enum": ["component", "material", "model"], "description": "defaults to component (a selection), material (a material), or model (the whole document)" },
+                    "profile_chain": { "type": "object", "description": "an open drawn chain saved as a profile item (category profile, implied): {sketch, edges: [<sketch edge id or locator>, …]}, edges in order from the profile's start on the bearing face to its end — not with selection or material", "properties": { "sketch": { "type": "string" }, "edges": { "type": "array", "items": {} } }, "required": ["sketch", "edges"] },
+                    "replace": { "type": "string", "description": "the id or path of an existing item to overwrite in place, keeping its id" },
+                    "category": { "type": "string", "enum": ["component", "material", "model", "profile"], "description": "defaults to component (a selection), material (a material), or model (the whole document)" },
                     "keywords": { "type": "array", "items": { "type": "string" } },
                     "collection": { "type": "string" },
                     "return_bytes": { "type": "boolean", "description": "also return the saved item's bytes base64" },
@@ -3290,6 +3460,10 @@ impl Registry {
                 "unknown_instance",
                 "explode_session_scope",
                 "save_failed",
+                "unknown_library_item",
+                "invalid_profile",
+                "locator_missed",
+                "ambiguous_locator",
             ];
         }
         {
@@ -4440,7 +4614,8 @@ impl Registry {
                     "face": { "description": "a face locator {object | path, at} | {object | path, ray} | {\"$face\"}; through a path the definition's face is painted, so every copy shows it" },
                     "id": { "type": "string", "description": "an object (its base material), an instance (the placement's own material), or a definition (every object it owns)" },
                     "material": { "type": ["string", "null"] },
-                    "scope": { "type": "string", "enum": ["instance", "definition"], "description": "for an instance id: the placement (default) or its definition; a definition id takes only \"definition\"" }
+                    "scope": { "type": "string", "enum": ["instance", "definition"], "description": "for an instance id: the placement (default) or its definition; a definition id takes only \"definition\"" },
+                    "logical": { "type": "boolean" }
                 },
                 "required": ["material"],
                 "additionalProperties": false
@@ -5382,6 +5557,7 @@ impl Registry {
                     "point_off_plane",
                     "degenerate_segment",
                     "unknown_sketch",
+                    "endpoint_near_miss",
                     "unknown_entity",
                     "locator_missed",
                     "ambiguous_locator",
@@ -5497,6 +5673,7 @@ impl Registry {
                     "degenerate_curve",
                     "degenerate_segment",
                     "unknown_sketch",
+                    "endpoint_near_miss",
                     "segments_above_cap",
                     "unknown_entity",
                     "locator_missed",
@@ -5891,6 +6068,16 @@ impl Registry {
                 "not_a_sub_face",
                 "radius_vanishes",
                 "wall_neighbor_non_planar",
+                // A blend face resizes its blend (re-blending can refuse).
+                "blend_modified",
+                "dependent_blend",
+                "radius_too_large",
+                "profile_too_wide",
+                "unsupported_edge",
+                "unsupported_vertex",
+                "blend_faces_flush",
+                "obstructed",
+                "blend_degenerate",
                 "unknown_face",
                 "unknown_object",
                 "unknown_component",
@@ -5959,14 +6146,20 @@ impl Registry {
             let join_result = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "result": { "type": "string" },
+                    "result": { "type": "string", "description": "the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, an Intersect of several overlaps)" },
+                    "pieces": { "type": "integer", "description": "present when the result is a group of pieces: how many" },
+                    "note": { "type": "string", "description": "present with pieces: why the result is several, in words for this operation" },
                     "unlinked": { "type": "array", "items": { "type": "string" }, "description": "present when unlink: true split placements off: the placements exploded" }
                 },
                 "required": ["result"]
             });
             let boolean_result = serde_json::json!({
                 "type": "object",
-                "properties": { "result": { "type": "string" } },
+                "properties": {
+                    "result": { "type": "string", "description": "the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, a Subtract that severs, an Intersect of several overlaps)" },
+                    "pieces": { "type": "integer", "description": "present when the result is a group of pieces: how many" },
+                    "note": { "type": "string", "description": "present with pieces: why the result is several, in words for this operation" }
+                },
                 "required": ["result"]
             });
             let boolean_refusals = || {
@@ -5977,6 +6170,8 @@ impl Registry {
                     "boolean_operand_empty",
                     "grouped_operand",
                     "degenerate_contact",
+                    "non_planar_input",
+                    "degenerate_input",
                     "unknown_object",
                     "unknown_group",
                     "unknown_instance",
@@ -6084,7 +6279,10 @@ impl Registry {
                             { "type": "object", "properties": { "face": face_locator_schema }, "required": ["face"] },
                             { "type": "object", "properties": { "curve": { "type": "string" } }, "required": ["curve"] }
                         ]
-                    }
+                    },
+                    "twist": { "type": "number", "description": "total twist over the swept length, radians (right-hand rule about the path); open paths only" },
+                    "end_scale": { "type": "number", "exclusiveMinimum": 0, "description": "scale of the end profile relative to the start (1 = none); open paths only" },
+                    "stations": { "type": "integer", "minimum": 1, "description": "stations per path segment; default one per 15° of twist" }
                 },
                 "required": ["profile", "path"]
             });
@@ -6108,6 +6306,7 @@ impl Registry {
                 "partial_sweep_on_pole",
                 "sweep_self_intersects",
                 "sweep_degenerate",
+                "twist_needs_open_path",
                 "unknown_region",
                 "unknown_object",
                 "unknown_face",
@@ -6271,6 +6470,578 @@ impl Registry {
             });
             cmd.refusals = imprint_refusals();
         }
+
+        // ==== true-curves: blend ====
+        {
+            let edge_locator_schema = serde_json::json!({
+                "description": "HEW_API.md §5.2 edge-set locator: {object, at}, {object, from, to}, {face: <face locator>}, {face, loop_near}, or {object, all: true}",
+                "type": "object"
+            });
+            let edges_schema = serde_json::json!({
+                "type": "array",
+                "minItems": 1,
+                "items": edge_locator_schema,
+                "description": "solid edges to blend, all on one object"
+            });
+            let corner_schema = serde_json::json!({
+                "type": "object",
+                "description": "a 2D corner instead of solid edges: {sketch: <sketch id>, at: [x,y,z]} for a drawn corner, or {face: <face locator>, at: [x,y,z]} for a corner of a shape drawn on a face",
+                "properties": {
+                    "sketch": { "type": "string" },
+                    "face": { "type": "object" },
+                    "at": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+                },
+                "required": ["at"]
+            });
+            let propagate_schema = serde_json::json!({
+                "type": "string",
+                "enum": ["tangent", "none"],
+                "description": "default \"tangent\": each located edge extends along the smooth chain a click on it would take"
+            });
+            let stops_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "start": { "type": "number" }, "end": { "type": "number" } },
+                "description": "meters left sharp at the start and end of the chain"
+            });
+            let blend_result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "string" },
+                    "blend_ids": { "type": "array", "items": { "type": "integer" } },
+                    "faces": { "type": "integer", "description": "new blend faces" },
+                    "sketch_id": { "type": "string", "description": "a corner of a world sketch: the sketch" }
+                },
+                "description": "an edge blend answers object_id, blend_ids, faces and size (meters; null for a bullnose); a 2D corner answers sketch_id or object_id"
+            });
+            let common_refusals = vec![
+                "radius_too_large",
+                "profile_too_wide",
+                "edge_is_smooth",
+                "blend_needs_solid",
+                "unsupported_vertex",
+                "blend_faces_flush",
+                "unsupported_edge",
+                "obstructed",
+                "segments_out_of_range",
+                "non_uniform_instance",
+                "stop_out_of_range",
+                "corner_not_blendable",
+                "corner_is_straight",
+                "corner_radius_too_large",
+                "corner_leaves_face",
+                "edges_span_objects",
+                "unknown_object",
+                "unknown_face",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+            ];
+
+            let cmd = commands
+                .get_mut("hew.solid.fillet")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "edges": edges_schema.clone(),
+                    "corner": corner_schema.clone(),
+                    "radius": { "type": "number", "exclusiveMinimum": 0, "description": "meters; required except for a bullnose or a profile" },
+                    "segments": { "type": "integer", "minimum": 1, "maximum": 1024, "description": "facets across the arc: 2 to 96 for an edge round, cove or bullnose, 1 to 96 for a profile, up to 1024 for a 2D corner; default the drawing tools' count for the edge's turn at this radius" },
+                    "profile": { "type": "string", "description": "\"round\" (default), \"cove\", \"bullnose\", a built-in id such as \"builtin:ogee\", or a Library profile's id" },
+                    "width": { "type": "number", "exclusiveMinimum": 0, "description": "profiles only, meters on the bearing face (replaces radius)" },
+                    "propagate": propagate_schema.clone(),
+                    "stops": stops_schema.clone(),
+                    "handles": {
+                        "type": "array",
+                        "items": { "type": "object", "properties": { "at": { "type": "number" }, "radius": { "type": "number" } }, "required": ["at", "radius"] },
+                        "description": "round only: a radius at an arc length along the chain (variable radius)"
+                    },
+                    "corners": { "type": "string", "enum": ["rolled", "mitered"], "description": "three-way corners; default \"rolled\"" }
+                },
+                "description": "give edges or corner"
+            });
+            cmd.result_schema = blend_result_schema.clone();
+            cmd.refusals = [
+                common_refusals.clone(),
+                vec![
+                    "profile_needs_convex_edge",
+                    "bullnose_needs_parallel_sides",
+                    "invalid_profile",
+                    "unknown_profile",
+                    "load_failed",
+                    "host_capability_missing",
+                ],
+            ]
+            .concat();
+
+            let cmd = commands
+                .get_mut("hew.solid.chamfer")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "edges": edges_schema,
+                    "corner": corner_schema,
+                    "distance": { "type": "number", "exclusiveMinimum": 0, "description": "meters on both faces, or on the primary face when `angle` is given" },
+                    "distances": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "[a, b] meters: a on the primary face, b on the other" },
+                    "primary": { "type": "object", "description": "face locator of the face that takes `distances[0]` (or `distance` with `angle`)" },
+                    "angle": { "type": "number", "description": "radians measured from the primary face; with `distance`" },
+                    "propagate": propagate_schema,
+                    "stops": stops_schema,
+                    "corners": { "type": "string", "enum": ["mitered", "flat"], "description": "three-way corners; default \"mitered\"" }
+                },
+                "description": "give edges or corner, and distance, distances, or distance with angle"
+            });
+            cmd.result_schema = blend_result_schema.clone();
+            cmd.refusals = [common_refusals, vec!["angle_does_not_fit"]].concat();
+
+            let blend_face = serde_json::json!({
+                "type": "object",
+                "description": "HEW_API.md §5.2 face locator of any face of the blend"
+            });
+            let cmd = commands
+                .get_mut("hew.solid.resize_blend")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "face": blend_face.clone(),
+                    "radius": { "type": "number", "exclusiveMinimum": 0 },
+                    "distance": { "type": "number", "exclusiveMinimum": 0 },
+                    "distances": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+                    "width": { "type": "number", "exclusiveMinimum": 0 },
+                    "profile": { "type": "string" },
+                    "segments": { "type": "integer", "minimum": 1, "maximum": 96, "description": "facets across the arc: 2 to 96 for a round, cove or bullnose, 1 to 96 for a profile" }
+                },
+                "required": ["face"]
+            });
+            cmd.result_schema = blend_result_schema;
+            cmd.refusals = vec![
+                "blend_modified",
+                "dependent_blend",
+                "unknown_blend",
+                "radius_too_large",
+                "blend_degenerate",
+                "profile_too_wide",
+                "segments_out_of_range",
+                "unsupported_edge",
+                "unsupported_vertex",
+                "blend_faces_flush",
+                "obstructed",
+                "invalid_profile",
+                "unknown_profile",
+                "unknown_object",
+                "unknown_face",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+            ];
+
+            let cmd = commands
+                .get_mut("hew.solid.remove_blend")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "face": blend_face },
+                "required": ["face"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = vec![
+                "blend_modified",
+                "dependent_blend",
+                "unknown_blend",
+                "unknown_object",
+                "unknown_face",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+            ];
+        }
+        // ==== end true-curves: blend ====
+        // ==== true-curves: shapes ====
+        {
+            let cmd = commands
+                .get_mut("hew.solid.revolve")
+                .expect("declared above");
+            cmd.implemented = true;
+            let point_schema = serde_json::json!({
+                "description": "[x, y, z] or a derived-point locator (HEW_API.md §5.3)"
+            });
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "oneOf": [
+                            { "type": "string", "description": "a sketch region id" },
+                            { "type": "object", "properties": { "face": { "type": "object", "description": "HEW_API.md §5.2 face locator of a world object's face" } }, "required": ["face"] }
+                        ]
+                    },
+                    "axis": {
+                        "oneOf": [
+                            { "type": "object", "properties": { "from": point_schema.clone(), "to": point_schema }, "required": ["from", "to"] },
+                            { "type": "object", "properties": { "edge": { "description": "a solid or sketch edge locator; the axis is its line" } }, "required": ["edge"] }
+                        ],
+                        "description": "a line lying in the profile's plane"
+                    },
+                    "angle": { "type": "number", "description": "radians, 0 < |angle| ≤ 2π, right-hand rule about from→to; default 2π (a closed solid)" },
+                    "segments": { "type": "integer", "minimum": 3, "maximum": 1024, "description": "facets per full turn; default the drawing tools' count at the profile's largest distance from the axis" }
+                },
+                "required": ["profile", "axis"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = vec![
+                "axis_not_in_profile_plane",
+                "amount_out_of_range",
+                "profile_crosses_axis",
+                "partial_sweep_on_pole",
+                "sweep_self_intersects",
+                "sweep_degenerate",
+                "follow_me_in_component_unsupported",
+                "unknown_region",
+                "unknown_object",
+                "unknown_face",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.solid.deform")
+                .expect("declared above");
+            cmd.implemented = true;
+            let axis_names = serde_json::json!({ "type": "string", "enum": ["+x", "-x", "+y", "-y", "+z", "-z"] });
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "a world object id" },
+                    "mode": { "type": "string", "enum": ["twist", "bend", "taper", "bend_to_path"] },
+                    "end": { "description": "the moving end of the object's world bounding box (twist, bend, taper); the opposite face stays fixed", "allOf": [axis_names.clone()] },
+                    "toward": { "description": "bend only: the cross axis it bends toward; default the one closest to -z, or +x for a vertical axis", "allOf": [axis_names] },
+                    "angle": { "type": "number", "description": "twist or bend, radians: |twist| ≤ 4π, |bend| ≤ 2π" },
+                    "ratio": { "type": "number", "exclusiveMinimum": 0, "description": "taper: the moving end's scale" },
+                    "stations": { "type": "integer", "minimum": 1, "description": "bands along the axis (twist/bend default one per 15°, at least 4; taper 1); the object is also cut through every vertex so no face spans one; for bend_to_path, bands per path segment (default 4)" },
+                    "base": { "type": "object", "properties": { "from": {}, "to": {} }, "required": ["from", "to"], "description": "bend_to_path: the straight line mapped onto the path" },
+                    "path": { "description": "bend_to_path: {\"curve\": <sketch curve id>} or {\"face\": <face locator>} (its boundary loop)" }
+                },
+                "required": ["object", "mode"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = vec![
+                "self_intersecting",
+                "shape_needs_solid",
+                "amount_out_of_range",
+                "shape_degenerate",
+                "unknown_object",
+                "unknown_entity",
+                "unknown_face",
+                "locator_missed",
+                "ambiguous_locator",
+                "follow_me_in_component_unsupported",
+                "unimplemented",
+            ];
+        }
+        {
+            let cmd = commands.get_mut("hew.solid.loft").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "profiles": {
+                        "type": "array",
+                        "items": {
+                            "oneOf": [
+                                { "type": "string", "description": "a sketch region id" },
+                                { "type": "object", "properties": { "face": { "type": "object", "description": "HEW_API.md §5.2 face locator of a world object's face" } }, "required": ["face"] }
+                            ]
+                        },
+                        "description": "closed shapes without holes, in loft order"
+                    },
+                    "apex": { "description": "[x, y, z] or a derived-point locator: the point the loft ends in" },
+                    "rails": { "type": "array", "maxItems": 2, "items": { "description": "{\"curve\": <sketch curve id>} or {\"face\": <face locator>} (its boundary loop)" }, "description": "up to two paths touching every profile at a vertex or a start marker" },
+                    "start_offsets": { "type": "array", "items": { "type": "integer" }, "description": "per profile: move its correspondence start by this many start candidates: corners where every profile has the same number of corners, else vertices" },
+                    "stations": { "type": "integer", "minimum": 1, "description": "stations between consecutive profiles (1 = ruled); default 1 for two shapes without rails, else 8" }
+                },
+                "required": ["profiles"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = vec![
+                "open_profile",
+                "loft_profile_has_hole",
+                "loft_needs_two_profiles",
+                "loft_too_many_rails",
+                "rail_misses_profile",
+                "self_intersecting",
+                "amount_out_of_range",
+                "shape_degenerate",
+                "unknown_region",
+                "unknown_object",
+                "unknown_face",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+                "follow_me_in_component_unsupported",
+                "unimplemented",
+            ];
+        }
+        {
+            let cmd = commands.get_mut("hew.array.path").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "nodes": { "type": "array", "items": { "type": "string" }, "description": "ids of the objects, groups or instances to copy" },
+                    "path": {
+                        "oneOf": [
+                            { "type": "object", "properties": { "curve": { "type": "string" } }, "required": ["curve"] },
+                            { "type": "object", "properties": { "face": { "type": "object", "description": "a face locator; its outer loop is a closed path" } }, "required": ["face"] },
+                            { "type": "object", "properties": { "edges": { "type": "array" } }, "required": ["edges"], "description": "Reserved: no kernel mapping yet, refuses unimplemented" }
+                        ]
+                    },
+                    "count": { "type": "integer", "minimum": 2, "description": "total instances including the original" },
+                    "scale": {
+                        "type": "object",
+                        "properties": { "from": { "type": "number" }, "to": { "type": "number" } },
+                        "required": ["from", "to"],
+                        "description": "uniform scale at the first and last copy, linear between; default 1 to 1"
+                    },
+                    "align": { "type": "boolean", "description": "turn copies to follow the path tangent (default true)" }
+                },
+                "required": ["nodes", "path", "count"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "node_ids": { "type": "array", "items": { "type": "string" } } },
+                "required": ["node_ids"]
+            });
+            cmd.refusals = vec![
+                "amount_out_of_range",
+                "path_too_short_for_count",
+                "array_count_too_large",
+                "empty_path",
+                "unknown_path_edge",
+                "path_branches",
+                "path_disconnected",
+                "path_segment_too_short",
+                "empty_selection",
+                "duplicate_member",
+                "unknown_object",
+                "unknown_group",
+                "unknown_instance",
+                "unknown_face",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+                "reflection",
+                "unimplemented",
+            ];
+        }
+        // ==== end true-curves: shapes ====
+        // ==== true-curves: smooth ====
+        // ==== true-curves: offset ====
+        {
+            let cmd = commands.get_mut("hew.solid.shell").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "an object id" },
+                    "open": {
+                        "type": "array",
+                        "items": { "type": "object", "description": "HEW_API.md §5.2 face locator of a face of `object` to leave open" }
+                    },
+                    "thickness": { "type": "number", "description": "wall thickness in meters; negative grows the wall outward" }
+                },
+                "required": ["object", "thickness"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = vec![
+                "wall_too_thick",
+                "self_intersecting",
+                "unsupported_shell_corner",
+                "shape_needs_solid",
+                "amount_out_of_range",
+                "shape_degenerate",
+                "unknown_object",
+                "unknown_component",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+            ];
+            let cmd = commands
+                .get_mut("hew.solid.project")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "the target object id" },
+                    "sketch": { "type": "string", "description": "the sketch whose shape is projected along its normal, toward the object" },
+                    "regions": { "type": "array", "items": { "type": "string" }, "description": "region ids of that sketch; default every region" },
+                    "depth": { "type": "number", "description": "meters; > 0 engraves, < 0 embosses; absent imprints only" },
+                    "mode": { "enum": ["straight", "follow"], "description": "straight (default) cuts along the projection and can go through a wall; follow offsets along the surface" }
+                },
+                "required": ["object", "sketch"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "string" },
+                    "faces": { "type": "integer", "description": "how many faces the imprinted region has" }
+                },
+                "required": ["object_id", "faces"]
+            });
+            cmd.refusals = vec![
+                "project_misses",
+                "project_needs_closed_shape",
+                "would_sever",
+                "self_intersecting",
+                "unsupported_shell_corner",
+                "wall_too_thick",
+                "shape_needs_solid",
+                "amount_out_of_range",
+                "shape_degenerate",
+                "degenerate_contact",
+                "non_planar_input",
+                "degenerate_input",
+                "unknown_object",
+                "unknown_sketch",
+                "unknown_component",
+                "unknown_entity",
+            ];
+        }
+        // ==== end true-curves: offset ====
+        {
+            let object_id = serde_json::json!({ "type": "string", "description": "an object id" });
+            let cmd = commands
+                .get_mut("hew.object.smooth")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": object_id.clone(),
+                    "level": { "type": "integer", "minimum": 0, "maximum": 3, "description": "0 = Off" }
+                },
+                "required": ["object", "level"]
+            });
+            cmd.result_schema = serde_json::json!({ "type": "object" });
+            cmd.refusals = vec![
+                "amount_out_of_range",
+                "smooth_too_dense",
+                "unknown_object",
+                "unknown_component",
+                "unknown_entity",
+            ];
+
+            let cmd = commands
+                .get_mut("hew.object.crease")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "edges": {
+                        "type": "array",
+                        "items": { "type": "object", "description": "an edge locator {object, at}; all on one object" },
+                        "minItems": 1
+                    },
+                    "crease": { "type": "boolean", "default": true },
+                    "propagate": { "enum": ["none", "tangent"], "default": "none", "description": "tangent: also follow each edge's tangent continuations" }
+                },
+                "required": ["edges"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "edges": { "type": "integer", "description": "how many kernel edges changed" } },
+                "required": ["edges"]
+            });
+            cmd.refusals = vec![
+                "crease_on_soft_edge",
+                "crease_on_boundary",
+                "edges_span_objects",
+                "shape_degenerate",
+                "unknown_object",
+                "unknown_component",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+            ];
+
+            let cmd = commands.get_mut("hew.solid.bake").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object": object_id },
+                "required": ["object"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = vec![
+                "amount_out_of_range",
+                "smooth_too_dense",
+                "shape_degenerate",
+                "unknown_object",
+                "unknown_component",
+                "unknown_entity",
+            ];
+        }
+        // ==== end true-curves: smooth ====
+        // ==== true-curves: imports ====
+        {
+            let cmd = commands
+                .get_mut("hew.solid.soften")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "an object id" },
+                    "max_angle": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": std::f64::consts::PI, "description": "radians: edges bending less than this are softened (coplanar and creased edges are left alone)" }
+                },
+                "required": ["object", "max_angle"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "softened": { "type": "integer" } },
+                "required": ["softened"]
+            });
+            cmd.refusals = vec![
+                "amount_out_of_range",
+                "shape_degenerate",
+                "unknown_object",
+                "unknown_component",
+                "unknown_entity",
+            ];
+        }
+        // ==== end true-curves: imports ====
 
         // The solitary commands that nevertheless change the document
         // (see `CommandDecl::mutates_document`). Everything else solitary
@@ -7142,6 +7913,22 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.history.undo",
                 "hew.history.redo",
                 "hew.doc.purge_unused",
+                // True Curves: blends, generated shapes, Smooth, repairs.
+                "hew.solid.fillet",
+                "hew.solid.chamfer",
+                "hew.solid.remove_blend",
+                "hew.solid.resize_blend",
+                "hew.solid.revolve",
+                "hew.solid.loft",
+                "hew.solid.deform",
+                "hew.solid.shell",
+                "hew.solid.project",
+                "hew.solid.bake",
+                "hew.solid.soften",
+                "hew.solid.remove_degenerate_faces",
+                "hew.object.smooth",
+                "hew.object.crease",
+                "hew.array.path",
             ],
         ),
         (AttributesWrite, &["hew.attr.set", "hew.attr.delete"]),

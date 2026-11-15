@@ -336,6 +336,9 @@ struct ExportParams {
     /// `hew.doc.save`).
     #[serde(default)]
     compat: bool,
+    /// Export smoothed objects' cages instead of their Smooth surfaces.
+    #[serde(default)]
+    cages: Option<bool>,
 }
 
 fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -346,6 +349,7 @@ fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         units,
         selection,
         compat,
+        cages,
     } = parse(params)?;
     if compat && format != "skp" {
         return Err(CmdError::Params(
@@ -382,6 +386,7 @@ fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             units.as_deref(),
             selection.as_deref(),
             compat,
+            cages.unwrap_or(false),
         )
         .map_err(CmdError::Refusal)?;
     Ok(match bytes {

@@ -144,6 +144,7 @@ impl Host for FakeHost {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // the host surface: document, format, path, resolution, units and two flags
     fn export_document(
         &mut self,
         doc: &Document,
@@ -153,15 +154,23 @@ impl Host for FakeHost {
         units: Option<&str>,
         selection: Option<&[api::locate::RenderRoot]>,
         compat: bool,
+        _cages: bool,
     ) -> Result<Option<Vec<u8>>, Refusal> {
         self.last_export_compat = compat;
         self.last_export_units = units.map(str::to_string);
         // A selection exports through the real writers, so its tests see
         // real bytes.
         if let Some(roots) = selection {
-            return mesh_export::export_occurrences(doc, roots, format, segments_per_turn, true)
-                .map(Some)
-                .map_err(|e| Refusal::api(e.name(), &e.message()));
+            return mesh_export::export_occurrences(
+                doc,
+                roots,
+                format,
+                segments_per_turn,
+                true,
+                false,
+            )
+            .map(Some)
+            .map_err(|e| Refusal::api(e.name(), &e.message()));
         }
         self.export_result
             .take()

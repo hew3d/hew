@@ -331,6 +331,31 @@ fn push_pull_face(
     // comment; mirrors `commands/sketch.rs`'s `apply_face_op`).
     let component = ctx.doc.object_owner_component(face_ref.object);
 
+    // A blend face resizes its blend; a face beside blends moves with them
+    // re-applied, falling back to the ordinary Push/Pull (WP08 §5).
+    if component.is_none()
+        && let Some(obj) = ctx.doc.object(face_ref.object)
+    {
+        if obj.blend_of_face(face_ref.face).is_some() {
+            ctx.doc
+                .push_pull_blend(face_ref.object, face_ref.face, distance)
+                .map_err(push_pull_refusal)?;
+            return Ok(
+                serde_json::json!({ "object_id": public_id_of(ctx, EntityRef::Object(face_ref.object)) }),
+            );
+        }
+        if obj.face_borders_blend(face_ref.face)
+            && ctx
+                .doc
+                .push_pull_with_blends(face_ref.object, face_ref.face, distance)
+                .is_ok()
+        {
+            return Ok(
+                serde_json::json!({ "object_id": public_id_of(ctx, EntityRef::Object(face_ref.object)) }),
+            );
+        }
+    }
+
     let overshoots = ctx
         .doc
         .object(face_ref.object)
@@ -429,7 +454,7 @@ fn boolean_op(ctx: &mut Ctx, params: &Value, op: kernel::BooleanOp) -> Result<Va
                 })
                 .collect::<Result<_, _>>()?;
             let (result, _change) = ctx.doc.boolean_nodes_many(op, &nodes)?;
-            return Ok(serde_json::json!({ "result": public_id_of(ctx, node_entity(result)) }));
+            return Ok(boolean_result_json(ctx, op, result));
         }
     } else {
         match (p.a, p.b) {
@@ -473,7 +498,31 @@ fn boolean_op(ctx: &mut Ctx, params: &Value, op: kernel::BooleanOp) -> Result<Va
         }
     };
     let (result, _change) = ctx.doc.boolean_nodes(op, a, b)?;
-    Ok(serde_json::json!({ "result": public_id_of(ctx, node_entity(result)) }))
+    Ok(boolean_result_json(ctx, op, result))
+}
+
+/// `{result}` for a world boolean. A result in more than one piece comes
+/// back as a group of them: a Union of operands that only touch (the app
+/// says so in a toast), a Subtract whose cutter severs, an Intersect of
+/// several overlaps. The API says which in the result (`pieces`, `note`).
+fn boolean_result_json(ctx: &Ctx, op: kernel::BooleanOp, result: NodeId) -> Value {
+    let mut out = serde_json::json!({ "result": public_id_of(ctx, node_entity(result)) });
+    if let NodeId::Group(group) = result
+        && let Some(members) = ctx.doc.group_members(group)
+    {
+        let pieces = members.len();
+        out["pieces"] = serde_json::json!(pieces);
+        out["note"] = serde_json::json!(match op {
+            kernel::BooleanOp::Union => format!(
+                "The operands don't overlap, so the result is a group of {pieces} separate pieces. Move one a little into the other and try again for one solid."
+            ),
+            kernel::BooleanOp::Subtract =>
+                format!("The cut left {pieces} separate pieces, kept as a group."),
+            kernel::BooleanOp::Intersect =>
+                format!("The operands overlap in {pieces} separate places, kept as a group."),
+        });
+    }
+    out
 }
 
 fn node_entity(node: NodeId) -> EntityRef {
@@ -674,11 +723,7 @@ fn boolean_unlinking(
     let a = settle_operand(ctx, a, &mut unlinked)?;
     let b = settle_operand(ctx, b, &mut unlinked)?;
     let (result, _change) = ctx.doc.boolean_nodes(op, a, b)?;
-    let entity = match result {
-        NodeId::Object(id) => EntityRef::Object(id),
-        NodeId::Group(id) => EntityRef::Group(id),
-        NodeId::Instance(id) => EntityRef::Instance(id),
-    };
+    let mut out = boolean_result_json(ctx, op, result);
     let mut all: Vec<String> = unlinked_public;
     for i in unlinked {
         let id = public_id_of(ctx, EntityRef::Instance(i));
@@ -686,7 +731,8 @@ fn boolean_unlinking(
             all.push(id);
         }
     }
-    Ok(json!({ "result": public_id_of(ctx, entity), "unlinked": all }))
+    out["unlinked"] = json!(all);
+    Ok(out)
 }
 
 /// A boolean whose `a` is a definition member reached by `path`
@@ -1081,20 +1127,15 @@ fn require_world_follow_me_face(ctx: &Ctx, object: kernel::ObjectId) -> Result<(
     Ok(())
 }
 
-pub(super) fn follow_me(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct P {
-        profile: Value,
-        path: Value,
-    }
-    let p: P = parse_params(params)?;
-
-    let path_obj = p
-        .path
+/// A Follow Me path parameter: `{"face": <locator>}` (that face's boundary
+/// loop) or `{"curve": "<sketch curve id>"}`; `{"edges": …}` refuses
+/// `unimplemented`. Shared with Deform's Bend to Path, Loft's rails and
+/// Array along Path.
+pub(super) fn follow_me_path(ctx: &Ctx, path: &Value) -> Result<FollowMePath, CmdError> {
+    let path_obj = path
         .as_object()
         .ok_or_else(|| CmdError::Params("path needs an object".into()))?;
-    let path = if let Some(face_locator) = path_obj.get("face") {
+    Ok(if let Some(face_locator) = path_obj.get("face") {
         if path_obj.len() != 1 {
             return Err(CmdError::Params("path.face takes no sibling keys".into()));
         }
@@ -1134,14 +1175,39 @@ pub(super) fn follow_me(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
         return Err(CmdError::Params(
             "path needs \"edges\", \"face\", or \"curve\"".into(),
         ));
+    })
+}
+
+pub(super) fn follow_me(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct P {
+        profile: Value,
+        path: Value,
+        /// Twist (radians), end scale (ratio) and stations per path
+        /// segment (true-curves.md §5.2); absent = a plain sweep.
+        #[serde(default)]
+        twist: Option<f64>,
+        #[serde(default)]
+        end_scale: Option<f64>,
+        #[serde(default)]
+        stations: Option<u32>,
+    }
+    let p: P = parse_params(params)?;
+    let opts = kernel::SweepOptions {
+        twist: p.twist.unwrap_or(0.0),
+        end_scale: p.end_scale.unwrap_or(1.0),
+        stations: p.stations,
     };
+
+    let path = follow_me_path(ctx, &p.path)?;
 
     if let Some(profile_pub) = p.profile.as_str() {
         let (sketch, region) = ctx
             .resolver()
             .resolve_region(profile_pub)
             .ok_or_else(|| unknown_entity(profile_pub))?;
-        let (object, _change) = ctx.doc.follow_me(sketch, region, &path)?;
+        let (object, _change) = ctx.doc.follow_me_with(sketch, region, &path, None, opts)?;
         Ok(serde_json::json!({ "object_id": public_id_of(ctx, EntityRef::Object(object)) }))
     } else if let Some(profile_obj) = p.profile.as_object() {
         let face_val = profile_obj
@@ -1154,7 +1220,9 @@ pub(super) fn follow_me(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
         }
         let f = locate::resolve_face(ctx, face_val)?;
         require_world_follow_me_face(ctx, f.object)?;
-        let (object, _change) = ctx.doc.follow_me_face(f.object, f.face, &path, None)?;
+        let (object, _change) = ctx
+            .doc
+            .follow_me_face_with(f.object, f.face, &path, None, opts)?;
         Ok(serde_json::json!({ "object_id": public_id_of(ctx, EntityRef::Object(object)) }))
     } else {
         Err(CmdError::Params(

@@ -349,7 +349,7 @@
           "code": -32000,
           "data": {
             "detail": {},
-            "explanation": "The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.",
+            "explanation": "The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.",
             "failed_index": 0,
             "failed_method": "hew.compute.boolean",
             "refusal": "degenerate_contact"

@@ -137,6 +137,15 @@ pub enum RecordedCall {
         /// so old recordings replay unchanged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_around_face(sketch, region, path_object, path_face)` —
     /// sweep a profile region around a solid face's outer boundary loop.
@@ -154,6 +163,15 @@ pub enum RecordedCall {
         /// Group-context birth (design §2f), absent for top-level.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         group: Option<u64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_around_instance_face(...)` — a face loop reached through
     /// a component instance (design §2e). Additive variant.
@@ -165,6 +183,15 @@ pub enum RecordedCall {
         path_face: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_merged_around_face(...)` — the merged molding gesture
     /// (design §3b). Additive variant, same posture as
@@ -176,6 +203,15 @@ pub enum RecordedCall {
         path_face: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_face_along_edges(...)` — a solid face as the profile
     /// (design §3a). Additive variant.
@@ -186,6 +222,15 @@ pub enum RecordedCall {
         path_edges: Vec<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_face_around_face(...)` — a solid face as the profile,
     /// swept around a face loop. Additive variant.
@@ -196,6 +241,15 @@ pub enum RecordedCall {
         path_face: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `sketch_offset_region(sketch, region, distance)` — the Offset tool's
     /// sketch commit: the region's whole boundary offset by a uniform
@@ -989,6 +1043,15 @@ pub enum RecordedCall {
         path_edges: Vec<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_around_face_in_instance(instance, sketch, region,
     /// path_object, path_face, stop_len)`.
@@ -1000,6 +1063,15 @@ pub enum RecordedCall {
         path_face: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_merged_around_face_in_instance(instance, sketch, region,
     /// path_object, path_face, stop_len)`.
@@ -1011,6 +1083,15 @@ pub enum RecordedCall {
         path_face: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_face_along_edges_in_instance(instance, profile_object,
     /// profile_face, path_sketch, path_edges, stop_len)`.
@@ -1022,6 +1103,15 @@ pub enum RecordedCall {
         path_edges: Vec<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_face_around_face_in_instance(instance, profile_object,
     /// profile_face, path_object, path_face, stop_len)`.
@@ -1033,6 +1123,15 @@ pub enum RecordedCall {
         path_face: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `boolean_in_component(component, op, a, b)`.
     BooleanInComponent {
@@ -1272,6 +1371,118 @@ pub enum RecordedCall {
         curve: u64,
         segments: u32,
     },
+    // ==== true-curves: blend ====
+    /// `draft_blend_corner(draft, at, profile)` — `profile` is the
+    /// `CornerProfile` JSON the call received.
+    DraftBlendCorner {
+        draft: u64,
+        at: [f64; 3],
+        profile: String,
+    },
+    /// `sketch_blend_corner(sketch, vertex, profile)` — `profile` is the
+    /// `CornerProfile` JSON the call received.
+    SketchBlendCorner {
+        sketch: u64,
+        vertex: u64,
+        profile: String,
+    },
+    /// `paint_logical_face(object, face, material)`.
+    PaintLogicalFace {
+        object: u64,
+        face: u64,
+        material: u64,
+    },
+    /// `blend_edges(object, spec)` — `spec` is the `BlendSpec` JSON the call
+    /// received.
+    BlendEdges { object: u64, spec: String },
+    /// `blend_edges_in_component(instance, object, spec)` — world sizes.
+    BlendEdgesInComponent {
+        instance: u64,
+        object: u64,
+        spec: String,
+    },
+    /// `resize_blend(object, blend, profile)` — `profile` is the
+    /// `BlendProfile` JSON the call received.
+    ResizeBlend {
+        object: u64,
+        blend: u32,
+        profile: String,
+    },
+    /// `resize_blend_in_component(instance, object, blend, profile)`.
+    ResizeBlendInComponent {
+        instance: u64,
+        object: u64,
+        blend: u32,
+        profile: String,
+    },
+    /// `remove_blend(object, blend)`.
+    RemoveBlend { object: u64, blend: u32 },
+    /// `remove_blend_in_component(instance, object, blend)`.
+    RemoveBlendInComponent {
+        instance: u64,
+        object: u64,
+        blend: u32,
+    },
+    // ==== end true-curves: blend ====
+    // ==== true-curves: shapes ====
+    /// `revolve(profile_json, spec_json)` — both JSON strings verbatim.
+    Revolve { profile: String, spec: String },
+    /// `revolve_in_instance(instance, object, face, spec_json)`.
+    RevolveInInstance {
+        instance: u64,
+        object: u64,
+        face: u64,
+        spec: String,
+    },
+    /// `deform(object, spec_json)` — the JSON verbatim.
+    Deform { object: u64, spec: String },
+    /// `loft(spec_json)` — the JSON verbatim.
+    Loft { spec: String },
+    /// `array_along_path(kinds, ids, path, count, scale_from, scale_to,
+    /// align)` — copy a selection along a path. `path` is the JSON string the
+    /// method received.
+    ArrayAlongPath {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        path: String,
+        count: u32,
+        scale_from: f64,
+        scale_to: f64,
+        align: bool,
+    },
+    // ==== end true-curves: shapes ====
+    // ==== true-curves: smooth ====
+    /// `set_smooth_level(object, level)`.
+    SetSmoothLevel { object: u64, level: u8 },
+    /// `set_crease(object, edges, crease)` — the edges as passed.
+    SetCrease {
+        object: u64,
+        edges: Vec<u64>,
+        crease: bool,
+    },
+    /// `bake(object)`.
+    Bake { object: u64 },
+    /// `shell(object, spec_json)` — the spec as the method received it.
+    Shell { object: u64, spec: String },
+    /// `project_imprint(object, sketch, regions)`.
+    ProjectImprint {
+        object: u64,
+        sketch: u64,
+        regions: Vec<u64>,
+    },
+    /// `project_depth(object, sketch, faces, depth, mode)`.
+    ProjectDepth {
+        object: u64,
+        sketch: u64,
+        faces: Vec<u64>,
+        depth: f64,
+        mode: u8,
+    },
+    // ==== end true-curves: smooth ====
+    // ==== true-curves: imports ====
+    /// `soften_by_angle(object, max_angle)` (radians).
+    SoftenByAngle { object: u64, max_angle: f64 },
+    // ==== end true-curves: imports ====
     /// One forwarded plugin command's compound (docs/agents/PLUGINS.md
     /// "Compounds"): the calls its handler made while the compound was
     /// open, which landed as one undo entry. The forwarded frame itself is
@@ -1487,6 +1698,30 @@ pub fn without_capture<R>(body: impl FnOnce() -> R) -> R {
     let out = body();
     ENABLED.with(|e| e.set(prev));
     out
+}
+
+/// The optional Follow Me record fields for `opts`: all absent for a plain
+/// sweep (so its record is byte-identical to one made before the fields
+/// existed).
+pub(crate) fn sweep_fields(opts: &kernel::SweepOptions) -> (Option<f64>, Option<f64>, Option<u32>) {
+    if opts.is_default() {
+        (None, None, None)
+    } else {
+        (Some(opts.twist), Some(opts.end_scale), opts.stations)
+    }
+}
+
+/// The options a Follow Me record carries (defaults where absent).
+pub(crate) fn sweep_from(
+    twist: Option<f64>,
+    end_scale: Option<f64>,
+    stations: Option<u32>,
+) -> kernel::SweepOptions {
+    kernel::SweepOptions {
+        twist: twist.unwrap_or(0.0),
+        end_scale: end_scale.unwrap_or(1.0),
+        stations,
+    }
 }
 
 #[cfg(test)]

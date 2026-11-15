@@ -13,6 +13,15 @@
 //! candidates and `mirror` the smallest over the det −1 ones, whose loops
 //! are read reversed so they run counter-clockwise about the mirrored
 //! outward normal, exactly as the mirror image's own loops do.
+//!
+//! True Curves marks are part of the shape: a face's blend tag (and what
+//! its blend's record asks for) follows its loops, and the creased edges,
+//! the Smooth level, and the edges' circle and polygon claims are records
+//! of their own. Each is written only when present, so a shape without
+//! them hashes as it always did. These are the facts
+//! `Document::join_linked` compares beyond the vertex set (every face's
+//! surface claim, every edge claim, every mark), so two shapes the
+//! signature calls the same link, and two it tells apart do not.
 
 use crate::part_frame::{self, PartFrame};
 use crate::scope::Scope;
@@ -93,7 +102,17 @@ fn candidate_hashes(
     // outward normal, with its surface.
     struct WorldFace {
         loops: Vec<Vec<Point3>>,
-        surface: Option<(Vec3, f64)>,
+        surface: Option<WorldSurface>,
+        /// The face's blend tag (kind, role) and what its blend's record
+        /// asks for (empty for none), as bytes.
+        blend: Option<(i64, i64, Vec<u8>)>,
+    }
+    /// A face's analytic claim in world space (meters, radians).
+    enum WorldSurface {
+        Cylinder(Vec3, f64),
+        Sphere(Point3, f64),
+        Torus(Point3, Vec3, f64, f64),
+        Cone(Point3, Vec3, f64),
     }
     let mut faces = Vec::with_capacity(obj.faces().len());
     for f in obj.faces().values() {
@@ -106,14 +125,95 @@ fn candidate_hashes(
             }
             loops.push(ring);
         }
-        let surface = match f.surface {
-            Some(kernel::SurfaceRef::Cylinder { axis, radius, .. }) => pose
-                .similarity_scale()
-                .map(|s| (pose.apply_vector(axis), radius * s)),
+        let surface = match (f.surface, pose.similarity_scale()) {
+            (Some(kernel::SurfaceRef::Cylinder { axis, radius, .. }), Some(s)) => {
+                Some(WorldSurface::Cylinder(pose.apply_vector(axis), radius * s))
+            }
+            (Some(kernel::SurfaceRef::Sphere { center, radius }), Some(s)) => {
+                Some(WorldSurface::Sphere(pose.apply_point(center), radius * s))
+            }
+            (
+                Some(kernel::SurfaceRef::Torus {
+                    center,
+                    axis,
+                    major_radius,
+                    minor_radius,
+                }),
+                Some(s),
+            ) => Some(WorldSurface::Torus(
+                pose.apply_point(center),
+                pose.apply_vector(axis),
+                major_radius * s,
+                minor_radius * s,
+            )),
+            (
+                Some(kernel::SurfaceRef::Cone {
+                    apex,
+                    axis,
+                    half_angle,
+                }),
+                Some(_),
+            ) => Some(WorldSurface::Cone(
+                pose.apply_point(apex),
+                pose.apply_vector(axis),
+                half_angle,
+            )),
             _ => None,
         };
-        faces.push(WorldFace { loops, surface });
+        let blend = f.blend.map(|t| {
+            let kind = match t.kind {
+                kernel::BlendKind::Fillet => 0,
+                kernel::BlendKind::Chamfer => 1,
+                kernel::BlendKind::Profile => 2,
+            };
+            let role = match t.role {
+                kernel::BlendRole::Strip => 0,
+                kernel::BlendRole::Corner => 1,
+                kernel::BlendRole::Runout => 2,
+            };
+            let digest = obj.blend_record_digest(t.id).unwrap_or_default();
+            (kind, role, digest.into_bytes())
+        });
+        faces.push(WorldFace {
+            loops,
+            surface,
+            blend,
+        });
     }
+    // Creased edges, world space; and the Smooth level. Both are written
+    // only when present, so a shape without either hashes as it did.
+    let creases: Vec<(Point3, Point3)> = obj
+        .edges()
+        .keys()
+        .filter(|&e| obj.edges()[e].crease)
+        .filter_map(|e| obj.edge_endpoints(e))
+        .map(|(a, b)| (pose.apply_point(a), pose.apply_point(b)))
+        .collect();
+    let smooth = i64::from(doc.smooth_level(id));
+    // Edges' circle and polygon claims, world space (ends, center, radius),
+    // written only when present. A pose that is not a similarity cannot
+    // carry a circle, so the claims drop there, as a face's surface does.
+    let scale = pose.similarity_scale();
+    let edge_claims = |claim: fn(&kernel::topo::Edge) -> Option<kernel::CurveGeom>| {
+        let Some(s) = scale else {
+            return Vec::new();
+        };
+        obj.edges()
+            .iter()
+            .filter_map(|(e, edge)| {
+                let g = claim(edge)?;
+                let (a, b) = obj.edge_endpoints(e)?;
+                Some((
+                    pose.apply_point(a),
+                    pose.apply_point(b),
+                    pose.apply_point(g.center),
+                    g.radius * s,
+                ))
+            })
+            .collect::<Vec<(Point3, Point3, Point3, f64)>>()
+    };
+    let circle_edges = edge_claims(|e| e.curve);
+    let polygon_edges = edge_claims(|e| e.polygon);
 
     let mut hashes: Vec<CandidateHash> = Vec::new();
     for (rot, det) in candidates(frame.extents) {
@@ -141,23 +241,46 @@ fn candidate_hashes(
             let holes = &mut loops[1..];
             holes.sort();
             let mut rec: Vec<i64> = Vec::new();
+            // An axis in the candidate frame, quantized; a line (`signed`
+            // false) has no sign, so its first nonzero component is made
+            // positive.
+            let axis_q = |axis: Vec3, signed: bool| -> [i64; 3] {
+                let a: [f64; 3] = std::array::from_fn(|k| axis.dot(axes[k]));
+                let len = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2])
+                    .sqrt()
+                    .max(f64::MIN_POSITIVE);
+                let mut a: [i64; 3] =
+                    std::array::from_fn(|k| (a[k] / len / QUANTUM).round() as i64);
+                if !signed && a.iter().find(|&&c| c != 0).is_some_and(|&c| c < 0) {
+                    a = a.map(|c| -c);
+                }
+                a
+            };
+            let len_q = |x: f64| (x / QUANTUM).round() as i64;
             match face.surface {
                 None => rec.push(0),
-                Some((axis, radius)) => {
+                Some(WorldSurface::Cylinder(axis, radius)) => {
                     rec.push(1);
-                    let a: [f64; 3] = std::array::from_fn(|k| axis.dot(axes[k]));
-                    let len = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2])
-                        .sqrt()
-                        .max(f64::MIN_POSITIVE);
-                    let mut a: [i64; 3] =
-                        std::array::from_fn(|k| (a[k] / len / QUANTUM).round() as i64);
-                    // An axis line has no sign: the first nonzero component
-                    // is positive.
-                    if a.iter().find(|&&c| c != 0).is_some_and(|&c| c < 0) {
-                        a = a.map(|c| -c);
-                    }
-                    rec.extend(a);
-                    rec.push((radius / QUANTUM).round() as i64);
+                    rec.extend(axis_q(axis, false));
+                    rec.push(len_q(radius));
+                }
+                Some(WorldSurface::Sphere(center, radius)) => {
+                    rec.push(2);
+                    rec.extend(q(center));
+                    rec.push(len_q(radius));
+                }
+                Some(WorldSurface::Torus(center, axis, major, minor)) => {
+                    rec.push(3);
+                    rec.extend(q(center));
+                    rec.extend(axis_q(axis, false));
+                    rec.push(len_q(major));
+                    rec.push(len_q(minor));
+                }
+                Some(WorldSurface::Cone(apex, axis, half_angle)) => {
+                    rec.push(4);
+                    rec.extend(q(apex));
+                    rec.extend(axis_q(axis, true));
+                    rec.push(len_q(half_angle));
                 }
             }
             rec.push(loops.len() as i64);
@@ -166,6 +289,69 @@ fn candidate_hashes(
                 for v in l {
                     rec.extend(v);
                 }
+            }
+            // A blend tag (and its record) after the loops, only when the
+            // face has one.
+            if let Some((kind, role, digest)) = &face.blend {
+                rec.extend([-1, *kind, *role, digest.len() as i64]);
+                rec.extend(digest.iter().map(|&b| i64::from(b)));
+            }
+            records.push(rec);
+        }
+        // One record for the creased edges (each a sorted pair of
+        // quantized ends, sorted), one for the Smooth level; both absent
+        // when there is nothing to say, and led by markers no face record
+        // starts with (a face record starts with its surface kind, 0 to 4).
+        if !creases.is_empty() {
+            let mut pairs: Vec<[[i64; 3]; 2]> = creases
+                .iter()
+                .map(|&(a, b)| {
+                    let (qa, qb) = (q(a), q(b));
+                    if qa <= qb { [qa, qb] } else { [qb, qa] }
+                })
+                .collect();
+            pairs.sort();
+            let mut rec = vec![-2, pairs.len() as i64];
+            for [a, b] in pairs {
+                rec.extend(a);
+                rec.extend(b);
+            }
+            records.push(rec);
+        }
+        if smooth > 0 {
+            records.push(vec![-3, smooth]);
+        }
+        // One record each for the circle- and polygon-claimed edges (each
+        // a sorted pair of quantized ends, then the quantized center and
+        // radius; sorted), led by markers of their own.
+        for (marker, claimed) in [(-4, &circle_edges), (-5, &polygon_edges)] {
+            if claimed.is_empty() {
+                continue;
+            }
+            let mut entries: Vec<[i64; 10]> = claimed
+                .iter()
+                .map(|&(a, b, c, r)| {
+                    let (qa, qb) = (q(a), q(b));
+                    let [lo, hi] = if qa <= qb { [qa, qb] } else { [qb, qa] };
+                    let qc = q(c);
+                    [
+                        lo[0],
+                        lo[1],
+                        lo[2],
+                        hi[0],
+                        hi[1],
+                        hi[2],
+                        qc[0],
+                        qc[1],
+                        qc[2],
+                        (r / QUANTUM).round() as i64,
+                    ]
+                })
+                .collect();
+            entries.sort();
+            let mut rec = vec![marker, entries.len() as i64];
+            for e in entries {
+                rec.extend(e);
             }
             records.push(rec);
         }

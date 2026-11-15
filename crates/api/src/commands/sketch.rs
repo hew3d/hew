@@ -105,6 +105,63 @@ fn sketch_err(e: kernel::SketchError) -> CmdError {
     CmdError::from(kernel::DocumentError::Sketch(e))
 }
 
+/// How far (meters) a drawn point may miss an open end of the same sketch
+/// and still be taken for a rounded copy of it. A heuristic about client
+/// input (a JSON pretty-printer or a `round(v, 6)` leaves ~1e-7 m gaps), not
+/// a kernel tolerance: the kernel merges only within `tol::POINT_MERGE`, and
+/// a chain that stops short of that leaves the profile open with no symptom
+/// but an empty `region_ids`.
+const ENDPOINT_NEAR_MISS_M: f64 = 1e-4;
+
+/// Refuses `endpoint_near_miss` when one of `pts` lies farther than
+/// `tol::POINT_MERGE` but no farther than [`ENDPOINT_NEAR_MISS_M`] from an
+/// open end (a vertex of exactly one edge) the sketch already had. Runs
+/// before any segment is added, so nothing changes on a refusal. Points
+/// created by the same command are not compared against each other.
+fn check_endpoint_near_miss(ctx: &Ctx, sketch: SketchId, pts: &[Point3]) -> Result<(), CmdError> {
+    let Some(s) = ctx.doc.sketch(sketch) else {
+        return Ok(());
+    };
+    let mut degree: std::collections::BTreeMap<kernel::SketchVertexId, u32> =
+        std::collections::BTreeMap::new();
+    for (_, e) in s.edges() {
+        *degree.entry(e.from).or_insert(0) += 1;
+        *degree.entry(e.to).or_insert(0) += 1;
+    }
+    let mut worst: Option<(f64, Point3)> = None;
+    for (id, v) in s.vertices() {
+        if degree.get(&id).copied() != Some(1) {
+            continue;
+        }
+        for p in pts {
+            let gap = (*p - v.position).length();
+            if gap > kernel::tol::POINT_MERGE
+                && gap <= ENDPOINT_NEAR_MISS_M
+                && worst.is_none_or(|(g, _)| gap < g)
+            {
+                worst = Some((gap, v.position));
+            }
+        }
+    }
+    let Some((gap, nearest)) = worst else {
+        return Ok(());
+    };
+    Err(CmdError::Refusal(
+        Refusal::api(
+            "endpoint_near_miss",
+            &format!(
+                "This point misses an existing endpoint by {:.3} micrometers. Send coordinates \
+                 at full precision, or use that endpoint exactly.",
+                gap * 1e6
+            ),
+        )
+        .with_detail(serde_json::json!({
+            "gap": gap,
+            "nearest": [nearest.x, nearest.y, nearest.z],
+        })),
+    ))
+}
+
 /// Commits a resolved plane spec (docs/agents/HEW_API.md §7) to a concrete
 /// sketch: mints a fresh one for `NewPlane` (the first gesture folds its
 /// creation into one undo step — api-kernel-map.md §1.1), looks up an
@@ -334,6 +391,7 @@ pub(super) fn draw_line(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
         return draft::draw_on_face(ctx, face_ref, "Draw line", vec![Run::plain(pts)]);
     }
     let (sketch, _plane) = commit_target(ctx, target)?;
+    check_endpoint_near_miss(ctx, sketch, &pts)?;
 
     let (reports, closed) = super::run_drawing_gesture(ctx, sketch, |s| {
         let mut reports = Vec::with_capacity(pts.len() - 1);
@@ -645,6 +703,11 @@ pub(super) fn draw_arc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError>
     }
     let (sketch, plane) = commit_target(ctx, target)?;
     let pts = arc_points(&plane, center, p.radius, p.start_angle, sweep, n);
+    let mut checked = pts.clone();
+    if close == ArcClose::Pie {
+        checked.push(center);
+    }
+    check_endpoint_near_miss(ctx, sketch, &checked)?;
 
     let ((curve, reports), closed) = super::run_drawing_gesture(ctx, sketch, |s| {
         let curve = s.begin_curve_with(geom).map_err(sketch_err)?;

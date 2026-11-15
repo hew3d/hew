@@ -993,6 +993,10 @@ msgstr "3mf"
 msgid "3MF (.3mf)"
 msgstr "3MF (.3mf)"
 
+#: src/kernelErrorCopy/blend.ts
+msgid "A bullnose needs two parallel edges of one face."
+msgstr "A bullnose needs two parallel edges of one face."
+
 #: src/kernelErrors.ts
 msgid "A circle needs at least 24 segments — below that it stops being a circle and becomes a polygon. Use the Polygon tool for a coarser shape."
 msgstr "A circle needs at least 24 segments — below that it stops being a circle and becomes a polygon. Use the Polygon tool for a coarser shape."
@@ -1013,6 +1017,10 @@ msgstr "A connected tool left a drawing step unfinished at the end of its batch,
 msgid "A connected tool undid history in the middle of its own batch, so the whole batch was discarded and the model was left unchanged."
 msgstr "A connected tool undid history in the middle of its own batch, so the whole batch was discarded and the model was left unchanged."
 
+#: src/kernelErrorCopy/blend.ts
+msgid "A cove needs an outside edge."
+msgstr "A cove needs an outside edge."
+
 #: src/kernelErrors.ts
 msgid "A dimension or label can't carry attributes. Put them on the object it measures instead."
 msgstr "A dimension or label can't carry attributes. Put them on the object it measures instead."
@@ -1020,6 +1028,10 @@ msgstr "A dimension or label can't carry attributes. Put them on the object it m
 #: src/kernelErrors.ts
 msgid "A face here would overlap another part of this object. Close all of the object's openings together, or draw faces across this one by hand."
 msgstr "A face here would overlap another part of this object. Close all of the object's openings together, or draw faces across this one by hand."
+
+#: src/kernelErrorCopy/blend.ts
+msgid "A fillet that runs into this one can't be rebuilt after that change. Change or remove that fillet first."
+msgstr "A fillet that runs into this one can't be rebuilt after that change. Change or remove that fillet first."
 
 #: src/panels/WelcomeScreen.tsx
 msgid "A finished piece: true-curve oak rim, brass hour markers as components, and a translucent glass cover."
@@ -1100,6 +1112,10 @@ msgstr "A solid's own edges can't be moved or erased by drawing. Push/Pull or a 
 #: src/kernelErrors.ts
 msgid "A splitting line must start and end on the face's edges. Snap both ends to the face boundary."
 msgstr "A splitting line must start and end on the face's edges. Snap both ends to the face boundary."
+
+#: src/kernelErrorCopy/blend.ts
+msgid "A stop or radius point has to sit on the edge, farther from its end than the radius."
+msgstr "A stop or radius point has to sit on the edge, farther from its end than the radius."
 
 #: src/kernelErrors.ts
 msgid "A tag with that name already exists. Choose a different name."
@@ -1267,6 +1283,10 @@ msgstr "Alt-click a face to sample its material."
 #: src/tools/ArcTool.ts
 msgid "An arc stays on its drawing plane. Move the cursor along the plane, or press an arrow key to change it, then type the length."
 msgstr "An arc stays on its drawing plane. Move the cursor along the plane, or press an arrow key to change it, then type the length."
+
+#: src/kernelErrorCopy/crease.ts
+msgid "An edge on an opening can't be creased."
+msgstr "An edge on an opening can't be creased."
 
 #: src/palette/registry.ts
 msgid "angle"
@@ -1552,6 +1572,14 @@ msgstr "Camera access is off for this site."
 #: src/health/healthCopy.ts
 msgid "Can't be closed"
 msgstr "Can't be closed"
+
+#: src/kernelErrorCopy/blend.ts
+msgid "Can't blend this corner. Try these edges one at a time."
+msgstr "Can't blend this corner. Try these edges one at a time."
+
+#: src/kernelErrorCopy/shell.ts
+msgid "Can't thicken this corner: its faces don't meet in one point."
+msgstr "Can't thicken this corner: its faces don't meet in one point."
 
 #: src/App.tsx
 msgid "cancel"
@@ -2441,6 +2469,10 @@ msgstr "Couldn't create guide: {raw}"
 msgid "Couldn't create radial dimension: {reason}"
 msgstr "Couldn't create radial dimension: {reason}"
 
+#: src/kernelErrorCopy/blend.ts
+msgid "Couldn't draw the preview picture. Try again."
+msgstr "Couldn't draw the preview picture. Try again."
+
 #: src/tools/PushPullTool.ts
 msgid "Couldn't find the profile to redo the push/pull"
 msgstr "Couldn't find the profile to redo the push/pull"
@@ -2532,6 +2564,10 @@ msgstr "Couldn’t read the library: {loadError}"
 #: src/kernelErrors.ts
 msgid "Couldn't read those Mend settings."
 msgstr "Couldn't read those Mend settings."
+
+#: src/kernelErrorCopy/shapeCommon.ts
+msgid "Couldn't redo this change. The model is unchanged."
+msgstr "Couldn't redo this change. The model is unchanged."
 
 #: src/health/healthCopy.ts
 msgid "Couldn't rejoin: {reason}"
@@ -3254,6 +3290,10 @@ msgstr "Drop open failed: {reason}"
 msgid "duplicate"
 msgstr "duplicate"
 
+#: src/kernelErrorCopy/loft.ts
+msgid "Each rail must run through a matching corner or point on every shape you loft between, and two rails must line the shapes up the same way."
+msgstr "Each rail must run through a matching corner or point on every shape you loft between, and two rails must line the shapes up the same way."
+
 #: src/panels/PrintDialog.tsx
 msgid "Each Scene ({sceneCount})"
 msgstr "Each Scene ({sceneCount})"
@@ -3602,6 +3642,10 @@ msgstr "Fill small gaps"
 #: src/panels/PrintDialog.tsx
 msgid "Fill the page with the model"
 msgstr "Fill the page with the model"
+
+#: src/kernelErrorCopy/blend.ts
+msgid "Fillet needs a solid. This object has gaps."
+msgstr "Fillet needs a solid. This object has gaps."
 
 #: src/kernelErrors.ts
 msgid "Filling this gap would cut through other faces, so it was left open."
@@ -4305,9 +4349,9 @@ msgstr "Hew's own request to the model kernel carried a malformed selection list
 msgid "Hew's own request to the model kernel carried a malformed selection. If this keeps happening, use Report Bug."
 msgstr "Hew's own request to the model kernel carried a malformed selection. If this keeps happening, use Report Bug."
 
-#: src/kernelErrors.ts
-#~ msgid "Hew's own request to the model kernel carried a malformed shape or path. If this keeps happening, use Report Bug."
-#~ msgstr "Hew's own request to the model kernel carried a malformed shape or path. If this keeps happening, use Report Bug."
+#: src/kernelErrorCopy/blend.ts
+msgid "Hew's own request to the model kernel carried a malformed shape or path. If this keeps happening, use Report Bug."
+msgstr "Hew's own request to the model kernel carried a malformed shape or path. If this keeps happening, use Report Bug."
 
 #: src/kernelErrors.ts
 msgid "Hew's own request to the model kernel carried a malformed snap point. If this keeps happening, use Report Bug."
@@ -5117,6 +5161,22 @@ msgstr "Locked to the {axis} plane — click to start; same arrow or Esc unlocks
 msgid "Locked to the {lockedAxis} plane — same arrow or ArrowDown unlocks."
 msgstr "Locked to the {lockedAxis} plane — same arrow or ArrowDown unlocks."
 
+#: src/kernelErrorCopy/loft.ts
+msgid "Loft needs at least two shapes, or one shape and a point."
+msgstr "Loft needs at least two shapes, or one shape and a point."
+
+#: src/kernelErrorCopy/loft.ts
+msgid "Loft needs closed shapes. Close this one first."
+msgstr "Loft needs closed shapes. Close this one first."
+
+#: src/kernelErrorCopy/loft.ts
+msgid "Loft needs shapes without holes. Shell the lofted solid to hollow it."
+msgstr "Loft needs shapes without holes. Shell the lofted solid to hollow it."
+
+#: src/kernelErrorCopy/loft.ts
+msgid "Loft takes at most two rails."
+msgstr "Loft takes at most two rails."
+
 #: src/log/LogPanel.tsx
 msgid "Log"
 msgstr "Log"
@@ -5228,6 +5288,10 @@ msgstr "Make these objects linked copies, so editing one changes them all"
 #: src/health/healthCopy.ts
 msgid "Make these objects solid"
 msgstr "Make these objects solid"
+
+#: src/kernelErrorCopy/blend.ts
+msgid "Make this component unique, or reset its scale, to fillet it."
+msgstr "Make this component unique, or reset its scale, to fillet it."
 
 #: src/health/healthCopy.ts
 msgid "Make this import solid"
@@ -5672,6 +5736,10 @@ msgid "Move, scale, and rotate a textured face's texture about a fixed pin."
 msgstr "Move, scale, and rotate a textured face's texture about a fixed pin."
 
 #: src/kernelErrors.ts
+msgid "Moving this face would bend a face that touches it out of flat, so it was refused. Adjust or simplify the touching faces first."
+msgstr "Moving this face would bend a face that touches it out of flat, so it was refused. Adjust or simplify the touching faces first."
+
+#: src/kernelErrors.ts
 msgid "Moving this point would make lines cross or merge. Move it somewhere clear, or delete and redraw the lines instead."
 msgstr "Moving this point would make lines cross or merge. Move it somewhere clear, or delete and redraw the lines instead."
 
@@ -5804,6 +5872,10 @@ msgstr "No components here yet."
 #: src/panels/ComponentsPanel.tsx
 msgid "No components match"
 msgstr "No components match"
+
+#: src/kernelErrorCopy/removeDegenerateFaces.ts
+msgid "No degenerate faces found."
+msgstr "No degenerate faces found."
 
 #: src/App.tsx
 #: src/scenes/useScenesController.ts
@@ -6145,8 +6217,8 @@ msgid "Offset locked to {axis} while Shift is held — release Shift, or press a
 msgstr "Offset locked to {axis} while Shift is held — release Shift, or press an arrow to keep it."
 
 #: src/kernelErrors.ts
-msgid "Offsetting this curved wall would bend a neighboring face out of flat, so it was refused. Adjust or simplify the touching faces first."
-msgstr "Offsetting this curved wall would bend a neighboring face out of flat, so it was refused. Adjust or simplify the touching faces first."
+#~ msgid "Offsetting this curved wall would bend a neighboring face out of flat, so it was refused. Adjust or simplify the touching faces first."
+#~ msgstr "Offsetting this curved wall would bend a neighboring face out of flat, so it was refused. Adjust or simplify the touching faces first."
 
 #: src/health/healthCopy.ts
 #: src/panels/LibraryWindow.tsx
@@ -6229,6 +6301,18 @@ msgstr "One face's entire boundary lies on the other, so this isn't an edge merg
 #: src/kernelErrors.ts
 msgid "One object's placement is scaled down to nothing, so the operation can't run."
 msgstr "One object's placement is scaled down to nothing, so the operation can't run."
+
+#: src/kernelErrorCopy/removeDegenerateFaces.ts
+msgid "One of these objects has a face that isn't flat enough to combine."
+msgstr "One of these objects has a face that isn't flat enough to combine."
+
+#: src/kernelErrorCopy/removeDegenerateFaces.ts
+msgid "One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first."
+msgstr "One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first."
+
+#: src/kernelErrorCopy/blend.ts
+msgid "Only a corner where two straight lines meet can be rounded."
+msgstr "Only a corner where two straight lines meet can be rounded."
 
 #: src/kernelErrors.ts
 msgid "Only a shape drawn fully inside a face can be removed this way. Select the imprinted inner face itself."
@@ -6709,6 +6793,10 @@ msgstr "Part of the line leaves the face. Keep every point on the face being spl
 msgid "Part of the path is too short to follow. Redraw the path without tiny segments."
 msgstr "Part of the path is too short to follow. Redraw the path without tiny segments."
 
+#: src/kernelErrorCopy/deform.ts
+msgid "Part of this solid is too thin to deform at this size. Deform a shorter piece, or make the thin part thicker."
+msgstr "Part of this solid is too thin to deform at this size. Deform a shorter piece, or make the thin part thicker."
+
 #: src/shop/partsSheetModel.ts
 msgid "Parts"
 msgstr "Parts"
@@ -7001,6 +7089,10 @@ msgstr "Print the current view to paper or PDF — standard, or to an exact scal
 #: src/shop/PrintSheet.tsx
 msgid "Print…"
 msgstr "Print…"
+
+#: src/kernelErrorCopy/project.ts
+msgid "Project needs a closed shape. Close the drawing first."
+msgstr "Project needs a closed shape. Close the drawing first."
 
 #. Snap tooltip suffix: the snap point sits above the drawing plane, so its height is dropped
 #: src/viewport/InferenceTooltip.tsx
@@ -8187,6 +8279,10 @@ msgstr "Select None"
 msgid "Select something in the model first."
 msgstr "Select something in the model first."
 
+#: src/kernelErrorCopy/blend.ts
+msgid "Select the edges to fillet first."
+msgstr "Select the edges to fillet first."
+
 #: src/health/healthCopy.ts
 #: src/panels/PrintDialog.tsx
 #: src/print/printJob.ts
@@ -8670,6 +8766,10 @@ msgstr "Slower"
 msgid "Smooth camera moves"
 msgstr "Smooth camera moves"
 
+#: src/kernelErrorCopy/crease.ts
+msgid "Soft seams can't be creased."
+msgstr "Soft seams can't be creased."
+
 #: src/palette/registry.ts
 msgid "solid"
 msgstr "solid"
@@ -8977,9 +9077,17 @@ msgstr "texture"
 msgid "Texture image"
 msgstr "Texture image"
 
+#: src/kernelErrorCopy/shapeCommon.ts
+msgid "That amount is out of range."
+msgstr "That amount is out of range."
+
 #: src/kernelErrors.ts
 msgid "That attribute doesn't exist on this item, so there was nothing to remove."
 msgstr "That attribute doesn't exist on this item, so there was nothing to remove."
+
+#: src/kernelErrorCopy/shapeCommon.ts
+msgid "That change didn't produce a valid solid. The model is unchanged."
+msgstr "That change didn't produce a valid solid. The model is unchanged."
 
 #: src/kernelErrors.ts
 msgid "That circle or arc is too small to keep. Drag a larger radius, or type an exact one."
@@ -9009,6 +9117,10 @@ msgstr "That component is no longer there — the model changed since it was pic
 msgid "That curve is no longer there — the model changed since it was picked. Click it again."
 msgstr "That curve is no longer there — the model changed since it was picked. Click it again."
 
+#: src/kernelErrorCopy/project.ts
+msgid "That depth would cut the object apart. Use Push/Pull or Subtract to split it."
+msgstr "That depth would cut the object apart. Use Push/Pull or Subtract to split it."
+
 #: src/kernelErrors.ts
 msgid "That dimension or label doesn't have a usable placement — its two points are on top of each other, or the circle it measures has no size. Drag to points with more room between them, or a bigger circle, and try again."
 msgstr "That dimension or label doesn't have a usable placement — its two points are on top of each other, or the circle it measures has no size. Drag to points with more room between them, or a bigger circle, and try again."
@@ -9036,6 +9148,10 @@ msgstr "That doesn't look like a Hew code — keep scanning."
 #: src/kernelErrors.ts
 msgid "That drawing can't belong to this object: it doesn't lie on any of the object's faces."
 msgstr "That drawing can't belong to this object: it doesn't lie on any of the object's faces."
+
+#: src/kernelErrorCopy/blend.ts
+msgid "That edge is already smooth."
+msgstr "That edge is already smooth."
 
 #: src/kernelErrors.ts
 msgid "That edge is no longer there — the model changed since it was picked. Click it again."
@@ -9089,6 +9205,10 @@ msgstr "That face is part of a component — double-click it to edit the compone
 msgid "That face is thinner than the profile is deep — pick a wider face, or use a shallower profile."
 msgstr "That face is thinner than the profile is deep — pick a wider face, or use a shallower profile."
 
+#: src/kernelErrorCopy/blend.ts
+msgid "That face isn't part of a fillet."
+msgstr "That face isn't part of a fillet."
+
 #: src/tools/FollowMeTool.ts
 msgid "That face isn’t part of the component you’re editing — press Esc to step out first."
 msgstr "That face isn’t part of the component you’re editing — press Esc to step out first."
@@ -9104,6 +9224,10 @@ msgstr "That face isn’t part of what you’re editing — press Esc to step ou
 #: src/panels/SentReportsDialog.tsx
 msgid "That file is too large to send."
 msgstr "That file is too large to send."
+
+#: src/kernelErrorCopy/blend.ts
+msgid "That fillet didn't produce a valid solid. The model is unchanged."
+msgstr "That fillet didn't produce a valid solid. The model is unchanged."
 
 #: src/kernelErrors.ts
 msgid "That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions."
@@ -9201,6 +9325,14 @@ msgstr "That point isn't on the drawing surface. Draw on the highlighted face or
 msgid "That profile is no longer there — the model changed since it was picked. Click it again."
 msgstr "That profile is no longer there — the model changed since it was picked. Click it again."
 
+#: src/kernelErrorCopy/blend.ts
+msgid "That profile isn't built in. Pick one from the profile list."
+msgstr "That profile isn't built in. Pick one from the profile list."
+
+#: src/kernelErrorCopy/blend.ts
+msgid "That radius doesn't fit here. Try a smaller one."
+msgstr "That radius doesn't fit here. Try a smaller one."
+
 #: src/kernelErrors.ts
 msgid "That resize factor isn't valid. Pick two points that aren't on top of each other and type a positive distance."
 msgstr "That resize factor isn't valid. Pick two points that aren't on top of each other and type a positive distance."
@@ -9281,6 +9413,10 @@ msgstr "That would stretch a picture or texture on the object so far it couldn't
 msgid "The app stopped to avoid a blank window. Reload to recover — your most recent autosave will be offered."
 msgstr "The app stopped to avoid a blank window. Reload to recover — your most recent autosave will be offered."
 
+#: src/kernelErrorCopy/revolve.ts
+msgid "The axis has to lie in the plane of the shape. Move the axis onto that plane."
+msgstr "The axis has to lie in the plane of the shape. Move the axis onto that plane."
+
 #: src/panels/LibraryDialog.tsx
 msgid "The browser denied access. Pick the folder again under Settings ▸ Folders, or switch back to browser storage there."
 msgstr "The browser denied access. Pick the folder again under Settings ▸ Folders, or switch back to browser storage there."
@@ -9332,6 +9468,10 @@ msgstr "The edges around this opening branch off in more than one direction, so 
 #: src/io/webFileHost.ts
 msgid "The file name must end in {ext}."
 msgstr "The file name must end in {ext}."
+
+#: src/kernelErrorCopy/blend.ts
+msgid "The fillet would cut into other geometry."
+msgstr "The fillet would cut into other geometry."
 
 #: src/viewport/Viewport.tsx
 msgid "The graphics context was lost (this can follow sleep/resume or a driver reset on Linux). Recovering automatically when it returns…"
@@ -9411,8 +9551,12 @@ msgid "The model is unavailable."
 msgstr "The model is unavailable."
 
 #: src/kernelErrors.ts
-msgid "The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect."
-msgstr "The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect."
+#~ msgid "The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect."
+#~ msgstr "The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect."
+
+#: src/kernelErrors.ts
+msgid "The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again."
+msgstr "The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again."
 
 #: src/kernelErrors.ts
 msgid "The path doesn't start on the profile's surface. Start the path at the profile — or, on a loop, cross the profile partway along a straight run, not at a corner."
@@ -9430,6 +9574,10 @@ msgstr "The path forks — Follow Me needs one continuous run of lines. Select a
 msgid "The path is in separate pieces. Select one connected run of lines."
 msgstr "The path is in separate pieces. Select one connected run of lines."
 
+#: src/kernelErrorCopy/pathArray.ts
+msgid "The path is too short for that many copies."
+msgstr "The path is too short for that many copies."
+
 #: src/kernelErrors.ts
 msgid "The path turns tighter than the profile is wide, so the sweep would fold into itself. Use a smaller profile or gentler turns."
 msgstr "The path turns tighter than the profile is wide, so the sweep would fold into itself. Use a smaller profile or gentler turns."
@@ -9441,6 +9589,10 @@ msgstr "The picture would be {w} × {h} m, and each side must be at most {max} m
 #: src/tools/FollowMeTool.ts
 msgid "The profile only touches the solid at an edge or corner — left as a separate object."
 msgstr "The profile only touches the solid at an edge or corner — left as a separate object."
+
+#: src/kernelErrorCopy/blend.ts
+msgid "The radius is too large for this corner. Try a smaller radius."
+msgstr "The radius is too large for this corner. Try a smaller radius."
 
 #: src/panels/PhoneShareDialog.tsx
 msgid "The relay is full — try again in a minute, or ask its admin to raise the memory cap."
@@ -9475,9 +9627,17 @@ msgstr "The report was rejected as invalid — check the description length."
 msgid "The result would be empty — the objects don't overlap that way. Check that the solids actually intersect."
 msgstr "The result would be empty — the objects don't overlap that way. Check that the solids actually intersect."
 
+#: src/kernelErrorCopy/shapeCommon.ts
+msgid "The result would pass through itself."
+msgstr "The result would pass through itself."
+
 #: src/kernelErrors.ts
 msgid "The rotation axis needs two distinct points. Pick a second point further from the first."
 msgstr "The rotation axis needs two distinct points. Pick a second point further from the first."
+
+#: src/kernelErrorCopy/blend.ts
+msgid "The rounded corner would run off the face. Draw the shape farther inside the face, or use a smaller radius."
+msgstr "The rounded corner would run off the face. Draw the shape farther inside the face, or use a smaller radius."
 
 #: src/kernelErrors.ts
 msgid "The same face is on both sides of this edge, so dissolving it would puncture the surface."
@@ -9519,6 +9679,10 @@ msgstr "The shape can't absorb that offset — its boundary would collapse, cros
 msgid "The shape can't go there: it would run off the face, touch an edge or another shape at just one point, or leave a piece too small to keep. A shape being moved can't overlap another one either. Keep it on the face, and draw across or along edges instead of touching them at one point."
 msgstr "The shape can't go there: it would run off the face, touch an edge or another shape at just one point, or leave a piece too small to keep. A shape being moved can't overlap another one either. Keep it on the face, and draw across or along edges instead of touching them at one point."
 
+#: src/kernelErrorCopy/project.ts
+msgid "The shape doesn't land on this object. Aim it at a face."
+msgstr "The shape doesn't land on this object. Aim it at a face."
+
 #: src/panels/MakeSolidSketches.tsx
 msgid "The shape touches itself, so it can't be a solid. Pull the touching parts apart."
 msgstr "The shape touches itself, so it can't be a solid. Pull the touching parts apart."
@@ -9559,6 +9723,14 @@ msgstr "The texture frame is degenerate — drag a pin to rebuild it first"
 msgid "The thickness must be more than zero."
 msgstr "The thickness must be more than zero."
 
+#: src/kernelErrorCopy/blend.ts
+msgid "The two surfaces meet smoothly here, with no edge between them, as two pipes of the same size do. There's nothing to round, chamfer, or cove there. Make one part a little larger or smaller."
+msgstr "The two surfaces meet smoothly here, with no edge between them, as two pipes of the same size do. There's nothing to round, chamfer, or cove there. Make one part a little larger or smaller."
+
+#: src/kernelErrors.ts
+msgid "The undo memory limit has to be a size of zero or more."
+msgstr "The undo memory limit has to be a size of zero or more."
+
 #: src/i18n/nativeMenu.ts
 msgid "The update command is on your clipboard. Paste it into a terminal to update Hew."
 msgstr "The update command is on your clipboard. Paste it into a terminal to update Hew."
@@ -9594,6 +9766,10 @@ msgstr "The view mode must be shaded, xray or wireframe. If this keeps happening
 #: src/panels/PrintDialog.tsx
 msgid "The viewport’s own framing"
 msgstr "The viewport’s own framing"
+
+#: src/kernelErrorCopy/shell.ts
+msgid "The wall is too thick for this shape. Try a thinner wall."
+msgstr "The wall is too thick for this shape. Try a thinner wall."
 
 #: src/kernelErrors.ts
 msgid "The walls this would create run into the object's other geometry. Try a different distance, or reshape the surrounding faces first."
@@ -9745,6 +9921,10 @@ msgstr "This document has unsaved changes."
 msgid "This document is too large to share this way ({maxMegabytes} MB max)."
 msgstr "This document is too large to share this way ({maxMegabytes} MB max)."
 
+#: src/kernelErrorCopy/blend.ts
+msgid "This edge can't be filleted yet."
+msgstr "This edge can't be filleted yet."
+
 #: src/kernelErrors.ts
 msgid "This edge has a face on only one side — there's nothing to merge it with."
 msgstr "This edge has a face on only one side — there's nothing to merge it with."
@@ -9780,6 +9960,10 @@ msgstr "This file needs a newer version of Hew than this one. Update Hew and try
 #: src/kernelErrors.ts
 msgid "This file's geometry data is damaged and can't be opened."
 msgstr "This file's geometry data is damaged and can't be opened."
+
+#: src/kernelErrorCopy/blend.ts
+msgid "This fillet has been changed and can't be edited. It's ordinary geometry now."
+msgstr "This fillet has been changed and can't be edited. It's ordinary geometry now."
 
 #: src/kernelErrors.ts
 msgid "This gap is too small or thin to fill."
@@ -9853,6 +10037,10 @@ msgstr "This model has more placed parts than Hew can list at once."
 msgid "This model is too large for Hew to open"
 msgstr "This model is too large for Hew to open"
 
+#: src/kernelErrorCopy/shapeCommon.ts
+msgid "This needs a solid. This object has gaps."
+msgstr "This needs a solid. This object has gaps."
+
 #: src/kernelErrors.ts
 #~ msgid "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
 #~ msgstr "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
@@ -9868,6 +10056,10 @@ msgstr "This object is no longer in the model."
 #: src/health/healthCopy.ts
 msgid "This object is solid."
 msgstr "This object is solid."
+
+#: src/kernelErrorCopy/deform.ts
+msgid "This object is too large to preview. Click or press Enter to apply it anyway."
+msgstr "This object is too large to preview. Click or press Enter to apply it anyway."
 
 #: src/kernelErrors.ts
 msgid "This object isn't solid, so it can't be pushed or pulled. To make it solid, select it and choose Object ▸ Make Solid…"
@@ -9905,9 +10097,17 @@ msgstr "This profile can't be swept along that path into a valid solid. Simplify
 msgid "This profile crosses the circle's center axis, so revolving it would lose the geometry on one side. Draw the profile entirely on one side of the axis instead."
 msgstr "This profile crosses the circle's center axis, so revolving it would lose the geometry on one side. Draw the profile entirely on one side of the axis instead."
 
+#: src/kernelErrorCopy/blend.ts
+msgid "This profile is wider than the face it has to fit on. Try a smaller profile or a smaller size."
+msgstr "This profile is wider than the face it has to fit on. Try a smaller profile or a smaller size."
+
 #: src/tools/followMeStart.ts
 msgid "This profile isn’t square to the path yet — Follow Me will stand it upright automatically before sweeping."
 msgstr "This profile isn’t square to the path yet — Follow Me will stand it upright automatically before sweeping."
+
+#: src/kernelErrorCopy/blend.ts
+msgid "This profile shape isn't valid. Redraw it as one open chain."
+msgstr "This profile shape isn't valid. Redraw it as one open chain."
 
 #: src/tools/FollowMeTool.ts
 msgid "This profile starts cleanly on the path — click to sweep it, or drag along the path for a partial sweep."
@@ -9953,6 +10153,10 @@ msgstr "This shape has no circle behind it, so there's nothing to re-build. Only
 msgid "This shape is inside a solid, so nothing was made. Push or pull its face to cut into the solid."
 msgstr "This shape is inside a solid, so nothing was made. Push or pull its face to cut into the solid."
 
+#: src/kernelErrorCopy/smooth.ts
+msgid "This shape is too dense for that Smooth level. Try a lower level, or simplify the shape first."
+msgstr "This shape is too dense for that Smooth level. Try a lower level, or simplify the shape first."
+
 #: src/kernelErrors.ts
 msgid "This shape touches another shape at a point, so it can't be pulled as one piece. Pull the shape inside it instead, or move them a hair apart."
 msgstr "This shape touches another shape at a point, so it can't be pulled as one piece. Pull the shape inside it instead, or move them a hair apart."
@@ -9988,6 +10192,10 @@ msgstr "This throws away everything you changed since the last save."
 #: src/panels/MakeSolidSketches.tsx
 msgid "Those edges don't lie flat on one plane, so a single face can't close them. Draw a line across the opening to split it into flat faces."
 msgstr "Those edges don't lie flat on one plane, so a single face can't close them. Draw a line across the opening to split it into flat faces."
+
+#: src/kernelErrorCopy/blend.ts
+msgid "Those lines are in a straight line; there is no corner to round."
+msgstr "Those lines are in a straight line; there is no corner to round."
 
 #: src/kernelErrors.ts
 msgid "Those points don't define a plane. Pick three points that aren't in a line."
@@ -10207,6 +10415,10 @@ msgstr "Turn this off to make copies independent; you can still choose a linked 
 #: src/palette/registry.ts
 msgid "tween"
 msgstr "tween"
+
+#: src/kernelErrorCopy/followMeTwist.ts
+msgid "Twist and end scale need an open path."
+msgstr "Twist and end scale need an open path."
 
 #: src/kernelErrors.ts
 msgid "Two faces in this panel meet without sharing an edge, so a thickness would leave a crack inside. Draw a line where they meet, then try again."
@@ -10520,6 +10732,10 @@ msgstr "usdz"
 #: src/io/savePanel.ts
 msgid "USDZ (.usdz)"
 msgstr "USDZ (.usdz)"
+
+#: src/kernelErrorCopy/blend.ts
+msgid "Use between 2 and 96 segments."
+msgstr "Use between 2 and 96 segments."
 
 #: src/settings/FoldersPane.tsx
 msgid "Use browser storage"

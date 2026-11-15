@@ -401,3 +401,82 @@ mod tests {
         assert!((d - 1.0).abs() < 1e-12 && (t - 0.5).abs() < 1e-12);
     }
 }
+
+/// The drawing tools' sagitta budget (`app/src/tools/arcMath.ts`
+/// `DRAW_SAGITTA_TOL_M`): a drawn curve's facets stay within this of the
+/// true circle. A client-side density rule, not a kernel tolerance.
+pub const DRAW_SAGITTA_TOL_M: f64 = 5e-4;
+/// Floor of the drawing tools' segments-per-turn rule.
+pub const DRAW_MIN_SEGMENTS_PER_TURN: u32 = 24;
+/// Cap of the drawing tools' segments-per-turn rule.
+pub const DRAW_MAX_SEGMENTS_PER_TURN: u32 = 96;
+
+/// Segments per full turn for a drawn curve of `radius` meters — an exact
+/// port of `arcMath.ts` `segmentsPerTurn`:
+/// `clamp(24, 96, ceil4(π / acos(1 − s/r)))` with `s` the sagitta budget,
+/// rounded up to a multiple of 4; non-finite or non-positive radii (and radii
+/// at or under the budget) take the floor. The parity table in this crate's
+/// tests and in `arcMath.test.ts` pins the two together.
+pub fn draw_segments_per_turn(radius: f64) -> u32 {
+    if !radius.is_finite() || radius <= 0.0 {
+        return DRAW_MIN_SEGMENTS_PER_TURN;
+    }
+    let ratio = DRAW_SAGITTA_TOL_M / radius;
+    if ratio >= 1.0 {
+        return DRAW_MIN_SEGMENTS_PER_TURN;
+    }
+    let exact = std::f64::consts::PI / (1.0 - ratio).acos();
+    let ceil4 = (exact / 4.0).ceil() * 4.0;
+    (ceil4 as u32).clamp(DRAW_MIN_SEGMENTS_PER_TURN, DRAW_MAX_SEGMENTS_PER_TURN)
+}
+
+/// Facets across an arc of sweep `phi` radians at `radius`:
+/// `max(2, ceil(draw_segments_per_turn(radius) · |phi| / 2π))` — the port of
+/// `arcMath.ts` `arcSegmentCount`.
+pub fn arc_segments(radius: f64, phi: f64) -> u32 {
+    let turns = phi.abs() / std::f64::consts::TAU;
+    ((turns * f64::from(draw_segments_per_turn(radius))).ceil() as u32).max(2)
+}
+
+#[cfg(test)]
+mod draw_rule_tests {
+    use super::*;
+
+    /// Computed once with `arcMath.ts` `segmentsPerTurn`; `arcMath.test.ts`
+    /// asserts the same table.
+    const PARITY: [(f64, u32); 12] = [
+        (1e-4, 24),
+        (1e-3, 24),
+        (5e-3, 24),
+        (0.01, 24),
+        (0.05, 24),
+        (0.1, 32),
+        (0.3, 56),
+        (1.0, 96),
+        (3.0, 96),
+        (10.0, 96),
+        (100.0, 96),
+        (0.0, 24),
+    ];
+
+    #[test]
+    fn segments_per_turn_matches_the_drawing_tools() {
+        for (r, n) in PARITY {
+            assert_eq!(draw_segments_per_turn(r), n, "radius {r}");
+        }
+    }
+
+    #[test]
+    fn arc_segments_matches_the_drawing_tools() {
+        use std::f64::consts::{FRAC_PI_2, PI, TAU};
+        for (r, phi, n) in [
+            (0.01, FRAC_PI_2, 6),
+            (0.1, FRAC_PI_2, 8),
+            (1.0, PI, 48),
+            (0.003, 0.1, 2),
+            (3.0, TAU, 96),
+        ] {
+            assert_eq!(arc_segments(r, phi), n, "radius {r}, sweep {phi}");
+        }
+    }
+}

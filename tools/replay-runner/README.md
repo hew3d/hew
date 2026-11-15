@@ -72,6 +72,19 @@ Drives a fresh `Scene` through each named scenario in `generate.mjs`
   and X-ray both land on the buried box, nothing in scope behind falls back
   to the nearest face, and a cleared scope returns the nearest face. The inference, wasm-api and e2e
   specs cover it as well.
+- `shell-cup` — a 24-gon prism shelled inward with its top left open: Shell's
+  recorded spec (open face ids, thickness) and its rebuilt walls and rim.
+- `project-label` — a rectangle on a vertical plane imprinted onto a 24-gon
+  prism and debossed following the surface: Project's two recorded steps.
+- `smooth-cushion` — a slab given Smooth level 2, then baked: the level's
+  attribute write and Bake's subdivided solid.
+- `fillet-box-rim` — a unit box with its top rim filleted (the four top edges
+  picked through the top face's loop), the fillet resized, removed, then undone
+  and redone: the recorded blend calls and their replay.
+
+- `path-array-ramp` — a box copied along a bent two-segment ground path: six
+  instances, a 100% to 40% scale ramp, copies aligned to the path
+  (`array_along_path`).
 
 To regenerate a single scenario: `node generate.mjs <name>` (or
 `node generate.mjs` with no arg to run every scenario, same as

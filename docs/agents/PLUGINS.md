@@ -613,8 +613,12 @@ frame: { origin, x, y, z, extents } }` for one object. Two objects with equal `s
 part in any position; `a.shape == b.mirror` means `b` is `a`'s mirror
 image (a left and a right side); `symmetric` means the part is its own
 mirror image. The hashes survive a save and reload and any move or turn,
-to 1 µm. `frame` is the part's face frame, `origin` its minimum corner
-and `extents` its size along the axes; the pose that carries one
+to 1 µm. What a face or edge claims is part of the shape: corners drawn
+as a circle, as a regular polygon, or as plain lines are three different
+parts, and a part with a cylinder wall, a fillet, a crease or a Smooth
+level is not the same part without it. "Link identical copies" compares the
+same things, so two parts with equal `shape` can be linked. `frame` is
+the part's face frame, `origin` its minimum corner and `extents` its size along the axes; the pose that carries one
 matching part onto another is `frame_b ∘ frame_a⁻¹`, and onto its
 mirror twin `frame_b ∘ C ∘ R ∘ C⁻¹ ∘ frame_a⁻¹` with `R` a reflection
 and `C` the shift to the frame's center, `origin + extents / 2` (a

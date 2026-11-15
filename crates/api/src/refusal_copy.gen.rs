@@ -151,7 +151,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "Pushing that far would shrink the curved wall to nothing. Push a shorter distance."
         }
         "WallNeighborNonPlanar" => {
-            "Offsetting this curved wall would bend a neighboring face out of flat, so it was refused. Adjust or simplify the touching faces first."
+            "Moving this face would bend a face that touches it out of flat, so it was refused. Adjust or simplify the touching faces first."
         }
         "EmptyPath" => {
             "Follow Me needs a path. Select or click the line, curve, or face edge to follow."
@@ -249,7 +249,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "One object's placement is scaled down to nothing, so the operation can't run."
         }
         "DegenerateContact" => {
-            "The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect."
+            "The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again."
         }
         "NothingRemoved" => {
             "Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting."
@@ -568,6 +568,88 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "REPLAY" => {
             "This recorded session couldn't be replayed. If this keeps happening, use Report Bug."
         }
+        "EmptySpec" => "Select the edges to fillet first.",
+        "BlendNeedsSolid" => "Fillet needs a solid. This object has gaps.",
+        "EdgeIsSmooth" => "That edge is already smooth.",
+        "UnsupportedEdge" => "This edge can't be filleted yet.",
+        "UnsupportedVertex" => "Can't blend this corner. Try these edges one at a time.",
+        "RadiusTooLarge" => "That radius doesn't fit here. Try a smaller one.",
+        "ProfileTooWide" => {
+            "This profile is wider than the face it has to fit on. Try a smaller profile or a smaller size."
+        }
+        "ProfileNeedsConvexEdge" => "A cove needs an outside edge.",
+        "BullnoseNeedsParallelSides" => "A bullnose needs two parallel edges of one face.",
+        "InvalidProfile" => "This profile shape isn't valid. Redraw it as one open chain.",
+        "UnknownProfile" => "That profile isn't built in. Pick one from the profile list.",
+        "RenderFailed" => "Couldn't draw the preview picture. Try again.",
+        "StopOutOfRange" => {
+            "A stop or radius point has to sit on the edge, farther from its end than the radius."
+        }
+        "Obstructed" => "The fillet would cut into other geometry.",
+        "SegmentsOutOfRange" => "Use between 2 and 96 segments.",
+        "NonUniformInstance" => "Make this component unique, or reset its scale, to fillet it.",
+        "BlendModified" => {
+            "This fillet has been changed and can't be edited. It's ordinary geometry now."
+        }
+        "UnknownBlend" => "That face isn't part of a fillet.",
+        "BlendDegenerate" => "That fillet didn't produce a valid solid. The model is unchanged.",
+        "CornerNotBlendable" => "Only a corner where two straight lines meet can be rounded.",
+        "CornerIsStraight" => "Those lines are in a straight line; there is no corner to round.",
+        "CornerRadiusTooLarge" => "The radius is too large for this corner. Try a smaller radius.",
+        "CornerLeavesFace" => {
+            "The rounded corner would run off the face. Draw the shape farther inside the face, or use a smaller radius."
+        }
+        "DependentBlend" => {
+            "A fillet that runs into this one can't be rebuilt after that change. Change or remove that fillet first."
+        }
+        "BadSpec" => {
+            "Hew's own request to the model kernel carried a malformed shape or path. If this keeps happening, use Report Bug."
+        }
+        "TwistNeedsOpenPath" => "Twist and end scale need an open path.",
+        "SelfIntersecting" => "The result would pass through itself.",
+        "WallTooThick" => "The wall is too thick for this shape. Try a thinner wall.",
+        "OpenProfile" => "Loft needs closed shapes. Close this one first.",
+        "LoftProfileHasHole" => {
+            "Loft needs shapes without holes. Shell the lofted solid to hollow it."
+        }
+        "LoftNeedsTwoProfiles" => "Loft needs at least two shapes, or one shape and a point.",
+        "LoftTooManyRails" => "Loft takes at most two rails.",
+        "RailMissesProfile" => {
+            "Each rail must run through a matching corner or point on every shape you loft between, and two rails must line the shapes up the same way."
+        }
+        "AxisNotInProfilePlane" => {
+            "The axis has to lie in the plane of the shape. Move the axis onto that plane."
+        }
+        "ProjectMisses" => "The shape doesn't land on this object. Aim it at a face.",
+        "ProjectNeedsClosedShape" => "Project needs a closed shape. Close the drawing first.",
+        "WouldSever" => {
+            "That depth would cut the object apart. Use Push/Pull or Subtract to split it."
+        }
+        "UnsupportedShellCorner" => "Can't thicken this corner: its faces don't meet in one point.",
+        "ShapeNeedsSolid" => "This needs a solid. This object has gaps.",
+        "AmountOutOfRange" => "That amount is out of range.",
+        "SmoothTooDense" => {
+            "This shape is too dense for that Smooth level. Try a lower level, or simplify the shape first."
+        }
+        "PathTooShortForCount" => "The path is too short for that many copies.",
+        "CreaseOnSoftEdge" => "Soft seams can't be creased.",
+        "CreaseOnBoundary" => "An edge on an opening can't be creased.",
+        "ShapeDegenerate" => "That change didn't produce a valid solid. The model is unchanged.",
+        "ReshapeRedoDiverged" => "Couldn't redo this change. The model is unchanged.",
+        "TooThinToDeform" => {
+            "Part of this solid is too thin to deform at this size. Deform a shorter piece, or make the thin part thicker."
+        }
+        "PreviewTooLarge" => {
+            "This object is too large to preview. Click or press Enter to apply it anyway."
+        }
+        "BlendFacesFlush" => {
+            "The two surfaces meet smoothly here, with no edge between them, as two pipes of the same size do. There's nothing to round, chamfer, or cove there. Make one part a little larger or smaller."
+        }
+        "NothingToRemove" => "No degenerate faces found.",
+        "NonPlanarInput" => "One of these objects has a face that isn't flat enough to combine.",
+        "DegenerateInput" => {
+            "One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first."
+        }
         "NothingToMend" => "Nothing to mend here: no nearby points, touching parts or small gaps.",
         "WeldDistanceOutOfRange" => {
             "That distance for merging points is out of range. Try a distance nearer the one first shown."
@@ -596,6 +678,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "Merging points that far apart would press the sides of a thin part together. Try a smaller distance."
         }
         "BadMendPlan" => "Couldn't read those Mend settings.",
+        "BadHistoryBudget" => "The undo memory limit has to be a size of zero or more.",
         _ => return None,
     })
 }

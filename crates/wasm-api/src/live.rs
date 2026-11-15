@@ -553,6 +553,7 @@ impl Host for LiveHost {
     /// only a `path` would — so a live export produces the bytes and
     /// hands them back for the caller to write, and refuses only that one
     /// specific thing this boundary genuinely cannot do.
+    #[allow(clippy::too_many_arguments)] // the host surface: document, format, path, resolution, units and two flags
     fn export_document(
         &mut self,
         doc: &kernel::Document,
@@ -562,6 +563,7 @@ impl Host for LiveHost {
         units: Option<&str>,
         selection: Option<&[api::locate::RenderRoot]>,
         compat: bool,
+        cages: bool,
     ) -> Result<Option<Vec<u8>>, Refusal> {
         if path.is_some() {
             return Err(refuse(
@@ -595,11 +597,16 @@ impl Host for LiveHost {
                     .bytes
             }
             _ => match selection {
-                Some(roots) => {
-                    mesh_export::export_occurrences(doc, roots, format, segments_per_turn, true)
-                        .map_err(export_refusal)?
-                }
-                None => mesh_export::export(doc, format, segments_per_turn, true)
+                Some(roots) => mesh_export::export_occurrences(
+                    doc,
+                    roots,
+                    format,
+                    segments_per_turn,
+                    true,
+                    cages,
+                )
+                .map_err(export_refusal)?,
+                None => mesh_export::export(doc, format, segments_per_turn, true, cages)
                     .map_err(export_refusal)?,
             },
         };
@@ -1250,7 +1257,7 @@ mod tests {
                 skp_import::skpwright::Container::Stream
             };
             let bytes = host
-                .export_document(&doc, &format, None, 0, None, None, false)
+                .export_document(&doc, &format, None, 0, None, None, false, false)
                 .expect("a box exports as a .skp live")
                 .expect("bytes come back");
             assert_eq!(skp_import::skpwright::detect_container(&bytes), container);
@@ -1277,7 +1284,7 @@ mod tests {
         };
         let unit = |host: &mut LiveHost, units: Option<&str>| {
             let bytes = host
-                .export_document(&doc, "skp", None, 0, units, None, false)
+                .export_document(&doc, "skp", None, 0, units, None, false, false)
                 .unwrap()
                 .unwrap();
             skp_import::skpwright::Model::parse(&bytes)
@@ -1322,11 +1329,11 @@ mod tests {
         let doc = box_document();
         let mut host = LiveHost::default();
         let bytes = host
-            .export_document(&doc, "stl", None, 0, None, None, false)
+            .export_document(&doc, "stl", None, 0, None, None, false, false)
             .expect("a solid box exports live")
             .expect("bytes come back since there is no filesystem to write to");
-        let direct =
-            mesh_export::export_stl(&doc, 0, true).expect("the same writer, called directly");
+        let direct = mesh_export::export_stl(&doc, 0, true, false)
+            .expect("the same writer, called directly");
         assert_eq!(
             bytes, direct,
             "live export matches mesh-export byte for byte"
@@ -1340,7 +1347,16 @@ mod tests {
         let doc = box_document();
         let mut host = LiveHost::default();
         let err = host
-            .export_document(&doc, "stl", Some("/tmp/out.stl"), 0, None, None, false)
+            .export_document(
+                &doc,
+                "stl",
+                Some("/tmp/out.stl"),
+                0,
+                None,
+                None,
+                false,
+                false,
+            )
             .unwrap_err();
         assert_eq!(err.name, "host_capability_missing");
     }
@@ -1350,7 +1366,7 @@ mod tests {
         let doc = kernel::Document::new();
         let mut host = LiveHost::default();
         let err = host
-            .export_document(&doc, "stl", None, 0, None, None, false)
+            .export_document(&doc, "stl", None, 0, None, None, false, false)
             .unwrap_err();
         assert_eq!(err.name, "nothing_to_export");
     }
@@ -1683,7 +1699,7 @@ mod tests {
     /// The box above, as binary STL bytes — a real file for the import
     /// tests below to merge.
     fn box_stl() -> Vec<u8> {
-        mesh_export::export(&box_document(), "stl", 0, true).expect("export the box to STL")
+        mesh_export::export(&box_document(), "stl", 0, true, false).expect("export the box to STL")
     }
 
     fn import_params(path: &str, bytes: Option<&[u8]>, units: Option<&str>) -> serde_json::Value {

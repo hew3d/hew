@@ -100,6 +100,14 @@ pub fn report_json(
                     _ => None,
                 })
                 .unwrap_or(1);
+            let degenerate = d
+                .findings
+                .iter()
+                .find_map(|f| match f {
+                    Finding::DegenerateFaces { count } => Some(*count),
+                    _ => None,
+                })
+                .unwrap_or(0);
             json!({
                 "object": id(EntityRef::Object(row.object)),
                 "name": doc.object_name(row.object),
@@ -125,6 +133,7 @@ pub fn report_json(
                 })).collect::<Vec<_>>(),
                 "branching_vertices": branching,
                 "islands": islands,
+                "degenerate_faces": degenerate,
                 "faces": doc.object(row.object).map_or(0, |o| o.faces().len()),
             })
         })

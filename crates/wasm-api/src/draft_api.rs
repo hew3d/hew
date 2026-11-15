@@ -1036,6 +1036,103 @@ impl Scene {
         Ok(())
     }
 
+    /// Rounds or chamfers the drafted corner at `(x,y,z)` (world; the
+    /// vertex is found exactly as [`Scene::draft_move_vertex`] finds its
+    /// own, within the kernel's merge tolerance). `profile_json` is a
+    /// `kernel::CornerProfile`: `{"kind":"round","radius":r,"segments":n}`
+    /// (`r` in meters, `n` in 1..=1024) or
+    /// `{"kind":"chamfer","setback_a":a,"setback_b":b}` (meters; `a` runs
+    /// along the edge that starts the counter-clockwise order seen from the
+    /// plane normal). Lengths are world lengths: inside an instance the pose
+    /// must be a similarity.
+    ///
+    /// Contract. Mutates only the open draft's working sketch (lowered, with
+    /// everything else drawn, as the draft's single undo step); a refusal
+    /// leaves the draft exactly as it was. Records after success.
+    ///
+    /// # Errors
+    /// `StaleDraft`; `BadSpec` (malformed profile JSON); `UnknownVertex` (no
+    /// draft vertex there); `CornerNotBlendable`, `CornerIsStraight`,
+    /// `CornerRadiusTooLarge` (its message carries the largest size that
+    /// fits), `SegmentsBelowFloor`, `SegmentsAboveCap`, `DegenerateCurve`,
+    /// `DegenerateSegment`; and `CornerLeavesFace` when the corner is the
+    /// solid's own boundary or the arc or segment would leave the face.
+    pub fn draft_blend_corner(
+        &mut self,
+        draft: u64,
+        x: f64,
+        y: f64,
+        z: f64,
+        profile_json: &str,
+    ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        let pose = self.draft_check(draft)?;
+        let profile = crate::curves_api::parse_corner_profile(profile_json)?;
+        let local = match pose {
+            Some(p) => crate::curves_api::scale_corner_profile(profile, 1.0 / p.scale()?),
+            None => profile,
+        };
+        let at = pose.map_or(Point3::new(x, y, z), |p| p.to_local(Point3::new(x, y, z)));
+        let v = self
+            .doc
+            .draft_check_corner(at, &local)
+            .map_err(|e| api_err(&e, &e))?;
+        self.draft_edit(draft, true, |sk, _| {
+            sk.blend_corner(v, local)
+                .map(|_| ())
+                .map_err(|e| api_err(&e, &e))
+        })?;
+        recording::record(recording::RecordedCall::DraftBlendCorner {
+            draft,
+            at: [x, y, z],
+            profile: profile_json.to_owned(),
+        });
+        Ok(())
+    }
+
+    /// The blendable corner of a context's drawing nearest `(x,y,z)` within
+    /// `aperture` (world meters), as its world position `[x,y,z]`, or
+    /// `None`. A blendable corner is a drawing vertex with exactly two
+    /// straight, non-curve edges that are not collinear, and neither edge
+    /// along a solid's own boundary (those never blend:
+    /// `draft_blend_corner` would refuse `CornerLeavesFace`). For hover
+    /// highlighting; read-only, opens no draft. `ctx_json` is as for
+    /// [`Scene::plane_units_json`].
+    ///
+    /// # Errors
+    /// `BadContext`, `BadVector` (non-finite `x,y,z` or `aperture`), and
+    /// whatever lifting the context's drawing refuses.
+    pub fn draft_blendable_corner_at(
+        &self,
+        ctx_json: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+        aperture: f64,
+    ) -> Result<Option<Vec<f64>>, ApiError> {
+        if ![x, y, z, aperture].iter().all(|v| v.is_finite()) {
+            return Err(ApiError::new(
+                "BadVector",
+                "the point and aperture must be finite",
+            ));
+        }
+        let ctx = self.ctx_from_json(ctx_json)?;
+        let corners = self
+            .doc
+            .plane_blendable_corners(ctx.plane, ctx.frame, &ctx.objects)
+            .map_err(doc_err)?;
+        let at = Point3::new(x, y, z);
+        let mut best: Option<(f64, Point3)> = None;
+        for c in corners {
+            let w = ctx.pose.map_or(c, |p| p.to_world(c));
+            let d = (w - at).length();
+            if d <= aperture && best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, w));
+            }
+        }
+        Ok(best.map(|(_, w)| vec![w.x, w.y, w.z]))
+    }
+
     /// Offsets the region with key `region_key` by `distance` (world
     /// length; positive grows the material).
     pub fn draft_offset_region(

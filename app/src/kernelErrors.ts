@@ -23,12 +23,108 @@
 import { i18n } from '@lingui/core'
 import { msg, t } from '@lingui/core/macro'
 import type { MessageDescriptor } from '@lingui/core'
+import { BLEND_ERRORS } from './kernelErrorCopy/blend'
+import { LOFT_ERRORS } from './kernelErrorCopy/loft'
+import { REVOLVE_ERRORS } from './kernelErrorCopy/revolve'
+import { FOLLOW_ME_TWIST_ERRORS } from './kernelErrorCopy/followMeTwist'
+import { PROJECT_ERRORS } from './kernelErrorCopy/project'
+import { SHELL_ERRORS } from './kernelErrorCopy/shell'
+import { DEFORM_ERRORS } from './kernelErrorCopy/deform'
+import { SMOOTH_ERRORS } from './kernelErrorCopy/smooth'
+import { CREASE_ERRORS } from './kernelErrorCopy/crease'
+import { PATH_ARRAY_ERRORS } from './kernelErrorCopy/pathArray'
+import { SHAPE_COMMON_ERRORS } from './kernelErrorCopy/shapeCommon'
+import { REMOVE_DEGENERATE_FACES_ERRORS } from './kernelErrorCopy/removeDegenerateFaces'
 
 // Every entry below is a whole sentence pair written out in full, including
 // the shared tail ("To make it solid, ..." / "If this keeps happening, ..."),
 // so a translator sees and can reorder the complete message. The table is
 // built once at import, so it holds descriptors; `kernelErrorMessage`
 // resolves them against the active language at call time.
+
+/** The curve features' copy, one file per feature (`./kernelErrorCopy/`). */
+const CURVE_FEATURE_ERRORS: Record<string, MessageDescriptor> = {
+  ...BLEND_ERRORS,
+  ...LOFT_ERRORS,
+  ...REVOLVE_ERRORS,
+  ...FOLLOW_ME_TWIST_ERRORS,
+  ...PROJECT_ERRORS,
+  ...SHELL_ERRORS,
+  ...DEFORM_ERRORS,
+  ...SMOOTH_ERRORS,
+  ...CREASE_ERRORS,
+  ...PATH_ARRAY_ERRORS,
+  ...SHAPE_COMMON_ERRORS,
+  ...REMOVE_DEGENERATE_FACES_ERRORS,
+}
+
+/** The order these codes were listed in before the table was split by
+ *  feature. The generated Rust refusal copy (`crates/api/src/refusal_copy.
+ *  gen.rs`) lists codes in table order, so the order is kept as it was. A
+ *  new code not listed here goes after the listed ones. */
+/* oxlint-disable lingui/no-unlocalized-strings -- kernel error code identifiers, not copy */
+const CURVE_ERROR_ORDER: readonly string[] = [
+  'EmptySpec',
+  'BlendNeedsSolid',
+  'EdgeIsSmooth',
+  'UnsupportedEdge',
+  'UnsupportedVertex',
+  'RadiusTooLarge',
+  'ProfileTooWide',
+  'ProfileNeedsConvexEdge',
+  'BullnoseNeedsParallelSides',
+  'InvalidProfile',
+  'UnknownProfile',
+  'RenderFailed',
+  'StopOutOfRange',
+  'Obstructed',
+  'SegmentsOutOfRange',
+  'NonUniformInstance',
+  'BlendModified',
+  'UnknownBlend',
+  'BlendDegenerate',
+  'CornerNotBlendable',
+  'CornerIsStraight',
+  'CornerRadiusTooLarge',
+  'CornerLeavesFace',
+  'DependentBlend',
+  'BadSpec',
+  'TwistNeedsOpenPath',
+  'SelfIntersecting',
+  'WallTooThick',
+  'OpenProfile',
+  'LoftProfileHasHole',
+  'LoftNeedsTwoProfiles',
+  'LoftTooManyRails',
+  'RailMissesProfile',
+  'AxisNotInProfilePlane',
+  'ProjectMisses',
+  'ProjectNeedsClosedShape',
+  'WouldSever',
+  'UnsupportedShellCorner',
+  'ShapeNeedsSolid',
+  'AmountOutOfRange',
+  'SmoothTooDense',
+  'PathTooShortForCount',
+  'CreaseOnSoftEdge',
+  'CreaseOnBoundary',
+  'ShapeDegenerate',
+  'ReshapeRedoDiverged',
+  'TooThinToDeform',
+  'PreviewTooLarge',
+  'BlendFacesFlush',
+  'NothingToRemove',
+  'NonPlanarInput',
+  'DegenerateInput',
+]
+/* oxlint-enable lingui/no-unlocalized-strings */
+
+function inLegacyOrder(table: Record<string, MessageDescriptor>): Record<string, MessageDescriptor> {
+  const ordered: Record<string, MessageDescriptor> = {}
+  for (const code of CURVE_ERROR_ORDER) if (code in table) ordered[code] = table[code]
+  for (const code of Object.keys(table)) if (!(code in ordered)) ordered[code] = table[code]
+  return ordered
+}
 
 /**
  * Human copy for every kernel error code that can cross the wasm boundary,
@@ -119,7 +215,7 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   NotASubFace: msg`Push/Pull here needs a shape drawn on the face. Draw a closed outline on the face first.`,
   RadiusVanishes: msg`Pushing that far would shrink the curved wall to nothing. Push a shorter distance.`,
   WallNeighborNonPlanar:
-    msg`Offsetting this curved wall would bend a neighboring face out of flat, so it was refused. Adjust or simplify the touching faces first.`,
+    msg`Moving this face would bend a face that touches it out of flat, so it was refused. Adjust or simplify the touching faces first.`,
 
   // -------------------------------------------------------- follow me
   EmptyPath: msg`Follow Me needs a path. Select or click the line, curve, or face edge to follow.`,
@@ -185,7 +281,7 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`The result would be empty — the objects don't overlap that way. Check that the solids actually intersect.`,
   SingularTransform: msg`One object's placement is scaled down to nothing, so the operation can't run.`,
   DegenerateContact:
-    msg`The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.`,
+    msg`The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.`,
   NothingRemoved:
     msg`Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting.`,
 
@@ -442,6 +538,8 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   BadRenderMode:
     msg`The view mode must be shaded, xray or wireframe. If this keeps happening, use Report Bug.`,
   REPLAY: msg`This recorded session couldn't be replayed. If this keeps happening, use Report Bug.`,
+  // ---------------------------------- true-curves features (one file each)
+  ...inLegacyOrder(CURVE_FEATURE_ERRORS),
 
   // ------------------------------------------------------------- mend
   NothingToMend: msg`Nothing to mend here: no nearby points, touching parts or small gaps.`,
@@ -456,6 +554,7 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   MendOpensObject: msg`Mend would leave this object more open than it is now, so nothing was changed. Try a smaller distance.`,
   WeldFlattensObject: msg`Merging points that far apart would press the sides of a thin part together. Try a smaller distance.`,
   BadMendPlan: msg`Couldn't read those Mend settings.`,
+  BadHistoryBudget: msg`The undo memory limit has to be a size of zero or more.`,
 }
 
 /**
@@ -529,6 +628,7 @@ const ERROR_LEVEL_CODES: ReadonlySet<string> = new Set([
   'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'SingularTransform',
   'NothingRemoved',
   'BooleanOperandHasInstance', 'BooleanOperandNotSolid', 'BooleanOperandEmpty',
+  'NonPlanarInput', 'DegenerateInput',
   // A refusal to rebuild geometry the user asked to rebuild. Its sibling
   // segment-count codes stay at warn: those are an out-of-range number, not a
   // refusal of the shape.

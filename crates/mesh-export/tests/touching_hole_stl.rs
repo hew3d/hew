@@ -106,7 +106,7 @@ fn assert_closed_and_volume(tris: &[[[f32; 3]; 3]]) -> f64 {
 fn a_box_with_a_touching_hole_exports_a_closed_stl() {
     let (doc, _) = boxed_with_tangent_circle();
     for segments in [72, 24, 96] {
-        let stl = mesh_export::export_stl(&doc, segments, true).expect("exports");
+        let stl = mesh_export::export_stl(&doc, segments, true, false).expect("exports");
         let v = assert_closed_and_volume(&triangles(&stl));
         assert!((v - 4.0).abs() < 1e-4, "{segments} facets: volume {v}");
     }
@@ -130,7 +130,7 @@ fn a_pocket_from_a_touching_hole_exports_a_closed_stl() {
         },
     )
     .expect("the pocket");
-    let stl = mesh_export::export_stl(&doc, 72, true).expect("exports");
+    let stl = mesh_export::export_stl(&doc, 72, true, false).expect("exports");
     let v = assert_closed_and_volume(&triangles(&stl));
     let disc_area = 0.5 * 72.0 * 0.25 * (std::f64::consts::TAU / 72.0).sin();
     assert!((v - (4.0 - 0.4 * disc_area)).abs() < 1e-4, "volume {v}");

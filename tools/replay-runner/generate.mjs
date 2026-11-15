@@ -286,6 +286,74 @@ function buildCutterMovedIntoBin(scene) {
 }
 
 /**
+ * A 24-gon cup: a prism shelled 0.05 inward with its top (picked by a ray
+ * straight down) left open. Locks Shell's recorded spec and its result.
+ */
+function buildShellCup(scene) {
+  scene.start_recording();
+  const [sketch, region] = groundRegularPolygon(scene, 24, 0, 0, 0.5);
+  const cup = scene.extrude_region(sketch, region, 1.0);
+  const top = scene.pick_face(0, 0, 5, 0, 0, -1);
+  if (!top) {
+    throw new Error('the ray straight down misses the prism top');
+  }
+  // Face ids are u64 (BigInt in JS), which JSON.stringify refuses.
+  scene.shell(cup, `{"open":[${top.face()}],"thickness":0.05}`);
+  scene.stop_recording();
+  return scene.take_recording();
+}
+// ==== true-curves: shapes ====
+/**
+ * Draws a goblet half-profile in the XZ plane with one side on the Z axis —
+ * a foot, a stem, and a bowl whose outer wall is a facetted arc carrying its
+ * exact circle — and revolves it a full turn about Z: one closed solid whose
+ * walls are planes, cylinders, a cone and a sphere band.
+ */
+function buildRevolveGoblet(scene) {
+  scene.start_recording();
+  const sketch = scene.begin_sketch_on_plane(0, 0, 0, 0, -1, 0);
+  // Bowl: circle centered (0, 0.8) radius 0.3, from the stem top (0.1, z0)
+  // up to the rim (0.3, 0.8), facetted in 6 steps.
+  const r = 0.3;
+  const z0 = 0.8 - Math.sqrt(r * r - 0.1 * 0.1);
+  const a0 = Math.atan2(z0 - 0.8, 0.1);
+  const bowl = [];
+  for (let i = 0; i <= 6; i++) {
+    const a = a0 + ((0 - a0) * i) / 6;
+    bowl.push([r * Math.cos(a), 0.8 + r * Math.sin(a)]);
+  }
+  bowl[0] = [0.1, z0];
+  bowl[6] = [0.3, 0.8];
+  const seg = (a, b) => scene.sketch_add_segment(sketch, a[0], 0, a[1], b[0], 0, b[1]);
+  const regions = [];
+  const keep = (report) => regions.push(...report.regions_created());
+  keep(seg([0, 0], [0.3, 0]));
+  keep(seg([0.3, 0], [0.3, 0.04]));
+  keep(seg([0.3, 0.04], [0.1, 0.12]));
+  keep(seg([0.1, 0.12], bowl[0]));
+  scene.sketch_begin_curve_with(sketch, 0, 0, 0.8, r);
+  for (let i = 0; i < 6; i++) keep(seg(bowl[i], bowl[i + 1]));
+  scene.sketch_end_curve(sketch);
+  keep(seg([0.3, 0.8], [0, 0.8]));
+  keep(seg([0, 0.8], [0, 0]));
+  if (regions.length !== 1) {
+    throw new Error(`goblet profile made ${regions.length} regions`);
+  }
+  const profile = JSON.stringify({
+    region: { sketch: String(sketch), region: String(regions[0]) },
+  });
+  const spec = JSON.stringify({
+    axis_point: [0, 0, 0],
+    axis: [0, 0, 1],
+    angle: 2 * Math.PI,
+    segments: 24,
+  });
+  scene.revolve(profile, spec);
+  scene.stop_recording();
+  return scene.take_recording();
+}
+
+/**
  * The same cutter drawn the way the Getting Started guide now draws it: the
  * bin as above, then a 2 cm disk centered on the right face's upper corner
  * at y = 0 drawn as a DETACHED shape (`draft_begin_detached` on the face),
@@ -339,6 +407,26 @@ function buildDetachedCutterOnBin(scene) {
   const cutter = scene.extrude_region(pick.sketch(), pick.region(), -0.07);
   scene.boolean_nodes(1 /* subtract */, 0, block, 0, cutter);
 
+  scene.stop_recording();
+  return scene.take_recording();
+}
+
+/**
+ * Sweeps a 0.2 m square along a straight 1 m line with a 90° twist and a
+ * 40% end: Follow Me's generated sweep through the skin builder.
+ */
+function buildFollowMeTwist(scene) {
+  scene.start_recording();
+  const sketch = scene.begin_sketch_on_plane(0, 0, 0, 0, -1, 0);
+  const pts = [[0, 0], [0.2, 0], [0.2, 0.2], [0, 0.2]];
+  const regions = [];
+  for (let i = 0; i < 4; i++) {
+    const [a, b] = [pts[i], pts[(i + 1) % 4]];
+    regions.push(...scene.sketch_add_segment(sketch, a[0], 0, a[1], b[0], 0, b[1]).regions_created());
+  }
+  const path = scene.begin_ground_sketch();
+  const edges = scene.sketch_add_segment(path, 0.1, 0, 0, 0.1, -1, 0).new_edges();
+  scene.follow_me_along_edges_with(sketch, regions[0], path, edges, undefined, undefined, Math.PI / 2, 0.4, 0);
   scene.stop_recording();
   return scene.take_recording();
 }
@@ -408,6 +496,148 @@ function buildXrayEditScope(scene) {
   return scene.take_recording();
 }
 
+/**
+ * A 0.2 × 0.2 × 1 bar twisted 90° about its long axis, then bent 60%
+ * of a quarter turn: two Deform reshapes, each one undo step.
+ */
+function buildDeformTwistBend(scene) {
+  scene.start_recording();
+  const [sketch, region] = groundUnitSquare(scene);
+  const bar = scene.extrude_region(sketch, region, 1.0);
+  scene.transform_object(bar, [0.2, 0, 0, 0, 0, 0.2, 0, 0, 0, 0, 1, 0]);
+  const frame = { origin: [0.1, 0.1, 0], axis: [0, 0, 1], u: [1, 0, 0], length: 1 };
+  scene.deform(bar, JSON.stringify({ mode: 'twist', frame, angle: Math.PI / 2 }));
+  scene.deform(bar, JSON.stringify({ mode: 'bend', frame, angle: 0.6 * (Math.PI / 2) }));
+  scene.stop_recording();
+  return scene.take_recording();
+}
+/**
+ * Five rectangles on parallel planes, wide in the middle, lofted through a
+ * smooth hull (4 stations per span).
+ */
+function buildLoftHull(scene) {
+  scene.start_recording();
+  const sizes = [[0.2, 0.1], [0.4, 0.3], [0.5, 0.4], [0.4, 0.3], [0.2, 0.1]];
+  const sources = sizes.map(([w, d], i) => {
+    const z = i;
+    const sketch = scene.begin_sketch_on_plane(0, 0, z, 0, 0, 1);
+    const c = [[-w, -d], [w, -d], [w, d], [-w, d]];
+    let region = null;
+    for (let k = 0; k < 4; k++) {
+      const [a, b] = [c[k], c[(k + 1) % 4]];
+      const created = scene.sketch_add_segment(sketch, a[0], a[1], z, b[0], b[1], z).regions_created();
+      if (created.length > 0) region = created[0];
+    }
+    return { region: { sketch: String(sketch), region: String(region) } };
+  });
+  scene.loft(JSON.stringify({ sources, stations: 4 }));
+  scene.stop_recording();
+  return scene.take_recording();
+}
+// ==== end true-curves: shapes ====
+
+/**
+ * A label pressed into a round prism: a 24-gon prism, a rectangle drawn on
+ * a vertical plane in front of it, imprinted along the plane's normal, then
+ * debossed 0.01 following the surface. Locks Project's two recorded steps.
+ */
+function buildProjectLabel(scene) {
+  scene.start_recording();
+  const [sketch, region] = groundRegularPolygon(scene, 24, 0, 0, 0.5);
+  const post = scene.extrude_region(sketch, region, 1.0);
+  const label = scene.begin_sketch_on_plane(-2, 0, 0, -1, 0, 0);
+  const c = [
+    [-0.15, 0.4],
+    [0.15, 0.4],
+    [0.15, 0.6],
+    [-0.15, 0.6],
+  ];
+  for (let i = 0; i < 4; i++) {
+    const [ay, az] = c[i];
+    const [by, bz] = c[(i + 1) % 4];
+    scene.sketch_add_segment(label, -2, ay, az, -2, by, bz);
+  }
+  const faces = scene.project_imprint(post, label, new BigUint64Array());
+  scene.project_depth(post, label, faces, 0.01, 1 /* follow */);
+  scene.stop_recording();
+  return scene.take_recording();
+}
+
+/**
+ * A cushion: a 1 × 1 × 0.3 slab smoothed to level 2, then baked into real
+ * faces. Locks Smooth's level write and Bake's subdivided solid.
+ */
+function buildSmoothCushion(scene) {
+  scene.start_recording();
+  const [sketch, region] = groundUnitSquare(scene);
+  const slab = scene.extrude_region(sketch, region, 0.3);
+  scene.set_smooth_level(slab, 2);
+  scene.bake(slab);
+  scene.stop_recording();
+  return scene.take_recording();
+}
+
+// ==== true-curves: blend ====
+/**
+ * A unit box with its top rim filleted (the four top edges, picked through
+ * the top face's loop), the fillet resized, removed, then undone and redone.
+ * Locks the recorded blend calls and their replay.
+ */
+function buildFilletBoxRim(scene) {
+  scene.start_recording();
+  const [sketch, region] = groundUnitSquare(scene);
+  const box = scene.extrude_region(sketch, region, 1.0);
+  const top = scene.pick_face(0.5, 0.5, 5, 0, 0, -1);
+  if (!top) {
+    throw new Error('the ray straight down misses the box top');
+  }
+  const loop = scene.face_loop_edges(box, top.face(), 0.5, 0.02, 1.0);
+  const edges = Array.from(loop.edges()).map((e) => `"${e}"`).join(',');
+  const round = (r) => `{"kind":"round","radius":${r},"segments":6}`;
+  const report = scene.blend_edges(box, `{"edges":[${edges}],"profile":${round(0.1)}}`);
+  const [blend] = Array.from(report.blend_ids());
+  scene.resize_blend(box, blend, round(0.2));
+  const [resized] = JSON.parse(scene.blend_features_json(box));
+  scene.remove_blend(box, resized.id);
+  scene.scene_undo();
+  scene.scene_redo();
+  scene.stop_recording();
+  return scene.take_recording();
+}
+// ==== end true-curves: blend ====
+/**
+ * Array along a path: a box copied along a bent two-segment ground path, six
+ * instances with a 100% to 40% scale ramp, copies turned to follow the path.
+ * Drives the path frames (a corner's parallel transport), the similarity
+ * placements and the single-undo array record.
+ */
+function buildPathArrayRamp(scene) {
+  scene.start_recording();
+  const [sketch, region] = groundUnitSquare(scene);
+  const box = scene.extrude_region(sketch, region, 0.5);
+  const path = scene.begin_ground_sketch();
+  const edges = [
+    ...scene.sketch_add_segment(path, 0, -3, 0, 3, -3, 0).new_edges(),
+    ...scene.sketch_add_segment(path, 3, -3, 0, 3, 0, 0).new_edges(),
+  ];
+  const pathJson = JSON.stringify({
+    kind: 'sketch_edges',
+    sketch: path.toString(),
+    edges: edges.map((e) => e.toString()),
+  });
+  scene.array_along_path(
+    new Uint8Array([0]),
+    new BigUint64Array([box]),
+    pathJson,
+    6,
+    1.0,
+    0.4,
+    true,
+  );
+  scene.stop_recording();
+  return scene.take_recording();
+}
+
 /** Named scenarios, each producing a `take_recording()` JSON string. */
 const SCENARIOS = {
   'two-boxes-union-slice': buildTwoBoxesUnionSlice,
@@ -421,6 +651,19 @@ const SCENARIOS = {
   'cutter-moved-into-bin': buildCutterMovedIntoBin,
   'detached-cutter-on-bin': buildDetachedCutterOnBin,
   'xray-edit-scope': buildXrayEditScope,
+  'path-array-ramp': buildPathArrayRamp,
+  'shell-cup': buildShellCup,
+  'project-label': buildProjectLabel,
+  'smooth-cushion': buildSmoothCushion,
+  // ==== true-curves: blend ====
+  'fillet-box-rim': buildFilletBoxRim,
+  // ==== end true-curves: blend ====
+  // ==== true-curves: shapes ====
+  'revolve-goblet': buildRevolveGoblet,
+  'follow-me-twist': buildFollowMeTwist,
+  'deform-twist-bend': buildDeformTwistBend,
+  'loft-hull': buildLoftHull,
+  // ==== end true-curves: shapes ====
 };
 
 /** Runs scenario `name`'s build and writes `fixtures/<name>.json`. */

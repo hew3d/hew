@@ -609,6 +609,137 @@ pub fn resolve_edge(ctx: &Ctx, v: &serde_json::Value) -> Result<EdgeRef, CmdErro
     }
 }
 
+/// Resolves an edge set (01-conventions §7.1): an array of locators, each
+/// one of
+///
+/// - `{"object": id, "at": [x,y,z]}`: the nearest solid edge
+///   ([`resolve_edge`]);
+/// - `{"object": id, "from": [..], "to": [..]}`: the edge whose endpoints
+///   match within [`geom::API_SURFACE_TOL`], in either order;
+/// - `{"face": <face locator>}`: every sharp edge of that face's outer loop;
+/// - `{"face": <face locator>, "loop_near": [x,y,z]}`: the sharp edges of the
+///   loop (outer or hole) nearest the point;
+/// - `{"object": id, "all": true}`: every sharp edge of the object.
+///
+/// The edges come back in locator order without duplicates. All must lie on
+/// one object, else the `edges_span_objects` refusal. An empty array is a
+/// params error.
+pub fn resolve_edge_set(
+    ctx: &Ctx,
+    locators: &[serde_json::Value],
+) -> Result<(ObjectId, Vec<kernel::EdgeId>), CmdError> {
+    if locators.is_empty() {
+        return Err(CmdError::Params("edges needs at least one locator".into()));
+    }
+    let mut object: Option<ObjectId> = None;
+    let mut out: Vec<kernel::EdgeId> = Vec::new();
+    let mut take = |o: ObjectId, edges: Vec<kernel::EdgeId>| -> Result<(), CmdError> {
+        match object {
+            None => object = Some(o),
+            Some(prev) if prev != o => {
+                return Err(CmdError::Refusal(Refusal::api(
+                    "edges_span_objects",
+                    "Those edges belong to different objects. Round one object at a time.",
+                )));
+            }
+            _ => {}
+        }
+        for e in edges {
+            if !out.contains(&e) {
+                out.push(e);
+            }
+        }
+        Ok(())
+    };
+    for loc in locators {
+        let obj = loc
+            .as_object()
+            .ok_or_else(|| CmdError::Params("an edge locator must be an object".into()))?;
+        if let Some(face_loc) = obj.get("face") {
+            let f = resolve_face(ctx, face_loc)?;
+            let object_ref = ctx
+                .doc
+                .object(f.object)
+                .ok_or_else(|| unknown_entity("object"))?;
+            let face = object_ref
+                .faces()
+                .get(f.face)
+                .ok_or_else(|| unknown_entity("face"))?;
+            let loop_id = match obj.get("loop_near") {
+                None => face.outer_loop,
+                Some(near) => {
+                    let near = parse_xyz(near)?;
+                    let dist = |l| -> f64 {
+                        let ring: Vec<Point3> = object_ref.loop_positions(l).collect();
+                        (0..ring.len())
+                            .map(|i| {
+                                geom::point_segment_distance(
+                                    near,
+                                    ring[i],
+                                    ring[(i + 1) % ring.len()],
+                                )
+                                .0
+                            })
+                            .fold(f64::INFINITY, f64::min)
+                    };
+                    std::iter::once(face.outer_loop)
+                        .chain(face.inner_loops.iter().copied())
+                        .min_by(|&a, &b| dist(a).total_cmp(&dist(b)))
+                        .unwrap_or(face.outer_loop)
+                }
+            };
+            let edges: Vec<kernel::EdgeId> = object_ref
+                .loop_half_edges(loop_id)
+                .map(|h| object_ref.half_edges()[h].edge)
+                .filter(|&e| object_ref.edge_convexity(e).is_some())
+                .collect();
+            take(f.object, edges)?;
+        } else if obj.get("all").and_then(serde_json::Value::as_bool) == Some(true) {
+            let public = obj
+                .get("object")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| CmdError::Params("edge locator needs \"object\"".into()))?;
+            let Some(EntityRef::Object(id)) = ctx.resolver().resolve(public) else {
+                return Err(unknown_entity(public));
+            };
+            let o = ctx.doc.object(id).ok_or_else(|| unknown_entity(public))?;
+            take(id, o.sharp_edges())?;
+        } else if let (Some(from), Some(to)) = (obj.get("from"), obj.get("to")) {
+            let public = obj
+                .get("object")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| CmdError::Params("edge locator needs \"object\"".into()))?;
+            let Some(EntityRef::Object(id)) = ctx.resolver().resolve(public) else {
+                return Err(unknown_entity(public));
+            };
+            let o = ctx.doc.object(id).ok_or_else(|| unknown_entity(public))?;
+            let (a, b) = (parse_xyz(from)?, parse_xyz(to)?);
+            let near = |p: Point3, q: Point3| (p - q).length() <= geom::API_SURFACE_TOL;
+            let found: Vec<kernel::EdgeId> = o
+                .edges()
+                .keys()
+                .filter(|&e| {
+                    o.edge_endpoints(e).is_some_and(|(p, q)| {
+                        (near(p, a) && near(q, b)) || (near(p, b) && near(q, a))
+                    })
+                })
+                .collect();
+            match found.as_slice() {
+                [] => return Err(missed("edge")),
+                [one] => take(id, vec![*one])?,
+                _ => return Err(ambiguous("edge")),
+            }
+        } else {
+            let e = resolve_edge(ctx, loc)?;
+            take(e.object, vec![e.edge])?;
+        }
+    }
+    Ok((
+        object.expect("a non-empty locator list sets the object"),
+        out,
+    ))
+}
+
 /// The endpoints of a live sketch edge, from the sketch's own storage
 /// (`Sketch::vertices`/`Sketch::edges`, both already public — no new
 /// kernel accessor needed for this half).

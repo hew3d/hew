@@ -424,7 +424,7 @@ fn cli_host_exports_a_box_to_well_formed_binary_stl() {
     let doc = box_document();
     let mut host = CliHost::new();
     let bytes = host
-        .export_document(&doc, "stl", None, 0, None, None, false)
+        .export_document(&doc, "stl", None, 0, None, None, false, false)
         .expect("a solid box exports")
         .expect("no path given — bytes come back inline");
 
@@ -459,6 +459,7 @@ fn cli_host_export_with_a_path_writes_the_file_and_returns_no_bytes() {
             None,
             None,
             false,
+            false,
         )
         .expect("export succeeds");
     assert!(
@@ -478,7 +479,7 @@ fn cli_host_export_refuses_nothing_to_export_on_an_empty_document() {
     let doc = Document::new();
     let mut host = CliHost::new();
     let err = host
-        .export_document(&doc, "stl", None, 0, None, None, false)
+        .export_document(&doc, "stl", None, 0, None, None, false, false)
         .unwrap_err();
     assert_eq!(err.name, "nothing_to_export");
 }
@@ -516,7 +517,7 @@ fn dispatch_export_3mf_glb_and_usdz_match_a_direct_export_byte_for_byte() {
         let reloaded = Document::load(&std::fs::read(&path).unwrap()).expect("reloads");
         let mut host = CliHost::new();
         let direct_bytes = host
-            .export_document(&reloaded, format, None, 0, None, None, false)
+            .export_document(&reloaded, format, None, 0, None, None, false, false)
             .unwrap_or_else(|e| panic!("{format}: direct export succeeds: {e:?}"))
             .unwrap_or_else(|| panic!("{format}: bytes returned inline"));
 

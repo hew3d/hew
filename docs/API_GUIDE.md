@@ -132,6 +132,95 @@ became four. `hew.view.snapshot` let the program see the result rather
 than infer it from numbers. The rest of this guide is those four, plus
 what to do when a command says no.
 
+## Draw curved profiles
+
+A profile with rounded corners is a chain of straight runs and arcs that
+ends where it began. Draw each run with its own command, and put every
+command after the first on the sketch the first one made:
+
+- Draw the straight runs with `hew.sketch.draw_line` and the arcs with
+  `hew.sketch.draw_arc`. The first call takes a plane such as
+  `{"ground": true}`; every later call takes `{"sketch": <id>}` from that
+  call's result, so all the runs land in one sketch. The region closes when
+  the last edge lands on the first point, and the closing call's result
+  carries `region_id`.
+- An arc you want kept as an arc must come from `draw_arc`. A run of short
+  `draw_line` segments that happens to follow a curve gives hard facets on
+  purpose: Hew never treats a curve as round unless you said it was. It
+  extrudes into flat strips, it does not snap to a center, and it is not
+  smooth-shaded.
+- Extrude along the sketch normal to keep circles circular. Tilt the solid
+  afterward if you want a lean.
+- Send coordinates at full precision. Points closer than a nanometer
+  (1e-9 m) are the same point, and nothing looser is. A client that rounds
+  to micrometers, as a JSON pretty-printer or `round(v, 6)` will, leaves
+  every line and arc junction open by about 1e-7 m. The loop never closes,
+  and the only sign is an empty `region_ids` on the last call. To catch
+  this early, `draw_line` and `draw_arc` refuse a point that misses an open
+  end of the same sketch by more than a nanometer but less than 0.1 mm,
+  with the refusal `endpoint_near_miss`:
+
+  ```json
+  {"refusal": "endpoint_near_miss",
+   "detail": {"gap": 1e-07, "nearest": [0.04, 0.0, 0.0]},
+   "explanation": "This point misses an existing endpoint by 0.100 micrometers. Send coordinates at full precision, or use that endpoint exactly."}
+  ```
+
+  Nothing is drawn when it refuses. Send the point `nearest` names, or the
+  full-precision value you computed it from.
+
+This transaction draws a 0.4 by 0.2 m plate with 0.04 m rounded corners,
+extrudes it 0.05 m, and rounds the top rim with a 0.01 m fillet. The
+fillet's edge is the whole rim of the top face, named by a face locator;
+the corner arcs and the straight runs are rounded as one chain.
+
+```json
+{"jsonrpc": "2.0", "id": 3, "method": "hew.doc.transact",
+ "params": {"label": "Rounded plate", "commands": [
+  {"method": "hew.sketch.draw_line", "as": "bottom",
+   "params": {"plane": {"ground": true},
+              "points": [[0.04, 0, 0], [0.36, 0, 0]]}},
+  {"method": "hew.sketch.draw_arc",
+   "params": {"plane": {"sketch": {"$ref": "bottom#/sketch"}},
+              "center": [0.36, 0.04, 0], "radius": 0.04,
+              "start_angle": -1.5707963267948966, "end_angle": 0}},
+  {"method": "hew.sketch.draw_line",
+   "params": {"plane": {"sketch": {"$ref": "bottom#/sketch"}},
+              "points": [[0.4, 0.04, 0], [0.4, 0.16, 0]]}},
+  {"method": "hew.sketch.draw_arc",
+   "params": {"plane": {"sketch": {"$ref": "bottom#/sketch"}},
+              "center": [0.36, 0.16, 0], "radius": 0.04,
+              "start_angle": 0, "end_angle": 1.5707963267948966}},
+  {"method": "hew.sketch.draw_line",
+   "params": {"plane": {"sketch": {"$ref": "bottom#/sketch"}},
+              "points": [[0.36, 0.2, 0], [0.04, 0.2, 0]]}},
+  {"method": "hew.sketch.draw_arc",
+   "params": {"plane": {"sketch": {"$ref": "bottom#/sketch"}},
+              "center": [0.04, 0.16, 0], "radius": 0.04,
+              "start_angle": 1.5707963267948966, "end_angle": 3.141592653589793}},
+  {"method": "hew.sketch.draw_line",
+   "params": {"plane": {"sketch": {"$ref": "bottom#/sketch"}},
+              "points": [[0, 0.16, 0], [0, 0.04, 0]]}},
+  {"method": "hew.sketch.draw_arc", "as": "closed",
+   "params": {"plane": {"sketch": {"$ref": "bottom#/sketch"}},
+              "center": [0.04, 0.04, 0], "radius": 0.04,
+              "start_angle": 3.141592653589793, "end_angle": 4.71238898038469}},
+  {"method": "hew.solid.extrude", "as": "plate",
+   "params": {"region": {"$ref": "closed#/region_id"}, "distance": 0.05}},
+  {"method": "hew.solid.fillet",
+   "params": {"edges": [{"face": {"object": {"$ref": "plate#/object_id"},
+                                  "at": [0.2, 0.1, 0.05]}}],
+              "radius": 0.01}}]}}
+```
+
+The first seven commands answer with an empty `region_ids`, and the
+closing arc answers with the one `region_id` that `extrude` takes. The
+fillet's result names the new blend and its size:
+
+```json
+{"blend_ids": [1], "faces": 312, "object_id": "obj_1", "size": 0.01}
+```
+
 ## Every request is JSON-RPC 2.0
 
 A request carries `id`, `method`, and `params`. A response carries the

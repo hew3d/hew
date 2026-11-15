@@ -17,6 +17,7 @@ pub fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.doc.health" => health,
         "hew.solid.cap" => cap,
+        "hew.solid.remove_degenerate_faces" => remove_degenerate_faces,
         "hew.solid.mend" => mend,
         "hew.solid.delete_faces" => delete_faces,
         "hew.solid.mark_surface" => mark_surface,
@@ -127,6 +128,20 @@ fn mend(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let mut out = crate::health::mend_report_json(&report, ids);
     out["object_id"] = json!(public);
     Ok(out)
+}
+
+/// `hew.solid.remove_degenerate_faces`: Model Health's "Remove degenerate
+/// faces" repair.
+fn remove_degenerate_faces(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct P {
+        object: String,
+    }
+    let p: P = parse_params(params)?;
+    let object = resolve_object(ctx, &p.object)?;
+    let (report, _change) = ctx.doc.remove_degenerate_faces(object)?;
+    Ok(json!({ "removed": report.removed }))
 }
 
 fn delete_faces(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {

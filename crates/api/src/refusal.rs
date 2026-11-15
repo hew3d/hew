@@ -44,7 +44,7 @@ impl Refusal {
             .unwrap_or_else(|| e.to_string());
         Refusal {
             name: snake_case(&code),
-            detail: serde_json::json!({}),
+            detail: refusal_detail(e),
             explanation,
         }
     }
@@ -76,6 +76,43 @@ impl Refusal {
     }
 }
 
+/// The structured payload of a refusal that carries numbers the caller can
+/// act on (01-conventions §3): a limit, a maximum, a location. `{}` for the
+/// rest.
+fn refusal_detail(e: &DocumentError) -> serde_json::Value {
+    use kernel::{BlendError, ShapeError};
+    let point = |p: kernel::Point3| serde_json::json!([p.x, p.y, p.z]);
+    match e {
+        DocumentError::Shape(ShapeError::SelfIntersecting { limit: Some(l) }) => {
+            serde_json::json!({ "limit": l })
+        }
+        DocumentError::Shape(ShapeError::SmoothTooDense { faces, cap }) => {
+            serde_json::json!({ "faces": faces, "cap": cap })
+        }
+        DocumentError::Shape(ShapeError::WallTooThick { at })
+        | DocumentError::Shape(ShapeError::UnsupportedShellCorner { at })
+        | DocumentError::Blend(BlendError::UnsupportedVertex { at })
+        | DocumentError::Blend(BlendError::BlendFacesFlush { at })
+        | DocumentError::Blend(BlendError::Obstructed { at }) => {
+            serde_json::json!({ "at": point(*at) })
+        }
+        DocumentError::Blend(BlendError::RadiusTooLarge { max, limited_by }) => {
+            serde_json::json!({ "max": max, "limited_by": limited_by.name() })
+        }
+        DocumentError::Sketch(kernel::SketchError::CornerRadiusTooLarge { max }) => {
+            serde_json::json!({ "max": max })
+        }
+        DocumentError::Blend(BlendError::ProfileTooWide { needed, available }) => {
+            serde_json::json!({ "needed": needed, "available": available })
+        }
+        DocumentError::Boolean(kernel::BooleanError::NonPlanarInput { at })
+        | DocumentError::Boolean(kernel::BooleanError::DegenerateInput { at }) => {
+            serde_json::json!({ "at": point(*at) })
+        }
+        _ => serde_json::json!({}),
+    }
+}
+
 /// The error's variant code: the leading alphanumeric run of its `Debug`
 /// form — the innermost variant name for delegating variants is NOT
 /// unwrapped here; the kernel's `DocumentError` wrappers (`Sketch(..)`,
@@ -97,6 +134,8 @@ fn variant_code(e: &DocumentError) -> String {
         DocumentError::Op(kernel::KernelOpError::Sticky(inner)) => format!("{inner:?}"),
         DocumentError::InvalidAxesFrame(inner) => format!("{inner:?}"),
         DocumentError::Repair(inner) => format!("{inner:?}"),
+        DocumentError::Shape(inner) => format!("{inner:?}"),
+        DocumentError::Blend(inner) => format!("{inner:?}"),
         other => format!("{other:?}"),
     };
     debug
@@ -204,6 +243,29 @@ mod tests {
             assert!(
                 ui_copy(code).is_some(),
                 "expected generated UI copy for {code}"
+            );
+        }
+    }
+
+    /// The import-boolean refusals name the offending face's position.
+    #[test]
+    fn import_boolean_refusals_carry_the_face_position() {
+        let at = kernel::Point3::new(1.0, 2.0, 3.0);
+        for (e, name) in [
+            (
+                kernel::BooleanError::NonPlanarInput { at },
+                "non_planar_input",
+            ),
+            (
+                kernel::BooleanError::DegenerateInput { at },
+                "degenerate_input",
+            ),
+        ] {
+            let e = DocumentError::Boolean(e);
+            assert_eq!(snake_case(&variant_code(&e)), name);
+            assert_eq!(
+                refusal_detail(&e),
+                serde_json::json!({ "at": [1.0, 2.0, 3.0] })
             );
         }
     }

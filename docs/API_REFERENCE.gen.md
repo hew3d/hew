@@ -16,6 +16,145 @@ New to the API? Read docs/API_GUIDE.md first — how to connect, what
 a session looks like, and worked examples of the idioms these
 entries assume (transactions, `$ref`, face locators, refusals).
 
+## hew.array
+
+### `hew.array.path`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Copy nodes along a sketch curve or face loop, with an optional scale ramp.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "align": {
+      "description": "turn copies to follow the path tangent (default true)",
+      "type": "boolean"
+    },
+    "count": {
+      "description": "total instances including the original",
+      "minimum": 2,
+      "type": "integer"
+    },
+    "nodes": {
+      "description": "ids of the objects, groups or instances to copy",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "path": {
+      "oneOf": [
+        {
+          "properties": {
+            "curve": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "curve"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "face": {
+              "description": "a face locator; its outer loop is a closed path",
+              "type": "object"
+            }
+          },
+          "required": [
+            "face"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Reserved: no kernel mapping yet, refuses unimplemented",
+          "properties": {
+            "edges": {
+              "type": "array"
+            }
+          },
+          "required": [
+            "edges"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "scale": {
+      "description": "uniform scale at the first and last copy, linear between; default 1 to 1",
+      "properties": {
+        "from": {
+          "type": "number"
+        },
+        "to": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "nodes",
+    "path",
+    "count"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "node_ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "node_ids"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `amount_out_of_range` — That amount is out of range.
+- `path_too_short_for_count` — The path is too short for that many copies.
+- `array_count_too_large`
+- `empty_path` — Follow Me needs a path. Select or click the line, curve, or face edge to follow.
+- `unknown_path_edge` — That path line is no longer there — the model changed since it was picked. Click it again.
+- `path_branches` — The path forks — Follow Me needs one continuous run of lines. Select a single chain with no branches.
+- `path_disconnected` — The path is in separate pieces. Select one connected run of lines.
+- `path_segment_too_short` — Part of the path is too short to follow. Redraw the path without tiny segments.
+- `empty_selection` — The selection has nothing visible to transform — everything in it is hidden or empty. Unhide its contents, or select something visible.
+- `duplicate_member` — The same object is in the selection twice. Reselect and try again.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `reflection`
+- `unimplemented`
+
 ## hew.attr
 
 ### `hew.attr.delete`
@@ -1454,7 +1593,7 @@ Union, subtract, or intersect two solids without touching the document; answers 
 - `compute_too_large`
 - `mesh_too_large`
 - `operand_not_solid` — Combining needs a solid on both sides. To make it solid, select it and choose Object ▸ Make Solid…
-- `degenerate_contact` — The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.
+- `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
 - `nothing_removed` — Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting.
 - `singular_transform` — One object's placement is scaled down to nothing, so the operation can't run.
 
@@ -3936,6 +4075,11 @@ Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a Sk
 {
   "additionalProperties": false,
   "properties": {
+    "cages": {
+      "default": false,
+      "description": "Mesh formats: export smoothed objects' cages instead of their Smooth surfaces.",
+      "type": "boolean"
+    },
     "compat": {
       "description": "Format \"skp\" only: write revision 17 of the container, leaving out what only newer SketchUp versions hold (see hew.doc.save). Absent or false: the lowest revision that holds the content.",
       "type": "boolean"
@@ -4217,6 +4361,10 @@ Model health: every open object (world or component member) with its verdict, op
               "string",
               "null"
             ]
+          },
+          "degenerate_faces": {
+            "description": "zero-width or sub-tolerance faces hew.solid.remove_degenerate_faces would remove; a solid is listed only when it has some",
+            "type": "integer"
           },
           "faces": {
             "description": "how many faces the object has",
@@ -6692,7 +6840,8 @@ One library item's full metadata, manifest summary, and document attributes.
       "enum": [
         "component",
         "material",
-        "model"
+        "model",
+        "profile"
       ],
       "type": "string"
     },
@@ -6869,6 +7018,7 @@ Insert a library item into the attached document, wired for idempotent re-insert
 - `singular` — That transform would scale the object down to nothing, so it was refused.
 - `degenerate_axis` — The rotation axis needs two distinct points. Pick a second point further from the first.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `profile_not_insertable`
 
 ### `hew.library.list`
 
@@ -6890,7 +7040,8 @@ List items in the Hew Library, optionally filtered by category, collection, or a
       "enum": [
         "component",
         "material",
-        "model"
+        "model",
+        "profile"
       ],
       "type": "string"
     },
@@ -6922,7 +7073,8 @@ List items in the Hew Library, optionally filtered by category, collection, or a
             "enum": [
               "component",
               "material",
-              "model"
+              "model",
+              "profile"
             ],
             "type": "string"
           },
@@ -7057,7 +7209,8 @@ Save a selection, one material, or the whole document to the library. Records no
       "enum": [
         "component",
         "material",
-        "model"
+        "model",
+        "profile"
       ],
       "type": "string"
     },
@@ -7075,6 +7228,27 @@ Save a selection, one material, or the whole document to the library. Records no
       "type": "string"
     },
     "name": {
+      "type": "string"
+    },
+    "profile_chain": {
+      "description": "an open drawn chain saved as a profile item (category profile, implied): {sketch, edges: [<sketch edge id or locator>, …]}, edges in order from the profile's start on the bearing face to its end — not with selection or material",
+      "properties": {
+        "edges": {
+          "items": {},
+          "type": "array"
+        },
+        "sketch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sketch",
+        "edges"
+      ],
+      "type": "object"
+    },
+    "replace": {
+      "description": "the id or path of an existing item to overwrite in place, keeping its id",
       "type": "string"
     },
     "return_bytes": {
@@ -7135,6 +7309,10 @@ Save a selection, one material, or the whole document to the library. Records no
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `save_failed`
+- `unknown_library_item`
+- `invalid_profile` — This profile shape isn't valid. Redraw it as one open chain.
+- `locator_missed`
+- `ambiguous_locator`
 
 ### `hew.library.update_meta`
 
@@ -7185,7 +7363,8 @@ Edit a library item's name, keywords, or collection in place.
       "enum": [
         "component",
         "material",
-        "model"
+        "model",
+        "profile"
       ],
       "type": "string"
     },
@@ -7320,7 +7499,7 @@ Add a color or texture material to the palette. Registry-state: records no undo 
 - **Served:** kernel
 - **Permission:** model.write
 
-Paint a face or entity.
+Paint a face (by default its whole logical face: a fillet, a cylinder wall; `logical: false` paints one facet) or an entity.
 
 **Params schema:**
 
@@ -7334,6 +7513,9 @@ Paint a face or entity.
     "id": {
       "description": "an object (its base material), an instance (the placement's own material), or a definition (every object it owns)",
       "type": "string"
+    },
+    "logical": {
+      "type": "boolean"
     },
     "material": {
       "type": [
@@ -8002,6 +8184,130 @@ Open the connection: negotiate protocol and encoding, learn the granted profile 
 
 **Refusals:** none.
 
+## hew.object
+
+### `hew.object.crease`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Set or clear the crease on edges, which keeps them sharp under Smooth.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "crease": {
+      "default": true,
+      "type": "boolean"
+    },
+    "edges": {
+      "items": {
+        "description": "an edge locator {object, at}; all on one object",
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "propagate": {
+      "default": "none",
+      "description": "tangent: also follow each edge's tangent continuations",
+      "enum": [
+        "none",
+        "tangent"
+      ]
+    }
+  },
+  "required": [
+    "edges"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "edges": {
+      "description": "how many kernel edges changed",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "edges"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `crease_on_soft_edge` — Soft seams can't be creased.
+- `crease_on_boundary` — An edge on an opening can't be creased.
+- `edges_span_objects`
+- `shape_degenerate` — That change didn't produce a valid solid. The model is unchanged.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+
+### `hew.object.smooth`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Set an object's Smooth level (0 = Off, 1–3): its faces become the cage of a subdivision surface.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "level": {
+      "description": "0 = Off",
+      "maximum": 3,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "object": {
+      "description": "an object id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "object",
+    "level"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `amount_out_of_range` — That amount is out of range.
+- `smooth_too_dense` — This shape is too dense for that Smooth level. Try a lower level, or simplify the shape first.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+
 ## hew.print
 
 ### `hew.print.pdf`
@@ -8525,6 +8831,62 @@ A solid's faces: planes, areas, centroids, boundary loops.
     },
     "faces": {
       "description": "per face: object, plane, area, centroid, outer, holes, material, surface, texture_pins, attrs (the face's attribute dictionary, namespace -> key -> value, {} for none), and material_effective when asked through a path",
+      "items": {
+        "properties": {
+          "blend": {
+            "description": "present on a face of a fillet, chamfer or profile blend: `id` (per object), `kind` (\"fillet\", \"chamfer\" or \"profile\") and `role` (\"strip\", \"corner\" or \"runout\")",
+            "properties": {
+              "id": {
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "fillet",
+                  "chamfer",
+                  "profile"
+                ],
+                "type": "string"
+              },
+              "role": {
+                "enum": [
+                  "strip",
+                  "corner",
+                  "runout"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "role"
+            ],
+            "type": "object"
+          },
+          "surface": {
+            "description": "the analytic surface the face is a chord facet of, or null. `kind` is \"cylinder\" (axis_point, axis, radius), \"sphere\" (center, radius), \"torus\" (center, axis, major_radius, minor_radius) or \"cone\" (apex, axis, half_angle in radians); lengths in meters",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "cylinder",
+                  "sphere",
+                  "torus",
+                  "cone"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "type": "array"
     },
     "generation": {
@@ -11492,6 +11854,7 @@ Draw an arc on a plane spec.
 - `degenerate_curve` — That circle or arc is too small to keep. Drag a larger radius, or type an exact one.
 - `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `endpoint_near_miss`
 - `segments_above_cap` — That is more segments than a circle can hold. Enter a smaller count.
 - `unknown_entity`
 - `locator_missed`
@@ -11917,6 +12280,7 @@ Draw a line (chain) on a plane spec.
 - `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
 - `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `endpoint_near_miss`
 - `unknown_entity`
 - `locator_missed`
 - `ambiguous_locator`
@@ -13148,6 +13512,58 @@ List a plane's drawing as units: islands of edges (with where each is stored) an
 
 ## hew.solid
 
+### `hew.solid.bake`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Replace a smoothed object's cage with its Smooth surface and clear the level.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "object": {
+      "description": "an object id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "object"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `amount_out_of_range` — That amount is out of range.
+- `smooth_too_dense` — This shape is too dense for that Smooth level. Try a lower level, or simplify the shape first.
+- `shape_degenerate` — That change didn't produce a valid solid. The model is unchanged.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+
 ### `hew.solid.cap`
 
 - **Version:** 1
@@ -13228,6 +13644,290 @@ Close an open object's flat openings with faces; an object closed all round beco
 - `cap_would_be_coplanar` — This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid.
 - `non_manifold_rim` — The edges around this opening branch off in more than one direction, so Hew can't tell where a face goes. Fix those edges by hand first.
 - `caps_overlap` — A face here would overlap another part of this object. Close all of the object's openings together, or draw faces across this one by hand.
+
+### `hew.solid.chamfer`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Chamfer the edges of a solid, or chamfer a 2D corner, as the Fillet tool's Chamfer mode does.
+
+**Params schema:**
+
+```json
+{
+  "description": "give edges or corner, and distance, distances, or distance with angle",
+  "properties": {
+    "angle": {
+      "description": "radians measured from the primary face; with `distance`",
+      "type": "number"
+    },
+    "corner": {
+      "description": "a 2D corner instead of solid edges: {sketch: <sketch id>, at: [x,y,z]} for a drawn corner, or {face: <face locator>, at: [x,y,z]} for a corner of a shape drawn on a face",
+      "properties": {
+        "at": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "face": {
+          "type": "object"
+        },
+        "sketch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "at"
+      ],
+      "type": "object"
+    },
+    "corners": {
+      "description": "three-way corners; default \"mitered\"",
+      "enum": [
+        "mitered",
+        "flat"
+      ],
+      "type": "string"
+    },
+    "distance": {
+      "description": "meters on both faces, or on the primary face when `angle` is given",
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
+    "distances": {
+      "description": "[a, b] meters: a on the primary face, b on the other",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 2,
+      "minItems": 2,
+      "type": "array"
+    },
+    "edges": {
+      "description": "solid edges to blend, all on one object",
+      "items": {
+        "description": "HEW_API.md §5.2 edge-set locator: {object, at}, {object, from, to}, {face: <face locator>}, {face, loop_near}, or {object, all: true}",
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "primary": {
+      "description": "face locator of the face that takes `distances[0]` (or `distance` with `angle`)",
+      "type": "object"
+    },
+    "propagate": {
+      "description": "default \"tangent\": each located edge extends along the smooth chain a click on it would take",
+      "enum": [
+        "tangent",
+        "none"
+      ],
+      "type": "string"
+    },
+    "stops": {
+      "description": "meters left sharp at the start and end of the chain",
+      "properties": {
+        "end": {
+          "type": "number"
+        },
+        "start": {
+          "type": "number"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "an edge blend answers object_id, blend_ids, faces and size (meters; null for a bullnose); a 2D corner answers sketch_id or object_id",
+  "properties": {
+    "blend_ids": {
+      "items": {
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "faces": {
+      "description": "new blend faces",
+      "type": "integer"
+    },
+    "object_id": {
+      "type": "string"
+    },
+    "sketch_id": {
+      "description": "a corner of a world sketch: the sketch",
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `radius_too_large` — That radius doesn't fit here. Try a smaller one.
+- `profile_too_wide` — This profile is wider than the face it has to fit on. Try a smaller profile or a smaller size.
+- `edge_is_smooth` — That edge is already smooth.
+- `blend_needs_solid` — Fillet needs a solid. This object has gaps.
+- `unsupported_vertex` — Can't blend this corner. Try these edges one at a time.
+- `blend_faces_flush` — The two surfaces meet smoothly here, with no edge between them, as two pipes of the same size do. There's nothing to round, chamfer, or cove there. Make one part a little larger or smaller.
+- `unsupported_edge` — This edge can't be filleted yet.
+- `obstructed` — The fillet would cut into other geometry.
+- `segments_out_of_range` — Use between 2 and 96 segments.
+- `non_uniform_instance` — Make this component unique, or reset its scale, to fillet it.
+- `stop_out_of_range` — A stop or radius point has to sit on the edge, farther from its end than the radius.
+- `corner_not_blendable` — Only a corner where two straight lines meet can be rounded.
+- `corner_is_straight` — Those lines are in a straight line; there is no corner to round.
+- `corner_radius_too_large` — The radius is too large for this corner. Try a smaller radius.
+- `corner_leaves_face` — The rounded corner would run off the face. Draw the shape farther inside the face, or use a smaller radius.
+- `edges_span_objects`
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `angle_does_not_fit`
+
+### `hew.solid.deform`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Twist, bend or taper a solid along its bounding box, or bend it along a path, as the Deform tool does.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "angle": {
+      "description": "twist or bend, radians: |twist| ≤ 4π, |bend| ≤ 2π",
+      "type": "number"
+    },
+    "base": {
+      "description": "bend_to_path: the straight line mapped onto the path",
+      "properties": {
+        "from": {},
+        "to": {}
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    "end": {
+      "allOf": [
+        {
+          "enum": [
+            "+x",
+            "-x",
+            "+y",
+            "-y",
+            "+z",
+            "-z"
+          ],
+          "type": "string"
+        }
+      ],
+      "description": "the moving end of the object's world bounding box (twist, bend, taper); the opposite face stays fixed"
+    },
+    "mode": {
+      "enum": [
+        "twist",
+        "bend",
+        "taper",
+        "bend_to_path"
+      ],
+      "type": "string"
+    },
+    "object": {
+      "description": "a world object id",
+      "type": "string"
+    },
+    "path": {
+      "description": "bend_to_path: {\"curve\": <sketch curve id>} or {\"face\": <face locator>} (its boundary loop)"
+    },
+    "ratio": {
+      "description": "taper: the moving end's scale",
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
+    "stations": {
+      "description": "bands along the axis (twist/bend default one per 15°, at least 4; taper 1); the object is also cut through every vertex so no face spans one; for bend_to_path, bands per path segment (default 4)",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "toward": {
+      "allOf": [
+        {
+          "enum": [
+            "+x",
+            "-x",
+            "+y",
+            "-y",
+            "+z",
+            "-z"
+          ],
+          "type": "string"
+        }
+      ],
+      "description": "bend only: the cross axis it bends toward; default the one closest to -z, or +x for a vertical axis"
+    }
+  },
+  "required": [
+    "object",
+    "mode"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `self_intersecting` — The result would pass through itself.
+- `shape_needs_solid` — This needs a solid. This object has gaps.
+- `amount_out_of_range` — That amount is out of range.
+- `shape_degenerate` — That change didn't produce a valid solid. The model is unchanged.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `locator_missed`
+- `ambiguous_locator`
+- `follow_me_in_component_unsupported`
+- `unimplemented`
 
 ### `hew.solid.delete_faces`
 
@@ -13430,6 +14130,184 @@ Extrude a region into a new Object, consuming the profile.
 - `region_not_pushable` — That shape can't be pushed or pulled: part of it is drawn on the solid's face and part is loose, so the face can't hold it. Move the drawing clear of the edge, or push/pull the neighboring pieces instead.
 - `region_touches_hole` — This shape touches another shape at a point, so it can't be pulled as one piece. Pull the shape inside it instead, or move them a hair apart.
 
+### `hew.solid.fillet`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Round, cove, bullnose or profile the edges of a solid, or round a 2D corner, as the Fillet tool does.
+
+**Params schema:**
+
+```json
+{
+  "description": "give edges or corner",
+  "properties": {
+    "corner": {
+      "description": "a 2D corner instead of solid edges: {sketch: <sketch id>, at: [x,y,z]} for a drawn corner, or {face: <face locator>, at: [x,y,z]} for a corner of a shape drawn on a face",
+      "properties": {
+        "at": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "face": {
+          "type": "object"
+        },
+        "sketch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "at"
+      ],
+      "type": "object"
+    },
+    "corners": {
+      "description": "three-way corners; default \"rolled\"",
+      "enum": [
+        "rolled",
+        "mitered"
+      ],
+      "type": "string"
+    },
+    "edges": {
+      "description": "solid edges to blend, all on one object",
+      "items": {
+        "description": "HEW_API.md §5.2 edge-set locator: {object, at}, {object, from, to}, {face: <face locator>}, {face, loop_near}, or {object, all: true}",
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "handles": {
+      "description": "round only: a radius at an arc length along the chain (variable radius)",
+      "items": {
+        "properties": {
+          "at": {
+            "type": "number"
+          },
+          "radius": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "at",
+          "radius"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "profile": {
+      "description": "\"round\" (default), \"cove\", \"bullnose\", a built-in id such as \"builtin:ogee\", or a Library profile's id",
+      "type": "string"
+    },
+    "propagate": {
+      "description": "default \"tangent\": each located edge extends along the smooth chain a click on it would take",
+      "enum": [
+        "tangent",
+        "none"
+      ],
+      "type": "string"
+    },
+    "radius": {
+      "description": "meters; required except for a bullnose or a profile",
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
+    "segments": {
+      "description": "facets across the arc: 2 to 96 for an edge round, cove or bullnose, 1 to 96 for a profile, up to 1024 for a 2D corner; default the drawing tools' count for the edge's turn at this radius",
+      "maximum": 1024,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "stops": {
+      "description": "meters left sharp at the start and end of the chain",
+      "properties": {
+        "end": {
+          "type": "number"
+        },
+        "start": {
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "width": {
+      "description": "profiles only, meters on the bearing face (replaces radius)",
+      "exclusiveMinimum": 0,
+      "type": "number"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "an edge blend answers object_id, blend_ids, faces and size (meters; null for a bullnose); a 2D corner answers sketch_id or object_id",
+  "properties": {
+    "blend_ids": {
+      "items": {
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "faces": {
+      "description": "new blend faces",
+      "type": "integer"
+    },
+    "object_id": {
+      "type": "string"
+    },
+    "sketch_id": {
+      "description": "a corner of a world sketch: the sketch",
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `radius_too_large` — That radius doesn't fit here. Try a smaller one.
+- `profile_too_wide` — This profile is wider than the face it has to fit on. Try a smaller profile or a smaller size.
+- `edge_is_smooth` — That edge is already smooth.
+- `blend_needs_solid` — Fillet needs a solid. This object has gaps.
+- `unsupported_vertex` — Can't blend this corner. Try these edges one at a time.
+- `blend_faces_flush` — The two surfaces meet smoothly here, with no edge between them, as two pipes of the same size do. There's nothing to round, chamfer, or cove there. Make one part a little larger or smaller.
+- `unsupported_edge` — This edge can't be filleted yet.
+- `obstructed` — The fillet would cut into other geometry.
+- `segments_out_of_range` — Use between 2 and 96 segments.
+- `non_uniform_instance` — Make this component unique, or reset its scale, to fillet it.
+- `stop_out_of_range` — A stop or radius point has to sit on the edge, farther from its end than the radius.
+- `corner_not_blendable` — Only a corner where two straight lines meet can be rounded.
+- `corner_is_straight` — Those lines are in a straight line; there is no corner to round.
+- `corner_radius_too_large` — The radius is too large for this corner. Try a smaller radius.
+- `corner_leaves_face` — The rounded corner would run off the face. Draw the shape farther inside the face, or use a smaller radius.
+- `edges_span_objects`
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `profile_needs_convex_edge` — A cove needs an outside edge.
+- `bullnose_needs_parallel_sides` — A bullnose needs two parallel edges of one face.
+- `invalid_profile` — This profile shape isn't valid. Redraw it as one open chain.
+- `unknown_profile` — That profile isn't built in. Pick one from the profile list.
+- `load_failed`
+- `host_capability_missing`
+
 ### `hew.solid.follow_me`
 
 - **Version:** 1
@@ -13445,6 +14323,11 @@ Sweep a profile along an edge-chain path, as the tool does.
 ```json
 {
   "properties": {
+    "end_scale": {
+      "description": "scale of the end profile relative to the start (1 = none); open paths only",
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
     "path": {
       "oneOf": [
         {
@@ -13503,6 +14386,15 @@ Sweep a profile along an edge-chain path, as the tool does.
           "type": "object"
         }
       ]
+    },
+    "stations": {
+      "description": "stations per path segment; default one per 15° of twist",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "twist": {
+      "description": "total twist over the swept length, radians (right-hand rule about the path); open paths only",
+      "type": "number"
     }
   },
   "required": [
@@ -13545,6 +14437,7 @@ Sweep a profile along an edge-chain path, as the tool does.
 - `partial_sweep_on_pole` — A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis.
 - `sweep_self_intersects` — Following this path would make the shape run into itself. Shorten the path or use a smaller profile.
 - `sweep_degenerate` — This profile can't be swept along that path into a valid solid. Simplify the profile or the path and try again.
+- `twist_needs_open_path` — Twist and end scale need an open path.
 - `unknown_region` — That profile is no longer there — the model changed since it was picked. Click it again.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
@@ -13846,7 +14739,16 @@ Boolean intersection of two or more solids: the material in all of them.
 ```json
 {
   "properties": {
+    "note": {
+      "description": "present with pieces: why the result is several, in words for this operation",
+      "type": "string"
+    },
+    "pieces": {
+      "description": "present when the result is a group of pieces: how many",
+      "type": "integer"
+    },
     "result": {
+      "description": "the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, an Intersect of several overlaps)",
       "type": "string"
     },
     "unlinked": {
@@ -13871,7 +14773,9 @@ Boolean intersection of two or more solids: the material in all of them.
 - `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
 - `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.
 - `grouped_operand` — This operation can't target an object inside a group. Ungroup it, or leave the group context, first.
-- `degenerate_contact` — The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.
+- `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
+- `non_planar_input` — One of these objects has a face that isn't flat enough to combine.
+- `degenerate_input` — One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
@@ -13880,6 +14784,111 @@ Boolean intersection of two or more solids: the material in all of them.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `would_unlink`
+
+### `hew.solid.loft`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Skin a new solid through closed shapes in order, optionally to an apex and along rails, as the Loft tool does.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "apex": {
+      "description": "[x, y, z] or a derived-point locator: the point the loft ends in"
+    },
+    "profiles": {
+      "description": "closed shapes without holes, in loft order",
+      "items": {
+        "oneOf": [
+          {
+            "description": "a sketch region id",
+            "type": "string"
+          },
+          {
+            "properties": {
+              "face": {
+                "description": "HEW_API.md §5.2 face locator of a world object's face",
+                "type": "object"
+              }
+            },
+            "required": [
+              "face"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "type": "array"
+    },
+    "rails": {
+      "description": "up to two paths touching every profile at a vertex or a start marker",
+      "items": {
+        "description": "{\"curve\": <sketch curve id>} or {\"face\": <face locator>} (its boundary loop)"
+      },
+      "maxItems": 2,
+      "type": "array"
+    },
+    "start_offsets": {
+      "description": "per profile: move its correspondence start by this many start candidates: corners where every profile has the same number of corners, else vertices",
+      "items": {
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "stations": {
+      "description": "stations between consecutive profiles (1 = ruled); default 1 for two shapes without rails, else 8",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "profiles"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `open_profile` — Loft needs closed shapes. Close this one first.
+- `loft_profile_has_hole` — Loft needs shapes without holes. Shell the lofted solid to hollow it.
+- `loft_needs_two_profiles` — Loft needs at least two shapes, or one shape and a point.
+- `loft_too_many_rails` — Loft takes at most two rails.
+- `rail_misses_profile` — Each rail must run through a matching corner or point on every shape you loft between, and two rails must line the shapes up the same way.
+- `self_intersecting` — The result would pass through itself.
+- `amount_out_of_range` — That amount is out of range.
+- `shape_degenerate` — That change didn't produce a valid solid. The model is unchanged.
+- `unknown_region` — That profile is no longer there — the model changed since it was picked. Click it again.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `follow_me_in_component_unsupported`
+- `unimplemented`
 
 ### `hew.solid.mark_surface`
 
@@ -14200,6 +15209,96 @@ Kept for compatibility: slide a drawn shape (sub-face or chord island) in its pl
 - `face_token_unknown`
 - `face_token_stale`
 
+### `hew.solid.project`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Drape a sketch's shape onto an object's faces, then engrave or emboss it.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "depth": {
+      "description": "meters; > 0 engraves, < 0 embosses; absent imprints only",
+      "type": "number"
+    },
+    "mode": {
+      "description": "straight (default) cuts along the projection and can go through a wall; follow offsets along the surface",
+      "enum": [
+        "straight",
+        "follow"
+      ]
+    },
+    "object": {
+      "description": "the target object id",
+      "type": "string"
+    },
+    "regions": {
+      "description": "region ids of that sketch; default every region",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "sketch": {
+      "description": "the sketch whose shape is projected along its normal, toward the object",
+      "type": "string"
+    }
+  },
+  "required": [
+    "object",
+    "sketch"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "faces": {
+      "description": "how many faces the imprinted region has",
+      "type": "integer"
+    },
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id",
+    "faces"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `project_misses` — The shape doesn't land on this object. Aim it at a face.
+- `project_needs_closed_shape` — Project needs a closed shape. Close the drawing first.
+- `would_sever` — That depth would cut the object apart. Use Push/Pull or Subtract to split it.
+- `self_intersecting` — The result would pass through itself.
+- `unsupported_shell_corner` — Can't thicken this corner: its faces don't meet in one point.
+- `wall_too_thick` — The wall is too thick for this shape. Try a thinner wall.
+- `shape_needs_solid` — This needs a solid. This object has gaps.
+- `amount_out_of_range` — That amount is out of range.
+- `shape_degenerate` — That change didn't produce a valid solid. The model is unchanged.
+- `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
+- `non_planar_input` — One of these objects has a face that isn't flat enough to combine.
+- `degenerate_input` — One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+
 ### `hew.solid.push_pull`
 
 - **Version:** 1
@@ -14261,7 +15360,16 @@ Push/pull a face of a solid with the tool's full semantics.
 - `non_manifold_result` — The walls this would create run into the object's other geometry. Try a different distance, or reshape the surrounding faces first.
 - `not_a_sub_face` — Push/Pull here needs a shape drawn on the face. Draw a closed outline on the face first.
 - `radius_vanishes` — Pushing that far would shrink the curved wall to nothing. Push a shorter distance.
-- `wall_neighbor_non_planar` — Offsetting this curved wall would bend a neighboring face out of flat, so it was refused. Adjust or simplify the touching faces first.
+- `wall_neighbor_non_planar` — Moving this face would bend a face that touches it out of flat, so it was refused. Adjust or simplify the touching faces first.
+- `blend_modified` — This fillet has been changed and can't be edited. It's ordinary geometry now.
+- `dependent_blend` — A fillet that runs into this one can't be rebuilt after that change. Change or remove that fillet first.
+- `radius_too_large` — That radius doesn't fit here. Try a smaller one.
+- `profile_too_wide` — This profile is wider than the face it has to fit on. Try a smaller profile or a smaller size.
+- `unsupported_edge` — This edge can't be filleted yet.
+- `unsupported_vertex` — Can't blend this corner. Try these edges one at a time.
+- `blend_faces_flush` — The two surfaces meet smoothly here, with no edge between them, as two pipes of the same size do. There's nothing to round, chamfer, or cove there. Make one part a little larger or smaller.
+- `obstructed` — The fillet would cut into other geometry.
+- `blend_degenerate` — That fillet didn't produce a valid solid. The model is unchanged.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
@@ -14339,12 +15447,342 @@ Rejoin one seam family of split pieces as a single solid (Model Health's Rejoin 
 - `non_manifold_rim` — The edges around this opening branch off in more than one direction, so Hew can't tell where a face goes. Fix those edges by hand first.
 - `caps_overlap` — A face here would overlap another part of this object. Close all of the object's openings together, or draw faces across this one by hand.
 - `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
-- `degenerate_contact` — The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.
+- `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
 - `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
 - `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+
+### `hew.solid.remove_blend`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Remove a fillet or chamfer, restoring the sharp edges, by naming any face of it.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "face": {
+      "description": "HEW_API.md §5.2 face locator of any face of the blend",
+      "type": "object"
+    }
+  },
+  "required": [
+    "face"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `blend_modified` — This fillet has been changed and can't be edited. It's ordinary geometry now.
+- `dependent_blend` — A fillet that runs into this one can't be rebuilt after that change. Change or remove that fillet first.
+- `unknown_blend` — That face isn't part of a fillet.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+
+### `hew.solid.remove_degenerate_faces`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Remove an object's zero-width and sub-tolerance faces, keeping it closed.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "object": {
+      "description": "obj_ id (a world object or a component member)",
+      "type": "string"
+    }
+  },
+  "required": [
+    "object"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "removed": {
+      "description": "faces removed",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "removed"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `object_is_solid` — This is already solid, so there's nothing to close. Use Push/Pull to change its shape.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
+- `nothing_to_remove` — No degenerate faces found.
+
+### `hew.solid.resize_blend`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Resize a fillet or chamfer (or switch it between round and chamfer) by naming any face of it.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "distance": {
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
+    "distances": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 2,
+      "minItems": 2,
+      "type": "array"
+    },
+    "face": {
+      "description": "HEW_API.md §5.2 face locator of any face of the blend",
+      "type": "object"
+    },
+    "profile": {
+      "type": "string"
+    },
+    "radius": {
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
+    "segments": {
+      "description": "facets across the arc: 2 to 96 for a round, cove or bullnose, 1 to 96 for a profile",
+      "maximum": 96,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "width": {
+      "exclusiveMinimum": 0,
+      "type": "number"
+    }
+  },
+  "required": [
+    "face"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "an edge blend answers object_id, blend_ids, faces and size (meters; null for a bullnose); a 2D corner answers sketch_id or object_id",
+  "properties": {
+    "blend_ids": {
+      "items": {
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "faces": {
+      "description": "new blend faces",
+      "type": "integer"
+    },
+    "object_id": {
+      "type": "string"
+    },
+    "sketch_id": {
+      "description": "a corner of a world sketch: the sketch",
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `blend_modified` — This fillet has been changed and can't be edited. It's ordinary geometry now.
+- `dependent_blend` — A fillet that runs into this one can't be rebuilt after that change. Change or remove that fillet first.
+- `unknown_blend` — That face isn't part of a fillet.
+- `radius_too_large` — That radius doesn't fit here. Try a smaller one.
+- `blend_degenerate` — That fillet didn't produce a valid solid. The model is unchanged.
+- `profile_too_wide` — This profile is wider than the face it has to fit on. Try a smaller profile or a smaller size.
+- `segments_out_of_range` — Use between 2 and 96 segments.
+- `unsupported_edge` — This edge can't be filleted yet.
+- `unsupported_vertex` — Can't blend this corner. Try these edges one at a time.
+- `blend_faces_flush` — The two surfaces meet smoothly here, with no edge between them, as two pipes of the same size do. There's nothing to round, chamfer, or cove there. Make one part a little larger or smaller.
+- `obstructed` — The fillet would cut into other geometry.
+- `invalid_profile` — This profile shape isn't valid. Redraw it as one open chain.
+- `unknown_profile` — That profile isn't built in. Pick one from the profile list.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+
+### `hew.solid.revolve`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Turn a profile about an axis in its plane into a solid, as the Revolve tool does.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "angle": {
+      "description": "radians, 0 < |angle| ≤ 2π, right-hand rule about from→to; default 2π (a closed solid)",
+      "type": "number"
+    },
+    "axis": {
+      "description": "a line lying in the profile's plane",
+      "oneOf": [
+        {
+          "properties": {
+            "from": {
+              "description": "[x, y, z] or a derived-point locator (HEW_API.md §5.3)"
+            },
+            "to": {
+              "description": "[x, y, z] or a derived-point locator (HEW_API.md §5.3)"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "edge": {
+              "description": "a solid or sketch edge locator; the axis is its line"
+            }
+          },
+          "required": [
+            "edge"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "profile": {
+      "oneOf": [
+        {
+          "description": "a sketch region id",
+          "type": "string"
+        },
+        {
+          "properties": {
+            "face": {
+              "description": "HEW_API.md §5.2 face locator of a world object's face",
+              "type": "object"
+            }
+          },
+          "required": [
+            "face"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "segments": {
+      "description": "facets per full turn; default the drawing tools' count at the profile's largest distance from the axis",
+      "maximum": 1024,
+      "minimum": 3,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "profile",
+    "axis"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `axis_not_in_profile_plane` — The axis has to lie in the plane of the shape. Move the axis onto that plane.
+- `amount_out_of_range` — That amount is out of range.
+- `profile_crosses_axis` — This profile crosses the circle's center axis, so revolving it would lose the geometry on one side. Draw the profile entirely on one side of the axis instead.
+- `partial_sweep_on_pole` — A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis.
+- `sweep_self_intersects` — Following this path would make the shape run into itself. Shorten the path or use a smaller profile.
+- `sweep_degenerate` — This profile can't be swept along that path into a valid solid. Simplify the profile or the path and try again.
+- `follow_me_in_component_unsupported`
+- `unknown_region` — That profile is no longer there — the model changed since it was picked. Click it again.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
 
 ### `hew.solid.rotate_imprint`
 
@@ -14502,6 +15940,75 @@ Kept for compatibility: uniformly scale a drawn shape about an anchor in its pla
 - `face_token_stale`
 - `no_such_point`
 
+### `hew.solid.shell`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Hollow a solid to a wall of one thickness, leaving chosen faces open.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "object": {
+      "description": "an object id",
+      "type": "string"
+    },
+    "open": {
+      "items": {
+        "description": "HEW_API.md §5.2 face locator of a face of `object` to leave open",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "thickness": {
+      "description": "wall thickness in meters; negative grows the wall outward",
+      "type": "number"
+    }
+  },
+  "required": [
+    "object",
+    "thickness"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `wall_too_thick` — The wall is too thick for this shape. Try a thinner wall.
+- `self_intersecting` — The result would pass through itself.
+- `unsupported_shell_corner` — Can't thicken this corner: its faces don't meet in one point.
+- `shape_needs_solid` — This needs a solid. This object has gaps.
+- `amount_out_of_range` — That amount is out of range.
+- `shape_degenerate` — That change didn't produce a valid solid. The model is unchanged.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+
 ### `hew.solid.slice`
 
 - **Version:** 1
@@ -14625,6 +16132,64 @@ Slice a solid by a plane into two solids; the object may be a path to a definiti
 - `grouped_operand` — This operation can't target an object inside a group. Ungroup it, or leave the group context, first.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
+### `hew.solid.soften`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Soften the edges of an object that bend less than an angle, so faceted walls read as smooth.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "max_angle": {
+      "description": "radians: edges bending less than this are softened (coplanar and creased edges are left alone)",
+      "exclusiveMaximum": 3.141592653589793,
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
+    "object": {
+      "description": "an object id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "object",
+    "max_angle"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "softened": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "softened"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `amount_out_of_range` — That amount is out of range.
+- `shape_degenerate` — That change didn't produce a valid solid. The model is unchanged.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+
 ### `hew.solid.subtract`
 
 - **Version:** 1
@@ -14732,7 +16297,16 @@ Boolean subtraction: the first solid minus every other one; a may be a path to a
 ```json
 {
   "properties": {
+    "note": {
+      "description": "present with pieces: why the result is several, in words for this operation",
+      "type": "string"
+    },
+    "pieces": {
+      "description": "present when the result is a group of pieces: how many",
+      "type": "integer"
+    },
     "result": {
+      "description": "the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, a Subtract that severs, an Intersect of several overlaps)",
       "type": "string"
     }
   },
@@ -14750,7 +16324,9 @@ Boolean subtraction: the first solid minus every other one; a may be a path to a
 - `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
 - `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.
 - `grouped_operand` — This operation can't target an object inside a group. Ungroup it, or leave the group context, first.
-- `degenerate_contact` — The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.
+- `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
+- `non_planar_input` — One of these objects has a face that isn't flat enough to combine.
+- `degenerate_input` — One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
@@ -14919,7 +16495,16 @@ Boolean union of two or more solids: the material in any of them.
 ```json
 {
   "properties": {
+    "note": {
+      "description": "present with pieces: why the result is several, in words for this operation",
+      "type": "string"
+    },
+    "pieces": {
+      "description": "present when the result is a group of pieces: how many",
+      "type": "integer"
+    },
     "result": {
+      "description": "the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, an Intersect of several overlaps)",
       "type": "string"
     },
     "unlinked": {
@@ -14944,7 +16529,9 @@ Boolean union of two or more solids: the material in any of them.
 - `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
 - `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.
 - `grouped_operand` — This operation can't target an object inside a group. Ungroup it, or leave the group context, first.
-- `degenerate_contact` — The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.
+- `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
+- `non_planar_input` — One of these objects has a face that isn't flat enough to combine.
+- `degenerate_input` — One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.

@@ -257,6 +257,7 @@ impl Host for FakeHost {
                 let dir = match category {
                     "component" => "Components",
                     "material" => "Materials",
+                    "profile" => "Profiles",
                     _ => "Models",
                 };
                 let slug: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
@@ -1007,4 +1008,151 @@ fn base64_encode(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+// ======================================================== profile items
+
+/// Draws a three-point open chain in the ground plane and returns the
+/// sketch id with the two edge locators in drawing order.
+fn draw_profile_chain(conn: &mut Connection, doc: &mut Document) -> (String, Vec<Value>) {
+    let r = call_ok(
+        conn,
+        doc,
+        &mut NoHost,
+        20,
+        "hew.sketch.draw_line",
+        json!({
+            "plane": { "ground": true },
+            "points": [[0.0, 0.05, 0.0], [-0.02, 0.02, 0.0], [-0.05, 0.0, 0.0]]
+        }),
+    );
+    let sketch = r["results"][0]["sketch"].as_str().unwrap().to_string();
+    let edges = vec![
+        json!({ "from": [0.0, 0.05, 0.0], "to": [-0.02, 0.02, 0.0] }),
+        json!({ "from": [-0.02, 0.02, 0.0], "to": [-0.05, 0.0, 0.0] }),
+    ];
+    (sketch, edges)
+}
+
+#[test]
+fn save_a_profile_chain_then_fillet_with_it_and_replace_it() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let (sketch, edges) = draw_profile_chain(&mut conn, &mut doc);
+    let saved = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        21,
+        "hew.library.save",
+        json!({ "name": "My Edge", "profile_chain": { "sketch": sketch, "edges": edges } }),
+    );
+    let path = saved["path"].as_str().unwrap().to_string();
+    let id = saved["id"].as_str().unwrap().to_string();
+    assert!(path.starts_with("Profiles/"), "{path}");
+    let bytes = host.items.get(&path).unwrap().clone();
+    let summary = item_summary(&bytes);
+    assert!(summary.profile_chain_only);
+    assert_eq!(summary.doc_attrs["hew.library"]["category"], "profile");
+
+    // Fillet a box edge with the saved profile, by item id.
+    let b = build_box(&mut conn, &mut doc);
+    let object = api::IdResolver::new(&doc)
+        .public_of(&doc, &EntityRef::Object(b))
+        .unwrap();
+    let r = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        22,
+        "hew.solid.fillet",
+        json!({
+            "edges": [{ "object": object, "from": [0.0, 0.0, 1.0], "to": [1.0, 0.0, 1.0] }],
+            "profile": id,
+            "propagate": "none"
+        }),
+    );
+    assert!((r["results"][0]["size"].as_f64().unwrap() - 0.05).abs() < 1e-9);
+    // An unknown profile still refuses typed.
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        23,
+        "hew.solid.fillet",
+        json!({
+            "edges": [{ "object": object, "from": [0.0, 1.0, 1.0], "to": [1.0, 1.0, 1.0] }],
+            "profile": "no-such-item",
+            "width": 0.1
+        }),
+    );
+    assert_eq!(d["refusal"], "unknown_profile");
+
+    // Replace keeps the id and overwrites the same file.
+    let replaced = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        24,
+        "hew.library.save",
+        json!({
+            "name": "My Edge v2",
+            "replace": id,
+            "profile_chain": { "sketch": sketch, "edges": edges }
+        }),
+    );
+    assert_eq!(replaced["path"], json!(path));
+    assert_eq!(replaced["id"], json!(id));
+    assert_eq!(host.items.len(), 1);
+}
+
+#[test]
+fn a_profile_item_cannot_be_inserted_and_save_refuses_a_bad_chain() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let (sketch, edges) = draw_profile_chain(&mut conn, &mut doc);
+    let saved = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        21,
+        "hew.library.save",
+        json!({ "name": "Edge", "profile_chain": { "sketch": sketch, "edges": edges } }),
+    );
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        22,
+        "hew.library.insert",
+        json!({ "item": saved["id"] }),
+    );
+    assert_eq!(d["refusal"], "profile_not_insertable");
+    // One edge of a two-edge chain is still a chain; two unconnected are not.
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        23,
+        "hew.library.save",
+        json!({ "name": "Bad", "profile_chain": { "sketch": sketch, "edges": [] } }),
+    );
+    assert_eq!(d["refusal"], "invalid_profile");
+    // Two edges that do not meet are not a chain either.
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        24,
+        "hew.library.save",
+        json!({
+            "name": "Bad",
+            "profile_chain": { "sketch": sketch, "edges": [edges[0].clone(), edges[0].clone()] }
+        }),
+    );
+    assert_eq!(d["refusal"], "invalid_profile");
 }

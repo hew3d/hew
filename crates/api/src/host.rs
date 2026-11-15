@@ -298,7 +298,7 @@ pub struct LibraryItemEntry {
     /// The item's stable library identity, if its metadata carries one.
     pub id: Option<String>,
     pub name: String,
-    /// `"component"` | `"material"` | `"model"`.
+    /// `"component"` | `"material"` | `"model"` | `"profile"`.
     pub category: String,
     pub keywords: Vec<String>,
     pub collection: Option<String>,
@@ -772,7 +772,8 @@ pub trait Host {
     /// the host's display units. `compat` (the 2021-and-later `skp`
     /// container only) writes revision 17, leaving out what only newer
     /// SketchUp versions open; a stream release and every other format
-    /// ignore it.
+    /// ignore it. `cages`: export smoothed objects' cages instead of their
+    /// Smooth surfaces (mesh formats).
     #[allow(clippy::too_many_arguments)]
     fn export_document(
         &mut self,
@@ -783,6 +784,7 @@ pub trait Host {
         units: Option<&str>,
         selection: Option<&[crate::locate::RenderRoot]>,
         compat: bool,
+        cages: bool,
     ) -> Result<Option<Vec<u8>>, Refusal> {
         let _ = (
             doc,
@@ -792,6 +794,7 @@ pub trait Host {
             units,
             selection,
             compat,
+            cages,
         );
         Err(unsupported("export"))
     }

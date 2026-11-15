@@ -218,7 +218,9 @@ pub(super) fn run_drawing_gesture<T>(
     }
 }
 
+pub mod array;
 pub mod attrs;
+pub mod blend;
 /// Shared camera-spec parsing for `hew.view.snapshot` (doc.rs) and
 /// `hew.view.camera` (view.rs) — not a command namespace of its own, so
 /// it carries no `handler`.
@@ -231,11 +233,13 @@ pub mod geo;
 pub mod health;
 pub mod history;
 pub mod library;
+pub mod object;
 pub mod parts;
 pub mod print;
 pub mod query;
 pub mod scenes;
 pub mod selection;
+pub mod shape;
 pub mod sketch;
 pub mod solid;
 pub mod structure;
@@ -264,4 +268,8 @@ pub fn handler(name: &str) -> Option<Handler> {
         .or_else(|| print::handler(name))
         .or_else(|| library::handler(name))
         .or_else(|| compute::handler(name))
+        .or_else(|| blend::handler(name))
+        .or_else(|| shape::handler(name))
+        .or_else(|| object::handler(name))
+        .or_else(|| array::handler(name))
 }

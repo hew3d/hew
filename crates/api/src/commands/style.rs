@@ -170,6 +170,9 @@ struct PaintParams {
     #[serde(default)]
     id: Option<String>,
     material: Option<String>,
+    /// Paint the whole logical face (default) or only the picked facet.
+    #[serde(default)]
+    logical: Option<bool>,
     /// For an instance id: paint the placement (`instance`, the default)
     /// or its definition's geometry (`definition`). A definition id takes
     /// only `definition`; nothing else takes a scope.
@@ -199,7 +202,14 @@ fn material_paint(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         }
         (Some(face), None) => {
             let face = locate::resolve_face(ctx, face)?;
-            ctx.doc.paint_face(face.object, face.face, material)?;
+            // A whole logical face (a fillet, a cylinder wall) by default,
+            // as the Paint tool paints; `"logical": false` paints one facet.
+            if p.logical.unwrap_or(true) {
+                ctx.doc
+                    .paint_logical_face(face.object, face.face, material)?;
+            } else {
+                ctx.doc.paint_face(face.object, face.face, material)?;
+            }
         }
         (None, Some(id)) => match (ctx.resolver().resolve(id), p.scope.as_deref()) {
             (Some(EntityRef::Object(object)), None) => {

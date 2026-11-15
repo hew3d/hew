@@ -21,6 +21,7 @@
 //! `version()`/`demo_mesh()` remain from M0 until the viewport fully retires
 //! the demo path.
 
+mod curves_api;
 mod draft_api;
 mod geo_api;
 mod health;
@@ -192,8 +193,9 @@ pub fn end_gesture() {
 /// this trust boundary (recorded sessions are plain JSON replayed through
 /// that method verbatim, so a hand-edited count must fail typed instead of
 /// hanging the engine). The single source of truth: the UI reads it via
-/// [`Scene::max_array_count`], so the app-side cap cannot drift.
-pub const MAX_ARRAY_COUNT: u32 = 1000;
+/// [`Scene::max_array_count`], so the app-side cap cannot drift. The value
+/// lives in the kernel, shared with the path array's own check.
+pub use kernel::MAX_ARRAY_COUNT;
 
 // ------------------------------------------------------------------ errors
 
@@ -245,6 +247,24 @@ fn api_err(code_source: &dyn std::fmt::Debug, message: &dyn std::fmt::Display) -
     ApiError(format!("{code}: {message}"))
 }
 
+/// The mesh an object is drawn with: its Smooth surface at its level, or
+/// the cage itself when it has none, or when the cage has grown too dense
+/// for its level since (the surface refuses and the cage shows).
+fn render_mesh(
+    doc: &kernel::Document,
+    id: ObjectId,
+    object: &kernel::Object,
+) -> Result<RenderMesh, tessellate::TessellateError> {
+    let palette = doc.materials();
+    let level = doc.smooth_level(id);
+    if level > 0
+        && let Ok(mesh) = tessellate::tessellate_smoothed(object, palette, level)
+    {
+        return Ok(mesh);
+    }
+    tessellate(object, palette)
+}
+
 /// One cached Mend preview ([`Scene::mend_census_json`]).
 struct CensusEntry {
     object: u64,
@@ -282,6 +302,8 @@ fn doc_err(e: DocumentError) -> ApiError {
         DocumentError::Op(KernelOpError::Sticky(inner)) => api_err(inner, &e),
         DocumentError::InvalidAxesFrame(inner) => api_err(inner, &e),
         DocumentError::Repair(inner) => api_err(inner, &e),
+        DocumentError::Shape(inner) => api_err(inner, &e),
+        DocumentError::Blend(inner) => api_err(inner, &e),
         // UnknownSketch/UnknownObject/UnknownFace/UnknownMaterial/NothingTo{Undo,Redo}/
         // InverseFailed carry no separate inner code: the variant name is the code.
         _ => api_err(&e, &e),
@@ -447,6 +469,10 @@ pub const BUSY_EXEMPT: &[&str] = &[
     // the inference scene's transient tool segments;
     "add_transient_segment",
     "clear_transient_segments",
+    // the undo-memory budget and its trim note (session settings the
+    // scene holds; a trim never runs while a compound is open);
+    "set_history_budget",
+    "take_history_trim",
     // the face-range cache a tessellation fills;
     "object_mesh",
     "member_mesh",
@@ -1730,6 +1756,20 @@ impl MeshJs {
         self.mesh.soft_edge_positions.clone()
     }
 
+    /// Line-segment endpoints (xyz pairs) of the tangent edges: joints between
+    /// two different surfaces that meet tangentially (fillet rails, a rounded
+    /// rectangle's wall-to-corner seams). Hidden by default; View ▸ Tangent
+    /// Edges draws them thin (true-curves.md §3.3 rule 3).
+    pub fn tangent_edge_positions(&self) -> Vec<f32> {
+        self.mesh.tangent_edge_positions.clone()
+    }
+
+    /// Line-segment endpoints (xyz pairs) of a smoothed object's cage
+    /// edges, for the wire overlay; empty for an unsmoothed object.
+    pub fn cage_edge_positions(&self) -> Vec<f32> {
+        self.mesh.cage_edge_positions.clone()
+    }
+
     /// Whether the source Object encloses a volume.
     pub fn watertight(&self) -> bool {
         self.watertight
@@ -2063,6 +2103,67 @@ impl FaceSplitJs {
             .iter()
             .map(|e| e.data().as_ffi())
             .collect()
+    }
+}
+
+/// What the undo and redo stacks hold (mirrors `kernel::HistoryMemory`),
+/// from [`Scene::history_memory`]. Byte counts are estimates and cross as
+/// `number`s (exact far past any wasm heap).
+#[wasm_bindgen]
+pub struct HistoryMemoryJs {
+    inner: kernel::HistoryMemory,
+}
+
+#[wasm_bindgen]
+impl HistoryMemoryJs {
+    /// Estimated bytes only the undo and redo stacks hold.
+    pub fn bytes(&self) -> f64 {
+        self.inner.bytes as f64
+    }
+
+    /// The budget: the stacks are trimmed once they hold more than this.
+    pub fn budget_bytes(&self) -> f64 {
+        self.inner.budget.max_bytes as f64
+    }
+
+    /// The fewest undo steps a trim keeps.
+    pub fn min_steps(&self) -> u32 {
+        self.inner.budget.min_steps as u32
+    }
+
+    /// Undo steps on the stack.
+    pub fn undo_steps(&self) -> u32 {
+        self.inner.undo_steps as u32
+    }
+
+    /// Redo steps on the stack.
+    pub fn redo_steps(&self) -> u32 {
+        self.inner.redo_steps as u32
+    }
+
+    /// Undo steps trimmed since the document was created or opened.
+    pub fn trimmed_total(&self) -> f64 {
+        self.inner.trimmed_total as f64
+    }
+}
+
+/// One trim the undo-memory budget made (mirrors `kernel::HistoryTrim`),
+/// from [`Scene::take_history_trim`]: the app's status-bar note.
+#[wasm_bindgen]
+pub struct HistoryTrimJs {
+    inner: kernel::HistoryTrim,
+}
+
+#[wasm_bindgen]
+impl HistoryTrimJs {
+    /// The oldest undo steps the trim dropped.
+    pub fn dropped(&self) -> u32 {
+        self.inner.dropped as u32
+    }
+
+    /// The undo steps left.
+    pub fn kept(&self) -> u32 {
+        self.inner.kept as u32
     }
 }
 
@@ -2647,6 +2748,12 @@ pub struct Scene {
     next_draft_handle: u64,
     /// The open history bracket ([`Scene::history_bracket_open`]), if any.
     open_bracket: Option<kernel::DocTransaction>,
+    /// The undo-memory budget ([`Scene::set_history_budget`]), applied to
+    /// whatever document the scene holds.
+    history_budget: kernel::HistoryBudget,
+    /// The last trim the budget made and nobody has collected yet
+    /// ([`Scene::take_history_trim`]).
+    history_trim: Option<kernel::HistoryTrim>,
     /// The objects the last import created (Model Health's "Last import"
     /// scope); replaced by each import, kept across other edits.
     last_import_objects: Vec<ObjectId>,
@@ -2851,6 +2958,15 @@ impl Scene {
         }
 
         self.torture_self_check(change);
+
+        // The undo-memory budget (kernel `history_budget.rs`): between
+        // operations, so a trim never lands inside one. The kernel itself
+        // refuses inside an open bracket. The budget is re-applied each
+        // time because a load or New replaces the document.
+        self.doc.set_history_budget(self.history_budget);
+        if let Some(trim) = self.doc.enforce_history_budget() {
+            self.history_trim = Some(trim);
+        }
     }
 
     /// Torture-mode (docs/dev/DEVELOPMENT.md) re-tessellation self-check.
@@ -3226,6 +3342,8 @@ impl Scene {
             last_drained_tool: String::new(),
             open_draft: None,
             open_bracket: None,
+            history_budget: kernel::HistoryBudget::default(),
+            history_trim: None,
             next_draft_handle: 0,
             last_import_objects: Vec::new(),
             health_cache: std::collections::BTreeMap::new(),
@@ -5167,6 +5285,31 @@ impl Scene {
         group: Option<u64>,
     ) -> Result<u64, ApiError> {
         self.ensure_not_busy()?;
+        self.follow_me_along_edges_opts(
+            sketch,
+            region,
+            path_sketch,
+            path_edges,
+            stop_len,
+            group,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_along_edges`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_along_edges_opts(
+        &mut self,
+        sketch: u64,
+        region: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+        stop_len: Option<f64>,
+        group: Option<u64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let edges: Vec<SketchEdgeId> = path_edges
             .iter()
@@ -5178,26 +5321,30 @@ impl Scene {
         };
         let sid = sketch_id(sketch);
         let (id, change) = match group {
-            Some(g) => self.doc.follow_me_grouped(
+            Some(g) => self.doc.follow_me_grouped_with(
                 sid,
                 region_id,
                 &path,
                 stop_len,
                 GroupId::from(KeyData::from_ffi(g)),
+                opts,
             ),
-            None => match stop_len {
-                None => self.doc.follow_me(sid, region_id, &path),
-                Some(stop) => self.doc.follow_me_to(sid, region_id, &path, stop),
-            },
+            None => self
+                .doc
+                .follow_me_with(sid, region_id, &path, stop_len, opts),
         }
         .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeAlongEdges {
             sketch,
             region,
             path_sketch,
             path_edges,
             stop_len,
+            twist,
+            end_scale,
+            stations,
             group,
         });
         Ok(id.data().as_ffi())
@@ -5220,6 +5367,31 @@ impl Scene {
         group: Option<u64>,
     ) -> Result<u64, ApiError> {
         self.ensure_not_busy()?;
+        self.follow_me_around_face_opts(
+            sketch,
+            region,
+            path_object,
+            path_face,
+            stop_len,
+            group,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_around_face`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_around_face_opts(
+        &mut self,
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+        group: Option<u64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
@@ -5227,26 +5399,30 @@ impl Scene {
         };
         let sid = sketch_id(sketch);
         let (id, change) = match group {
-            Some(g) => self.doc.follow_me_grouped(
+            Some(g) => self.doc.follow_me_grouped_with(
                 sid,
                 region_id,
                 &path,
                 stop_len,
                 GroupId::from(KeyData::from_ffi(g)),
+                opts,
             ),
-            None => match stop_len {
-                None => self.doc.follow_me(sid, region_id, &path),
-                Some(stop) => self.doc.follow_me_to(sid, region_id, &path, stop),
-            },
+            None => self
+                .doc
+                .follow_me_with(sid, region_id, &path, stop_len, opts),
         }
         .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeAroundFace {
             sketch,
             region,
             path_object,
             path_face,
             stop_len,
+            twist,
+            end_scale,
+            stations,
             group,
         });
         Ok(id.data().as_ffi())
@@ -5267,6 +5443,29 @@ impl Scene {
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
         self.ensure_not_busy()?;
+        self.follow_me_merged_around_face_opts(
+            sketch,
+            region,
+            path_object,
+            path_face,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_merged_around_face`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_merged_around_face_opts(
+        &mut self,
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
@@ -5274,15 +5473,19 @@ impl Scene {
         };
         let (id, change) = self
             .doc
-            .follow_me_merged(sketch_id(sketch), region_id, &path, stop_len)
+            .follow_me_merged_with(sketch_id(sketch), region_id, &path, stop_len, opts)
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeMergedAroundFace {
             sketch,
             region,
             path_object,
             path_face,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -5301,6 +5504,29 @@ impl Scene {
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
         self.ensure_not_busy()?;
+        self.follow_me_face_along_edges_opts(
+            profile_object,
+            profile_face,
+            path_sketch,
+            path_edges,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_face_along_edges`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_face_along_edges_opts(
+        &mut self,
+        profile_object: u64,
+        profile_face: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let edges: Vec<SketchEdgeId> = path_edges
             .iter()
             .map(|&e| SketchEdgeId::from(KeyData::from_ffi(e)))
@@ -5311,20 +5537,25 @@ impl Scene {
         };
         let (id, change) = self
             .doc
-            .follow_me_face(
+            .follow_me_face_with(
                 object_id(profile_object),
                 FaceId::from(KeyData::from_ffi(profile_face)),
                 &path,
                 stop_len,
+                opts,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeFaceAlongEdges {
             profile_object,
             profile_face,
             path_sketch,
             path_edges,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -5341,26 +5572,54 @@ impl Scene {
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
         self.ensure_not_busy()?;
+        self.follow_me_face_around_face_opts(
+            profile_object,
+            profile_face,
+            path_object,
+            path_face,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_face_around_face`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_face_around_face_opts(
+        &mut self,
+        profile_object: u64,
+        profile_face: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
             face: FaceId::from(KeyData::from_ffi(path_face)),
         };
         let (id, change) = self
             .doc
-            .follow_me_face(
+            .follow_me_face_with(
                 object_id(profile_object),
                 FaceId::from(KeyData::from_ffi(profile_face)),
                 &path,
                 stop_len,
+                opts,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeFaceAroundFace {
             profile_object,
             profile_face,
             path_object,
             path_face,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -5419,6 +5678,31 @@ impl Scene {
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
         self.ensure_not_busy()?;
+        self.follow_me_around_instance_face_opts(
+            sketch,
+            region,
+            instance,
+            path_object,
+            path_face,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_around_instance_face`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_around_instance_face_opts(
+        &mut self,
+        sketch: u64,
+        region: u64,
+        instance: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::InstanceFaceLoop {
             instance: InstanceId::from(KeyData::from_ffi(instance)),
@@ -5426,12 +5710,12 @@ impl Scene {
             face: FaceId::from(KeyData::from_ffi(path_face)),
         };
         let sid = sketch_id(sketch);
-        let (id, change) = match stop_len {
-            None => self.doc.follow_me(sid, region_id, &path),
-            Some(stop) => self.doc.follow_me_to(sid, region_id, &path, stop),
-        }
-        .map_err(doc_err)?;
+        let (id, change) = self
+            .doc
+            .follow_me_with(sid, region_id, &path, stop_len, opts)
+            .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeAroundInstanceFace {
             sketch,
             region,
@@ -5439,6 +5723,9 @@ impl Scene {
             path_object,
             path_face,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -5464,6 +5751,31 @@ impl Scene {
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
         self.ensure_not_busy()?;
+        self.follow_me_along_edges_in_instance_opts(
+            instance,
+            sketch,
+            region,
+            path_sketch,
+            path_edges,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_along_edges_in_instance`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_along_edges_in_instance_opts(
+        &mut self,
+        instance: u64,
+        sketch: u64,
+        region: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let edges: Vec<SketchEdgeId> = path_edges
             .iter()
@@ -5475,15 +5787,17 @@ impl Scene {
         };
         let (id, change) = self
             .doc
-            .follow_me_in_instance(
+            .follow_me_in_instance_with(
                 instance_id(instance),
                 sketch_id(sketch),
                 region_id,
                 &path,
                 stop_len,
+                opts,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeAlongEdgesInInstance {
             instance,
             sketch,
@@ -5491,6 +5805,9 @@ impl Scene {
             path_sketch,
             path_edges,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -5509,6 +5826,31 @@ impl Scene {
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
         self.ensure_not_busy()?;
+        self.follow_me_around_face_in_instance_opts(
+            instance,
+            sketch,
+            region,
+            path_object,
+            path_face,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_around_face_in_instance`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_around_face_in_instance_opts(
+        &mut self,
+        instance: u64,
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
@@ -5516,15 +5858,17 @@ impl Scene {
         };
         let (id, change) = self
             .doc
-            .follow_me_in_instance(
+            .follow_me_in_instance_with(
                 instance_id(instance),
                 sketch_id(sketch),
                 region_id,
                 &path,
                 stop_len,
+                opts,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeAroundFaceInInstance {
             instance,
             sketch,
@@ -5532,6 +5876,9 @@ impl Scene {
             path_object,
             path_face,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -5550,6 +5897,31 @@ impl Scene {
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
         self.ensure_not_busy()?;
+        self.follow_me_merged_around_face_in_instance_opts(
+            instance,
+            sketch,
+            region,
+            path_object,
+            path_face,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_merged_around_face_in_instance`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_merged_around_face_in_instance_opts(
+        &mut self,
+        instance: u64,
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
@@ -5557,15 +5929,17 @@ impl Scene {
         };
         let (id, change) = self
             .doc
-            .follow_me_merged_in_instance(
+            .follow_me_merged_in_instance_with(
                 instance_id(instance),
                 sketch_id(sketch),
                 region_id,
                 &path,
                 stop_len,
+                opts,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(
             recording::RecordedCall::FollowMeMergedAroundFaceInInstance {
                 instance,
@@ -5574,6 +5948,9 @@ impl Scene {
                 path_object,
                 path_face,
                 stop_len,
+                twist,
+                end_scale,
+                stations,
             },
         );
         Ok(id.data().as_ffi())
@@ -5593,6 +5970,31 @@ impl Scene {
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
         self.ensure_not_busy()?;
+        self.follow_me_face_along_edges_in_instance_opts(
+            instance,
+            profile_object,
+            profile_face,
+            path_sketch,
+            path_edges,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_face_along_edges_in_instance`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_face_along_edges_in_instance_opts(
+        &mut self,
+        instance: u64,
+        profile_object: u64,
+        profile_face: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let edges: Vec<SketchEdgeId> = path_edges
             .iter()
             .map(|&e| SketchEdgeId::from(KeyData::from_ffi(e)))
@@ -5603,15 +6005,17 @@ impl Scene {
         };
         let (id, change) = self
             .doc
-            .follow_me_face_in_instance(
+            .follow_me_face_in_instance_with(
                 instance_id(instance),
                 object_id(profile_object),
                 FaceId::from(KeyData::from_ffi(profile_face)),
                 &path,
                 stop_len,
+                opts,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeFaceAlongEdgesInInstance {
             instance,
             profile_object,
@@ -5619,6 +6023,9 @@ impl Scene {
             path_sketch,
             path_edges,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -5637,21 +6044,48 @@ impl Scene {
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
         self.ensure_not_busy()?;
+        self.follow_me_face_around_face_in_instance_opts(
+            instance,
+            profile_object,
+            profile_face,
+            path_object,
+            path_face,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_face_around_face_in_instance`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_face_around_face_in_instance_opts(
+        &mut self,
+        instance: u64,
+        profile_object: u64,
+        profile_face: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
             face: FaceId::from(KeyData::from_ffi(path_face)),
         };
         let (id, change) = self
             .doc
-            .follow_me_face_in_instance(
+            .follow_me_face_in_instance_with(
                 instance_id(instance),
                 object_id(profile_object),
                 FaceId::from(KeyData::from_ffi(profile_face)),
                 &path,
                 stop_len,
+                opts,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeFaceAroundFaceInInstance {
             instance,
             profile_object,
@@ -5659,6 +6093,9 @@ impl Scene {
             path_object,
             path_face,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -8839,7 +9276,7 @@ impl Scene {
             .doc
             .object(id)
             .ok_or_else(|| stale("UnknownObject", "object"))?;
-        let mesh = tessellate(object, self.doc.materials()).map_err(|e| api_err(&e, &e))?;
+        let mesh = render_mesh(&self.doc, id, object).map_err(|e| api_err(&e, &e))?;
         self.face_range_cache.insert(id, mesh.face_ranges.clone());
         let watertight = object.watertight() == WatertightState::Watertight;
         Ok(MeshJs { mesh, watertight })
@@ -8921,6 +9358,28 @@ impl Scene {
             out.extend([p.x as f32, p.y as f32, p.z as f32]);
         }
         Ok(out)
+    }
+
+    /// How many holes `face` has (its inner loops). A Loft refuses a shape
+    /// with holes at the pick, for a solid face as for a drawn region.
+    pub fn face_hole_count(&self, object: u64, face: u64) -> u32 {
+        use slotmap::KeyData;
+        self.doc
+            .object(object_id(object))
+            .and_then(|o| o.faces().get(FaceId::from(KeyData::from_ffi(face))))
+            .map_or(0, |f| f.inner_loops.len() as u32)
+    }
+
+    /// How many holes a sketch region has, drawn free or on a solid's face
+    /// (0 for a stale id). The Loft tool's partner to [`Self::face_hole_count`].
+    pub fn region_hole_count(&self, sketch: u64, region: u64) -> u32 {
+        self.doc
+            .sketch(sketch_id(sketch))
+            .and_then(|s| {
+                s.regions()
+                    .get(SketchRegionId::from(KeyData::from_ffi(region)))
+            })
+            .map_or(0, |r| r.holes.len() as u32)
     }
 
     /// An Object face's outer-loop boundary as a flat `[x,y,z, x,y,z, …]` of
@@ -9122,6 +9581,35 @@ impl Scene {
         let face_id = FaceId::from(KeyData::from_ffi(face));
         let oid = object_id(object);
 
+        // A blend face resizes its blend; a face beside blends moves with
+        // them re-applied, falling back to the ordinary Push/Pull when they
+        // cannot be (WP08 §5). Replay routes the same way.
+        if let Some(obj) = self.doc.object(oid) {
+            let change = if obj.blend_of_face(face_id).is_some() {
+                Some(
+                    self.doc
+                        .push_pull_blend(oid, face_id, distance)
+                        .map_err(doc_err)?,
+                )
+            } else if obj.face_borders_blend(face_id) {
+                self.doc.push_pull_with_blends(oid, face_id, distance).ok()
+            } else {
+                None
+            };
+            if let Some(change) = change {
+                self.reconcile(&change);
+                recording::record(recording::RecordedCall::PushPull {
+                    object,
+                    face,
+                    distance,
+                });
+                return Ok(PushPullJs {
+                    inner: None,
+                    through: Vec::new(),
+                });
+            }
+        }
+
         // Through detection: an inward push past the opposite wall becomes
         // a subtract, an outward pull past a co-facing wall a union — not a
         // translate.
@@ -9263,6 +9751,48 @@ impl Scene {
     /// `Option<u32>` to `number | undefined`.
     pub fn saved_depth(&self) -> Option<u32> {
         self.doc.saved_depth().map(|d| d as u32)
+    }
+
+    /// What the undo and redo stacks hold, and the budget in force
+    /// (kernel `Document::history_memory`). Pure; O(objects + steps).
+    pub fn history_memory(&self) -> HistoryMemoryJs {
+        let mut memory = self.doc.history_memory();
+        memory.budget = self.history_budget;
+        HistoryMemoryJs { inner: memory }
+    }
+
+    /// Sets the undo-memory budget: once the stacks hold more than
+    /// `max_bytes` (an estimate), the oldest undo steps are dropped after
+    /// the next mutation, keeping at least `min_steps` (raised to 1). The
+    /// default is 1 GiB and 3 steps. Held by the scene, so it carries over
+    /// to every document the scene loads. Trims nothing by itself.
+    ///
+    /// # Errors
+    /// `BadHistoryBudget` when `max_bytes` is negative or not finite.
+    pub fn set_history_budget(&mut self, max_bytes: f64, min_steps: u32) -> Result<(), ApiError> {
+        if !max_bytes.is_finite() || max_bytes < 0.0 {
+            return Err(ApiError::new(
+                "BadHistoryBudget",
+                "the undo memory budget must be a finite number of bytes, zero or more",
+            ));
+        }
+        self.history_budget = kernel::HistoryBudget {
+            // Saturating: a budget past the address space is "no limit".
+            max_bytes: max_bytes as usize,
+            min_steps: (min_steps as usize).max(1),
+        };
+        self.doc.set_history_budget(self.history_budget);
+        Ok(())
+    }
+
+    /// The trim the undo-memory budget made since the last call, if any,
+    /// and forgets it: the app shows it once as a status-bar note ("Undo
+    /// history trimmed to save memory: 12 steps kept"). Several trims
+    /// between calls report the latest, whose `kept` is current.
+    pub fn take_history_trim(&mut self) -> Option<HistoryTrimJs> {
+        self.history_trim
+            .take()
+            .map(|inner| HistoryTrimJs { inner })
     }
 
     /// Every undo/redo entry with a human-readable label and origin, plus
@@ -10599,9 +11129,8 @@ impl Scene {
     pub fn face_mesh_range(&mut self, object: u64, face: u64) -> Option<Vec<u32>> {
         let id = object_id(object);
         if !self.face_range_cache.contains_key(id) {
-            let palette = self.doc.materials();
             let obj = self.doc.object(id)?;
-            let mesh = tessellate(obj, palette).ok()?;
+            let mesh = render_mesh(&self.doc, id, obj).ok()?;
             self.face_range_cache.insert(id, mesh.face_ranges);
         }
         let fid = FaceId::from(KeyData::from_ffi(face));
@@ -12714,8 +13243,15 @@ impl Scene {
         &self,
         format: &str,
         segments_per_turn: u32,
+        cages: Option<bool>,
     ) -> Result<Option<Vec<u8>>, ApiError> {
-        match mesh_export::export(&self.doc, format, segments_per_turn, false) {
+        match mesh_export::export(
+            &self.doc,
+            format,
+            segments_per_turn,
+            false,
+            cages.unwrap_or(false),
+        ) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(mesh_export::ExportError::NothingToExport) => Ok(None),
             Err(e) => Err(ApiError::new(e.name(), &e.message())),
@@ -12916,15 +13452,19 @@ impl Scene {
                     path_sketch,
                     path_edges,
                     stop_len,
+                    twist,
+                    end_scale,
+                    stations,
                     group,
                 } => {
-                    self.follow_me_along_edges(
+                    self.follow_me_along_edges_opts(
                         sketch,
                         region,
                         path_sketch,
                         path_edges,
                         stop_len,
                         group,
+                        recording::sweep_from(twist, end_scale, stations),
                     )?;
                 }
                 FollowMeAroundFace {
@@ -12933,15 +13473,19 @@ impl Scene {
                     path_object,
                     path_face,
                     stop_len,
+                    twist,
+                    end_scale,
+                    stations,
                     group,
                 } => {
-                    self.follow_me_around_face(
+                    self.follow_me_around_face_opts(
                         sketch,
                         region,
                         path_object,
                         path_face,
                         stop_len,
                         group,
+                        recording::sweep_from(twist, end_scale, stations),
                     )?;
                 }
                 FollowMeAroundInstanceFace {
@@ -12951,14 +13495,18 @@ impl Scene {
                     path_object,
                     path_face,
                     stop_len,
+                    twist,
+                    end_scale,
+                    stations,
                 } => {
-                    self.follow_me_around_instance_face(
+                    self.follow_me_around_instance_face_opts(
                         sketch,
                         region,
                         instance,
                         path_object,
                         path_face,
                         stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
                     )?;
                 }
                 FollowMeMergedAroundFace {
@@ -12967,13 +13515,17 @@ impl Scene {
                     path_object,
                     path_face,
                     stop_len,
+                    twist,
+                    end_scale,
+                    stations,
                 } => {
-                    self.follow_me_merged_around_face(
+                    self.follow_me_merged_around_face_opts(
                         sketch,
                         region,
                         path_object,
                         path_face,
                         stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
                     )?;
                 }
                 FollowMeFaceAlongEdges {
@@ -12982,13 +13534,17 @@ impl Scene {
                     path_sketch,
                     path_edges,
                     stop_len,
+                    twist,
+                    end_scale,
+                    stations,
                 } => {
-                    self.follow_me_face_along_edges(
+                    self.follow_me_face_along_edges_opts(
                         profile_object,
                         profile_face,
                         path_sketch,
                         path_edges,
                         stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
                     )?;
                 }
                 FollowMeFaceAroundFace {
@@ -12997,13 +13553,17 @@ impl Scene {
                     path_object,
                     path_face,
                     stop_len,
+                    twist,
+                    end_scale,
+                    stations,
                 } => {
-                    self.follow_me_face_around_face(
+                    self.follow_me_face_around_face_opts(
                         profile_object,
                         profile_face,
                         path_object,
                         path_face,
                         stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
                     )?;
                 }
                 SketchOffsetRegion {
@@ -13711,14 +14271,18 @@ impl Scene {
                     path_sketch,
                     path_edges,
                     stop_len,
+                    twist,
+                    end_scale,
+                    stations,
                 } => {
-                    self.follow_me_along_edges_in_instance(
+                    self.follow_me_along_edges_in_instance_opts(
                         instance,
                         sketch,
                         region,
                         path_sketch,
                         path_edges,
                         stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
                     )?;
                 }
                 FollowMeAroundFaceInInstance {
@@ -13728,14 +14292,18 @@ impl Scene {
                     path_object,
                     path_face,
                     stop_len,
+                    twist,
+                    end_scale,
+                    stations,
                 } => {
-                    self.follow_me_around_face_in_instance(
+                    self.follow_me_around_face_in_instance_opts(
                         instance,
                         sketch,
                         region,
                         path_object,
                         path_face,
                         stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
                     )?;
                 }
                 FollowMeMergedAroundFaceInInstance {
@@ -13745,14 +14313,18 @@ impl Scene {
                     path_object,
                     path_face,
                     stop_len,
+                    twist,
+                    end_scale,
+                    stations,
                 } => {
-                    self.follow_me_merged_around_face_in_instance(
+                    self.follow_me_merged_around_face_in_instance_opts(
                         instance,
                         sketch,
                         region,
                         path_object,
                         path_face,
                         stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
                     )?;
                 }
                 FollowMeFaceAlongEdgesInInstance {
@@ -13762,14 +14334,18 @@ impl Scene {
                     path_sketch,
                     path_edges,
                     stop_len,
+                    twist,
+                    end_scale,
+                    stations,
                 } => {
-                    self.follow_me_face_along_edges_in_instance(
+                    self.follow_me_face_along_edges_in_instance_opts(
                         instance,
                         profile_object,
                         profile_face,
                         path_sketch,
                         path_edges,
                         stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
                     )?;
                 }
                 FollowMeFaceAroundFaceInInstance {
@@ -13779,14 +14355,18 @@ impl Scene {
                     path_object,
                     path_face,
                     stop_len,
+                    twist,
+                    end_scale,
+                    stations,
                 } => {
-                    self.follow_me_face_around_face_in_instance(
+                    self.follow_me_face_around_face_in_instance_opts(
                         instance,
                         profile_object,
                         profile_face,
                         path_object,
                         path_face,
                         stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
                     )?;
                 }
                 BooleanInComponent {
@@ -14017,6 +14597,133 @@ impl Scene {
                 DeleteSelection { kinds, ids } => {
                     self.delete_selection(&kinds, &ids)?;
                 }
+                Shell { object, spec } => {
+                    self.shell(object, &spec)?;
+                }
+                ProjectImprint {
+                    object,
+                    sketch,
+                    regions,
+                } => {
+                    self.project_imprint(object, sketch, &regions)?;
+                }
+                ProjectDepth {
+                    object,
+                    sketch,
+                    faces,
+                    depth,
+                    mode,
+                } => {
+                    self.project_depth(object, sketch, &faces, depth, mode)?;
+                }
+                // ==== end true-curves: offset ====
+                // ==== true-curves: smooth ====
+                SetSmoothLevel { object, level } => {
+                    self.set_smooth_level(object, level)?;
+                }
+                SetCrease {
+                    object,
+                    edges,
+                    crease,
+                } => {
+                    self.set_crease(object, &edges, crease)?;
+                }
+                Bake { object } => {
+                    self.bake(object)?;
+                }
+                // ==== end true-curves: smooth ====
+                // ==== true-curves: imports ====
+                SoftenByAngle { object, max_angle } => {
+                    self.soften_by_angle(object, max_angle)?;
+                }
+                // ==== end true-curves: imports ====
+                DraftBlendCorner { draft, at, profile } => {
+                    self.draft_blend_corner(draft, at[0], at[1], at[2], &profile)?;
+                }
+                SketchBlendCorner {
+                    sketch,
+                    vertex,
+                    profile,
+                } => {
+                    self.sketch_blend_corner(sketch, vertex, &profile)?;
+                }
+                PaintLogicalFace {
+                    object,
+                    face,
+                    material,
+                } => {
+                    self.paint_logical_face(object, face, material)?;
+                }
+                BlendEdges { object, spec } => {
+                    self.blend_edges(object, &spec)?;
+                }
+                BlendEdgesInComponent {
+                    instance,
+                    object,
+                    spec,
+                } => {
+                    self.blend_edges_in_component(instance, object, &spec)?;
+                }
+                ResizeBlend {
+                    object,
+                    blend,
+                    profile,
+                } => {
+                    self.resize_blend(object, blend, &profile)?;
+                }
+                ResizeBlendInComponent {
+                    instance,
+                    object,
+                    blend,
+                    profile,
+                } => {
+                    self.resize_blend_in_component(instance, object, blend, &profile)?;
+                }
+                RemoveBlend { object, blend } => {
+                    self.remove_blend(object, blend)?;
+                }
+                RemoveBlendInComponent {
+                    instance,
+                    object,
+                    blend,
+                } => {
+                    self.remove_blend_in_component(instance, object, blend)?;
+                }
+                // ==== end true-curves: blend ====
+                // ==== true-curves: shapes ====
+                Revolve { profile, spec } => {
+                    self.revolve(&profile, &spec)?;
+                }
+                RevolveInInstance {
+                    instance,
+                    object,
+                    face,
+                    spec,
+                } => {
+                    self.revolve_in_instance(instance, object, face, &spec)?;
+                }
+                Deform { object, spec } => {
+                    self.deform(object, &spec)?;
+                }
+                Loft { spec } => {
+                    self.loft(&spec)?;
+                }
+                ArrayAlongPath {
+                    kinds,
+                    ids,
+                    path,
+                    count,
+                    scale_from,
+                    scale_to,
+                    align,
+                } => {
+                    self.array_along_path(&kinds, &ids, &path, count, scale_from, scale_to, align)?;
+                }
+                // ==== end true-curves: shapes ====
+                // ==== true-curves: smooth ====
+                // ==== end true-curves: smooth ====
+                // ==== true-curves: imports ====
+                // ==== end true-curves: imports ====
                 ReparentNodes { kinds, ids, group } => {
                     self.reparent_nodes(&kinds, &ids, group)?;
                 }
@@ -14744,10 +15451,10 @@ mod tests {
         scene.extrude_region(sketch, region, 1.0).unwrap();
 
         let bytes = scene
-            .export("stl", 0)
+            .export("stl", 0, None)
             .expect("a solid box exports")
             .expect("bytes come back, not a nothing-to-export null");
-        let direct = mesh_export::export(&scene.doc, "stl", 0, false)
+        let direct = mesh_export::export(&scene.doc, "stl", 0, false, false)
             .expect("the same writer, called directly with the same solids_only");
         assert_eq!(
             bytes, direct,
@@ -14757,20 +15464,20 @@ mod tests {
         // USDZ reaches the same shared writer too — the newest format on
         // the same dispatch match arm.
         let usdz_bytes = scene
-            .export("usdz", 0)
+            .export("usdz", 0, None)
             .expect("a solid box exports to usdz")
             .expect("bytes come back, not a nothing-to-export null");
-        let usdz_direct = mesh_export::export(&scene.doc, "usdz", 0, false)
+        let usdz_direct = mesh_export::export(&scene.doc, "usdz", 0, false, false)
             .expect("the same writer, called directly with the same solids_only");
         assert_eq!(usdz_bytes, usdz_direct);
 
         // An unrecognized format still refuses, typed.
-        let err = scene.export("obj", 0).unwrap_err();
+        let err = scene.export("obj", 0, None).unwrap_err();
         assert!(format!("{err:?}").contains("host_capability_missing"));
 
         // Nothing at all: None, not a refusal.
         let empty = Scene::new();
-        assert_eq!(empty.export("stl", 0).unwrap(), None);
+        assert_eq!(empty.export("stl", 0, None).unwrap(), None);
     }
 
     /// Move+Alt's sketch copy is a translated replay through the drawing
@@ -15852,6 +16559,386 @@ mod tests {
         // Saved in the document too.
         let reloaded = kernel::Document::load(&scene.save()).unwrap();
         assert_eq!(reloaded.scenes()[0].transition_s, Some(1.5));
+    }
+
+    /// The 2D corner blends record and replay: a world sketch corner and a
+    /// drafted face corner, replayed into a fresh scene, reproduce the
+    /// golden state hash and the saved bytes. Also pins the hover queries
+    /// and the typed refusals at the boundary.
+    #[test]
+    fn corner_blends_record_and_replay() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        // A world sketch corner.
+        let (sketch, _region) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        let hit = scene
+            .pick_sketch_vertex(5.0, 0.0, 5.0, 0.0, 0.0, -1.0)
+            .expect("a vertex sits under the corner");
+        let corner = scene
+            .sketch_blendable_corner_at(sketch, 5.01, 0.01, 0.0, 0.1)
+            .unwrap()
+            .expect("the corner is blendable");
+        assert_eq!(corner, hit.vertex());
+        assert_eq!(
+            scene
+                .sketch_blendable_corner_at(sketch, 50.0, 0.0, 0.0, 0.1)
+                .unwrap(),
+            None
+        );
+        let round = r#"{"kind":"round","radius":0.2,"segments":6}"#;
+        let err = scene
+            .sketch_blend_corner(
+                sketch,
+                corner,
+                r#"{"kind":"round","radius":9.0,"segments":6}"#,
+            )
+            .unwrap_err();
+        assert!(err.0.starts_with("CornerRadiusTooLarge:"), "{}", err.0);
+        let err = scene.sketch_blend_corner(sketch, corner, "{").unwrap_err();
+        assert!(err.0.starts_with("BadSpec:"), "{}", err.0);
+        scene.sketch_blend_corner(sketch, corner, round).unwrap();
+        assert_eq!(
+            scene
+                .sketch_blendable_corner_at(sketch, 5.0, 0.0, 0.0, 0.1)
+                .unwrap(),
+            None,
+            "the rounded corner is gone"
+        );
+
+        // A drafted corner on a box top.
+        let (s1, r1) = ground_unit_square(&mut scene);
+        scene.extrude_region(s1, r1, 1.0).unwrap();
+        let ctx = r#"{"plane":[0,0,1,0,0,1]}"#;
+        assert_eq!(
+            scene
+                .draft_blendable_corner_at(ctx, 0.0, 0.0, 1.0, 0.1)
+                .unwrap(),
+            None,
+            "the solid's own corners never blend"
+        );
+        let draft = scene
+            .draft_begin_plane(0.0, 0.0, 1.0, 0.0, 0.0, 1.0, "Round corner")
+            .unwrap();
+        let pts = [(0.2, 0.2), (0.7, 0.2), (0.7, 0.7), (0.2, 0.7)];
+        for i in 0..4 {
+            let (a, b) = (pts[i], pts[(i + 1) % 4]);
+            scene
+                .draft_add_segment(draft, a.0, a.1, 1.0, b.0, b.1, 1.0)
+                .unwrap();
+        }
+        let err = scene
+            .draft_blend_corner(draft, 0.9, 0.9, 1.0, round)
+            .unwrap_err();
+        assert!(err.0.starts_with("UnknownVertex:"), "{}", err.0);
+        scene
+            .draft_blend_corner(draft, 0.7, 0.7, 1.0, round)
+            .unwrap();
+        scene.draft_end(draft).unwrap();
+        let near = scene
+            .draft_blendable_corner_at(ctx, 0.21, 0.19, 1.0, 0.1)
+            .unwrap()
+            .expect("the imprint's other corner is blendable");
+        assert!((near[0] - 0.2).abs() < 1e-9 && (near[1] - 0.2).abs() < 1e-9);
+
+        // A drafted corner in the face's own corner leaves the face.
+        let draft = scene
+            .draft_begin_plane(0.0, 0.0, 1.0, 0.0, 0.0, 1.0, "Round corner")
+            .unwrap();
+        for (a, b) in [
+            ((0.0, 0.0), (0.4, 0.0)),
+            ((0.4, 0.0), (0.4, 0.4)),
+            ((0.4, 0.4), (0.0, 0.4)),
+            ((0.0, 0.4), (0.0, 0.0)),
+        ] {
+            scene
+                .draft_add_segment(draft, a.0, a.1, 1.0, b.0, b.1, 1.0)
+                .unwrap();
+        }
+        let err = scene
+            .draft_blend_corner(draft, 0.0, 0.0, 1.0, round)
+            .unwrap_err();
+        assert!(err.0.starts_with("CornerLeavesFace:"), "{}", err.0);
+        assert!(scene.draft_cancel(draft).unwrap());
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("SketchBlendCorner") || json.contains("sketch_blend_corner"));
+        assert!(json.contains("DraftBlendCorner") || json.contains("draft_blend_corner"));
+
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save());
+
+        // One undo takes the drafted corner back out; another the sketch's.
+        scene.scene_undo().unwrap();
+    }
+
+    /// The Fillet tool's wasm surface end to end: pick an edge, expand it,
+    /// preview, clamp, commit, resize, remove; then the recording replays
+    /// into a fresh scene with the same state hash and saved bytes.
+    #[test]
+    fn blend_calls_record_and_replay() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(s, r, 1.0).unwrap();
+
+        // A ray onto the top face near its y = 0 edge picks that edge.
+        let pick = scene
+            .pick_solid_edge(0.5, 0.02, 10.0, 0.0, 0.0, -1.0, 0.05)
+            .unwrap()
+            .expect("the top edge is in range");
+        assert_eq!(pick.object(), obj);
+        assert!(!pick.smooth());
+        assert!((pick.z() - 1.0).abs() < 1e-9);
+        // Out of range, nothing.
+        assert!(
+            scene
+                .pick_solid_edge(0.5, 0.5, 10.0, 0.0, 0.0, -1.0, 0.05)
+                .unwrap()
+                .is_none()
+        );
+        let chain = scene.logical_edge(obj, pick.edge(), true).unwrap();
+        assert_eq!(chain.edges(), vec![pick.edge()]);
+        assert_eq!(chain.segments().len(), 6);
+        assert_eq!(chain.convexity(), 0);
+        assert!(!chain.closed());
+        assert!((chain.dihedral() - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+        let face = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
+        let ring = scene
+            .face_loop_edges(obj, face.face(), 0.5, 0.02, 1.0)
+            .unwrap();
+        assert_eq!(ring.edges().len(), 4);
+        assert!(ring.closed());
+        assert_eq!(scene.object_sharp_edges(obj).unwrap().len(), 12);
+        assert_eq!(scene.edge_faces(obj, pick.edge()).unwrap().len(), 2);
+        assert_eq!(
+            scene.objects_touching_point(0.5, 0.5, 1.0, 1e-6).unwrap(),
+            vec![obj]
+        );
+
+        let spec = |radius: f64| {
+            format!(
+                r#"{{"edges":["{}"],"profile":{{"kind":"round","radius":{radius},"segments":6}}}}"#,
+                pick.edge()
+            )
+        };
+        let max = scene.max_blend_size(obj, &spec(5.0)).unwrap();
+        assert!(max > 0.4 && max < 5.0, "{max}");
+
+        // A preview is pure and clamps an oversize request.
+        let preview = scene.blend_preview(obj, &spec(0.1)).unwrap();
+        assert!(!preview.clamped());
+        assert!((preview.applied_size() - 0.1).abs() < 1e-12);
+        assert!(!preview.replaced_faces().is_empty());
+        assert!(!preview.indices().is_empty());
+        assert!(!preview.rail_positions().is_empty());
+        assert_eq!(preview.three_way_corners(), 0);
+        // A typed size previews as the commit makes it: here, as the
+        // pointer preview does.
+        let typed = scene.blend_preview_typed(obj, &spec(0.1)).unwrap();
+        assert!(!typed.clamped());
+        assert!((typed.applied_size() - 0.1).abs() < 1e-12);
+        assert_eq!(typed.indices(), preview.indices());
+        assert_eq!(typed.replaced_faces(), preview.replaced_faces());
+        // The same clamp past the limit, and the same refusals.
+        let (q, t) = (
+            scene.blend_preview(obj, &spec(5.0)).unwrap(),
+            scene.blend_preview_typed(obj, &spec(5.0)).unwrap(),
+        );
+        assert!(t.clamped());
+        assert_eq!(t.max_size(), q.max_size());
+        assert_eq!(t.limited_by(), q.limited_by());
+        assert_eq!(t.indices(), q.indices());
+        for (o, json) in [(obj, "{".to_owned()), (obj + 999, spec(0.1))] {
+            let code = |e: ApiError| e.0.split(':').next().unwrap_or("").to_owned();
+            let quick = scene.blend_preview(o, &json).map(|_| ()).unwrap_err();
+            let typed = scene.blend_preview_typed(o, &json).map(|_| ()).unwrap_err();
+            assert_eq!(code(typed), code(quick), "{json}");
+        }
+        let big = scene.blend_preview(obj, &spec(5.0)).unwrap();
+        assert!(big.clamped());
+        assert!(big.max_size().is_finite() && big.max_size() < 5.0);
+        assert!(!big.limited_by().is_empty());
+        let err = scene.blend_edges(obj, &spec(5.0)).unwrap_err();
+        assert!(err.0.starts_with("RadiusTooLarge:"), "{}", err.0);
+        let err = scene.blend_edges(obj, "{").unwrap_err();
+        assert!(err.0.starts_with("BadSpec:"), "{}", err.0);
+
+        let hash_before = scene.state_hash();
+        let report = scene.blend_edges(obj, &spec(0.1)).unwrap();
+        assert_eq!(report.blend_ids().len(), 1);
+        assert!(!report.faces().is_empty());
+        assert!((report.size() - 0.1).abs() < 1e-12);
+        let blend = report.blend_ids()[0];
+        assert_eq!(scene.blend_faces(obj, blend).len(), report.faces().len());
+        assert_eq!(scene.blend_of_face(obj, report.faces()[0]), Some(blend));
+        let features = scene.blend_features_json(obj).unwrap();
+        assert!(features.contains("\"fillet\""), "{features}");
+
+        let resized = scene
+            .resize_blend_preview(obj, blend, r#"{"kind":"round","radius":0.2,"segments":6}"#)
+            .unwrap();
+        assert!((resized.applied_size() - 0.2).abs() < 1e-12);
+        scene
+            .resize_blend(obj, blend, r#"{"kind":"round","radius":0.2,"segments":6}"#)
+            .unwrap();
+        let blend = scene.blend_features_json(obj).unwrap();
+        let id: u32 = serde_json::from_str::<serde_json::Value>(&blend).unwrap()[0]["id"]
+            .as_u64()
+            .unwrap() as u32;
+        scene.remove_blend(obj, id).unwrap();
+        let err = scene.remove_blend(obj, id).unwrap_err();
+        assert!(err.0.starts_with("UnknownBlend:"), "{}", err.0);
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        for name in ["blend_edges", "resize_blend", "remove_blend"] {
+            assert!(json.contains(name), "{name} in the recording");
+        }
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save());
+        // Undo goes back through remove, resize, commit.
+        for _ in 0..3 {
+            scene.scene_undo().unwrap();
+        }
+        assert_eq!(scene.state_hash(), hash_before);
+    }
+
+    /// Profile items across the boundary: the bundled list, an item built
+    /// from a bundled id and read back, a thumbnail PNG, and an item built
+    /// from a drawn chain.
+    #[test]
+    fn profile_items_round_trip_through_the_boundary() {
+        use crate::curves_api::{
+            bundled_profiles_json, profile_item_bytes_from_bundled, profile_shape_from_item,
+            render_profile_thumbnail,
+        };
+        let list: serde_json::Value = serde_json::from_str(&bundled_profiles_json()).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 7);
+        assert_eq!(list[0]["id"], "builtin:ogee");
+        let meta = r#"{"id":"abc","name":"Ogee copy","category":"profile"}"#;
+        let bytes = profile_item_bytes_from_bundled("builtin:ogee", meta).unwrap();
+        let back: serde_json::Value =
+            serde_json::from_str(&profile_shape_from_item(&bytes).unwrap()).unwrap();
+        assert!((back["width"].as_f64().unwrap() - 0.05).abs() < 1e-9);
+        assert_eq!(back["shape"]["b"], list[0]["shape"]["b"]);
+        assert!(
+            profile_item_bytes_from_bundled("builtin:nope", meta)
+                .unwrap_err()
+                .0
+                .starts_with("UnknownProfile:")
+        );
+        // Bytes that are not a profile are refused typed.
+        let mut scene = Scene::new();
+        let (_s, _r) = ground_unit_square(&mut scene);
+        let model = scene.save();
+        assert!(
+            profile_shape_from_item(&model)
+                .unwrap_err()
+                .0
+                .starts_with("InvalidProfile:")
+        );
+
+        let png = render_profile_thumbnail(&list[0]["shape"].to_string(), 64).unwrap();
+        assert_eq!(&png[..4], &[0x89, b'P', b'N', b'G']);
+        assert!(
+            render_profile_thumbnail("{", 64)
+                .unwrap_err()
+                .0
+                .starts_with("BadSpec:")
+        );
+
+        // A drawn chain: two segments in the ground plane.
+        let sketch = scene.begin_ground_sketch().unwrap();
+        for (a, b) in [((0.0, 0.05), (-0.02, 0.02)), ((-0.02, 0.02), (-0.05, 0.0))] {
+            scene
+                .sketch_add_segment(sketch, a.0 + 5.0, a.1, 0.0, b.0 + 5.0, b.1, 0.0)
+                .unwrap();
+        }
+        let edges = scene.sketch_edge_list(sketch).unwrap();
+        assert_eq!(edges.len(), 2);
+        let item = scene
+            .profile_item_bytes_from_chain(sketch, edges.clone(), meta)
+            .unwrap();
+        let read: serde_json::Value =
+            serde_json::from_str(&profile_shape_from_item(&item).unwrap()).unwrap();
+        assert!((read["width"].as_f64().unwrap() - 0.05).abs() < 1e-9);
+        // The same chain as a polyline (a chain drawn on a face).
+        let poly = crate::curves_api::profile_item_bytes_from_polyline(
+            vec![0.0, 0.0, 1.0],
+            vec![5.0, 0.05, 0.0, 4.98, 0.02, 0.0, 4.95, 0.0, 0.0],
+            vec![0.0; 6],
+            vec![f64::NAN, f64::NAN],
+            meta,
+        )
+        .unwrap();
+        let read2: serde_json::Value =
+            serde_json::from_str(&profile_shape_from_item(&poly).unwrap()).unwrap();
+        assert_eq!(read2["shape"], read["shape"]);
+        assert!(
+            scene
+                .profile_item_bytes_from_chain(sketch, vec![], meta)
+                .unwrap_err()
+                .0
+                .starts_with("InvalidProfile:")
+        );
+    }
+
+    /// Array along a path records its call (path JSON verbatim) and replays
+    /// into a fresh scene to the same state hash; the preview placements
+    /// match the committed copies and never record.
+    #[test]
+    fn array_along_path_records_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let path_sketch = scene.begin_ground_sketch().unwrap();
+        let report = scene
+            .sketch_add_segment(path_sketch, 0.0, -2.0, 0.0, 4.0, -2.0, 0.0)
+            .unwrap();
+        let edge = report.inner.new_edges[0].data().as_ffi();
+        let path =
+            format!(r#"{{"kind":"sketch_edges","sketch":{path_sketch},"edges":["{edge}"]}}"#);
+
+        let preview = scene
+            .array_along_path_preview_transforms(&path, 4, 1.0, 0.5, true)
+            .unwrap();
+        assert_eq!(preview.len(), 36, "12 floats per copy");
+        let roots = scene
+            .array_along_path(&[0], &[o], &path, 4, 1.0, 0.5, true)
+            .unwrap();
+        assert_eq!(roots.len(), 3);
+        assert_eq!(scene.object_ids().len(), 4);
+
+        let err = scene
+            .array_along_path(&[0], &[o], &path, 1, 1.0, 1.0, true)
+            .unwrap_err();
+        assert!(err.0.starts_with("AmountOutOfRange"), "got {}", err.0);
+        let err = scene
+            .array_along_path(&[0], &[o], "{", 3, 1.0, 1.0, true)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadSpec"), "got {}", err.0);
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert_eq!(
+            json.matches("array_along_path").count(),
+            1,
+            "only the committed call was recorded"
+        );
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save());
     }
 
     /// A library insert is a committed document mutation: it must be
@@ -17216,6 +18303,55 @@ mod tests {
             g3,
             "view-state toggles leave the generation untouched"
         );
+    }
+
+    /// The undo-memory budget crosses the FFI: a bad budget is refused
+    /// typed, the default trims nothing on an ordinary model, and a budget
+    /// of zero trims after the next mutation down to `min_steps`, reporting
+    /// the trim once.
+    #[test]
+    fn history_budget_crosses_the_ffi() {
+        let mut scene = Scene::new();
+        assert!(
+            scene
+                .set_history_budget(f64::NAN, 1)
+                .unwrap_err()
+                .0
+                .starts_with("BadHistoryBudget")
+        );
+        assert!(scene.set_history_budget(-1.0, 1).is_err());
+        let m = scene.history_memory();
+        assert_eq!(m.budget_bytes(), (1u64 << 30) as f64);
+        assert_eq!(m.min_steps(), 3);
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let shift = [1.0, 0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        for _ in 0..4 {
+            scene.transform_object(o, &shift).unwrap();
+        }
+        assert!(
+            scene.take_history_trim().is_none(),
+            "an ordinary model never trims"
+        );
+        scene.set_history_budget(0.0, 2).unwrap();
+        let generation = scene.history_generation();
+        scene.transform_object(o, &shift).unwrap();
+        let trim = scene.take_history_trim().expect("over a zero budget");
+        assert_eq!(trim.kept(), 2);
+        assert!(trim.dropped() > 0);
+        assert!(scene.take_history_trim().is_none(), "reported once");
+        assert_eq!(scene.undo_depth(), 2);
+        assert_eq!(
+            scene.history_generation(),
+            generation + 1,
+            "only the Move counts"
+        );
+        let m = scene.history_memory();
+        assert_eq!(
+            (m.undo_steps(), m.min_steps(), m.budget_bytes()),
+            (2, 2, 0.0)
+        );
+        assert_eq!(m.trimmed_total(), f64::from(trim.dropped()));
     }
 
     /// The saved mark round-trips across the FFI exactly as `kernel`'s own
@@ -18949,6 +20085,25 @@ mod tests {
 
         // Stale object/face reads back undefined, not a stale range.
         assert_eq!(scene.face_mesh_range(u64::MAX, face), None);
+    }
+
+    /// A smoothed Object draws its Smooth surface, so a face range asked for
+    /// on a cold cache indexes that mesh, not the cage's.
+    #[test]
+    fn face_mesh_range_of_a_smoothed_object_indexes_the_smooth_mesh() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
+        let face = pick.face();
+        scene.set_smooth_level(a, 2).unwrap();
+
+        scene.object_mesh(a).unwrap();
+        let warm = scene.face_mesh_range(a, face).expect("live face");
+        scene.face_range_cache.clear();
+        let cold = scene.face_mesh_range(a, face).expect("live face");
+        assert_eq!(cold, warm, "the cold-cache range is the drawn mesh's");
+        assert!(cold[1] > 6, "a smoothed face spans more than its cage quad");
     }
 
     /// A session co-authored by the user and an agent — UI gestures

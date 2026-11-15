@@ -101,7 +101,7 @@ fn a_submicrometer_cube_keeps_all_of_its_facets_and_closes() {
     // about 4e-13 mm^4, under the retired 1e-12 gate that dropped them.
     let side = 8e-7;
     let doc = cube(side);
-    let bytes = mesh_export::export_stl(&doc, 0, true).unwrap();
+    let bytes = mesh_export::export_stl(&doc, 0, true, false).unwrap();
     let (count, volume_mm3, edges) = decode(&bytes);
     assert_eq!(count, 12, "a box is twelve triangles; none are dropped");
     for ((a, b), uses) in &edges {
@@ -127,7 +127,7 @@ fn a_cube_pushed_past_f32_millimeter_resolution_is_refused_whole() {
         &kernel::Transform::translation(kernel::Vec3::new(100_000.0, 100_000.0, 100_000.0)),
     )
     .unwrap();
-    let err = mesh_export::export_stl(&doc, 0, true).unwrap_err();
+    let err = mesh_export::export_stl(&doc, 0, true, false).unwrap_err();
     assert_eq!(err.name(), "export_failed");
     assert!(err.message().contains("No file was produced"));
 }

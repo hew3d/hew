@@ -574,6 +574,22 @@ or edge take a **locator** instead — the API's equivalent of pointing:
   documents (§5.4). Tokens are transaction-scoped and expire with it;
   they are ergonomics, not identity.
 
+**Edge sets.** Commands that blend edges (`hew.solid.fillet`,
+`hew.solid.chamfer`) take `edges`, an array of edge-set locators, all on
+one object (else `edges_span_objects`). Besides `{object, at}` (the
+nearest solid edge) each entry may be:
+
+- `{"object": "obj_5f3a", "from": [x, y, z], "to": [x, y, z]}`: the edge
+  whose endpoints match the two points, in either order;
+- `{"face": <face locator>}`: every sharp edge of that face's outer
+  loop; add `"loop_near": [x, y, z]` to take the loop (outer, or a
+  hole) nearest the point instead;
+- `{"object": "obj_5f3a", "all": true}`: every sharp edge of the object.
+
+Each located edge is then extended along the chain a click on it would
+take, unless the command says `"propagate": "none"` (the default is
+`"tangent"`).
+
 Additional predicate locators (e.g. "the face with normal +Z of greatest
 area") are *Reserved*: the shapes above are sufficient for the first
 release, and predicates can be added additively.
@@ -1020,9 +1036,11 @@ for, not shipped.
 | `hew.doc` | `attach` (to a named document, §4.2), `transact`, `new`, `open` (the desktop app opens each into a new background window), `close`, `focus` (desktop app windows; `app` profile), `save`, `export` (STL/3MF/glTF/USDZ), `import` (foreign formats), `purge_unused` (delete every unused palette material and component definition, one undo entry), `health` (every open object with its verdict, open rims and seam family) | Required (`import`, `purge_unused`, `health`, `close`, `focus` Standard) |
 | `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack as `stack`, the app's in-context entries as `fallback`, whether a tool gesture is armed as `armed`; headless: `fallback: []`, `armed: false`), `changes_since` (what changed since a history generation, §4.5), `occurrences`, `part_frame`, `signature` (same part or mirrored twin), `mesh`, `topology` (§7.4) | Required (`changes_since`, `occurrences`, `part_frame`, `signature`, `mesh`, `topology` Standard) |
 | `hew.sketch` | `draw_line`, `draw_rect`, `draw_circle`, `draw_arc`, `draw_polygon`, `offset` (a sketch region, or a face/plane region by unit key), `units` (list a plane's drawing as units), `move`, `rotate`, `scale`, `copy`, `delete` (edit units on a plane) | Required (`units`, `move`, `rotate`, `scale`, `copy`, `delete` Standard) |
-| `hew.solid` | `extrude` (region → new Object; also a plane region by unit key), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice` (`subtract`, `slice`, and `push_pull` also on a definition member through a path, below), `follow_me`, `imprints` (list an object's drawn shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one; kept for compatibility, implemented over plane units, with `hew.sketch.units`/`move`/... as the general form), `cap`, `delete_faces`, `mark_surface`, `thicken` (repair open objects, see below), `from_faces` (Make Solid on drawn faces) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint`, the repair commands and `from_faces` Standard) |
+| `hew.solid` | `extrude` (region → new Object; also a plane region by unit key), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice` (`subtract`, `slice`, and `push_pull` also on a definition member through a path, below), `follow_me`, `imprints` (list an object's drawn shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one; kept for compatibility, implemented over plane units, with `hew.sketch.units`/`move`/... as the general form), `cap`, `delete_faces`, `mark_surface`, `thicken` (repair open objects, see below), `shell` (hollow to a wall, chosen faces open), `project` (drape a sketch's shape onto faces, then engrave or emboss it straight or following the surface), `bake` (replace a smoothed object's cage with its Smooth surface), `fillet` (round, cove, bullnose or profile edges, or round a 2D corner), `chamfer` (bevel edges or a 2D corner), `resize_blend` (resize or switch a fillet or chamfer by naming one of its faces), `remove_blend` (restore the sharp edges), `remove_degenerate_faces` (a Model Health repair), `soften` (soften edges bending less than an angle), `from_faces` (Make Solid on drawn faces) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint`, the repair commands, `from_faces`, `shell`, `project`, `bake`, `fillet`, `chamfer`, `resize_blend`, `remove_blend` and `soften` Standard) |
 | `hew.compute` | `boolean`, `slice`, `shells`, `measure`, `outline`, `offset`: pure computations on transient solids that never change the document (§7.6); `project` and `stretch` are declared and refuse `unimplemented` until the flat-drawing projection and section stretch land | Standard |
+| `hew.object` | `smooth` (set the Smooth level, 0–3), `crease` (keep edges sharp under Smooth) | Standard |
 | `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy, array, and grid forms), `rotate`, `scale`, `flip` (mirror across a plane, with an optional mirrored copy) (each also on members of one definition through a path, below), `set_frame` (a part's frame override, §7.4) | Required (`flip`, `set_frame` Standard) |
+| `hew.array` | `path` (copy nodes along a sketch curve or face loop with an optional scale ramp; params `nodes`, `path`, `count` (total instances, 2 to 1000), `scale` `{from,to}`, `align`; result `node_ids`; one undo entry) | Standard |
 | `hew.context` | `enter`, `exit` | Required |
 | `hew.group` | `create`, `explode`, `reparent` | Required (`reparent` Standard) |
 | `hew.component` | `create`, `place`, `make_unique` (one placement, through a path at any depth), `promote` (a linked set becomes a named component), `explode`, `rebase` (new definition axes, nothing moves), `flip_instance` (mirror one placement) (§7.4) | Standard |
@@ -1341,13 +1359,178 @@ Semantics notes, normative:
   edge locators, a face locator standing for that face's boundary loop,
   or a sketch curve id — validated for connectivity and refused typed
   where the tool itself refuses (branching selections, bends tighter
-  than the profile). Exact schema in the registry.
+  than the profile). Optional `twist` (radians), `end_scale` (ratio) and
+  `stations` (per path segment) turn and scale the profile along an open
+  path; a closed path refuses `twist_needs_open_path`. Exact schema in the
+  registry.
+- `hew.solid.revolve` mirrors the Revolve tool: the profile is a sketch
+  region or a world solid's face (as `follow_me`'s), turned about an axis
+  in its plane — two points `{from, to}` or an edge's line `{edge}`.
+  `angle` defaults to a full turn (a closed solid); `segments` defaults
+  to the drawing tools' count at the profile's largest distance from the
+  axis. A partial turn of a profile touching the axis refuses
+  `partial_sweep_on_pole`.
+- `hew.solid.fillet` and `hew.solid.chamfer` mirror the Fillet tool.
+  `edges` is an edge-set (§5.2); alternatively `corner` rounds or
+  chamfers a 2D corner, either of a drawn sketch (`{"sketch": id, "at":
+  p}`) or of a shape drawn on a face (`{"face": <locator>, "at": p}`).
+  Fillet takes `radius` (meters), `segments` (default the drawing tools'
+  count for the edge's turn), `profile` (`"round"` by default, `"cove"`,
+  `"bullnose"`, a built-in id such as `"builtin:ogee"`, or a Library
+  profile's id) with `width` for profiles, `stops`, `handles` (a radius at
+  an arc length, round only) and `corners` (`"rolled"` or `"mitered"`).
+  Chamfer takes `distance`, or `distances` `[a, b]` with a `primary`
+  face locator that takes `a`, or `distance` with `angle` (radians from
+  the primary face); `corners` is `"mitered"` or `"flat"`. A result names
+  `object_id`, `blend_ids`, `faces` and the applied `size`; a 2D corner
+  names `sketch_id` or `object_id`. A size that does not fit refuses
+  `radius_too_large` with `detail: {max, limited_by}` (`limited_by` is
+  one of `adjacent_face`, `neighbor_edge`, `hole`, `imprint`,
+  `opposite_blend`, `short_edge`, `rim_radius`, `facet_width`,
+  `other_geometry`, `unknown`), a profile wider than the faces refuses
+  `profile_too_wide` with `detail: {needed, available}`, a corner too
+  large refuses `corner_radius_too_large` with `detail: {max}`, and a
+  vertex or an obstruction refuses `unsupported_vertex` / `obstructed`
+  with `detail: {at}`, and a vertex where the edge's two faces meet
+  flush (two pipes of one radius in a tee) refuses `blend_faces_flush`
+  with `detail: {at}`. Edges outside the analytic shapes (a pipe tee, an
+  oblique cut through a cylinder, imported meshes) take `round`,
+  `chamfer`, `cove` and profiles as a rolling blend, around a closed loop
+  or along a run that ends on a face at both ends; a bullnose or a stop
+  there refuses `unsupported_edge`, and a run ending anywhere else
+  refuses `unsupported_vertex`. `hew.query.faces` adds `blend: {id, kind, role}` to
+  every face a blend made.
+- **Profile items.** A Library item of category `profile` holds one open
+  drawn chain (the shape of an edge) and nothing else; it lives under
+  `Profiles/`. `hew.library.save` takes `{"profile_chain": {"sketch":
+  <id>, "edges": [<sketch edge id or locator>, …]}}` (edges in order from
+  the profile's start on the bearing face to its end; the category is
+  implied) and normalizes the chain to the ground plane with its corner
+  at the origin. `"replace": "<item id or path>"` overwrites an existing
+  item in place and keeps its id. `hew.solid.fillet`'s `profile` accepts
+  such an item's id or path (the drawn width is the default `width`). A
+  profile item is not placeable: `hew.library.insert` refuses
+  `profile_not_insertable`.
 - `hew.solid.union`, `hew.solid.subtract` and `hew.solid.intersect` take
   `a` and `b`, or `operands` (two or more node ids, in order) for one
   combine over all of them as one undo step: a Union of all, the first
   minus the union of the rest, the intersection of all. `operands` with
   fewer than two refuses `boolean_needs_two`; `a` without `b`, or both
   spellings at once, is a malformed request.
+- `hew.solid.resize_blend` and `hew.solid.remove_blend` take a `face`
+  locator naming any face of the blend (`unknown_blend` when it has
+  none). `resize_blend` takes the same size fields as `fillet` and
+  `chamfer` (`radius`, `distance`, `distances`, `width` with `profile`)
+  and may switch a fillet to a chamfer or back; a resize keeps the
+  blend's stops and scales its radius handles with the size. A blend
+  made since blends record what they replaced is removed or resized by
+  replaying its record, with a later blend that ran into it taken off and
+  put back (if that later blend cannot be put back after the change, the
+  call refuses `dependent_blend`); a blend whose own region was edited
+  since (a face pushed through it, a boolean across it) refuses
+  `blend_modified`.
+- `hew.solid.deform` mirrors the Deform tool on a world object: `twist`,
+  `bend` and `taper` work about the object's world bounding box — `end`
+  names the moving face, the opposite face stays fixed, and `toward`
+  (bend only) the cross axis it bends toward; `bend_to_path` maps the
+  straight `base` line end to end onto a `path` (a sketch curve or a
+  face's boundary loop), stretching the object to the path's length.
+  A result that would pass through itself refuses `self_intersecting`
+  with `detail.limit`, the largest angle or ratio that works.
+- `hew.solid.loft` mirrors the Loft tool: `profiles` are closed regions
+  or world faces without holes, in order (a line or curve refuses
+  `open_profile`); an optional `apex` ends the loft in a point, up to two
+  `rails` (a sketch curve or a face's boundary loop) guide it, and
+  `start_offsets` move each profile's correspondence start by whole start
+  candidates: corners where every profile has the same number of corners
+  (they then loft corner to corner), else vertices. An arc drawn as a
+  single edge turns the short way unless a straight side tangent to it
+  says otherwise, so split one over a half turn into two or more edges.
+  The profiles are not consumed; the result is a new object.
+- `hew.solid.shell {object, open?, thickness}` hollows a solid to a wall
+  of `thickness` meters, leaving the faces named by `open` (face
+  locators, none for a closed hollow body) open. A negative thickness
+  grows the wall outward. The object keeps its id; the result is
+  `{object_id}`. Opening a pocket's floor leaves a rim in the floor's
+  plane around the opening when the pocket is deeper than the wall; when
+  it is as deep as the wall or shallower, the pocket's walls run on down
+  and the opening is a hole through the top's wall. A wall that leaves no room (one thicker than the
+  shape, or walls around a pocket that would run into the side walls or
+  another pocket's) refuses `wall_too_thick` with `detail: {at}`, a
+  corner whose offset faces do not meet in one point refuses
+  `unsupported_shell_corner` with `detail: {at}`, and a result
+  that would pass through itself refuses `self_intersecting` (with
+  `detail: {limit}`, the largest amount that works, when one is known).
+- `hew.solid.project {object, sketch, regions?, depth?, mode?}` projects
+  the sketch's closed shapes along the sketch's normal onto the object's
+  faces and draws them there as imprints. With no `depth` that is all it
+  does. With a `depth`, a positive value engraves and a negative one
+  embosses; `mode` is `"straight"` (the default: the region swept straight
+  along the projection direction, which can cut through a wall) or
+  `"follow"` (a constant depth along the surface). A depth that would cut
+  the object into pieces refuses `would_sever`; a shape that lands on
+  nothing refuses `project_misses`; an open shape refuses
+  `project_needs_closed_shape`. The result is `{object_id, faces}`, the
+  count of faces the imprint made.
+- `hew.object.smooth {object, level}` sets the Smooth level (0 is Off, 1
+  to 3 are steps), stored as the first-party attribute in §8.2. The
+  object's own faces stay the cage that other commands edit and locate
+  against; `hew.query` reports `smooth_level` on every object.
+  `hew.object.crease {edges, crease?, propagate?}` sets (default) or
+  clears the crease flag that keeps edges sharp under Smooth. `edges` are
+  `{object, at}` locators all on one object; `propagate` is `"none"` (the
+  default here, unlike Fillet) or `"tangent"`. The result is `{edges}`, the
+  number of kernel edges changed. Soft seams and edges on an opening
+  refuse `crease_on_soft_edge` and `crease_on_boundary`.
+  `hew.solid.bake {object}` replaces the cage with the dense solid of its
+  Smooth surface and clears the level; an object with no level refuses
+  `amount_out_of_range`. `hew.doc.export` takes `cages: true` to write
+  smoothed objects' cages instead of their Smooth surfaces in the mesh
+  formats (STL, 3MF, glTF, USDZ); `.skp` export always writes the cage.
+  A boolean between smooth objects works on their cages and the result
+  keeps the first operand's level.
+- `hew.solid.soften {object, max_angle}` marks soft every interior edge
+  that bends by less than `max_angle` radians (open range, 0 to pi).
+  Coplanar, creased and already-soft edges are left alone. The result is
+  `{softened}`, the number of edges changed; a call that softens nothing
+  records no undo entry.
+- `hew.solid.remove_degenerate_faces {object}` is the Model Health repair
+  of the same name: it drops zero-width and sub-tolerance faces and keeps
+  the object closed. The result is `{removed}`; an object with none
+  refuses `nothing_to_remove`. `hew.doc.health` rows carry
+  `degenerate_faces`, and a closed object is listed when it has some. A
+  boolean that meets such a face refuses `degenerate_input` with `detail:
+  {at}`, and one that meets a face too warped to treat as flat refuses
+  `non_planar_input` with `detail: {at}`.
+- `hew.array.path {nodes, path, count, scale?, align?}` places `count`
+  total instances (the originals count as the first) along a sketch curve
+  or a face's boundary loop, optionally turning each to follow the path
+  (`align`, default true) and scaling along a ramp (`scale: {from, to}`).
+  A closed path divides its loop by `count`. The copies are one undo
+  entry; the result names the new `node_ids`.
+- Paint and Push/Pull know about blends. `hew.material.paint` paints a
+  face's whole logical face by default (all facets of a fillet or a
+  cylinder wall); `logical: false` paints the one facet. `hew.solid.push_pull`
+  on a face of a fillet or chamfer resizes it, and on a face next to one
+  restores it, moves the face and re-applies the blend, falling back to
+  the ordinary push/pull if that does not work. `hew.query.faces` reports
+  each face's `surface` as `{kind: "cylinder" | "sphere" | "torus" |
+  "cone", …}` with that class's fields, and `blend: {id, kind, role}` on
+  faces a blend made.
+- Refusal details. A refusal's `detail` carries the numbers a client needs
+  to retry: `radius_too_large` `{max, limited_by}`; `profile_too_wide`
+  `{needed, available}`; `corner_radius_too_large` `{max}`;
+  `unsupported_vertex`, `obstructed`, `wall_too_thick` and
+  `unsupported_shell_corner` `{at}`; `self_intersecting` `{limit}` when known;
+  `non_planar_input` and `degenerate_input` `{at}`; and, from the drawing
+  commands, `endpoint_near_miss` `{gap, nearest}`. Every `at` and
+  `nearest` is a world point `[x, y, z]` in meters.
+- `hew.sketch.draw_line` and `hew.sketch.draw_arc` on an existing sketch
+  refuse `endpoint_near_miss` when a point misses an open end (a vertex
+  with a single edge) of that sketch by more than `1e-9` m and no more
+  than `1e-4` m. The 0.1 mm limit is a heuristic about client input (a
+  rounded coordinate leaves a gap of about `1e-7` m that never closes a
+  loop), not a kernel tolerance. Nothing is drawn on a refusal.
 - `hew.solid.mend {object, weld?, folds?, split?, fill?, require_solid?}`
   is Model Health's Mend: merge points closer than `weld` meters (omitted
   or `true` = the object's default distance, `false`/`null` = none), remove
@@ -2656,7 +2839,7 @@ writable only by first-party code):
 - **On a library item file's DOCUMENT dictionary** — the item's own
   metadata, written when the item is saved and edited by the library's
   manage flows: `id` (the item's stable library identity, a UUID string),
-  `name`, `category` (`"component"` | `"material"` | `"model"`),
+  `name`, `category` (`"component"` | `"material"` | `"model"` | `"profile"`),
   `keywords` (list of strings), `collection`, `saved_at` /
   `sourceDoc`-style bookkeeping keys. The library browser derives
   everything it lists from this dictionary plus the manifest — there is
@@ -2681,12 +2864,38 @@ edits both, and Make Unique is the way to break the link. The insert
 strips the namespace from every copy it makes, and a paste under another
 origin (another window, or after the window opened another document)
 copies as an ordinary item would.
+The `profile` category holds the shapes the Fillet tool's profile chip
+offers: a Library item whose whole content is one open chain of drawn
+lines and arcs, filed under `Profiles/`. `hew.library.save` writes one
+from `profile_chain` (a sketch and its edges in order, from the profile's
+start on the bearing face to its end; the category is implied) and
+rewrites an existing item in place, keeping its id, from `replace`;
+`hew.library.list`, `describe` and `update_meta` accept and report the
+category. A profile is not placeable, so `hew.library.insert` refuses
+`profile_not_insertable`. The ready-made profiles that ship with the app
+are not Library items: they are named `builtin:<name>` and only
+`hew.solid.fillet`'s `profile` parameter takes them. An older reader that
+does not know the category derives `model` for these items, since it
+reads them as a document.
 
 Clients may read these dictionaries freely; external writes through
 `hew.attr.set` remain refused like every `hew.*` namespace. The wire-level `.hew` encoding is specified in
 HEW_FILE_FORMAT.md in the change that implements it (per that document's
 same-commit rule and DEVELOPMENT.md rule 8); this section is the
 semantic contract.
+
+### 8.2 First-party namespace: `hew.smooth`
+
+`hew.smooth` on an Object holds one key, `level`, an integer from 1 to 3:
+the number of subdivision steps of the Smooth surface drawn over the
+object's faces. An absent key, or any other value, is Off. It is an
+ordinary attribute (round-tripped, readable through `hew.attr.get`,
+writable by first-party code only) and is the whole of the feature in the
+file; the per-edge crease flag lives in the geometry. `hew.object.smooth`
+is the supported way to write it, because setting the level also checks
+the size of the result and keeps the displayed mesh current. The level
+follows the object through edits to its faces, and through a boolean from
+the first operand.
 
 ## 9. Discovery, schema, and versioning
 
@@ -3123,7 +3332,7 @@ invocation) — is handled identically.
 
 ### 12.2 Headless and live: what is the same, and what cannot be
 
-The 81 commands the kernel serves run the same dispatcher over the same
+The 101 commands the kernel serves run the same dispatcher over the same
 kernel in both modes — a script's replies are the same, byte for byte
 (exports included), except where §12.2's last list says otherwise. The 18
 host-served commands are where the two hosts differ, and each is either

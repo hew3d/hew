@@ -199,6 +199,7 @@ impl Host for CliHost {
         Ok(outcome)
     }
 
+    #[allow(clippy::too_many_arguments)] // the host surface: document, format, path, resolution, units and two flags
     fn export_document(
         &mut self,
         doc: &Document,
@@ -208,6 +209,7 @@ impl Host for CliHost {
         units: Option<&str>,
         selection: Option<&[api::locate::RenderRoot]>,
         compat: bool,
+        cages: bool,
     ) -> Result<Option<Vec<u8>>, Refusal> {
         // `true`: a headless dispatch has no dialog of its own to warn about
         // non-solid objects first, so a leaky object is dropped rather than
@@ -227,11 +229,16 @@ impl Host for CliHost {
                 .bytes
             }
             _ => match selection {
-                Some(roots) => {
-                    mesh_export::export_occurrences(doc, roots, format, segments_per_turn, true)
-                        .map_err(export_refusal)?
-                }
-                None => mesh_export::export(doc, format, segments_per_turn, true)
+                Some(roots) => mesh_export::export_occurrences(
+                    doc,
+                    roots,
+                    format,
+                    segments_per_turn,
+                    true,
+                    cages,
+                )
+                .map_err(export_refusal)?,
+                None => mesh_export::export(doc, format, segments_per_turn, true, cages)
                     .map_err(export_refusal)?,
             },
         };

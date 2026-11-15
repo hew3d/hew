@@ -262,7 +262,7 @@ struct GridAxis {
 
 /// Mirrors the wasm boundary's MAX_ARRAY_COUNT trust cap: an agent typo
 /// ("count": 1e9) must refuse, not grind the document forever.
-const API_MAX_ARRAY_COUNT: u32 = 1000;
+const API_MAX_ARRAY_COUNT: u32 = kernel::MAX_ARRAY_COUNT;
 
 fn array_count_too_large() -> CmdError {
     CmdError::Refusal(

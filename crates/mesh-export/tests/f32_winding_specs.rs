@@ -357,7 +357,7 @@ fn check_every_writer(doc: &Document, id: ObjectId, what: &str) -> (usize, usize
     let (source, gated_mm) = gated_at(doc, id, 1000.0);
     let (_, gated_m) = gated_at(doc, id, 1.0);
 
-    let stl = stl_facets(&mesh_export::export_stl(doc, 0, true).expect("stl"));
+    let stl = stl_facets(&mesh_export::export_stl(doc, 0, true, false).expect("stl"));
     let stl_tris: Vec<Tri> = stl.iter().map(|(_, t)| *t).collect();
     assert_winds_outward(&stl_tris, &format!("{what} STL"));
     assert_stl_normals_agree(&stl, &format!("{what} STL"));
@@ -367,7 +367,7 @@ fn check_every_writer(doc: &Document, id: ObjectId, what: &str) -> (usize, usize
         "{what} STL: written = source − gated"
     );
 
-    let glb = glb_triangles(&mesh_export::export_glb(doc, 0, true).expect("glb"));
+    let glb = glb_triangles(&mesh_export::export_glb(doc, 0, true, false).expect("glb"));
     assert_winds_outward(&glb, &format!("{what} GLB"));
     assert_eq!(
         glb.len(),
@@ -375,7 +375,7 @@ fn check_every_writer(doc: &Document, id: ObjectId, what: &str) -> (usize, usize
         "{what} GLB: written = source − gated"
     );
 
-    let usdz = usdz_triangles(mesh_export::export_usdz(doc, 0, true).expect("usdz"));
+    let usdz = usdz_triangles(mesh_export::export_usdz(doc, 0, true, false).expect("usdz"));
     assert_winds_outward(&usdz, &format!("{what} USDZ"));
     assert_eq!(
         usdz.len(),
@@ -414,7 +414,7 @@ fn a_fan_tangent_to_a_hole_exports_every_triangle_to_stl_with_agreeing_normals()
     let (doc, id) = fan_case();
     let (source, gated_mm, _) = check_every_writer(&doc, id, "fan case");
     assert_eq!(gated_mm, 0, "nothing inverts at mm scale here");
-    let stl = stl_facets(&mesh_export::export_stl(&doc, 0, true).expect("stl"));
+    let stl = stl_facets(&mesh_export::export_stl(&doc, 0, true, false).expect("stl"));
     assert_eq!(stl.len(), source);
 }
 
@@ -465,7 +465,7 @@ fn every_lattice_case_exports_outward_triangles_from_every_writer() {
 #[test]
 fn the_left_out_sliver_changes_no_extent() {
     let (doc, _) = fan_case();
-    let glb = glb_triangles(&mesh_export::export_glb(&doc, 0, true).expect("glb"));
+    let glb = glb_triangles(&mesh_export::export_glb(&doc, 0, true, false).expect("glb"));
     let mut lo = [f64::INFINITY; 3];
     let mut hi = [f64::NEG_INFINITY; 3];
     for t in &glb {

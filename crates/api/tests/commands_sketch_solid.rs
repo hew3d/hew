@@ -990,6 +990,78 @@ fn intersect_combines_two_overlapping_boxes() {
 }
 
 #[test]
+fn union_of_boxes_that_only_touch_reports_the_pieces() {
+    let mut conn = Connection::new(Grant::core(), "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    // Apart: nothing to combine, so the union keeps both as pieces of a
+    // group (a shared edge or corner would be a grazing refusal instead).
+    let a = build_box(
+        &mut conn,
+        &mut doc,
+        2,
+        [0.0, 0.0, 0.0],
+        [0.2, 0.2, 0.0],
+        0.2,
+    );
+    let b = build_box(
+        &mut conn,
+        &mut doc,
+        3,
+        [0.3, 0.3, 0.0],
+        [0.5, 0.5, 0.0],
+        0.2,
+    );
+    let result = single(call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.solid.union",
+        json!({ "a": a, "b": b }),
+    ));
+    assert!(result["result"].as_str().unwrap().starts_with("grp_"));
+    assert_eq!(result["pieces"], json!(2));
+    assert!(result["note"].as_str().unwrap().contains("don't overlap"));
+}
+
+#[test]
+fn subtract_that_severs_reports_the_pieces_in_its_own_words() {
+    let mut conn = Connection::new(Grant::core(), "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    // A bar cut through its middle by a taller, wider slab: two pieces.
+    let bar = build_box(
+        &mut conn,
+        &mut doc,
+        2,
+        [0.0, 0.0, 0.0],
+        [0.6, 0.2, 0.0],
+        0.2,
+    );
+    let cutter = build_box(
+        &mut conn,
+        &mut doc,
+        3,
+        [0.25, -0.1, 0.0],
+        [0.35, 0.3, 0.0],
+        0.4,
+    );
+    let result = single(call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.solid.subtract",
+        json!({ "a": bar, "b": cutter }),
+    ));
+    assert!(result["result"].as_str().unwrap().starts_with("grp_"));
+    assert_eq!(result["pieces"], json!(2));
+    assert_eq!(
+        result["note"],
+        json!("The cut left 2 separate pieces, kept as a group.")
+    );
+}
+
+#[test]
 fn union_takes_any_number_of_operands_as_one_undo_step() {
     let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
@@ -1106,6 +1178,11 @@ fn subtract_with_operands_takes_the_rest_off_the_first() {
         "hew.solid.subtract",
         json!({ "operands": [bar, k1, k2] }),
     ));
+    assert_eq!(result["pieces"], json!(3), "{result}");
+    assert_eq!(
+        result["note"],
+        json!("The cut left 3 separate pieces, kept as a group.")
+    );
     // Both cutters sever the bar: three pieces, kept together in a group.
     assert!(
         result["result"]

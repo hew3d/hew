@@ -53,12 +53,13 @@ impl Host for ExportHost {
         _units: Option<&str>,
         selection: Option<&[api::locate::RenderRoot]>,
         _compat: bool,
+        cages: bool,
     ) -> Result<Option<Vec<u8>>, Refusal> {
         let bytes = match selection {
             Some(roots) => {
-                mesh_export::export_occurrences(doc, roots, format, segments_per_turn, true)
+                mesh_export::export_occurrences(doc, roots, format, segments_per_turn, true, cages)
             }
-            None => mesh_export::export(doc, format, segments_per_turn, true),
+            None => mesh_export::export(doc, format, segments_per_turn, true, cages),
         };
         bytes
             .map(Some)

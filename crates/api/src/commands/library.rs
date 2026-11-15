@@ -64,8 +64,9 @@ fn parse_category(s: &str) -> Result<&'static str, CmdError> {
         "component" => Ok("component"),
         "material" => Ok("material"),
         "model" => Ok("model"),
+        "profile" => Ok("profile"),
         _ => Err(CmdError::Params(format!(
-            "category must be one of \"component\", \"material\", \"model\" — got {s:?}"
+            "category must be one of \"component\", \"material\", \"model\", \"profile\" — got {s:?}"
         ))),
     }
 }
@@ -80,7 +81,7 @@ fn find_item<'a>(entries: &'a [LibraryItemEntry], item: &str) -> Option<&'a Libr
         .or_else(|| entries.iter().find(|e| e.id.as_deref() == Some(item)))
 }
 
-fn resolve_entry(ctx: &Ctx, item: &str) -> Result<LibraryItemEntry, CmdError> {
+pub(super) fn resolve_entry(ctx: &Ctx, item: &str) -> Result<LibraryItemEntry, CmdError> {
     let listing = ctx.host.library_list().map_err(CmdError::Refusal)?;
     find_item(&listing.items, item)
         .cloned()
@@ -411,6 +412,17 @@ fn insert_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     };
 
     let item_doc = Document::load(&bytes).map_err(load_failed)?;
+    let is_profile = library_meta_text(&item_doc, "category").as_deref() == Some("profile")
+        || (library_meta_text(&item_doc, "category").is_none()
+            && kernel::read_item_summary(&bytes).is_ok_and(|s| {
+                s.profile_chain_only && s.objects == 0 && s.components == 0 && s.materials == 0
+            }));
+    if is_profile {
+        return Err(CmdError::Refusal(Refusal::api(
+            "profile_not_insertable",
+            "Profiles are used by the Fillet tool, not inserted. Pick it in the Fillet tool's profile chip.",
+        )));
+    }
     if library_meta_text(&item_doc, "category").as_deref() == Some("material") {
         if p.at.is_some() || p.name.is_some() {
             return Err(CmdError::Params(
@@ -486,6 +498,15 @@ struct SaveParams {
     /// palette's "Save to Library".
     #[serde(default)]
     material: Option<String>,
+    /// An open drawn chain saved as a profile item (category `profile`):
+    /// `{"sketch": <id>, "edges": [<sketch edge locator>, …]}`, edges in
+    /// order from the profile's start (the bearing-face end) to its end.
+    #[serde(default)]
+    profile_chain: Option<Value>,
+    /// The id (or path) of an existing item to overwrite in place, keeping
+    /// its id.
+    #[serde(default)]
+    replace: Option<String>,
     name: String,
     #[serde(default)]
     category: Option<String>,
@@ -510,12 +531,22 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: SaveParams = parse(params)?;
 
     let selection = p.selection.filter(|s| !s.is_empty());
+    if p.profile_chain.is_some() && (selection.is_some() || p.material.is_some()) {
+        return Err(CmdError::Params(
+            "library.save takes one of \"selection\", \"material\" or \"profile_chain\"".into(),
+        ));
+    }
     if selection.is_some() && p.material.is_some() {
         return Err(CmdError::Params(
             "library.save takes \"selection\" or \"material\", not both".into(),
         ));
     }
     let (mut item_doc, default_category, source_nodes) = match &selection {
+        None if p.profile_chain.is_some() => {
+            let chain = p.profile_chain.as_ref().expect("checked above");
+            let item = profile_item_from_chain(ctx, chain)?;
+            (item, "profile", Vec::new())
+        }
         None if p.material.is_some() => {
             let public = p.material.as_deref().expect("checked above");
             let Some(EntityRef::Material(mid)) = ctx.resolver().resolve(public) else {
@@ -552,13 +583,34 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         Some(c) => parse_category(c)?,
         None => default_category,
     };
+    if default_category == "profile" && category != "profile" {
+        return Err(CmdError::Params(
+            "a saved \"profile_chain\" is a profile item; leave \"category\" off or make it \"profile\"".into(),
+        ));
+    }
     if default_category == "material" && category != "material" {
         return Err(CmdError::Params(
             "a saved \"material\" is a material item; leave \"category\" off or make it \"material\"".into(),
         ));
     }
 
-    let id = mint_item_id(ctx.host);
+    // Replacing keeps the item's own id and writes over its file.
+    let replaced = match &p.replace {
+        Some(item) => Some(resolve_entry(ctx, item)?),
+        None => None,
+    };
+    if let Some(old) = &replaced
+        && old.category != category
+    {
+        return Err(CmdError::Params(format!(
+            "replace: the item is a {:?} item; it can only be replaced by another {:?}",
+            old.category, old.category
+        )));
+    }
+    let id = match replaced.as_ref().and_then(|e| e.id.clone()) {
+        Some(id) => id,
+        None => mint_item_id(ctx.host),
+    };
     let mut set = |key: &str, value: AttrValue| -> Result<(), CmdError> {
         item_doc
             .attr_set(AttrTarget::Document, "hew.library", key, value)
@@ -568,13 +620,25 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     set("id", AttrValue::Text(id.clone()))?;
     set("name", AttrValue::Text(p.name.clone()))?;
     set("category", AttrValue::Text(category.to_string()))?;
-    if let Some(keywords) = &p.keywords {
+    // A replace keeps the old item's keywords and collection unless new
+    // ones are given.
+    let keywords = p.keywords.clone().or_else(|| {
+        replaced
+            .as_ref()
+            .map(|e| e.keywords.clone())
+            .filter(|k| !k.is_empty())
+    });
+    if let Some(keywords) = &keywords {
         set(
             "keywords",
             AttrValue::List(keywords.iter().cloned().map(AttrValue::Text).collect()),
         )?;
     }
-    if let Some(collection) = &p.collection {
+    let collection = p
+        .collection
+        .clone()
+        .or_else(|| replaced.as_ref().and_then(|e| e.collection.clone()));
+    if let Some(collection) = &collection {
         set("collection", AttrValue::Text(collection.clone()))?;
     }
     // An explicit `source_doc` always wins; absent, fall back to the
@@ -592,16 +656,17 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     set("savedAt", AttrValue::Text(iso_now(ctx.host.unix_time_ms())))?;
 
     let bytes = item_doc.save();
+    let target = match &replaced {
+        Some(entry) => LibraryWriteTarget::Existing { path: &entry.path },
+        None => LibraryWriteTarget::New {
+            category,
+            name: &p.name,
+            id: &id,
+        },
+    };
     let write = ctx
         .host
-        .library_write(
-            LibraryWriteTarget::New {
-                category,
-                name: &p.name,
-                id: &id,
-            },
-            &bytes,
-        )
+        .library_write(target, &bytes)
         .map_err(CmdError::Refusal)?;
 
     if !source_nodes.is_empty() {
@@ -640,6 +705,73 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 }
 
 // ---------------------------------------------------------------- helpers
+
+/// The profile document for a `profile_chain` save parameter: the open
+/// chain of sketch edges, normalized to a profile item.
+fn profile_item_from_chain(ctx: &Ctx, chain: &Value) -> Result<Document, CmdError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Chain {
+        sketch: String,
+        edges: Vec<Value>,
+    }
+    let c: Chain =
+        serde_json::from_value(chain.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    let Some(EntityRef::Sketch(sketch)) = ctx.resolver().resolve(&c.sketch) else {
+        return Err(super::entity::unknown_entity(&c.sketch));
+    };
+    let mut edges = Vec::with_capacity(c.edges.len());
+    for loc in &c.edges {
+        // A bare edge id string, or a {sketch, at | from+to} locator.
+        let value = match loc {
+            Value::String(_) => loc.clone(),
+            other => {
+                let mut o = other.clone();
+                if let Some(obj) = o.as_object_mut() {
+                    obj.entry("sketch")
+                        .or_insert_with(|| Value::String(c.sketch.clone()));
+                }
+                o
+            }
+        };
+        let r = crate::locate::resolve_edge_locator(ctx, &value)?;
+        match r {
+            crate::locate::AnyEdge::Sketch(e) if e.sketch == sketch => edges.push(e.edge),
+            _ => {
+                return Err(CmdError::Params(
+                    "every profile_chain edge must be an edge of its sketch".into(),
+                ));
+            }
+        }
+    }
+    Ok(ctx.doc.profile_document_from_chain(sketch, &edges)?)
+}
+
+/// A Library profile item's shape and drawn width, by item id or path, for
+/// `hew.solid.fillet`'s `profile` parameter. `unknown_profile` when no
+/// item matches, `invalid_profile` when its document is not one open chain.
+pub(super) fn library_profile(
+    ctx: &Ctx,
+    item: &str,
+) -> Result<(kernel::ProfileShape, f64), CmdError> {
+    let unknown = || {
+        CmdError::Refusal(
+            Refusal::api(
+                "unknown_profile",
+                &format!("'{item}' is not a profile. Use \"round\", \"cove\", \"bullnose\", a built-in id such as \"builtin:ogee\", or the id of a profile in the Library."),
+            )
+            .with_detail(serde_json::json!({ "profile": item })),
+        )
+    };
+    let listing = ctx.host.library_list().map_err(|_| unknown())?;
+    let entry = find_item(&listing.items, item).ok_or_else(unknown)?;
+    let read = ctx
+        .host
+        .library_read(&entry.path)
+        .map_err(CmdError::Refusal)?;
+    let doc = Document::load(&read.bytes).map_err(load_failed)?;
+    Ok(doc.profile_shape_of()?)
+}
 
 /// Mints a fresh library item id: 128 bits from the host's
 /// [`Host::random_u64`] — good enough uniqueness for a library item's own

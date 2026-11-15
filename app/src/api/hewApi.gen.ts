@@ -95,6 +95,27 @@ export class HewApiError extends Error {
 export type UnspecifiedShape = Record<string, unknown>
 
 /**
+ * `hew.array.path` (v1) — Copy nodes along a sketch curve or face loop, with an optional scale ramp.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: amount_out_of_range, path_too_short_for_count, array_count_too_large, empty_path, unknown_path_edge, path_branches, path_disconnected, path_segment_too_short, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_face, unknown_entity, locator_missed, ambiguous_locator, reflection, unimplemented
+ */
+export interface ArrayPathParams {
+  /** turn copies to follow the path tangent (default true) */
+  align?: boolean
+  /** total instances including the original */
+  count: number
+  /** ids of the objects, groups or instances to copy */
+  nodes: string[]
+  path: { curve: string } | { face: UnspecifiedShape } | { edges: unknown[] }
+  /** uniform scale at the first and last copy, linear between; default 1 to 1 */
+  scale?: { from: number; to: number }
+}
+
+export interface ArrayPathResult {
+  node_ids: string[]
+}
+
+/**
  * `hew.attr.delete` (v1) — Delete one attribute key or a whole namespace.
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: unknown_entity, unknown_face, unknown_edge, not_a_solid_edge, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, unknown_occurrence, not_an_object, explode_session_scope, invalid_attr_name, reserved_attr_namespace, attr_namespace_not_granted, unknown_attr, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_material, unknown_component, unknown_tag
@@ -495,6 +516,8 @@ export interface DocCloseResult {
  * Refusals: export_failed, host_capability_missing, nothing_to_export, save_failed, unknown_entity, unknown_occurrence, too_many_occurrences
  */
 export interface DocExportParams {
+  /** Mesh formats: export smoothed objects' cages instead of their Smooth surfaces. */
+  cages?: boolean
   /** Format "skp" only: write revision 17 of the container, leaving out what only newer SketchUp versions hold (see hew.doc.save). Absent or false: the lowest revision that holds the content. */
   compat?: boolean
   /** "gltf" is an alias for "glb" — every host that implements one implements both. "skp" is the SketchUp 2021-and-later container, "skp3" to "skp8" and "skp2013" to "skp2020" those releases' formats; exporting never changes the document's own file */
@@ -541,7 +564,7 @@ export interface DocHealthResult {
   /** objects an importer split from one shape, joined by shared rims */
   families: { members?: string[]; shared_rims?: number }[]
   /** one per open (non-solid) object; a component member is one row however often it is placed */
-  rows: ({ accepted: boolean; branching_vertices?: number; definition?: string | null; definition_name?: string | null; faces?: number; family?: number | null; instances?: string[]; islands?: number; name?: string | null; object: string; placements: number; rims: ({ cappable?: boolean; closed?: boolean; edges?: number; extent?: number; perimeter?: number; planar?: boolean; role?: "outer" | "hole"; shared?: boolean; sheet_edge?: boolean })[]; verdict: { holes?: number; kind: "flat_sheet" | "bent_sheet" | "cappable" | "holes" | "mixed" | "non_manifold"; planar?: number; warped?: number } })[]
+  rows: ({ accepted: boolean; branching_vertices?: number; definition?: string | null; definition_name?: string | null; degenerate_faces?: number; faces?: number; family?: number | null; instances?: string[]; islands?: number; name?: string | null; object: string; placements: number; rims: ({ cappable?: boolean; closed?: boolean; edges?: number; extent?: number; perimeter?: number; planar?: boolean; role?: "outer" | "hole"; shared?: boolean; sheet_edge?: boolean })[]; verdict: { holes?: number; kind: "flat_sheet" | "bent_sheet" | "cappable" | "holes" | "mixed" | "non_manifold"; planar?: number; warped?: number } })[]
 }
 
 /**
@@ -998,7 +1021,7 @@ export interface LibraryDescribeParams {
 export interface LibraryDescribeResult {
   /** the item's full document attribute dictionaries, namespace -> key -> value */
   attrs: UnspecifiedShape
-  category: "component" | "material" | "model"
+  category: "component" | "material" | "model" | "profile"
   collection?: string
   /** present only when the file failed to parse */
   error?: string
@@ -1016,7 +1039,7 @@ export interface LibraryDescribeResult {
 /**
  * `hew.library.insert` (v1) — Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement; a material item goes into the palette instead, recording no undo entry (§6.4).
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: host_capability_missing, unknown_library_item, load_failed, component_expansion_exceeded, singular, degenerate_axis, explode_session_scope
+ * Refusals: host_capability_missing, unknown_library_item, load_failed, component_expansion_exceeded, singular, degenerate_axis, explode_session_scope, profile_not_insertable
  */
 export interface LibraryInsertParams {
   /** a translation applied to the item's world roots; identity when omitted */
@@ -1050,7 +1073,7 @@ export interface LibraryInsertResult {
  * Refusals: host_capability_missing
  */
 export interface LibraryListParams {
-  category?: "component" | "material" | "model"
+  category?: "component" | "material" | "model" | "profile"
   /** matches this collection path and its subtree */
   collection?: string
   /** case-insensitive substring match against name and keywords */
@@ -1059,7 +1082,7 @@ export interface LibraryListParams {
 
 export interface LibraryListResult {
   folder: string
-  items: ({ category: "component" | "material" | "model"; collection?: string; error?: string; id?: string; keywords: string[]; mtime_ms: number; name: string; path: string; saved_at?: string; size: number; summary?: UnspecifiedShape })[]
+  items: ({ category: "component" | "material" | "model" | "profile"; collection?: string; error?: string; id?: string; keywords: string[]; mtime_ms: number; name: string; path: string; saved_at?: string; size: number; summary?: UnspecifiedShape })[]
 }
 
 /**
@@ -1079,16 +1102,20 @@ export interface LibraryRemoveResult {
 /**
  * `hew.library.save` (v1) — Save a selection, one material, or the whole document to the library. Records no undo entry (§6.4).
  * Tier: Standard · Class: read-only · Served: kernel
- * Refusals: host_capability_missing, unknown_entity, empty_component, duplicate_member, unknown_object, unknown_group, unknown_instance, explode_session_scope, save_failed
+ * Refusals: host_capability_missing, unknown_entity, empty_component, duplicate_member, unknown_object, unknown_group, unknown_instance, explode_session_scope, save_failed, unknown_library_item, invalid_profile, locator_missed, ambiguous_locator
  */
 export interface LibrarySaveParams {
   /** defaults to component (a selection), material (a material), or model (the whole document) */
-  category?: "component" | "material" | "model"
+  category?: "component" | "material" | "model" | "profile"
   collection?: string
   keywords?: string[]
   /** one palette material to save alone as a material item, as the palette's Save to Library does — not with selection */
   material?: string
   name: string
+  /** an open drawn chain saved as a profile item (category profile, implied): {sketch, edges: [<sketch edge id or locator>, …]}, edges in order from the profile's start on the bearing face to its end — not with selection or material */
+  profile_chain?: { edges: UnspecifiedShape[]; sketch: string }
+  /** the id or path of an existing item to overwrite in place, keeping its id */
+  replace?: string
   /** also return the saved item's bytes base64 */
   return_bytes?: boolean
   /** node ids to save as a component item; omitted saves the whole document as a model item */
@@ -1118,7 +1145,7 @@ export interface LibraryUpdateMetaParams {
 }
 
 export interface LibraryUpdateMetaResult {
-  category: "component" | "material" | "model"
+  category: "component" | "material" | "model" | "profile"
   collection?: string
   id?: string
   keywords: string[]
@@ -1144,7 +1171,7 @@ export interface MaterialCreateResult {
 }
 
 /**
- * `hew.material.paint` (v1) — Paint a face or entity.
+ * `hew.material.paint` (v1) — Paint a face (by default its whole logical face: a fillet, a cylinder wall; `logical: false` paints one facet) or an entity.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: unknown_entity, unknown_object, unknown_instance, unknown_component, unknown_face, unknown_material, locator_missed, ambiguous_locator, unknown_occurrence, not_an_object, explode_session_scope
  */
@@ -1153,6 +1180,7 @@ export interface MaterialPaintParams {
   face?: UnspecifiedShape
   /** an object (its base material), an instance (the placement's own material), or a definition (every object it owns) */
   id?: string
+  logical?: boolean
   material: string | null
   /** for an instance id: the placement (default) or its definition; a definition id takes only "definition" */
   scope?: "instance" | "definition"
@@ -1275,6 +1303,37 @@ export interface MetaHelloResult {
 }
 
 /**
+ * `hew.object.crease` (v1) — Set or clear the crease on edges, which keeps them sharp under Smooth.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: crease_on_soft_edge, crease_on_boundary, edges_span_objects, shape_degenerate, unknown_object, unknown_component, unknown_entity, locator_missed, ambiguous_locator
+ */
+export interface ObjectCreaseParams {
+  crease?: boolean
+  edges: UnspecifiedShape[]
+  /** tangent: also follow each edge's tangent continuations */
+  propagate?: "none" | "tangent"
+}
+
+export interface ObjectCreaseResult {
+  /** how many kernel edges changed */
+  edges: number
+}
+
+/**
+ * `hew.object.smooth` (v1) — Set an object's Smooth level (0 = Off, 1–3): its faces become the cage of a subdivision surface.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: amount_out_of_range, smooth_too_dense, unknown_object, unknown_component, unknown_entity
+ */
+export interface ObjectSmoothParams {
+  /** 0 = Off */
+  level: number
+  /** an object id */
+  object: string
+}
+
+export type ObjectSmoothResult = UnspecifiedShape
+
+/**
  * `hew.print.pdf` (v1) — Print the document to a PDF the way File ▸ Print… does: standard (one page, the view as-is) or scaled (parallel projection at an exact drawing scale, tiled across pages with overlap bands, crop/trim marks, a scale bar, and a title block). Line art is vector (hidden lines removed); shaded is a software-rasterized bitmap per page. Bytes base64 inline, or written to path.
  * Tier: Standard · Class: solitary · Served: host
  * Refusals: host_capability_missing, nothing_to_render, too_complex, save_failed, unknown_scene
@@ -1391,7 +1450,7 @@ export interface QueryFacesParams {
 export interface QueryFacesResult {
   epoch: number
   /** per face: object, plane, area, centroid, outer, holes, material, surface, texture_pins, attrs (the face's attribute dictionary, namespace -> key -> value, {} for none), and material_effective when asked through a path */
-  faces: unknown[]
+  faces: ({ blend?: { id: number; kind: "fillet" | "chamfer" | "profile"; role: "strip" | "corner" | "runout" }; surface?: unknown | null })[]
   generation: number
   object: string
 }
@@ -1807,7 +1866,7 @@ export interface SketchDeleteResult {
 /**
  * `hew.sketch.draw_arc` (v1) — Draw an arc on a plane spec.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: point_off_plane, degenerate_curve, degenerate_segment, unknown_sketch, segments_above_cap, unknown_entity, locator_missed, ambiguous_locator, curve_claim_off_loop, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
+ * Refusals: point_off_plane, degenerate_curve, degenerate_segment, unknown_sketch, endpoint_near_miss, segments_above_cap, unknown_entity, locator_missed, ambiguous_locator, curve_claim_off_loop, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
  */
 export interface SketchDrawArcParams {
   center: [number, number, number] | UnspecifiedShape
@@ -1849,7 +1908,7 @@ export type SketchDrawCircleResult = { curve_id?: string; faces_closed?: string[
 /**
  * `hew.sketch.draw_line` (v1) — Draw a line (chain) on a plane spec.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: point_off_plane, degenerate_segment, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
+ * Refusals: point_off_plane, degenerate_segment, unknown_sketch, endpoint_near_miss, unknown_entity, locator_missed, ambiguous_locator, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
  */
 export interface SketchDrawLineParams {
   /** keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides */
@@ -1999,6 +2058,20 @@ export interface SketchUnitsResult {
 }
 
 /**
+ * `hew.solid.bake` (v1) — Replace a smoothed object's cage with its Smooth surface and clear the level.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: amount_out_of_range, smooth_too_dense, shape_degenerate, unknown_object, unknown_component, unknown_entity
+ */
+export interface SolidBakeParams {
+  /** an object id */
+  object: string
+}
+
+export interface SolidBakeResult {
+  object_id: string
+}
+
+/**
  * `hew.solid.cap` (v1) — Close an open object's flat openings with faces; an object closed all round becomes a solid.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: object_is_solid, unknown_component, unknown_entity, explode_session_scope, invalid, unknown_rim, rim_not_planar, rim_self_intersecting, cap_would_be_coplanar, non_manifold_rim, caps_overlap
@@ -2018,6 +2091,70 @@ export interface SolidCapResult {
   object_id: string
   /** an island the caps closed was inside out, so that island's faces were turned over (a cavity inside another island is left as is) */
   reversed: boolean
+}
+
+/**
+ * `hew.solid.chamfer` (v1) — Chamfer the edges of a solid, or chamfer a 2D corner, as the Fillet tool's Chamfer mode does.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: radius_too_large, profile_too_wide, edge_is_smooth, blend_needs_solid, unsupported_vertex, blend_faces_flush, unsupported_edge, obstructed, segments_out_of_range, non_uniform_instance, stop_out_of_range, corner_not_blendable, corner_is_straight, corner_radius_too_large, corner_leaves_face, edges_span_objects, unknown_object, unknown_face, unknown_entity, locator_missed, ambiguous_locator, angle_does_not_fit
+ */
+export interface SolidChamferParams {
+  /** radians measured from the primary face; with `distance` */
+  angle?: number
+  /** a 2D corner instead of solid edges: {sketch: <sketch id>, at: [x,y,z]} for a drawn corner, or {face: <face locator>, at: [x,y,z]} for a corner of a shape drawn on a face */
+  corner?: { at: [number, number, number]; face?: UnspecifiedShape; sketch?: string }
+  /** three-way corners; default "mitered" */
+  corners?: "mitered" | "flat"
+  /** meters on both faces, or on the primary face when `angle` is given */
+  distance?: number
+  /** [a, b] meters: a on the primary face, b on the other */
+  distances?: [number, number]
+  /** solid edges to blend, all on one object */
+  edges?: UnspecifiedShape[]
+  /** face locator of the face that takes `distances[0]` (or `distance` with `angle`) */
+  primary?: UnspecifiedShape
+  /** default "tangent": each located edge extends along the smooth chain a click on it would take */
+  propagate?: "tangent" | "none"
+  /** meters left sharp at the start and end of the chain */
+  stops?: { end?: number; start?: number }
+}
+
+export interface SolidChamferResult {
+  blend_ids?: number[]
+  /** new blend faces */
+  faces?: number
+  object_id?: string
+  /** a corner of a world sketch: the sketch */
+  sketch_id?: string
+}
+
+/**
+ * `hew.solid.deform` (v1) — Twist, bend or taper a solid along its bounding box, or bend it along a path, as the Deform tool does.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: self_intersecting, shape_needs_solid, amount_out_of_range, shape_degenerate, unknown_object, unknown_entity, unknown_face, locator_missed, ambiguous_locator, follow_me_in_component_unsupported, unimplemented
+ */
+export interface SolidDeformParams {
+  /** twist or bend, radians: |twist| ≤ 4π, |bend| ≤ 2π */
+  angle?: number
+  /** bend_to_path: the straight line mapped onto the path */
+  base?: { from: UnspecifiedShape; to: UnspecifiedShape }
+  /** the moving end of the object's world bounding box (twist, bend, taper); the opposite face stays fixed */
+  end?: UnspecifiedShape
+  mode: "twist" | "bend" | "taper" | "bend_to_path"
+  /** a world object id */
+  object: string
+  /** bend_to_path: {"curve": <sketch curve id>} or {"face": <face locator>} (its boundary loop) */
+  path?: UnspecifiedShape
+  /** taper: the moving end's scale */
+  ratio?: number
+  /** bands along the axis (twist/bend default one per 15°, at least 4; taper 1); the object is also cut through every vertex so no face spans one; for bend_to_path, bands per path segment (default 4) */
+  stations?: number
+  /** bend only: the cross axis it bends toward; default the one closest to -z, or +x for a vertical axis */
+  toward?: UnspecifiedShape
+}
+
+export interface SolidDeformResult {
+  object_id: string
 }
 
 /**
@@ -2073,13 +2210,56 @@ export interface SolidExtrudeResult {
 }
 
 /**
+ * `hew.solid.fillet` (v1) — Round, cove, bullnose or profile the edges of a solid, or round a 2D corner, as the Fillet tool does.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: radius_too_large, profile_too_wide, edge_is_smooth, blend_needs_solid, unsupported_vertex, blend_faces_flush, unsupported_edge, obstructed, segments_out_of_range, non_uniform_instance, stop_out_of_range, corner_not_blendable, corner_is_straight, corner_radius_too_large, corner_leaves_face, edges_span_objects, unknown_object, unknown_face, unknown_entity, locator_missed, ambiguous_locator, profile_needs_convex_edge, bullnose_needs_parallel_sides, invalid_profile, unknown_profile, load_failed, host_capability_missing
+ */
+export interface SolidFilletParams {
+  /** a 2D corner instead of solid edges: {sketch: <sketch id>, at: [x,y,z]} for a drawn corner, or {face: <face locator>, at: [x,y,z]} for a corner of a shape drawn on a face */
+  corner?: { at: [number, number, number]; face?: UnspecifiedShape; sketch?: string }
+  /** three-way corners; default "rolled" */
+  corners?: "rolled" | "mitered"
+  /** solid edges to blend, all on one object */
+  edges?: UnspecifiedShape[]
+  /** round only: a radius at an arc length along the chain (variable radius) */
+  handles?: { at: number; radius: number }[]
+  /** "round" (default), "cove", "bullnose", a built-in id such as "builtin:ogee", or a Library profile's id */
+  profile?: string
+  /** default "tangent": each located edge extends along the smooth chain a click on it would take */
+  propagate?: "tangent" | "none"
+  /** meters; required except for a bullnose or a profile */
+  radius?: number
+  /** facets across the arc: 2 to 96 for an edge round, cove or bullnose, 1 to 96 for a profile, up to 1024 for a 2D corner; default the drawing tools' count for the edge's turn at this radius */
+  segments?: number
+  /** meters left sharp at the start and end of the chain */
+  stops?: { end?: number; start?: number }
+  /** profiles only, meters on the bearing face (replaces radius) */
+  width?: number
+}
+
+export interface SolidFilletResult {
+  blend_ids?: number[]
+  /** new blend faces */
+  faces?: number
+  object_id?: string
+  /** a corner of a world sketch: the sketch */
+  sketch_id?: string
+}
+
+/**
  * `hew.solid.follow_me` (v1) — Sweep a profile along an edge-chain path, as the tool does.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: empty_path, unknown_path_edge, path_branches, path_disconnected, path_segment_too_short, profile_not_perpendicular, follow_me_in_component_unsupported, path_detached_from_profile, path_reverses, path_too_tight, profile_crosses_axis, partial_sweep_on_pole, sweep_self_intersects, sweep_degenerate, unknown_region, unknown_object, unknown_face, unknown_entity, locator_missed, ambiguous_locator, unimplemented
+ * Refusals: empty_path, unknown_path_edge, path_branches, path_disconnected, path_segment_too_short, profile_not_perpendicular, follow_me_in_component_unsupported, path_detached_from_profile, path_reverses, path_too_tight, profile_crosses_axis, partial_sweep_on_pole, sweep_self_intersects, sweep_degenerate, twist_needs_open_path, unknown_region, unknown_object, unknown_face, unknown_entity, locator_missed, ambiguous_locator, unimplemented
  */
 export interface SolidFollowMeParams {
+  /** scale of the end profile relative to the start (1 = none); open paths only */
+  end_scale?: number
   path: { edges: unknown[] } | { face: UnspecifiedShape } | { curve: string }
   profile: string | { face: UnspecifiedShape }
+  /** stations per path segment; default one per 15° of twist */
+  stations?: number
+  /** total twist over the swept length, radians (right-hand rule about the path); open paths only */
+  twist?: number
 }
 
 export interface SolidFollowMeResult {
@@ -2121,7 +2301,7 @@ export interface SolidImprintsResult {
 /**
  * `hew.solid.intersect` (v1) — Boolean intersection of two or more solids: the material in all of them.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, would_unlink
+ * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, non_planar_input, degenerate_input, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, would_unlink
  */
 export interface SolidIntersectParams {
   /** a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows */
@@ -2135,9 +2315,36 @@ export interface SolidIntersectParams {
 }
 
 export interface SolidIntersectResult {
+  /** present with pieces: why the result is several, in words for this operation */
+  note?: string
+  /** present when the result is a group of pieces: how many */
+  pieces?: number
+  /** the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, an Intersect of several overlaps) */
   result: string
   /** present when unlink: true split placements off: the placements exploded */
   unlinked?: string[]
+}
+
+/**
+ * `hew.solid.loft` (v1) — Skin a new solid through closed shapes in order, optionally to an apex and along rails, as the Loft tool does.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: open_profile, loft_profile_has_hole, loft_needs_two_profiles, loft_too_many_rails, rail_misses_profile, self_intersecting, amount_out_of_range, shape_degenerate, unknown_region, unknown_object, unknown_face, unknown_entity, locator_missed, ambiguous_locator, follow_me_in_component_unsupported, unimplemented
+ */
+export interface SolidLoftParams {
+  /** [x, y, z] or a derived-point locator: the point the loft ends in */
+  apex?: UnspecifiedShape
+  /** closed shapes without holes, in loft order */
+  profiles: (string | { face: UnspecifiedShape })[]
+  /** up to two paths touching every profile at a vertex or a start marker */
+  rails?: UnspecifiedShape[]
+  /** per profile: move its correspondence start by this many start candidates: corners where every profile has the same number of corners, else vertices */
+  start_offsets?: number[]
+  /** stations between consecutive profiles (1 = ruled); default 1 for two shapes without rails, else 8 */
+  stations?: number
+}
+
+export interface SolidLoftResult {
+  object_id: string
 }
 
 /**
@@ -2221,9 +2428,33 @@ export interface SolidMoveImprintResult {
 }
 
 /**
+ * `hew.solid.project` (v1) — Drape a sketch's shape onto an object's faces, then engrave or emboss it.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: project_misses, project_needs_closed_shape, would_sever, self_intersecting, unsupported_shell_corner, wall_too_thick, shape_needs_solid, amount_out_of_range, shape_degenerate, degenerate_contact, non_planar_input, degenerate_input, unknown_object, unknown_sketch, unknown_component, unknown_entity
+ */
+export interface SolidProjectParams {
+  /** meters; > 0 engraves, < 0 embosses; absent imprints only */
+  depth?: number
+  /** straight (default) cuts along the projection and can go through a wall; follow offsets along the surface */
+  mode?: "straight" | "follow"
+  /** the target object id */
+  object: string
+  /** region ids of that sketch; default every region */
+  regions?: string[]
+  /** the sketch whose shape is projected along its normal, toward the object */
+  sketch: string
+}
+
+export interface SolidProjectResult {
+  /** how many faces the imprinted region has */
+  faces: number
+  object_id: string
+}
+
+/**
  * `hew.solid.push_pull` (v1) — Push/pull a face of a solid with the tool's full semantics.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: object_not_solid, distance_too_small, would_vanish, non_manifold_result, not_a_sub_face, radius_vanishes, wall_neighbor_non_planar, unknown_face, unknown_object, unknown_component, grouped_operand, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, unknown_occurrence, explode_session_scope, not_an_object
+ * Refusals: object_not_solid, distance_too_small, would_vanish, non_manifold_result, not_a_sub_face, radius_vanishes, wall_neighbor_non_planar, blend_modified, dependent_blend, radius_too_large, profile_too_wide, unsupported_edge, unsupported_vertex, blend_faces_flush, obstructed, blend_degenerate, unknown_face, unknown_object, unknown_component, grouped_operand, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, unknown_occurrence, explode_session_scope, not_an_object
  */
 export interface SolidPushPullParams {
   distance: number
@@ -2252,6 +2483,80 @@ export interface SolidRejoinParams {
 export interface SolidRejoinResult {
   /** obj_ id of the joined solid; it keeps the largest piece's name, tags, and attributes */
   object: string
+}
+
+/**
+ * `hew.solid.remove_blend` (v1) — Remove a fillet or chamfer, restoring the sharp edges, by naming any face of it.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: blend_modified, dependent_blend, unknown_blend, unknown_object, unknown_face, unknown_entity, locator_missed, ambiguous_locator
+ */
+export interface SolidRemoveBlendParams {
+  /** HEW_API.md §5.2 face locator of any face of the blend */
+  face: UnspecifiedShape
+}
+
+export interface SolidRemoveBlendResult {
+  object_id: string
+}
+
+/**
+ * `hew.solid.remove_degenerate_faces` (v1) — Remove an object's zero-width and sub-tolerance faces, keeping it closed.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: object_is_solid, unknown_component, unknown_entity, explode_session_scope, invalid, nothing_to_remove
+ */
+export interface SolidRemoveDegenerateFacesParams {
+  /** obj_ id (a world object or a component member) */
+  object: string
+}
+
+export interface SolidRemoveDegenerateFacesResult {
+  /** faces removed */
+  removed: number
+}
+
+/**
+ * `hew.solid.resize_blend` (v1) — Resize a fillet or chamfer (or switch it between round and chamfer) by naming any face of it.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: blend_modified, dependent_blend, unknown_blend, radius_too_large, blend_degenerate, profile_too_wide, segments_out_of_range, unsupported_edge, unsupported_vertex, blend_faces_flush, obstructed, invalid_profile, unknown_profile, unknown_object, unknown_face, unknown_entity, locator_missed, ambiguous_locator
+ */
+export interface SolidResizeBlendParams {
+  distance?: number
+  distances?: [number, number]
+  /** HEW_API.md §5.2 face locator of any face of the blend */
+  face: UnspecifiedShape
+  profile?: string
+  radius?: number
+  /** facets across the arc: 2 to 96 for a round, cove or bullnose, 1 to 96 for a profile */
+  segments?: number
+  width?: number
+}
+
+export interface SolidResizeBlendResult {
+  blend_ids?: number[]
+  /** new blend faces */
+  faces?: number
+  object_id?: string
+  /** a corner of a world sketch: the sketch */
+  sketch_id?: string
+}
+
+/**
+ * `hew.solid.revolve` (v1) — Turn a profile about an axis in its plane into a solid, as the Revolve tool does.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: axis_not_in_profile_plane, amount_out_of_range, profile_crosses_axis, partial_sweep_on_pole, sweep_self_intersects, sweep_degenerate, follow_me_in_component_unsupported, unknown_region, unknown_object, unknown_face, unknown_entity, locator_missed, ambiguous_locator
+ */
+export interface SolidRevolveParams {
+  /** radians, 0 < |angle| ≤ 2π, right-hand rule about from→to; default 2π (a closed solid) */
+  angle?: number
+  /** a line lying in the profile's plane */
+  axis: { from: UnspecifiedShape; to: UnspecifiedShape } | { edge: UnspecifiedShape }
+  profile: string | { face: UnspecifiedShape }
+  /** facets per full turn; default the drawing tools' count at the profile's largest distance from the axis */
+  segments?: number
+}
+
+export interface SolidRevolveResult {
+  object_id: string
 }
 
 /**
@@ -2289,6 +2594,23 @@ export interface SolidScaleImprintResult {
 }
 
 /**
+ * `hew.solid.shell` (v1) — Hollow a solid to a wall of one thickness, leaving chosen faces open.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: wall_too_thick, self_intersecting, unsupported_shell_corner, shape_needs_solid, amount_out_of_range, shape_degenerate, unknown_object, unknown_component, unknown_entity, locator_missed, ambiguous_locator
+ */
+export interface SolidShellParams {
+  /** an object id */
+  object: string
+  open?: UnspecifiedShape[]
+  /** wall thickness in meters; negative grows the wall outward */
+  thickness: number
+}
+
+export interface SolidShellResult {
+  object_id: string
+}
+
+/**
  * `hew.solid.slice` (v1) — Slice a solid by a plane into two solids; the object may be a path to a definition member, sliced in the definition.
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: not_solid, plane_misses_solid, degenerate, unknown_object, unknown_entity, unknown_occurrence, unknown_instance, unknown_component, grouped_operand, explode_session_scope
@@ -2306,9 +2628,25 @@ export interface SolidSliceResult {
 }
 
 /**
+ * `hew.solid.soften` (v1) — Soften the edges of an object that bend less than an angle, so faceted walls read as smooth.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: amount_out_of_range, shape_degenerate, unknown_object, unknown_component, unknown_entity
+ */
+export interface SolidSoftenParams {
+  /** radians: edges bending less than this are softened (coplanar and creased edges are left alone) */
+  max_angle: number
+  /** an object id */
+  object: string
+}
+
+export interface SolidSoftenResult {
+  softened: number
+}
+
+/**
  * `hew.solid.subtract` (v1) — Boolean subtraction: the first solid minus every other one; a may be a path to a definition member, cut through that placement so every placement shows the cut, by a world object or a transient prism or box.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, nothing_removed, mirrored_pose, compute_too_large
+ * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, non_planar_input, degenerate_input, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, nothing_removed, mirrored_pose, compute_too_large
  */
 export interface SolidSubtractParams {
   /** a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows */
@@ -2320,6 +2658,11 @@ export interface SolidSubtractParams {
 }
 
 export interface SolidSubtractResult {
+  /** present with pieces: why the result is several, in words for this operation */
+  note?: string
+  /** present when the result is a group of pieces: how many */
+  pieces?: number
+  /** the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, a Subtract that severs, an Intersect of several overlaps) */
   result: string
 }
 
@@ -2346,7 +2689,7 @@ export interface SolidThickenResult {
 /**
  * `hew.solid.union` (v1) — Boolean union of two or more solids: the material in any of them.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, would_unlink
+ * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, non_planar_input, degenerate_input, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, would_unlink
  */
 export interface SolidUnionParams {
   /** a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows */
@@ -2360,6 +2703,11 @@ export interface SolidUnionParams {
 }
 
 export interface SolidUnionResult {
+  /** present with pieces: why the result is several, in words for this operation */
+  note?: string
+  /** present when the result is a group of pieces: how many */
+  pieces?: number
+  /** the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, an Intersect of several overlaps) */
   result: string
   /** present when unlink: true split placements off: the placements exploded */
   unlinked?: string[]
@@ -2723,6 +3071,10 @@ export class HewApiClient {
     return envelope.results[0]
   }
 
+  readonly array = {
+    path: (params: ArrayPathParams): Promise<ArrayPathResult> => this.mutate('hew.array.path', params),
+  }
+
   readonly attr = {
     delete: (params: AttrDeleteParams): Promise<AttrDeleteResult> => this.mutate('hew.attr.delete', params),
     get: (params: AttrGetParams): Promise<AttrGetResult> => this.call('hew.attr.get', params),
@@ -2835,6 +3187,11 @@ export class HewApiClient {
     hello: (params: MetaHelloParams): Promise<MetaHelloResult> => this.call('hew.meta.hello', params),
   }
 
+  readonly object = {
+    crease: (params: ObjectCreaseParams): Promise<ObjectCreaseResult> => this.mutate('hew.object.crease', params),
+    smooth: (params: ObjectSmoothParams): Promise<ObjectSmoothResult> => this.mutate('hew.object.smooth', params),
+  }
+
   readonly print = {
     pdf: (params: PrintPdfParams): Promise<PrintPdfResult> => this.call('hew.print.pdf', params),
   }
@@ -2888,22 +3245,34 @@ export class HewApiClient {
   }
 
   readonly solid = {
+    bake: (params: SolidBakeParams): Promise<SolidBakeResult> => this.mutate('hew.solid.bake', params),
     cap: (params: SolidCapParams): Promise<SolidCapResult> => this.mutate('hew.solid.cap', params),
+    chamfer: (params: SolidChamferParams): Promise<SolidChamferResult> => this.mutate('hew.solid.chamfer', params),
+    deform: (params: SolidDeformParams): Promise<SolidDeformResult> => this.mutate('hew.solid.deform', params),
     deleteFaces: (params: SolidDeleteFacesParams): Promise<SolidDeleteFacesResult> => this.mutate('hew.solid.delete_faces', params),
     deleteImprint: (params: SolidDeleteImprintParams): Promise<SolidDeleteImprintResult> => this.mutate('hew.solid.delete_imprint', params),
     extrude: (params: SolidExtrudeParams): Promise<SolidExtrudeResult> => this.mutate('hew.solid.extrude', params),
+    fillet: (params: SolidFilletParams): Promise<SolidFilletResult> => this.mutate('hew.solid.fillet', params),
     followMe: (params: SolidFollowMeParams): Promise<SolidFollowMeResult> => this.mutate('hew.solid.follow_me', params),
     fromFaces: (params: SolidFromFacesParams): Promise<SolidFromFacesResult> => this.mutate('hew.solid.from_faces', params),
     imprints: (params: SolidImprintsParams): Promise<SolidImprintsResult> => this.call('hew.solid.imprints', params),
     intersect: (params: SolidIntersectParams): Promise<SolidIntersectResult> => this.mutate('hew.solid.intersect', params),
+    loft: (params: SolidLoftParams): Promise<SolidLoftResult> => this.mutate('hew.solid.loft', params),
     markSurface: (params: SolidMarkSurfaceParams): Promise<SolidMarkSurfaceResult> => this.mutate('hew.solid.mark_surface', params),
     mend: (params: SolidMendParams): Promise<SolidMendResult> => this.mutate('hew.solid.mend', params),
     moveImprint: (params: SolidMoveImprintParams): Promise<SolidMoveImprintResult> => this.mutate('hew.solid.move_imprint', params),
+    project: (params: SolidProjectParams): Promise<SolidProjectResult> => this.mutate('hew.solid.project', params),
     pushPull: (params: SolidPushPullParams): Promise<SolidPushPullResult> => this.mutate('hew.solid.push_pull', params),
     rejoin: (params: SolidRejoinParams): Promise<SolidRejoinResult> => this.mutate('hew.solid.rejoin', params),
+    removeBlend: (params: SolidRemoveBlendParams): Promise<SolidRemoveBlendResult> => this.mutate('hew.solid.remove_blend', params),
+    removeDegenerateFaces: (params: SolidRemoveDegenerateFacesParams): Promise<SolidRemoveDegenerateFacesResult> => this.mutate('hew.solid.remove_degenerate_faces', params),
+    resizeBlend: (params: SolidResizeBlendParams): Promise<SolidResizeBlendResult> => this.mutate('hew.solid.resize_blend', params),
+    revolve: (params: SolidRevolveParams): Promise<SolidRevolveResult> => this.mutate('hew.solid.revolve', params),
     rotateImprint: (params: SolidRotateImprintParams): Promise<SolidRotateImprintResult> => this.mutate('hew.solid.rotate_imprint', params),
     scaleImprint: (params: SolidScaleImprintParams): Promise<SolidScaleImprintResult> => this.mutate('hew.solid.scale_imprint', params),
+    shell: (params: SolidShellParams): Promise<SolidShellResult> => this.mutate('hew.solid.shell', params),
     slice: (params: SolidSliceParams): Promise<SolidSliceResult> => this.mutate('hew.solid.slice', params),
+    soften: (params: SolidSoftenParams): Promise<SolidSoftenResult> => this.mutate('hew.solid.soften', params),
     subtract: (params: SolidSubtractParams): Promise<SolidSubtractResult> => this.mutate('hew.solid.subtract', params),
     thicken: (params: SolidThickenParams): Promise<SolidThickenResult> => this.mutate('hew.solid.thicken', params),
     union: (params: SolidUnionParams): Promise<SolidUnionResult> => this.mutate('hew.solid.union', params),

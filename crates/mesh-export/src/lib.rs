@@ -162,6 +162,7 @@ pub fn export(
     format: &str,
     segments_per_turn: u32,
     solids_only: bool,
+    cages: bool,
 ) -> Result<Vec<u8>, ExportError> {
     // Session normalization (module doc, "Session normalization"): a live
     // export must see what a live save sees.
@@ -174,6 +175,7 @@ pub fn export(
         segments_per_turn,
         solids_only,
         true,
+        cages,
     )
 }
 
@@ -183,15 +185,24 @@ pub fn export(
 /// its leaves at the identity pose. The roots are read against `doc` as
 /// given — they were resolved against it — so, unlike [`export`], an open
 /// session is not closed first. [`export`] is this with every world root of
-/// the session-closed document.
+/// the session-closed document. `cages` as for [`export`].
 pub fn export_occurrences(
     doc: &Document,
     roots: &[RenderRoot],
     format: &str,
     segments_per_turn: u32,
     solids_only: bool,
+    cages: bool,
 ) -> Result<Vec<u8>, ExportError> {
-    export_roots(doc, roots, format, segments_per_turn, solids_only, false)
+    export_roots(
+        doc,
+        roots,
+        format,
+        segments_per_turn,
+        solids_only,
+        false,
+        cages,
+    )
 }
 
 /// The shared body of [`export`] and [`export_occurrences`]. `whole`:
@@ -206,19 +217,23 @@ fn export_roots(
     segments_per_turn: u32,
     solids_only: bool,
     whole: bool,
+    cages: bool,
 ) -> Result<Vec<u8>, ExportError> {
     match format {
-        "stl" => stl_from_roots(doc, roots, segments_per_turn, solids_only, whole),
+        "stl" => stl_from_roots(doc, roots, segments_per_turn, solids_only, whole, cages),
         "3mf" => {
-            let solids = collect_export_solids(doc, roots, segments_per_turn, solids_only, whole)?;
+            let solids =
+                collect_export_solids(doc, roots, segments_per_turn, solids_only, whole, cages)?;
             write_3mf(&solids).ok_or(ExportError::NothingToExport)
         }
         "glb" | "gltf" => {
-            let solids = collect_export_solids(doc, roots, segments_per_turn, solids_only, whole)?;
+            let solids =
+                collect_export_solids(doc, roots, segments_per_turn, solids_only, whole, cages)?;
             write_glb(&solids, doc.materials()).ok_or(ExportError::NothingToExport)
         }
         "usdz" => {
-            let solids = collect_export_solids(doc, roots, segments_per_turn, solids_only, whole)?;
+            let solids =
+                collect_export_solids(doc, roots, segments_per_turn, solids_only, whole, cages)?;
             write_usdz(&solids).ok_or(ExportError::NothingToExport)
         }
         other => Err(ExportError::UnsupportedFormat(other.to_string())),
@@ -328,6 +343,39 @@ fn root_leaves(
 }
 
 // -------------------------------------------------------- shared collection
+
+/// One object's export triangles (9 `f64`s each, object-local, CCW from
+/// outside) with the source face of each: its Smooth surface when it has
+/// a Smooth level and `cages` is off (each subdivided quad split along its
+/// 0–2 diagonal, closed by construction), else its own faces at
+/// `segments_per_turn`.
+fn object_triangles(
+    doc: &Document,
+    id: kernel::ObjectId,
+    obj: &Object,
+    segments_per_turn: u32,
+    cages: bool,
+) -> Result<(Vec<f64>, Vec<FaceId>), ExportError> {
+    let level = doc.smooth_level(id);
+    if level == 0 || cages {
+        return tessellate::export_triangles_with_faces(obj, segments_per_turn)
+            .map_err(ExportError::Failed);
+    }
+    let m = kernel::subdiv::subdivide(obj, level)
+        .map_err(|e| ExportError::Failed(tessellate::TessellateError::Subdivide(e)))?;
+    let mut tris = Vec::with_capacity(m.faces.len() * 18);
+    let mut faces = Vec::with_capacity(m.faces.len() * 2);
+    for (f, &src) in m.faces.iter().zip(&m.source) {
+        for k in 1..f.len() - 1 {
+            for i in [f[0], f[k], f[k + 1]] {
+                let p = m.points[i as usize];
+                tris.extend([p.x, p.y, p.z]);
+            }
+            faces.push(src);
+        }
+    }
+    Ok((tris, faces))
+}
 
 /// One exported solid: a display name plus its world-space triangle soup
 /// (meters, 9 `f64`s per triangle, CCW from outside) — pose baked in,
@@ -451,6 +499,7 @@ pub(crate) fn collect_export_solids(
     segments_per_turn: u32,
     solids_only: bool,
     whole: bool,
+    cages: bool,
 ) -> Result<Vec<ExportSolid>, ExportError> {
     let mut solids: Vec<ExportSolid> = Vec::new();
     let palette = doc.materials();
@@ -471,8 +520,7 @@ pub(crate) fn collect_export_solids(
             };
             let flip = pose.is_some_and(|p| p.determinant() < 0.0);
             let vertex_order: [usize; 3] = if flip { [0, 2, 1] } else { [0, 1, 2] };
-            let (raw, face_ids) = tessellate::export_triangles_with_faces(obj, segments_per_turn)
-                .map_err(ExportError::Failed)?;
+            let (raw, face_ids) = object_triangles(doc, member, obj, segments_per_turn, cages)?;
             if raw.is_empty() {
                 continue;
             }
@@ -548,12 +596,20 @@ pub fn export_stl(
     doc: &Document,
     segments_per_turn: u32,
     solids_only: bool,
+    cages: bool,
 ) -> Result<Vec<u8>, ExportError> {
     // Session normalization (module doc, "Session normalization"): a live
     // export must see what a live save sees.
     let normalized = doc.session_closed();
     let roots = world_roots(&normalized);
-    stl_from_roots(&normalized, &roots, segments_per_turn, solids_only, true)
+    stl_from_roots(
+        &normalized,
+        &roots,
+        segments_per_turn,
+        solids_only,
+        true,
+        cages,
+    )
 }
 
 fn stl_from_roots(
@@ -562,6 +618,7 @@ fn stl_from_roots(
     segments_per_turn: u32,
     solids_only: bool,
     whole: bool,
+    cages: bool,
 ) -> Result<Vec<u8>, ExportError> {
     let mut soup: Vec<f64> = Vec::new();
     // Validate each claimed solid independently: STL flattens the scene,
@@ -577,8 +634,7 @@ fn stl_from_roots(
             let Some(obj) = doc.object(member) else {
                 continue;
             };
-            let triangles = tessellate::export_triangles(obj, segments_per_turn)
-                .map_err(ExportError::Failed)?;
+            let (triangles, _) = object_triangles(doc, member, obj, segments_per_turn, cages)?;
             any_solid = true;
             let start = soup.len() / 9;
             if let Some(pose) = pose {
@@ -898,11 +954,18 @@ pub fn export_3mf(
     doc: &Document,
     segments_per_turn: u32,
     solids_only: bool,
+    cages: bool,
 ) -> Result<Vec<u8>, ExportError> {
     let normalized = doc.session_closed();
     let doc: &Document = &normalized;
-    let solids =
-        collect_export_solids(doc, &world_roots(doc), segments_per_turn, solids_only, true)?;
+    let solids = collect_export_solids(
+        doc,
+        &world_roots(doc),
+        segments_per_turn,
+        solids_only,
+        true,
+        cages,
+    )?;
     write_3mf(&solids).ok_or(ExportError::NothingToExport)
 }
 
@@ -1205,11 +1268,18 @@ pub fn export_glb(
     doc: &Document,
     segments_per_turn: u32,
     solids_only: bool,
+    cages: bool,
 ) -> Result<Vec<u8>, ExportError> {
     let normalized = doc.session_closed();
     let doc: &Document = &normalized;
-    let solids =
-        collect_export_solids(doc, &world_roots(doc), segments_per_turn, solids_only, true)?;
+    let solids = collect_export_solids(
+        doc,
+        &world_roots(doc),
+        segments_per_turn,
+        solids_only,
+        true,
+        cages,
+    )?;
     write_glb(&solids, doc.materials()).ok_or(ExportError::NothingToExport)
 }
 
@@ -1654,11 +1724,18 @@ pub fn export_usdz(
     doc: &Document,
     segments_per_turn: u32,
     solids_only: bool,
+    cages: bool,
 ) -> Result<Vec<u8>, ExportError> {
     let normalized = doc.session_closed();
     let doc: &Document = &normalized;
-    let solids =
-        collect_export_solids(doc, &world_roots(doc), segments_per_turn, solids_only, true)?;
+    let solids = collect_export_solids(
+        doc,
+        &world_roots(doc),
+        segments_per_turn,
+        solids_only,
+        true,
+        cages,
+    )?;
     write_usdz(&solids).ok_or(ExportError::NothingToExport)
 }
 
@@ -2209,9 +2286,31 @@ mod tests {
     // ---------------------------------------------------------------- STL
 
     #[test]
+    fn smoothed_stl_differs_from_cage_and_cages_flag_restores_it() {
+        let mut doc = box_document();
+        let cage = export_stl(&doc, 0, true, false).unwrap();
+        let id = doc.visible_object_ids()[0];
+        doc.set_smooth_level(id, 1).unwrap();
+        let smooth = export_stl(&doc, 0, true, false).unwrap();
+        assert_ne!(smooth, cage, "a smoothed object exports its Smooth surface");
+        let count = |b: &[u8]| u32::from_le_bytes([b[80], b[81], b[82], b[83]]);
+        assert_eq!(count(&smooth), 48, "24 quads, two triangles each");
+        assert_eq!(
+            export_stl(&doc, 0, true, true).unwrap(),
+            cage,
+            "cages restores the cage"
+        );
+        // The named formats follow the same switch.
+        assert_ne!(
+            export_3mf(&doc, 0, true, false).unwrap(),
+            export_3mf(&doc, 0, true, true).unwrap()
+        );
+    }
+
+    #[test]
     fn export_stl_produces_a_well_formed_binary_stl_with_twelve_triangles() {
         let doc = box_document();
-        let bytes = export_stl(&doc, 0, true).expect("a solid box exports");
+        let bytes = export_stl(&doc, 0, true, false).expect("a solid box exports");
         // Version-agnostic: the header is "Hew <version> binary STL…", so
         // assert the stable signature prefix, not a version digit (a version
         // bump must not break this).
@@ -2224,7 +2323,7 @@ mod tests {
     #[test]
     fn export_stl_refuses_nothing_to_export_on_an_empty_document() {
         let doc = Document::new();
-        let err = export_stl(&doc, 0, true).unwrap_err();
+        let err = export_stl(&doc, 0, true, false).unwrap_err();
         assert_eq!(err.name(), "nothing_to_export");
     }
 
@@ -2431,8 +2530,8 @@ mod tests {
         .unwrap();
         let before = doc.save();
         for error in [
-            export_stl(&doc, 0, true).unwrap_err(),
-            export(&doc, "stl", 0, true).unwrap_err(),
+            export_stl(&doc, 0, true, false).unwrap_err(),
+            export(&doc, "stl", 0, true, false).unwrap_err(),
         ] {
             assert!(matches!(error, ExportError::StlIntegrity(_)));
             assert_eq!(error.name(), "export_failed");
@@ -2461,7 +2560,7 @@ mod tests {
         doc.place_instance(component, mirrored)
             .expect("place a mirrored second instance");
 
-        let bytes = export_3mf(&doc, 0, true).expect("both instances export");
+        let bytes = export_3mf(&doc, 0, true, false).expect("both instances export");
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a valid zip");
         let mut model = String::new();
         std::io::Read::read_to_string(
@@ -2503,14 +2602,14 @@ mod tests {
         doc.place_instance(component, translated)
             .expect("place a second instance");
 
-        let before = export_stl(&doc, 0, true).expect("both instances export");
+        let before = export_stl(&doc, 0, true, false).expect("both instances export");
         let count_before = u32::from_le_bytes(before[80..84].try_into().unwrap());
         assert_eq!(count_before, 24, "two box instances, 12 triangles each");
 
         doc.open_explode_session(first_instance)
             .expect("open a session on the first instance");
 
-        let after = export_stl(&doc, 0, true).expect("still exports mid-session");
+        let after = export_stl(&doc, 0, true, false).expect("still exports mid-session");
         let count_after = u32::from_le_bytes(after[80..84].try_into().unwrap());
         assert_eq!(
             count_after, count_before,
@@ -2579,7 +2678,7 @@ mod tests {
         )
         .expect("place a second instance");
 
-        let bytes = export_3mf(&doc, 0, true).expect("the whole scene exports");
+        let bytes = export_3mf(&doc, 0, true, false).expect("the whole scene exports");
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a valid zip");
         let mut model = String::new();
         std::io::Read::read_to_string(
@@ -2603,7 +2702,7 @@ mod tests {
         assert!(model.contains("#FF0000"), "{model}");
         assert!(model.contains("#CCCCCC"), "{model}");
 
-        let stl = export_stl(&doc, 0, true).expect("the whole scene exports to stl too");
+        let stl = export_stl(&doc, 0, true, false).expect("the whole scene exports to stl too");
         let count = u32::from_le_bytes(stl[80..84].try_into().unwrap());
         assert_eq!(count, 48, "4 boxes, 12 triangles each");
     }
@@ -2627,7 +2726,7 @@ mod tests {
         let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(0x00, 0x00, 0xff)));
         doc.set_instance_material(second, Some(blue)).unwrap();
 
-        let solids = collect_export_solids(&doc, &world_roots(&doc), 0, true, true).unwrap();
+        let solids = collect_export_solids(&doc, &world_roots(&doc), 0, true, true, false).unwrap();
         assert_eq!(solids.len(), 2);
         let blue_parts = solids
             .iter()
@@ -2639,13 +2738,13 @@ mod tests {
             doc.occurrence_at(&[], kernel::NodeId::Instance(first))
                 .unwrap(),
         )];
-        let solids = collect_export_solids(&doc, &only_first, 0, true, false).unwrap();
+        let solids = collect_export_solids(&doc, &only_first, 0, true, false, false).unwrap();
         assert!(solids[0].materials.iter().all(|&m| m.is_none()));
         let only_second = vec![RenderRoot::Occurrence(
             doc.occurrence_at(&[], kernel::NodeId::Instance(second))
                 .unwrap(),
         )];
-        let solids = collect_export_solids(&doc, &only_second, 0, true, false).unwrap();
+        let solids = collect_export_solids(&doc, &only_second, 0, true, false, false).unwrap();
         assert!(solids[0].materials.iter().all(|&m| m == Some(blue)));
     }
 
@@ -2657,15 +2756,15 @@ mod tests {
     #[test]
     fn export_dispatches_by_format() {
         let doc = box_document();
-        let direct = export_stl(&doc, 0, true).unwrap();
-        let dispatched = export(&doc, "stl", 0, true).unwrap();
+        let direct = export_stl(&doc, 0, true, false).unwrap();
+        let dispatched = export(&doc, "stl", 0, true, false).unwrap();
         assert_eq!(direct, dispatched);
     }
 
     #[test]
     fn export_refuses_host_capability_missing_for_an_unrecognized_format() {
         let doc = box_document();
-        let err = export(&doc, "obj", 0, true).unwrap_err();
+        let err = export(&doc, "obj", 0, true, false).unwrap_err();
         assert_eq!(err.name(), "host_capability_missing");
         assert_eq!(err.message(), "Unrecognized export format \"obj\".");
     }
@@ -2702,7 +2801,7 @@ mod tests {
     #[test]
     fn export_3mf_produces_one_object_with_eight_vertices_and_twelve_triangles() {
         let doc = box_document();
-        let bytes = export_3mf(&doc, 0, true).expect("a solid box exports to 3mf");
+        let bytes = export_3mf(&doc, 0, true, false).expect("a solid box exports to 3mf");
 
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a valid zip");
         assert!(zip.by_name("[Content_Types].xml").is_ok());
@@ -2726,15 +2825,15 @@ mod tests {
     #[test]
     fn export_3mf_refuses_nothing_to_export_on_an_empty_document() {
         let doc = Document::new();
-        let err = export_3mf(&doc, 0, true).unwrap_err();
+        let err = export_3mf(&doc, 0, true, false).unwrap_err();
         assert_eq!(err.name(), "nothing_to_export");
     }
 
     #[test]
     fn export_3mf_is_byte_identical_across_two_exports() {
         let doc = box_document();
-        let a = export_3mf(&doc, 0, true).unwrap();
-        let b = export_3mf(&doc, 0, true).unwrap();
+        let a = export_3mf(&doc, 0, true, false).unwrap();
+        let b = export_3mf(&doc, 0, true, false).unwrap();
         assert_eq!(a, b, "3MF export must be deterministic");
     }
 
@@ -2746,7 +2845,7 @@ mod tests {
     #[test]
     fn export_3mf_encodes_face_colors_via_basematerials() {
         let (doc, _red, _blue) = painted_box_document();
-        let bytes = export_3mf(&doc, 0, true).expect("a painted box exports to 3mf");
+        let bytes = export_3mf(&doc, 0, true, false).expect("a painted box exports to 3mf");
 
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a valid zip");
         let mut model = String::new();
@@ -2790,7 +2889,7 @@ mod tests {
     #[test]
     fn export_3mf_renders_a_textured_face_as_its_tint_color() {
         let doc = textured_box_document();
-        let bytes = export_3mf(&doc, 0, true).expect("a textured box exports to 3mf");
+        let bytes = export_3mf(&doc, 0, true, false).expect("a textured box exports to 3mf");
 
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a valid zip");
         let mut model = String::new();
@@ -2878,17 +2977,17 @@ mod tests {
     fn solids_only_toggles_non_solid_inclusion() {
         let doc = open_quad_document();
         assert!(
-            export_stl(&doc, 0, true).is_err(),
+            export_stl(&doc, 0, true, false).is_err(),
             "solids-only drops the open quad"
         );
-        assert!(export_3mf(&doc, 0, true).is_err());
-        assert!(export_glb(&doc, 0, true).is_err());
+        assert!(export_3mf(&doc, 0, true, false).is_err());
+        assert!(export_glb(&doc, 0, true, false).is_err());
 
-        let stl = export_stl(&doc, 0, false).expect("permissive mode includes it");
+        let stl = export_stl(&doc, 0, false, false).expect("permissive mode includes it");
         let count = u32::from_le_bytes(stl[80..84].try_into().unwrap());
         assert_eq!(count, 2, "one quad triangulates to 2 triangles");
 
-        let glb = export_glb(&doc, 0, false).expect("permissive mode includes it");
+        let glb = export_glb(&doc, 0, false, false).expect("permissive mode includes it");
         let (json, _bin) = glb_chunks(&glb);
         assert_eq!(json["meshes"].as_array().unwrap().len(), 1);
     }
@@ -2925,7 +3024,7 @@ mod tests {
     #[test]
     fn export_glb_produces_a_well_formed_container_with_one_mesh() {
         let doc = box_document();
-        let bytes = export_glb(&doc, 0, true).expect("a solid box exports to glb");
+        let bytes = export_glb(&doc, 0, true, false).expect("a solid box exports to glb");
         let (json, bin) = glb_chunks(&bytes);
 
         assert_eq!(json["asset"]["version"], "2.0");
@@ -2965,22 +3064,22 @@ mod tests {
     #[test]
     fn export_glb_refuses_nothing_to_export_on_an_empty_document() {
         let doc = Document::new();
-        let err = export_glb(&doc, 0, true).unwrap_err();
+        let err = export_glb(&doc, 0, true, false).unwrap_err();
         assert_eq!(err.name(), "nothing_to_export");
     }
 
     #[test]
     fn export_glb_is_byte_identical_across_two_exports() {
         let doc = box_document();
-        let a = export_glb(&doc, 0, true).unwrap();
-        let b = export_glb(&doc, 0, true).unwrap();
+        let a = export_glb(&doc, 0, true, false).unwrap();
+        let b = export_glb(&doc, 0, true, false).unwrap();
         assert_eq!(a, b, "GLB export must be deterministic");
     }
 
     #[test]
     fn export_glb_chunks_are_four_byte_aligned() {
         let doc = box_document();
-        let bytes = export_glb(&doc, 0, true).unwrap();
+        let bytes = export_glb(&doc, 0, true, false).unwrap();
         let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
         assert_eq!(json_len % 4, 0, "JSON chunk length must be 4-byte aligned");
         let bin_header = 20 + json_len as usize;
@@ -2996,7 +3095,7 @@ mod tests {
     #[test]
     fn export_glb_encodes_face_colors_as_distinct_materials() {
         let (doc, _red, _blue) = painted_box_document();
-        let bytes = export_glb(&doc, 0, true).expect("a painted box exports to glb");
+        let bytes = export_glb(&doc, 0, true, false).expect("a painted box exports to glb");
         let (json, _bin) = glb_chunks(&bytes);
 
         let materials = json["materials"].as_array().unwrap();
@@ -3053,7 +3152,7 @@ mod tests {
     #[test]
     fn export_glb_embeds_a_textured_materials_image_bytes() {
         let doc = textured_box_document();
-        let bytes = export_glb(&doc, 0, true).expect("a textured box exports to glb");
+        let bytes = export_glb(&doc, 0, true, false).expect("a textured box exports to glb");
         let (json, bin) = glb_chunks(&bytes);
 
         let materials = json["materials"].as_array().unwrap();
@@ -3151,7 +3250,7 @@ mod tests {
     #[test]
     fn export_usdz_produces_one_mesh_with_eight_points_and_twelve_triangles() {
         let doc = box_document();
-        let bytes = export_usdz(&doc, 0, true).expect("a solid box exports to usdz");
+        let bytes = export_usdz(&doc, 0, true, false).expect("a solid box exports to usdz");
 
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).expect("a valid zip");
         assert_eq!(zip.len(), 1, "a single usda layer entry");
@@ -3180,23 +3279,23 @@ mod tests {
     #[test]
     fn export_usdz_refuses_nothing_to_export_on_an_empty_document() {
         let doc = Document::new();
-        let err = export_usdz(&doc, 0, true).unwrap_err();
+        let err = export_usdz(&doc, 0, true, false).unwrap_err();
         assert_eq!(err.name(), "nothing_to_export");
     }
 
     #[test]
     fn export_usdz_is_byte_identical_across_two_exports() {
         let doc = box_document();
-        let a = export_usdz(&doc, 0, true).unwrap();
-        let b = export_usdz(&doc, 0, true).unwrap();
+        let a = export_usdz(&doc, 0, true, false).unwrap();
+        let b = export_usdz(&doc, 0, true, false).unwrap();
         assert_eq!(a, b, "USDZ export must be deterministic");
     }
 
     #[test]
     fn export_dispatches_usdz_format() {
         let doc = box_document();
-        let direct = export_usdz(&doc, 0, true).unwrap();
-        let dispatched = export(&doc, "usdz", 0, true).unwrap();
+        let direct = export_usdz(&doc, 0, true, false).unwrap();
+        let dispatched = export(&doc, "usdz", 0, true, false).unwrap();
         assert_eq!(direct, dispatched);
     }
 
@@ -3211,7 +3310,7 @@ mod tests {
     fn export_usdz_splits_a_multi_colored_part_into_geom_subsets_bound_to_preview_surface_materials()
      {
         let (doc, _red, _blue) = painted_box_document();
-        let bytes = export_usdz(&doc, 0, true).expect("a painted box exports to usdz");
+        let bytes = export_usdz(&doc, 0, true, false).expect("a painted box exports to usdz");
         let usda = usda_layer(bytes);
 
         assert_eq!(usda.matches("def GeomSubset \"").count(), 3, "{usda}");
@@ -3249,7 +3348,7 @@ mod tests {
     #[test]
     fn export_usdz_renders_a_textured_face_as_its_tint_color_with_no_embedded_image() {
         let doc = textured_box_document();
-        let bytes = export_usdz(&doc, 0, true).expect("a textured box exports to usdz");
+        let bytes = export_usdz(&doc, 0, true, false).expect("a textured box exports to usdz");
         let usda = usda_layer(bytes);
         assert!(
             usda.contains("color3f inputs:diffuseColor"),
@@ -3285,7 +3384,7 @@ mod tests {
         doc.ingest(scene, Vec::new())
             .expect("ingest an awkwardly named box");
 
-        let bytes = export_usdz(&doc, 0, true).expect("exports despite the name");
+        let bytes = export_usdz(&doc, 0, true, false).expect("exports despite the name");
         let usda = usda_layer(bytes);
 
         let expected_id = sanitize_usd_identifier("3 Legs & \"Stuff\"");
@@ -3331,7 +3430,7 @@ mod tests {
         doc.ingest(scene, Vec::new())
             .expect("ingest two colliding-sanitized boxes");
 
-        let bytes = export_usdz(&doc, 0, true).expect("both boxes export");
+        let bytes = export_usdz(&doc, 0, true, false).expect("both boxes export");
         let usda = usda_layer(bytes);
         assert_eq!(usda.matches("def Xform \"Leg_1\" (").count(), 1, "{usda}");
         assert_eq!(usda.matches("def Xform \"Leg_1_2\" (").count(), 1, "{usda}");
@@ -3344,7 +3443,7 @@ mod tests {
     #[test]
     fn export_usdz_every_entry_is_stored_and_sixty_four_byte_aligned() {
         let (doc, _red, _blue) = painted_box_document();
-        let bytes = export_usdz(&doc, 0, true).expect("a painted box exports to usdz");
+        let bytes = export_usdz(&doc, 0, true, false).expect("a painted box exports to usdz");
 
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a valid zip");
         assert!(!zip.is_empty(), "at least one entry");
@@ -3379,7 +3478,7 @@ mod tests {
     #[test]
     fn export_usdz_central_directory_matches_local_headers() {
         let (doc, _red, _blue) = painted_box_document();
-        let bytes = export_usdz(&doc, 0, true).expect("a painted box exports to usdz");
+        let bytes = export_usdz(&doc, 0, true, false).expect("a painted box exports to usdz");
 
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).expect("a valid zip");
         assert!(!zip.is_empty());
@@ -3488,9 +3587,10 @@ mod tests {
         )
         .expect("place a second instance");
 
-        let usda_bytes = export_usdz(&doc, 0, true).expect("the whole scene exports to usdz");
+        let usda_bytes =
+            export_usdz(&doc, 0, true, false).expect("the whole scene exports to usdz");
         let usda = usda_layer(usda_bytes);
-        let glb = export_glb(&doc, 0, true).expect("the whole scene exports to glb too");
+        let glb = export_glb(&doc, 0, true, false).expect("the whole scene exports to glb too");
         let (json, _bin) = glb_chunks(&glb);
 
         let glb_meshes = json["meshes"].as_array().unwrap();
@@ -3532,11 +3632,11 @@ mod tests {
     fn export_usdz_solids_only_toggles_non_solid_inclusion() {
         let doc = open_quad_document();
         assert!(
-            export_usdz(&doc, 0, true).is_err(),
+            export_usdz(&doc, 0, true, false).is_err(),
             "solids-only drops the open quad"
         );
 
-        let bytes = export_usdz(&doc, 0, false).expect("permissive mode includes it");
+        let bytes = export_usdz(&doc, 0, false, false).expect("permissive mode includes it");
         let usda = usda_layer(bytes);
         assert_eq!(usda.matches("def Mesh \"").count(), 1, "{usda}");
         assert_eq!(

@@ -1674,3 +1674,127 @@ fn a_path_locator_miss_names_the_leaf_frame() {
         "{alone}"
     );
 }
+
+/// The edge of `o` along x at `y = y0`, `z = z0`.
+fn edge_along_x(doc: &Document, o: ObjectId, y0: f64, z0: f64) -> kernel::EdgeId {
+    let obj = doc.object(o).unwrap();
+    obj.edges()
+        .keys()
+        .find(|&e| {
+            let (a, b) = obj.edge_endpoints(e).unwrap();
+            (a.y - y0).abs() < 1e-9
+                && (b.y - y0).abs() < 1e-9
+                && (a.z - z0).abs() < 1e-9
+                && (b.z - z0).abs() < 1e-9
+        })
+        .unwrap()
+}
+
+fn fillet_front_top(doc: &mut Document, o: ObjectId, y0: f64, h: f64) {
+    let e = edge_along_x(doc, o, y0, h);
+    doc.blend_edges(
+        o,
+        &kernel::BlendSpec {
+            edges: vec![e],
+            profile: kernel::BlendProfile::Round {
+                radius: 0.05,
+                segments: 4,
+            },
+            primary: None,
+            corners: kernel::CornerStyle::Default,
+            stops: None,
+            handles: Vec::new(),
+        },
+    )
+    .unwrap();
+}
+
+/// True Curves marks are part of a shape's identity: a crease, a Smooth
+/// level, or a blend whose record is gone (a reflection there and back
+/// drops it, the geometry unchanged) make look-alikes distinct, so "Link
+/// identical copies" never offers them; identically filleted copies still
+/// match.
+#[test]
+fn signature_tells_apart_curve_marks_and_matches_identical_fillets() {
+    let mut doc = Document::new();
+    let size = [0.4, 0.2, 0.1];
+    let plain = cuboid(&mut doc, [0.0, 0.0, 0.0], size);
+    let creased = cuboid(&mut doc, [1.0, 0.0, 0.0], size);
+    let e = edge_along_x(&doc, creased, 0.2, 0.0);
+    doc.set_crease(creased, &[e], true).unwrap();
+    let smoothed = cuboid(&mut doc, [2.0, 0.0, 0.0], size);
+    doc.set_smooth_level(smoothed, 1).unwrap();
+    let base = sig_of(&mut doc, plain)["shape"].clone();
+    assert_ne!(sig_of(&mut doc, creased)["shape"], base, "a crease");
+    assert_ne!(sig_of(&mut doc, smoothed)["shape"], base, "a Smooth level");
+
+    let f1 = cuboid(&mut doc, [3.0, 0.0, 0.0], size);
+    let f2 = cuboid(&mut doc, [4.0, 0.0, 0.0], size);
+    let f3 = cuboid(&mut doc, [5.0, 0.0, 0.0], size);
+    for o in [f1, f2, f3] {
+        fillet_front_top(&mut doc, o, 0.0, 0.1);
+    }
+    let mirror =
+        Transform::reflection(Point3::new(5.2, 0.1, 0.05), Vec3::new(1.0, 0.0, 0.0)).unwrap();
+    doc.transform_object(f3, &mirror).unwrap();
+    doc.transform_object(f3, &mirror).unwrap();
+    let s1 = sig_of(&mut doc, f1)["shape"].clone();
+    assert_eq!(sig_of(&mut doc, f2)["shape"], s1, "identical fillets match");
+    assert_ne!(
+        sig_of(&mut doc, f3)["shape"],
+        s1,
+        "a fillet without its record"
+    );
+}
+
+/// A cuboid at `(x, 0, 0)` with a 24-gon drawn on its top face about the
+/// top's middle: as a circle (circle-claimed edges), a regular polygon
+/// (polygon-claimed edges), or plain segments through the same corners.
+fn ringed_cuboid(doc: &mut Document, x: f64, kind: Option<kernel::SketchCurveKind>) -> ObjectId {
+    let size = [0.4, 0.2, 0.1];
+    let o = cuboid(doc, [x, 0.0, 0.0], size);
+    let top =
+        kernel::Plane::from_point_normal(Point3::new(0.0, 0.0, 0.1), Vec3::new(0.0, 0.0, 1.0))
+            .unwrap();
+    let center = Point3::new(x + 0.2, 0.1, 0.1);
+    let (r, n) = (0.05, 24usize);
+    doc.draft(top, None, &[o], "Ring", |w| {
+        if let Some(kind) = kind {
+            w.begin_curve_with_kind(kernel::CurveGeom { center, radius: r }, kind)?;
+        }
+        let at = |k: usize| {
+            let a = std::f64::consts::TAU * k as f64 / n as f64;
+            Point3::new(center.x + r * a.cos(), center.y + r * a.sin(), center.z)
+        };
+        for k in 0..n {
+            w.add_segment(at(k), at(k + 1))?;
+        }
+        if kind.is_some() {
+            w.end_curve();
+        }
+        Ok(())
+    })
+    .unwrap();
+    o
+}
+
+/// An edge's circle or polygon claim is part of a shape's identity, as a
+/// face's surface claim is: the same corners drawn as a circle, as a
+/// polygon, or as plain segments are three shapes, so "Link identical
+/// copies" never offers them as one; identically drawn copies match.
+#[test]
+fn signature_tells_apart_edge_claims_and_matches_identical_drawings() {
+    let mut doc = Document::new();
+    let plain = ringed_cuboid(&mut doc, 0.0, None);
+    let circle = ringed_cuboid(&mut doc, 1.0, Some(kernel::SketchCurveKind::Circle));
+    let circle2 = ringed_cuboid(&mut doc, 2.0, Some(kernel::SketchCurveKind::Circle));
+    let polygon = ringed_cuboid(&mut doc, 3.0, Some(kernel::SketchCurveKind::Polygon));
+    let polygon2 = ringed_cuboid(&mut doc, 4.0, Some(kernel::SketchCurveKind::Polygon));
+    let [p, c, c2, g, g2] =
+        [plain, circle, circle2, polygon, polygon2].map(|o| sig_of(&mut doc, o)["shape"].clone());
+    assert_ne!(c, p, "a circle claim");
+    assert_ne!(g, p, "a polygon claim");
+    assert_ne!(c, g, "a circle is not a polygon");
+    assert_eq!(c2, c, "identical circles match");
+    assert_eq!(g2, g, "identical polygons match");
+}
