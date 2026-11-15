@@ -65,6 +65,11 @@ msgstr ""
 msgid "{0, plural, one {# solid} other {# solids}}"
 msgstr ""
 
+#. placeholder {0}: o.stations
+#: src/tools/FollowMeTool.ts
+msgid "{0, plural, one {# station} other {# stations}}"
+msgstr ""
+
 #. placeholder {0}: r.linked + r.sets
 #: src/linkSimilar.ts
 msgid "{0, plural, one {Linked # copy} other {Linked # copies}}"
@@ -3371,6 +3376,18 @@ msgstr ""
 
 #: src/settings/FluentSettingsPage.tsx
 msgid "Enables the rolling diagnostic log file (diagnostic.log in the app log directory), low-level input recording, and kernel torture mode — extra validation after every op; slower, but surfaces flakes at the exact op."
+msgstr ""
+
+#: src/tools/FollowMeTool.ts
+msgid "End {end}"
+msgstr ""
+
+#: src/tools/FollowMeTool.ts
+msgid "End size must be above 0%."
+msgstr ""
+
+#: src/tools/FollowMeTool.ts
+msgid "End size set to {noteEnd}."
 msgstr ""
 
 #: src/viewport/InferenceTooltip.tsx
@@ -8870,6 +8887,10 @@ msgstr ""
 msgid "Starting…"
 msgstr ""
 
+#: src/tools/FollowMeTool.ts
+msgid "Stations set to {noteStations}."
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "stl"
 msgstr ""
@@ -10077,6 +10098,10 @@ msgstr ""
 msgid "This path can't be swept in reverse from here — it either only closes going one direction, or bends too tightly to walk backward. Drag forward instead, or start the profile somewhere with more room to reverse."
 msgstr ""
 
+#: src/tools/FollowMeTool.ts
+msgid "This path is closed, so a full sweep can’t take a twist or an end size. Drag along it for a partial sweep, or press Esc to clear the option."
+msgstr ""
+
 #: src/kernelErrors.ts
 msgid "This profile can't be extruded into a valid solid. Simplify the shape and try again."
 msgstr ""
@@ -10408,8 +10433,16 @@ msgstr ""
 msgid "tween"
 msgstr ""
 
+#: src/tools/FollowMeTool.ts
+msgid "Twist {twist}"
+msgstr ""
+
 #: src/kernelErrorCopy/followMeTwist.ts
 msgid "Twist and end scale need an open path."
+msgstr ""
+
+#: src/tools/FollowMeTool.ts
+msgid "Twist set to {noteTwist}."
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -10424,6 +10457,10 @@ msgstr ""
 #: src/panels/library/LibraryListHead.tsx
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Type"
+msgstr ""
+
+#: src/tools/FollowMeTool.ts
+msgid "Type 30deg to twist it or 40% to shrink its end."
 msgstr ""
 
 #: src/tools/MoveTool.ts
@@ -10452,6 +10489,10 @@ msgstr ""
 
 #: src/tools/LineTool.ts
 msgid "Type a length to resize the segment you just drew, or move to start the next one — double-click or Esc to finish."
+msgstr ""
+
+#: src/tools/FollowMeTool.ts
+msgid "Type a twist (30deg), an end size (40%) or stations (8s) to redo the sweep, or click the next path."
 msgstr ""
 
 #: src/tools/RotateTool.ts

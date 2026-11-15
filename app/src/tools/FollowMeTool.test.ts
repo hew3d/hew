@@ -1081,7 +1081,7 @@ describe('FollowMeTool — solid-face PROFILES (design §3a)', () => {
     tool.onPointerDown(null, RAY) // path: face loop on object 30n
     ;(scene.pick_face as ReturnType<typeof vi.fn>).mockReturnValue(makeFacePick(40n, 41n))
     tool.onPointerMove(null, RAY) // hover a DIFFERENT object's face
-    expect(tool.statusHint()).toBe('Click this face to use it as the profile.')
+    expect(tool.statusHint()).toBe('Click this face to use it as the profile. Type 30deg to twist it or 40% to shrink its end.')
   })
 
   it('discloses the group-birth gap while editing a group (no group-birth surface on this route)', () => {
