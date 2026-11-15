@@ -67,6 +67,25 @@ function makeHost(reports: FollowedReport[], over: Partial<Record<keyof FollowHo
   return host as unknown as FollowHost & Record<'list' | 'check' | 'post' | 'markSeen' | 'attach' | 'forget', ReturnType<typeof vi.fn>>
 }
 
+/**
+ * Resolves once the dialog has settled on a thread. A thread's controls
+ * appear in the commit that selects it, but the selection's own effects (the
+ * seen mark, then clearing the draft, the Forget confirm and any error) run
+ * after that commit, and state set in between is wiped. Viewing a thread
+ * marks it seen, so that call is the point where the thread is really open
+ * and interaction sticks.
+ */
+async function threadOpen(host: ReturnType<typeof makeHost>) {
+  await waitFor(() => expect(host.markSeen).toHaveBeenCalled())
+}
+
+/** The reply box of the settled thread. */
+async function openReplyBox(host: ReturnType<typeof makeHost>) {
+  const box = await screen.findByTestId('sent-report-reply-input')
+  await threadOpen(host)
+  return box
+}
+
 beforeEach(() => {
   mockBuild.mockReset().mockResolvedValue({ gzip: new Uint8Array([1]), compressedBytes: 1, unavailableReason: null })
   mockIsTauri.value = false
@@ -228,7 +247,7 @@ describe('SentReportsDialog — reply, attach, check, forget', () => {
   it('sends a reply, caps the box at 4000 characters, and disables empty replies', async () => {
     const host = makeHost([base()])
     render(<SentReportsDialog host={host} onClose={vi.fn()} />)
-    const box = await screen.findByTestId('sent-report-reply-input')
+    const box = await openReplyBox(host)
     expect(box).toHaveAttribute('maxlength', '4000')
     expect(screen.getByTestId('sent-report-send-reply')).toBeDisabled()
     fireEvent.change(box, { target: { value: 'Here you go' } })
@@ -240,7 +259,7 @@ describe('SentReportsDialog — reply, attach, check, forget', () => {
   it('shows a worded error with the Retry-After seconds', async () => {
     const host = makeHost([base()], { post: vi.fn().mockRejectedValue(new ReportError('rateLimited', 'x', 429, 30)) })
     render(<SentReportsDialog host={host} onClose={vi.fn()} />)
-    fireEvent.change(await screen.findByTestId('sent-report-reply-input'), { target: { value: 'hi' } })
+    fireEvent.change(await openReplyBox(host), { target: { value: 'hi' } })
     fireEvent.click(screen.getByTestId('sent-report-send-reply'))
     expect(await screen.findByTestId('sent-report-error')).toHaveTextContent('Try again in 30 seconds.')
   })
@@ -257,6 +276,7 @@ describe('SentReportsDialog — reply, attach, check, forget', () => {
     })
     render(<SentReportsDialog host={host} onClose={vi.fn()} />)
     const btn = await screen.findByTestId('sent-report-attach-failed')
+    await threadOpen(host)
     expect(btn).toHaveTextContent('Attach kitchen.skp (the file that didn’t open)')
     fireEvent.click(btn)
     await waitFor(() => expect(host.attach).toHaveBeenCalled())
@@ -269,6 +289,7 @@ describe('SentReportsDialog — reply, attach, check, forget', () => {
     const host = makeHost([base()])
     render(<SentReportsDialog host={host} onClose={vi.fn()} />)
     await screen.findByTestId('sent-report-attach')
+    await threadOpen(host)
     expect(screen.queryByTestId('sent-report-attach-failed')).not.toBeInTheDocument()
     const file = new File([new Uint8Array([9, 9])], 'model.skp')
     Object.defineProperty(file, 'arrayBuffer', { value: async () => new Uint8Array([9, 9]).buffer })
@@ -284,6 +305,7 @@ describe('SentReportsDialog — reply, attach, check, forget', () => {
     beginOpenAttempt({ name: 'k.skp', label: 'x', bytes: new Uint8Array([1]) })
     openAttemptFailed('bad')
     render(<SentReportsDialog host={host} onClose={vi.fn()} />)
+    await threadOpen(host)
     fireEvent.click(await screen.findByTestId('sent-report-attach-failed'))
     expect(await screen.findByTestId('sent-report-error')).toHaveTextContent('over the 1 GB limit')
     expect(host.attach).not.toHaveBeenCalled()
@@ -303,6 +325,7 @@ describe('SentReportsDialog — reply, attach, check, forget', () => {
   it('Forget asks first, and Cancel keeps the report', async () => {
     const host = makeHost([base()])
     render(<SentReportsDialog host={host} onClose={vi.fn()} />)
+    await threadOpen(host)
     fireEvent.click(await screen.findByTestId('sent-report-forget'))
     fireEvent.click(screen.getByTestId('sent-report-forget-cancel'))
     expect(host.forget).not.toHaveBeenCalled()
@@ -313,7 +336,9 @@ describe('SentReportsDialog — reply, attach, check, forget', () => {
 
   it('Escape closes; the first Escape only dismisses an open Forget confirm', async () => {
     const onClose = vi.fn()
-    render(<SentReportsDialog host={makeHost([base()])} onClose={onClose} />)
+    const host = makeHost([base()])
+    render(<SentReportsDialog host={host} onClose={onClose} />)
+    await threadOpen(host)
     fireEvent.click(await screen.findByTestId('sent-report-forget'))
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByTestId('sent-report-forget-confirm')).not.toBeInTheDocument()
@@ -333,6 +358,7 @@ describe('SentReportsDialog — busy guards', () => {
     const host = makeHost([base()], { attach: vi.fn(() => new Promise(() => {})) })
     render(<SentReportsDialog host={host} onClose={vi.fn()} />)
     const input = await screen.findByTestId('sent-report-attach-input')
+    await threadOpen(host)
     fireEvent.change(input, { target: { files: [slow] } })
     expect(screen.getByTestId('sent-report-attach')).toBeDisabled()
     fireEvent.change(input, { target: { files: [new File(['y'], 'b.skp')] } })
@@ -345,7 +371,7 @@ describe('SentReportsDialog — busy guards', () => {
     const other = report('HEW-BBBB-0002', { sentAt: 5 })
     const host = makeHost([base(), other], { post: vi.fn(() => new Promise(() => {})) })
     render(<SentReportsDialog host={host} onClose={vi.fn()} />)
-    fireEvent.change(await screen.findByTestId('sent-report-reply-input'), { target: { value: 'hi' } })
+    fireEvent.change(await openReplyBox(host), { target: { value: 'hi' } })
     fireEvent.click(screen.getByTestId('sent-report-forget'))
     expect(screen.getByTestId('sent-report-attach')).toBeDisabled()
     fireEvent.click(screen.getByTestId('sent-report-forget-cancel'))
@@ -359,7 +385,7 @@ describe('SentReportsDialog — busy guards', () => {
     let fail!: (e: unknown) => void
     const host = makeHost([base(), other], { post: vi.fn(() => new Promise((_, rej) => (fail = rej))) })
     render(<SentReportsDialog host={host} onClose={vi.fn()} />)
-    fireEvent.change(await screen.findByTestId('sent-report-reply-input'), { target: { value: 'hi' } })
+    fireEvent.change(await openReplyBox(host), { target: { value: 'hi' } })
     fireEvent.click(screen.getByTestId('sent-report-send-reply'))
     await waitFor(() => expect(host.post).toHaveBeenCalled())
     // Switching is blocked while busy, so unblock by selecting before the failure lands is impossible;

@@ -71,6 +71,9 @@ test.beforeEach(async ({ page, baseURL }) => {
     page.on('pageerror', (e) => console.log('[pageerror]', String(e)))
   }
   const origin = new URL(baseURL!).origin
+  // A row that navigates the page away abandons its in-flight requests; a
+  // fulfill that loses that race has nobody left to answer.
+  const gone = () => {}
   await page.route('**/*', async (route) => {
     const req = route.request()
     if (new URL(req.url()).origin !== origin) return route.fallback()
@@ -94,9 +97,9 @@ test.beforeEach(async ({ page, baseURL }) => {
       )
       const csp = PARENT_CSP.replace("'self' 'wasm-unsafe-eval' blob:", `'self' 'wasm-unsafe-eval' blob: ${hashes.join(' ')}`)
       delete headers['content-length']
-      return route.fulfill({ response: res, body, headers: { ...headers, 'content-security-policy': csp } })
+      return route.fulfill({ response: res, body, headers: { ...headers, 'content-security-policy': csp } }).catch(gone)
     }
-    return route.fulfill({ response: res, headers })
+    return route.fulfill({ response: res, headers }).catch(gone)
   })
   await page.route('https://example.com/**', (route) => {
     exampleHits++

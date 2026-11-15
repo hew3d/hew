@@ -164,21 +164,33 @@ test('an orbit coasting to rest under a still cursor ends with the patch for the
   const atRelease = await camera(page)
   const hitAtRelease = (await cueAndExpected(page, canvas, px + 50, py)).hit
 
-  // Wait for the coast to end (two reads 100 ms apart agree), then for the
-  // settle notification.
+  // Wait for the coast to end: the camera unchanged across reads that span
+  // more than the settle debounce (250 ms). A single pair of equal reads is
+  // not enough: a slow frame can leave the camera untouched for 100 ms in
+  // the middle of the coast.
   let last = atRelease
-  for (let i = 0; i < 40; i++) {
+  let still = 0
+  for (let i = 0; i < 80 && still < 4; i++) {
     await page.waitForTimeout(100)
     const now = await camera(page)
     const moved = Math.hypot(now.eye[0] - last.eye[0], now.eye[1] - last.eye[1], now.eye[2] - last.eye[2])
     last = now
-    if (moved < 1e-9) break
+    still = moved < 1e-9 ? still + 1 : 0
   }
-  await page.waitForTimeout(300)
+  expect(still).toBe(4)
   // The camera kept moving after the release (inertia), so a cue left from
   // the drag's last re-resolve would be stale.
   expect(Math.hypot(last.eye[0] - atRelease.eye[0], last.eye[1] - atRelease.eye[1], last.eye[2] - atRelease.eye[2])).toBeGreaterThan(1e-3)
-  const final = await cueAndExpected(page, canvas, px + 50, py)
+  // The settle notification re-resolves the patch 250 ms after the camera's
+  // last change; wait for that, not for a fixed time. A patch that is never
+  // re-resolved stays where the drag left it and times out here.
+  let final = await cueAndExpected(page, canvas, px + 50, py)
+  await expect
+    .poll(async () => {
+      final = await cueAndExpected(page, canvas, px + 50, py)
+      return final.cue === null ? Infinity : Math.hypot(final.cue.through[0] - final.hit[0], final.cue.through[2] - final.hit[2])
+    })
+    .toBeLessThan(0.005)
   // The coast moved the held pointer's hit on the plane well past any
   // tolerance below…
   expect(Math.hypot(final.hit[0] - hitAtRelease[0], final.hit[2] - hitAtRelease[2])).toBeGreaterThan(0.1)

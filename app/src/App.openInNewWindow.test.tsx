@@ -25,7 +25,19 @@ import { render, screen, fireEvent, waitFor, within, act } from '@testing-librar
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 
 vi.hoisted(() => {
-  Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true })
+  // The harness can hand a concurrent first-time dynamic import of
+  // `@tauri-apps/api/core` the real package instead of the mock below (see
+  // the note above makeNonPristine). The real `invoke` forwards to this
+  // object, so route it to the same mock: a call is then recorded whichever
+  // module the import resolved to. The real `invoke` defaults a missing
+  // argument object to `{}`; drop it again so recorded calls match.
+  const internals = {
+    invoke: (cmd: string, args?: Record<string, unknown>) =>
+      args !== undefined && Object.keys(args).length > 0
+        ? (invokeMock as unknown as (c: string, a: unknown) => Promise<unknown>)(cmd, args)
+        : invokeMock(cmd),
+  }
+  Object.defineProperty(window, '__TAURI_INTERNALS__', { value: internals, configurable: true })
 })
 
 const menubar = () => within(screen.getByTestId('menu-bar'))
