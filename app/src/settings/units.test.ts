@@ -2,6 +2,7 @@ import { afterEach, describe, it, expect, vi } from 'vitest'
 import {
   formatLengthIn,
   formatAreaIn,
+  formatLengthLimitIn,
   formatVolumeIn,
   metersFromUnit,
   getLengthUnitSuffix,
@@ -937,6 +938,23 @@ describe('parse accepts a leading ~', () => {
     const text = formatLengthIn(meters, 'arch', 'exact')
     expect(text).toBe('1\' 2.3333"')
     expect(Math.abs(parseLengthToMeters(text, 'arch')! - meters)).toBeLessThanOrEqual(1e-6)
+  })
+})
+
+describe('formatLengthLimitIn — a limit never reads above itself', () => {
+  it('floors with enough digits to stay within 1%', () => {
+    expect(formatLengthLimitIn(0.0029999992847, 'mm')).toBe('2.99 mm')
+    expect(formatLengthLimitIn(0.0029999992847, 'm')).toBe('0.00299 m')
+    expect(formatLengthLimitIn(0.0029999992847, 'cm')).toBe('0.299 cm')
+  })
+  it('keeps the plain precision when it is already close', () => {
+    expect(formatLengthLimitIn(0.014, 'mm')).toBe('14 mm')
+    expect(formatLengthLimitIn(0.25, 'm')).toBe('0.25 m')
+  })
+  it('floors inches too', () => {
+    const inch = 0.0254
+    expect(formatLengthLimitIn(0.4999 * inch, 'dec_in')).toBe('0.499"')
+    expect(formatLengthLimitIn(0.499 * inch, 'frac_in')).toBe(formatLengthIn((7 / 16) * inch, 'frac_in'))
   })
 })
 

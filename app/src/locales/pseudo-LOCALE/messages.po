@@ -1733,6 +1733,10 @@ msgstr ""
 msgid "Choose Library Folder"
 msgstr ""
 
+#: src/viewport/ProfileChip.tsx
+msgid "Choose the shape of the edge"
+msgstr ""
+
 #: src/health/healthCopy.ts
 msgid "Choose what to mend"
 msgstr ""

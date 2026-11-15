@@ -622,6 +622,35 @@ export function formatLength(meters: number): string {
   return formatLengthIn(meters, currentFormat)
 }
 
+/**
+ * A size limit, formatted so it never reads larger than the limit: floored
+ * rather than rounded, with decimals added (up to six) until the shown
+ * value is within 1% of the limit. "Radius limited to 2.99 mm", never
+ * "3 mm" for a limit of 2.9999 mm that refused 3 mm.
+ */
+export function formatLengthLimitIn(meters: number, format: LengthFormat): string {
+  if (!(meters > 0) || !Number.isFinite(meters)) return formatLengthIn(meters, format)
+  const floorTo = (x: number, step: number) => Math.floor(x / step + 1e-9) * step
+  if (format === 'frac_in' || format === 'arch') {
+    // Fractions show sixteenths: floor to one.
+    const inches = meters / METERS_PER_INCH
+    return formatLengthIn(floorTo(inches, 1 / 16) * METERS_PER_INCH, format)
+  }
+  const perUnit = format === 'dec_in' ? METERS_PER_INCH : METERS_PER_UNIT[format]
+  const value = meters / perUnit
+  const base = format === 'm' || format === 'dec_in' ? 3 : format === 'cm' ? 2 : 1
+  let decimals = base
+  while (decimals < 6 && floorTo(value, 10 ** -decimals) < 0.99 * value) decimals += 1
+  const shown = floorTo(value, 10 ** -decimals).toFixed(decimals)
+  const trimmed = shown.includes('.') ? shown.replace(/0+$/, '').replace(/\.$/, '') : shown
+  return format === 'dec_in' ? `${trimmed}"` : `${trimmed} ${UNIT_SUFFIX[format]}`
+}
+
+/** [`formatLengthLimitIn`] in the current format. */
+export function formatLengthLimit(meters: number): string {
+  return formatLengthLimitIn(meters, currentFormat)
+}
+
 // ---------------------------------------------------------------------------
 // Parse
 // ---------------------------------------------------------------------------
