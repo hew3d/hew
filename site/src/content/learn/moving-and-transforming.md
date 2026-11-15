@@ -103,12 +103,12 @@ Scaling a component instance scales that instance alone — the shared definitio
 
 ## Flip
 
-Flip mirrors the selection across a plane. Pick **Flip** in the Tools menu or the Modify group of the tool rail (it has no shortcut), and three see-through squares appear through the middle of the selection's bounding box, one per axis. Each square is colored by the axis that runs straight through it: the red square mirrors left to right along the red axis, the green one along green, the blue one top to bottom.
+Flip mirrors the selection across a plane. Pick **Flip** in the Tools menu or the Modify group of the tool rail (it has no shortcut), and three see-through colored planes appear through the middle of the selection's bounding box, one per axis. Each plane is colored by the axis that runs straight through it: the red plane mirrors left to right along the red axis, the green one along green, the blue one top to bottom.
 
-1. Hover a square. It brightens and a ghost shows where the selection would land.
+1. Hover a colored plane. It brightens and a ghost shows where the selection would land.
 2. Click it. The selection mirrors across that plane, in place, as one undo step.
 
-To mirror across a face of the model instead, hover that face (any face that is not part of the selection) and click: the selection mirrors across the face's plane, so a side panel flips over to the far side of a divider. `Esc` drops the ghost. With nothing selected, the first click selects what is under the cursor, as Move's does, and the next click flips it.
+To mirror across a face of the model instead, hover that face (anywhere on it, including a face of the selection itself) and click: the selection mirrors across the face's plane, so a side panel flips over to the far side of a divider. Across the selection's own face, it moves to the other side of that face, or, with the copy modifier, leaves a mirrored twin there. When a colored plane and a face are under the cursor together, the plane wins. `Esc` drops the ghost. With nothing selected, the first click selects what is under the cursor, as Move's does, and the next click flips it.
 
 A flipped solid stays a solid, with every face the right way out. A component instance keeps its shared shape and takes a mirrored placement instead, so its other copies are untouched. A group mirrors with everything in it, drawn lines included.
 

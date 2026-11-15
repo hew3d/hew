@@ -348,8 +348,12 @@ msgid "{kind} is on — click to set the center of rotation. Tap {COPY_MODIFIER_
 msgstr ""
 
 #: src/tools/FlipTool.ts
-msgid "{kind} is on. Click a square or a face to place a mirrored copy. Tap {COPY_MODIFIER_LABEL} to change."
+msgid "{kind} is on. Click a colored plane or a face to place a mirrored copy. Tap {COPY_MODIFIER_LABEL} to change."
 msgstr ""
+
+#: src/tools/FlipTool.ts
+#~ msgid "{kind} is on. Click a square or a face to place a mirrored copy. Tap {COPY_MODIFIER_LABEL} to change."
+#~ msgstr ""
 
 #: src/panels/PrintDialog.tsx
 msgid "{label} (fit)"
@@ -1924,6 +1928,10 @@ msgstr ""
 msgid "Click a base point to start the move."
 msgstr ""
 
+#: src/tools/FlipTool.ts
+msgid "Click a colored plane to flip across it, or click a face to flip across that face. Tap {COPY_MODIFIER_LABEL} to make a mirrored copy."
+msgstr ""
+
 #: src/tools/EraserTool.ts
 msgid "Click a drawn line to erase it. Drag across lines to erase several."
 msgstr ""
@@ -1997,8 +2005,8 @@ msgid "Click a solid to cut it along the plane — arrow keys aim the plane alon
 msgstr ""
 
 #: src/tools/FlipTool.ts
-msgid "Click a square to flip across that plane, or click a face to flip across it. Tap {COPY_MODIFIER_LABEL} to make a mirrored copy."
-msgstr ""
+#~ msgid "Click a square to flip across that plane, or click a face to flip across it. Tap {COPY_MODIFIER_LABEL} to make a mirrored copy."
+#~ msgstr ""
 
 #: src/tools/RotateTool.ts
 msgid "Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis."

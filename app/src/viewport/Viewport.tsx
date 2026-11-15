@@ -4278,6 +4278,20 @@ export default function Viewport({
       )
     }
 
+    /**
+     * Flip's mirror-plane faces: any face the user could select or edit in
+     * the current scope, not only the plain objects a draw tool may draw on.
+     * A face of a group or component at the top level is a fine mirror plane;
+     * a face outside the open group, component, or object is not. Hidden
+     * geometry is already absent from the kernel pick.
+     */
+    function flipFaceEligible(objectId: bigint, instanceId: bigint | undefined): boolean {
+      if (isPickHidden(hiddenObjectIdsRef.current, hiddenInstanceIdsRef.current, objectId, instanceId)) return false
+      if (faceDrawEligible(objectId, instanceId)) return true
+      const ctx = activeContextRef.current
+      return resolvePickToSelectable(wasmScene, objectId, ctx, instanceId, sessionScopeFor(ctx)) !== null
+    }
+
     function pushPullEligible(objectId: bigint, instanceId: bigint | undefined): boolean {
       return faceDrawEligible(objectId, instanceId) || linkedPlacementEligible(objectId, instanceId)
     }
@@ -8193,6 +8207,7 @@ export default function Viewport({
         },
       )
       tool.setSelectionAcquirer(acquireTransformTargets)
+      tool.setFaceEligibility(flipFaceEligible)
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
     }

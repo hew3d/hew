@@ -1,6 +1,7 @@
 /**
  * FlipTool against the REAL compiled wasm module: the gizmo's squares, the
- * hover ghost, a click that flips, the copy toggle, a face pick, Escape,
+ * hover ghost, a click that flips, the copy toggle, face picks (including
+ * the selection's own faces), Escape,
  * picking a target with nothing selected, and drawing in the selection.
  */
 
@@ -224,10 +225,143 @@ describe('FlipTool', () => {
     const { min, max } = minMax(scene, b)
     expect(min[0]).toBeCloseTo(14, 9)
     expect(max[0]).toBeCloseTo(18, 9)
-    // A face of the selection itself is not a mirror plane.
-    tool.setSelection([obj(b), obj(wall)])
-    tool.onPointerMove(snap, missRay)
+  })
+
+  /** A 2 x 2 x 1 box on x in [0, 2]; its center is (1, 1, 0.5). */
+  const ownFaceBox = (scene: Scene) => box(scene, 0, 2, 0, 2, 1)
+  /** A ray into the box's x = 2 face at (2, 0.3, 0.95), rising so it leaves
+   *  through the top before it can meet any of the three squares. */
+  const ownFaceRay: Ray = { origin: [5, 0.3, -0.55], direction: [-1, 0, 0.5] }
+
+  it('a_selections_own_face_flips_it_across_that_face_in_place', () => {
+    const scene = new Scene()
+    const b = ownFaceBox(scene)
+    const { tool, onCommit } = makeTool(scene, [obj(b)])
+    const pick = scene.pick_face(...ownFaceRay.origin, ...ownFaceRay.direction)
+    expect(pick?.object()).toBe(b)
+    tool.onPointerMove(null, ownFaceRay)
+    expect(tool.hoveredPlane()).toMatchObject({ kind: 'face', normal: [1, 0, 0] })
+    tool.onPointerDown(null, ownFaceRay)
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    // Across x = 2, x in [0, 2] lands on [2, 4].
+    const { min, max } = minMax(scene, b)
+    expect(min[0]).toBeCloseTo(2, 9)
+    expect(max[0]).toBeCloseTo(4, 9)
+    expect(scene.object_ids()).toHaveLength(1)
+  })
+
+  it('a_selections_own_face_with_the_copy_modifier_adds_the_mirrored_twin', () => {
+    setCopiesLinked(false)
+    const scene = new Scene()
+    const b = ownFaceBox(scene)
+    const { tool, onCommit } = makeTool(scene, [obj(b)])
+    tool.toggleCopyMode()
+    tool.onPointerDown(null, ownFaceRay)
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    const ids = Array.from(scene.object_ids())
+    expect(ids).toHaveLength(2)
+    const original = minMax(scene, b)
+    expect([original.min[0], original.max[0]]).toEqual([0, 2])
+    const twin = ids.find((i) => i !== b) as bigint
+    const t = minMax(scene, twin)
+    expect(t.min[0]).toBeCloseTo(2, 9)
+    expect(t.max[0]).toBeCloseTo(4, 9)
+  })
+
+  it('a_face_pick_ignores_an_edge_or_vertex_snap_and_a_missing_snap', () => {
+    const scene = new Scene()
+    const b = lBoard(scene)
+    const wall = box(scene, 10, 11, 0, 3, 1)
+    const ray: Ray = { origin: [8, 2.5, 0.9], direction: [1, 0, 0] }
+    const snaps: Array<Snap | null> = [
+      null,
+      { x: 10, y: 3, z: 0.9, kind: 'on-edge', elementKind: 'edge', object: wall, element: 0n },
+      { x: 10, y: 3, z: 1, kind: 'endpoint', elementKind: 'vertex', object: wall, element: 0n },
+      ground(10, 2.5),
+    ]
+    for (const snap of snaps) {
+      const { tool, onCommit } = makeTool(scene, [obj(b)])
+      tool.onPointerMove(snap, ray)
+      expect(tool.hoveredPlane()).toMatchObject({ kind: 'face', normal: [-1, 0, 0] })
+      // The cue would name a point the click does not use, unless the snap
+      // itself sits on a face.
+      expect(tool.hidesSnapCue()).toBe(true)
+      tool.onPointerDown(snap, ray)
+      expect(onCommit).toHaveBeenCalledTimes(1)
+      scene.scene_undo()
+    }
+  })
+
+  it('a_colored_plane_beats_a_face_under_the_same_ray', () => {
+    const scene = new Scene()
+    const b = lBoard(scene)
+    box(scene, -2, -1, 0, 3, 1)
+    // Along -x through the board's middle: the red plane at x = 4 is on the
+    // ray, and so is the board's own x = 6 face before it.
+    const { tool } = makeTool(scene, [obj(b)])
+    tool.onPointerMove(null, redRay(1.5, 0.3))
+    expect(tool.hoveredPlane()).toEqual({ kind: 'axis', axis: 0 })
+    expect(tool.hidesSnapCue()).toBe(true)
+  })
+
+  it('faces_the_host_excludes_are_not_picked', () => {
+    const scene = new Scene()
+    const b = lBoard(scene)
+    const wall = box(scene, 10, 11, 0, 3, 1)
+    const { tool, onCommit } = makeTool(scene, [obj(b)])
+    tool.setFaceEligibility((o) => o !== wall)
+    const ray: Ray = { origin: [8, 2.5, 0.9], direction: [1, 0, 0] }
+    tool.onPointerMove(null, ray)
     expect(tool.hoveredPlane()).toBeNull()
+    tool.onPointerDown(null, ray)
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it('every_square_stands_on_its_axis_and_matches_the_pick_extents', () => {
+    const scene = new Scene()
+    // Extents 4 x 3 x 0.5 (center 4, 1.5, 0.25), so a swapped width and
+    // height, or a wrong normal, cannot match.
+    const b = lBoard(scene)
+    const { tool, preview } = makeTool(scene, [obj(b)])
+    const ext: V3 = [4, 3, 0.5]
+    const center: V3 = [4, 1.5, 0.25]
+    const side = (e: number): number => Math.max(e, 4 * 0.25) * 1.15
+    for (const axis of [0, 1, 2] as const) {
+      const mesh = preview.getObjectByName(`FlipSquare_${axis}`) as THREE.Mesh
+      mesh.updateMatrixWorld(true)
+      const normal = new THREE.Vector3(0, 0, 1).transformDirection(mesh.matrixWorld)
+      const want = [0, 0, 0]
+      want[axis] = 1
+      expect(normal.x).toBeCloseTo(want[0], 9)
+      expect(normal.y).toBeCloseTo(want[1], 9)
+      expect(normal.z).toBeCloseTo(want[2], 9)
+      // The drawn corners span the pick extents: width along the lower
+      // in-plane axis, height along the higher one.
+      const size = new THREE.Box3().setFromObject(mesh).getSize(new THREE.Vector3()).toArray()
+      const [u, v] = ([0, 1, 2] as const).filter((k) => k !== axis)
+      expect(size[axis]).toBeCloseTo(0, 9)
+      expect(size[u]).toBeCloseTo(side(ext[u]), 5)
+      expect(size[v]).toBeCloseTo(side(ext[v]), 5)
+      // And picking agrees: a hair inside each extent hits, a hair outside
+      // misses.
+      const ray = (du: number, dv: number): Ray => {
+        const origin: V3 = [center[0], center[1], center[2]]
+        origin[u] += du
+        origin[v] += dv
+        origin[axis] += 50
+        const direction: V3 = [0, 0, 0]
+        direction[axis] = -1
+        return { origin, direction }
+      }
+      const hu = side(ext[u]) / 2
+      const hv = side(ext[v]) / 2
+      tool.onPointerMove(null, ray(hu - 0.01, hv - 0.01))
+      expect(tool.hoveredPlane()).toEqual({ kind: 'axis', axis })
+      tool.onPointerMove(null, ray(hu + 0.01, 0))
+      expect(tool.hoveredPlane()?.kind).not.toBe('axis')
+      tool.onPointerMove(null, ray(0, hv + 0.01))
+      expect(tool.hoveredPlane()?.kind).not.toBe('axis')
+    }
   })
 
   it('escape_cancels', () => {
@@ -336,7 +470,7 @@ describe('FlipTool', () => {
     expect(max[0]).toBeCloseTo(18, 9)
   })
 
-  it('a_selected_members_own_face_is_not_a_mirror_plane_inside_its_component', () => {
+  it('a_selected_members_own_face_is_a_mirror_plane_inside_its_component', () => {
     const scene = new Scene()
     const b = lBoard(scene)
     const inst = scene.make_component(new Uint8Array([0]), new BigUint64Array([b]))
@@ -345,13 +479,13 @@ describe('FlipTool', () => {
     const { tool } = makeTool(scene, [obj(member)])
     tool.setEditContext({ kind: 'instance', id: inst, component: def })
     tool.setSelection([obj(member)])
-    const pick = scene.pick_face(3, 0.5, 5, 0, 0, -1)
+    // The board's top near its x = 2 end, struck on a slant that stays clear
+    // of the squares: the member's own face, picked through its placement.
+    const ray: Ray = { origin: [5, 0.3, 1.95], direction: [-1, 0, -0.5] }
+    const pick = scene.pick_face(...ray.origin, ...ray.direction)
     expect(pick?.object()).toBe(member)
-    const snap: Snap = {
-      x: 3, y: 0.5, z: 0.5, kind: 'on-face', elementKind: 'face', object: member, element: pick!.face(), instance: inst,
-    }
-    tool.onPointerMove(snap, missRay)
-    expect(tool.hoveredPlane()).toBeNull()
+    tool.onPointerMove(null, ray)
+    expect(tool.hoveredPlane()).toMatchObject({ kind: 'face', normal: [0, 0, 1] })
   })
 
   it('the_hover_ghost_disposes_its_own_materials', () => {

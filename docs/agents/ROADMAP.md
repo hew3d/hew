@@ -463,8 +463,9 @@ below.
   or any combination — as one shared transform and one undo step; a scaled
   component instance carries the (possibly non-uniform) scale in its own
   pose, leaving the shared definition and every sibling instance untouched
-- Flip: three axis squares through the selection's bounding-box center
-  (or a hovered model face) mirror the selection in one click and one undo
+- Flip: three colored axis planes through the selection's bounding-box center
+  (or any face under the cursor, the selection's own included, taken
+  from the pick ray in the current editing scope) mirror the selection in one click and one undo
   step, with a hover ghost; objects and drawing bake the mirror, instances
   take a mirrored pose. The copy toggle makes a mirrored copy, linked by
   default (a placement with a reflected pose). Object ▸ Flip Along ▸ Red /

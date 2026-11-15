@@ -7,7 +7,7 @@ declare global {
 }
 
 /**
- * Flip: the tool's squares mirror the selection across a plane through its
+ * Flip: the tool's colored planes mirror the selection across a plane through its
  * center in one undo step, and with the copy toggle on it places a mirrored
  * linked copy. Real pointer and keyboard events drive the tool; the harness
  * only builds the starting boards and reads the model back.
@@ -180,5 +180,58 @@ test.describe('flip', () => {
     await page.evaluate(() => window.__hew_test!.undo())
     await page.waitForTimeout(100)
     expect(await page.evaluate(() => window.__hew_test!.getObjectIds())).toEqual([board])
+  })
+
+  // A 6 x 2 x 1.5 box with a corner on the origin. Its y = 0 face is turned
+  // toward the camera; a click low at its x = 0 end (0.3, 0, 0.3) is on the
+  // face but clear of all three colored planes, so only the face can answer.
+  const FACE_POINT: [number, number, number] = [0.3, 0, 0.3]
+
+  test('clicking_the_selections_own_face_flips_it_across_that_face', async ({ page }, info) => {
+    await setup(page)
+    const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [6, 2, 0], 1.5))
+    await page.evaluate((i) => window.__hew_test!.selectObjects([i]), id)
+    await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
+    await pickFlip(page)
+    const hash = await page.evaluate(() => window.__hew_test!.getStateHash())
+    await page.screenshot({ path: info.outputPath('face-before.png') })
+
+    await hoverAndClick(page, FACE_POINT)
+    // Across its own y = 0 face the box moves from y in [0, 2] to [-2, 0].
+    const b = await boundsOf(page, id)
+    expect(b[0]).toBeCloseTo(0, 9)
+    expect(b[1]).toBeCloseTo(-2, 9)
+    expect(b[3]).toBeCloseTo(6, 9)
+    expect(b[4]).toBeCloseTo(0, 9)
+    expect(b[5]).toBeCloseTo(1.5, 9)
+    expect(await page.evaluate(() => window.__hew_test!.getObjectIds())).toEqual([id])
+    await page.screenshot({ path: info.outputPath('face-after.png') })
+
+    await page.evaluate(() => window.__hew_test!.undo())
+    await page.waitForTimeout(100)
+    expect(await page.evaluate(() => window.__hew_test!.getStateHash())).toBe(hash)
+  })
+
+  test('clicking_the_selections_own_face_with_copy_on_adds_the_mirrored_twin', async ({ page }, info) => {
+    await setup(page)
+    const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [6, 2, 0], 1.5))
+    await page.evaluate((i) => window.__hew_test!.selectObjects([i]), id)
+    await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
+    await pickFlip(page)
+    // First tap: the preferred copy kind (linked); second: an independent
+    // copy, which stays a plain object.
+    await tapCopyModifier(page)
+    await tapCopyModifier(page)
+
+    await hoverAndClick(page, FACE_POINT)
+    const ids = await page.evaluate(() => window.__hew_test!.getObjectIds())
+    expect(ids).toHaveLength(2)
+    const original = await boundsOf(page, id)
+    expect([original[1], original[4]]).toEqual([0, 2])
+    const twinId = ids.find((i) => i !== id)!
+    const twin = await boundsOf(page, twinId)
+    expect(twin[1]).toBeCloseTo(-2, 9)
+    expect(twin[4]).toBeCloseTo(0, 9)
+    await page.screenshot({ path: info.outputPath('face-copy.png') })
   })
 })

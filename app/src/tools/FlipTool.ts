@@ -5,9 +5,14 @@
  * selection's bounding box, one per world axis, each colored by the axis
  * that is its normal (red for the plane across the red axis, and so on) and
  * sized to the box. Hovering a square highlights it and shows a ghost of the
- * mirrored selection; clicking commits. Hovering a face of the model (one
- * that is not part of the selection) mirrors across that face's plane
- * instead, with the same ghost and click.
+ * mirrored selection; clicking commits. Hovering any visible face of the
+ * model, including a face of the selection itself, mirrors across that
+ * face's plane instead, with the same ghost and click. The face is the one
+ * the cursor ray strikes, wherever on it the cursor sits, so an edge or
+ * corner snap under the cursor does not matter. A colored plane under the
+ * cursor wins over a face. Flipping in place across the selection's own face
+ * moves it to the other side of that face; a copy puts the mirrored twin
+ * there.
  *
  * The copy modifier (tap Option on macOS, Ctrl elsewhere) cycles plain Flip,
  * Copy (the preferred kind), and the other kind of copy, as Move and Rotate
@@ -42,10 +47,10 @@ import { axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
 import { getCopiesLinked } from '../settings/editing'
 import { nextCopyState, linkedFor, type CopyState, type OnCopyModeChange } from './copyMode'
-import { worldFacePlane } from './faceDraw'
+import { worldFacePlane, FacePickCache, type FaceEligible } from './faceDraw'
 import { isMac, COPY_MODIFIER_LABEL } from '../platform'
 import type { NodeRef } from '../panels/treeModel'
-import { collectLeafIds, isDraftKind, isSketchScopedKind, nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
+import { isDraftKind, isSketchScopedKind, nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
 import { worldBoundsForSelection, unionBounds, type Bounds } from '../panels/objectBounds'
 
 type V3 = [number, number, number]
@@ -232,9 +237,9 @@ export class FlipTool implements Tool {
           ? t`Linked copy`
           : t`Independent copy`
     if (kind !== null) {
-      return t`${kind} is on. Click a square or a face to place a mirrored copy. Tap ${COPY_MODIFIER_LABEL} to change.`
+      return t`${kind} is on. Click a colored plane or a face to place a mirrored copy. Tap ${COPY_MODIFIER_LABEL} to change.`
     }
-    return t`Click a square to flip across that plane, or click a face to flip across it. Tap ${COPY_MODIFIER_LABEL} to make a mirrored copy.`
+    return t`Click a colored plane to flip across it, or click a face to flip across that face. Tap ${COPY_MODIFIER_LABEL} to make a mirrored copy.`
   }
 
   private preview: THREE.Group
@@ -247,11 +252,24 @@ export class FlipTool implements Tool {
   private selection: NodeRef[] = []
   private copyState: CopyState = 'off'
   private hover: Hover = null
+  /** The snap under the cursor at the last move, to decide whether its cue
+   *  still describes what a face click will do. */
+  private lastSnap: Snap | null = null
+  private readonly facePicks = new FacePickCache()
+  /** Which picked faces may serve as a mirror plane; `null` accepts every
+   *  face the kernel pick reports (it already skips hidden objects). */
+  private faceEligible: FaceEligible | null = null
 
   /** The squares drawn for the current selection, by axis. */
   private gizmoGroup: THREE.Group | null = null
   private squares: { axis: 0 | 1 | 2; mesh: THREE.Mesh; half: [number, number] }[] = []
   private center: V3 | null = null
+
+  /** Limit the faces that can be picked as a mirror plane to the current
+   *  editing scope (the host's own policy). */
+  setFaceEligibility(pred: FaceEligible | null): void {
+    this.faceEligible = pred
+  }
 
   private acquireSelection: ((ray: Ray) => NodeRef[] | null) | null = null
   setSelectionAcquirer(acquire: ((ray: Ray) => NodeRef[] | null) | null): void {
@@ -317,18 +335,25 @@ export class FlipTool implements Tool {
     return this.hover?.plane ?? null
   }
 
-  /** A hot gizmo square flips on click; no point is being snapped there. */
+  /** A hot gizmo square flips on click; no point is being snapped there.
+   *  A picked face is a real snap only when the cursor's own snap is on a
+   *  face; on an edge, corner, or midpoint the chip would name a point the
+   *  click does not use. */
   hidesSnapCue(): boolean {
-    return this.hover?.plane.kind === 'axis'
+    const plane = this.hover?.plane
+    if (plane === undefined) return false
+    if (plane.kind === 'axis') return true
+    return this.lastSnap?.elementKind !== 'face'
   }
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
+    this.lastSnap = snap
     if (this.selection.length === 0) {
       this._clearHover()
       return
     }
     if (this.gizmoGroup === null) this._showGizmo()
-    const plane = this._planeUnder(snap, ray)
+    const plane = this._planeUnder(ray)
     if (samePlane(plane, this.hover?.plane ?? null)) return
     this._clearHover()
     if (plane === null) return
@@ -350,7 +375,7 @@ export class FlipTool implements Tool {
       return
     }
     if (this.gizmoGroup === null) this._showGizmo()
-    const plane = this._planeUnder(snap, ray)
+    const plane = this._planeUnder(ray)
     if (plane === null) return
     this.commit(plane)
   }
@@ -370,6 +395,8 @@ export class FlipTool implements Tool {
       return false
     }
     this._clearHover()
+    // The pick memo names faces the flip is about to move.
+    this.facePicks.clear()
     clearPreview(this.preview)
     this.gizmoGroup = null
     this.squares = []
@@ -420,10 +447,10 @@ export class FlipTool implements Tool {
   // ── Private ──────────────────────────────────────────────────────────
 
   /** The square under the ray (nearest first), else a model face's plane. */
-  private _planeUnder(snap: Snap | null, ray: Ray): FlipPlane | null {
+  private _planeUnder(ray: Ray): FlipPlane | null {
     const axis = this._pickSquare(ray)
     if (axis !== null) return { kind: 'axis', axis }
-    return this._facePlane(snap)
+    return this._facePlane(ray)
   }
 
   private _pickSquare(ray: Ray): 0 | 1 | 2 | null {
@@ -445,34 +472,17 @@ export class FlipTool implements Tool {
     return best?.axis ?? null
   }
 
-  /** The plane of the model face under the cursor, unless that face belongs
-   *  to the selection itself. */
-  private _facePlane(snap: Snap | null): FlipPlane | null {
-    if (snap === null || snap.elementKind !== 'face' || snap.object === undefined || snap.element === undefined) {
-      return null
-    }
-    if (this._inSelection(snap.object, snap.instance)) return null
-    const plane = worldFacePlane(this.wasmScene, snap.object, snap.element, snap.instance ?? null)
+  /** The plane of the visible face the ray strikes first, mapped through
+   *  the instance it was struck through. Faces the editing scope excludes
+   *  are not picked (the host's `setFaceEligibility`). */
+  private _facePlane(ray: Ray): FlipPlane | null {
+    const pred: FaceEligible = this.faceEligible ?? (() => true)
+    if (this.facePicks.pickFor(this.wasmScene, ray, pred) === null) return null
+    const raw = this.facePicks.rawPickFor(ray)
+    if (raw === null) return null
+    const plane = worldFacePlane(this.wasmScene, raw.object, raw.face, raw.instance ?? null)
     if (plane === null) return null
     return { kind: 'face', point: plane.point, normal: plane.normal }
-  }
-
-  private _inSelection(object: bigint, instance: bigint | undefined): boolean {
-    // Inside an open component a selected member's faces report the
-    // placement being edited as their instance; they are still its own.
-    const own = instance === undefined || instance === this._activeInstance
-    for (const node of this.selection) {
-      if (node.kind === 'object' && node.id === object && own) return true
-      if (node.kind === 'instance' && instance !== undefined && node.id === instance) return true
-      if (node.kind === 'group') {
-        const { objectIds, instanceIds } = collectLeafIds(node, (g) =>
-          this.wasmScene.group_members(g).map(nodeRefFromJs),
-        )
-        if (instance === undefined && objectIds.includes(object)) return true
-        if (instance !== undefined && instanceIds.includes(instance)) return true
-      }
-    }
-    return false
   }
 
   private _showGizmo(): void {
@@ -508,11 +518,14 @@ export class FlipTool implements Tool {
       mesh.name = `FlipSquare_${axis}`
       // PlaneGeometry lies in its local XY plane: turn it so its width runs
       // along `u`, its height along `v`, and its normal along `axis`.
-      const basis = new THREE.Matrix4().makeBasis(
-        new THREE.Vector3(...AXIS_UNIT[u]),
-        new THREE.Vector3(...AXIS_UNIT[v]),
-        new THREE.Vector3(...AXIS_UNIT[axis]),
-      )
+      // The triple must be right-handed or the quaternion is wrong; the
+      // square is symmetric, so negating `v` when it is not changes nothing
+      // else.
+      const eu = new THREE.Vector3(...AXIS_UNIT[u])
+      const ev = new THREE.Vector3(...AXIS_UNIT[v])
+      const ea = new THREE.Vector3(...AXIS_UNIT[axis])
+      if (eu.clone().cross(ev).dot(ea) < 0) ev.negate()
+      const basis = new THREE.Matrix4().makeBasis(eu, ev, ea)
       mesh.quaternion.setFromRotationMatrix(basis)
       mesh.position.set(this.center[0], this.center[1], this.center[2])
       mesh.renderOrder = 10
