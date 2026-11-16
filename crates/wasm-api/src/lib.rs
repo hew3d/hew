@@ -56,6 +56,13 @@ use wasm_bindgen::prelude::*;
 /// deliberate click without competing with nearby solid geometry.
 const SKETCH_PICK_APERTURE: f64 = 0.02;
 
+/// The most hits one top-level placement contributes to
+/// [`Scene::pick_instance_sketch_edge`] and
+/// [`Scene::pick_instance_sketch_region`], its best-ranked first. Enough
+/// for the caller's occlusion filter to reach a visible line behind a few
+/// hidden ones without a dense drawing flooding the list.
+const INSTANCE_PICK_HITS_PER_PLACEMENT: usize = 8;
+
 fn segment_ray_depth(origin: Point3, direction: kernel::Vec3, a: Point3, b: Point3) -> f64 {
     let dir = direction.normalized().unwrap_or(direction);
     (segment_ray_closest(origin, dir, a, b) - origin).dot(dir)
@@ -2489,13 +2496,15 @@ impl SketchEdgePickJs {
 
 /// The lines or fills drawn inside components under a pick ray, RANKED
 /// (`Scene::pick_instance_sketch_edge`, `Scene::pick_instance_sketch_region`):
-/// at most one hit per shown top-level instance, best first. Parallel
-/// arrays, one entry per hit: `instances()` the top-level placement the
-/// drawing is seen through, `sketches()` the sketch holding it (the
-/// definition's own, or a nested definition's), `depths()` the distance
-/// along the normalized ray, and `points()` the world point hit, three
-/// floats per hit (on the line for an edge pick, on the fill for a region
-/// pick). Empty on a miss.
+/// up to `INSTANCE_PICK_HITS_PER_PLACEMENT` hits per shown top-level
+/// instance (one per line for an edge pick, one per sketch for a region
+/// pick), all of them best first, so an instance may appear more than
+/// once. Parallel arrays, one entry per hit: `instances()` the top-level
+/// placement the drawing is seen through, `sketches()` the sketch holding
+/// it (the definition's own, or a nested definition's), `depths()` the
+/// distance along the normalized ray, and `points()` the world point hit,
+/// three floats per hit (on the line for an edge pick, on the fill for a
+/// region pick). Empty on a miss.
 #[wasm_bindgen]
 #[derive(Default)]
 pub struct InstanceSketchHitsJs {
@@ -10823,29 +10832,38 @@ impl Scene {
 
     /// The lines drawn inside components under the ray, RANKED: for every
     /// shown top-level instance (not hidden by [`Scene::set_hidden`], by
-    /// eye or by tag) its best line, walked into nested definitions with
-    /// the poses composed, then those per-placement bests in order, best
-    /// first. The drawing is exactly what the renderer draws for a
+    /// eye or by tag) every line in the cone, walked into nested
+    /// definitions with the poses composed, the best
+    /// [`INSTANCE_PICK_HITS_PER_PLACEMENT`] of each placement kept, then
+    /// all of them in order, best first (so `instances()` repeats a
+    /// placement once per line). Every line, not one per placement: the
+    /// caller's occlusion and scope filters reject hits this pick cannot
+    /// judge (a line behind an opaque face), and a placement's visible
+    /// line must still be there when its better-ranked hidden one is
+    /// dropped. The drawing is exactly what the renderer draws for a
     /// placement ([`Scene::instance_sketch_placements`]: the one kernel walk,
     /// [`Document::expanded_def_sketch_placements`], so nothing hidden by
     /// tag, under a hidden member, or off a definition on loan is ever
-    /// picked). The cone is [`Scene::pick_sketch_edge`]'s, in world space,
-    /// so a non-uniformly scaled placement keeps the screen-angle meaning;
-    /// the ranking is its angle from the ray, then depth, with angles
-    /// within [`inference::RANK_TIE_FRACTION`] of the cone counted equal
-    /// (the snap ranking's rule: the line in front wins). Each placement is
-    /// culled against the world box of its lines first, and a document
-    /// with no drawing inside any definition answers at once, so a hover
-    /// pays only for the instances near the ray.
+    /// picked). The cone is [`Scene::pick_sketch_edge`]'s own
+    /// [`SKETCH_PICK_APERTURE`] — deliberately the same aperture, so a line
+    /// inside a component is exactly as easy to hit as one outside — in
+    /// world space, so a non-uniformly scaled placement keeps the
+    /// screen-angle meaning; the ranking is its angle from the ray, then
+    /// depth, with angles within [`inference::RANK_TIE_FRACTION`] of the
+    /// cone counted equal (the snap ranking's rule: the line in front
+    /// wins). Each placement is culled against the world box of its lines
+    /// first, and a document with no drawing inside any definition answers
+    /// at once, so a hover pays only for the instances near the ray.
     ///
     /// The global inference index leaves a definition's sketches out (they
     /// would repeat per placement), so this is how a click on such a line
     /// finds the component it belongs to. The ranking is unscoped: a caller
     /// inside an editing context takes the first hit in its scope, so an
     /// out-of-scope placement's nearer line never masks an in-scope one.
-    /// Each hit carries the top-level instance, the sketch, the depth along
-    /// the normalized ray of the line's point nearest the ray, and that
-    /// world point. Empty on a miss. Never throws. Read-only.
+    /// Each hit carries the top-level instance, the sketch, and the point
+    /// of the line the cone ranked it by (its smallest angle from the ray,
+    /// always in front of the eye) with that point's depth along the
+    /// normalized ray. Empty on a miss. Never throws. Read-only.
     pub fn pick_instance_sketch_edge(
         &self,
         ox: f64,
@@ -10869,10 +10887,11 @@ impl Scene {
         // integer, so the order is total and a hair of pose noise between
         // two placements never decides it.
         let tie = SKETCH_PICK_APERTURE * inference::RANK_TIE_FRACTION;
-        // (angle bucket, depth, placement, sketch, a, b): the best per
-        // placement.
-        type Best = (i64, f64, InstanceId, SketchId, Point3, Point3);
-        let mut ranked: Vec<Best> = Vec::new();
+        // (angle bucket, depth, placement, sketch, cone point): every line
+        // in the cone, at the point and depth it ranks by.
+        type Hit = (i64, f64, InstanceId, SketchId, Point3);
+        let rank = |x: &Hit, y: &Hit| x.0.cmp(&y.0).then(x.1.total_cmp(&y.1));
+        let mut ranked: Vec<Hit> = Vec::new();
         for (root, pose, def) in self.instance_sketch_roots() {
             let entry = lines.get(&self.doc, def);
             let Some(bounds) = entry.bounds else {
@@ -10881,7 +10900,7 @@ impl Scene {
             if !ray_meets_posed_box(origin, unit, bounds, &pose, SKETCH_PICK_APERTURE) {
                 continue;
             }
-            let mut best: Option<Best> = None;
+            let mut hits: Vec<Hit> = Vec::new();
             for &(sid, to_def) in &entry.placements {
                 let Some(sketch) = self.doc.sketch(sid) else {
                     continue;
@@ -10890,7 +10909,7 @@ impl Scene {
                 for (_, edge) in sketch.edges().iter() {
                     let a = to_world.apply_point(sketch.vertices()[edge.from].position);
                     let b = to_world.apply_point(sketch.vertices()[edge.to].position);
-                    let Some((_, ang, depth)) = inference::segment_cone_hit(
+                    let Some((point, ang, depth)) = inference::segment_cone_hit(
                         origin,
                         unit,
                         a,
@@ -10901,27 +10920,31 @@ impl Scene {
                         continue;
                     };
                     let bucket = inference::rank_distance_bucket(ang, tie);
-                    if best.is_none_or(|(bb, bd, ..)| (bucket, depth) < (bb, bd)) {
-                        best = Some((bucket, depth, root, sid, a, b));
-                    }
+                    hits.push((bucket, depth, root, sid, point));
                 }
             }
-            ranked.extend(best);
+            hits.sort_by(rank);
+            hits.truncate(INSTANCE_PICK_HITS_PER_PLACEMENT);
+            ranked.extend(hits);
         }
-        ranked.sort_by(|x, y| x.0.cmp(&y.0).then(x.1.total_cmp(&y.1)));
-        for (_, _, root, sid, a, b) in ranked {
-            let point = segment_ray_closest(origin, unit, a, b);
-            out.push(root, sid, (point - origin).dot(unit), point);
+        // Stable: equal ranks keep their placement's walk order.
+        ranked.sort_by(rank);
+        for (_, depth, root, sid, point) in ranked {
+            out.push(root, sid, depth, point);
         }
         out
     }
 
     /// The fills of regions drawn inside components under the ray, RANKED
     /// as [`Scene::pick_instance_sketch_edge`] ranks lines (its walk, its
-    /// cull, its early answer, unscoped): for every shown top-level
-    /// instance the region whose fill the ray enters nearest, the smaller
-    /// on a tie, then those per-placement bests nearest first, the smaller
-    /// first among ties. Areas compare in the WORLD: a region's own area
+    /// cull, its early answer, unscoped, and its per-placement list): for
+    /// every shown top-level instance each sketch whose fill the ray
+    /// enters, at the smallest of its regions there, the best
+    /// [`INSTANCE_PICK_HITS_PER_PLACEMENT`] of each placement kept, then
+    /// all of them nearest first, the smaller first among ties (so
+    /// `instances()` repeats a placement once per sketch, and a fill the
+    /// caller finds hidden does not mask the same placement's next one).
+    /// Areas compare in the WORLD: a region's own area
     /// times its placement's in-plane area scale, so a scaled placement's
     /// fill ranks by the size it is drawn at. A loop with no face and an
     /// imported sketch (drawn as ink, no fill) are nothing to pick, and in
@@ -10949,10 +10972,26 @@ impl Scene {
         };
         let length = dir.length();
         let ties = |a: f64, b: f64| (a - b).abs() < kernel::tol::PLANE_DIST;
+        // Nearest first; a run of hits within the tie distance of its first
+        // ranks smaller area first (a total order, so the sort is sound).
+        let rank = |hits: &mut [Hit]| {
+            hits.sort_by(|x, y| x.0.total_cmp(&y.0));
+            let mut start = 0;
+            while start < hits.len() {
+                let lead = hits[start].0;
+                let end = hits[start..]
+                    .iter()
+                    .position(|h| !ties(h.0, lead))
+                    .map_or(hits.len(), |k| start + k);
+                hits[start..end].sort_by(|x, y| x.1.total_cmp(&y.1));
+                start = end;
+            }
+        };
         let mut lines = DefLinesMemo::default();
-        // (depth, world area, placement, sketch, world point)
-        type Best = (f64, f64, InstanceId, SketchId, Point3);
-        let mut ranked: Vec<Best> = Vec::new();
+        // (depth, world area, placement, sketch, world point): one per
+        // sketch whose fill the ray enters, its smallest region there.
+        type Hit = (f64, f64, InstanceId, SketchId, Point3);
+        let mut ranked: Vec<Hit> = Vec::new();
         for (root, pose, def) in self.instance_sketch_roots() {
             let entry = lines.get(&self.doc, def);
             let Some(bounds) = entry.bounds else {
@@ -10961,7 +11000,7 @@ impl Scene {
             if !ray_meets_posed_box(origin, unit, bounds, &pose, 0.0) {
                 continue;
             }
-            let mut best: Option<Best> = None;
+            let mut hits: Vec<Hit> = Vec::new();
             for &(sid, to_def) in &entry.placements {
                 let Some(sketch) = self.doc.sketch(sid) else {
                     continue;
@@ -10988,33 +11027,25 @@ impl Scene {
                 let hit = o + d * t;
                 let depth = t * length;
                 let scale = in_plane_area_scale(&to_world, plane.normal());
-                for (rid, _) in sketch.regions().iter().filter(|(_, r)| !r.faceless) {
-                    if !sketch.region_contains_point(rid, hit).unwrap_or(false) {
-                        continue;
-                    }
-                    let area = sketch.region_area(rid).unwrap_or(f64::INFINITY) * scale;
-                    if best.is_none_or(|(bd, ba, ..)| {
-                        (depth < bd && !ties(depth, bd)) || (ties(depth, bd) && area < ba)
-                    }) {
-                        best = Some((depth, area, root, sid, origin + dir * t));
-                    }
+                // One hit per sketch: its regions share the hit point, so
+                // only the smallest one entered says anything.
+                let area = sketch
+                    .regions()
+                    .iter()
+                    .filter(|(rid, r)| {
+                        !r.faceless && sketch.region_contains_point(*rid, hit).unwrap_or(false)
+                    })
+                    .map(|(rid, _)| sketch.region_area(rid).unwrap_or(f64::INFINITY) * scale)
+                    .min_by(f64::total_cmp);
+                if let Some(area) = area {
+                    hits.push((depth, area, root, sid, origin + dir * t));
                 }
             }
-            ranked.extend(best);
+            rank(&mut hits);
+            hits.truncate(INSTANCE_PICK_HITS_PER_PLACEMENT);
+            ranked.extend(hits);
         }
-        // Nearest first; a run of hits within the tie distance of its first
-        // ranks smaller area first (a total order, so the sort is sound).
-        ranked.sort_by(|x, y| x.0.total_cmp(&y.0));
-        let mut start = 0;
-        while start < ranked.len() {
-            let lead = ranked[start].0;
-            let end = ranked[start..]
-                .iter()
-                .position(|h| !ties(h.0, lead))
-                .map_or(ranked.len(), |k| start + k);
-            ranked[start..end].sort_by(|x, y| x.1.total_cmp(&y.1));
-            start = end;
-        }
+        rank(&mut ranked);
         for (depth, _, root, sid, point) in ranked {
             out.push(root, sid, depth, point);
         }
@@ -25041,6 +25072,180 @@ mod tests {
         assert!(down_edge_pick(&scene, 1.3, 0.5).is_none(), "hidden by eye");
         scene.set_node_user_hidden(2, inst, false).unwrap();
         assert!(down_edge_pick(&scene, 1.3, 0.5).is_some());
+    }
+
+    /// One sketch to draw: a point on its plane, the plane's normal, and
+    /// its segments.
+    type Drawing<'a> = (Point3, kernel::Vec3, &'a [(Point3, Point3)]);
+
+    /// A component whose definition holds a unit cube at x = 20 (out of
+    /// the way) and one sketch per `(plane point, plane normal, segments)`
+    /// entry, drawn through an identity placement that is then removed.
+    /// Returns the definition and the sketches, in order.
+    fn component_with_drawings(scene: &mut Scene, drawings: &[Drawing<'_>]) -> (u64, Vec<u64>) {
+        let (s, r) = ground_unit_square_at(scene, 20.0, 0.0);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        let mut sketches = Vec::new();
+        for (p, n, segments) in drawings {
+            let sketch = scene
+                .begin_sketch_on_plane_in_instance(inst, p.x, p.y, p.z, n.x, n.y, n.z)
+                .unwrap();
+            for (a, b) in *segments {
+                scene
+                    .sketch_add_segment(sketch, a.x, a.y, a.z, b.x, b.y, b.z)
+                    .unwrap();
+            }
+            sketches.push(sketch);
+        }
+        scene.delete_node(2, inst).unwrap();
+        (comp, sketches)
+    }
+
+    /// Every line of a placement in the cone is listed, not only its
+    /// best-ranked one: a line H straight under the ray (the smaller angle)
+    /// and a line V nearer the eye but a little off the ray both come back,
+    /// H first. A caller that rejects H (say, behind an opaque face) still
+    /// finds V of the same component next in the list.
+    #[test]
+    fn pick_instance_sketch_edge_lists_every_line_of_a_placement_in_the_cone() {
+        let mut scene = Scene::new();
+        let up = kernel::Vec3::new(0.0, 0.0, 1.0);
+        let h_seg = [(Point3::new(1.3, 0.0, 0.0), Point3::new(1.3, 1.0, 0.0))];
+        let v_seg = [(Point3::new(1.4, 0.0, 0.5), Point3::new(1.4, 1.0, 0.5))];
+        let (comp, sk) = component_with_drawings(
+            &mut scene,
+            &[
+                (Point3::new(0.0, 0.0, 0.0), up, &h_seg),
+                (Point3::new(0.0, 0.0, 0.5), up, &v_seg),
+            ],
+        );
+        let (h, v) = (sk[0], sk[1]);
+        let inst = scene
+            .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+
+        let rows = hit_rows(&scene.pick_instance_sketch_edge(1.3, 0.5, 10.0, 0.0, 0.0, -1.0));
+        assert_eq!(
+            rows.iter().map(|r| (r.0, r.1)).collect::<Vec<_>>(),
+            vec![(inst, h), (inst, v)],
+            "both lines, the smaller angle first"
+        );
+        assert!((rows[0].2 - 10.0).abs() < 1e-9);
+        assert!(near3(rows[0].3, Point3::new(1.3, 0.5, 0.0)));
+        // The app drops H as hidden: V is the same placement's next hit.
+        let visible = rows
+            .iter()
+            .find(|r| r.0 == inst && r.1 != h)
+            .expect("V survives H's rejection");
+        assert_eq!(visible.1, v);
+        assert!((visible.2 - 9.5).abs() < 1e-9, "depth {}", visible.2);
+        assert!(
+            near3(visible.3, Point3::new(1.4, 0.5, 0.5)),
+            "{:?}",
+            visible.3
+        );
+    }
+
+    /// The reported point and depth are the ones the cone ranked the line
+    /// by (its point of smallest angle from the ray), not the line's
+    /// perpendicular-nearest point, which can sit elsewhere on the line or
+    /// even behind the eye.
+    #[test]
+    fn pick_instance_sketch_edge_reports_the_cone_point_it_ranked_by() {
+        for (a, label) in [
+            (Point3::new(0.05, 0.0, 9.0), "a line rising toward the eye"),
+            (
+                Point3::new(0.01, 0.0, 11.0),
+                "a line passing behind the eye",
+            ),
+        ] {
+            let mut scene = Scene::new();
+            let seg = [(a, Point3::new(0.1, 0.0, 0.0))];
+            let (comp, sk) = component_with_drawings(
+                &mut scene,
+                &[(
+                    Point3::new(0.0, 0.0, 0.0),
+                    kernel::Vec3::new(0.0, 1.0, 0.0),
+                    &seg,
+                )],
+            );
+            let inst = scene
+                .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+                .unwrap();
+            let rows = hit_rows(&scene.pick_instance_sketch_edge(0.0, 0.0, 10.0, 0.0, 0.0, -1.0));
+            assert_eq!(rows.len(), 1, "{label}: {rows:?}");
+            let (i, s, depth, at) = rows[0];
+            assert_eq!((i, s), (inst, sk[0]), "{label}");
+            assert!((depth - 10.0).abs() < 1e-9, "{label}: depth {depth}");
+            assert!(near3(at, Point3::new(0.1, 0.0, 0.0)), "{label}: {at:?}");
+        }
+    }
+
+    /// The fill pick lists every sketch of a placement whose fill the ray
+    /// enters, not only the nearest: two stacked squares in one definition
+    /// both come back, the nearer first, so a caller that finds the upper
+    /// one hidden still reaches the lower.
+    #[test]
+    fn pick_instance_sketch_region_lists_every_fill_of_a_placement() {
+        let mut scene = Scene::new();
+        let square = |z: f64| {
+            let c = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+            (0..4)
+                .map(|k| {
+                    let ((ax, ay), (bx, by)) = (c[k], c[(k + 1) % 4]);
+                    (Point3::new(ax, ay, z), Point3::new(bx, by, z))
+                })
+                .collect::<Vec<_>>()
+        };
+        let (low, high) = (square(0.0), square(0.5));
+        let up = kernel::Vec3::new(0.0, 0.0, 1.0);
+        let (comp, sk) = component_with_drawings(
+            &mut scene,
+            &[
+                (Point3::new(0.0, 0.0, 0.0), up, &low),
+                (Point3::new(0.0, 0.0, 0.5), up, &high),
+            ],
+        );
+        let inst = scene
+            .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+        let rows = region_rows(&scene, 0.5, 0.5, 10.0, -1.0);
+        assert_eq!(
+            rows.iter().map(|r| (r.0, r.1)).collect::<Vec<_>>(),
+            vec![(inst, sk[1]), (inst, sk[0])]
+        );
+        assert!((rows[0].2 - 9.5).abs() < 1e-9 && (rows[1].2 - 10.0).abs() < 1e-9);
+        assert!(near3(rows[1].3, Point3::new(0.5, 0.5, 0.0)));
+    }
+
+    /// A placement with more lines in the cone than the per-placement cap
+    /// lists only its best-ranked ones, best first.
+    #[test]
+    fn pick_instance_sketch_edge_caps_the_lines_one_placement_lists() {
+        let mut scene = Scene::new();
+        // Twelve lines straight under the ray, one per sketch at heights
+        // 0, 0.1, ... 1.1: the same angle, so the nearer (higher) ranks
+        // first.
+        let segs: Vec<[(Point3, Point3); 1]> = (0..12)
+            .map(|k| {
+                let z = 0.1 * f64::from(k);
+                [(Point3::new(1.0, 0.0, z), Point3::new(1.0, 1.0, z))]
+            })
+            .collect();
+        let up = kernel::Vec3::new(0.0, 0.0, 1.0);
+        let drawings: Vec<Drawing<'_>> = segs.iter().map(|s| (s[0].0, up, s.as_slice())).collect();
+        let (comp, _) = component_with_drawings(&mut scene, &drawings);
+        scene
+            .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+        let rows = hit_rows(&scene.pick_instance_sketch_edge(1.0, 0.5, 10.0, 0.0, 0.0, -1.0));
+        assert_eq!(rows.len(), INSTANCE_PICK_HITS_PER_PLACEMENT, "{rows:?}");
+        for (k, row) in rows.iter().enumerate() {
+            let z = 0.1 * (11 - k) as f64;
+            assert!((row.2 - (10.0 - z)).abs() < 1e-9, "{rows:?}");
+        }
     }
 
     /// A component whose definition holds a filled square drawn on its
