@@ -117,12 +117,9 @@ pnpm --dir shells/tauri dev
 ```
 
 Both `dev` and `build` compile the Rust kernel to WASM automatically,
-rebuilding only when the kernel sources change. To build it on its own
-(or if `wasm-pack` isn't on your `PATH` and you want to run it manually):
-
-```sh
-wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
-```
+rebuilding only when the kernel sources change. They need `wasm-pack` on
+your `PATH`; `scripts/install-wasm-pack.sh` installs the pinned version.
+The first build takes several minutes.
 
 ## Documentation
 

@@ -23,7 +23,8 @@ Start with these documents — they are the source of truth:
 - Verify (run before every commit): `scripts/verify.sh`
 - Full pre-push gate (verify + replay + chromium E2E, mirrors blocking CI):
   `scripts/verify-full.sh`
-- WASM build: `wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg`
+- WASM build: `pnpm --dir app wasm` (the production kernel unless
+  `HEW_PREVIEW=1`; the dev server builds the preview kernel it needs on its own)
 - UI dev server: `pnpm --dir app dev`
 - Desktop shell dev: `pnpm --dir shells/tauri dev`
 

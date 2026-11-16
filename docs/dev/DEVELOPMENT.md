@@ -41,17 +41,20 @@ non-negotiable and how the pins get bumped.
 Clone the repository, then:
 
 ```sh
-cargo build --workspace          # build every Rust crate
+scripts/install-wasm-pack.sh     # the pinned wasm-pack
 pnpm install                     # install JS/TS dependencies
-wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
 pnpm --dir app dev               # UI dev server (web build)
 pnpm --dir shells/tauri dev      # desktop shell dev
 ```
 
-The WASM build step is required before the UI dev server will run — the app
-imports the kernel bindings from `app/src/wasm/pkg`, which is generated, not
-checked in. Re-run it whenever you change a kernel crate the bindings
-depend on (`kernel`, `inference`, `tessellate`, `wasm-api`).
+The app imports the kernel bindings from `app/src/wasm/pkg`, which is
+generated, not checked in. `pnpm --dir app dev` and `pnpm --dir app build`
+build it first when it is missing, older than its sources, or the wrong
+flavor for the command (`app/scripts/build-wasm.mjs`). The dev server is a
+preview build unless `HEW_PREVIEW=0` is set, so it gets the preview kernel;
+see [Preview features](#preview-features). The first build compiles the
+kernel crates and takes several minutes. `cargo build --workspace` builds
+every crate natively and is not needed to run the app.
 
 Before every commit, run the fast verification script:
 
@@ -582,7 +585,15 @@ HEW_PREVIEW=0 pnpm --dir app exec playwright test --project=chromium
 ```
 
 The WASM module carries the API's live half, so each build has its own
-module; `preview_build()` on the module says which one it is.
+module; `preview_build()` on the module says which one it is. The app's
+`dev` and `build` scripts ask the module in `app/src/wasm/pkg` and rebuild
+it when it is the other flavor, so `pnpm --dir app dev` and
+`HEW_PREVIEW=0 pnpm --dir app dev` each start on the right kernel without
+the `wasm-flavors.sh` lines. One slot holds one flavor, so each switch is
+a rebuild; `wasm-flavors.sh` keeps both built side by side, as the gate
+does, and `use` swaps between them in seconds. The dev server's own
+builds skip `wasm-opt`, and `pnpm --dir app build` rebuilds over one
+rather than bundle it.
 
 **Determinism and replay.** The kernel is required to be bit-for-bit
 deterministic — the same input produces the same output on every machine,
