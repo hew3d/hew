@@ -131,6 +131,25 @@ impl Object {
         )
     }
 
+    /// [`Object::from_polygons_with_holes_import`] with no materials or UV
+    /// frames, for the executable specs (an imported mesh with holed faces,
+    /// built at [`tol::IMPORT_PLANE_DIST`]). Test support only.
+    #[doc(hidden)]
+    pub fn from_polygons_with_holes_import_for_test(
+        positions: &[Point3],
+        faces: &[Vec<usize>],
+        holes: &[Vec<Vec<usize>>],
+    ) -> Result<Object, TopologyError> {
+        let n = faces.len();
+        Object::from_polygons_with_holes_import(
+            positions,
+            faces,
+            holes,
+            &vec![None; n],
+            &vec![None; n],
+        )
+    }
+
     /// Import path for faces that may carry holes: `holes[i]` is face `i`'s list
     /// of inner-loop index lists (empty = no holes). Validated exactly like the
     /// hole-free import path (manifold edges incl. hole edges, planarity of outer

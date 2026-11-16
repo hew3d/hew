@@ -591,8 +591,13 @@ impl Document {
 
         // Keep the coplanar edges either operand already had (imprints), in
         // the definition's frame; dissolve the seams the boolean added.
-        let result = Object::boolean_product(op, &rec_host.object, tool_object, &to_def)
-            .map_err(DocumentError::Boolean)?;
+        let mut tidy = crate::ops::BooleanTidy::default();
+        let result =
+            Object::boolean_product_reported(op, &rec_host.object, tool_object, &to_def, &mut tidy)
+                .map_err(DocumentError::Boolean)?;
+        // The tidy's sites are in the definition's frame; the report's are
+        // world.
+        self.boolean_tidy.absorb(&tidy, &pose);
 
         let (name, tags) = (rec_host.name.clone(), rec_host.tags.clone());
         // The result keeps the operands' imprints, so an imported operand's
@@ -683,7 +688,7 @@ impl Document {
     ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "boolean_members_through_placement", boolean_op = ?op, depth = path.len());
         self.refuse_during_any_session()?;
-        let (component, _pose) = self.placement_target(path)?;
+        let (component, pose) = self.placement_target(path)?;
         let grouped = |o: ObjectId| {
             self.objects.get(o).is_some_and(|r| {
                 !r.hidden
@@ -693,7 +698,13 @@ impl Document {
         if grouped(a) || grouped(b) {
             return Err(DocumentError::GroupedOperand);
         }
-        self.boolean_in_component(component, a, b, op)
+        // The boolean in the definition reports its tidy in the
+        // definition's frame; through this placement it is world.
+        let earlier = std::mem::take(&mut self.boolean_tidy);
+        let done = self.boolean_in_component(component, a, b, op);
+        let inner = std::mem::replace(&mut self.boolean_tidy, earlier);
+        self.boolean_tidy.absorb(&inner, &pose);
+        done
     }
 
     /// [`Document::slice_def_member`] through an occurrence path: cuts

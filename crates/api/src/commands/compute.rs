@@ -21,7 +21,8 @@ use crate::part_frame;
 use crate::refusal::Refusal;
 use crate::solid_spec::{self, PlaneParams, check_compute_size, resolve_solid};
 use kernel::{
-    BooleanError, BooleanOp, DocumentError, Object, Plane, Point3, RenderRoot, Transform, Vec3,
+    BooleanError, BooleanOp, BooleanTidy, DocumentError, Object, Plane, Point3, RenderRoot,
+    Transform, Vec3,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -205,10 +206,14 @@ fn boolean(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let b = resolve_solid(ctx, &p.b)?;
     check_compute_size(&[&a, &b])?;
     // Both operands are in world space, so b maps into a's frame unchanged.
-    match Object::boolean_product(op, &a, &b, &Transform::IDENTITY) {
+    let mut tidy = BooleanTidy::default();
+    match Object::boolean_product_reported(op, &a, &b, &Transform::IDENTITY, &mut tidy) {
         Ok(result) => {
             let mut out = blocks(ctx, &result, want)?;
             out.insert("solid".into(), Value::Bool(true));
+            if !tidy.is_empty() {
+                out.insert("tidied".into(), super::solid::tidied_json(&tidy));
+            }
             Ok(Value::Object(out))
         }
         // Nothing left: an intersect of disjoint solids, a subtract that
@@ -234,13 +239,18 @@ fn slice(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let plane = solid_spec::plane_of(&p.plane)?;
     let solid = resolve_solid(ctx, &p.solid)?;
     check_compute_size(&[&solid])?;
+    let mut tidy = BooleanTidy::default();
     let (positive, negative) = solid
-        .slice(&plane)
+        .slice_reported(&plane, &mut tidy)
         .map_err(|e| CmdError::from(DocumentError::Slice(e)))?;
-    Ok(json!({
+    let mut out = json!({
         "positive": Value::Object(blocks(ctx, &positive, want)?),
         "negative": Value::Object(blocks(ctx, &negative, want)?),
-    }))
+    });
+    if !tidy.is_empty() {
+        out["tidied"] = super::solid::tidied_json(&tidy);
+    }
+    Ok(out)
 }
 
 // -------------------------------------------------------- hew.compute.shells

@@ -254,6 +254,15 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "DegenerateContact" => {
             "The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again."
         }
+        "OperandFaceNotFlat" => {
+            "One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles."
+        }
+        "ArrangementFailed" => {
+            "Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug."
+        }
+        "ResultTooThin" => {
+            "The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again."
+        }
         "NothingRemoved" => {
             "Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting."
         }

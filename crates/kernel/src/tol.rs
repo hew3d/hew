@@ -66,7 +66,43 @@ pub const SMALL_RING_MIN_SHAPE: f64 = 1e-6;
 /// normal by about `PLANE_DIST / w`. At 10 nm the worst case is 0.1 rad, so
 /// the normal cannot flip or turn sideways (which would leave the face
 /// impossible to triangulate for display); near 1 nm it could.
+///
+/// This is what may exist, not what a cut leaves: a boolean tidies away
+/// the pieces of its own cut narrower than [`FEATURE_MIN`].
 pub const MIN_FACE_WIDTH: f64 = 10.0 * POINT_MERGE;
+
+/// Nothing narrower than this is a feature (meters; 0.1 µm): the narrowest
+/// face a boolean leaves from its own cut.
+///
+/// A cut through a dense mesh leaves slivers at every size down to the
+/// merge distance where it passes near a vertex. Points merge at
+/// [`POINT_MERGE`] and a face needs [`MIN_FACE_WIDTH`] to keep a stable
+/// plane, so a piece between the two is distinct but cannot be kept, and
+/// lowering the width floor cannot close that gap while vertices may sit
+/// [`PLANE_DIST`] off their planes. The boolean closes it from the other
+/// side: it welds the points of its cut around any face it made narrower
+/// than this, moving nothing farther than [`TIDY_REACH`], and reports what
+/// it merged (`ops::BooleanTidy`; DEVELOPMENT.md rule 4).
+///
+/// Why 0.1 µm, and absolute: it is a thousand times below what an eye
+/// resolves (about 100 µm), hundreds of times below the finest
+/// resin-printer pixel, ten times below the 1 µm grid an STL written to
+/// three decimals of a millimeter sits on (and below
+/// [`SIGNATURE_QUANTUM`]), and about half of what visible light can
+/// resolve. The reason is physical, so it does not scale with the model: a
+/// relative tolerance would make the same cut behave differently after the
+/// object is scaled or moved beside something large. It is ten times
+/// [`MIN_FACE_WIDTH`] on purpose, so a face a boolean leaves at this width
+/// cannot drift under the validity floor through rounding or a later
+/// transform. Faces between the two stay legal everywhere else (a file
+/// holding one opens, a scale making one succeeds); a boolean neither
+/// preserves them through its cut nor manufactures them.
+pub const FEATURE_MIN: f64 = 1e-7;
+
+/// The farthest the boolean's tidy moves any point (meters;
+/// [`FEATURE_MIN`] × 2): a cut point welds to an anchor no farther than
+/// this, and anchors never move, so clusters cannot chain along a strip.
+pub const TIDY_REACH: f64 = 2.0 * FEATURE_MIN;
 
 /// Two unit normals whose difference is shorter than this are considered the
 /// same direction (dimensionless).

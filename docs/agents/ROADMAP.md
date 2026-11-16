@@ -325,7 +325,28 @@ below.
 - Explicit boolean union, subtract, and intersect, with coplanar seams
   dissolved on the result (a union of two flush boxes reads as one box).
   A subtract whose cutter sits apart from, or only touches, the target
-  refuses with a typed `NothingRemoved` and leaves both solids in place
+  refuses with a typed `NothingRemoved` and leaves both solids in place.
+  Nothing narrower than 0.1 µm is a feature (`tol::FEATURE_MIN`): a face
+  the boolean's own cut leaves narrower than that (a cut through a dense
+  mesh passing nanometers from a vertex) is merged into its neighbors by
+  a bounded, deterministic weld of the cut's points (`boolean::tidy`;
+  nothing moves farther than `tol::TIDY_REACH`, 0.2 µm, operands are never
+  changed, faces the cut does not touch pass through bit for bit, and a
+  face the weld bends past the planarity tolerance is split into flat
+  triangles with soft diagonals). Every tidy is logged (`kernel::op`,
+  `boolean_tidy`), counted in a `BooleanTidy` (`Object::boolean_reported`,
+  `Document::take_boolean_tidy`) and returned to scripts as a `tidied`
+  block. A tidy that cannot give a valid solid falls back to the cut as
+  made; `ResultTooThin` is left only where both fail. The face-validity
+  floor stays 10 nm (`tol::MIN_FACE_WIDTH`): faces between 10 nm and
+  0.1 µm stay legal everywhere else. Known limits: faces of the two
+  operands parallel and closer than 0.1 µm but farther than 1 nm apart
+  are not yet treated as one plane; a sub-face a few nanometers across
+  right beside an apex can be misjudged by the arrangement's ray cast
+  (the intersection of a box and a tetrahedron whose apex is 5 nm past a
+  box edge refuses `DegenerateContact`); and the Follow Me merge,
+  push-through and the cell builder log their tidy but do not report it
+  to scripts
 - Non-destructive, nestable grouping (Group/Ungroup)
 - Group-level booleans: Union/Subtract/Intersect accept a whole group on
   either side (or mixed with a plain solid). The group's solids are fused

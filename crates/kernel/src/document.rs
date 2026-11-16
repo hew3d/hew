@@ -74,8 +74,8 @@ use crate::import::{ImportReport, ImportScene, SkippedMesh};
 use crate::material::{FaceMaterial, Material, Pbr, UvFrame};
 use crate::math::{MathError, Plane, Point3, Vec3};
 use crate::ops::{
-    BooleanError, BooleanOp, ExtrudeError, FollowMeError, Operand, SliceError, StickyError,
-    SweepOptions,
+    BooleanError, BooleanOp, BooleanTidy, ExtrudeError, FollowMeError, Operand, SliceError,
+    StickyError, SweepOptions,
 };
 use crate::serialize::{
     DocSaveData, LoadError, NodeRefDto, RawAnchor, RawAnnotation, decode_document_raw,
@@ -255,16 +255,24 @@ fn face_under(obj: &Object, plane: &crate::math::Plane, p: Point3) -> bool {
 /// then refuses too — a sweep within tolerance of coinciding with its base,
 /// a degenerate contact — that refusal stands: it is the arrangement's
 /// answer, not a disagreement between two of them.
-fn merge_sweep(base: &Object, swept: &Object) -> Result<Object, BooleanError> {
+///
+/// What the merge's own boolean tidied is added to `tidy` (the
+/// Intersect that only decides the op is not counted).
+fn merge_sweep(
+    base: &Object,
+    swept: &Object,
+    tidy: &mut BooleanTidy,
+) -> Result<Object, BooleanError> {
     let op = match Object::boolean(BooleanOp::Intersect, base, swept, &Transform::IDENTITY) {
         Ok(_) => BooleanOp::Subtract,
         Err(_) => BooleanOp::Union,
     };
-    match Object::boolean(op, base, swept, &Transform::IDENTITY) {
+    let id = &Transform::IDENTITY;
+    match Object::boolean_reported(op, base, swept, id, tidy) {
         Err(BooleanError::NothingRemoved | BooleanError::EmptyResult)
             if op == BooleanOp::Subtract =>
         {
-            Object::boolean(BooleanOp::Union, base, swept, &Transform::IDENTITY)
+            Object::boolean_reported(BooleanOp::Union, base, swept, id, tidy)
         }
         r => r,
     }
@@ -4433,6 +4441,13 @@ pub struct Document {
     /// (wireframe faces §5, [`Document::cells_by_last_edit`]). Session-only,
     /// never serialized; cleared by every new recorded edit.
     cells_last: Vec<CellOutcome>,
+    /// What the booleans of the edits since it was last read merged out of
+    /// their own cuts ([`BooleanTidy`]; DEVELOPMENT.md rule 4), sites in
+    /// world coordinates or a definition's (as
+    /// [`Document::take_boolean_tidy`] says), until that reads it.
+    /// Session-only: never serialized, not in the state hash; undo and redo
+    /// clear it.
+    boolean_tidy: BooleanTidy,
     /// The Objects the view hides (the app's Hide), which the automatic
     /// cell search never closes against or grows
     /// ([`Document::set_view_hidden_objects`]). Session-only view state,
@@ -4609,6 +4624,25 @@ impl Document {
     /// An empty document.
     pub fn new() -> Document {
         Document::default()
+    }
+
+    /// What the booleans of the edits since the last call merged out of
+    /// their own cuts, and clears it: pieces narrower than
+    /// [`crate::tol::FEATURE_MIN`] welded into their neighbors, or kept
+    /// when that could not give a valid solid ([`BooleanTidy`];
+    /// DEVELOPMENT.md rule 4). Sites are in world coordinates, except for
+    /// a boolean that runs in a component definition's own geometry
+    /// (between members of a definition edited directly, a Rejoin of a
+    /// definition's pieces, a push/pull through on a definition member,
+    /// faces drawn closed in a definition growing a member), which reports
+    /// them in that definition's frame; a boolean through a placement maps
+    /// its sites to world. Every two-operand and many-operand boolean, the
+    /// boolean through a placement, Slice, Rejoin, a push/pull through,
+    /// the union that grows a solid from faces drawn onto it, and Follow
+    /// Me's merge add to it; undo and redo clear it. Empty
+    /// ([`BooleanTidy::is_empty`]) when nothing was too thin.
+    pub fn take_boolean_tidy(&mut self) -> BooleanTidy {
+        std::mem::take(&mut self.boolean_tidy)
     }
 
     /// Enables/disables torture ("paranoid") mode (docs/dev/DEVELOPMENT.md): the
@@ -13895,7 +13929,8 @@ impl Document {
             return Err(DocumentError::GroupedOperand);
         }
         let base = &base_rec.object;
-        let mut result = merge_sweep(base, &swept).map_err(DocumentError::Boolean)?;
+        let mut result =
+            merge_sweep(base, &swept, &mut self.boolean_tidy).map_err(DocumentError::Boolean)?;
         // Dissolve the merge's coplanar seams, preserving the base's
         // pre-existing imprints (`Document::boolean`'s treatment; the
         // swept tool is fresh and contributes none).
@@ -13992,7 +14027,8 @@ impl Document {
             return Err(DocumentError::GroupedOperand);
         }
         let base = &base_rec.object;
-        let mut result = merge_sweep(base, &swept).map_err(DocumentError::Boolean)?;
+        let mut result =
+            merge_sweep(base, &swept, &mut self.boolean_tidy).map_err(DocumentError::Boolean)?;
         // Dissolve the coplanar seams the merge introduced, preserving the
         // base's pre-existing imprints; the swept tool is fresh and
         // contributes none (exactly `Document::boolean`'s treatment).
@@ -14211,7 +14247,8 @@ impl Document {
             })
             .ok_or(DocumentError::UnknownObject)?;
         let base = &base_rec.object;
-        let mut result = merge_sweep(base, &swept).map_err(DocumentError::Boolean)?;
+        let mut result =
+            merge_sweep(base, &swept, &mut self.boolean_tidy).map_err(DocumentError::Boolean)?;
         // Dissolve the merge's coplanar seams, preserving the base's
         // pre-existing imprints (`Document::boolean`'s treatment).
         let preserve = base.coplanar_edge_segments();
@@ -14329,7 +14366,8 @@ impl Document {
         // boolean's operand rules; the swept body never enters the document.
         let base_rec = &self.objects[object];
         let base = &base_rec.object;
-        let mut result = merge_sweep(base, &swept).map_err(DocumentError::Boolean)?;
+        let mut result =
+            merge_sweep(base, &swept, &mut self.boolean_tidy).map_err(DocumentError::Boolean)?;
         let preserve = base.coplanar_edge_segments();
         result.merge_coplanar_faces(&preserve);
         // The merged solid keeps the base's imprints, so its provenance too.
@@ -15068,9 +15106,16 @@ impl Document {
         // coplanar edges the operands already had — those are face imprints
         // drawn but not yet extruded, not seams. Runs BEFORE the result is
         // inserted, so undo/redo of the boolean is untouched.
-        let result =
-            Object::boolean_product(op, &rec_a.object, &rec_b.object, &Transform::IDENTITY)
-                .map_err(DocumentError::Boolean)?;
+        let mut tidy = BooleanTidy::default();
+        let result = Object::boolean_product_reported(
+            op,
+            &rec_a.object,
+            &rec_b.object,
+            &Transform::IDENTITY,
+            &mut tidy,
+        )
+        .map_err(DocumentError::Boolean)?;
+        self.boolean_tidy.absorb(&tidy, &Transform::IDENTITY);
         // The result carries operand `a`'s identity (a board cut by a tool
         // is still that board); `b`'s is consumed with it.
         let (name, tags) = (rec_a.name.clone(), rec_a.tags.clone());
@@ -15209,7 +15254,9 @@ impl Document {
             members.push(&rec.object);
         }
 
-        let mut result = combine_all(op, &members)?;
+        let mut tidy = BooleanTidy::default();
+        let mut result = combine_all(op, &members, &mut tidy)?;
+        self.boolean_tidy.absorb(&tidy, &Transform::IDENTITY);
 
         // Dissolve the coplanar seams the boolean introduced, preserving
         // coplanar edges the operands already had (`Document::boolean`'s
@@ -15393,12 +15440,14 @@ impl Document {
         }
 
         // ── Fallible geometry, entirely on clones (document untouched) ─────
+        let mut tidy = BooleanTidy::default();
         let composites: Vec<Object> = leaves
             .iter()
-            .map(|l| self.compose_operand_union(l))
+            .map(|l| self.compose_operand_union(l, &mut tidy))
             .collect::<Result<_, _>>()?;
         let refs: Vec<&Object> = composites.iter().collect();
-        let mut result = combine_all(op, &refs)?;
+        let mut result = combine_all(op, &refs, &mut tidy)?;
+        self.boolean_tidy.absorb(&tidy, &Transform::IDENTITY);
 
         // Dissolve the coplanar seams the composition unions and the final op
         // introduced, preserving imprints the original leaves already carried
@@ -15572,16 +15621,21 @@ impl Document {
     /// boolean engine's Union, on clones, in tree order (deterministic).
     /// Group transforms are always baked (a group holds no pose), so members
     /// already share the world frame and map with the identity transform.
-    fn compose_operand_union(&self, leaves: &[ObjectId]) -> Result<Object, DocumentError> {
+    fn compose_operand_union(
+        &self,
+        leaves: &[ObjectId],
+        tidy: &mut BooleanTidy,
+    ) -> Result<Object, DocumentError> {
         let mut iter = leaves.iter();
         let &first = iter.next().expect("operand leaves are non-empty");
         let mut acc = self.objects[first].object.clone();
         for &next in iter {
-            acc = Object::boolean(
+            acc = Object::boolean_reported(
                 BooleanOp::Union,
                 &acc,
                 &self.objects[next].object,
                 &Transform::IDENTITY,
+                tidy,
             )
             .map_err(DocumentError::Boolean)?;
         }
@@ -15632,7 +15686,12 @@ impl Document {
         if rec.group_parent().is_some() {
             return Err(DocumentError::GroupedOperand);
         }
-        let (positive, negative) = rec.object.slice(plane).map_err(DocumentError::Slice)?;
+        let mut tidy = BooleanTidy::default();
+        let (positive, negative) = rec
+            .object
+            .slice_reported(plane, &mut tidy)
+            .map_err(DocumentError::Slice)?;
+        self.boolean_tidy.absorb(&tidy, &Transform::IDENTITY);
         let imported = rec.imported;
 
         let a = self.insert_object_record(ObjectRecord {
@@ -15750,10 +15809,12 @@ impl Document {
                     && matches!(r.owner, ObjectOwner::Definition { def: d, .. } if d == component)
             })
             .ok_or(DocumentError::UnknownObject)?;
+        let mut tidy = BooleanTidy::default();
         let (positive, negative) = rec
             .object
-            .slice(&local_plane)
+            .slice_reported(&local_plane, &mut tidy)
             .map_err(DocumentError::Slice)?;
+        self.boolean_tidy.absorb(&tidy, pose);
         let imported = rec.imported;
 
         let a = self.insert_object_record(ObjectRecord {
@@ -15846,10 +15907,13 @@ impl Document {
         if rec.group_parent().is_some() {
             return Err(DocumentError::GroupedOperand);
         }
+        let mut tidy = BooleanTidy::default();
         let result = rec
             .object
-            .push_through(face, distance)
+            .push_through_reported(face, distance, &mut tidy)
             .map_err(|e| DocumentError::Op(KernelOpError::PushPull(e)))?;
+        // A world object's frame is the world's.
+        self.boolean_tidy.absorb(&tidy, &Transform::IDENTITY);
         let pieces = result.split_connected_components();
         // Every piece keeps the source's name and tags (wireframe faces
         // §5.6): tags are membership, and names are not unique.
@@ -15941,10 +16005,14 @@ impl Document {
                     && matches!(r.owner, ObjectOwner::Definition { def: d, .. } if d == component)
             })
             .ok_or(DocumentError::UnknownObject)?;
+        let mut tidy = BooleanTidy::default();
         let result = rec
             .object
-            .push_through(face, distance)
+            .push_through_reported(face, distance, &mut tidy)
             .map_err(|e| DocumentError::Op(KernelOpError::PushPull(e)))?;
+        // Sites in the definition's frame, as for every boolean between
+        // members of a definition edited directly.
+        self.boolean_tidy.absorb(&tidy, &Transform::IDENTITY);
         let pieces = result.split_connected_components();
         // As in `push_pull_through`: every piece keeps the source's name
         // and tags (wireframe faces §5.6).
@@ -26088,6 +26156,7 @@ impl Document {
         let before = self.history_generation();
         // Success and refusal alike, as `history_generation` moves on both.
         self.document_epoch += 1;
+        self.boolean_tidy = BooleanTidy::default();
         let mut change = self.undo_step()?;
         self.complete_change(&mut change);
         self.record_top(crate::changes::ChangeKind::Undo, before);
@@ -28053,6 +28122,7 @@ impl Document {
     pub fn redo(&mut self) -> Result<DocChange, DocumentError> {
         let before = self.history_generation();
         self.document_epoch += 1;
+        self.boolean_tidy = BooleanTidy::default();
         let mut change = self.redo_step()?;
         self.complete_change(&mut change);
         self.record_top(crate::changes::ChangeKind::Redo, before);
@@ -31401,34 +31471,45 @@ fn group_change(group: GroupId, parent: Option<GroupId>, members: &[NodeId]) -> 
 
 /// `op` over `operands` (two or more, each a composite volume): a Union is
 /// the union of all, a Subtract the first minus the union of the rest, an
-/// Intersect the intersection of all. On clones; nothing is mutated.
-fn combine_all(op: BooleanOp, operands: &[&Object]) -> Result<Object, DocumentError> {
+/// Intersect the intersection of all. On clones; nothing is mutated. What
+/// the booleans that make the result tidied is added to `tidy`.
+fn combine_all(
+    op: BooleanOp,
+    operands: &[&Object],
+    tidy: &mut BooleanTidy,
+) -> Result<Object, DocumentError> {
     let (first, rest) = operands.split_first().expect("two operands or more");
     match op {
         BooleanOp::Intersect => {
             let mut acc = (*first).clone();
             for o in rest {
-                acc = join(BooleanOp::Intersect, &acc, o)?;
+                acc = join(BooleanOp::Intersect, &acc, o, tidy)?;
             }
             Ok(acc)
         }
         BooleanOp::Union | BooleanOp::Subtract => {
             // The rest as one volume, in the order given, then the op
-            // against it.
+            // against it. Its tidy counts only if the fold is the answer.
             let (second, more) = rest.split_first().expect("two operands or more");
+            let mut folded = BooleanTidy::default();
             let whole = more
                 .iter()
-                .try_fold((*second).clone(), |acc, o| join(BooleanOp::Union, &acc, o))
-                .and_then(|others| join(op, first, &others));
+                .try_fold((*second).clone(), |acc, o| {
+                    join(BooleanOp::Union, &acc, o, &mut folded)
+                })
+                .and_then(|others| join(op, first, &others, &mut folded));
+            if whole.is_ok() {
+                tidy.absorb(&folded, &Transform::IDENTITY);
+            }
             match whole {
                 // Two operands that only touch (an edge, a corner) cannot
                 // be one volume, and whether a fold in the order given
                 // meets such a pair depends on that order. The answer must
-                // not, so the operands are then taken piecewise.
-                Err(DocumentError::Boolean(BooleanError::DegenerateContact))
-                    if !more.is_empty() =>
-                {
-                    combine_piecewise(op, first, rest)
+                // not, so the operands are then taken piecewise. A pair
+                // the arrangement could not resolve is retried the same
+                // way: another order may never meet it.
+                Err(DocumentError::Boolean(e)) if waits(e) && !more.is_empty() => {
+                    combine_piecewise(op, first, rest, tidy)
                 }
                 whole => whole,
             }
@@ -31436,9 +31517,30 @@ fn combine_all(op: BooleanOp, operands: &[&Object]) -> Result<Object, DocumentEr
     }
 }
 
-/// One two-operand boolean in place, as [`combine_all`] composes them.
-fn join(op: BooleanOp, a: &Object, b: &Object) -> Result<Object, DocumentError> {
-    Object::boolean(op, a, b, &Transform::IDENTITY).map_err(DocumentError::Boolean)
+/// Whether a pairwise refusal parks the operand to be tried again once
+/// others have joined: a degenerate contact (the pair only touches), an
+/// arrangement that could not resolve where the pair meets (which arose as
+/// a degenerate contact before it had a name of its own), or a meeting
+/// that would leave a face too thin to keep (one passing within nanometers
+/// of a corner, which another operand joined first may cover).
+fn waits(e: BooleanError) -> bool {
+    matches!(
+        e,
+        BooleanError::DegenerateContact
+            | BooleanError::ArrangementFailed
+            | BooleanError::ResultTooThin
+    )
+}
+
+/// One two-operand boolean in place, as [`combine_all`] composes them,
+/// adding what it tidied to `tidy`.
+fn join(
+    op: BooleanOp,
+    a: &Object,
+    b: &Object,
+    tidy: &mut BooleanTidy,
+) -> Result<Object, DocumentError> {
+    Object::boolean_reported(op, a, b, &Transform::IDENTITY, tidy).map_err(DocumentError::Boolean)
 }
 
 /// `op` (Union or Subtract) of `rest` against `first` when `rest` does not
@@ -31457,16 +31559,21 @@ fn combine_piecewise(
     op: BooleanOp,
     first: &Object,
     rest: &[&Object],
+    tidy: &mut BooleanTidy,
 ) -> Result<Object, DocumentError> {
-    let contact = || DocumentError::Boolean(BooleanError::DegenerateContact);
+    // The refusal an operand still waiting at the end gave, last.
+    let contact = |last: Option<BooleanError>| {
+        DocumentError::Boolean(last.unwrap_or(BooleanError::DegenerateContact))
+    };
     match op {
         BooleanOp::Union => {
             let pending: Vec<Object> = rest.iter().map(|o| (*o).clone()).collect();
-            let (all, waiting) = join_all_that_will(BooleanOp::Union, first.clone(), pending)?;
+            let (all, waiting, last) =
+                join_all_that_will(BooleanOp::Union, first.clone(), pending, tidy)?;
             if waiting.is_empty() {
                 Ok(all)
             } else {
-                Err(contact())
+                Err(contact(last))
             }
         }
         BooleanOp::Subtract => {
@@ -31476,7 +31583,8 @@ fn combine_piecewise(
             let mut pending: Vec<Object> = rest.iter().map(|o| (*o).clone()).collect();
             while !pending.is_empty() {
                 let seed = pending.remove(0);
-                let (volume, waiting) = join_all_that_will(BooleanOp::Union, seed, pending)?;
+                let (volume, waiting, _) =
+                    join_all_that_will(BooleanOp::Union, seed, pending, tidy)?;
                 cutters.push(volume);
                 pending = waiting;
             }
@@ -31486,8 +31594,9 @@ fn combine_piecewise(
             loop {
                 let mut waiting = Vec::new();
                 let mut progressed = false;
+                let mut last = None;
                 for cutter in pending {
-                    match join(BooleanOp::Subtract, &acc, &cutter) {
+                    match join(BooleanOp::Subtract, &acc, &cutter, tidy) {
                         Ok(next) => {
                             acc = next;
                             progressed = true;
@@ -31496,7 +31605,8 @@ fn combine_piecewise(
                         // What is left only shrinks, so a cutter that
                         // misses it now misses it for good.
                         Err(DocumentError::Boolean(BooleanError::NothingRemoved)) => {}
-                        Err(DocumentError::Boolean(BooleanError::DegenerateContact)) => {
+                        Err(DocumentError::Boolean(e)) if waits(e) => {
+                            last = Some(e);
                             waiting.push(cutter);
                         }
                         Err(e) => return Err(e),
@@ -31506,7 +31616,7 @@ fn combine_piecewise(
                     break;
                 }
                 if !progressed {
-                    return Err(contact());
+                    return Err(contact(last));
                 }
                 pending = waiting;
             }
@@ -31521,29 +31631,35 @@ fn combine_piecewise(
 }
 
 /// Joins into `acc` every one of `pending` that will, in order, trying
-/// again those that only touched it (a degenerate contact) each time
-/// another has joined. Returns the volume and the operands still waiting
-/// when a whole pass joins none.
+/// again those that only touched it (a degenerate contact, or a meeting the
+/// arrangement could not resolve: [`waits`]) each time another has joined.
+/// Returns the volume, the operands still waiting when a whole pass joins
+/// none, and the last refusal one of those gave.
 fn join_all_that_will(
     op: BooleanOp,
     mut acc: Object,
     mut pending: Vec<Object>,
-) -> Result<(Object, Vec<Object>), DocumentError> {
+    tidy: &mut BooleanTidy,
+) -> Result<(Object, Vec<Object>, Option<BooleanError>), DocumentError> {
     loop {
         let mut waiting = Vec::new();
         let mut progressed = false;
+        let mut last = None;
         for o in pending {
-            match join(op, &acc, &o) {
+            match join(op, &acc, &o, tidy) {
                 Ok(next) => {
                     acc = next;
                     progressed = true;
                 }
-                Err(DocumentError::Boolean(BooleanError::DegenerateContact)) => waiting.push(o),
+                Err(DocumentError::Boolean(e)) if waits(e) => {
+                    last = Some(e);
+                    waiting.push(o);
+                }
                 Err(e) => return Err(e),
             }
         }
         if waiting.is_empty() || !progressed {
-            return Ok((acc, waiting));
+            return Ok((acc, waiting, last));
         }
         pending = waiting;
     }
@@ -31846,12 +31962,12 @@ mod tests {
 
         // Crossing: carved.
         let crossing = bare_box(Point3::new(0.5, 0.5, 0.5), Point3::new(1.5, 1.5, 1.5));
-        let r = merge_sweep(&base, &crossing).expect("carve");
+        let r = merge_sweep(&base, &crossing, &mut Default::default()).expect("carve");
         assert!((volume(&r) - 0.875).abs() < 1e-9, "carved {}", volume(&r));
 
         // Apart: fused (two shells, both volumes).
         let apart = bare_box(Point3::new(3.0, 0.0, 0.0), Point3::new(4.0, 1.0, 1.0));
-        let r = merge_sweep(&base, &apart).expect("fuse");
+        let r = merge_sweep(&base, &apart, &mut Default::default()).expect("fuse");
         assert!((volume(&r) - 2.0).abs() < 1e-9, "fused {}", volume(&r));
 
         // Engulfing: Intersect is the base, Subtract is empty — the merge is
@@ -31861,7 +31977,8 @@ mod tests {
             Object::boolean(BooleanOp::Subtract, &base, &engulf, &Transform::IDENTITY).unwrap_err(),
             BooleanError::EmptyResult
         );
-        let r = merge_sweep(&base, &engulf).expect("engulfing sweep merges to itself");
+        let r = merge_sweep(&base, &engulf, &mut Default::default())
+            .expect("engulfing sweep merges to itself");
         assert!((volume(&r) - 27.0).abs() < 1e-9, "engulfed {}", volume(&r));
 
         // Within tolerance of coincident: every op refuses, and so does the
@@ -31870,7 +31987,7 @@ mod tests {
             Point3::new(1e-9, 0.0, 0.0),
             Point3::new(1.0 + 1e-9, 1.0, 1.0),
         );
-        assert!(merge_sweep(&base, &nudged).is_err());
+        assert!(merge_sweep(&base, &nudged, &mut Default::default()).is_err());
     }
 
     /// The unique face of `obj` whose plane normal matches `dir`, if any.

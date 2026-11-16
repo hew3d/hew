@@ -601,10 +601,47 @@ pub enum BooleanError {
     EmptyResult,
     /// The frame-mapping transform is singular.
     SingularTransform,
+    /// The frame-mapping transform would leave a face of the second
+    /// operand off its plane: rounding far from the origin, where a face
+    /// flat before the map cannot stay flat after it
+    /// ([`crate::TransformError::FaceNotFlat`], whose code and meaning it
+    /// shares). Nothing about the solids' contact; moving the operands
+    /// nearer the origin clears it. Distinct from
+    /// [`BooleanError::OperandFaceNotFlat`], a face that is not flat to
+    /// begin with.
+    FaceNotFlat,
     /// Operands touch in a way with no manifold result (coincident faces,
     /// edge-on-face tangency). Refused rather than repaired; nudge or use a
     /// merge-group container instead.
     DegenerateContact,
+    /// A face of an operand is not flat enough to cut, and could not be
+    /// split into flat triangles through its own vertices where the cut
+    /// reaches it. Imported geometry is flat only to the import tolerance
+    /// ([`tol::IMPORT_PLANE_DIST`]); the boolean triangulates such a face
+    /// where the other operand comes near it, and refuses, naming the
+    /// face, when that fails. Nothing is moved to make the face flat
+    /// (DEVELOPMENT.md rule 4).
+    OperandFaceNotFlat {
+        /// Which operand.
+        which: Operand,
+        /// The face, in that operand (for `b`, its own face id).
+        face: FaceId,
+    },
+    /// The arrangement could not resolve where the operands meet: a seam
+    /// or a face boundary would not imprint, a kept piece had no plane, the
+    /// welded pieces did not form valid faces, or a face of the result
+    /// would not be flat to the plane it carries. Unlike
+    /// [`BooleanError::DegenerateContact`] this is not a verdict about how
+    /// the solids touch; moving one slightly usually gives an answer.
+    ArrangementFailed,
+    /// The result would keep a face too thin to have a plane: narrower than
+    /// [`tol::MIN_FACE_WIDTH`] (10 nm) and smaller than the area floor.
+    /// The boolean merges pieces of its own cut narrower than
+    /// [`tol::FEATURE_MIN`] into their neighbors ([`BooleanTidy`]), so
+    /// this is raised only where that tidy could not give a valid solid and
+    /// the untidied result is not one either; moving either operand by a
+    /// hundredth of a millimeter clears it.
+    ResultTooThin,
     /// Subtract removed no volume: the operands are disjoint or only touch
     /// (along a face, an edge, or a corner), so the result would be `a`
     /// unchanged. Refused rather than returned as a no-op that reads like a
@@ -622,6 +659,67 @@ pub enum BooleanError {
         /// A point on the offending face.
         at: Point3,
     },
+}
+
+/// What a boolean merged out of its own cut (DEVELOPMENT.md rule 4).
+///
+/// A cut through dense geometry leaves faces far narrower than anything a
+/// person can see, print or measure where it passes near a vertex or an
+/// edge. When the cut leaves a face narrower than [`tol::FEATURE_MIN`]
+/// (0.1 µm), the boolean welds the points of its cut around it, moving
+/// none farther than [`tol::TIDY_REACH`] and never changing an operand,
+/// and counts what it did here. A tidy that cannot give a valid solid is
+/// discarded for the untidied result, whose too-thin faces are counted
+/// as `slivers_kept`. All zero (the default) when nothing was too thin.
+/// Accumulates: each boolean adds to it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BooleanTidy {
+    /// Faces under [`tol::FEATURE_MIN`] the weld removed.
+    pub slivers_merged: u32,
+    /// Faces under [`tol::FEATURE_MIN`] the result still holds: left in
+    /// place because the tidy fell back to the untidied result, or because
+    /// the weld could not reach them.
+    pub slivers_kept: u32,
+    /// Distinct points the weld moved.
+    pub points_moved: u32,
+    /// The farthest any point moved (meters, at most
+    /// [`tol::TIDY_REACH`]).
+    pub max_move: f64,
+    /// Faces split into flat triangles because a moved point left them
+    /// bent past the result's planarity tolerance.
+    pub faces_split: u32,
+    /// One point per place the weld merged something, in the frame of the
+    /// boolean's first operand: the first [`BooleanTidy::MAX_SITES`].
+    pub sites: Vec<Point3>,
+    /// How many such places there were.
+    pub sites_total: u32,
+}
+
+impl BooleanTidy {
+    /// How many sites [`BooleanTidy::sites`] lists.
+    pub const MAX_SITES: usize = 16;
+
+    /// Whether anything was merged or kept, so there is something to
+    /// report.
+    pub fn is_empty(&self) -> bool {
+        self.slivers_merged == 0 && self.slivers_kept == 0
+    }
+
+    /// Adds `other`'s counts to this one, its sites (moved by `to_frame`)
+    /// after these up to [`BooleanTidy::MAX_SITES`].
+    pub fn absorb(&mut self, other: &BooleanTidy, to_frame: &Transform) {
+        self.slivers_merged += other.slivers_merged;
+        self.slivers_kept += other.slivers_kept;
+        self.points_moved += other.points_moved;
+        self.max_move = self.max_move.max(other.max_move);
+        self.faces_split += other.faces_split;
+        for &p in &other.sites {
+            if self.sites.len() < Self::MAX_SITES {
+                self.sites.push(to_frame.apply_point(p));
+            }
+        }
+        self.sites_total += other.sites_total;
+    }
 }
 
 /// Typed failures of [`Object::slice`].
@@ -925,8 +1023,24 @@ impl std::fmt::Display for BooleanError {
             BooleanError::SingularTransform => {
                 write!(f, "operand transform is singular")
             }
+            BooleanError::FaceNotFlat => {
+                write!(f, "operand transform would leave a face off its plane")
+            }
             BooleanError::DegenerateContact => {
                 write!(f, "operands touch degenerately; no manifold result exists")
+            }
+            BooleanError::OperandFaceNotFlat { which, .. } => {
+                write!(
+                    f,
+                    "a face of the {} boolean operand is not flat enough to cut",
+                    which.ordinal()
+                )
+            }
+            BooleanError::ArrangementFailed => {
+                write!(f, "the boolean could not resolve where the operands meet")
+            }
+            BooleanError::ResultTooThin => {
+                write!(f, "the result would keep a face too thin to have a plane")
             }
             BooleanError::NothingRemoved => {
                 write!(
@@ -6777,24 +6891,43 @@ impl Object {
     /// merge-group containers) belong to M2 UX. A subtract whose operands
     /// are disjoint or only touch, so that nothing is removed, refuses as
     /// [`BooleanError::NothingRemoved`] rather than returning `a` unchanged.
+    ///
+    /// A face the cut leaves narrower than [`tol::FEATURE_MIN`] is merged
+    /// into its neighbors and logged ([`BooleanTidy`]);
+    /// [`Object::boolean_reported`] also hands back what was merged.
     pub fn boolean(
         op: BooleanOp,
         a: &Object,
         b: &Object,
         b_to_a: &Transform,
     ) -> Result<Object, BooleanError> {
-        crate::boolean::execute(op, a, b, b_to_a)
+        Object::boolean_reported(op, a, b, b_to_a, &mut BooleanTidy::default())
+    }
+
+    /// [`Object::boolean`], adding what its tidy merged to `tidy` (sites in
+    /// `a`'s frame). `tidy` is untouched on `Err`.
+    pub fn boolean_reported(
+        op: BooleanOp,
+        a: &Object,
+        b: &Object,
+        b_to_a: &Transform,
+        tidy: &mut BooleanTidy,
+    ) -> Result<Object, BooleanError> {
+        crate::boolean::execute(op, a, b, b_to_a, tidy)
     }
 
     /// [`Object::boolean`], also returning what it rebuilt when it kept an
     /// operand's untouched faces in place ([`crate::boolean::BooleanTouch`]).
+    /// What the boolean's tidy merged is added to `tidy`
+    /// ([`Object::boolean_reported`]).
     pub(crate) fn boolean_region(
         op: BooleanOp,
         a: &Object,
         b: &Object,
         b_to_a: &Transform,
+        tidy: &mut BooleanTidy,
     ) -> Result<(Object, Option<crate::boolean::BooleanTouch>), BooleanError> {
-        crate::boolean::execute_region(op, a, b, b_to_a)
+        crate::boolean::execute_region(op, a, b, b_to_a, tidy)
     }
 
     /// [`Object::boolean`] as the document commits it: the coplanar seams
@@ -6814,7 +6947,19 @@ impl Object {
         b: &Object,
         b_to_a: &Transform,
     ) -> Result<Object, BooleanError> {
-        let (mut result, touch) = Object::boolean_region(op, a, b, b_to_a)?;
+        Object::boolean_product_reported(op, a, b, b_to_a, &mut BooleanTidy::default())
+    }
+
+    /// [`Object::boolean_product`], adding what the boolean's tidy merged
+    /// to `tidy` ([`Object::boolean_reported`]).
+    pub fn boolean_product_reported(
+        op: BooleanOp,
+        a: &Object,
+        b: &Object,
+        b_to_a: &Transform,
+        tidy: &mut BooleanTidy,
+    ) -> Result<Object, BooleanError> {
+        let (mut result, touch) = Object::boolean_region(op, a, b, b_to_a, tidy)?;
         let in_a = |(p, q): (Point3, Point3)| (b_to_a.apply_point(p), b_to_a.apply_point(q));
         // A boolean that kept an operand's untouched faces looks only where
         // it rebuilt.
@@ -7152,6 +7297,16 @@ impl Object {
     /// On any `Err`, nothing is produced (the caller's source object is
     /// untouched).
     pub fn slice(&self, plane: &Plane) -> Result<(Object, Object), SliceError> {
+        self.slice_reported(plane, &mut BooleanTidy::default())
+    }
+
+    /// [`Object::slice`], adding what its two booleans' tidy merged to
+    /// `tidy` (sites in this object's frame); `tidy` is untouched on `Err`.
+    pub fn slice_reported(
+        &self,
+        plane: &Plane,
+        tidy: &mut BooleanTidy,
+    ) -> Result<(Object, Object), SliceError> {
         if self.watertight != WatertightState::Watertight {
             return Err(SliceError::NotSolid);
         }
@@ -7229,10 +7384,13 @@ impl Object {
             BooleanError::OperandNotSolid { .. } => SliceError::NotSolid,
             _ => SliceError::Degenerate,
         };
-        let positive = Object::boolean(BooleanOp::Intersect, self, &plus_box, &Transform::IDENTITY)
-            .map_err(map_bool)?;
+        let mut both = BooleanTidy::default();
+        let id = &Transform::IDENTITY;
+        let positive =
+            Object::boolean_reported(BooleanOp::Intersect, self, &plus_box, id, &mut both)
+                .map_err(map_bool)?;
         let negative =
-            Object::boolean(BooleanOp::Intersect, self, &minus_box, &Transform::IDENTITY)
+            Object::boolean_reported(BooleanOp::Intersect, self, &minus_box, id, &mut both)
                 .map_err(map_bool)?;
 
         positive.check_invariants();
@@ -7241,6 +7399,7 @@ impl Object {
         // piece rather than hand back invalid solids.
         positive.validate().map_err(|_| SliceError::Degenerate)?;
         negative.validate().map_err(|_| SliceError::Degenerate)?;
+        tidy.absorb(&both, id);
         Ok((positive, negative))
     }
 
@@ -7852,6 +8011,17 @@ impl Object {
     /// - [`PushPullError::NonManifoldResult`] — the swept tool is degenerate or
     ///   the contact is tangent (refused, not repaired).
     pub fn push_through(&self, face: FaceId, distance: f64) -> Result<Object, PushPullError> {
+        self.push_through_reported(face, distance, &mut BooleanTidy::default())
+    }
+
+    /// [`Object::push_through`], adding what its boolean's tidy merged to
+    /// `tidy` (sites in this object's frame); `tidy` is untouched on `Err`.
+    pub fn push_through_reported(
+        &self,
+        face: FaceId,
+        distance: f64,
+        tidy: &mut BooleanTidy,
+    ) -> Result<Object, PushPullError> {
         if self.watertight != WatertightState::Watertight {
             return Err(PushPullError::ObjectNotSolid);
         }
@@ -7871,7 +8041,8 @@ impl Object {
         } else {
             BooleanOp::Union
         };
-        match Object::boolean(op, self, &tool, &Transform::IDENTITY) {
+        let mut merged = BooleanTidy::default();
+        match Object::boolean_reported(op, self, &tool, &Transform::IDENTITY, &mut merged) {
             Ok(mut result) => {
                 // Dissolve coplanar seams the boolean introduced (a cut or
                 // grown wall flush with an existing wall must read as ONE
@@ -7886,6 +8057,7 @@ impl Object {
                 result
                     .validate()
                     .map_err(|_| PushPullError::NonManifoldResult)?;
+                tidy.absorb(&merged, &Transform::IDENTITY);
                 Ok(result)
             }
             Err(BooleanError::EmptyResult) => Err(PushPullError::WouldVanish),

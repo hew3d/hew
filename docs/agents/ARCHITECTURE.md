@@ -108,7 +108,11 @@ triangle-soup CSG library — this lets coplanar contact (shared walls,
 stacked solids, coincident faces) be resolved exactly instead of falling back
 to numerically fragile epsilon comparisons. A boolean that would depend on
 resolving a pure tangency (an edge lying exactly on a face, with no volume
-overlap) refuses cleanly rather than guess.
+overlap) refuses cleanly rather than guess. Within its own result a
+boolean merges away the slivers its cut leaves narrower than 0.1 µm
+(`tol::FEATURE_MIN`): a bounded, reported weld that never changes an
+operand or joins two Objects (`boolean::tidy`; see DEVELOPMENT.md rule
+4).
 
 ### 2.4 Sticky geometry, scoped to an Object
 

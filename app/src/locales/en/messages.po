@@ -4528,6 +4528,10 @@ msgstr "Hew couldn't check this drawing, so nothing was saved. Try again; if it 
 msgid "Hew couldn't complete that ({code}: {rawMsg}). If this keeps happening, use Report Bug."
 msgstr "Hew couldn't complete that ({code}: {rawMsg}). If this keeps happening, use Report Bug."
 
+#: src/tools/FollowMeTool.ts
+msgid "Hew couldn't join the sweep to the solid where they meet — left as a separate object."
+msgstr "Hew couldn't join the sweep to the solid where they meet — left as a separate object."
+
 #: src/panels/MakeSolidSketches.tsx
 msgid "Hew couldn't make a solid from this shape."
 msgstr "Hew couldn't make a solid from this shape."
@@ -4539,6 +4543,10 @@ msgstr "Hew couldn't make that change."
 #: src/kernelErrors.ts
 msgid "Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug."
 msgstr "Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug."
+
+#: src/kernelErrors.ts
+msgid "Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug."
+msgstr "Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug."
 
 #: src/io/docFormat.ts
 msgid "Hew document (.hew)"
@@ -5135,6 +5143,10 @@ msgstr "Items are stored by this browser on this device. This browser doesn’t 
 #: src/palette/registry.ts
 msgid "join"
 msgstr "join"
+
+#: src/tools/FollowMeTool.ts
+msgid "Joining the sweep to the solid would leave a piece too thin to keep — left as a separate object."
+msgstr "Joining the sweep to the solid would leave a piece too thin to keep — left as a separate object."
 
 #: src/palette/registry.ts
 msgid "jpeg"
@@ -6704,6 +6716,10 @@ msgstr "One object's placement is scaled down to nothing, so the operation can't
 #: src/kernelErrorCopy/removeDegenerateFaces.ts
 msgid "One of these objects has a face that isn't flat enough to combine."
 msgstr "One of these objects has a face that isn't flat enough to combine."
+
+#: src/kernelErrors.ts
+msgid "One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles."
+msgstr "One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles."
 
 #: src/kernelErrors.ts
 msgid "One of these objects has a face with no area, so these objects can't be combined."
@@ -10124,6 +10140,10 @@ msgid "The cut needs at least two points. Click a start and an end."
 msgstr "The cut needs at least two points. Click a start and an end."
 
 #: src/kernelErrors.ts
+msgid "The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again."
+msgstr "The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again."
+
+#: src/kernelErrors.ts
 msgid "The drawing tools got out of step. Press Escape and try again."
 msgstr "The drawing tools got out of step. Press Escape and try again."
 
@@ -10388,6 +10408,10 @@ msgstr "The SketchUp file can’t hold everything exactly"
 #: src/kernelErrors.ts
 msgid "The slicing plane doesn't pass through the object. Position the cut so it goes through the solid."
 msgstr "The slicing plane doesn't pass through the object. Position the cut so it goes through the solid."
+
+#: src/tools/FollowMeTool.ts
+msgid "The solid has a face that isn't flat enough to join the sweep to — left as a separate object."
+msgstr "The solid has a face that isn't flat enough to join the sweep to — left as a separate object."
 
 #: src/tools/FollowMeTool.ts
 msgid "The sweep starts at the profile and follows the path’s shape — click to sweep it, or drag along the path for a partial sweep."

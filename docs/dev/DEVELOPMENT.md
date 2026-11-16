@@ -229,6 +229,16 @@ this list.
 4. **No silent geometry repair.** If an operation would produce invalid
    topology, it fails loudly with a typed error. The kernel never welds,
    drops, nudges, or reorders geometry to force an operation to succeed.
+   There is one exception, and it is bounded and reported: where a
+   boolean's own cut leaves a piece narrower than `tol::FEATURE_MIN`
+   (0.1 µm), the boolean merges that piece into its neighbors. It moves no
+   point farther than `tol::TIDY_REACH` (0.2 µm), moves only points within
+   that reach of such a piece, and returns what it merged, and where, in
+   its result and in the log. A tidied result must pass every check an
+   untidied one does; one that cannot is discarded, and the boolean
+   answers as it would have without the tidy. Geometry the cut does not
+   touch is never changed, and no other operation may merge geometry this
+   way without a change to this rule.
 5. **Tests pass before merge.** No change lands with a failing test or a
    Clippy warning. A failing test is never weakened or deleted to make it
    pass without an explicit, reviewed decision to do so.

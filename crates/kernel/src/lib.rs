@@ -119,7 +119,7 @@ pub use offset::{
     FaceOffsetError, OffsetError, OffsetLoop, ProfileOffset, offset_face_boundary, offset_profile,
 };
 pub use ops::{
-    BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceAttrsAt,
+    BooleanError, BooleanOp, BooleanTidy, CollapseSubFaceReport, ExtrudeError, FaceAttrsAt,
     FaceMergeInnerReport, FaceMergeReport, FaceSplitInnerReport, FaceSplitReport, FollowMeError,
     LoopImprintPlan, Operand, PushPullError, PushPullReport, SliceError, StickyError, SweepOptions,
     TransformSubFaceReport,

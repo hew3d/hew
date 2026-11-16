@@ -4522,6 +4522,10 @@ msgstr ""
 msgid "Hew couldn't complete that ({code}: {rawMsg}). If this keeps happening, use Report Bug."
 msgstr ""
 
+#: src/tools/FollowMeTool.ts
+msgid "Hew couldn't join the sweep to the solid where they meet — left as a separate object."
+msgstr ""
+
 #: src/panels/MakeSolidSketches.tsx
 msgid "Hew couldn't make a solid from this shape."
 msgstr ""
@@ -4532,6 +4536,10 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug."
+msgstr ""
+
+#: src/kernelErrors.ts
+msgid "Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug."
 msgstr ""
 
 #: src/io/docFormat.ts
@@ -5128,6 +5136,10 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "join"
+msgstr ""
+
+#: src/tools/FollowMeTool.ts
+msgid "Joining the sweep to the solid would leave a piece too thin to keep — left as a separate object."
 msgstr ""
 
 #: src/palette/registry.ts
@@ -6697,6 +6709,10 @@ msgstr ""
 
 #: src/kernelErrorCopy/removeDegenerateFaces.ts
 msgid "One of these objects has a face that isn't flat enough to combine."
+msgstr ""
+
+#: src/kernelErrors.ts
+msgid "One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles."
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -10118,6 +10134,10 @@ msgid "The cut needs at least two points. Click a start and an end."
 msgstr ""
 
 #: src/kernelErrors.ts
+msgid "The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again."
+msgstr ""
+
+#: src/kernelErrors.ts
 msgid "The drawing tools got out of step. Press Escape and try again."
 msgstr ""
 
@@ -10381,6 +10401,10 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "The slicing plane doesn't pass through the object. Position the cut so it goes through the solid."
+msgstr ""
+
+#: src/tools/FollowMeTool.ts
+msgid "The solid has a face that isn't flat enough to join the sweep to — left as a separate object."
 msgstr ""
 
 #: src/tools/FollowMeTool.ts

@@ -182,6 +182,55 @@ fn boolean_two_prisms_equals_committed_subtract() {
     );
 }
 
+/// A union whose cut leaves slivers under the feature floor (a box whose
+/// top stands 30 nm proud of the other's) reports them in a `tidied`
+/// block, computed and committed alike; a cut with none has no block.
+#[test]
+fn a_boolean_that_merges_slivers_says_so_in_tidied() {
+    let proud = 1.0 + 3e-8;
+    let check = |t: &Value, what: &str| {
+        assert!(t["slivers_merged"].as_u64().unwrap() > 0, "{what}: {t}");
+        assert_eq!(t["slivers_kept"], 0, "{what}: {t}");
+        assert!(t["points_moved"].as_u64().unwrap() > 0, "{what}: {t}");
+        let max_move = t["max_move"].as_f64().unwrap();
+        assert!(max_move > 0.0 && max_move <= 2e-7, "{what}: {t}");
+        assert!(t["faces_split"].as_u64().unwrap() >= 1, "{what}: {t}");
+        assert_eq!(t["feature_min"], 1e-7, "{what}");
+        let sites = t["sites"].as_array().unwrap();
+        assert!(!sites.is_empty() && sites.len() <= 16, "{what}: {t}");
+        assert_eq!(t["sites_total"].as_u64().unwrap() as usize, sites.len());
+        for p in sites {
+            // At the proud box's top corners, in world coordinates.
+            close(&p[2], proud, 1e-12);
+        }
+    };
+    let mut s = Session::new();
+    let r = s.compute(
+        "hew.compute.boolean",
+        json!({
+            "op": "union",
+            "a": unit_box(),
+            "b": { "box": { "min": [0.2, 0.2, 0.2], "max": [0.6, 0.6, proud] } }
+        }),
+    );
+    assert_eq!(r["solid"], true);
+    check(&r["tidied"], "compute");
+    let r = s.compute(
+        "hew.compute.boolean",
+        json!({
+            "op": "union",
+            "a": unit_box(),
+            "b": { "box": { "min": [0.2, 0.2, 0.2], "max": [0.6, 0.6, 1.5] } }
+        }),
+    );
+    assert!(r.get("tidied").is_none(), "nothing under the floor: {r}");
+
+    let a = s.prism(0.0, &rect(0.0, 0.0, 1.0, 1.0, 0.0), 1.0);
+    let b = s.prism(0.2, &rect(0.2, 0.2, 0.6, 0.6, 0.2), proud - 0.2);
+    let r = s.commit("hew.solid.union", json!({ "a": a, "b": b }));
+    check(&r["tidied"], "committed");
+}
+
 #[test]
 fn boolean_by_id_and_by_box_agree() {
     let mut s = Session::new();

@@ -261,6 +261,22 @@ impl Plane {
         })
     }
 
+    /// The ring's Newell plane with no floor at all: `None` only when the
+    /// Newell vector is zero or not finite. For the boolean, which arranges
+    /// a piece too narrow to keep on it before merging the piece away;
+    /// never a plane a face may keep.
+    pub(crate) fn from_polygon_unfloored(points: &[Point3]) -> Option<Plane> {
+        let (n, centroid) = Self::newell(points).ok()?;
+        let len = n.length();
+        if !(len.is_finite() && len > 0.0) {
+            return None;
+        }
+        let normal = n / len;
+        Some(Plane {
+            normal,
+            offset: normal.dot(centroid),
+        })
+    }
 
     /// The ring's Newell vector (twice its vector area) and its vertex
     /// centroid, summed in one fixed order so both plane constructors
@@ -292,6 +308,17 @@ fn half_perimeter(points: &[Point3]) -> f64 {
     perimeter / 2.0
 }
 
+/// A ring's width: its Newell length (twice its area) over half its
+/// perimeter, the measure [`Plane::from_polygon`] holds to
+/// [`tol::MIN_FACE_WIDTH`]. A triangle's height over its long side, a
+/// strip's short side; zero for fewer than three points or no perimeter.
+pub(crate) fn ring_width(points: &[Point3]) -> f64 {
+    let Ok((n, _)) = Plane::newell(points) else {
+        return 0.0;
+    };
+    let half = half_perimeter(points);
+    if half > 0.0 { n.length() / half } else { 0.0 }
+}
 
 impl Plane {
     /// Plane through `point` with the given `normal` (which need not be unit

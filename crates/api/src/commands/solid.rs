@@ -51,12 +51,13 @@ use serde_json::{Value, json};
 pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.solid.extrude" => extrude,
-        "hew.solid.push_pull" => push_pull,
-        "hew.solid.rejoin" => rejoin,
-        "hew.solid.union" => union,
-        "hew.solid.subtract" => subtract,
-        "hew.solid.intersect" => intersect,
-        "hew.solid.slice" => slice,
+        // A through push or pull is a boolean (`push_pull_through`).
+        "hew.solid.push_pull" => |ctx, params| with_tidy(ctx, params, push_pull),
+        "hew.solid.rejoin" => |ctx, params| with_tidy(ctx, params, rejoin),
+        "hew.solid.union" => |ctx, params| with_tidy(ctx, params, union),
+        "hew.solid.subtract" => |ctx, params| with_tidy(ctx, params, subtract),
+        "hew.solid.intersect" => |ctx, params| with_tidy(ctx, params, intersect),
+        "hew.solid.slice" => |ctx, params| with_tidy(ctx, params, slice),
         "hew.solid.follow_me" => follow_me,
         "hew.solid.imprints" => imprints,
         "hew.solid.move_imprint" => move_imprint,
@@ -69,6 +70,38 @@ pub(crate) fn handler(name: &str) -> Option<Handler> {
 }
 
 // ------------------------------------------------------------- plumbing
+
+/// Runs a command whose booleans may tidy their own cut, adding the
+/// `tidied` block (docs/agents/HEW_API.md §7) to its result when any of
+/// them merged or kept a sliver narrower than `kernel::tol::FEATURE_MIN`.
+/// A command's booleans sum into one block.
+fn with_tidy(ctx: &mut Ctx, params: &Value, run: Handler) -> Result<Value, CmdError> {
+    // What earlier edits reported is not this command's.
+    let _ = ctx.doc.take_boolean_tidy();
+    let mut result = run(ctx, params)?;
+    let tidy = ctx.doc.take_boolean_tidy();
+    if let (false, Some(out)) = (tidy.is_empty(), result.as_object_mut()) {
+        out.insert("tidied".into(), tidied_json(&tidy));
+    }
+    Ok(result)
+}
+
+/// The `tidied` result block: what a boolean merged out of its own cut,
+/// in meters, sites as [`kernel::Document::take_boolean_tidy`] gives them
+/// (world coordinates, or a definition's own where the boolean ran in its
+/// geometry directly).
+pub(super) fn tidied_json(tidy: &kernel::BooleanTidy) -> Value {
+    json!({
+        "slivers_merged": tidy.slivers_merged,
+        "slivers_kept": tidy.slivers_kept,
+        "points_moved": tidy.points_moved,
+        "max_move": tidy.max_move,
+        "faces_split": tidy.faces_split,
+        "sites": tidy.sites.iter().map(|p| json!([p.x, p.y, p.z])).collect::<Vec<_>>(),
+        "sites_total": tidy.sites_total,
+        "feature_min": kernel::tol::FEATURE_MIN,
+    })
+}
 
 fn parse_params<T: serde::de::DeserializeOwned>(params: &Value) -> Result<T, CmdError> {
     serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))

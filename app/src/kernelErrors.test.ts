@@ -434,6 +434,7 @@ describe('isErrorLevelCode', () => {
     // OperandNotSolid (adversarial review, minor).
     for (const code of [
       'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'NothingRemoved',
+      'OperandFaceNotFlat', 'ArrangementFailed', 'ResultTooThin',
       'BooleanOperandHasInstance', 'BooleanOperandNotSolid', 'BooleanOperandEmpty',
     ]) {
       expect(isErrorLevelCode(code), code).toBe(true)
@@ -450,7 +451,7 @@ describe('isErrorLevelCode', () => {
     for (const code of [
       'WouldVanish', 'NonManifoldResult', 'ObjectNotSolid', 'DegenerateGeometry',
       'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'SingularTransform',
-      'NothingRemoved',
+      'NothingRemoved', 'OperandFaceNotFlat', 'ArrangementFailed', 'ResultTooThin',
       'BooleanOperandHasInstance', 'BooleanOperandNotSolid', 'BooleanOperandEmpty',
     ]) {
       expect(described.has(code), `${code} has copy`).toBe(true)

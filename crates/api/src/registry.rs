@@ -2920,7 +2920,8 @@ impl Registry {
             cmd.result_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "object": { "type": "string", "description": "obj_ id of the joined solid; it keeps the largest piece's name, tags, and attributes" }
+                    "object": { "type": "string", "description": "obj_ id of the joined solid; it keeps the largest piece's name, tags, and attributes" },
+                    "tidied": tidied_schema()
                 },
                 "required": ["object"]
             });
@@ -2935,6 +2936,9 @@ impl Registry {
                 "caps_overlap",
                 "invalid",
                 "degenerate_contact",
+                "operand_face_not_flat",
+                "arrangement_failed",
+                "result_too_thin",
                 "boolean_operand_not_solid",
                 "boolean_operand_empty",
                 "unknown_object",
@@ -6093,9 +6097,10 @@ impl Registry {
                 "type": "object",
                 "properties": {
                     "object_id": { "type": "string", "description": "the pushed/pulled object, still standing (in-place or sub-face case)" },
-                    "object_ids": { "type": "array", "items": { "type": "string" }, "description": "a through-cut's resulting pieces, replacing the source object" }
+                    "object_ids": { "type": "array", "items": { "type": "string" }, "description": "a through-cut's resulting pieces, replacing the source object" },
+                    "tidied": tidied_schema()
                 },
-                "description": "exactly one of object_id / object_ids is present, depending on the tool's three-way branch (HEW_API.md §7 semantics notes)"
+                "description": "exactly one of object_id / object_ids is present, depending on the tool's three-way branch (HEW_API.md §7 semantics notes); a through push or pull is a boolean, so it can carry tidied"
             });
             cmd.refusals = vec![
                 "object_not_solid",
@@ -6186,7 +6191,8 @@ impl Registry {
                     "result": { "type": "string", "description": "the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, an Intersect of several overlaps)" },
                     "pieces": { "type": "integer", "description": "present when the result is a group of pieces: how many" },
                     "note": { "type": "string", "description": "present with pieces: why the result is several, in words for this operation" },
-                    "unlinked": { "type": "array", "items": { "type": "string" }, "description": "present when unlink: true split placements off: the placements exploded" }
+                    "unlinked": { "type": "array", "items": { "type": "string" }, "description": "present when unlink: true split placements off: the placements exploded" },
+                    "tidied": tidied_schema()
                 },
                 "required": ["result"]
             });
@@ -6195,7 +6201,8 @@ impl Registry {
                 "properties": {
                     "result": { "type": "string", "description": "the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, a Subtract that severs, an Intersect of several overlaps)" },
                     "pieces": { "type": "integer", "description": "present when the result is a group of pieces: how many" },
-                    "note": { "type": "string", "description": "present with pieces: why the result is several, in words for this operation" }
+                    "note": { "type": "string", "description": "present with pieces: why the result is several, in words for this operation" },
+                    "tidied": tidied_schema()
                 },
                 "required": ["result"]
             });
@@ -6209,6 +6216,9 @@ impl Registry {
                     "degenerate_contact",
                     "non_planar_input",
                     "degenerate_input",
+                    "operand_face_not_flat",
+                    "arrangement_failed",
+                    "result_too_thin",
                     "unknown_object",
                     "unknown_group",
                     "unknown_instance",
@@ -6282,7 +6292,7 @@ impl Registry {
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "positive": { "type": "string" }, "negative": { "type": "string" } },
+                "properties": { "positive": { "type": "string" }, "negative": { "type": "string" }, "tidied": tidied_schema() },
                 "required": ["positive", "negative"]
             });
             cmd.refusals = vec![
@@ -7282,10 +7292,14 @@ impl Registry {
                 "additionalProperties": false
             });
             cmd.result_schema = blocks(true);
+            cmd.result_schema["properties"]["tidied"] = tidied_schema();
             cmd.refusals = solid_refusals();
             cmd.refusals.extend([
                 "operand_not_solid",
                 "degenerate_contact",
+                "operand_face_not_flat",
+                "arrangement_failed",
+                "result_too_thin",
                 "nothing_removed",
                 "singular_transform",
             ]);
@@ -7304,7 +7318,8 @@ impl Registry {
                 "type": "object",
                 "properties": {
                     "positive": blocks(false),
-                    "negative": blocks(false)
+                    "negative": blocks(false),
+                    "tidied": tidied_schema()
                 },
                 "required": ["positive", "negative"],
                 "description": "positive is the piece on the side the plane normal points to"
@@ -7814,6 +7829,27 @@ fn plugin_decl_from_capability(entry: &serde_json::Value) -> Option<CommandDecl>
         refusals,
         implemented: entry.get("implemented")?.as_bool()?,
         mutates_document: mutating,
+    })
+}
+
+/// The optional `tidied` block on a boolean's result
+/// (docs/agents/HEW_API.md §7): present only when the boolean merged away,
+/// or kept, pieces of its own cut narrower than `kernel::tol::FEATURE_MIN`.
+fn tidied_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+        "properties": {
+            "slivers_merged": { "type": "integer", "minimum": 0, "description": "faces under feature_min the merge removed" },
+            "slivers_kept": { "type": "integer", "minimum": 0, "description": "faces under feature_min the result still holds" },
+            "points_moved": { "type": "integer", "minimum": 0 },
+            "max_move": { "type": "number", "minimum": 0, "description": "meters, at most twice feature_min" },
+            "faces_split": { "type": "integer", "minimum": 0, "description": "faces split into flat triangles because a moved point bent them" },
+            "sites": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }, "maxItems": 16, "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates" },
+            "sites_total": { "type": "integer", "minimum": 0 },
+            "feature_min": { "type": "number", "description": "meters: 1e-7" }
+        },
+        "required": ["slivers_merged", "slivers_kept", "points_moved", "max_move", "faces_split", "sites", "sites_total", "feature_min"]
     })
 }
 

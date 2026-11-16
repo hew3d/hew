@@ -79,8 +79,16 @@ impl Refusal {
 /// The structured payload of a refusal that carries numbers the caller can
 /// act on (01-conventions §3): a limit, a maximum, a location. `{}` for the
 /// rest.
+///
+/// `operand_face_not_flat` names the face: `operand` is `"a"` or `"b"`
+/// (the first or second operand of the pairwise boolean that refused, or
+/// the 1-based place of a later one, as a string) and `face` is the
+/// kernel's key for the face in that operand, an opaque hex string like
+/// the key part of a region or edge id. A solid face has no public id
+/// (§5.2), so the key is for reports and logs, not for addressing it.
 fn refusal_detail(e: &DocumentError) -> serde_json::Value {
     use kernel::{BlendError, ShapeError};
+    use slotmap::Key as _;
     let point = |p: kernel::Point3| serde_json::json!([p.x, p.y, p.z]);
     match e {
         DocumentError::Shape(ShapeError::SelfIntersecting { limit: Some(l) }) => {
@@ -108,6 +116,17 @@ fn refusal_detail(e: &DocumentError) -> serde_json::Value {
         DocumentError::Boolean(kernel::BooleanError::NonPlanarInput { at })
         | DocumentError::Boolean(kernel::BooleanError::DegenerateInput { at }) => {
             serde_json::json!({ "at": point(*at) })
+        }
+        DocumentError::Boolean(kernel::BooleanError::OperandFaceNotFlat { which, face }) => {
+            let operand = match which {
+                kernel::Operand::A => "a".to_string(),
+                kernel::Operand::B => "b".to_string(),
+                kernel::Operand::Nth(n) => n.to_string(),
+            };
+            serde_json::json!({
+                "operand": operand,
+                "face": format!("{:x}", face.data().as_ffi()),
+            })
         }
         _ => serde_json::json!({}),
     }

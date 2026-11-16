@@ -308,7 +308,7 @@ export interface ComponentRebaseResult {
 /**
  * `hew.compute.boolean` (v1) — Union, subtract, or intersect two solids without touching the document; answers the result's measure, mesh, topology, or shell count.
  * Tier: Standard · Class: read-only · Served: kernel
- * Refusals: unknown_entity, unknown_occurrence, not_an_object, mirrored_pose, compute_busy, compute_too_large, mesh_too_large, face_not_flat, operand_not_solid, degenerate_contact, nothing_removed, singular_transform
+ * Refusals: unknown_entity, unknown_occurrence, not_an_object, mirrored_pose, compute_busy, compute_too_large, mesh_too_large, face_not_flat, operand_not_solid, degenerate_contact, operand_face_not_flat, arrangement_failed, result_too_thin, nothing_removed, singular_transform
  */
 export interface ComputeBooleanParams {
   /** SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}} */
@@ -327,6 +327,8 @@ export interface ComputeBooleanResult {
   shells?: number
   /** false when nothing is left (no other block then) */
   solid: boolean
+  /** present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum */
+  tidied?: { faces_split: number; feature_min: number; max_move: number; points_moved: number; sites: [number, number, number][]; sites_total: number; slivers_kept: number; slivers_merged: number }
   topology?: { edges: UnspecifiedShape[]; faces: UnspecifiedShape[]; object: string | null; vertices: [number, number, number][] }
 }
 
@@ -439,6 +441,8 @@ export interface ComputeSliceParams {
 export interface ComputeSliceResult {
   negative: { measure?: { area: number; bbox: unknown | null; volume: number | null }; mesh?: { face_indices_base64: string; indices_base64: string; normals_base64: string; parts: ({ face_index_base: number; id: string | null; index_base: number; index_count: number })[]; positions_base64: string; triangle_count: number; vertex_count: number }; shells?: number; topology?: { edges: UnspecifiedShape[]; faces: UnspecifiedShape[]; object: string | null; vertices: [number, number, number][] } }
   positive: { measure?: { area: number; bbox: unknown | null; volume: number | null }; mesh?: { face_indices_base64: string; indices_base64: string; normals_base64: string; parts: ({ face_index_base: number; id: string | null; index_base: number; index_count: number })[]; positions_base64: string; triangle_count: number; vertex_count: number }; shells?: number; topology?: { edges: UnspecifiedShape[]; faces: UnspecifiedShape[]; object: string | null; vertices: [number, number, number][] } }
+  /** present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum */
+  tidied?: { faces_split: number; feature_min: number; max_move: number; points_moved: number; sites: [number, number, number][]; sites_total: number; slivers_kept: number; slivers_merged: number }
 }
 
 /**
@@ -2315,7 +2319,7 @@ export interface SolidImprintsResult {
 /**
  * `hew.solid.intersect` (v1) — Boolean intersection of two or more solids: the material in all of them.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, non_planar_input, degenerate_input, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, face_not_flat, would_unlink
+ * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, non_planar_input, degenerate_input, operand_face_not_flat, arrangement_failed, result_too_thin, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, face_not_flat, would_unlink
  */
 export interface SolidIntersectParams {
   /** a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows */
@@ -2335,6 +2339,8 @@ export interface SolidIntersectResult {
   pieces?: number
   /** the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, an Intersect of several overlaps) */
   result: string
+  /** present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum */
+  tidied?: { faces_split: number; feature_min: number; max_move: number; points_moved: number; sites: [number, number, number][]; sites_total: number; slivers_kept: number; slivers_merged: number }
   /** present when unlink: true split placements off: the placements exploded */
   unlinked?: string[]
 }
@@ -2483,12 +2489,14 @@ export interface SolidPushPullResult {
   object_id?: string
   /** a through-cut's resulting pieces, replacing the source object */
   object_ids?: string[]
+  /** present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum */
+  tidied?: { faces_split: number; feature_min: number; max_move: number; points_moved: number; sites: [number, number, number][]; sites_total: number; slivers_kept: number; slivers_merged: number }
 }
 
 /**
  * `hew.solid.rejoin` (v1) — Rejoin one seam family of split pieces as a single solid (Model Health's Rejoin as one solid); one undo entry.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: unknown_family, not_cappable, rejoin_not_possible, rim_not_planar, rim_self_intersecting, cap_would_be_coplanar, non_manifold_rim, caps_overlap, invalid, degenerate_contact, boolean_operand_not_solid, boolean_operand_empty, unknown_object, unknown_component, explode_session_scope
+ * Refusals: unknown_family, not_cappable, rejoin_not_possible, rim_not_planar, rim_self_intersecting, cap_would_be_coplanar, non_manifold_rim, caps_overlap, invalid, degenerate_contact, operand_face_not_flat, arrangement_failed, result_too_thin, boolean_operand_not_solid, boolean_operand_empty, unknown_object, unknown_component, explode_session_scope
  */
 export interface SolidRejoinParams {
   as: "one_solid"
@@ -2499,6 +2507,8 @@ export interface SolidRejoinParams {
 export interface SolidRejoinResult {
   /** obj_ id of the joined solid; it keeps the largest piece's name, tags, and attributes */
   object: string
+  /** present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum */
+  tidied?: { faces_split: number; feature_min: number; max_move: number; points_moved: number; sites: [number, number, number][]; sites_total: number; slivers_kept: number; slivers_merged: number }
 }
 
 /**
@@ -2644,6 +2654,8 @@ export interface SolidSliceParams {
 export interface SolidSliceResult {
   negative: string
   positive: string
+  /** present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum */
+  tidied?: { faces_split: number; feature_min: number; max_move: number; points_moved: number; sites: [number, number, number][]; sites_total: number; slivers_kept: number; slivers_merged: number }
 }
 
 /**
@@ -2666,7 +2678,7 @@ export interface SolidSoftenResult {
 /**
  * `hew.solid.subtract` (v1) — Boolean subtraction: the first solid minus every other one; a may be a path to a definition member, cut through that placement so every placement shows the cut, by a world object or a transient prism or box.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, non_planar_input, degenerate_input, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, face_not_flat, nothing_removed, mirrored_pose, compute_too_large
+ * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, non_planar_input, degenerate_input, operand_face_not_flat, arrangement_failed, result_too_thin, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, face_not_flat, nothing_removed, mirrored_pose, compute_too_large
  */
 export interface SolidSubtractParams {
   /** a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows */
@@ -2684,6 +2696,8 @@ export interface SolidSubtractResult {
   pieces?: number
   /** the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, a Subtract that severs, an Intersect of several overlaps) */
   result: string
+  /** present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum */
+  tidied?: { faces_split: number; feature_min: number; max_move: number; points_moved: number; sites: [number, number, number][]; sites_total: number; slivers_kept: number; slivers_merged: number }
 }
 
 /**
@@ -2709,7 +2723,7 @@ export interface SolidThickenResult {
 /**
  * `hew.solid.union` (v1) — Boolean union of two or more solids: the material in any of them.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, non_planar_input, degenerate_input, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, face_not_flat, would_unlink
+ * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, non_planar_input, degenerate_input, operand_face_not_flat, arrangement_failed, result_too_thin, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, face_not_flat, would_unlink
  */
 export interface SolidUnionParams {
   /** a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows */
@@ -2729,6 +2743,8 @@ export interface SolidUnionResult {
   pieces?: number
   /** the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, an Intersect of several overlaps) */
   result: string
+  /** present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum */
+  tidied?: { faces_split: number; feature_min: number; max_move: number; points_moved: number; sites: [number, number, number][]; sites_total: number; slivers_kept: number; slivers_merged: number }
   /** present when unlink: true split placements off: the placements exploded */
   unlinked?: string[]
 }

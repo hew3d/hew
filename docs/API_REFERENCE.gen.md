@@ -1537,6 +1537,67 @@ Union, subtract, or intersect two solids without touching the document; answers 
       "description": "false when nothing is left (no other block then)",
       "type": "boolean"
     },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
+      "type": "object"
+    },
     "topology": {
       "additionalProperties": false,
       "properties": {
@@ -1601,6 +1662,9 @@ Union, subtract, or intersect two solids without touching the document; answers 
 - `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 - `operand_not_solid` — Combining needs a solid on both sides. To make it solid, select it and choose Object ▸ Make Solid…
 - `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
+- `operand_face_not_flat` — One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles.
+- `arrangement_failed` — Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug.
+- `result_too_thin` — The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again.
 - `nothing_removed` — Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting.
 - `singular_transform` — One object's placement is scaled down to nothing, so the operation can't run.
 
@@ -3577,6 +3641,67 @@ Cut a solid by a plane without touching the document; answers both pieces.
         }
       },
       "required": [],
+      "type": "object"
+    },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
       "type": "object"
     }
   },
@@ -14796,6 +14921,67 @@ Boolean intersection of two or more solids: the material in all of them.
       "description": "the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, an Intersect of several overlaps)",
       "type": "string"
     },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
+      "type": "object"
+    },
     "unlinked": {
       "description": "present when unlink: true split placements off: the placements exploded",
       "items": {
@@ -14821,6 +15007,9 @@ Boolean intersection of two or more solids: the material in all of them.
 - `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
 - `non_planar_input` — One of these objects has a face that isn't flat enough to combine.
 - `degenerate_input` — One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first.
+- `operand_face_not_flat` — One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles.
+- `arrangement_failed` — Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug.
+- `result_too_thin` — The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
@@ -15384,7 +15573,7 @@ Push/pull a face of a solid with the tool's full semantics.
 
 ```json
 {
-  "description": "exactly one of object_id / object_ids is present, depending on the tool's three-way branch (HEW_API.md §7 semantics notes)",
+  "description": "exactly one of object_id / object_ids is present, depending on the tool's three-way branch (HEW_API.md §7 semantics notes); a through push or pull is a boolean, so it can carry tidied",
   "properties": {
     "object_id": {
       "description": "the pushed/pulled object, still standing (in-place or sub-face case)",
@@ -15396,6 +15585,67 @@ Push/pull a face of a solid with the tool's full semantics.
         "type": "string"
       },
       "type": "array"
+    },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
+      "type": "object"
     }
   },
   "type": "object"
@@ -15477,6 +15727,67 @@ Rejoin one seam family of split pieces as a single solid (Model Health's Rejoin 
     "object": {
       "description": "obj_ id of the joined solid; it keeps the largest piece's name, tags, and attributes",
       "type": "string"
+    },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
+      "type": "object"
     }
   },
   "required": [
@@ -15498,6 +15809,9 @@ Rejoin one seam family of split pieces as a single solid (Model Health's Rejoin 
 - `caps_overlap` — A face here would overlap another part of this object. Close all of the object's openings together, or draw faces across this one by hand.
 - `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
 - `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
+- `operand_face_not_flat` — One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles.
+- `arrangement_failed` — Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug.
+- `result_too_thin` — The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again.
 - `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
 - `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
@@ -16165,6 +16479,67 @@ Slice a solid by a plane into two solids; the object may be a path to a definiti
     },
     "positive": {
       "type": "string"
+    },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
+      "type": "object"
     }
   },
   "required": [
@@ -16366,6 +16741,67 @@ Boolean subtraction: the first solid minus every other one; a may be a path to a
     "result": {
       "description": "the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, a Subtract that severs, an Intersect of several overlaps)",
       "type": "string"
+    },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
+      "type": "object"
     }
   },
   "required": [
@@ -16385,6 +16821,9 @@ Boolean subtraction: the first solid minus every other one; a may be a path to a
 - `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
 - `non_planar_input` — One of these objects has a face that isn't flat enough to combine.
 - `degenerate_input` — One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first.
+- `operand_face_not_flat` — One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles.
+- `arrangement_failed` — Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug.
+- `result_too_thin` — The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
@@ -16566,6 +17005,67 @@ Boolean union of two or more solids: the material in any of them.
       "description": "the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, an Intersect of several overlaps)",
       "type": "string"
     },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
+      "type": "object"
+    },
     "unlinked": {
       "description": "present when unlink: true split placements off: the placements exploded",
       "items": {
@@ -16591,6 +17091,9 @@ Boolean union of two or more solids: the material in any of them.
 - `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
 - `non_planar_input` — One of these objects has a face that isn't flat enough to combine.
 - `degenerate_input` — One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first.
+- `operand_face_not_flat` — One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles.
+- `arrangement_failed` — Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug.
+- `result_too_thin` — The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.

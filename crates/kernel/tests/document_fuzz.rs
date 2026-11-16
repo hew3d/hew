@@ -173,6 +173,8 @@ enum DocOp {
     },
     /// Boolean between two distinct visible objects. A typed refusal is an
     /// accepted no-op: `DegenerateContact` for a measure-zero contact,
+    /// `ArrangementFailed` for a meeting the arrangement cannot resolve,
+    /// `ResultTooThin` for one that would leave a face under 10 nm wide,
     /// `EmptyResult` for an empty intersect or a total subtract, and
     /// `NothingRemoved` for a subtract whose operands do not overlap.
     Boolean {
@@ -731,6 +733,12 @@ fn arb_offset() -> impl Strategy<Value = (f64, f64, f64)> {
     (-8.0..8.0f64, -8.0..8.0f64, -4.0..4.0f64)
 }
 
+/// A move of a few microns at most: two objects that met before now meet
+/// a fraction of a micron off, which leaves sub-micron slivers to cut.
+fn arb_micro_offset() -> impl Strategy<Value = (f64, f64, f64)> {
+    (-3e-6..3e-6f64, -3e-6..3e-6f64, -3e-6..3e-6f64)
+}
+
 /// A non-degenerate rotation axis for `Transform::rotation` — it normalizes
 /// internally, so only near-zero magnitude (the `DegenerateAxis` case) needs
 /// filtering out.
@@ -994,6 +1002,15 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
             DocOp::DuplicateLinked { obj_sel, offset }
         }),
         2 => (any::<usize>(), (0.2..3.0f64, 0.2..3.0f64, 0.2..3.0f64)).prop_map(
+            |(obj_sel, factors)| DocOp::NonUniformScale { obj_sel, factors }
+        ),
+        // KB-25: micron-scale moves and deep shrinks, so booleans, structure
+        // ops and undo meet faces under the old 1e-12 m² area floor (kept
+        // now when at least 10 nm wide), with the reopen check every step.
+        1 => (any::<usize>(), arb_micro_offset()).prop_map(|(obj_sel, offset)| {
+            DocOp::Translate { obj_sel, offset }
+        }),
+        1 => (any::<usize>(), (1e-7..1e-5f64, 1e-7..1e-5f64, 1e-7..1e-5f64)).prop_map(
             |(obj_sel, factors)| DocOp::NonUniformScale { obj_sel, factors }
         ),
         // A reflection baked into a visible object (negative x factor).

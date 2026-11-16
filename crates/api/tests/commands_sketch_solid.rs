@@ -850,6 +850,89 @@ fn push_pull_a_side_face_by_point_locator_moves_the_object_in_place() {
     assert_eq!(result["object_id"].as_str().unwrap(), object_id);
 }
 
+/// A through pull is a boolean, so its result carries `tidied` when the
+/// boolean merged slivers of its cut: a U slab's short arm pulled across
+/// the gap, through the long arm and 30 nm past its outer face, leaves a
+/// rim 30 nm proud that is merged flush. A pull that stops in the gap is
+/// no boolean and has no block.
+#[test]
+fn a_through_push_pull_that_merges_slivers_says_so_in_tidied() {
+    let mut conn = Connection::new(Grant::core(), "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    let mm = 1e-3;
+    let outline: Vec<[f64; 3]> = [
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 10.0),
+        (8.0, 10.0),
+        (8.0, 2.0),
+        (2.0, 2.0),
+        (2.0, 6.0),
+        (0.0, 6.0),
+        (0.0, 0.0),
+    ]
+    .iter()
+    .map(|&(x, y)| [x * mm, y * mm, 0.0])
+    .collect();
+    let result = call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.doc.transact",
+        json!({
+            "commands": [
+                { "method": "hew.sketch.draw_line", "as": "u", "params": {
+                    "plane": { "ground": true }, "points": outline
+                }},
+                { "method": "hew.solid.extrude", "params": {
+                    "region": { "$ref": "u#/region_ids/0" }, "distance": 2.0 * mm
+                }}
+            ]
+        }),
+    );
+    let object_id = result["results"][1]["object_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let inner_face = json!({ "object": object_id, "at": [2.0 * mm, 4.0 * mm, mm] });
+
+    // In the gap: an in-place push/pull, no boolean.
+    let short = single(call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.solid.push_pull",
+        json!({ "face": inner_face.clone(), "distance": 2.0 * mm }),
+    ));
+    assert!(short.get("tidied").is_none(), "{short}");
+    doc.undo().unwrap();
+
+    let through = single(call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.solid.push_pull",
+        json!({ "face": inner_face, "distance": 8.0 * mm + 3e-8 }),
+    ));
+    assert_eq!(
+        through["object_ids"].as_array().unwrap().len(),
+        1,
+        "{through}"
+    );
+    let t = &through["tidied"];
+    assert!(t["slivers_merged"].as_u64().unwrap() > 0, "{through}");
+    assert_eq!(t["slivers_kept"], 0, "{through}");
+    let max_move = t["max_move"].as_f64().unwrap();
+    assert!(max_move > 0.0 && max_move <= 2e-7, "{through}");
+    for p in t["sites"].as_array().unwrap() {
+        assert!(
+            (p[0].as_f64().unwrap() - (10.0 * mm + 3e-8)).abs() < 1e-12,
+            "{through}"
+        );
+    }
+}
+
 #[test]
 fn push_pull_zero_distance_refuses_distance_too_small() {
     let mut conn = Connection::new(Grant::core(), "test");

@@ -1416,7 +1416,44 @@ Semantics notes, normative:
   combine over all of them as one undo step: a Union of all, the first
   minus the union of the rest, the intersection of all. `operands` with
   fewer than two refuses `boolean_needs_two`; `a` without `b`, or both
-  spellings at once, is a malformed request.
+  spellings at once, is a malformed request. Solids that only touch (along
+  an edge, at a corner) refuse `degenerate_contact`. An imported solid is
+  flat only to the import tolerance: where the other operand reaches one
+  of its faces that is not flat, the boolean splits that face into flat
+  triangles through its own corners (their diagonals are soft), and a face
+  it cannot split refuses `operand_face_not_flat`, with `detail.operand`
+  (`"a"` or `"b"`, the side of the pairwise boolean that refused) and
+  `detail.face` (an opaque key for logs and reports, not an address).
+  `arrangement_failed` means the boolean could not resolve where the two
+  meet, or that a face of its result would not stay flat once the file
+  is reopened; moving one solid slightly usually gives an answer.
+  A cut through dense geometry, an imported mesh above all, passes within
+  nanometers of some vertex or edge and leaves slivers far below anything
+  that can be seen or made. The boolean merges every face its own cut
+  leaves narrower than 0.1 µm (`kernel::tol::FEATURE_MIN`) into its
+  neighbors, moving no point farther than 0.2 µm
+  (`kernel::tol::TIDY_REACH`) and leaving every face the cut does not
+  touch as it was, and says so: the result then carries a `tidied` block,
+  `{ slivers_merged, slivers_kept, points_moved, max_move, faces_split,
+  sites, sites_total, feature_min }` (`max_move` and `feature_min` in
+  meters; `sites` one point per place something was merged, the first
+  16). Sites are world coordinates, except where the boolean ran in a
+  component definition's own geometry, which reports that definition's
+  coordinates: a `push_pull` on a definition member (whose face locator is
+  in the definition's coordinates too) and a `rejoin` of a definition's
+  pieces. A `subtract` or `slice` reached through a path reports world
+  points. `faces_split` counts faces a moved point bent off their plane,
+  split into flat triangles with soft diagonals. The block is present only
+  when something was merged or kept, on `hew.solid.union`, `subtract`,
+  `intersect`, `slice`, `rejoin` and a through `push_pull` (one that
+  passes another wall of the solid, a boolean) and on
+  `hew.compute.boolean` and `hew.compute.slice`; the booleans of one
+  command sum into one block.
+  When merging cannot give a valid solid the boolean keeps the cut as
+  made, and `slivers_kept` counts what it kept. `result_too_thin` is left
+  for the rare cut where neither gives a valid solid (a face under 10 nm
+  wide that would not merge); moving either solid by a hundredth of a
+  millimeter clears it.
 - `hew.solid.resize_blend` and `hew.solid.remove_blend` take a `face`
   locator naming any face of the blend (`unknown_blend` when it has
   none). `resize_blend` takes the same size fields as `fillet` and
@@ -1840,8 +1877,11 @@ Semantics notes, normative:
   `unknown_family`, `not_cappable` (a seam rim cannot take a cap),
   `rejoin_not_possible` (a shape drawn with an opening, members under
   different parents, or pieces that meet only through a wall), or a cap's
-  own refusal (`invalid`, `degenerate_contact`, or a boolean operand
-  refusal from the union step), and leaves the model as it was. Params are
+  own refusal (`invalid`, `degenerate_contact`, `operand_face_not_flat`,
+  `arrangement_failed`, `result_too_thin`, or a boolean operand refusal
+  from the union step), and leaves the model as it was. Like the
+  booleans, its result carries `tidied` when the union merged slivers of
+  its cut. Params are
   exactly `family` and `as`; the command takes no generation guard, so run
   it inside `hew.doc.transact` with `expect_generation` when the index
   came from an earlier read.
@@ -2705,8 +2745,8 @@ Exactly one form per operand; an unknown member is `-32602`.
 
 | Command | Params | Result |
 |---|---|---|
-| `hew.compute.boolean` | `{ op: "union" \| "subtract" \| "intersect", a, b, want? }` | `{ solid, mesh?, topology?, measure?, shells? }`; `solid: false` and no other block when nothing is left (an intersect of disjoint solids). The geometry is what the committed boolean would leave. `want` lists `mesh`, `topology`, `measure`, `shells` (a count); default `["measure"]`. Refusals are the boolean's by name (`degenerate_contact`, `nothing_removed`, `operand_not_solid`). |
-| `hew.compute.slice` | `{ solid, plane: { origin, normal }, want? }` | `{ positive, negative }`, each with the wanted blocks; `positive` is the piece on the side the normal points to. Refuses `plane_misses_solid`, `degenerate`, `not_solid`. |
+| `hew.compute.boolean` | `{ op: "union" \| "subtract" \| "intersect", a, b, want? }` | `{ solid, mesh?, topology?, measure?, shells? }`; `solid: false` and no other block when nothing is left (an intersect of disjoint solids). The geometry is what the committed boolean would leave. `want` lists `mesh`, `topology`, `measure`, `shells` (a count); default `["measure"]`. Refusals are the boolean's by name (`degenerate_contact`, `operand_face_not_flat`, `arrangement_failed`, `result_too_thin`, `nothing_removed`, `operand_not_solid`). A `tidied` block, as on the committed booleans (§7), reports slivers of the cut the boolean merged. |
+| `hew.compute.slice` | `{ solid, plane: { origin, normal }, want? }` | `{ positive, negative }`, each with the wanted blocks; `positive` is the piece on the side the normal points to, and `tidied` beside them when the cut's slivers were merged (§7). Refuses `plane_misses_solid`, `degenerate`, `not_solid`. |
 | `hew.compute.shells` | `{ solid, want_mesh? }` | `{ count, shells: [{ measure, mesh? }] }`: the solid's connected pieces. |
 | `hew.compute.measure` | `{ solid }` | `{ volume, area, bbox: { min, max }, centroid }`; `volume` and `centroid` are `null` for a solid that is not watertight. |
 | `hew.compute.outline` | `{ id \| path, frame?, which }` | `{ loops: [{ outer, edges }] }` in the frame's xy. `which: "largest_face"`: the loops of the part's largest face (ties: the one facing the frame's +z). `which: "projection"`: the silhouette of every face seen along the frame's z. `frame`: `"part"` (the default, `hew.query.part_frame`'s frame) or `{ origin, x, y, z }`, orthonormal and right-handed, else `invalid_frame`. Edges are `{ kind: "line", a, b }`, `{ kind: "arc", center, radius, start, end, ccw }`, or `{ kind: "circle", center, radius }`; a circle whose axis is the frame's z stays analytic, any other edge is a line. Outer loops run counter-clockwise, holes clockwise. |

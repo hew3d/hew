@@ -1332,16 +1332,27 @@ impl Document {
                 }
                 Commit::Create => None,
             };
+            // What the grow-union's tidy merged, reported only when the
+            // grown solid is committed; sites in the frame the cells are
+            // in (a definition's when drawn in one).
+            let mut tidy = crate::ops::BooleanTidy::default();
             let union = target.and_then(|o| {
                 let base = &self.objects[o].object;
-                let mut result =
-                    Object::boolean(BooleanOp::Union, base, &solid, &Transform::IDENTITY).ok()?;
+                let mut result = Object::boolean_reported(
+                    BooleanOp::Union,
+                    base,
+                    &solid,
+                    &Transform::IDENTITY,
+                    &mut tidy,
+                )
+                .ok()?;
                 result.merge_coplanar_faces(&base.coplanar_edge_segments());
                 (result.watertight() == WatertightState::Watertight && result.validate().is_ok())
                     .then_some(result)
             });
             match (target, union) {
                 (Some(o), Some(result)) => {
+                    self.boolean_tidy.absorb(&tidy, &Transform::IDENTITY);
                     let (owner, name, tags) = {
                         let rec = &self.objects[o];
                         (rec.owner, rec.name.clone(), rec.tags.clone())

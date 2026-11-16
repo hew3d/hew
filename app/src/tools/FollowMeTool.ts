@@ -1627,14 +1627,34 @@ export class FollowMeTool implements Tool {
       // true is what guarantees this branch is even reachable: a plain
       // commit never calls the merged wasm entry point at all (see
       // `_invokeFollowMe`), so it can never produce this code in the first
-      // place.
+      // place. `ArrangementFailed` (the boolean could not resolve where the
+      // sweep meets the solid, a refusal that arose as `DegenerateContact`
+      // before it had a name of its own) takes the same fallback, with a
+      // note that does not claim the two only touch.
       const code = parseKernelErrorCode(err)
-      if (merge && code === 'DegenerateContact') {
+      // `ResultTooThin` (a sliver the boolean could not merge away, which used to
+      // arrive as `DegenerateContact`) and `OperandFaceNotFlat` (a face of
+      // the solid being merged into is too bent to cut) are both properties
+      // of the merge against the existing solid; the separate sweep never
+      // touches that solid, so the same fallback applies.
+      if (
+        merge &&
+        (code === 'DegenerateContact' ||
+          code === 'ArrangementFailed' ||
+          code === 'ResultTooThin' ||
+          code === 'OperandFaceNotFlat')
+      ) {
         try {
           const objectId = this._invokeFollowMe(path, sketchHandle, regionHandle, stopLen, false, opts)
           this._finishCommit(objectId, { invoke: (o) => replay(o, false), opts })
           this.onToast(
-            t`The profile only touches the solid at an edge or corner — left as a separate object.`,
+            code === 'DegenerateContact'
+              ? t`The profile only touches the solid at an edge or corner — left as a separate object.`
+              : code === 'ArrangementFailed'
+                ? t`Hew couldn't join the sweep to the solid where they meet — left as a separate object.`
+                : code === 'ResultTooThin'
+                  ? t`Joining the sweep to the solid would leave a piece too thin to keep — left as a separate object.`
+                  : t`The solid has a face that isn't flat enough to join the sweep to — left as a separate object.`,
           )
           return
         } catch (fallbackErr) {
