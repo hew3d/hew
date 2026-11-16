@@ -1294,9 +1294,9 @@ dependencies = [
 
 [[package]]
 name = "skpwright"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7bc4bf681b4039e70134a32ba837ed7a67f315b1ad4d3b6715c82f822ecdfbc"
+checksum = "fa374de079ed320cace464fce37867d56fee8d108168f0787b087e6ecf3d1261"
 dependencies = [
  "miniz_oxide 0.9.1",
 ]
