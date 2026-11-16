@@ -181,10 +181,10 @@ test('Cut removes the original and leaves the clipboard pasteable', async ({ pag
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
 })
 
-test('a sketch-only selection copies as a shape, with a toast', async ({ page }) => {
+test('a sketch-only selection copies as a shape, and Paste In Place over it records nothing', async ({ page }) => {
   const ctx = await setup(page)
-  // A detached (never-extruded) rectangle sketch — `drawRectangle` leaves
-  // exactly that behind; Copy carries the drawing through the kernel.
+  // A detached (never-extruded) rectangle sketch, which `drawRectangle`
+  // leaves behind: a selection with drawing and no objects.
   await page.evaluate(() => window.__hew_test!.drawRectangle([0, 0, 0], [1, 1, 0]))
   // Click its fill (a real gesture, not a constructed NodeRef — region/island
   // ids aren't the same numbering) to select the whole island.
@@ -193,8 +193,23 @@ test('a sketch-only selection copies as a shape, with a toast', async ({ page })
     const sel = window.__hew_test!.getSelection()
     return sel.length === 1 && sel[0].kind === 'draft-island'
   })
+  const state = (): Promise<{ hash: string; units: number }> =>
+    page.evaluate(() => {
+      const h = window.__hew_test!
+      return { hash: String(h.getStateHash()), units: h.getPlaneUnits(h.ctxGround()).units.length }
+    })
+  const before = await state()
+  expect(before.units).toBe(1)
+
   await page.keyboard.press('Control+c')
   await expect(page.getByText('Copied 1 shape', { exact: false })).toBeVisible()
+
+  // The pasted drawing lies exactly over the original, so nothing is drawn
+  // and no undo step is recorded.
+  await page.keyboard.press('Control+Shift+v')
+  // Nothing to wait on when nothing changes: give the paste time to run.
+  await page.waitForTimeout(750)
+  expect(await state()).toEqual(before)
 })
 
 test('Cut of a multi-node selection is ONE undo step — a single Ctrl+Z restores everything', async ({ page }) => {
