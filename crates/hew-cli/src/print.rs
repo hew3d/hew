@@ -190,11 +190,7 @@ pub fn print_pdf(
         .collect();
     let render_items: Vec<softrender::RenderItem> = items
         .iter()
-        .map(|it| softrender::RenderItem {
-            mesh: &it.mesh,
-            pose: it.pose,
-            sid: it.sid,
-        })
+        .map(softrender::DocumentItem::as_render_item)
         .collect();
     let section = hlr_section(doc, scene.as_ref());
     let range = (depth.1 - depth.0).max(1e-3);

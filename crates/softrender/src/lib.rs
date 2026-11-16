@@ -9,6 +9,11 @@
 //! object is at pixel (x, y)" without computer vision.
 
 pub mod png;
+pub mod texture;
+
+pub use texture::{Image, TextureSet};
+
+use std::sync::Arc;
 
 use kernel::{Point3, Transform, Vec3};
 
@@ -112,6 +117,9 @@ pub struct RenderItem<'a> {
     pub mesh: &'a tessellate::RenderMesh,
     pub pose: Transform,
     pub sid: u64,
+    /// Decoded images of the mesh's textured materials; `None` renders
+    /// every face in its base color.
+    pub textures: Option<&'a TextureSet>,
 }
 
 /// Why a render was refused.
@@ -316,13 +324,13 @@ impl Frame {
     /// ceiling sheet in a close view — is CUT at the plane, not dropped:
     /// dropping it made whatever lay behind it show through. Parallel
     /// projection has no behind-the-eye, so nothing is clipped there.
-    fn clip_triangle(&self, tri: [[f64; 3]; 3]) -> Vec<[[f64; 3]; 3]> {
+    fn clip_triangle(&self, tri: [[f64; 5]; 3]) -> Vec<[[f64; 5]; 3]> {
         if matches!(self.proj, Projection::Parallel { .. })
             || tri.iter().all(|v| v[2] >= NEAR_PLANE)
         {
             return vec![tri];
         }
-        let mut poly: Vec<[f64; 3]> = Vec::with_capacity(4);
+        let mut poly: Vec<[f64; 5]> = Vec::with_capacity(4);
         for i in 0..3 {
             let (cur, next) = (tri[i], tri[(i + 1) % 3]);
             let (cur_in, next_in) = (cur[2] >= NEAR_PLANE, next[2] >= NEAR_PLANE);
@@ -355,13 +363,16 @@ impl Frame {
 }
 
 /// Where the segment `a → b` crosses `z = NEAR_PLANE`.
-fn lerp_to_plane(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+/// Every extra component (the UV a clipped triangle carries) is
+/// interpolated along with the position.
+fn lerp_to_plane<const N: usize>(a: [f64; N], b: [f64; N]) -> [f64; N] {
     let t = (NEAR_PLANE - a[2]) / (b[2] - a[2]);
-    [
-        a[0] + (b[0] - a[0]) * t,
-        a[1] + (b[1] - a[1]) * t,
-        NEAR_PLANE,
-    ]
+    let mut out = a;
+    for i in 0..N {
+        out[i] = a[i] + (b[i] - a[i]) * t;
+    }
+    out[2] = NEAR_PLANE;
+    out
 }
 
 fn dot4(row: &[f64; 4], v: &[f64; 4]) -> f64 {
@@ -437,57 +448,92 @@ pub fn render_with_background(
             .unwrap_or(Vec3::new(0.0, -1.0, 0.0));
         let perspective = matches!(frame.proj, Projection::Perspective { .. });
 
-        for tri in mesh.front_triangles() {
-            let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-            let clipped = frame.clip_triangle([cams[a], cams[b], cams[c]]);
-            if clipped.is_empty() {
-                continue; // wholly behind the near plane
-            }
-            // Two-sided flat shade from the face normal (headlight).
-            let nrm = world_normals[a];
-            let lambert = nrm.dot(view_dir).abs() as f32;
-            let shade = AMBIENT + (1.0 - AMBIENT) * lambert.clamp(0.0, 1.0);
-            let color = [
-                (mesh.colors[a * 3] * shade * 255.0).clamp(0.0, 255.0) as u8,
-                (mesh.colors[a * 3 + 1] * shade * 255.0).clamp(0.0, 255.0) as u8,
-                (mesh.colors[a * 3 + 2] * shade * 255.0).clamp(0.0, 255.0) as u8,
-                255,
-            ];
-            // Camera-space normal for the normals pass: x right, y up, z
-            // toward the viewer, flipped to face the viewer like the
-            // two-sided shading above.
-            let (mut nx, mut ny, mut nz) = (
-                frame.view[0][0] * nrm.x + frame.view[0][1] * nrm.y + frame.view[0][2] * nrm.z,
-                frame.view[1][0] * nrm.x + frame.view[1][1] * nrm.y + frame.view[1][2] * nrm.z,
-                -(frame.view[2][0] * nrm.x + frame.view[2][1] * nrm.y + frame.view[2][2] * nrm.z),
-            );
-            if nz < 0.0 {
-                (nx, ny, nz) = (-nx, -ny, -nz);
-            }
-            let to_byte = |v: f64| ((v * 0.5 + 0.5) * 255.0).round().clamp(0.0, 255.0) as u8;
-            let normal_rgb = [to_byte(nx), to_byte(ny), to_byte(nz)];
-            for piece in &clipped {
-                let (pa, pb, pc) = (
-                    frame.screen(piece[0]),
-                    frame.screen(piece[1]),
-                    frame.screen(piece[2]),
+        for group in mesh.groups.iter().filter(|g| !g.back) {
+            // A textured material's decoded image, sampled by UV below.
+            let texture = group
+                .material
+                .and_then(|m| item.textures.and_then(|t| t.get(m)));
+            let tris = mesh.indices[group.start as usize..(group.start + group.count) as usize]
+                .chunks_exact(3);
+            for tri in tris {
+                let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+                let uv_of = |i: usize| -> [f64; 2] {
+                    match (mesh.uvs.get(i * 2), mesh.uvs.get(i * 2 + 1)) {
+                        (Some(&u), Some(&v)) => [u as f64, v as f64],
+                        _ => [0.0, 0.0],
+                    }
+                };
+                let with_uv = |i: usize| {
+                    let uv = uv_of(i);
+                    [cams[i][0], cams[i][1], cams[i][2], uv[0], uv[1]]
+                };
+                let clipped = frame.clip_triangle([with_uv(a), with_uv(b), with_uv(c)]);
+                if clipped.is_empty() {
+                    continue; // wholly behind the near plane
+                }
+                // Two-sided flat shade from the face normal (headlight).
+                let nrm = world_normals[a];
+                let lambert = nrm.dot(view_dir).abs() as f32;
+                let shade = AMBIENT + (1.0 - AMBIENT) * lambert.clamp(0.0, 1.0);
+                let color = [
+                    (mesh.colors[a * 3] * shade * 255.0).clamp(0.0, 255.0) as u8,
+                    (mesh.colors[a * 3 + 1] * shade * 255.0).clamp(0.0, 255.0) as u8,
+                    (mesh.colors[a * 3 + 2] * shade * 255.0).clamp(0.0, 255.0) as u8,
+                    255,
+                ];
+                // Camera-space normal for the normals pass: x right, y up, z
+                // toward the viewer, flipped to face the viewer like the
+                // two-sided shading above.
+                let (mut nx, mut ny, mut nz) = (
+                    frame.view[0][0] * nrm.x + frame.view[0][1] * nrm.y + frame.view[0][2] * nrm.z,
+                    frame.view[1][0] * nrm.x + frame.view[1][1] * nrm.y + frame.view[1][2] * nrm.z,
+                    -(frame.view[2][0] * nrm.x
+                        + frame.view[2][1] * nrm.y
+                        + frame.view[2][2] * nrm.z),
                 );
-                fill_triangle(
-                    pa,
-                    pb,
-                    pc,
-                    color,
-                    id_index,
-                    perspective,
-                    width,
-                    height,
-                    &mut rgba,
-                    &mut depth,
-                    &mut ids,
-                    &mut surface_depth,
-                    &mut normals,
-                    normal_rgb,
-                );
+                if nz < 0.0 {
+                    (nx, ny, nz) = (-nx, -ny, -nz);
+                }
+                let to_byte = |v: f64| ((v * 0.5 + 0.5) * 255.0).round().clamp(0.0, 255.0) as u8;
+                let normal_rgb = [to_byte(nx), to_byte(ny), to_byte(nz)];
+                for piece in &clipped {
+                    let (pa, pb, pc) = (
+                        frame.screen([piece[0][0], piece[0][1], piece[0][2]]),
+                        frame.screen([piece[1][0], piece[1][1], piece[1][2]]),
+                        frame.screen([piece[2][0], piece[2][1], piece[2][2]]),
+                    );
+                    let sampler = texture.map(|image| TextureFill {
+                        image,
+                        uv: [
+                            [piece[0][3] as f32, piece[0][4] as f32],
+                            [piece[1][3] as f32, piece[1][4] as f32],
+                            [piece[2][3] as f32, piece[2][4] as f32],
+                        ],
+                        // Material color × headlight shade, 0..=1.
+                        tint: [
+                            mesh.colors[a * 3] * shade,
+                            mesh.colors[a * 3 + 1] * shade,
+                            mesh.colors[a * 3 + 2] * shade,
+                        ],
+                    });
+                    fill_triangle(
+                        pa,
+                        pb,
+                        pc,
+                        color,
+                        sampler.as_ref(),
+                        id_index,
+                        perspective,
+                        width,
+                        height,
+                        &mut rgba,
+                        &mut depth,
+                        &mut ids,
+                        &mut surface_depth,
+                        &mut normals,
+                        normal_rgb,
+                    );
+                }
             }
         }
 
@@ -530,12 +576,22 @@ fn item_edges(mesh: &tessellate::RenderMesh) -> impl Iterator<Item = (Point3, Po
     })
 }
 
+/// What a textured triangle samples per pixel.
+struct TextureFill<'a> {
+    image: &'a Image,
+    /// UV of the (possibly clipped) triangle's three corners.
+    uv: [[f32; 2]; 3],
+    /// Material color times the headlight shade.
+    tint: [f32; 3],
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fill_triangle(
     a: (f32, f32, f32),
     b: (f32, f32, f32),
     c: (f32, f32, f32),
     color: [u8; 4],
+    texture: Option<&TextureFill>,
     id_index: u16,
     perspective: bool,
     width: u32,
@@ -579,7 +635,34 @@ fn fill_triangle(
             if z < depth[idx] {
                 depth[idx] = z;
                 ids[idx] = id_index;
-                rgba[idx * 4..idx * 4 + 4].copy_from_slice(&color);
+                match texture {
+                    None => rgba[idx * 4..idx * 4 + 4].copy_from_slice(&color),
+                    Some(t) => {
+                        // UV is affine in 1/z under perspective: weight each
+                        // corner by w/z, then renormalize.
+                        let (u, v) = if perspective {
+                            let (k0, k1, k2) = (w0 / a.2, w1 / b.2, w2 / c.2);
+                            let inv = 1.0 / (k0 + k1 + k2);
+                            (
+                                (k0 * t.uv[0][0] + k1 * t.uv[1][0] + k2 * t.uv[2][0]) * inv,
+                                (k0 * t.uv[0][1] + k1 * t.uv[1][1] + k2 * t.uv[2][1]) * inv,
+                            )
+                        } else {
+                            (
+                                w0 * t.uv[0][0] + w1 * t.uv[1][0] + w2 * t.uv[2][0],
+                                w0 * t.uv[0][1] + w1 * t.uv[1][1] + w2 * t.uv[2][1],
+                            )
+                        };
+                        let texel = t.image.sample(u, v);
+                        let px = [
+                            (texel[0] * t.tint[0] * 255.0).clamp(0.0, 255.0) as u8,
+                            (texel[1] * t.tint[1] * 255.0).clamp(0.0, 255.0) as u8,
+                            (texel[2] * t.tint[2] * 255.0).clamp(0.0, 255.0) as u8,
+                            255,
+                        ];
+                        rgba[idx * 4..idx * 4 + 4].copy_from_slice(&px);
+                    }
+                }
                 surface_depth[idx] = z;
                 normals[idx * 3..idx * 3 + 3].copy_from_slice(&normal_rgb);
             }
@@ -589,6 +672,42 @@ fn fill_triangle(
 
 fn edge_fn(a: (f32, f32, f32), b: (f32, f32, f32), p: (f32, f32)) -> f32 {
     (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)
+}
+
+/// The parameter span `[t0, t1]` of the segment `a → b` inside the image
+/// rectangle (Liang–Barsky), or `None` when it misses it or is not finite.
+fn visible_span(
+    a: (f32, f32, f32),
+    b: (f32, f32, f32),
+    width: u32,
+    height: u32,
+) -> Option<(f64, f64)> {
+    let (ax, ay) = (a.0 as f64, a.1 as f64);
+    let (dx, dy) = (b.0 as f64 - ax, b.1 as f64 - ay);
+    if !(ax.is_finite() && ay.is_finite() && dx.is_finite() && dy.is_finite()) {
+        return None;
+    }
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for (p, q) in [
+        (-dx, ax),
+        (dx, width as f64 - ax),
+        (-dy, ay),
+        (dy, height as f64 - ay),
+    ] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                t0 = t0.max(r);
+            } else {
+                t1 = t1.min(r);
+            }
+        }
+    }
+    (t0 <= t1).then_some((t0, t1))
 }
 
 fn draw_line(
@@ -601,17 +720,35 @@ fn draw_line(
     depth: &mut [f32],
 ) {
     let steps = (b.0 - a.0).abs().max((b.1 - a.1).abs()).ceil().max(1.0) as usize;
-    for i in 0..=steps {
-        let t = i as f32 / steps as f32;
+    // Visit only the steps whose point can land on the image. A segment
+    // that grazes the camera plane projects to coordinates in the millions
+    // (or, before the near-plane clip, the trillions: KB-23, a snapshot
+    // that never returned), and walking every step of it to discard all but
+    // a few hundred is the hang. Each step's point is placed in f64, as the
+    // span is found: the step index and count are exact there (to 2^53
+    // steps, where f32 stops at 2^24) and the point lands within a hair of
+    // the true line, so a step outside the span's one-step margin is off
+    // the image and the pixels drawn are the ones walking every step draws.
+    let Some((t0, t1)) = visible_span(a, b, width, height) else {
+        return;
+    };
+    let first = ((t0 * steps as f64).floor() as usize).saturating_sub(1);
+    let last = (((t1 * steps as f64).ceil() as usize).saturating_add(1)).min(steps);
+    let (a, b) = (
+        (a.0 as f64, a.1 as f64, a.2 as f64),
+        (b.0 as f64, b.1 as f64, b.2 as f64),
+    );
+    for i in first..=last {
+        let t = i as f64 / steps as f64;
         let x = a.0 + (b.0 - a.0) * t;
         let y = a.1 + (b.1 - a.1) * t;
         let z_surface = if perspective {
             1.0 / ((1.0 - t) / a.2 + t / b.2)
         } else {
             a.2 + (b.2 - a.2) * t
-        };
+        } as f32;
         let z = z_surface - EDGE_DEPTH_BIAS * (1.0 + z_surface.abs());
-        if x < 0.0 || y < 0.0 || x >= width as f32 || y >= height as f32 {
+        if x < 0.0 || y < 0.0 || x >= width as f64 || y >= height as f64 {
             continue;
         }
         let idx = (y as usize) * (width as usize) + (x as usize);
@@ -633,6 +770,21 @@ pub struct DocumentItem {
     pub mesh: tessellate::RenderMesh,
     pub pose: Transform,
     pub sid: u64,
+    /// The document's decoded textures, shared by every item of one
+    /// [`document_items`] call.
+    pub textures: Arc<TextureSet>,
+}
+
+impl DocumentItem {
+    /// This item as a render item.
+    pub fn as_render_item(&self) -> RenderItem<'_> {
+        RenderItem {
+            mesh: &self.mesh,
+            pose: self.pose,
+            sid: self.sid,
+            textures: Some(&self.textures),
+        }
+    }
 }
 
 /// Whether a node, or any group above it, is user-hidden (SketchUp "Hide" —
@@ -735,6 +887,7 @@ pub fn document_items_hiding(doc: &kernel::Document, hidden: &HiddenLeaves) -> V
             mesh,
             pose: Transform::IDENTITY,
             sid,
+            textures: Arc::default(),
         });
     }
     for instance in doc.instance_ids() {
@@ -779,10 +932,27 @@ pub fn document_items_hiding(doc: &kernel::Document, hidden: &HiddenLeaves) -> V
                 mesh,
                 pose: local.then(&pose),
                 sid,
+                textures: Arc::default(),
             });
         }
     }
+    attach_textures(doc, &mut items);
     items
+}
+
+/// Decode each textured material `items` actually draw, once, and share
+/// the set across every item.
+fn attach_textures(doc: &kernel::Document, items: &mut [DocumentItem]) {
+    let used = items
+        .iter()
+        .flat_map(|it| it.mesh.groups.iter().filter_map(|g| g.material));
+    let textures = TextureSet::for_materials(doc.materials(), used);
+    if !textures.is_empty() || !textures.undecodable.is_empty() {
+        let shared = Arc::new(textures);
+        for it in items.iter_mut() {
+            it.textures = Arc::clone(&shared);
+        }
+    }
 }
 
 /// The items a `selection` draws (`hew.view.line_drawing`'s `selection`):
@@ -846,9 +1016,15 @@ pub fn selection_items_hiding(
             let Ok(mesh) = tessellate::tessellate_with(obj, doc.materials(), inherited) else {
                 continue;
             };
-            items.push(DocumentItem { mesh, pose, sid });
+            items.push(DocumentItem {
+                mesh,
+                pose,
+                sid,
+                textures: Arc::default(),
+            });
         }
     }
+    attach_textures(doc, &mut items);
     Ok(items)
 }
 
@@ -941,14 +1117,7 @@ pub fn render_document_thumbnail(doc: &kernel::Document, size: u32) -> Option<Ve
     if items.is_empty() {
         return None;
     }
-    let render_items: Vec<RenderItem> = items
-        .iter()
-        .map(|it| RenderItem {
-            mesh: &it.mesh,
-            pose: it.pose,
-            sid: it.sid,
-        })
-        .collect();
+    let render_items: Vec<RenderItem> = items.iter().map(DocumentItem::as_render_item).collect();
     let camera = Camera::standard_view(StandardView::Iso, document_bbox(doc));
     let rendered = render(&render_items, &camera, size, size).ok()?;
     Some(png::encode(&rendered.rgba, rendered.width, rendered.height))
@@ -1075,6 +1244,7 @@ mod tests {
                 mesh: &mesh,
                 pose: Transform::IDENTITY,
                 sid: 1,
+                textures: None,
             }],
             &camera,
             128,
@@ -1200,16 +1370,19 @@ mod tests {
                 mesh: &joists,
                 pose: Transform::IDENTITY,
                 sid: 9,
+                textures: None,
             },
             RenderItem {
                 mesh: &sheet[0],
                 pose: Transform::IDENTITY,
                 sid: 1,
+                textures: None,
             },
             RenderItem {
                 mesh: &sheet[1],
                 pose: Transform::IDENTITY,
                 sid: 1,
+                textures: None,
             },
         ];
         let r = render(&items, &ceiling_camera(), 128, 128).expect("renders");
@@ -1244,6 +1417,7 @@ mod tests {
             mesh: &mesh,
             pose: Transform::IDENTITY,
             sid: 1,
+            textures: None,
         }];
         let r = render(&items, &ceiling_camera(), 128, 128).expect("renders");
         let ink = [EDGE_COLOR[0], EDGE_COLOR[1], EDGE_COLOR[2], 255];
@@ -1260,6 +1434,7 @@ mod tests {
             mesh: &behind,
             pose: Transform::IDENTITY,
             sid: 1,
+            textures: None,
         }];
         let r = render(&items, &ceiling_camera(), 64, 64).expect("renders");
         assert!(r.ids.iter().all(|&i| i == 0));
@@ -1279,6 +1454,7 @@ mod tests {
                 mesh: &mesh,
                 pose: Transform::IDENTITY,
                 sid: 1,
+                textures: None,
             }],
             &camera,
             64,
@@ -1321,6 +1497,7 @@ mod tests {
                 mesh: &mesh,
                 pose: Transform::IDENTITY,
                 sid: 1,
+                textures: None,
             }],
             &camera,
             64,
@@ -1373,6 +1550,7 @@ mod tests {
                 mesh: &mesh,
                 pose: Transform::IDENTITY,
                 sid: 42,
+                textures: None,
             }],
             &camera,
             128,
@@ -1404,12 +1582,14 @@ mod tests {
             mesh: &mesh,
             pose: Transform::IDENTITY,
             sid: 42,
+            textures: None,
         };
         let opaque = render(&[item], &camera, 128, 128).expect("renders");
         let item = RenderItem {
             mesh: &mesh,
             pose: Transform::IDENTITY,
             sid: 42,
+            textures: None,
         };
         let clear =
             render_with_background(&[item], &camera, 128, 128, [0, 0, 0, 0]).expect("renders");
@@ -1444,6 +1624,7 @@ mod tests {
             mesh: &mesh,
             pose: Transform::IDENTITY,
             sid: 1,
+            textures: None,
         }];
         let a = render(&items, &camera, 96, 96).expect("renders");
         let b = render(&items, &camera, 96, 96).expect("renders");
@@ -1466,11 +1647,13 @@ mod tests {
                 mesh: &mesh,
                 pose: Transform::translation(Vec3::new(0.0, 2.0, 0.0)),
                 sid: 7,
+                textures: None,
             },
             RenderItem {
                 mesh: &mesh,
                 pose: Transform::IDENTITY,
                 sid: 9,
+                textures: None,
             },
         ];
         let r = render(&items, &camera, 96, 96).expect("renders");
@@ -1527,11 +1710,13 @@ mod perspective_tests {
                 mesh: &near_steep,
                 pose: Transform::IDENTITY,
                 sid: 111,
+                textures: None,
             },
             RenderItem {
                 mesh: &far_flat,
                 pose: Transform::IDENTITY,
                 sid: 222,
+                textures: None,
             },
         ];
         let r = render(&items, &camera, 400, 400).expect("renders");
@@ -1544,5 +1729,197 @@ mod perspective_tests {
             111,
             "the truly nearer steep triangle owns the pixel"
         );
+    }
+}
+
+/// KB-23: `hew.view.snapshot` never returned for some interior cameras. An
+/// edge that touched the camera plane projected to coordinates in the
+/// trillions, and `draw_line` walked every step of it.
+#[cfg(test)]
+mod line_hang_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// Runs `f` on a thread and fails the test if it takes over 20 s, so a
+    /// regression is a red test and not a stuck CI job.
+    fn within_deadline<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(Duration::from_secs(20))
+            .expect("render did not finish: a line walks every step of an off-screen span")
+    }
+
+    #[test]
+    fn a_line_that_grazes_the_camera_plane_finishes() {
+        // Endpoints a hair in front of the eye, metres to either side: the
+        // screen-space segment is millions to trillions of pixels long, and
+        // only a few dozen of them are on the image.
+        within_deadline(|| {
+            for reach in [5.0e6f32, 3.0e15] {
+                let (w, h) = (100u32, 100u32);
+                let mut rgba = vec![0u8; (w * h * 4) as usize];
+                let mut depth = vec![f32::INFINITY; (w * h) as usize];
+                draw_line(
+                    (-reach, 50.0, 1.0),
+                    (reach, 50.0, 1.0),
+                    false,
+                    w,
+                    h,
+                    &mut rgba,
+                    &mut depth,
+                );
+                if reach < 1.0e7 {
+                    // Still resolvable in f32: the line crosses the image.
+                    assert!(
+                        (0..100).any(|x| rgba[(50 * 100 + x) * 4..(50 * 100 + x) * 4 + 4]
+                            == EDGE_COLOR),
+                        "the line shows on row 50"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn a_non_finite_line_draws_nothing() {
+        let (w, h) = (10u32, 10u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        let mut depth = vec![f32::INFINITY; (w * h) as usize];
+        within_deadline(move || {
+            draw_line(
+                (f32::NEG_INFINITY, 5.0, 1.0),
+                (f32::INFINITY, 5.0, 1.0),
+                false,
+                w,
+                h,
+                &mut rgba,
+                &mut depth,
+            );
+            assert!(rgba.iter().all(|&b| b == 0));
+        });
+    }
+
+    /// Every step of a line, the walk `draw_line` restricts to the image.
+    fn full_walk(
+        a: (f32, f32, f32),
+        b: (f32, f32, f32),
+        perspective: bool,
+        w: u32,
+        h: u32,
+        rgba: &mut [u8],
+        depth: &mut [f32],
+    ) {
+        let steps = (b.0 - a.0).abs().max((b.1 - a.1).abs()).ceil().max(1.0) as usize;
+        let (a, b) = (
+            (a.0 as f64, a.1 as f64, a.2 as f64),
+            (b.0 as f64, b.1 as f64, b.2 as f64),
+        );
+        for i in 0..=steps {
+            let t = i as f64 / steps as f64;
+            let x = a.0 + (b.0 - a.0) * t;
+            let y = a.1 + (b.1 - a.1) * t;
+            let zs = if perspective {
+                1.0 / ((1.0 - t) / a.2 + t / b.2)
+            } else {
+                a.2 + (b.2 - a.2) * t
+            } as f32;
+            let z = zs - EDGE_DEPTH_BIAS * (1.0 + zs.abs());
+            if x < 0.0 || y < 0.0 || x >= w as f64 || y >= h as f64 {
+                continue;
+            }
+            let idx = (y as usize) * (w as usize) + (x as usize);
+            if z <= depth[idx] {
+                depth[idx] = z;
+                rgba[idx * 4..idx * 4 + 4].copy_from_slice(&EDGE_COLOR);
+            }
+        }
+    }
+
+    /// A line of more than 2^24 steps: an f32 step parameter cannot tell
+    /// neighboring steps apart there, nor place a point to the pixel. The
+    /// walk still draws a solid run across the image, and the very pixels
+    /// walking every step draws.
+    #[test]
+    fn a_line_of_more_than_two_to_the_24_steps_draws_as_the_full_walk() {
+        let (w, h) = (64u32, 48u32);
+        let n = (w * h) as usize;
+        for (a, b) in [
+            ((-3.0e7f32, 24.5f32, 1.0f32), (3.0e7f32, 24.5f32, 2.0f32)),
+            ((-2.1e7f32, 3.25, 1.0), (2.3e7f32, 40.75, 3.0)),
+            ((40.5f32, -1.9e7, 2.0), (12.5f32, 2.2e7, 1.0)),
+        ] {
+            let steps = (b.0 - a.0).abs().max((b.1 - a.1).abs()).ceil() as usize;
+            assert!(steps > 1 << 24, "{steps}");
+            for perspective in [false, true] {
+                let (mut r1, mut d1) = (vec![0u8; n * 4], vec![f32::INFINITY; n]);
+                let (mut r2, mut d2) = (r1.clone(), d1.clone());
+                draw_line(a, b, perspective, w, h, &mut r1, &mut d1);
+                full_walk(a, b, perspective, w, h, &mut r2, &mut d2);
+                assert!(r1 == r2, "{a:?} -> {b:?} perspective={perspective}");
+                assert_eq!(d1, d2);
+            }
+        }
+        // The horizontal one runs across its row: a column missed where a
+        // whole-pixel step rounds just short of it, never two side by side
+        // (an f32 step there lands every fourth pixel or so).
+        let (a, b) = ((-3.0e7f32, 24.5f32, 1.0f32), (3.0e7f32, 24.5f32, 2.0f32));
+        let (mut rgba, mut depth) = (vec![0u8; n * 4], vec![f32::INFINITY; n]);
+        draw_line(a, b, false, w, h, &mut rgba, &mut depth);
+        let drawn = |x: usize| rgba[(24 * w as usize + x) * 4..][..4] == EDGE_COLOR;
+        let gaps: Vec<usize> = (1..w as usize)
+            .filter(|&x| !drawn(x - 1) && !drawn(x))
+            .collect();
+        assert!(
+            gaps.is_empty(),
+            "two columns in a row not drawn at {gaps:?}"
+        );
+    }
+
+    /// Walking only the visible span draws exactly the pixels the full walk
+    /// does.
+    #[test]
+    fn restricting_the_walk_does_not_change_a_pixel() {
+        let (w, h) = (64u32, 48u32);
+        // A fixed pseudo-random spread of segments: inside, crossing,
+        // outside, axis-aligned, single-point, and far off the image.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f32 / (1u64 << 53) as f32
+        };
+        for case in 0..400 {
+            let span = if case % 5 == 0 { 4000.0 } else { 160.0 };
+            let mut pt = |z0: f32| {
+                (
+                    (next() - 0.5) * span + 32.0,
+                    (next() - 0.5) * span + 24.0,
+                    z0 + next() * 4.0,
+                )
+            };
+            let (a, b) = (pt(0.5), pt(0.5));
+            let (a, b) = match case % 7 {
+                0 => ((a.0, a.1, a.2), (b.0, a.1, b.2)),
+                1 => ((a.0, a.1, a.2), (a.0, b.1, b.2)),
+                2 => (a, a),
+                _ => (a, b),
+            };
+            for perspective in [false, true] {
+                let n = (w * h) as usize;
+                let (mut r1, mut d1) = (vec![0u8; n * 4], vec![f32::INFINITY; n]);
+                let (mut r2, mut d2) = (r1.clone(), d1.clone());
+                draw_line(a, b, perspective, w, h, &mut r1, &mut d1);
+                full_walk(a, b, perspective, w, h, &mut r2, &mut d2);
+                assert_eq!(
+                    r1, r2,
+                    "case {case} {a:?} -> {b:?} perspective={perspective}"
+                );
+                assert_eq!(d1, d2);
+            }
+        }
     }
 }

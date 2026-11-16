@@ -145,11 +145,7 @@ fn a_transparent_background_clears_untouched_pixels_only() {
     .unwrap();
     let render_items: Vec<_> = items
         .iter()
-        .map(|it| softrender::RenderItem {
-            mesh: &it.mesh,
-            pose: it.pose,
-            sid: it.sid,
-        })
+        .map(softrender::DocumentItem::as_render_item)
         .collect();
     let cam = softrender::Camera::standard_view(
         softrender::StandardView::Iso,

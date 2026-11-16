@@ -1336,8 +1336,10 @@ dependencies = [
 name = "softrender"
 version = "1.4.0"
 dependencies = [
+ "jpeg-decoder",
  "kernel",
  "miniz_oxide 0.8.9",
+ "png",
  "tessellate",
 ]
 

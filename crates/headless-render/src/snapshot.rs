@@ -41,11 +41,7 @@ pub fn snapshot(doc: &Document, params: &SnapshotParams) -> Result<SnapshotResul
 
     let render_items: Vec<softrender::RenderItem> = items
         .iter()
-        .map(|it| softrender::RenderItem {
-            mesh: &it.mesh,
-            pose: it.pose,
-            sid: it.sid,
-        })
+        .map(softrender::DocumentItem::as_render_item)
         .collect();
 
     let camera = resolve_camera(doc, params, scene.as_ref(), &hidden, &items);

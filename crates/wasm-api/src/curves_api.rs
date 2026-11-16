@@ -2775,11 +2775,7 @@ pub fn render_profile_thumbnail(shape_json: &str, px: u32) -> Result<Vec<u8>, Ap
     let items = softrender::document_items(&doc);
     let render_items: Vec<softrender::RenderItem> = items
         .iter()
-        .map(|it| softrender::RenderItem {
-            mesh: &it.mesh,
-            pose: it.pose,
-            sid: it.sid,
-        })
+        .map(softrender::DocumentItem::as_render_item)
         .collect();
     // Looking along +x at the end face from outside; the corner (y = 0,
     // z = side) sits up and to the right of the view's center.
