@@ -332,7 +332,7 @@ export class PathArrayTool implements Tool {
    *  never a refusal; null when it cannot be worked out. */
   private _overlapNote(spec: ArraySpec, nodes: NodeRef[]): string | null {
     try {
-      const bounds = worldBoundsForSelection(this.wasmScene, nodes)
+      const bounds = worldBoundsForSelection(this.wasmScene, nodes, { lines: false })
       if (bounds === null) return null
       const { points } = pathHighlight(this.wasmScene, spec.path)
       if (points.length < 6) return null
