@@ -15,6 +15,16 @@ cd "$(dirname "$0")/.."
 # `HEW_PREVIEW=1 <command>`. Nothing below skips the production half.
 # ---------------------------------------------------------------------------
 unset HEW_PREVIEW
+# The flag is a cfg, so in one target directory each build overwrites the
+# other's artifacts for those crates, and every gate run would recompile
+# them twice (and the next run twice again). The preview steps build into
+# their own directory instead, so both stay cached side by side.
+case "${CARGO_TARGET_DIR:-}" in
+  "") PREVIEW_TARGET="$PWD/target/preview" ;;
+  /*) PREVIEW_TARGET="$CARGO_TARGET_DIR/preview" ;;
+  *) PREVIEW_TARGET="$PWD/$CARGO_TARGET_DIR/preview" ;;
+esac
+TAURI_PREVIEW_TARGET="$PWD/shells/tauri/src-tauri/target/preview"
 # The crates whose code the flag changes: crates/api (where cfg(hew_preview)
 # is set) and everything that links it. Every other crate builds the same
 # either way, so its tests run once.
@@ -30,11 +40,12 @@ preview_crates() {
 #   rust    packaging tests, cargo fmt, clippy, cargo test; the production
 #           build for the workspace, then the preview build for the crates
 #           the flag changes
-#   wasm    build the kernel's two WASM flavors (scripts/wasm-flavors.sh):
-#           the production module optimized, as it ships (CI builds that as
-#           the `wasm-release` job; its test lanes use unoptimized builds of
-#           both flavors from the `wasm` job instead), and the preview module
-#           unoptimized, for the tests only
+#   wasm    build the kernel's two WASM flavors (scripts/wasm-flavors.sh),
+#           both without wasm-opt: nothing this gate tests needs the
+#           size-optimized module, and wasm-opt is most of a wasm-pack
+#           build's time. The module that ships is built by the release
+#           workflow and by CI's `wasm-release` job, which holds it to its
+#           size ceiling
 #   web     typecheck, lint, i18n, vitest in both builds (each held to
 #           app/scripts/check-unit-skips.mjs), then the production app build
 #           and the site (needs both flavors in target/wasm-flavors; leaves
@@ -89,11 +100,11 @@ if lane rust; then
   PREVIEW_CRATES="$(preview_crates)"
   echo "=== HEW_PREVIEW=1 cargo clippy $PREVIEW_CRATES--all-targets -- -D warnings (preview) ==="
   # shellcheck disable=SC2086 # one -p per crate
-  HEW_PREVIEW=1 cargo clippy $PREVIEW_CRATES --all-targets -- -D warnings
+  HEW_PREVIEW=1 CARGO_TARGET_DIR="$PREVIEW_TARGET" cargo clippy $PREVIEW_CRATES --all-targets -- -D warnings
 
   echo "=== HEW_PREVIEW=1 cargo test $PREVIEW_CRATES(preview) ==="
   # shellcheck disable=SC2086
-  HEW_PREVIEW=1 cargo test $PREVIEW_CRATES
+  HEW_PREVIEW=1 CARGO_TARGET_DIR="$PREVIEW_TARGET" cargo test $PREVIEW_CRATES
 fi
 
 # Only when asked for by name: the rust and tauri lanes already run these.
@@ -109,11 +120,10 @@ fi
 
 if lane wasm; then
   # Each flavor is built once and copied into place by the lanes that use
-  # it. The production module is optimized because the web lane's app build
-  # ships it; the preview module only serves the tests, so it skips wasm-opt
-  # (most of a wasm-pack build's time).
-  echo "=== WASM, production flavor (optimized) ==="
-  scripts/wasm-flavors.sh build production web
+  # it. Both skip wasm-opt (most of a wasm-pack build's time): the gate's
+  # app build is a check, not the artifact that ships.
+  echo "=== WASM, production flavor (no wasm-opt) ==="
+  scripts/wasm-flavors.sh build production web --no-opt
   echo "=== WASM, preview flavor (HEW_PREVIEW=1, no wasm-opt) ==="
   scripts/wasm-flavors.sh build preview web --no-opt
   # The dev server's default is the preview build.
@@ -179,8 +189,12 @@ if lane web; then
   done
   rm -f "$UNIT_REPORT"
 
+  # The kernel here is the unoptimized test module, which is larger than
+  # the shipped one: HEW_UNOPTIMIZED_WASM=1 tells app/scripts/build-wasm.mjs
+  # to build on it as it is, and raises the precache ceiling in
+  # app/vite.config.ts, for this build only.
   echo "=== pnpm --dir app build (production) ==="
-  pnpm --dir app build
+  HEW_UNOPTIMIZED_WASM=1 pnpm --dir app build
   # Back to the preview module, the dev server's default build.
   scripts/wasm-flavors.sh use preview
 
@@ -227,10 +241,10 @@ if lane tauri; then
   cargo test --manifest-path "$TAURI_MANIFEST"
 
   echo "=== HEW_PREVIEW=1 cargo clippy --all-targets -- -D warnings (tauri shell, preview) ==="
-  HEW_PREVIEW=1 cargo clippy --manifest-path "$TAURI_MANIFEST" --all-targets -- -D warnings
+  HEW_PREVIEW=1 CARGO_TARGET_DIR="$TAURI_PREVIEW_TARGET" cargo clippy --manifest-path "$TAURI_MANIFEST" --all-targets -- -D warnings
 
   echo "=== HEW_PREVIEW=1 cargo test (tauri shell, preview) ==="
-  HEW_PREVIEW=1 cargo test --manifest-path "$TAURI_MANIFEST"
+  HEW_PREVIEW=1 CARGO_TARGET_DIR="$TAURI_PREVIEW_TARGET" cargo test --manifest-path "$TAURI_MANIFEST"
 fi
 
 echo "verify: all green ($LANE)"

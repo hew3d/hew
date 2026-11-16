@@ -31,6 +31,10 @@
 // Most of this module is exercised only on Linux; macOS and Windows compile
 // it for the shared types and the unit tests.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
+// On Linux, a build without the updater (see build.rs) has no reader either.
+// Scoped to Linux so that no build gets `dead_code` allowed twice, which
+// clippy rejects (`duplicated_attributes`).
+#![cfg_attr(all(target_os = "linux", not(hew_updater)), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

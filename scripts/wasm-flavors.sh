@@ -10,11 +10,15 @@
 #   build <production|preview> <web|nodejs> [--no-opt]
 #       wasm-pack into target/wasm-flavors/<flavor>/<target>/, with HEW_PREVIEW
 #       set for preview and REMOVED from the environment for production, and
-#       a `preview-build` stamp ("1" or "0") beside the package.
+#       a `preview-build` stamp ("1" or "0") beside the package. A --no-opt
+#       build also leaves a `no-opt` stamp.
 #   use <production|preview>
 #       copy the web package into app/src/wasm/pkg (what Vite, Vitest and
 #       Playwright load) and freshen its mtimes so app/scripts/build-wasm.mjs
-#       does not rebuild over it.
+#       does not rebuild over it. A --no-opt package gets that script's
+#       `dev-build` mark, so a later plain `pnpm --dir app build` rebuilds
+#       rather than bundle an unoptimized kernel (the gate's own app build
+#       opts in with HEW_UNOPTIMIZED_WASM=1).
 #   use-node <production|preview>
 #       copy the Node package into tools/replay-runner/pkg-node.
 #
@@ -25,6 +29,15 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cd "$(dirname "$0")/.."
 
 STASH="target/wasm-flavors"
+
+# A relative CARGO_TARGET_DIR would resolve against wasm-pack's crate
+# directory, not this one; make the preview directory absolute from here, as
+# scripts/verify.sh does for its cargo steps.
+case "${CARGO_TARGET_DIR:-}" in
+  "") PREVIEW_TARGET="$PWD/target/preview" ;;
+  /*) PREVIEW_TARGET="$CARGO_TARGET_DIR/preview" ;;
+  *) PREVIEW_TARGET="$PWD/$CARGO_TARGET_DIR/preview" ;;
+esac
 
 die() { echo "wasm-flavors: $*" >&2; exit 1; }
 
@@ -50,17 +63,26 @@ case "$cmd" in
     rm -rf "$out"
     # NB: wasm-pack's --out-dir is relative to the crate dir.
     if [ "$flavor" = preview ]; then
-      HEW_PREVIEW=1 wasm-pack build crates/wasm-api --target "$target" "$@" --out-dir "../../$out"
+      # Its own cargo target directory, so the two flavors do not overwrite
+      # each other's artifacts and an unchanged kernel is not recompiled.
+      HEW_PREVIEW=1 CARGO_TARGET_DIR="$PREVIEW_TARGET" wasm-pack build crates/wasm-api --target "$target" "$@" --out-dir "../../$out"
       echo 1 > "$out/preview-build"
     else
       env -u HEW_PREVIEW wasm-pack build crates/wasm-api --target "$target" "$@" --out-dir "../../$out"
       echo 0 > "$out/preview-build"
     fi
+    case " $* " in *" --no-opt "*) : > "$out/no-opt" ;; esac
     echo "wasm-flavors: built $flavor/$target"
     ;;
   use)
     flavor="${2:-}"; flavor_ok "$flavor"
     copy_into "$STASH/$flavor/web" app/src/wasm/pkg
+    # The mark names the module by its mtime, as app/scripts/build-wasm.mjs
+    # reads it, so it is written after copy_into has freshened the files.
+    if [ -f app/src/wasm/pkg/no-opt ]; then
+      node -e 'const fs = require("fs"); fs.writeFileSync(process.argv[2], String(fs.statSync(process.argv[1]).mtimeMs))' \
+        app/src/wasm/pkg/wasm_api_bg.wasm app/src/wasm/pkg/dev-build
+    fi
     echo "wasm-flavors: app/src/wasm/pkg is the $flavor module"
     ;;
   use-node)

@@ -63,7 +63,8 @@ scripts/verify.sh
 ```
 
 It covers Rust formatting and Clippy (with warnings denied), the whole Rust
-test suite, a release WASM build, the app's type-check/test/build steps, and
+test suite, a WASM build of the kernel (without `wasm-opt`; CI builds the
+size-optimized module that ships), the app's type-check/test/build steps, and
 the Tauri host crate's fmt/clippy. It is deliberately dependency-light and
 fast, so it does **not** run the browser- and runner-heavy CI lanes — the
 replay gate and the Playwright E2E suite. A green `verify.sh` is therefore
@@ -493,7 +494,7 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 HEW_PREVIEW=1 cargo clippy / cargo test   (the crates the flag changes)
-scripts/wasm-flavors.sh build production web; ... build preview web --no-opt
+scripts/wasm-flavors.sh build production web --no-opt; ... build preview web --no-opt
 pnpm --dir app typecheck && pnpm --dir app test (both builds) && pnpm --dir app build
 pnpm --dir site check && pnpm --dir site build
 ```
@@ -602,8 +603,8 @@ it when it is the other flavor, so `pnpm --dir app dev` and
 the `wasm-flavors.sh` lines. One slot holds one flavor, so each switch is
 a rebuild; `wasm-flavors.sh` keeps both built side by side, as the gate
 does, and `use` swaps between them in seconds. The dev server's own
-builds skip `wasm-opt`, and `pnpm --dir app build` rebuilds over one
-rather than bundle it.
+builds skip `wasm-opt`, as the gate's do, and `pnpm --dir app build`
+rebuilds over either rather than bundle an unoptimized kernel.
 
 **Determinism and replay.** The kernel is required to be bit-for-bit
 deterministic — the same input produces the same output on every machine,

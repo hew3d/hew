@@ -470,6 +470,16 @@ jobs:
           scripts/wasm-flavors.sh build production web
           scripts/wasm-flavors.sh use production
 
+      # The shipped module must fit the service worker's precache ceiling
+      # (maximumFileSizeToCacheInBytes in app/vite.config.ts). The gate's own
+      # app build uses the unoptimized module and a raised ceiling, so this
+      # is where kernel growth past the limit turns a PR red.
+      - name: Optimized kernel fits the precache ceiling (16 MB)
+        run: |
+          size="$(stat -c %s app/src/wasm/pkg/wasm_api_bg.wasm)"
+          echo "wasm_api_bg.wasm: $size bytes"
+          [ "$size" -le $((16 * 1024 * 1024)) ]
+
       - name: Upload optimized kernel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

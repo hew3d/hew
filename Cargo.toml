@@ -95,6 +95,17 @@ dae-parser = { path = "crates/vendor/dae-parser" }
 png = { version = "0.18", default-features = false }
 jpeg-decoder = { version = "0.3", default-features = false }
 
+# `cargo test` compiles the workspace optimized. The suite is dominated by
+# geometry-heavy specs and property tests, which run an order of magnitude
+# slower unoptimized; the extra compile time is a fraction of what the run
+# saves. Debug assertions and overflow checks stay on (this profile inherits
+# `dev`), so a test still trips everything a debug build would. Line tables
+# keep file:line in a panic backtrace without the link cost of full debug
+# info. `cargo build` and `cargo clippy` are unaffected.
+[profile.test]
+opt-level = 2
+debug = "line-tables-only"
+
 [profile.release]
 # WASM payload size matters for the web shell.
 opt-level = "s"

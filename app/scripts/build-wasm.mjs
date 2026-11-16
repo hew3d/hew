@@ -26,7 +26,10 @@
 // `--dev` builds skip wasm-opt (`--no-opt`), as the gate's preview builds do:
 // it is the slowest step and only a shipped module needs it. Such a build
 // leaves a `dev-build` mark beside the module, and a later `build` rebuilds
-// over a marked module rather than bundle an unoptimized kernel.
+// over a marked module rather than bundle an unoptimized kernel. The gate's
+// unoptimized modules carry the same mark (scripts/wasm-flavors.sh use); its
+// own app build, which ships nothing, sets HEW_UNOPTIMIZED_WASM=1 to build
+// on one as it is.
 
 import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -128,7 +131,8 @@ function devBuilt() {
     return false;
   }
 }
-const unoptimized = !dev && fresh && have === want && devBuilt();
+const acceptUnoptimized = process.env.HEW_UNOPTIMIZED_WASM === "1";
+const unoptimized = !dev && !acceptUnoptimized && fresh && have === want && devBuilt();
 if (fresh && have === want && !unoptimized) {
   console.log(`[build-wasm] kernel WASM is up to date (${want}) — skipping build`);
   process.exit(0);
@@ -142,7 +146,7 @@ console.log(
       : !fresh
         ? `[build-wasm] kernel source changed — rebuilding the ${want} module…`
         : unoptimized
-          ? `[build-wasm] the kernel WASM in place was built for the dev server, without optimization — rebuilding the ${want} module…`
+          ? `[build-wasm] the kernel WASM in place was built without optimization (for the dev server or the gate) — rebuilding the ${want} module…`
           : `[build-wasm] the kernel WASM in place is ${have ?? "not a module this build can read"}; this command needs ${want} — rebuilding…`,
 );
 

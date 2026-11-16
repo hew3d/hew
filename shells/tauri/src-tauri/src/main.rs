@@ -30,8 +30,7 @@ mod fly_cursor;
 mod fonts;
 // How this copy was installed, and so how it updates. Only the updater reads
 // it; a build without it (no `updater` feature, or a preview build, see
-// build.rs) leaves it unused.
-#[cfg_attr(not(hew_updater), allow(dead_code))]
+// build.rs) leaves it unused, which the module itself allows for.
 mod install_channel;
 mod menu_labels;
 // The Preview wall in the native menu: a production build prunes every
