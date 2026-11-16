@@ -171,6 +171,8 @@ function makeScene(opts: {
     component_rendered_sketches: () => new BigUint64Array(),
     component_sketch_frame: () => Float64Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]),
     session_placements: () => BigUint64Array.from(sessionPlacements),
+    component_ids: () =>
+      BigUint64Array.from([...new Set(Object.values(instances).map((i) => i.def))]),
     sketch_ids: () => new BigUint64Array(),
     guide_ids: () => new BigUint64Array(),
     guide_dash: () => undefined,
@@ -1770,6 +1772,7 @@ describe('SceneRenderer — definition-owned sketch rendering (component-edit-pa
     const scene = makeScene({ instances }) as unknown as Record<string, unknown>
     // Sketch 500 is the definition's own (identity); 501 belongs to a nested
     // definition placed +3 in y, with a fill.
+    scene.component_rendered_sketches = () => BigUint64Array.from([500n])
     scene.instance_sketch_placements = () =>
       placementsOfSketches([500n, 501n], [
         1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
@@ -1787,6 +1790,70 @@ describe('SceneRenderer — definition-owned sketch rendering (component-edit-pa
     expect(Array.from(fatLinePositions(g))).toEqual([0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 4, 0])
     const fill = g.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
     expect(fill.matrix.elements[13]).toBe(3)
+  })
+
+  /** One instance (10n) whose drawing places the SAME sketch (500n, one
+   *  region) twice at different poses — a component holding two instances of
+   *  a drawn component. */
+  function makeTwiceNestedScene(): WasmScene {
+    const instances = {
+      '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true } },
+    }
+    const scene = makeScene({ instances }) as unknown as Record<string, unknown>
+    scene.component_rendered_sketches = () => BigUint64Array.from([500n])
+    scene.instance_sketch_placements = () =>
+      placementsOfSketches([500n, 500n], [
+        1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+        1, 0, 0, 4, 0, 1, 0, 0, 0, 0, 1, 0,
+      ])
+    scene.sketch_lines = () => new Float32Array([0, 0, 0, 1, 0, 0])
+    scene.sketch_regions = () => BigUint64Array.from([1n])
+    scene.region_boundary = () => new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0])
+    return scene as unknown as WasmScene
+  }
+
+  it('keeps one fill per placement when the same nested sketch is placed twice, and disposes and dims both', () => {
+    setThemeSetting('dark')
+    const renderer = new SceneRenderer(new THREE.Scene(), makeTwiceNestedScene())
+    renderer.refresh()
+    const g = renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group
+    const fills = g.children.filter((c) => (c as THREE.Mesh).isMesh === true && !('isLineSegments2' in c)) as THREE.Mesh[]
+    expect(fills).toHaveLength(2)
+    expect(fills[0].matrix.elements[12]).toBe(0)
+    expect(fills[1].matrix.elements[12]).toBe(4)
+
+    // Both dim with the edit context (sibling of the edited instance).
+    renderer.setActiveContext(new Set([2n]), new Set([99n]))
+    for (const f of fills) {
+      expect((f.material as THREE.MeshBasicMaterial).opacity).toBeLessThan(1)
+    }
+    const opacities = fills.map((f) => (f.material as THREE.Material).opacity)
+    expect(opacities[0]).toBe(opacities[1])
+
+    // Both dispose on the rebuild.
+    const spies = fills.map((f) => vi.spyOn(f.geometry, 'dispose'))
+    renderer.refreshAllSketches()
+    for (const sp of spies) expect(sp).toHaveBeenCalled()
+  })
+
+  it('skips the per-instance placement walk when no definition draws anything', () => {
+    const scene = makeDefSketchScene(false) as unknown as Record<string, unknown>
+    const walk = vi.fn(scene.instance_sketch_placements as (id: bigint) => unknown)
+    scene.instance_sketch_placements = walk
+    const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
+    renderer.refresh()
+    expect(walk).not.toHaveBeenCalled()
+  })
+
+  it('a targeted refresh leaves the rebuilt def-sketch lines and fills clipped by the active section', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), makeDefSketchScene(true))
+    renderer.refresh()
+    renderer.setSectionPlane({ origin: [0.5, 0, 0], normal: [1, 0, 0], active: true })
+    renderer.refreshTouched({ instanceIds: [10n] })
+    const g = renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group
+    const mats = g.children.map((c) => (c as THREE.Mesh).material as THREE.Material)
+    expect(mats.length).toBeGreaterThan(1)
+    for (const m of mats) expect(m.clippingPlanes?.length).toBe(1)
   })
 
   it('an undone/deleted def sketch (component_member_sketches no longer reports it) renders NO group', () => {
@@ -2353,6 +2420,7 @@ describe('SceneRenderer — section widget coverage (D1, section-plane-polish)',
       instance_pose: () => undefined,
       component_member_objects: () => new BigUint64Array(),
       component_member_sketches: () => new BigUint64Array(),
+      component_ids: () => new BigUint64Array(),
       sketch_ids: () => new BigUint64Array(),
       guide_ids: () => new BigUint64Array(),
     } as unknown as WasmScene
@@ -2722,6 +2790,7 @@ describe('SceneRenderer — untextured painted materials', () => {
         instance_expanded_local_poses: () => new Float64Array(),
         instance_expanded_shown: () => new Uint8Array(),
         component_member_sketches: () => new BigUint64Array(),
+        component_ids: () => new BigUint64Array(),
         sketch_ids: () => new BigUint64Array(),
         guide_ids: () => new BigUint64Array(),
         material_info: () => materialInfo,

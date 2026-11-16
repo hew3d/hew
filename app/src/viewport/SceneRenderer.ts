@@ -495,8 +495,10 @@ interface DefSketchGroup {
   linesAttached: LineSegments2 | null
   /** Lines of imported sketches (plain edge ink), when any. */
   linesPlain: LineSegments2 | null
-  /** Fill meshes, keyed `${sketchHandle}:${regionHandle}` (region handles
-   *  are per-sketch, so they can collide across sketches). */
+  /** Fill meshes, keyed `${placementIndex}:${sketchHandle}:${regionHandle}`.
+   *  Region handles are per-sketch, and the same nested sketch can be placed
+   *  more than once under one instance (a component holding two instances of
+   *  a drawn component), so the placement index keeps every fill. */
   regionMeshes: Map<string, THREE.Mesh>
 }
 
@@ -3025,6 +3027,10 @@ export class SceneRenderer {
    */
   private _refreshDefSketches(): void {
     this._clearDefSketchGroups()
+    if (!this._mayDrawDefinitionSketches()) {
+      this._reassertSectionClip()
+      return
+    }
     for (const instanceId of this.wasmScene.instance_ids()) {
       const pose = this.wasmScene.instance_pose(instanceId)
       if (pose === undefined) continue
@@ -3043,6 +3049,28 @@ export class SceneRenderer {
         placements.free()
       }
     }
+    // The groups above were built with fresh, unclipped materials; the
+    // callers' own section-clip reassertion may have run before this rebuild
+    // (`refreshTouched` syncs materialized instances first), so reassert the
+    // active cut onto them here, whichever caller got us here.
+    this._reassertSectionClip()
+  }
+
+  /**
+   * Cheap conservative test of whether any instance could draw lines from
+   * inside a definition (mirrors the kernel's `has_definition_drawing`, which
+   * the wasm surface does not expose): some definition renders a sketch
+   * (`component_rendered_sketches` is the session's live drawing while a
+   * definition is on loan, so an open component session counts too).
+   * Nested definitions are components themselves, so checking each one
+   * covers every placement. `false` lets a refresh skip the per-instance
+   * placement walk entirely.
+   */
+  private _mayDrawDefinitionSketches(): boolean {
+    for (const c of this.wasmScene.component_ids()) {
+      if (this.wasmScene.component_rendered_sketches(c).length > 0) return true
+    }
+    return false
   }
 
   /** Dispose and clear every rendered def-sketch group. */
@@ -3111,7 +3139,7 @@ export class SceneRenderer {
         mesh.matrix.copy(rowMajorToMatrix4(placement))
         mesh.matrixWorldNeedsUpdate = true
         group.add(mesh)
-        regionMeshes.set(`${sketchHandle}:${regionHandle}`, mesh)
+        regionMeshes.set(`${k}:${sketchHandle}:${regionHandle}`, mesh)
       }
     }
 
