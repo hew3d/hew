@@ -81,6 +81,8 @@ function setup(scene: Scene, api: ViewportApi = makeApi()) {
     scene,
     viewportApi,
     docRev: 0,
+    hiddenKeys: new Set<string>(),
+    hiddenTagPaths: new Set<string>(),
     display: { grid: true, axes: true, guides: true },
     setDisplay: vi.fn(),
     setViewStyle: vi.fn(),
@@ -296,5 +298,24 @@ describe('useScenesController', () => {
     expect(hook.result.current.drift?.camera).toBe(true)
     expect(hook.result.current.drift?.staleRefs).toBe(1)
     expect(hook.result.current.activeDrifted).toBe(true)
+  })
+
+  it('refreshes drift when a tag or node is hidden or shown, with no document change', () => {
+    const scene = makeScene([{ sid: 1, name: 'A', props: PROP_ALL }])
+    const { hook, deps } = setup(scene)
+    act(() => hook.result.current.activate(1))
+    const drift = scene.scene_drift as ReturnType<typeof vi.fn>
+    drift.mockReturnValue('{"hiddenTags":true,"staleRefs":0}')
+    drift.mockClear()
+    hook.rerender({ ...deps, hiddenTagPaths: new Set(['Hardware']) })
+    expect(drift).toHaveBeenCalledTimes(1)
+    expect(hook.result.current.drift?.hiddenTags).toBe(true)
+    expect(hook.result.current.activeDrifted).toBe(true)
+    drift.mockReturnValue('{"hiddenTags":false,"staleRefs":0}')
+    hook.rerender({ ...deps, hiddenTagPaths: new Set() })
+    expect(hook.result.current.drift?.hiddenTags).toBe(false)
+    drift.mockClear()
+    hook.rerender({ ...deps, hiddenTagPaths: new Set(), hiddenKeys: new Set(['1:5']) })
+    expect(drift).toHaveBeenCalledTimes(1)
   })
 })

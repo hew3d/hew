@@ -62,7 +62,18 @@ export class CameraRig {
   active: THREE.PerspectiveCamera | THREE.OrthographicCamera
   projection: Projection
 
+  /** The camera's STORED vertical angle (what `CameraState.fov_deg`, the
+   * readout and the fov gestures speak). `perspective.fov` is what the
+   * renderer gets: equal to this unless a scene frame fit is active. */
+  private storedFovDeg = 45
+  /** The stored aspect ratio (width/height) of the scene camera being shown,
+   * or null for a free camera. See `setFrameAspect`. */
+  private frameRatio: number | null = null
+  /** The viewport's own width / height, kept by `setAspect`. */
+  private viewportRatio: number
+
   constructor(aspect: number, near = 0.01, far = 100) {
+    this.viewportRatio = aspect
     this.perspective = new THREE.PerspectiveCamera(45, aspect, near, far)
     // Placeholder frustum — `toggleProjection`/`frameOrthoToRadius` size it
     // for real before it ever becomes the active camera; only its aspect
@@ -171,6 +182,71 @@ export class CameraRig {
     this.perspective.up.copy(this.orthographic.up)
   }
 
+  /** The stored vertical angle in degrees (`perspective.fov` with the frame
+   * fit taken out). Everything that persists, compares or lets the user edit
+   * the angle reads this; everything that measures the screen reads
+   * `perspective.fov`. */
+  get fovDeg(): number {
+    return this.storedFovDeg
+  }
+
+  /** The scene-camera aspect ratio currently being fitted, or null. */
+  get frameAspect(): number | null {
+    return this.frameRatio
+  }
+
+  /** How much taller than the stored vertical angle's view the window shows:
+   * `A / min(A, W)` while a frame is held (1 when the window is at least as
+   * wide as the frame, or no frame is held). */
+  private fitScale(): number {
+    const a = this.frameRatio
+    if (a === null) return 1
+    return a / Math.min(a, this.viewportRatio)
+  }
+
+  /** Push the stored angle (through the frame fit) onto the perspective
+   * camera. */
+  private refitPerspective(): void {
+    const scale = this.fitScale()
+    // Exactly the stored angle when no widening applies (no trig round trip).
+    this.perspective.fov =
+      scale === 1 ? this.storedFovDeg : Math.min(179, (2 * Math.atan(Math.tan((this.storedFovDeg * Math.PI) / 360) * scale) * 180) / Math.PI)
+    this.perspective.updateProjectionMatrix()
+  }
+
+  /** Change the fit (frame ratio and/or viewport ratio) while keeping the
+   * orthographic frustum's STORED height: the frustum carries the fit scale
+   * (so a parallel scene camera shows the same frame), and is rescaled by
+   * the ratio of the new scale to the old one. */
+  private refit(change: () => void): void {
+    const oldScale = this.fitScale()
+    change()
+    this.refitPerspective()
+    const halfH = ((this.orthographic.top - this.orthographic.bottom) / 2 / oldScale) * this.fitScale()
+    this.orthographic.top = halfH
+    this.orthographic.bottom = -halfH
+    this.orthographic.right = halfH * this.viewportRatio
+    this.orthographic.left = -this.orthographic.right
+    this.orthographic.updateProjectionMatrix()
+  }
+
+  /**
+   * Hold (or, with null, release) a scene camera's frame. Viewport fit of an
+   * imported SketchUp scene camera (decision D5): with `A` the stored aspect
+   * ratio and `W` the viewport's, the vertical angle rendered is
+   * `2*atan(tan(fov/2) * A / min(A, W))` and a parallel view's height scales
+   * by the same `A / min(A, W)`. A window at least as wide as the frame
+   * shows the stored angle; a narrower one widens it so the frame's width
+   * still fills the window (Hew draws no bars). Non-positive or non-finite
+   * ratios release the frame. The stored angle is untouched.
+   */
+  setFrameAspect(ratio: number | null): void {
+    const next = ratio !== null && Number.isFinite(ratio) && ratio > 0 ? ratio : null
+    this.refit(() => {
+      this.frameRatio = next
+    })
+  }
+
   /**
    * Re-pose BOTH cameras from an eye/target/up/fov tuple without flipping
    * `active`/`projection` — the per-frame step of a camera tween
@@ -187,8 +263,8 @@ export class CameraRig {
     this.perspective.position.copy(eye)
     this.perspective.up.copy(up)
     this.perspective.lookAt(target)
-    this.perspective.fov = Math.min(MAX_FOV_DEG, Math.max(MIN_FOV_DEG, fovDeg))
-    this.perspective.updateProjectionMatrix()
+    this.storedFovDeg = Math.min(MAX_FOV_DEG, Math.max(MIN_FOV_DEG, fovDeg))
+    this.refitPerspective()
     this.matchOrthoToPerspective(target)
     this.orthographic.updateProjectionMatrix()
   }
@@ -203,9 +279,9 @@ export class CameraRig {
    */
   heightAtTarget(dist: number): number {
     if (this.projection === 'parallel') {
-      return (this.orthographic.top - this.orthographic.bottom) / this.orthographic.zoom
+      return (this.orthographic.top - this.orthographic.bottom) / this.orthographic.zoom / this.fitScale()
     }
-    return 2 * dist * tanHalfFovRad(this.perspective.fov)
+    return 2 * dist * tanHalfFovRad(this.storedFovDeg)
   }
 
   /**
@@ -215,7 +291,7 @@ export class CameraRig {
    * (`Viewport.applyCameraState`); a no-op on the perspective camera.
    */
   setParallelHeight(height: number): void {
-    const halfH = Math.max(height, 1e-6) / 2
+    const halfH = (Math.max(height, 1e-6) / 2) * this.fitScale()
     const halfW = halfH * this.perspective.aspect
     this.orthographic.left = -halfW
     this.orthographic.right = halfW
@@ -227,10 +303,13 @@ export class CameraRig {
 
   /** Set the perspective vertical fov (degrees), clamped to
    * [`MIN_FOV_DEG`, `MAX_FOV_DEG`]. No-op on the orthographic frustum — fov
-   * only ever applies to (and persists across toggles on) `perspective`. */
+   * only ever applies to (and persists across toggles on) `perspective`.
+   * A user-set angle is a free camera: it releases any held scene frame (the
+   * restore path, `Viewport.applyCameraState`, re-holds it afterwards). */
   setFov(deg: number): void {
-    this.perspective.fov = Math.min(MAX_FOV_DEG, Math.max(MIN_FOV_DEG, deg))
-    this.perspective.updateProjectionMatrix()
+    this.storedFovDeg = Math.min(MAX_FOV_DEG, Math.max(MIN_FOV_DEG, deg))
+    this.setFrameAspect(null)
+    this.refitPerspective()
   }
 
   /** Keep both cameras' frustums matched to a new viewport aspect ratio.
@@ -239,12 +318,11 @@ export class CameraRig {
    * must not change what's already framed vertically. */
   setAspect(aspect: number): void {
     this.perspective.aspect = aspect
-    this.perspective.updateProjectionMatrix()
-    const halfH = (this.orthographic.top - this.orthographic.bottom) / 2
-    const halfW = halfH * aspect
-    this.orthographic.left = -halfW
-    this.orthographic.right = halfW
-    this.orthographic.updateProjectionMatrix()
+    // With a scene frame held the window's ratio also moves the fit (the
+    // ortho half-height then rescales by the new A / min(A, W)).
+    this.refit(() => {
+      this.viewportRatio = aspect
+    })
   }
 
   /**
@@ -311,9 +389,12 @@ export class CameraRig {
   /** Size the orthographic frustum (half-height `radius · margin`, half-width
    * scaled by `aspect`, zoom reset to 1) to fit a sphere of `radius` — the
    * parallel-projection analogue of `perspectiveFramingDistance` (design §1,
-   * "Framing"). Does not touch camera position/orientation. */
+   * "Framing"). Does not touch camera position/orientation. While a scene
+   * frame is held the frustum carries the fit scale (`A / min(A, W)`, see
+   * `refit`), exactly as the perspective framing distance does through the
+   * widened fov, so the model is framed the same in both projections. */
   frameOrthoToRadius(radius: number, margin: number, aspect: number): void {
-    const halfH = radius * margin
+    const halfH = radius * margin * this.fitScale()
     const halfW = halfH * aspect
     this.orthographic.left = -halfW
     this.orthographic.right = halfW

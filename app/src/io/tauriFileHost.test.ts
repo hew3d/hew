@@ -39,3 +39,15 @@ describe('TauriFileHost.openImage', () => {
     expect((err as FileReadError).reason).toBe(reason)
   })
 })
+
+describe('TauriFileHost.saveAs', () => {
+  it('writes a doubled extension from the dialog back as a single one', async () => {
+    mockInvoke.mockResolvedValueOnce('/d/kb10test.hew.hew') // pick_save_path
+    mockInvoke.mockResolvedValueOnce(undefined) // write_file_bytes
+    const ref = await new TauriFileHost().saveAs(new Uint8Array([1]), 'Untitled.hew', 'hew')
+    expect(ref).toMatchObject({ name: 'kb10test.hew', handle: '/d/kb10test.hew' })
+    expect(mockInvoke).toHaveBeenLastCalledWith('write_file_bytes', new Uint8Array([1]), {
+      headers: { path: encodeURIComponent('/d/kb10test.hew') },
+    })
+  })
+})

@@ -244,6 +244,53 @@ function isDegenerate(m: THREE.Matrix4): boolean {
   return [0, 1, 2, 4, 5, 6, 8, 9, 10].every((i) => e[i] === 0)
 }
 
+describe('SceneRenderer — an object the kernel cannot tessellate (#77)', () => {
+  const refusal = () => {
+    throw new Error('UnbridgeableHole: face FaceId(158v1) has a hole that cannot be bridged')
+  }
+
+  it('skips a standalone object that throws and still draws the others, toasting once', () => {
+    const objects: Record<string, boolean> = { '1': true, '2': true }
+    const scene = makeScene({ objects })
+    const good = (scene as unknown as { object_mesh: (id: bigint) => unknown }).object_mesh
+    ;(scene as unknown as { object_mesh: (id: bigint) => unknown }).object_mesh = (id: bigint) =>
+      id === 1n ? refusal() : good(id)
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    const onUnrenderable = vi.fn()
+    renderer.onUnrenderable = onUnrenderable
+    expect(() => renderer.refresh()).not.toThrow()
+    expect(renderer.getObjectGroup(1n)).toBeNull()
+    expect(renderer.getObjectGroup(2n)).not.toBeNull()
+    renderer.refresh()
+    expect(onUnrenderable).toHaveBeenCalledTimes(1)
+  })
+
+  it('a kernel trap is not "part left out": it propagates and no toast fires', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    ;(scene as unknown as { object_mesh: () => unknown }).object_mesh = () => {
+      throw new WebAssembly.RuntimeError('unreachable')
+    }
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    const onUnrenderable = vi.fn()
+    renderer.onUnrenderable = onUnrenderable
+    expect(() => renderer.refresh()).toThrow(WebAssembly.RuntimeError)
+    expect(onUnrenderable).not.toHaveBeenCalled()
+  })
+
+  it('a placed member that throws is left out without crashing instance paths', () => {
+    const scene = makeScene({
+      instances: { '10': { def: 1n, pose: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], memberIds: [5n], memberWatertight: { '5': true } } },
+    })
+    ;(scene as unknown as { object_mesh: (id: bigint) => unknown }).object_mesh = refusal
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    const onUnrenderable = vi.fn()
+    renderer.onUnrenderable = onUnrenderable
+    expect(() => renderer.refreshInstances()).not.toThrow()
+    expect(() => renderer.instanceFaceParts(10n)).not.toThrow()
+    expect(onUnrenderable).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('SceneRenderer — double-sided rendering for open shells', () => {
   it('a watertight object keeps THREE.FrontSide', () => {
     const scene = makeScene({ objects: { '1': true } })

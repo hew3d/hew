@@ -247,26 +247,29 @@ export class SliceTool implements Tool {
   // ── Optional Tool interface extensions ─────────────────────────────────
 
   capturingInput(): boolean {
-    // Slice has no multi-stage gesture, but the VCB offset is always live so
-    // typed digits never leak through to tool-switch shortcuts while this
-    // tool is active (mirrors Protractor/TapeMeasure capturing during their
-    // hover/preview phase).
-    return true
+    // Only a typed offset is captured input. Everything else (Space, the tool
+    // letters, bare digits that are not opening an offset) belongs to the
+    // shortcut table, as with Tape Measure's idle buffer.
+    return this.typed !== ''
+  }
+
+  /** Per-key capture: only a digit, `.` or `-` opens the offset buffer; once
+   *  it is open, the full length grammar and Enter are Slice's. Arrows and
+   *  Shift are not captured here: they reach `onKey` through the idle path. */
+  capturesKey(key: string): boolean {
+    if (this.typed !== '') return key === 'Enter' || isLengthInputKey(key)
+    return /^[0-9.-]$/.test(key)
   }
 
   /**
-   * Unlike `capturingInput` above (deliberately unconditional), this is
-   * precise: only the plane LOCK is a genuinely armed, Escape-cancelable
-   * gesture (`onKey`'s Escape lifts the lock first, matching this exactly).
-   * Consulted by the Viewport's `toolHasArmedGesture` (component-edit-
-   * parity.md phase A2) so Escape can still pop the edit-context path while
-   * Slice is merely hovering — using the blanket `capturingInput()` here
-   * would make Escape never reach the context pop at all while Slice is the
-   * active tool, which is wrong: an unlocked hover has nothing worth
-   * protecting from a context change.
+   * A genuinely armed, Escape-cancelable gesture: the plane LOCK or a typed
+   * offset (`onKey`'s Escape clears the buffer first, then lifts the lock,
+   * matching this exactly). Consulted by the Viewport's `toolHasArmedGesture`
+   * (component-edit-parity.md phase A2) so Escape can still pop the
+   * edit-context path while Slice is merely hovering.
    */
   hasArmedGesture(): boolean {
-    return this.lockedNormal !== null
+    return this.lockedNormal !== null || this.typed !== ''
   }
 
   // ── Tool interface ──────────────────────────────────────────────────────
@@ -292,9 +295,13 @@ export class SliceTool implements Tool {
 
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
-      // First Esc lifts the plane lock (back to follow-the-hovered-face mode);
-      // a second Esc (unlocked) cancels the tool.
-      if (this.lockedNormal !== null) {
+      // First Esc clears a typed offset, then the plane lock (back to
+      // follow-the-hovered-face mode); the next Esc (unlocked) cancels the tool.
+      if (this.typed !== '') {
+        this.typed = ''
+        this.onMeasurementCb('')
+        this._refreshPreview()
+      } else if (this.lockedNormal !== null) {
         this.lockedNormal = null
         this._refreshPreview()
       } else {
@@ -343,7 +350,9 @@ export class SliceTool implements Tool {
       return
     }
 
-    if (isLengthInputKey(ev.key)) {
+    // Only a digit, `.` or `-` opens the buffer (see `capturesKey`); a stray
+    // letter or space reaching here with nothing typed is not input.
+    if (this.capturesKey(ev.key) && ev.key !== 'Enter') {
       this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
       this.onMeasurementCb(this._typedReadout())
       this._refreshPreview()

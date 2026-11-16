@@ -34,6 +34,7 @@ import { LineSlot } from './previewLines'
 import { cueColors, pathHoverColors } from './FollowMeTool'
 import { geometryOf, type PlaneUnitsScene } from './planeUnits'
 import { takeTouched, type TouchedIds } from './offsetShared'
+import { inHistoryBracket } from './transformSelection'
 
 export type OnToast = (message: string, code?: string) => void
 
@@ -298,14 +299,8 @@ export class EraserTool implements Tool {
       run()
       return
     }
-    this.wasmScene.history_bracket_open()
-    try {
-      run()
-      this.wasmScene.history_bracket_commit(label)
-    } catch (err) {
-      this.wasmScene.history_bracket_abort()
-      throw err
-    }
+    // The shared helper: a runDelete inside `run` joins this bracket.
+    inHistoryBracket(this.wasmScene, label, run)
   }
 
   private _apply(mode: 'erase' | 'crease', targets: EraserTarget[]): void {

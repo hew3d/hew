@@ -26,6 +26,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { i18n } from '@lingui/core'
 import { useLingui } from '@lingui/react/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
+import { noteKernelStop } from '../log/kernelStopNote'
 import {
   HEALTH_SCOPE_LABELS,
   KIND_ORDER,
@@ -446,6 +447,10 @@ export function ModelHealthPanel({
       onGeometryChanged()
       return { value }
     } catch (err) {
+      // A wasm trap is the kernel gone, not a refusal: hand it to the crash
+      // screen rather than toast it (KB-38).
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- diagnostic log text
+      if (noteKernelStop('Model Health repair', err)) return null
       const code = parseKernelErrorCode(err)
       const raw = err instanceof Error ? err.message : String(err)
       onToast?.(kernelErrorMessage(code ?? 'Unknown', raw), code ?? undefined)
@@ -480,6 +485,9 @@ export function ModelHealthPanel({
         }
         onToast?.(kind === 'degenerate' ? removedFacesToast(removedCount(result), result.failed.length) : batchSummary(kind, result))
       } catch (err) {
+        // See `repair`: a wasm trap goes to the crash screen (KB-38).
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- diagnostic log text
+        if (noteKernelStop(`Model Health ${kind} batch`, err)) return
         const code = parseKernelErrorCode(err)
         const raw = err instanceof Error ? err.message : String(err)
         onToast?.(code !== null ? kernelErrorMessage(code, raw) : raw, code ?? undefined)

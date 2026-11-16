@@ -976,7 +976,9 @@ fn create_window(app: &AppHandle, front: bool) -> Result<String, Refused> {
                     format!("Could not create a window: {e}"),
                 )
             })?;
-    if !front {
+    if front {
+        wait_until_focused(app, &label);
+    } else {
         #[cfg(target_os = "macos")]
         crate::order_window_behind(app, &label, &anchor_label);
         #[cfg(not(target_os = "macos"))]
@@ -985,6 +987,38 @@ fn create_window(app: &AppHandle, front: bool) -> Result<String, Refused> {
         }
     }
     Ok(label)
+}
+
+/// How long a `focus: "front"` request waits for the window system to report
+/// the window focused. Focus changes land asynchronously, so a document list
+/// read straight after `set_focus` still sees the old window in front.
+const FOCUS_SETTLE: Duration = Duration::from_millis(1000);
+
+/// Polls (bounded by [`FOCUS_SETTLE`]) until `label` reports itself focused,
+/// so the next `hew.meta.documents` names it as `front` (KB-5). A window
+/// that never takes focus (the app is in the background) just times out.
+fn wait_until_focused(app: &AppHandle, label: &str) {
+    let deadline = Instant::now() + FOCUS_SETTLE;
+    while Instant::now() < deadline {
+        match app.get_webview_window(label) {
+            Some(w) if !w.is_focused().unwrap_or(false) => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => return,
+        }
+    }
+}
+
+/// The document entry a close refusal carries. An `unsaved_changes` refusal
+/// is the window's own answer that it has unsaved work, so the entry says
+/// so even when the shell's cached flag (pushed by the webview after a
+/// render) has not caught up (KB-5).
+fn refusal_entry(entry: Value, refusal: &str) -> Value {
+    let mut entry = entry;
+    if refusal == "unsaved_changes" {
+        entry["dirty"] = Value::Bool(true);
+    }
+    entry
 }
 
 fn destroy_window(app: &AppHandle, label: &str) {
@@ -1036,6 +1070,7 @@ fn cmd_open_inner(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Resu
         record_label(app, &existing, params);
         if front {
             let _ = crate::focus_window_by_label(app, &existing);
+            wait_until_focused(app, &existing);
         }
         return Ok(json!({
             "document": entry_for_label(app, conn, &existing),
@@ -1206,7 +1241,7 @@ fn cmd_close_inner(
             return Err(Refused {
                 name,
                 explanation: e.message,
-                detail: json!({ "document": entry }),
+                detail: json!({ "document": refusal_entry(entry, name) }),
             });
         }
     }
@@ -1722,6 +1757,17 @@ mod tests {
         assert_eq!(strip_dirty_mark("• House"), "House");
         assert_eq!(strip_dirty_mark("House"), "House");
         assert_eq!(strip_dirty_mark("A • B"), "A • B");
+    }
+
+    #[test]
+    fn an_unsaved_changes_refusal_reports_the_document_dirty() {
+        let stale = json!({ "id": "doc_1", "dirty": false });
+        assert_eq!(
+            refusal_entry(stale.clone(), "unsaved_changes")["dirty"],
+            true
+        );
+        // Other refusals leave the entry as the shell knew it.
+        assert_eq!(refusal_entry(stale, "window_not_ready")["dirty"], false);
     }
 
     #[test]

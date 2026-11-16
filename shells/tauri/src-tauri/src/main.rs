@@ -716,6 +716,30 @@ struct WindowCounter(u32);
 /// [`PendingRecovery`], just for a plain open instead of a recovery slot.
 struct PendingWindowOpen(HashMap<String, PendingWindowOpenEntry>);
 
+/// Which window asked for each `open_in_new_window` window: `new label ->
+/// opener label`. Unlike [`PendingWindowOpen`] the entry survives the new
+/// window's mount, so a refused open can hand its error back to the window
+/// that asked (`window_open_refused`). Entries drop with their window.
+struct WindowOpeners(HashMap<String, String>);
+
+/// What the shell does with the bookkeeping when a new window reports its
+/// open was refused: forget the window's opener entry and path claim, and
+/// say which window should show the error — `Some(opener)` when that opener
+/// is still alive, `None` when it is gone (the new window then stays and
+/// shows the error itself, but it still holds no file, so its claim goes
+/// too: a later open of the same path must not focus this blank window).
+/// A window with no opener entry is left as it is.
+fn settle_refused_open(
+    openers: &mut HashMap<String, String>,
+    paths: &mut HashMap<String, String>,
+    label: &str,
+    opener_alive: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let opener = openers.remove(label)?;
+    paths.remove(label);
+    opener_alive(&opener).then_some(opener)
+}
+
 /// Which `.hew` file each document window currently has open (label →
 /// canonical path), reported by the webview through `set_document_path`
 /// whenever its document session changes (open, Save As, New, Close). Read
@@ -1514,6 +1538,9 @@ async fn open_in_new_window(
     // mutex, silently returning Ok would leave the freshly opened window
     // blank forever — take_pending_window_open would find nothing to
     // deliver, and the caller would have no idea the open never happened.
+    if let Ok(mut openers) = app.state::<Mutex<WindowOpeners>>().lock() {
+        openers.0.insert(label.clone(), window.label().to_string());
+    }
     let state = app.state::<Mutex<PendingWindowOpen>>();
     let mut guard = state.lock().map_err(|e| e.to_string())?;
     guard.0.insert(
@@ -1525,6 +1552,63 @@ async fn open_in_new_window(
         },
     );
     Ok(())
+}
+
+/// What the opener window is told when the window it asked for could not
+/// open the file.
+#[derive(Clone, serde::Serialize)]
+struct WindowOpenRefused {
+    path: String,
+    as_copy: bool,
+    name: Option<String>,
+    message: String,
+    code: Option<String>,
+}
+
+/// A window made by `open_in_new_window` was refused its file (the kernel
+/// answered with an error and is still alive, so the window is still
+/// pristine). Hand the error back to the window that asked, focus it, and
+/// destroy this empty window. Returns `false`, leaving this window open, when
+/// the opener is gone: an error with no window to show it in is worse than
+/// an empty window, so the caller shows it here (its path claim is released
+/// either way, see [`settle_refused_open`]).
+#[tauri::command]
+fn window_open_refused(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    path: String,
+    as_copy: Option<bool>,
+    name: Option<String>,
+    message: String,
+    code: Option<String>,
+) -> bool {
+    let label = window.label().to_string();
+    let opener = {
+        let openers = app.state::<Mutex<WindowOpeners>>();
+        let paths = app.state::<Mutex<DocumentPaths>>();
+        let (Ok(mut openers), Ok(mut paths)) = (openers.lock(), paths.lock()) else {
+            return false;
+        };
+        settle_refused_open(&mut openers.0, &mut paths.0, &label, |l| {
+            app.get_webview_window(l).is_some()
+        })
+    };
+    let Some(opener) = opener else {
+        return false;
+    };
+    let payload = WindowOpenRefused {
+        path,
+        as_copy: as_copy.unwrap_or(false),
+        name,
+        message,
+        code,
+    };
+    let _ = app.emit_to(opener.as_str(), "window-open-refused", payload);
+    let _ = focus_window_by_label(&app, &opener);
+    // Destroy, not close: the close guard exists to protect a document and
+    // this one is pristine. `Destroyed` refreshes the window list.
+    let _ = window.destroy();
+    true
 }
 
 /// Claim (remove) the path queued by `open_in_new_window` for this window, if
@@ -3395,7 +3479,65 @@ fn rebuild_recent_submenu(
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// The one-line version string `hew --version` prints.
+fn version_line() -> String {
+    format!("hew {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// The `hew --help` page.
+fn help_text() -> String {
+    format!(
+        "{}\n\nUSAGE\n    hew [FILE]\n\nARGUMENTS\n    FILE          A .hew or .skp document to open\n\n\
+         OPTIONS\n    -h, --help       Print this help\n    -V, --version    Print the version\n",
+        version_line()
+    )
+}
+
+/// What the command line asks for before any window exists: the text to
+/// print for `-V`/`--version` or `-h`/`--help`, or `None` to start the app.
+/// Pure. Only a leading flag counts, so a document path that happens to
+/// follow another argument is never mistaken for one.
+fn cli_flag_output(args: &[String]) -> Option<String> {
+    match args.first().map(String::as_str)? {
+        "-V" | "--version" => Some(format!("{}\n", version_line())),
+        "-h" | "--help" => Some(help_text()),
+        _ => None,
+    }
+}
+
+/// Prints `text` where the person who ran `hew --flag` can see it. A Windows
+/// GUI-subsystem binary has no console of its own, so attach to the parent's
+/// first (best effort; nothing to attach to when launched from Explorer).
+fn print_cli_output(text: &str) {
+    use std::io::Write;
+    #[cfg(windows)]
+    {
+        // SAFETY: AttachConsole takes a plain process-id constant.
+        let attached = unsafe {
+            windows_sys::Win32::System::Console::AttachConsole(
+                windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            )
+        } != 0;
+        if attached {
+            if let Ok(mut con) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+                let _ = con.write_all(text.as_bytes());
+                return;
+            }
+        }
+    }
+    let _ = std::io::stdout().write_all(text.as_bytes());
+}
+
 fn main() {
+    // `--version` / `--help` answer before any window or webview exists, so
+    // they work with no display and never reach a running copy through the
+    // single-instance plugin.
+    let cli_args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(text) = cli_flag_output(&cli_args) {
+        print_cli_output(&text);
+        return;
+    }
+
     // Check argv for a .hew or .skp path on Windows/Linux (best-effort, first launch).
     // macOS uses RunEvent::Opened (Apple event), so we skip argv there.
     let argv_path: Option<String> = {
@@ -3456,6 +3598,7 @@ fn main() {
             frontend_ready,
             new_window,
             open_in_new_window,
+            window_open_refused,
             take_pending_window_open,
             list_windows,
             focus_window,
@@ -5179,6 +5322,7 @@ fn main() {
             app.manage(Mutex::new(ActiveWindow(None)));
             app.manage(Mutex::new(PendingRecovery(HashMap::new())));
             app.manage(Mutex::new(PendingWindowOpen(HashMap::new())));
+            app.manage(Mutex::new(WindowOpeners(HashMap::new())));
             app.manage(Mutex::new(ProtectedSlots(HashSet::new())));
             app.manage(Mutex::new(WindowStateCache {
                 last_normal: None,
@@ -5324,6 +5468,9 @@ fn main() {
                     // open_in_new_window path — nothing left to deliver it to.
                     if let Ok(mut pending) = app.state::<Mutex<PendingWindowOpen>>().lock() {
                         pending.0.remove(window.label());
+                    }
+                    if let Ok(mut openers) = app.state::<Mutex<WindowOpeners>>().lock() {
+                        openers.0.remove(window.label());
                     }
                     refresh_window_list(app);
                 }
@@ -5488,6 +5635,62 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_and_help_flags_answer_without_starting_the_app() {
+        let v = |a: &[&str]| cli_flag_output(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        for flag in ["-V", "--version"] {
+            assert_eq!(
+                v(&[flag]),
+                Some(format!("hew {}\n", env!("CARGO_PKG_VERSION")))
+            );
+        }
+        for flag in ["-h", "--help"] {
+            let help = v(&[flag]).expect("help text");
+            assert!(help.contains("USAGE") && help.contains("--version"));
+        }
+        assert_eq!(v(&[]), None);
+        assert_eq!(v(&["/tmp/a.hew"]), None);
+    }
+
+    #[test]
+    fn refused_open_with_live_opener_clears_claim_and_entry() {
+        let mut openers = HashMap::from([("main-2".to_string(), "main".to_string())]);
+        let mut paths = HashMap::from([("main-2".to_string(), "/a.skp".to_string())]);
+        let got = settle_refused_open(&mut openers, &mut paths, "main-2", |l| l == "main");
+        assert_eq!(got.as_deref(), Some("main"));
+        assert!(openers.is_empty());
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn refused_open_with_opener_gone_clears_its_entry_and_claim() {
+        // The window stays to show the error, but it does not hold the
+        // file: a later open of the same path must not focus it.
+        let mut openers = HashMap::from([("main-2".to_string(), "main".to_string())]);
+        let mut paths = HashMap::from([
+            ("main-2".to_string(), "/a.skp".to_string()),
+            ("main-3".to_string(), "/b.hew".to_string()),
+        ]);
+        let got = settle_refused_open(&mut openers, &mut paths, "main-2", |_| false);
+        assert_eq!(got, None);
+        assert!(openers.is_empty());
+        assert_eq!(
+            paths,
+            HashMap::from([("main-3".to_string(), "/b.hew".to_string())])
+        );
+    }
+
+    #[test]
+    fn refused_open_without_an_opener_entry_is_a_no_op() {
+        let mut openers = HashMap::new();
+        let mut paths = HashMap::from([("main-2".to_string(), "/a.skp".to_string())]);
+        assert_eq!(
+            settle_refused_open(&mut openers, &mut paths, "main-2", |_| true),
+            None
+        );
+        assert_eq!(paths.len(), 1);
+    }
 
     // `write_file_bytes` itself needs a live `AppHandle` for its
     // `write_allowed` check, which a plain `#[test]` can't construct (see

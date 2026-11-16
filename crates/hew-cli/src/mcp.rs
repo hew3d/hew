@@ -620,7 +620,10 @@ impl McpServer {
         if response.error.is_none() {
             label_plugin_result(&self.registry, method, &client_params, &mut value);
         }
-        if response.error.is_none()
+        // Live only: a headless host already wrote the item and answered
+        // `{path, id}`, so there are no bytes for `finish_save` to find.
+        if live
+            && response.error.is_none()
             && let Some(outcome) = crate::live_library::finish_save(method, &client_params, &value)
         {
             return match outcome {

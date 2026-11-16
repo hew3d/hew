@@ -282,7 +282,7 @@ test.describe('Fly ▸ hold the right mouse button (docs/design/fly-navigation.m
     await expect(page.getByRole('radio', { name: 'Rotate' })).toHaveAttribute('aria-checked', 'true')
   })
 
-  test('a hold under parallel projection switches to perspective and leaves it there (§3.5)', async ({ page }) => {
+  test('a right-click or a look-only hold under parallel stays parallel; the first movement key switches to perspective and leaves it there (§3.5)', async ({ page }) => {
     await setupUnlocked(page)
     await poseLookingAlongX(page)
     await page.getByRole('button', { name: 'Camera' }).click()
@@ -292,8 +292,24 @@ test.describe('Fly ▸ hold the right mouse button (docs/design/fly-navigation.m
 
     const { x, y } = await canvasCenter(page)
     await page.mouse.move(x, y)
+    // A bare right-click never changes the projection.
     await page.mouse.down({ button: 'right' })
     await page.waitForTimeout(50)
+    expect((await readCameraState(page)).projection).toBe('parallel')
+    await page.mouse.up({ button: 'right' })
+    await page.waitForTimeout(100)
+    expect((await readCameraState(page)).projection).toBe('parallel')
+
+    // Neither does a hold that only looks around.
+    await page.mouse.down({ button: 'right' })
+    await page.mouse.move(x + 30, y + 10, { steps: 4 })
+    await page.waitForTimeout(50)
+    expect((await readCameraState(page)).projection).toBe('parallel')
+
+    // The first movement key switches, and the switch stays after release.
+    await page.keyboard.down('w')
+    await page.waitForTimeout(100)
+    await page.keyboard.up('w')
     expect((await readCameraState(page)).projection).toBe('perspective')
     await page.mouse.up({ button: 'right' })
     await page.waitForTimeout(100)

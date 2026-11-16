@@ -256,6 +256,23 @@ fn usage_error(message: &str) -> ! {
 /// Distance 2 or less, so a genuinely different word suggests nothing.
 fn unknown_subcommand(typed: &str) -> String {
     const COMMANDS: [&str; 5] = ["run", "dispatch", "documents", "events", "mcp"];
+    // An MCP client configured with `"args": ["mcp --live"]` hands over the
+    // whole string as one argument; the client then only shows a closed
+    // connection, so say what is wrong and show the fix.
+    let mut words = typed.split_whitespace();
+    if let (Some(first), Some(_)) = (words.next(), words.next())
+        && COMMANDS.contains(&first)
+    {
+        let split: Vec<String> = typed
+            .split_whitespace()
+            .map(|w| format!("\"{w}\""))
+            .collect();
+        return format!(
+            "hew-cli: unknown command \"{typed}\". It looks like several arguments \
+             arrived as one; give each its own entry, for example \"args\": [{}]",
+            split.join(", ")
+        );
+    }
     let nearest = COMMANDS
         .iter()
         .map(|c| (edit_distance(typed, c), *c))
@@ -585,6 +602,20 @@ mod tests {
         let far = unknown_subcommand("frobnicate");
         assert!(far.contains("frobnicate"));
         assert!(!far.contains("Did you mean"));
+    }
+
+    /// CLI-2: several arguments joined into one string get a hint that shows
+    /// the split `args` array, not just "unknown command".
+    #[test]
+    fn joined_arguments_get_a_split_args_hint() {
+        let msg = unknown_subcommand("mcp --live --launch");
+        assert!(msg.contains("arrived as one"), "{msg}");
+        assert!(
+            msg.contains(r#""args": ["mcp", "--live", "--launch"]"#),
+            "{msg}"
+        );
+        // A multi-word string whose first word is not a command gets no hint.
+        assert!(!unknown_subcommand("frobnicate now").contains("arrived as one"));
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach } from 'vitest'
 import { scalePresetsFor } from '../print/scale'
 import {
   DEFAULT_STL_SEGMENTS,
+  collapseDoubledExtension,
   EXPORT_FORMATS,
   STL_RESOLUTIONS,
   defaultSvgScaleIndex,
@@ -152,5 +153,16 @@ describe('an export from the panel\'s answer', () => {
     expect(choice?.svg?.scale).toEqual(presets[defaultSvgScaleIndex(presets)])
     expect(choice?.svg?.includeDimensions).toBe(true)
     expect(exportChoiceFrom({ path: '/m.obj', format: 'obj', options: {} }, 'mm')).toBeNull()
+  })
+})
+
+describe('a doubled extension from the native panel', () => {
+  it('is reduced to one, in any case, and nothing else is touched', () => {
+    expect(collapseDoubledExtension('/d/kb10test.hew.hew', 'hew')).toBe('/d/kb10test.hew')
+    expect(collapseDoubledExtension('/d/Model.HEW.hew', 'hew')).toBe('/d/Model.HEW')
+    expect(collapseDoubledExtension('/d/Model.hew', 'hew')).toBe('/d/Model.hew')
+    expect(collapseDoubledExtension('/d/Model', 'hew')).toBe('/d/Model')
+    expect(collapseDoubledExtension('/d/Model.hew', 'skp')).toBe('/d/Model.hew')
+    expect(collapseDoubledExtension('/d/a.stl.stl', 'stl')).toBe('/d/a.stl')
   })
 })

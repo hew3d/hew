@@ -806,6 +806,9 @@ export class SceneRenderer {
    * Invalidated when a component definition is edited (refreshInstances re-builds it).
    */
   private memberGeometryCache: Map<bigint, Map<bigint, MemberGeometry>> = new Map()
+  /** Called once when an object cannot be tessellated and is left out. */
+  onUnrenderable: (() => void) | null = null
+  private unrenderableNotified = false
 
   /**
    * THREE.Texture cache, keyed by material id (as string). Built once per id
@@ -1502,6 +1505,33 @@ export class SceneRenderer {
     return rec
   }
 
+  /** Tessellate one object, or null when the kernel refuses (a face imported
+   * from an older file that cannot be drawn, e.g. UnbridgeableHole). The
+   * object is then left out instead of crashing selection/rendering, and
+   * `onUnrenderable` fires once per renderer (not per frame or per object).
+   * Only a typed refusal is swallowed: a wasm trap (`WebAssembly.RuntimeError`)
+   * is a kernel stop, not "part left out", and propagates to the crash
+   * screen (see `log/kernelStopNote`). */
+  private _tryObjectMesh(objectId: bigint): ReturnType<WasmScene['object_mesh']> | null {
+    return this._tryMesh(() => this.wasmScene.object_mesh(objectId))
+  }
+
+  /** `_tryObjectMesh`'s refusal handling around any mesh fetch. */
+  private _tryMesh(
+    fetch: () => ReturnType<WasmScene['object_mesh']>,
+  ): ReturnType<WasmScene['object_mesh']> | null {
+    try {
+      return fetch()
+    } catch (err) {
+      if (err instanceof WebAssembly.RuntimeError) throw err
+      if (!this.unrenderableNotified) {
+        this.unrenderableNotified = true
+        this.onUnrenderable?.()
+      }
+      return null
+    }
+  }
+
   /** Fetch (and cache) one member's typed arrays as drawn under an
    * inherited material — raw data only, not BufferAttributes, to avoid GPU
    * buffer aliasing on dispose. With nothing inherited the member draws
@@ -1514,10 +1544,30 @@ export class SceneRenderer {
     }
     let cached = variants.get(inherited)
     if (cached === undefined) {
-      const mesh =
+      const mesh = this._tryMesh(() =>
         inherited === NO_INHERITED
           ? this.wasmScene.object_mesh(memberId)
-          : this.wasmScene.member_mesh(memberId, inherited)
+          : this.wasmScene.member_mesh(memberId, inherited),
+      )
+      if (mesh === null) {
+        // Cached (not retried per frame) so the member stays drawn as nothing.
+        cached = {
+          positions: new Float32Array(0),
+          normals: new Float32Array(0),
+          indices: new Uint32Array(0),
+          colors: new Float32Array(0),
+          uvs: new Float32Array(0),
+          groupMaterialIds: new BigUint64Array(0),
+          groupStarts: new Uint32Array(0),
+          groupCounts: new Uint32Array(0),
+          groupBacks: new Uint8Array(0),
+          edgePositions: new Float32Array(0),
+          tangentEdgePositions: new Float32Array(0),
+          watertight: true,
+        }
+        variants.set(inherited, cached)
+        return cached
+      }
       try {
         cached = {
           positions: mesh.positions(),
@@ -2471,7 +2521,11 @@ export class SceneRenderer {
       this._removeObjectGroup(objectId)
     }
 
-    const mesh = this.wasmScene.object_mesh(objectId)
+    const mesh = this._tryObjectMesh(objectId)
+    if (mesh === null) {
+      this.watertightMap.delete(objectId)
+      return
+    }
     try {
       const watertight = mesh.watertight()
       this.watertightMap.set(objectId, watertight)
@@ -6138,16 +6192,18 @@ export class SceneRenderer {
    * `getInstanceGroup` this never materializes the placement out of its batch
    * (a marquee over a brick wall would otherwise pull thousands of placements
    * out of their batches and rebuild materials for each). `matrixWorld`
-   * composes the outer pose with the member's local pose. Null when the
-   * instance is not rendered.
+   * composes the outer pose with the member's local pose. `onlyMember`
+   * limits the parts to one definition member. Null when the instance is
+   * not rendered.
    */
-  instanceFaceParts(instanceId: bigint): { positions: Float32Array; indices: Uint32Array; matrixWorld: THREE.Matrix4 }[] | null {
+  instanceFaceParts(instanceId: bigint, onlyMember?: bigint): { positions: Float32Array; indices: Uint32Array; matrixWorld: THREE.Matrix4 }[] | null {
     const rec = this.instanceRecords.get(instanceId)
     if (rec === undefined) return null
     const outer = new THREE.Matrix4().multiplyMatrices(this.instancesGroup.matrixWorld, rec.matrix)
     const parts: { positions: Float32Array; indices: Uint32Array; matrixWorld: THREE.Matrix4 }[] = []
     for (const placement of rec.placements) {
       if (!placement.shown) continue
+      if (onlyMember !== undefined && placement.memberId !== onlyMember) continue
       const cached = this._getMemberGeometry(placement.memberId, placement.inherited)
       parts.push({
         positions: cached.positions,

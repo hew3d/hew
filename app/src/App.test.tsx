@@ -325,6 +325,7 @@ import Viewport from './viewport/Viewport'
 import { recordRecent } from './io/recents'
 import { getTrayLayout, setTrayLayout, DEFAULT_TRAY_LAYOUT } from './settings/trayLayout'
 import { setShowWelcome } from './settings/welcomeScreen'
+import * as LogStore from './log/LogStore'
 import { resetStlImportUnitForTest } from './settings/stlImportUnit'
 import { makeFileHost, type DocFormat, type FileHost } from './io/fileHost'
 import * as savePanel from './io/savePanel'
@@ -1767,6 +1768,23 @@ describe('App — import overlay lifecycle', () => {
     expect(screen.getByText(/Import failed: corrupt chunk/)).toBeInTheDocument()
   })
 
+  it('keeps the import error on screen until it is clicked away', async () => {
+    mockScene.import_skp = vi.fn(() => {
+      throw new Error('malformed sections')
+    })
+
+    await renderAndLoad()
+    triggerImport()
+    await screen.findByText(/Import failed: malformed sections/)
+    // Well past the ordinary 4 s toast lifetime, it is still there.
+    await new Promise((r) => setTimeout(r, 4600))
+    const toast = screen.getByText(/Import failed: malformed sections/).closest('[data-testid="toast"]') as HTMLElement
+    expect(toast).not.toBeNull()
+    expect(within(toast).getByText(/click to dismiss/i)).toBeInTheDocument()
+    fireEvent.click(toast)
+    expect(screen.queryByText(/Import failed: malformed sections/)).not.toBeInTheDocument()
+  }, 15000)
+
   it('latches the kernel-panic banner when the import traps the wasm kernel', async () => {
     // A wasm trap mid-import (an out-of-memory abort on a model too big for
     // the browser kernel) surfaces as the engine's "unreachable" error and
@@ -2857,6 +2875,15 @@ describe('App — toast severity', () => {
     expect(bubble.style.background).toBe('var(--status-leaky-bg)')
   })
 
+  it('keeps the raw code out of the toast and in the diagnostic log (KB-20)', async () => {
+    await renderAndLoad()
+    act(() => latestOnToast()("This object isn't solid.", 'ObjectNotSolid'))
+    expect(screen.getByText(/This object isn't solid\./)).toBeInTheDocument()
+    expect(screen.queryByText(/ObjectNotSolid/)).not.toBeInTheDocument()
+    // The code travels with the report: the log tail the Report Bug dialog sends.
+    expect(LogStore.getEntries().some((e) => e.message === "[ObjectNotSolid] This object isn't solid.")).toBe(true)
+  })
+
   it('renders warning-level refusals as neutral bubbles', async () => {
     await renderAndLoad()
     act(() => latestOnToast()('nothing to undo', 'NothingToUndo'))
@@ -3714,6 +3741,28 @@ describe('App — welcome screen', () => {
     expect(screen.queryByRole('dialog', { name: /welcome to hew/i })).not.toBeInTheDocument()
   })
 
+  it('opens after the recovery prompt is discarded (KB-39: declining is a fresh launch)', async () => {
+    setShowWelcome(true)
+    recoveryState.listings = [
+      { slot: 'web', meta: { version: 1, savedAt: Date.now(), name: 'Crashed Doc', path: null } },
+    ]
+    await renderAndLoad()
+    await screen.findByRole('dialog', { name: /recover unsaved document/i })
+    fireEvent.click(screen.getByRole('button', { name: /^discard$/i }))
+    await screen.findByRole('dialog', { name: /welcome to hew/i })
+  })
+
+  it('opens after the recovery prompt is dismissed with Escape (KB-39)', async () => {
+    setShowWelcome(true)
+    recoveryState.listings = [
+      { slot: 'web', meta: { version: 1, savedAt: Date.now(), name: 'Crashed Doc', path: null } },
+    ]
+    await renderAndLoad()
+    await screen.findByRole('dialog', { name: /recover unsaved document/i })
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await screen.findByRole('dialog', { name: /welcome to hew/i })
+  })
+
   it('swallows app shortcuts while open — no tool switch, no palette stacked underneath', async () => {
     setShowWelcome(true)
     await renderAndLoad()
@@ -3767,6 +3816,32 @@ describe('App — web settings modal', () => {
     // the dispatcher would have claimed (preventDefault-ed) it otherwise.
     const notClaimed = fireEvent.keyDown(within(dialog).getByRole('tab', { name: 'Controls' }), { key: ' ', code: 'Space' })
     expect(notClaimed).toBe(true)
+  })
+})
+
+describe('App — web settings modal Escape (KB-16)', () => {
+  it('closes with Escape', async () => {
+    await renderAndLoad()
+    fireEvent.keyDown(document, { key: ',', code: 'Comma', ctrlKey: true })
+    await screen.findByRole('dialog', { name: 'Settings' })
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Settings' })).not.toBeInTheDocument()
+  })
+})
+
+describe('App — web settings modal Escape with an open child (KB-16)', () => {
+  it('leaves Settings open while a child popup is open, then closes it', async () => {
+    await renderAndLoad()
+    fireEvent.keyDown(document, { key: ',', code: 'Comma', ctrlKey: true })
+    await screen.findByRole('dialog', { name: 'Settings' })
+    const child = document.createElement('div')
+    child.setAttribute('role', 'menu')
+    document.body.appendChild(child)
+    fireEvent.keyDown(child, { key: 'Escape' })
+    expect(screen.getByRole('dialog', { name: 'Settings' })).toBeInTheDocument()
+    child.remove()
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Settings' })).not.toBeInTheDocument()
   })
 })
 

@@ -54,6 +54,11 @@ export interface ScenesControllerDeps {
   viewportApi: RefObject<ViewportApi | null>
   /** Bumps on every document mutation — refreshes the entry list + drift. */
   docRev: number
+  /** The panel eyes' hidden sets (App's hiddenKeys / hiddenTagPaths). Hiding
+   *  or showing a node or tag is view state: it bumps neither `docRev` nor
+   *  anything else here, so a change of either set refreshes drift itself. */
+  hiddenKeys: ReadonlySet<string>
+  hiddenTagPaths: ReadonlySet<string>
   /** The editor's live display toggles (App's showGrid/showAxes/showGuides). */
   display: DisplayStateJson
   /** Apply a Scene's display toggles (App pushes them into the viewport). */
@@ -137,6 +142,8 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
     scene,
     viewportApi,
     docRev,
+    hiddenKeys,
+    hiddenTagPaths,
     display,
     setDisplay,
     setViewStyle,
@@ -217,11 +224,12 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
     }
   }, [viewportApi])
 
-  // Drift keys off document mutations and display toggles here; the camera
+  // Drift keys off document mutations, display toggles and node/tag
+  // visibility here; the camera
   // and section paths call `refreshDrift` from App's viewport callbacks.
   useEffect(() => {
     refreshDrift()
-  }, [refreshDrift, docRev, rev, activeSid, display.grid, display.axes, display.guides])
+  }, [refreshDrift, docRev, rev, activeSid, display.grid, display.axes, display.guides, hiddenKeys, hiddenTagPaths])
 
   const captureThumbnail = useCallback(
     (sid: number) => {

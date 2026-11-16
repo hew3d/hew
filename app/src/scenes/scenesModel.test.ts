@@ -12,6 +12,7 @@ import {
   parseViewStyleJson,
   parseSecondsInput,
   sceneIndex,
+  parseCameraJson,
 } from './scenesModel'
 
 const CAM = { projection: 'perspective', fovDeg: 45, eye: [4, -6, 3], target: [0, 0, 0], up: [0, 0, 1] }
@@ -138,5 +139,15 @@ describe('parseViewStyleJson', () => {
     })
     const bad = parseViewStyleJson({ ...base, sectionCutColor: [300, 0, 0], sectionCutWidth: -1, guidesHidden: 'yes' })
     expect(bad).toEqual(base)
+  })
+})
+
+describe('parseCameraJson aspectRatio', () => {
+  const cam = { projection: 'perspective', fovDeg: 48.46, eye: [0, 0, 1], target: [1, 0, 1], up: [0, 0, 1] }
+  it('keeps a positive ratio and drops a missing or bad one', () => {
+    expect(parseCameraJson({ ...cam, aspectRatio: 2 })?.aspectRatio).toBe(2)
+    expect(parseCameraJson(cam)?.aspectRatio).toBeUndefined()
+    expect(parseCameraJson({ ...cam, aspectRatio: 0 })?.aspectRatio).toBeUndefined()
+    expect(parseCameraJson({ ...cam, aspectRatio: 'x' })?.aspectRatio).toBeUndefined()
   })
 })

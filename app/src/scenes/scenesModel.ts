@@ -46,6 +46,10 @@ export interface CameraStateJson {
   /** The height the view spans at `target`, meters (the parallel frustum's
    * height) — absent in a camera recorded before the field existed. */
   parallelHeight?: number
+  /** The stored frame's width / height (a SketchUp scene camera's aspect
+   * ratio) — present only when the camera holds one. The viewport fits the
+   * frame into its window while this camera is shown (`CameraRig.setFrameAspect`). */
+  aspectRatio?: number
   eye: [number, number, number]
   target: [number, number, number]
   up: [number, number, number]
@@ -112,6 +116,7 @@ export function parseCameraJson(v: unknown): CameraStateJson | undefined {
   if (typeof o.fovDeg !== 'number' || !isTriple(o.eye) || !isTriple(o.target) || !isTriple(o.up)) return undefined
   const out: CameraStateJson = { projection: o.projection, fovDeg: o.fovDeg, eye: o.eye, target: o.target, up: o.up }
   if (typeof o.parallelHeight === 'number' && Number.isFinite(o.parallelHeight) && o.parallelHeight > 0) out.parallelHeight = o.parallelHeight
+  if (typeof o.aspectRatio === 'number' && Number.isFinite(o.aspectRatio) && o.aspectRatio > 0) out.aspectRatio = o.aspectRatio
   return out
 }
 

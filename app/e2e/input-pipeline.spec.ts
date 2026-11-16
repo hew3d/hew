@@ -413,8 +413,8 @@ test('Rotate: X-locked 90° (arrow lock, two clicks, typed angle) stands a drawn
 
   // And it committed cleanly — no error toast. [WouldRetopologize] is what
   // this flow used to surface; [PointOffPlane] is its kernel-level cause.
-  await expect(page.getByText('[WouldRetopologize]')).toHaveCount(0)
-  await expect(page.getByText('[PointOffPlane]')).toHaveCount(0)
+  await expect(page.getByText('would make lines cross or merge', { exact: false })).toHaveCount(0)
+  await expect(page.getByText("isn't on the drawing surface", { exact: false })).toHaveCount(0)
 })
 
 test('Ctrl+G with a single object selected is a no-op — the keyboard path honors the ≥2-sibling gate', async ({

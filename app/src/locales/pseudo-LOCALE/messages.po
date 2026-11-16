@@ -1958,7 +1958,11 @@ msgid "Click a face or a closed profile to offset its boundary."
 msgstr ""
 
 #: src/tools/PaintTool.ts
-msgid "Click a face to paint it with the current material — Shift-click replaces it everywhere, Ctrl/Cmd+Shift-click replaces within the object, Ctrl/Cmd-click fills the whole object, Alt = eyedropper."
+#~ msgid "Click a face to paint it with the current material — Shift-click replaces it everywhere, Ctrl/Cmd+Shift-click replaces within the object, Ctrl/Cmd-click fills the whole object, Alt = eyedropper."
+#~ msgstr ""
+
+#: src/tools/PaintTool.ts
+msgid "Click a face to paint it with the current material. Click something selected to paint all of it. Shift-click replaces it everywhere, Ctrl/Cmd+Shift-click replaces within the object, Ctrl/Cmd-click fills the whole object, Alt = eyedropper."
 msgstr ""
 
 #: src/tools/PushPullTool.ts
@@ -2147,6 +2151,10 @@ msgstr ""
 
 #: src/tools/FollowMeTool.ts
 msgid "Click this face to use it as the profile."
+msgstr ""
+
+#: src/App.tsx
+msgid "Click to dismiss"
 msgstr ""
 
 #: src/tools/ProtractorTool.ts
@@ -4594,6 +4602,18 @@ msgstr ""
 msgid "Hew ran out of memory opening {fileName} ({size}). Hew can use up to 4 GB of memory, and this model needs more. A lighter copy may open: in SketchUp, run Purge Unused and remove or simplify the heaviest components. Reload to keep working."
 msgstr ""
 
+#: src/log/kernelStopNote.ts
+msgid "Hew ran out of memory partway through a repair. Hew can use up to 4 GB of memory, and this model needs more. Reload to keep working, and use Report this crash to send what happened."
+msgstr ""
+
+#: src/log/kernelStopNote.ts
+msgid "Hew stopped during a repair"
+msgstr ""
+
+#: src/log/kernelStopNote.ts
+msgid "Hew stopped partway through a repair and can't continue. Reload to keep working, and use Report this crash to send what happened."
+msgstr ""
+
 #: src/App.tsx
 msgid "Hew stopped while opening {fileName} ({size}) and can't continue. Reload to keep working, and use Report this crash to send the file."
 msgstr ""
@@ -6417,6 +6437,10 @@ msgstr ""
 msgid "Nothing has been imported yet."
 msgstr ""
 
+#: src/viewport/Viewport.tsx
+msgid "Nothing here to select. Double-click empty space to leave this context."
+msgstr ""
+
 #: src/panels/PrintDialog.tsx
 msgid "Nothing is selected."
 msgstr ""
@@ -7102,6 +7126,7 @@ msgstr ""
 #: src/i18n/nativeMenu.ts
 #: src/panels/library/LibraryDetailPane.tsx
 #: src/panels/LibraryDialog.tsx
+#: src/tools/PaintTool.ts
 msgid "Paint"
 msgstr ""
 
@@ -7217,6 +7242,10 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "Part of the path is too short to follow. Redraw the path without tiny segments."
+msgstr ""
+
+#: src/viewport/Viewport.tsx
+msgid "Part of this file can't be drawn, so it was left out. The rest of the model is unaffected."
 msgstr ""
 
 #: src/kernelErrorCopy/deform.ts
@@ -10753,6 +10782,10 @@ msgstr ""
 
 #: src/App.tsx
 msgid "This model is too large for Hew to open"
+msgstr ""
+
+#: src/log/kernelStopNote.ts
+msgid "This model is too large for Hew to work on"
 msgstr ""
 
 #: src/kernelErrorCopy/shapeCommon.ts

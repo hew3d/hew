@@ -5,7 +5,8 @@ import { ph, plural, t } from '@lingui/core/macro'
 import { Trans, useLingui } from '@lingui/react/macro'
 import { historyLabel } from './i18n/historyLabels'
 import { useKeymap, useKeymapDispatch } from './keymap/useKeymap'
-import { currentKeymap, defaultKeymapBindings, shortcutLabel, subscribeKeymap } from './keymap/keymap'
+import { isComposingKey } from './input/keyboard'
+import { currentKeymap, defaultKeymapBindings, isRecordingChord, shortcutLabel, subscribeKeymap } from './keymap/keymap'
 import { startNativeMenuSync } from './keymap/nativeMenu'
 import { flushSync } from 'react-dom'
 import { loadKernel, type Scene } from './wasm/loader'
@@ -31,7 +32,7 @@ import { isCoarsePointer, isLinux, isMac, isWindows } from './platform'
 import { forwardToTextField, isTextFieldFocused, pasteTextIntoFocusedField } from './clipboard/textFieldPaste'
 import { nextPaint } from './paint'
 import { BUSY_REFUSED } from './busyCard'
-import { beginOpenAttempt, clearOpenAttempt, forgetSettledFailure, openAttemptFailed } from './log/failedOpen'
+import { beginOpenAttempt, clearOpenAttempt, forgetSettledFailure, noteHandedBackOpen, openAttemptFailed } from './log/failedOpen'
 import { getPanicCapture, recordKernelStop } from './log/panicCapture'
 import { kernelMemoryBytes } from './wasm/kernelMemory'
 import { formatBytes } from './log/reportBundle'
@@ -178,6 +179,7 @@ import { itemFileName } from './library/fileNaming'
 import type { LibraryCategory, LibraryItem } from './library/types'
 import type { LibraryPlacement } from './tools/LibraryPlaceTool'
 import { parseInsertResult } from './tools/LibraryPlaceTool'
+import { childPopupOpen } from './settingsEscape'
 import { alreadyHereToast, clipboardDrawing, copiedToast, cutTargets, isCopyableDrawing, nothingToCopyToast, pastedDrawingRefs } from './clipboard/drawingClipboard'
 import { readImageInfo, pictureName, isPictureFileName } from './tools/imageInfo'
 import {
@@ -287,6 +289,10 @@ interface Toast {
   emphasis?: boolean
   /** A button on the toast (the DegenerateInput toast offers Model Health). */
   action?: ToastAction
+  /** Stays up until the person dismisses it (a click). For an error they
+   * must be able to read, such as a failed import or open: the ordinary
+   * 4 s toast can vanish before a long reason is read. */
+  persistent?: boolean
 }
 
 let toastCounter = 0
@@ -428,6 +434,13 @@ function noteOpenFailure(what: string, err: unknown, file: { name: string; bytes
   }
 }
 /* oxlint-enable lingui/no-unlocalized-strings */
+
+/** True when a kernel call failed with an ordinary typed refusal: the kernel
+ *  is alive and the document untouched. A wasm trap or a captured panic means
+ *  the kernel is gone. */
+function isKernelRefusal(err: unknown): boolean {
+  return getPanicCapture() === null && !(err instanceof WebAssembly.RuntimeError)
+}
 
 /** Extract the filename from an absolute path (cross-platform / or \). */
 function basenameOf(path: string): string {
@@ -866,6 +879,7 @@ export default function App() {
   })
   /** Settings modal visibility — web fallback only (Tauri opens a real OS window). */
   const [showSettingsModal, setShowSettingsModal] = useState(false)
+  const settingsDialogRef = useRef<HTMLDivElement | null>(null)
   // Windows desktop settings surface (Fluent in-app page; see openSettings).
   const [showFluentSettings, setShowFluentSettings] = useState(false)
   /** Command palette visibility (⌘/ / Ctrl+/). */
@@ -2156,6 +2170,8 @@ export default function App() {
     scene: state?.scene ?? null,
     viewportApi,
     docRev,
+    hiddenKeys,
+    hiddenTagPaths,
     display: scenesDisplay,
     setDisplay: scenesSetDisplay,
     setViewStyle: scenesSetViewStyle,
@@ -2466,7 +2482,7 @@ export default function App() {
     pumpEvents(scene)
   }, [state?.scene, activeTool])
 
-  const handleToast = useCallback((message: string, code?: string) => {
+  const handleToast = useCallback((message: string, code?: string, opts?: { persistent?: boolean }) => {
     // Severity lives beside the copy table in kernelErrors.ts (one source; a
     // new code gets its level where it gets its message).
     const isError = code !== undefined && isErrorLevelCode(code)
@@ -2483,13 +2499,31 @@ export default function App() {
     // A boolean refused for a zero-area face points at the repair: the
     // selection is the operands, so Model Health lists them.
     const action = toastActionFor(code, (view) => openModelHealthRef.current(view))
-    setToasts((prev) => [...prev, { id, message, code, isError, emphasis, action }])
+    const persistent = opts?.persistent === true
+    setToasts((prev) => [...prev, { id, message, code, isError, emphasis, action, persistent }])
+    if (persistent) return
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id))
     }, action !== undefined ? ACTION_TOAST_MS : emphasis ? 7000 : 4000)
   }, [])
   const handleToastRef = useRef(handleToast)
   handleToastRef.current = handleToast
+
+  // A failed open's persistent error toast — except while a new window is
+  // running the open handed to it by another window (`open_in_new_window`):
+  // there the failure is held back so the startup handoff can pass it to
+  // the opener and close this empty window (`window_open_refused`). `refusal`
+  // is false for a kernel that died (a trap or panic): that window keeps its
+  // crash screen, so the toast shows here as ever.
+  const deferOpenFailureRef = useRef(false)
+  const deferredOpenFailureRef = useRef<{ message: string; code: string | null } | null>(null)
+  const toastOpenFailure = useCallback((message: string, refusal: boolean, code?: string | null) => {
+    if (deferOpenFailureRef.current && refusal) {
+      deferredOpenFailureRef.current = { message, code: code ?? null }
+      return
+    }
+    handleToast(message, undefined, { persistent: true })
+  }, [handleToast])
 
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id))
@@ -3116,7 +3150,9 @@ export default function App() {
       if (loaded.panicked) {
         setKernelPanicked(true)
       }
-      handleToast(friendlyErrorText(loaded.error))
+      // A file that would not open keeps its reason on screen until dismissed.
+      if (file !== undefined) toastOpenFailure(friendlyErrorText(loaded.error), !loaded.panicked, parseKernelErrorCode(loaded.error))
+      else handleToast(friendlyErrorText(loaded.error))
       return false
     }
     // Any successful load supersedes the welcome screen — e.g. a warm
@@ -3251,7 +3287,7 @@ export default function App() {
     })()
     pumpEvents(scene)
     return true
-  }, [handleToast, reseedHiddenStateFromScene, noteDocumentEvent])
+  }, [handleToast, toastOpenFailure, reseedHiddenStateFromScene, noteDocumentEvent])
   // Keep the harness's Open path ( __hew_test.load) pointed at the latest
   // applyLoadedBytes closure.
   applyLoadedBytesRef.current = applyLoadedBytes
@@ -3529,7 +3565,7 @@ export default function App() {
       // A wasm trap mid-import (an out-of-memory abort on a model too big
       // for the browser kernel) hands the page to the crash screen inside
       // noteOpenFailure; the toast below is for ordinary refusals.
-      handleToast(t`Import failed: ${ph({ reason: friendlyErrorText(err) })}`)
+      handleToast(t`Import failed: ${ph({ reason: friendlyErrorText(err) })}`, undefined, { persistent: true })
       // The blank-document replace above already committed (applyLoadedBytes
       // mutates the live scene directly, with no rollback), even though the
       // import into it just failed — the live scene really is blank now.
@@ -3635,7 +3671,7 @@ export default function App() {
       step = scene.open_skp_begin(pick.bytes) as OpenStepProgress
     } catch (err: unknown) {
       noteOpenFailure('SKP open', err, pick)
-      handleToast(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`)
+      toastOpenFailure(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`, isKernelRefusal(err), parseKernelErrorCode(err))
       settle()
       return false
     }
@@ -3667,7 +3703,7 @@ export default function App() {
       clearOpenAttempt()
     } catch (err: unknown) {
       noteOpenFailure('SKP open', err, pick)
-      handleToast(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`)
+      toastOpenFailure(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`, isKernelRefusal(err), parseKernelErrorCode(err))
       // The blank load committed even though the open failed: reflect a fresh
       // untitled document so the next Save can never write to a stale file
       // (same reasoning as runImportPick's catch).
@@ -3715,7 +3751,7 @@ export default function App() {
       void recordRecent(pick.bytes, pick.name, 'open', undefined, undefined, undefined, format)
     }
     return true
-  }, [handleToast, applyLoadedBytes, clearRecoverySnapshot, reseedHiddenStateFromScene, noteDocumentEvent])
+  }, [handleToast, toastOpenFailure, applyLoadedBytes, clearRecoverySnapshot, reseedHiddenStateFromScene, noteDocumentEvent])
 
   // The unified Open dialog: ONE picker accepting `.hew` plus every import
   // format, dispatching on the extension the user picked (see
@@ -3749,7 +3785,7 @@ export default function App() {
       try {
         pick = await fileHostRef.current.openAny()
       } catch (err: unknown) {
-        handleToast(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`)
+        handleToast(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`, undefined, { persistent: true })
         return
       }
       if (pick === null) return // user cancelled — current document unchanged
@@ -3868,7 +3904,7 @@ export default function App() {
       try {
         pick = await fileHostRef.current.openForImport()
       } catch (err: unknown) {
-        handleToast(t`Import failed: ${ph({ reason: friendlyErrorText(err) })}`)
+        handleToast(t`Import failed: ${ph({ reason: friendlyErrorText(err) })}`, undefined, { persistent: true })
         return
       }
       if (pick === null) return // user cancelled — current document unchanged
@@ -4061,7 +4097,7 @@ export default function App() {
         return false
       }
     },
-    [handleToast, clearRecoverySnapshot, pushCameraStateToScene, noteSkpSimplified, noteDocumentEvent, reportDocumentId],
+    [handleToast, toastOpenFailure, clearRecoverySnapshot, pushCameraStateToScene, noteSkpSimplified, noteDocumentEvent, reportDocumentId],
   )
 
   const saveDocument = useCallback(
@@ -4388,12 +4424,12 @@ export default function App() {
         const ok = applyLoadedBytes(bytes, { name: basenameOf(path), label: OPEN_FILE_LABELS.hew })
         if (ok) setDocSession(afterImport(name ?? t`Library Item`, Date.now()))
       } catch (err) {
-        handleToast(
-          t`Couldn't open the library item: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`,
-        )
+        const message = t`Couldn't open the library item: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`
+        if (deferOpenFailureRef.current) toastOpenFailure(message, isKernelRefusal(err), parseKernelErrorCode(err))
+        else handleToast(message)
       }
     },
-    [applyLoadedBytes, handleToast],
+    [applyLoadedBytes, handleToast, toastOpenFailure],
   )
   const openLibraryCopyRef = useRef(openLibraryCopy)
   useEffect(() => { openLibraryCopyRef.current = openLibraryCopy }, [openLibraryCopy])
@@ -4439,7 +4475,7 @@ export default function App() {
   // "clicking did nothing" is the worst outcome for a welcome-screen row.
   const openRecent = useCallback((path: string) => {
     openPath(path).catch(() => {
-      handleToast(t`Couldn't open ${ph({ fileName: basenameOf(path) })} — the file may have been moved or deleted.`)
+      handleToast(t`Couldn't open ${ph({ fileName: basenameOf(path) })} — the file may have been moved or deleted.`, undefined, { persistent: true })
     })
   }, [openPath, handleToast])
 
@@ -4586,18 +4622,27 @@ export default function App() {
     setRecoveryPrompt(null)
   }, [recoveryPrompt, adoptSnapshot])
 
+  // Declining recovery (Discard or Esc) is a fresh launch: the Welcome screen
+  // the recovery prompt pre-empted is offered now, unless the user turned it
+  // off or a document loaded in the meantime (KB-39).
+  const offerWelcomeAfterDecline = useCallback(() => {
+    if (getShowWelcome() && !documentLoadedRef.current) setWelcomeOpen(true)
+  }, [])
+
   const handleDiscardRecovery = useCallback(() => {
     // The dialog listed every snapshot, so this is an informed Discard All —
     // per-window saves use clear(), which drops only that window's own slot.
     recoveryStoreRef.current.discardAll().catch(() => { /* ignore */ })
     setRecoveryPrompt(null)
-  }, [])
+    offerWelcomeAfterDecline()
+  }, [offerWelcomeAfterDecline])
 
   // Escape closes the prompt WITHOUT clearing — the snapshot survives and is
   // re-offered next launch, so an accidental keypress can't lose work.
   const handleDismissRecovery = useCallback(() => {
     setRecoveryPrompt(null)
-  }, [])
+    offerWelcomeAfterDecline()
+  }, [offerWelcomeAfterDecline])
 
   // ---------------------------------------------------------------- undo/redo for Edit menu
   // Tag-visibility resync is NOT called here: it hangs off the viewport's
@@ -5794,6 +5839,24 @@ export default function App() {
     setShowSettingsModal(true)
   }, [])
 
+  // Esc closes the web Settings modal (KB-16), captured before the global
+  // keydown handlers so it cannot also cancel a tool underneath. A Controls
+  // pane that is recording a shortcut keeps its own Escape.
+  useEffect(() => {
+    if (!showSettingsModal) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isComposingKey(e) || e.key !== 'Escape') return
+      if (isRecordingChord()) return
+      // An open child popup/dialog takes this Escape first.
+      if (childPopupOpen(settingsDialogRef.current)) return
+      e.preventDefault()
+      e.stopPropagation()
+      setShowSettingsModal(false)
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [showSettingsModal])
+
   // ---------------------------------------------------------------- stable refs for Tauri event listeners
   // These refs always track the latest callbacks so Tauri event handlers
   // (registered once) don't capture stale closures.
@@ -6943,6 +7006,40 @@ export default function App() {
     return () => { cancelled = true; unlisten?.() }
   }, [])
 
+  // ---------------------------------------------------------------- window-open-refused listener (Tauri only)
+  // A window this one asked for (`open_in_new_window`) could not open the
+  // file and has closed itself, handing the error back (KB-9). Show it
+  // persistently here, and keep the file for Help ▸ Report Bug: the new
+  // window's copy of the bytes went with it, so read them again from the
+  // path (approved when it was picked; `read_file` checks the path, not the
+  // window).
+  useEffect(() => {
+    if (!isTauri) return
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    import('@tauri-apps/api/webviewWindow').then(({ getCurrentWebviewWindow }) => {
+      return getCurrentWebviewWindow().listen<{ path: string; message: string }>('window-open-refused', (event) => {
+        const { path, message } = event.payload
+        handleToastRef.current(message, undefined, { persistent: true })
+        void noteHandedBackOpen(
+          {
+            name: basenameOf(path),
+            label: /\.skp$/i.test(path) ? OPEN_FILE_LABELS.skp : OPEN_FILE_LABELS.hew,
+            error: message,
+          },
+          async () => {
+            const { invoke } = await import('@tauri-apps/api/core')
+            return new Uint8Array(await invoke<ArrayBuffer>('read_file', { path }))
+          },
+        )
+      })
+    }).then((fn) => {
+      if (cancelled) { fn(); return }
+      unlisten = fn
+    }).catch(() => { /* not in Tauri, or registration failed */ })
+    return () => { cancelled = true; unlisten?.() }
+  }, [])
+
   const focusWindow = useCallback((label: string) => {
     import('@tauri-apps/api/core')
       .then(({ invoke }) => invoke('focus_window', { label }))
@@ -7000,16 +7097,42 @@ export default function App() {
             return
           }
           if (windowOpen != null) {
-            if (windowOpen.as_copy) {
-              // Library "Open as Document": COPY semantics, matching the
-              // pristine route exactly — the document is import-shaped
-              // (Save always prompts), never path-bound to the library
-              // item, and the library path never enters recents (whose
-              // launch-time seeding grants WRITE approval — the round-3
-              // review's silent-overwrite path).
-              await openLibraryCopyRef.current(windowOpen.path, windowOpen.name)
-            } else {
-              await openPathRef.current(windowOpen.path)
+            // This window was made for the open: hold back a refusal's
+            // toast, and if the open is refused hand it to the window that
+            // asked for it and close this empty one (KB-9).
+            deferOpenFailureRef.current = true
+            deferredOpenFailureRef.current = null
+            try {
+              if (windowOpen.as_copy) {
+                // Library "Open as Document": COPY semantics, matching the
+                // pristine route exactly — the document is import-shaped
+                // (Save always prompts), never path-bound to the library
+                // item, and the library path never enters recents (whose
+                // launch-time seeding grants WRITE approval — the round-3
+                // review's silent-overwrite path).
+                await openLibraryCopyRef.current(windowOpen.path, windowOpen.name)
+              } else {
+                await openPathRef.current(windowOpen.path)
+              }
+            } finally {
+              deferOpenFailureRef.current = false
+            }
+            const refused = deferredOpenFailureRef.current as { message: string; code: string | null } | null
+            deferredOpenFailureRef.current = null
+            if (refused !== null) {
+              let handedBack = false
+              try {
+                handedBack = await invoke<boolean>('window_open_refused', {
+                  path: windowOpen.path,
+                  asCopy: windowOpen.as_copy,
+                  name: windowOpen.name,
+                  message: refused.message,
+                  code: refused.code,
+                })
+              } catch {
+                /* older shell — show it here */
+              }
+              if (!handedBack) handleToastRef.current(refused.message, undefined, { persistent: true })
             }
             return
           }
@@ -8692,8 +8815,17 @@ export default function App() {
                     <span aria-hidden="true" style={{ color: 'var(--status-solid)', flexShrink: 0 }}>✓</span>
                   )}
                   {/* The toast reads as plain words. The machine code stays in
-                      the log line and the bug-report bundle (logMessage). */}
-                  <span>{toast.message}</span>
+                      the log line and the bug-report bundle (logMessage). One
+                      flex item for the message and its dismiss hint, so a long
+                      message wraps under it instead of in a narrow column. */}
+                  <span>
+                    {toast.message}
+                    {toast.persistent === true && (
+                      <span style={{ display: 'block', marginTop: '4px', opacity: 0.75, fontSize: '11px' }}>
+                        <Trans>Click to dismiss</Trans>
+                      </span>
+                    )}
+                  </span>
                   {toast.action !== undefined && (
                     <button
                       type="button"
@@ -9530,6 +9662,7 @@ export default function App() {
           }}
         >
           <div
+            ref={settingsDialogRef}
             role="dialog"
             aria-modal="true"
             aria-label={t`Settings`}

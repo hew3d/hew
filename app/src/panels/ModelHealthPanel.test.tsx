@@ -7,8 +7,9 @@
  * tests in objectBounds.test.ts.
  */
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ModelHealthPanel } from './ModelHealthPanel'
+import { clearKernelStop, getKernelStop, getPanicCapture } from '../log/panicCapture'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { HealthOverlay, HealthScope } from '../health/healthReport'
 import type { NodeRef } from './treeModel'
@@ -104,6 +105,11 @@ async function search(value: string): Promise<void> {
   })
 }
 const lastOverlay = (fn: ReturnType<typeof vi.fn>): HealthOverlay | null => fn.mock.calls[fn.mock.calls.length - 1][0]
+
+afterEach(() => {
+  delete (globalThis as { __hewLastPanic?: unknown }).__hewLastPanic
+  clearKernelStop()
+})
 
 beforeEach(() => {
   vi.mocked(worldBoundsForSelection).mockClear()
@@ -468,6 +474,20 @@ describe('ModelHealthPanel — Stage 2 repairs', () => {
     expect(props.onToast.mock.calls[0][1]).toBe('RimNotPlanar')
     expect(props.onGeometryChanged).not.toHaveBeenCalled()
     expect(rowEl('1')).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('a kernel trap goes to the crash screen, not a refusal toast (KB-38)', () => {
+    const scene = makeScene(ROWS, {
+      cap_rims: vi.fn(() => {
+        throw new WebAssembly.RuntimeError('unreachable')
+      }),
+    })
+    const { props } = setup({ scene })
+    fireEvent.click(rowEl('1'))
+    fireEvent.click(btn('Close'))
+    expect(props.onToast).not.toHaveBeenCalled()
+    expect(getKernelStop()).not.toBeNull()
+    expect(getPanicCapture()?.message).toContain('Kernel trap during Model Health repair')
   })
 })
 

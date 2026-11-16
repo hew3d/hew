@@ -64,6 +64,16 @@ export function hasNativeSavePanel(): boolean {
   return isTauri
 }
 
+/**
+ * `path` with a doubled trailing `ext` (no dot) reduced to one, any case: a
+ * native panel that appends its allowed type to a typed `Model.hew` answers
+ * `Model.hew.hew`. A path with a single (or no) `ext` is returned as is.
+ */
+export function collapseDoubledExtension(path: string, ext: string): string {
+  const dotted = `.${ext}`.toLowerCase()
+  return path.toLowerCase().endsWith(dotted + dotted) ? path.slice(0, path.length - dotted.length) : path
+}
+
 /** Show the native panel; `null` when the user canceled. */
 export async function pickSaveTarget(
   title: string,
@@ -72,7 +82,10 @@ export async function pickSaveTarget(
   initial: string,
 ): Promise<PanelResult | null> {
   const { invoke } = await import('@tauri-apps/api/core')
-  return invoke<PanelResult | null>('pick_save_target', { title, defaultName, formats, initial })
+  const result = await invoke<PanelResult | null>('pick_save_target', { title, defaultName, formats, initial })
+  if (result === null) return null
+  // The shell has already settled the extension (save_panel::with_extension).
+  return result
 }
 
 // ------------------------------------------------------------------ Save As

@@ -190,6 +190,17 @@ describe('CameraRig — ortho framing (frameOrthoToRadius)', () => {
   })
 })
 
+describe('CameraRig — ortho framing under a held scene frame', () => {
+  it('carries the fit scale so releasing the frame leaves radius * margin', () => {
+    const rig = new CameraRig(1) // window narrower than the 2:1 frame: fit scale 2
+    rig.setFrameAspect(2)
+    rig.frameOrthoToRadius(4, 1.2, 1)
+    expect(rig.orthographic.top).toBeCloseTo(4.8 * 2, 9)
+    rig.setFrameAspect(null) // releasing the frame leaves the model framed as a free camera frames it
+    expect(rig.orthographic.top).toBeCloseTo(4.8, 9)
+  })
+})
+
 describe('CameraRig — perspectiveFramingDistance', () => {
   it('matches radius * margin / tanHalfFov', () => {
     const rig = new CameraRig(1)
@@ -414,5 +425,61 @@ describe('turnedEyePosition', () => {
     turnedEyePosition(target, eye, 2)
     expect(target.toArray()).toEqual([1, 1, 1])
     expect(eye.toArray()).toEqual([0, -3, 0])
+  })
+})
+
+describe('CameraRig — scene frame fit (aspectRatio held by a scene camera)', () => {
+  const fov = 48.46
+  const rendered = (w: number) => {
+    const rig = new CameraRig(w)
+    rig.setFov(fov)
+    rig.setFrameAspect(2)
+    return rig
+  }
+
+  it('widens the rendered vertical angle in a window narrower than the frame', () => {
+    const rig = rendered(1.707)
+    expect(rig.perspective.fov).toBeCloseTo(55.6, 1)
+    expect(rig.fovDeg).toBeCloseTo(fov, 9)
+  })
+
+  it('shows the stored angle in a window as wide as, or wider than, the frame', () => {
+    expect(rendered(2).perspective.fov).toBeCloseTo(fov, 9)
+    expect(rendered(2.5).perspective.fov).toBeCloseTo(fov, 9)
+  })
+
+  it('refits on resize, and a free camera (no frame) is untouched', () => {
+    const rig = rendered(2.5)
+    rig.setAspect(1.707)
+    expect(rig.perspective.fov).toBeCloseTo(55.6, 1)
+    rig.setAspect(2.5)
+    expect(rig.perspective.fov).toBeCloseTo(fov, 9)
+    rig.setFrameAspect(null)
+    rig.setAspect(1)
+    expect(rig.perspective.fov).toBeCloseTo(fov, 9)
+  })
+
+  it('scales a parallel view height by A / min(A, W) and keeps the stored height', () => {
+    const rig = new CameraRig(2)
+    rig.setFrameAspect(2)
+    rig.perspective.position.set(0, -10, 0)
+    rig.perspective.lookAt(0, 0, 0)
+    rig.toggleProjection(new THREE.Vector3())
+    rig.setParallelHeight(4)
+    expect(rig.orthographic.top - rig.orthographic.bottom).toBeCloseTo(4, 9)
+    rig.setAspect(1)
+    expect(rig.orthographic.top - rig.orthographic.bottom).toBeCloseTo(8, 9)
+    expect(rig.orthographic.right).toBeCloseTo(4, 9)
+    expect(rig.heightAtTarget(10)).toBeCloseTo(4, 9)
+  })
+
+  it('a user-set fov releases the frame; a tween pose keeps it', () => {
+    const rig = rendered(1.707)
+    rig.applyPose(new THREE.Vector3(0, -5, 0), new THREE.Vector3(), new THREE.Vector3(0, 0, 1), fov)
+    expect(rig.frameAspect).toBe(2)
+    expect(rig.perspective.fov).toBeCloseTo(55.6, 1)
+    rig.setFov(60)
+    expect(rig.frameAspect).toBeNull()
+    expect(rig.perspective.fov).toBeCloseTo(60, 9)
   })
 })

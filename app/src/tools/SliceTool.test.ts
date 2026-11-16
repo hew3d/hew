@@ -309,9 +309,35 @@ describe('SliceTool — hasArmedGesture (distinct from the unconditional capturi
     return { tool }
   }
 
-  it('capturingInput() is unconditionally true even with no lock engaged', () => {
+  it('capturingInput() is false with nothing typed, so Space and the tool letters reach the shortcut table', () => {
     const { tool } = makeTool()
+    expect(tool.capturingInput()).toBe(false)
+    expect(tool.hasArmedGesture()).toBe(false)
+    for (const key of [' ', 'r', 'm', 'l', 'p', 'Enter', 'Backspace', '/', "'"]) {
+      expect(tool.capturesKey(key)).toBe(false)
+    }
+  })
+
+  it('only a digit, a dot or a minus opens the typed offset; then the full length grammar and Enter belong to Slice', () => {
+    const { tool } = makeTool()
+    for (const key of ['0', '5', '9', '.', '-']) expect(tool.capturesKey(key)).toBe(true)
+    tool.onKey(makeKeyEvent('1'))
     expect(tool.capturingInput()).toBe(true)
+    expect(tool.hasArmedGesture()).toBe(true)
+    for (const key of ['2', 'c', 'm', "'", '"', '/', ' ', 'Backspace', 'Enter']) {
+      expect(tool.capturesKey(key)).toBe(true)
+    }
+  })
+
+  it('Escape clears the typed buffer first, then the lock, then the tool', () => {
+    const { tool } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    tool.onKey(makeKeyEvent('Shift')) // lock
+    tool.onKey(makeKeyEvent('2'))
+    tool.onKey(makeKeyEvent('Escape'))
+    expect(tool.capturingInput()).toBe(false)
+    expect(tool.hasArmedGesture()).toBe(true) // lock still held
+    tool.onKey(makeKeyEvent('Escape'))
     expect(tool.hasArmedGesture()).toBe(false)
   })
 

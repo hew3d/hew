@@ -916,7 +916,10 @@ Linux, installed from a `.deb`/`.rpm` (`hew-cli` is already on `PATH`):
 ```
 
 Add `"--live"` to `args` to drive the app the user has open instead of
-an embedded document.
+an embedded document. Each argument is its own array entry:
+`"args": ["mcp", "--live", "--launch"]`, never `"args": ["mcp --live --launch"]`
+(one string reaches `hew-cli` as a single unknown command, and the client
+only reports a closed connection).
 
 The server does not expose one tool per command. Eighty near-flat tools
 would bury a model in choices while stripping the transaction semantics

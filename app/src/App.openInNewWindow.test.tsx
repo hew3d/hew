@@ -176,7 +176,7 @@ vi.mock('./io/recoveryStore', async (importOriginal) => {
 // effects (title push, menu sync, startup handoff, window-list fetch) fire
 // on every render regardless of what a given test cares about, and must not
 // throw or hang the test.
-const invokeMock = vi.fn(async (cmd: string) => {
+const invokeMock = vi.fn(async (cmd: string): Promise<unknown> => {
   switch (cmd) {
     case 'get_recents':
     case 'list_windows':
@@ -580,5 +580,92 @@ describe('App — the document id reaches the shell with the save (Tauri)', () =
       .mock.calls.findIndex(([kind]) => kind === 'saved')
     const savedOrder = vi.mocked(mockScene.note_document_event).mock.invocationCallOrder[savedCall]
     expect(reportOrder).toBeLessThan(savedOrder)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// KB-9: a window made for an open the kernel refuses hands the error back to
+// the window that asked for it and closes itself.
+// ---------------------------------------------------------------------------
+
+describe('App — a refused open in a new window (Tauri)', () => {
+  const pending = { path: '/tmp/old.hew', as_copy: false, name: null }
+  const useHandoff = (refusedAnswer: () => Promise<boolean>) => {
+    mockScene.load.mockImplementationOnce(() => {
+      throw new Error('this file is not a Hew document')
+    })
+    invokeMock.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case 'take_pending_window_open':
+          return pending
+        case 'window_open_refused':
+          return refusedAnswer()
+        case 'get_recents':
+        case 'list_windows':
+          return []
+        case 'read_file':
+          return new ArrayBuffer(0)
+        case 'take_pending_recovery':
+        case 'take_pending_open':
+        case 'updater_available':
+          return null
+        default:
+          return undefined
+      }
+    })
+  }
+  // The mock's calls are typed as 1-tuples; widen so the payload (index 1) reads.
+  const refusedCall = () =>
+    invokeMock.mock.calls.find(([c]) => c === 'window_open_refused') as unknown[] | undefined
+
+  it('hands a refusal to the opener and shows no toast here when the shell closes the window', async () => {
+    useHandoff(async () => true)
+    await renderAndLoad()
+    await waitFor(() => expect(refusedCall()).toBeDefined())
+    expect(refusedCall()?.[1]).toMatchObject({
+      path: '/tmp/old.hew',
+      asCopy: false,
+      message: 'this file is not a Hew document',
+    })
+    await act(async () => {})
+    expect(screen.queryByText('this file is not a Hew document')).not.toBeInTheDocument()
+  })
+
+  it('shows the toast here when the shell says the opener is gone', async () => {
+    useHandoff(async () => false)
+    await renderAndLoad()
+    expect(await screen.findByText('this file is not a Hew document')).toBeInTheDocument()
+  })
+
+  it('shows the toast here when the command fails (older shell)', async () => {
+    useHandoff(async () => {
+      throw new Error('unknown command')
+    })
+    await renderAndLoad()
+    expect(await screen.findByText('this file is not a Hew document')).toBeInTheDocument()
+  })
+
+  it('never calls the command when the handoff open succeeds', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case 'take_pending_window_open':
+          return pending
+        case 'read_file':
+          return new ArrayBuffer(0)
+        case 'get_recents':
+        case 'list_windows':
+          return []
+        case 'take_pending_recovery':
+        case 'take_pending_open':
+        case 'updater_available':
+          return null
+        default:
+          return undefined
+      }
+    })
+    await renderAndLoad()
+    await waitFor(() => expect(mockScene.load).toHaveBeenCalled())
+    await act(async () => {})
+    expect(refusedCall()).toBeUndefined()
   })
 })

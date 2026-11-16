@@ -19,8 +19,13 @@
  *     material equals the clicked face's effective material with the
  *     current material (`scene.replace_material`, one atomic undo step).
  *   - Ctrl/Cmd+Shift: same replace, confined to the clicked object.
- *   - Ctrl/Cmd alone (no Shift): unchanged — fills the whole object's base
- *     material (`set_object_material`).
+ *   - Ctrl/Cmd alone (no Shift): fills the whole object's base material
+ *     (`set_object_material`), clearing faces painted one by one first so
+ *     the whole solid shows the new material.
+ *   - A plain click on something selected paints the whole selection the
+ *     same way (every selected solid, one undo step); a click off the
+ *     selection paints one face. A click reached through a component
+ *     placement paints the placement instead (below).
  *
  * The current material is set via `setCurrentMaterial(id)` from the
  * MaterialPalette panel. Sentinel `BigInt(0xFFFFFFFFFFFFFFFF)` = default/unpaint.
@@ -45,6 +50,7 @@ import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import type { NodeRef } from '../panels/treeModel'
+import { inHistoryBracket } from './transformSelection'
 
 export type OnPaintCommit = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
@@ -85,6 +91,24 @@ export function resetInstancePaintExplained(): void {
   linkedPaintExplained = false
 }
 
+/** What a click on the selection fills: every solid to paint (a component's
+ *  definition members and a group's solids included) and an optional note for
+ *  the user (a component paint changes every copy). */
+export interface PaintFillPlan {
+  objects: bigint[]
+  /** Component placements to paint (`set_instance_material`: each keeps its
+   *  own look, copies are untouched). Omitted, none. */
+  instances?: bigint[]
+  message: string | null
+}
+
+/** Asked at each plain click with the picked solid (and the instance it was
+ *  seen through); `null` when the click is off the selection. */
+export type SelectionFillResolver = (object: bigint, instance: bigint | undefined) => PaintFillPlan | null
+
+/** Fired after a whole-selection fill — the caller re-tessellates all of them. */
+export type OnFillCommit = (objectIds: bigint[]) => void
+
 /** `u64::MAX` as a BigInt — sentinel for "default / unpaint". */
 export const MATERIAL_SENTINEL: bigint = BigInt('18446744073709551615')
 
@@ -121,7 +145,7 @@ export class PaintTool implements Tool {
     if (this.eyedropper) {
       return t`Alt-click a face to sample its material.`
     }
-    return t`Click a face to paint it with the current material — Shift-click replaces it everywhere, Ctrl/Cmd+Shift-click replaces within the object, Ctrl/Cmd-click fills the whole object, Alt = eyedropper.`
+    return t`Click a face to paint it with the current material. Click something selected to paint all of it. Shift-click replaces it everywhere, Ctrl/Cmd+Shift-click replaces within the object, Ctrl/Cmd-click fills the whole object, Alt = eyedropper.`
   }
 
   private wasmScene: WasmScene
@@ -129,6 +153,8 @@ export class PaintTool implements Tool {
   private onToast: OnToast
   private onSample: OnSampleMaterial
   private onReplace: OnReplaceCommit
+  private onFill: OnFillCommit
+  private selectionFill: SelectionFillResolver | null = null
   private currentMaterialId: bigint = MATERIAL_SENTINEL
   /** When true, the next click fills the whole object (base material). */
   private wholeObject = false
@@ -163,7 +189,9 @@ export class PaintTool implements Tool {
     getSessionStack: () => NodeRef[] = () => [],
     onInstanceCommit: OnInstancePaintCommit = () => {},
     onHoverInstance: OnHoverInstance = () => {},
+    onFill: OnFillCommit = (ids) => { for (const id of ids) onCommit(id) },
   ) {
+    this.onFill = onFill
     this.wasmScene = wasmScene
     this.onCommit = onCommit
     this.onToast = onToast
@@ -193,6 +221,11 @@ export class PaintTool implements Tool {
     if (id === this.hoveredInstance) return
     this.hoveredInstance = id
     this.onHoverInstance(id)
+  }
+
+  /** Let a plain click on the selection paint all of it (see `PaintFillPlan`). */
+  setSelectionFill(resolver: SelectionFillResolver | null): void {
+    this.selectionFill = resolver
   }
 
   /** Set the active material id. `MATERIAL_SENTINEL` = unpaint. */
@@ -275,6 +308,11 @@ export class PaintTool implements Tool {
       const objectHandle = pick.object()
       const faceHandle = pick.face()
       const instance = this._paintableInstance(pick)
+      // A plain click on a selected thing (a placement included) paints the
+      // whole selection; ⌘/Ctrl-click stays single-target.
+      const plan = wholeObject || this.eyedropper || replaceScope !== null ? null : (this.selectionFill?.(objectHandle, pick.instance()) ?? null)
+      const selectionPlan =
+        plan !== null && (plan.objects.length > 0 || (plan.instances?.length ?? 0) > 0) ? plan : null
       // Alt (eyedropper) takes priority over every other modifier — SketchUp
       // parity, and it keeps the gesture unambiguous (Alt+Shift held together
       // samples, it never also replaces).
@@ -289,11 +327,14 @@ export class PaintTool implements Tool {
         }
       } else if (replaceScope !== null) {
         this._commitReplace(objectHandle, faceHandle, replaceScope, pick.instance())
+      } else if (selectionPlan !== null) {
+        this._fill(selectionPlan.objects, selectionPlan.message, selectionPlan.instances ?? [])
       } else if (instance !== undefined) {
-        // Plain click and ⌘/Ctrl-click alike: a placement has one knob.
+        // ⌘/Ctrl-click, or a plain click off the selection: just this
+        // placement (it has one knob).
         this._commitInstance(instance)
       } else if (wholeObject) {
-        this._commitObject(objectHandle)
+        this._fill([objectHandle], null)
       } else {
         this._commit(objectHandle, faceHandle)
       }
@@ -353,11 +394,33 @@ export class PaintTool implements Tool {
     }
   }
 
-  /** Set the base material on the whole object (⌘/Ctrl-click). */
-  private _commitObject(objectHandle: bigint): void {
+  /** Fill whole solids: per-face paint is cleared first (a whole-solid fill
+   *  supersedes it), then the base material is set, all in one undo step.
+   *  The clears are `replace_material` sweeps over each material the object
+   *  carries, so no per-face wasm call is needed. */
+  private _fill(objects: bigint[], message: string | null, instances: bigint[] = []): void {
     try {
-      this.wasmScene.set_object_material(objectHandle, this.currentMaterialId)
-      this.onCommit(objectHandle)
+      const touchedInstances: bigint[] = []
+      const linkedDefs = new Set<bigint>()
+      inHistoryBracket(this.wasmScene, t`Paint`, () => {
+        for (const instance of instances) {
+          const linked = this.wasmScene.is_linked(instance)
+          const touched = this.wasmScene.set_instance_material(instance, this.currentMaterialId)
+          touchedInstances.push(...(touched.length > 0 ? [...touched] : [instance]))
+          const def = linked ? this.wasmScene.instance_def(instance) : undefined
+          if (def !== undefined) linkedDefs.add(def)
+        }
+        for (const object of objects) {
+          for (const m of Array.from(this.wasmScene.object_materials(object))) {
+            this.wasmScene.replace_material(false, object, m, MATERIAL_SENTINEL)
+          }
+          this.wasmScene.set_object_material(object, this.currentMaterialId)
+        }
+      })
+      if (touchedInstances.length > 0) this.onInstanceCommit(touchedInstances, [...linkedDefs])
+      if (objects.length === 1) this.onCommit(objects[0])
+      else if (objects.length > 1) this.onFill(objects)
+      if (message !== null) this.onToast(message)
     } catch (err) {
       this._handleError(err)
     }

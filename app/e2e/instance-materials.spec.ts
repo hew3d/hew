@@ -161,3 +161,57 @@ test('paint one placement, then a member face inside another', async ({ page }) 
   expect(await page.evaluate((m) => window.__hew_test!.materialUsage(m), s.red)).toBe(2)
   expect(await page.evaluate(() => window.__hew_test!.unusedMaterials())).not.toContain(s.red)
 })
+
+test('a plain click on a selected placement paints the whole selection in one undo step', async ({ page }) => {
+  await page.goto('/')
+  await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, { timeout: 15_000 })
+  const ctx = await aim(page)
+
+  // A component placed three times (x = 0, 3, 6) plus a separate box at x = 9.
+  const s = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const member = h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    const { instance, component } = h.makeComponent([member])
+    const second = h.placeInstance(component, 3, 0, 0)
+    const third = h.placeInstance(component, 6, 0, 0)
+    const box = h.drawBox([9, 0, 0], [10, 1, 0], 1)
+    const red = h.addMaterial('Fill Red', 220, 40, 40, 255)
+    return { first: instance, second, third, box, red }
+  })
+
+  const swatch = page.getByTitle('Fill Red')
+  if (!(await swatch.isVisible().catch(() => false))) {
+    await page.getByText('Materials', { exact: true }).first().click()
+  }
+  await swatch.click()
+  await expect(page.getByText(/Click a face to paint it with the current material/i)).toBeVisible()
+
+  // Select two placements and the box, then click one SELECTED placement.
+  await page.evaluate(
+    (ids) =>
+      window.__hew_test!.selectNodes([
+        { kind: 'instance', id: ids.first },
+        { kind: 'instance', id: ids.second },
+        { kind: 'object', id: ids.box },
+      ]),
+    s,
+  )
+  const own = (id: string) => page.evaluate((i) => window.__hew_test!.getInstanceMaterial(i), id)
+  const boxPaint = async () => {
+    const hit = await page.evaluate(() => window.__hew_test!.pickFace([9.5, 0.5, 5], [0, 0, -1]))
+    return page.evaluate(({ o, f }) => window.__hew_test!.getFaceMaterial(o, f), { o: hit!.object, f: hit!.face })
+  }
+
+  await clickWorld(page, ctx, 3.5, 0.5, 1)
+
+  expect(await own(s.first)).toBe(s.red)
+  expect(await own(s.second)).toBe(s.red)
+  expect(await own(s.third)).toBeNull()
+  expect((await boxPaint())?.objectDefault).toBe(s.red)
+
+  // One undo restores all three.
+  await page.evaluate(() => window.__hew_test!.undo())
+  expect(await own(s.first)).toBeNull()
+  expect(await own(s.second)).toBeNull()
+  expect((await boxPaint())?.objectDefault).toBeNull()
+})

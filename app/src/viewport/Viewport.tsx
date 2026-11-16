@@ -66,7 +66,7 @@ import { routeBooleanMany, subtractThroughPlacement, opLabel, OP_SUBTRACT } from
 import { unlinkedLabel, unlinkedToJoin, cutOnlyThisOne, cutOneSolidAtATime } from '../linkedCopyCopy'
 import { DEFAULT_POLYGON_SIDES } from '../tools/PolygonTool'
 import type { TouchedIds } from '../tools/offsetShared'
-import { PaintTool, MATERIAL_SENTINEL } from '../tools/PaintTool'
+import { PaintTool, MATERIAL_SENTINEL, type PaintFillPlan } from '../tools/PaintTool'
 import { PositionTextureTool } from '../tools/PositionTextureTool'
 import { MoveTool } from '../tools/MoveTool'
 import { RotateTool } from '../tools/RotateTool'
@@ -176,6 +176,7 @@ import {
 } from '../tools/planeUnits'
 import { runDraft, setDraftSolidSelector } from '../tools/draftCommit'
 import { dedupeRefs, invertWithin, objectDrawingIslands } from './drawnSelection'
+import { contextSelectableRefs, marqueeDrawnRefs } from './contextSelection'
 import { cursorFor as toolIconCursor } from '../tools/toolIcons'
 import { copyBadgeText } from '../tools/copyMode'
 import { getCopiesLinked, subscribeCopiesLinked } from '../settings/editing'
@@ -1214,6 +1215,9 @@ export interface ViewportApi {
     /** Omitted by a caller that has none (an older saved view): the
      * height the perspective view spans at `target` stands in. */
     parallelHeight?: number
+    /** A scene camera's stored frame ratio: held (fitted into the window)
+     * until the user moves the camera. Omitted = a free camera. */
+    aspectRatio?: number
     eye: [number, number, number]
     target: [number, number, number]
     up: [number, number, number]
@@ -1233,6 +1237,7 @@ export interface ViewportApi {
       projection: Projection
       fovDeg: number
       parallelHeight?: number
+      aspectRatio?: number
       eye: [number, number, number]
       target: [number, number, number]
       up: [number, number, number]
@@ -3194,6 +3199,8 @@ export default function Viewport({
     // ------------------------------------------------------------------ scene renderer
     const sceneRenderer = new SceneRenderer(threeScene, wasmScene)
     sceneRendererRef.current = sceneRenderer
+    sceneRenderer.onUnrenderable = () =>
+      onToastRef.current?.(t`Part of this file can't be drawn, so it was left out. The rest of the model is unaffected.`)
     // Initial refresh (empty scene is fine — just populates nothing)
     sceneRenderer.refresh()
     sceneRenderer.refreshGuides()
@@ -3659,6 +3666,17 @@ export default function Viewport({
       return out
     }
 
+    /** What a click can select inside an open instance or single-solid
+     *  context (empty for the top level and for a group). */
+    function contextClickableRefs(): NodeRef[] {
+      const found = contextSelectableRefs(
+        wasmScene as never,
+        activeContextRef.current,
+        (o, i) => isPickHidden(hiddenObjectIdsRef.current, hiddenInstanceIdsRef.current, o, i),
+      )
+      return found === null ? [] : dedupeRefs([...found.objects, ...found.drawn])
+    }
+
     /**
      * Select All (Edit ▸ Select All / ⌘A). At the top level: every visible
      * top-level node plus every free-standing sketch island plus every drawn
@@ -3671,7 +3689,17 @@ export default function Viewport({
       const ctx = activeContextRef.current
       if (ctx.length > 0) {
         const top = ctx[ctx.length - 1]
-        if (top.kind !== 'group') return
+        if (top.kind !== 'group') {
+          // An instance or a single solid: what a click can select there.
+          const refs = contextClickableRefs()
+          if (refs.length > 0) {
+            onSelectManyRef.current?.(refs, 'replace')
+            scheduleRender()
+          } else {
+            onToastRef.current?.(t`Nothing here to select. Double-click empty space to leave this context.`)
+          }
+          return
+        }
         // Same visibility rule as the top level: hidden members stay out.
         const members = wasmScene.group_members(top.id)
           .map(nodeRefFromJs)
@@ -3705,10 +3733,17 @@ export default function Viewport({
       let candidates: NodeRef[]
       if (ctx.length > 0) {
         const top = ctx[ctx.length - 1]
-        if (top.kind !== 'group') return
-        candidates = wasmScene.group_members(top.id)
-          .map(nodeRefFromJs)
-          .filter((m) => visibleLeaves(m) !== null)
+        if (top.kind !== 'group') {
+          candidates = contextClickableRefs()
+          if (candidates.length === 0) {
+            onToastRef.current?.(t`Nothing here to select. Double-click empty space to leave this context.`)
+            return
+          }
+        } else {
+          candidates = wasmScene.group_members(top.id)
+            .map(nodeRefFromJs)
+            .filter((m) => visibleLeaves(m) !== null)
+        }
       } else {
         // Inside an open group session the group's own members are the whole
         // universe to invert within — free sketches are world-global there
@@ -3745,8 +3780,14 @@ export default function Viewport({
 
     /** The face geometry rendered for one node's visible leaves. Instances
      * are read from the renderer's member cache, never materialized. */
-    function candidateParts(cand: { leafObjects: bigint[]; leafInstances: bigint[] }): MarqueePart[] {
+    function candidateParts(cand: { leafObjects: bigint[]; leafInstances: bigint[]; member?: { instance: bigint; object: bigint } }): MarqueePart[] {
       const parts: MarqueePart[] = []
+      if (cand.member !== undefined) {
+        for (const p of sceneRenderer.instanceFaceParts(cand.member.instance, cand.member.object) ?? []) {
+          parts.push({ positions: p.positions, index: p.indices, matrixWorld: p.matrixWorld, box: boxOfPositions(p.positions) })
+        }
+        return parts
+      }
       for (const id of cand.leafObjects) {
         sceneRenderer.getObjectGroup(id)?.traverse((child) => {
           if (!(child instanceof THREE.Mesh)) return
@@ -3773,6 +3814,38 @@ export default function Viewport({
      * takes any triangle/segment touching it. Construction guides keep their
      * own click-selection path and are not swept up.
      */
+    /** The solids a marquee can sweep at the current depth: the top level's
+     *  nodes, a group's direct members, or an instance's definition members
+     *  (tested in the instance pose). A single solid has none. */
+    function marqueeCandidates(): { node: NodeRef; leafObjects: bigint[]; leafInstances: bigint[]; member?: { instance: bigint; object: bigint } }[] {
+      const ctx = activeContextRef.current
+      if (ctx.length === 0) return visibleTopLevelCandidates()
+      const top = ctx[ctx.length - 1]
+      if (top.kind === 'group') {
+        const out: { node: NodeRef; leafObjects: bigint[]; leafInstances: bigint[] }[] = []
+        for (const m of wasmScene.group_members(top.id).map(nodeRefFromJs)) {
+          const leaves = visibleLeaves(m)
+          if (leaves !== null) out.push({ node: m, ...leaves })
+        }
+        return out
+      }
+      if (top.kind === 'instance') {
+        return contextClickableObjects().map((node) => ({
+          node, leafObjects: [], leafInstances: [], member: { instance: top.id, object: node.id },
+        }))
+      }
+      return []
+    }
+
+    function contextClickableObjects(): { kind: 'object'; id: bigint }[] {
+      const found = contextSelectableRefs(
+        wasmScene as never,
+        activeContextRef.current,
+        (o, i) => isPickHidden(hiddenObjectIdsRef.current, hiddenInstanceIdsRef.current, o, i),
+      )
+      return (found?.objects ?? []).filter((r): r is { kind: 'object'; id: bigint } => r.kind === 'object')
+    }
+
     function computeMarqueeSelection(rect: MarqueeRect, mode: MarqueeMode): NodeRef[] {
       // Matrices are current from the last render; a non-forced update only
       // touches nodes still flagged dirty.
@@ -3781,7 +3854,7 @@ export default function Viewport({
       const out: NodeRef[] = []
 
       const bb: ScreenBounds = { minX: 0, minY: 0, maxX: 0, maxY: 0 }
-      for (const cand of visibleTopLevelCandidates()) {
+      for (const cand of marqueeCandidates()) {
         const parts = candidateParts(cand)
         if (parts.length === 0) continue
         // Cheap per-part screen bounds from the local bounding box (null when
@@ -3838,7 +3911,12 @@ export default function Viewport({
       }
 
       const identity = new THREE.Matrix4()
-      const drawn = [...visibleSketchRefs(), ...visibleObjectDrawingRefs()]
+      const drawn = marqueeDrawnRefs(
+        wasmScene as never,
+        activeContextRef.current,
+        (o, i) => isPickHidden(hiddenObjectIdsRef.current, hiddenInstanceIdsRef.current, o, i),
+        () => [...visibleSketchRefs(), ...visibleObjectDrawingRefs()],
+      )
       const drawnSeen = new Set<string>()
       for (const s of drawn) {
         if (drawnSeen.has(nodeKey(s))) continue
@@ -4914,7 +4992,7 @@ export default function Viewport({
      */
     function refreshFovReadout(): void {
       if (fovEntryBuffer !== null) return
-      onMeasurementRef.current?.(fovReadoutText(activeCameraTool, rig.projection, rig.perspective.fov))
+      onMeasurementRef.current?.(fovReadoutText(activeCameraTool, rig.projection, rig.fovDeg))
     }
 
     /** Parses the typed buffer via `parseFovEntry` (fovUnits.ts — degrees:
@@ -5292,7 +5370,7 @@ export default function Viewport({
       // the camera does not actually have.
       cancelFovEntry()
       const [, py] = canvasPoint(ev)
-      fovDragState = beginFovDrag(py, rig.perspective.fov)
+      fovDragState = beginFovDrag(py, rig.fovDeg)
       fovDragPointerId = ev.pointerId
       controls.mouseButtons.LEFT = null
       // Touch routes through `controls.touches` (never `mouseButtons`) —
@@ -5328,7 +5406,7 @@ export default function Viewport({
       // same stale-readout/silently-discarded-change bug shape if a typed
       // buffer is left open underneath it.
       cancelFovEntry()
-      rig.setFov(fovAfterWheel(rig.perspective.fov, ev.deltaY))
+      rig.setFov(fovAfterWheel(rig.fovDeg, ev.deltaY))
       controls.update()
       refreshFovReadout()
       scheduleRender()
@@ -7124,7 +7202,7 @@ export default function Viewport({
       return {
         position: [camera.position.x, camera.position.y, camera.position.z],
         target: [controls.target.x, controls.target.y, controls.target.z],
-        fovDeg: rig.perspective.fov,
+        fovDeg: rig.fovDeg,
       }
     }
 
@@ -7163,7 +7241,7 @@ export default function Viewport({
       const dist = controls.getDistance()
       return {
         projection: rig.projection,
-        fovDeg: rig.perspective.fov,
+        fovDeg: rig.fovDeg,
         parallelHeight: rig.heightAtTarget(dist),
         eye,
         target: [eye[0] + forward[0] * dist, eye[1] + forward[1] * dist, eye[2] + forward[2] * dist],
@@ -7191,6 +7269,7 @@ export default function Viewport({
       projection: Projection
       fovDeg: number
       parallelHeight?: number
+      aspectRatio?: number
       eye: [number, number, number]
       target: [number, number, number]
       up: [number, number, number]
@@ -7205,6 +7284,9 @@ export default function Viewport({
       rig.perspective.up.set(state.up[0], state.up[1], state.up[2])
       rig.perspective.lookAt(targetVec)
       rig.setFov(state.fovDeg)
+      // A scene camera holding a frame ratio: hold it (set before the
+      // parallel toggle so the frustum is sized through the fit).
+      rig.setFrameAspect(state.aspectRatio ?? null)
       rig.perspective.updateProjectionMatrix()
       if (state.projection === 'parallel') {
         rig.toggleProjection(targetVec)
@@ -7218,7 +7300,43 @@ export default function Viewport({
       }
       controls.target.copy(targetVec)
       rig.syncInactiveCamera(targetVec)
+      holdFramePose(state)
       controls.update()
+      scheduleRender()
+    }
+
+    // ---- Scene frame hold (D5 viewport fit) ----
+    // A scene camera that stores an aspect ratio is fitted into the window
+    // (`CameraRig.setFrameAspect`) only while that camera is what is shown.
+    // The fit is released the moment the camera is moved to anything else:
+    // `noteCameraMoved` (every OrbitControls change: orbit, pan, dolly) and a
+    // user-set fov (`rig.setFov`) compare the live pose with the pose the
+    // frame was applied at and drop the fit when they differ. Standard
+    // views, Zoom Extents and the walk tools all move the camera, so they
+    // release it too. A tween in flight is not a departure.
+    let framePose: { eye: [number, number, number]; target: [number, number, number]; up: [number, number, number] } | null = null
+    function holdFramePose(state: {
+      eye: [number, number, number]
+      target: [number, number, number]
+      up: [number, number, number]
+      aspectRatio?: number
+    }): void {
+      framePose = rig.frameAspect === null ? null : { eye: state.eye, target: state.target, up: state.up }
+    }
+    function releaseFrameIfMoved(): void {
+      if (framePose === null || cameraTween !== null) return
+      const eye = currentEye()
+      const forward = currentForward()
+      const dist = controls.getDistance()
+      const tol = 1e-5 * Math.max(1, dist)
+      const target = [eye[0] + forward[0] * dist, eye[1] + forward[1] * dist, eye[2] + forward[2] * dist]
+      const moved =
+        framePose.eye.some((v, i) => Math.abs(v - eye[i]) > tol) ||
+        framePose.target.some((v, i) => Math.abs(v - target[i]) > tol) ||
+        Math.abs(framePose.up[0] - camera.up.x) + Math.abs(framePose.up[1] - camera.up.y) + Math.abs(framePose.up[2] - camera.up.z) > 1e-4
+      if (!moved) return
+      framePose = null
+      rig.setFrameAspect(null)
       scheduleRender()
     }
 
@@ -7237,6 +7355,7 @@ export default function Viewport({
     // Debounced "camera settled" notification for drift detection.
     let cameraSettledTimer: ReturnType<typeof setTimeout> | null = null
     function noteCameraMoved(): void {
+      releaseFrameIfMoved()
       // What sits under a parked cursor changed with the view (a wheel
       // zoom, a Scene tween, Fly): the hover highlight follows at once, so
       // it never shows other than what a click would take now.
@@ -7263,6 +7382,7 @@ export default function Viewport({
         projection: Projection
         fovDeg: number
         parallelHeight?: number
+        aspectRatio?: number
         eye: [number, number, number]
         target: [number, number, number]
         up: [number, number, number]
@@ -7283,6 +7403,11 @@ export default function Viewport({
       if (start.projection !== state.projection) {
         applyCameraState({ ...start, projection: state.projection })
       }
+      // The frame (if the destination holds one) takes hold at the start of
+      // the move, so the whole tween renders through the destination's fit;
+      // the pose it is armed against is the destination's.
+      rig.setFrameAspect(state.aspectRatio ?? null)
+      holdFramePose(state)
       const eye0 = new THREE.Vector3(...start.eye)
       const eye1 = new THREE.Vector3(...state.eye)
       const tgt0 = new THREE.Vector3(...start.target)
@@ -8022,7 +8147,7 @@ export default function Viewport({
     }
 
     function makePaintTool(): PaintTool {
-      return new PaintTool(
+      const tool = new PaintTool(
         wasmScene,
         // Targeted refresh: only the painted object rebuilds. Painting a def
         // member (instanced geometry) invalidates all its placements via
@@ -8062,7 +8187,45 @@ export default function Viewport({
         (instanceId) => {
           sceneRenderer.setHoveredInstance(instanceId)
         },
+        // Whole-selection fill: every filled solid rebuilds (a component's
+        // members rebuild every copy through the member cache).
+        (objectIds) => {
+          handleSceneRefresh({ objectIds })
+        },
       )
+      tool.setSelectionFill(paintFillForClick)
+      return tool
+    }
+
+    /**
+     * A plain Paint click on something selected paints the whole selection
+     * (SketchUp parity). The click counts as "on the selection" when the
+     * picked solid resolves, in the current context, to a selected node.
+     * A component placement carries its own material (`set_instance_material`),
+     * so a selected placement is painted as a placement: its copies and the
+     * definition's members keep their look. Solids and groups' solids get a
+     * whole-solid fill (RPT-1).
+     */
+    function paintFillForClick(pickedObject: bigint, pickedInstance: bigint | undefined): PaintFillPlan | null {
+      const selected = selectedIdsRef.current
+      if (selected.length === 0) return null
+      const node = resolvePickToSelectable(
+        wasmScene, pickedObject, activeContextRef.current, pickedInstance, sessionScopeFor(activeContextRef.current),
+      )
+      if (node === null) return null
+      const selectedKeys = new Set(selected.map(nodeKey))
+      if (!selectedKeys.has(nodeKey(node))) return null
+      const objects = new Set<bigint>()
+      const instances = new Set<bigint>()
+      for (const ref of selected) {
+        if (ref.kind !== 'object' && ref.kind !== 'group' && ref.kind !== 'instance') continue
+        const leaves = visibleLeaves(ref)
+        if (leaves === null) continue
+        for (const o of leaves.leafObjects) objects.add(o)
+        for (const i of leaves.leafInstances) instances.add(i)
+      }
+      if (objects.size === 0 && instances.size === 0) return null
+      return { objects: [...objects], instances: [...instances], message: null }
     }
 
     function makePositionTextureTool(): PositionTextureTool {
@@ -10678,7 +10841,15 @@ export default function Viewport({
       // orbits switch as well.
       lastPointerClient.x = ev.clientX
       lastPointerClient.y = ev.clientY
-      if (ev.button !== 0) return
+      if (ev.button !== 0) {
+        // A press of another button (the right-button fly hold, a middle
+        // orbit) sits between two left clicks and breaks any double-click
+        // pairing, as it does natively. Fed to the tracker so a second
+        // click at the same spot soon after a fly is a fresh click, not the
+        // phantom half of a double-click that a tool like Line then drops.
+        multiClick.press(ev)
+        return
+      }
       // A plugin command holds the document (docs/agents/PLUGINS.md
       // "Compounds"): no gesture starts. The busy notice explains why once
       // the command has run a quarter second.
@@ -10817,10 +10988,10 @@ export default function Viewport({
           return
         }
 
-        // Top level: arm a marquee and DEFER the pick to pointerup — a drag
-        // becomes a rubber-band selection, a plain release runs the click-pick
-        // at the release position. Inside an editing context the marquee is
-        // out of scope; the press is an immediate click-pick. `readOnly`
+        // Arm a marquee and DEFER the pick to pointerup — a drag becomes a
+        // rubber-band selection (inside an editing context it sweeps what a
+        // click can select there), a plain release runs the click-pick at the
+        // release position. `readOnly` (Shop Mode has no contexts)
         // (shop-mode round-3 playtest finding 1) arms the lighter
         // `deferredTapDrag` instead of the real marquee — Shop Mode has no
         // multi-select, so the rubber-band overlay and its selection outcome
@@ -10830,7 +11001,7 @@ export default function Viewport({
         // independently on the document, see `onPointerDown` in
         // OrbitControls.js) see the exact same gesture a press on empty
         // space already produces — this branch doesn't distinguish the two.
-        if (topLevel) {
+        if (topLevel || !readOnlyRef.current) {
           if (readOnlyRef.current) {
             deferredTapDrag = { startX: px, startY: py, active: false, pointerId: ev.pointerId }
           } else {
@@ -11917,12 +12088,19 @@ export default function Viewport({
       }
     }
 
-    /** A flight begins (either engagement; idempotent): perspective first
-     * (§3.5 — flight along the view direction is invisible under parallel,
-     * and nothing is restored on exit), OrbitControls off, pose seeded. */
+    /** Flight along the view direction is invisible under parallel
+     * (§3.5), so the first MOVEMENT key switches to perspective, and
+     * nothing is restored on exit. Engaging alone (a bare right press, a
+     * right-click, a look-only hold) never changes the projection. */
+    function flyEnsurePerspective(): void {
+      if (rig.projection === 'parallel') toggleProjection()
+    }
+
+    /** A flight begins (either engagement; idempotent): OrbitControls off,
+     * pose seeded. The projection waits for a movement key
+     * (`flyEnsurePerspective`). */
     function flyBegin(): void {
       if (viewTurn !== null) cancelCameraTween()
-      if (rig.projection === 'parallel') toggleProjection()
       controls.enabled = false
       flySeedFromCamera()
       flyLastFrameMs = performance.now()
@@ -12201,6 +12379,7 @@ export default function Viewport({
       // Auto-repeats press too: `press` is a Set add, and a key physically
       // held before engagement (or across a blur) is only ever seen as a
       // repeat (review finding).
+      flyEnsurePerspective()
       flight.press(key)
       flyEnsureLoop()
     }

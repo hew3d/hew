@@ -15,6 +15,7 @@ import type { Snap } from './types'
 import type { NodeRef } from '../panels/treeModel'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
+import { inHistoryBracket } from './transformSelection'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
@@ -315,6 +316,46 @@ describe('EraserTool', () => {
     expect(t.host.runDelete).toHaveBeenCalledWith([a, b, c])
     expect(t.scene.history_bracket_open).toHaveBeenCalledOnce()
     expect(t.scene.history_bracket_commit).toHaveBeenCalledWith('Erase')
+  })
+
+  it('a sweep whose runDelete brackets itself joins the eraser bracket (kernel brackets do not nest)', () => {
+    const t = makeTool()
+    let open = false
+    const opened = vi.fn()
+    t.scene.history_bracket_open.mockImplementation(() => {
+      if (open) throw new Error('HistoryBracketOpen: stale or unknown history bracket handle')
+      open = true
+      opened()
+    })
+    t.scene.history_bracket_commit.mockImplementation(() => {
+      open = false
+      return true
+    })
+    t.scene.history_bracket_abort.mockImplementation(() => {
+      open = false
+    })
+    // Like Viewport's runDelete: a multi-node delete runs inside the shared bracket helper.
+    vi.mocked(t.host.runDelete).mockImplementation((refs: NodeRef[]) => {
+      inHistoryBracket(t.scene as unknown as WasmScene, 'Delete', () => undefined, refs.length > 1)
+    })
+    const [a, b, c] = [drawn('a'), drawn('b'), drawn('c')]
+    t.tool.setCreaseModifier(false)
+    t.setRef(a)
+    t.tool.onPointerMove(null, RAY)
+    t.tool.onPointerRawDown(100, 100)
+    t.tool.onPointerDown(null, RAY)
+    t.tool.onPointerScreenMove(130, 100)
+    t.setRef(b)
+    t.tool.onPointerMove(null, RAY)
+    t.setRef(c)
+    t.tool.onPointerMove(null, RAY)
+    t.tool.onPointerUp(null, RAY)
+    expect(t.onToast).not.toHaveBeenCalled()
+    expect(opened).toHaveBeenCalledOnce()
+    expect(t.scene.history_bracket_commit).toHaveBeenCalledOnce()
+    expect(t.scene.history_bracket_commit).toHaveBeenCalledWith('Erase')
+    expect(t.scene.history_bracket_abort).not.toHaveBeenCalled()
+    expect(open).toBe(false)
   })
 
   it('a plain drag skips solid edges and erases the line', () => {

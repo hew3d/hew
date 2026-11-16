@@ -54,8 +54,14 @@ function makeWasmScene(opts: {
   touched?: bigint[]
   /** The placement's linked set definition; omitted, not a linked copy. */
   linkedDef?: bigint
+  /** `object_materials(object)` — the distinct materials an object carries. */
+  objectMaterials?: Record<string, bigint[]>
 } = {}): WasmScene {
   return {
+    object_materials: vi.fn((o: bigint) => new BigUint64Array(opts.objectMaterials?.[String(o)] ?? [])),
+    history_bracket_open: vi.fn(),
+    history_bracket_commit: vi.fn(() => true),
+    history_bracket_abort: vi.fn(),
     pick_face: vi.fn(() => opts.facePick),
     face_material: vi.fn(() => opts.faceMaterial),
     paint_logical_face: vi.fn(() => {
@@ -477,3 +483,179 @@ describe('PaintTool — component placements', () => {
   })
 })
 
+describe('PaintTool — whole-solid fill paints over per-face paint (one undo step)', () => {
+  it('Ctrl/Cmd-click clears the per-face paint, then sets the base, inside one bracket', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n), objectMaterials: { '3': [5n, 6n] } })
+    const { tool, onCommit } = makeTool(scene)
+    tool.setCurrentMaterial(7n)
+    tool.setWholeObject(true)
+
+    tool.onPointerDown(makeSnap(), RAY)
+
+    expect(scene.history_bracket_open).toHaveBeenCalledTimes(1)
+    expect(scene.replace_material).toHaveBeenCalledWith(false, 3n, 5n, MATERIAL_SENTINEL)
+    expect(scene.replace_material).toHaveBeenCalledWith(false, 3n, 6n, MATERIAL_SENTINEL)
+    expect(scene.set_object_material).toHaveBeenCalledWith(3n, 7n)
+    expect(scene.history_bracket_commit).toHaveBeenCalledTimes(1)
+    const order = (scene.set_object_material as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]
+    for (const c of (scene.replace_material as ReturnType<typeof vi.fn>).mock.invocationCallOrder) expect(c).toBeLessThan(order)
+    expect(onCommit).toHaveBeenCalledWith(3n)
+  })
+})
+
+describe('PaintTool — a click on the selection paints the whole selection', () => {
+  function withSelection(scene: WasmScene, plan: { objects: bigint[]; message: string | null } | null) {
+    const made = makeTool(scene)
+    const onCommitMany = vi.fn()
+    const tool = new PaintTool(scene, made.onCommit, made.onToast, made.onSample, made.onReplace, () => [], () => {}, () => {}, onCommitMany)
+    const resolver = vi.fn(() => plan)
+    tool.setSelectionFill(resolver)
+    return { tool, onCommitMany, onCommit: made.onCommit, onToast: made.onToast, resolver }
+  }
+
+  it('fills every selected solid in one undo step and refreshes them together', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n), objectMaterials: { '3': [5n], '8': [] } })
+    const { tool, onCommitMany, onCommit } = withSelection(scene, { objects: [3n, 8n], message: null })
+    tool.setCurrentMaterial(7n)
+
+    tool.onPointerDown(makeSnap(), RAY)
+
+    expect(scene.paint_logical_face).not.toHaveBeenCalled()
+    expect(scene.history_bracket_open).toHaveBeenCalledTimes(1)
+    expect(scene.history_bracket_commit).toHaveBeenCalledTimes(1)
+    expect(scene.set_object_material).toHaveBeenCalledWith(3n, 7n)
+    expect(scene.set_object_material).toHaveBeenCalledWith(8n, 7n)
+    expect(scene.replace_material).toHaveBeenCalledWith(false, 3n, 5n, MATERIAL_SENTINEL)
+    expect(onCommitMany).toHaveBeenCalledWith([3n, 8n])
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it('a selected placement is painted as a placement; no object fill, copies untouched', () => {
+    // In the component's editing frame the pick is not claimed as a
+    // placement paint, so the selection resolver decides: it plans only the
+    // placement (set_instance_material), never the definition's members.
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 9n), touched: [9n] })
+    const onInstanceCommit = vi.fn()
+    const made = makeTool(scene)
+    const onFill = vi.fn()
+    const tool = new PaintTool(
+      scene, made.onCommit, made.onToast, made.onSample, made.onReplace,
+      () => [{ kind: 'instance', id: 9n }], onInstanceCommit, () => {}, onFill,
+    )
+    tool.setSelectionFill(() => ({ objects: [], instances: [9n], message: null }))
+    tool.setCurrentMaterial(7n)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(scene.set_instance_material).toHaveBeenCalledTimes(1)
+    expect(scene.set_instance_material).toHaveBeenCalledWith(9n, 7n)
+    expect(scene.set_object_material).not.toHaveBeenCalled()
+    expect(scene.replace_material).not.toHaveBeenCalled()
+    expect(scene.paint_logical_face).not.toHaveBeenCalled()
+    expect(scene.history_bracket_commit).toHaveBeenCalledTimes(1)
+    expect(onInstanceCommit).toHaveBeenCalledWith([9n], [])
+    expect(onFill).not.toHaveBeenCalled()
+    expect(made.onCommit).not.toHaveBeenCalled()
+  })
+
+  it('a plain click on a selected top-level placement paints the whole selection; Ctrl/Cmd stays single', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 9n), objectMaterials: { '3': [] } })
+    const onInstanceCommit = vi.fn()
+    const made = makeTool(scene)
+    const tool = new PaintTool(
+      scene, made.onCommit, made.onToast, made.onSample, made.onReplace, () => [], onInstanceCommit,
+    )
+    const resolver = vi.fn(() => ({ objects: [3n], instances: [9n, 10n], message: null }))
+    tool.setSelectionFill(resolver)
+    tool.setCurrentMaterial(7n)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(scene.history_bracket_open).toHaveBeenCalledTimes(1)
+    expect(scene.history_bracket_commit).toHaveBeenCalledTimes(1)
+    expect(scene.set_instance_material).toHaveBeenCalledWith(9n, 7n)
+    expect(scene.set_instance_material).toHaveBeenCalledWith(10n, 7n)
+    expect(scene.set_object_material).toHaveBeenCalledWith(3n, 7n)
+
+    // Ctrl/Cmd-click: only the clicked placement, selection not consulted.
+    resolver.mockClear()
+    ;(scene.set_instance_material as ReturnType<typeof vi.fn>).mockClear()
+    ;(scene.set_object_material as ReturnType<typeof vi.fn>).mockClear()
+    tool.setWholeObject(true)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(resolver).not.toHaveBeenCalled()
+    expect(scene.set_instance_material).toHaveBeenCalledTimes(1)
+    expect(scene.set_instance_material).toHaveBeenCalledWith(9n, 7n)
+    expect(scene.set_object_material).not.toHaveBeenCalled()
+  })
+
+  it('a plain click on an unselected placement paints just that placement', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 9n) })
+    const made = makeTool(scene)
+    const tool = new PaintTool(scene, made.onCommit, made.onToast, made.onSample, made.onReplace, () => [], vi.fn())
+    tool.setSelectionFill(() => null)
+    tool.setCurrentMaterial(7n)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(scene.set_instance_material).toHaveBeenCalledTimes(1)
+    expect(scene.set_instance_material).toHaveBeenCalledWith(9n, 7n)
+    expect(scene.set_object_material).not.toHaveBeenCalled()
+  })
+
+  it('a mixed selection paints solids whole and placements as placements', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n), objectMaterials: { '3': [5n] } })
+    const onInstanceCommit = vi.fn()
+    const made = makeTool(scene)
+    const tool = new PaintTool(
+      scene, made.onCommit, made.onToast, made.onSample, made.onReplace, () => [], onInstanceCommit,
+    )
+    tool.setSelectionFill(() => ({ objects: [3n], instances: [9n], message: null }))
+    tool.setCurrentMaterial(7n)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(scene.history_bracket_open).toHaveBeenCalledTimes(1)
+    expect(scene.set_object_material).toHaveBeenCalledWith(3n, 7n)
+    expect(scene.replace_material).toHaveBeenCalledWith(false, 3n, 5n, MATERIAL_SENTINEL)
+    expect(scene.set_instance_material).toHaveBeenCalledWith(9n, 7n)
+    expect(made.onCommit).toHaveBeenCalledWith(3n)
+    expect(onInstanceCommit).toHaveBeenCalledWith([9n], [])
+  })
+
+  it('says what a component paint changed', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool, onToast } = withSelection(scene, {
+      objects: [3n],
+      message: 'Painted the component. All 3 copies changed. Make Unique first to paint just one.',
+    })
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(onToast).toHaveBeenCalledWith('Painted the component. All 3 copies changed. Make Unique first to paint just one.')
+  })
+
+  it('a click off the selection (resolver says null) still paints one face', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool } = withSelection(scene, null)
+    tool.setCurrentMaterial(7n)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(scene.paint_logical_face).toHaveBeenCalledWith(3n, 4n, 7n)
+    expect(scene.set_object_material).not.toHaveBeenCalled()
+  })
+
+  it('a refused fill aborts the bracket and reports through onToast', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    ;(scene.set_object_material as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error('UnknownMaterial: material handle is not in the palette')
+    })
+    const { tool, onToast, onCommitMany } = withSelection(scene, { objects: [3n, 8n], message: null })
+    tool.setCurrentMaterial(7n)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(scene.history_bracket_abort).toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onCommitMany).not.toHaveBeenCalled()
+  })
+
+  it('Alt (eyedropper) and the replace gestures ignore the selection', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n), faceMaterial: makeFaceMaterial(9n, 5n) })
+    const { tool, resolver } = withSelection(scene, { objects: [3n, 8n], message: null })
+    tool.setEyedropper(true)
+    tool.onPointerDown(makeSnap(), RAY)
+    tool.setEyedropper(false)
+    tool.setReplaceScope('document')
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(scene.set_object_material).not.toHaveBeenCalled()
+    expect(resolver).not.toHaveBeenCalled()
+  })
+})

@@ -19,6 +19,7 @@ import { t } from '@lingui/core/macro'
 import type { DocFormat, ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
 import { FileReadError } from './fileHost'
 import { extensionFor, formatDescription, nameForFormat } from './docFormat'
+import { collapseDoubledExtension } from './savePanel'
 
 /**
  * Write `bytes` to `path` via the raw-IPC-body `write_file_bytes` command
@@ -189,11 +190,12 @@ export class TauriFileHost implements FileHost {
 
   async saveAs(bytes: Uint8Array, suggestedName: string, format: DocFormat = 'hew'): Promise<FileRef | null> {
     const { invoke } = await import('@tauri-apps/api/core')
-    const path = await invoke<string | null>('pick_save_path', {
+    const picked = await invoke<string | null>('pick_save_path', {
       defaultName: nameForFormat(suggestedName, format),
       filters: [{ name: formatDescription(format), extensions: [extensionFor(format).slice(1)] }],
     })
-    if (path === null) return null
+    if (picked === null) return null
+    const path = collapseDoubledExtension(picked, extensionFor(format).slice(1))
 
     await writeFileBytes(path, bytes)
 
@@ -212,11 +214,12 @@ export class TauriFileHost implements FileHost {
   ): Promise<string | null> {
     const dotExt = '.' + fileType.ext
     const { invoke } = await import('@tauri-apps/api/core')
-    const path = await invoke<string | null>('pick_save_path', {
+    const picked = await invoke<string | null>('pick_save_path', {
       defaultName: suggestedName.endsWith(dotExt) ? suggestedName : suggestedName + dotExt,
       filters: [{ name: fileType.description, extensions: [fileType.ext] }],
     })
-    if (path === null) return null
+    if (picked === null) return null
+    const path = collapseDoubledExtension(picked, fileType.ext)
 
     await writeFileBytes(path, bytes)
     return path

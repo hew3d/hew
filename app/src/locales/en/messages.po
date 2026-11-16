@@ -1958,8 +1958,12 @@ msgid "Click a face or a closed profile to offset its boundary."
 msgstr "Click a face or a closed profile to offset its boundary."
 
 #: src/tools/PaintTool.ts
-msgid "Click a face to paint it with the current material — Shift-click replaces it everywhere, Ctrl/Cmd+Shift-click replaces within the object, Ctrl/Cmd-click fills the whole object, Alt = eyedropper."
-msgstr "Click a face to paint it with the current material — Shift-click replaces it everywhere, Ctrl/Cmd+Shift-click replaces within the object, Ctrl/Cmd-click fills the whole object, Alt = eyedropper."
+#~ msgid "Click a face to paint it with the current material — Shift-click replaces it everywhere, Ctrl/Cmd+Shift-click replaces within the object, Ctrl/Cmd-click fills the whole object, Alt = eyedropper."
+#~ msgstr "Click a face to paint it with the current material — Shift-click replaces it everywhere, Ctrl/Cmd+Shift-click replaces within the object, Ctrl/Cmd-click fills the whole object, Alt = eyedropper."
+
+#: src/tools/PaintTool.ts
+msgid "Click a face to paint it with the current material. Click something selected to paint all of it. Shift-click replaces it everywhere, Ctrl/Cmd+Shift-click replaces within the object, Ctrl/Cmd-click fills the whole object, Alt = eyedropper."
+msgstr "Click a face to paint it with the current material. Click something selected to paint all of it. Shift-click replaces it everywhere, Ctrl/Cmd+Shift-click replaces within the object, Ctrl/Cmd-click fills the whole object, Alt = eyedropper."
 
 #: src/tools/PushPullTool.ts
 msgid "Click a face to push or pull it — double-click repeats the last distance."
@@ -2148,6 +2152,10 @@ msgstr "Click this face to sweep it as the profile — it merges straight into t
 #: src/tools/FollowMeTool.ts
 msgid "Click this face to use it as the profile."
 msgstr "Click this face to use it as the profile."
+
+#: src/App.tsx
+msgid "Click to dismiss"
+msgstr "Click to dismiss"
 
 #: src/tools/ProtractorTool.ts
 msgid "Click to drop an angular guide at the measured angle — or type exact degrees."
@@ -4600,6 +4608,18 @@ msgstr "Hew model"
 msgid "Hew ran out of memory opening {fileName} ({size}). Hew can use up to 4 GB of memory, and this model needs more. A lighter copy may open: in SketchUp, run Purge Unused and remove or simplify the heaviest components. Reload to keep working."
 msgstr "Hew ran out of memory opening {fileName} ({size}). Hew can use up to 4 GB of memory, and this model needs more. A lighter copy may open: in SketchUp, run Purge Unused and remove or simplify the heaviest components. Reload to keep working."
 
+#: src/log/kernelStopNote.ts
+msgid "Hew ran out of memory partway through a repair. Hew can use up to 4 GB of memory, and this model needs more. Reload to keep working, and use Report this crash to send what happened."
+msgstr "Hew ran out of memory partway through a repair. Hew can use up to 4 GB of memory, and this model needs more. Reload to keep working, and use Report this crash to send what happened."
+
+#: src/log/kernelStopNote.ts
+msgid "Hew stopped during a repair"
+msgstr "Hew stopped during a repair"
+
+#: src/log/kernelStopNote.ts
+msgid "Hew stopped partway through a repair and can't continue. Reload to keep working, and use Report this crash to send what happened."
+msgstr "Hew stopped partway through a repair and can't continue. Reload to keep working, and use Report this crash to send what happened."
+
 #: src/App.tsx
 msgid "Hew stopped while opening {fileName} ({size}) and can't continue. Reload to keep working, and use Report this crash to send the file."
 msgstr "Hew stopped while opening {fileName} ({size}) and can't continue. Reload to keep working, and use Report this crash to send the file."
@@ -6423,6 +6443,10 @@ msgstr "Nothing changed"
 msgid "Nothing has been imported yet."
 msgstr "Nothing has been imported yet."
 
+#: src/viewport/Viewport.tsx
+msgid "Nothing here to select. Double-click empty space to leave this context."
+msgstr "Nothing here to select. Double-click empty space to leave this context."
+
 #: src/panels/PrintDialog.tsx
 msgid "Nothing is selected."
 msgstr "Nothing is selected."
@@ -7108,6 +7132,7 @@ msgstr "Pages"
 #: src/i18n/nativeMenu.ts
 #: src/panels/library/LibraryDetailPane.tsx
 #: src/panels/LibraryDialog.tsx
+#: src/tools/PaintTool.ts
 msgid "Paint"
 msgstr "Paint"
 
@@ -7224,6 +7249,10 @@ msgstr "Part of the line leaves the face. Keep every point on the face being spl
 #: src/kernelErrors.ts
 msgid "Part of the path is too short to follow. Redraw the path without tiny segments."
 msgstr "Part of the path is too short to follow. Redraw the path without tiny segments."
+
+#: src/viewport/Viewport.tsx
+msgid "Part of this file can't be drawn, so it was left out. The rest of the model is unaffected."
+msgstr "Part of this file can't be drawn, so it was left out. The rest of the model is unaffected."
 
 #: src/kernelErrorCopy/deform.ts
 msgid "Part of this solid is too thin to deform at this size. Deform a shorter piece, or make the thin part thicker."
@@ -10766,6 +10795,10 @@ msgstr "This model has more placed parts than Hew can list at once."
 #: src/App.tsx
 msgid "This model is too large for Hew to open"
 msgstr "This model is too large for Hew to open"
+
+#: src/log/kernelStopNote.ts
+msgid "This model is too large for Hew to work on"
+msgstr "This model is too large for Hew to work on"
 
 #: src/kernelErrorCopy/shapeCommon.ts
 msgid "This needs a solid. This object has gaps."

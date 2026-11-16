@@ -209,10 +209,21 @@ mod tests {
             with_extension("/d/Model.skp.hew", "hew"),
             "/d/Model.skp.hew"
         );
+        assert_eq!(with_extension("/d/Model.hew", "skp"), "/d/Model.hew.skp");
         // A bare dotfile is a name with no extension (as before), so it
         // gets the extension once, and that result is left alone.
         assert_eq!(with_extension("/d/.hew", "hew"), "/d/.hew.hew");
         assert_eq!(with_extension("/d/.hew.hew", "hew"), "/d/.hew.hew");
+    }
+
+    #[test]
+    fn the_collapse_keeps_a_cut_on_a_char_boundary() {
+        // U+212A lowercases to ASCII `k` but is three bytes long: the cut
+        // must not be placed by the lowercased length.
+        assert_eq!(
+            with_extension("/d/Model.s\u{212A}p.s\u{212A}p", "skp"),
+            "/d/Model.s\u{212A}p.s\u{212A}p.skp"
+        );
     }
 
     #[test]
