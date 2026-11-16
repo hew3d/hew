@@ -1144,6 +1144,46 @@ impl Sketch {
         out
     }
 
+    /// The axis-aligned bounds `(low, high)` of this sketch's drawing seen
+    /// through `pose`: every vertex mapped by it, widened to the true
+    /// extent of each drawn circle or arc ([`Sketch::curve_rims`]) — a
+    /// curve bulges past its facet chords, and an affine pose maps it to an
+    /// ellipse whose extreme along each axis is solved for exactly and kept
+    /// when the curve covers that angle. `None` for a sketch with no
+    /// vertices. Read-only.
+    pub fn bounds_under(&self, pose: &crate::Transform) -> Option<(Point3, Point3)> {
+        let mut acc: Option<(Point3, Point3)> = None;
+        let mut grow = |p: Point3| {
+            acc = Some(match acc {
+                None => (p, p),
+                Some((lo, hi)) => (
+                    Point3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z)),
+                    Point3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z)),
+                ),
+            });
+        };
+        for v in self.vertices.values() {
+            grow(pose.apply_point(v.position));
+        }
+        for rim in self.curve_rims() {
+            // P(θ) = pose(center) + r·(cos θ·L·u + sin θ·L·v) for the pose's
+            // linear part L: along axis k that is a·cos θ + b·sin θ, extreme
+            // at θ = atan2(b, a) and opposite it.
+            let c = pose.apply_point(rim.center);
+            let lu = pose.apply_vector(rim.basis_u) * rim.radius;
+            let lv = pose.apply_vector(rim.basis_v) * rim.radius;
+            for (a, b) in [(lu.x, lv.x), (lu.y, lv.y), (lu.z, lv.z)] {
+                let peak = b.atan2(a);
+                for theta in [peak, peak + std::f64::consts::PI] {
+                    if rim.covers(theta) {
+                        grow(c + lu * theta.cos() + lv * theta.sin());
+                    }
+                }
+            }
+        }
+        acc
+    }
+
     /// The exact drawn centers of this sketch's [`SketchCurveKind::Polygon`]
     /// chains that still have at least one live edge — the polygon analogue
     /// of the center [`Sketch::curve_rims`] publishes for a circle, and the

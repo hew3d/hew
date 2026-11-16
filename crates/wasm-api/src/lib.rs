@@ -2459,6 +2459,38 @@ impl SketchEdgePickJs {
     }
 }
 
+/// A line or fill drawn inside a component, picked through a placement
+/// (`Scene::pick_instance_sketch_edge`, `Scene::pick_instance_sketch_region`):
+/// the placement it was drawn through, the definition's sketch, and how
+/// far along the ray.
+#[wasm_bindgen]
+pub struct InstanceSketchPickJs {
+    instance: u64,
+    sketch: u64,
+    depth: f64,
+}
+
+#[wasm_bindgen]
+impl InstanceSketchPickJs {
+    /// The OUTERMOST placement the drawing was seen through, in the pick's
+    /// scope: a top-level instance, or a member instance of the scope
+    /// instance's definition.
+    pub fn instance(&self) -> u64 {
+        self.instance
+    }
+
+    /// The sketch holding the picked drawing (a definition's own sketch,
+    /// or a nested definition's).
+    pub fn sketch(&self) -> u64 {
+        self.sketch
+    }
+
+    /// Radial distance along the normalized pick ray.
+    pub fn depth(&self) -> f64 {
+        self.depth
+    }
+}
+
 /// The camera's working view (mirrors `kernel::CameraState`; docs/design/
 /// camera.md §5). Returned by [`Scene::camera_state`].
 #[wasm_bindgen]
@@ -10450,6 +10482,155 @@ impl Scene {
                 detached: self.doc.sketch(s).is_some_and(kernel::Sketch::detached),
             })
     }
+
+    /// The placements [`Scene::pick_instance_sketch_edge`] and
+    /// [`Scene::pick_instance_sketch_region`] walk, each as (placement,
+    /// world pose, definition): every top-level instance not hidden by
+    /// [`Scene::set_hidden`], by eye or by tag; or, with `scope_instance`,
+    /// every member instance of that instance's definition (through its
+    /// member groups) not hidden there, at its pose composed with the
+    /// scope's. Empty for a stale or hidden scope.
+    fn instance_sketch_roots(
+        &self,
+        scope_instance: Option<u64>,
+    ) -> Vec<(InstanceId, Transform, ComponentId)> {
+        let Some(scope) = scope_instance.map(instance_id) else {
+            return self
+                .doc
+                .instance_ids()
+                .into_iter()
+                .filter(|i| {
+                    !self.hidden_instances.contains(i)
+                        && !self.doc.node_effectively_hidden(NodeId::Instance(*i))
+                })
+                .filter_map(|i| Some((i, self.doc.instance_pose(i)?, self.doc.instance_def(i)?)))
+                .collect();
+        };
+        let (Some(scope_pose), Some(scope_def)) =
+            (self.doc.instance_pose(scope), self.doc.instance_def(scope))
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut stack: Vec<NodeId> = self.doc.def_member_nodes(scope_def).unwrap_or_default();
+        stack.reverse();
+        while let Some(node) = stack.pop() {
+            // Hidden by eye or tag, itself or through a member group above
+            // it (the walk stops at the definition's root).
+            if self.doc.node_effectively_hidden(node) {
+                continue;
+            }
+            match node {
+                NodeId::Object(_) => {}
+                NodeId::Group(g) => {
+                    let mut members = self.doc.group_members(g).unwrap_or_default();
+                    members.reverse();
+                    stack.extend(members);
+                }
+                NodeId::Instance(i) => {
+                    if let (Some(pose), Some(def)) =
+                        (self.doc.instance_pose(i), self.doc.instance_def(i))
+                    {
+                        out.push((i, pose.then(&scope_pose), def));
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// One definition's drawing as the instance-sketch picks walk it: every
+/// sketch a placement shows with its transform into the definition's
+/// frame ([`Document::expanded_def_sketch_placements`]), and their bounds
+/// in that frame. `bounds` is `None` when nothing is drawn.
+struct DefLines {
+    placements: Vec<(SketchId, Transform)>,
+    bounds: Option<(Point3, Point3)>,
+}
+
+/// [`DefLines`] per definition, computed once per pick: many placements
+/// share a definition.
+#[derive(Default)]
+struct DefLinesMemo(std::collections::HashMap<ComponentId, std::rc::Rc<DefLines>>);
+
+impl DefLinesMemo {
+    fn get(&mut self, doc: &Document, def: ComponentId) -> std::rc::Rc<DefLines> {
+        self.0
+            .entry(def)
+            .or_insert_with(|| {
+                let placements = doc.expanded_def_sketch_placements(def);
+                let mut bounds: Option<(Point3, Point3)> = None;
+                for &(sid, to_def) in &placements {
+                    let Some((lo, hi)) = doc.sketch(sid).and_then(|s| s.bounds_under(&to_def))
+                    else {
+                        continue;
+                    };
+                    bounds = Some(match bounds {
+                        None => (lo, hi),
+                        Some((a, b)) => (
+                            Point3::new(a.x.min(lo.x), a.y.min(lo.y), a.z.min(lo.z)),
+                            Point3::new(b.x.max(hi.x), b.y.max(hi.y), b.z.max(hi.z)),
+                        ),
+                    });
+                }
+                std::rc::Rc::new(DefLines { placements, bounds })
+            })
+            .clone()
+    }
+}
+
+/// Whether a ray (unit `dir`) can reach a definition-frame box placed by
+/// `pose`, within a pick cone of half-angle `aperture`: the box's eight
+/// corners mapped into the world give a box that holds it, widened by the
+/// cone's reach at the farthest corner, then a slab test from the origin
+/// forward. A cheap, conservative cull — a `true` still needs the exact
+/// test.
+fn ray_meets_posed_box(
+    origin: Point3,
+    dir: kernel::Vec3,
+    (lo, hi): (Point3, Point3),
+    pose: &Transform,
+    aperture: f64,
+) -> bool {
+    let mut wlo = [f64::INFINITY; 3];
+    let mut whi = [f64::NEG_INFINITY; 3];
+    let mut reach: f64 = 0.0;
+    for i in 0..8 {
+        let p = pose.apply_point(Point3::new(
+            if i & 1 == 0 { lo.x } else { hi.x },
+            if i & 2 == 0 { lo.y } else { hi.y },
+            if i & 4 == 0 { lo.z } else { hi.z },
+        ));
+        for (k, c) in [p.x, p.y, p.z].into_iter().enumerate() {
+            wlo[k] = wlo[k].min(c);
+            whi[k] = whi[k].max(c);
+        }
+        reach = reach.max((p - origin).length());
+    }
+    let margin = reach * aperture.tan() + kernel::tol::POINT_MERGE;
+    let o = [origin.x, origin.y, origin.z];
+    let d = [dir.x, dir.y, dir.z];
+    let (mut t0, mut t1) = (0.0_f64, f64::INFINITY);
+    for k in 0..3 {
+        let (a, b) = (wlo[k] - margin, whi[k] + margin);
+        if d[k].abs() < kernel::tol::NORMALIZE_MIN_LENGTH {
+            if o[k] < a || o[k] > b {
+                return false;
+            }
+            continue;
+        }
+        let (mut ta, mut tb) = ((a - o[k]) / d[k], (b - o[k]) / d[k]);
+        if ta > tb {
+            std::mem::swap(&mut ta, &mut tb);
+        }
+        t0 = t0.max(ta);
+        t1 = t1.min(tb);
+        if t0 > t1 {
+            return false;
+        }
+    }
+    true
 }
 
 #[wasm_bindgen]
@@ -10585,6 +10766,190 @@ impl Scene {
                     depth: segment_ray_depth(ray.origin, ray.direction, a, b),
                 })
             })
+    }
+
+    /// The line drawn inside a component nearest the ray, seen through
+    /// any placement: every shown top-level instance, or — with
+    /// `scope_instance`, the instance whose editing context is open — every
+    /// shown member instance of its definition, each walked into its
+    /// nested definitions with the poses composed. The drawing is what the
+    /// renderer draws for a placement ([`Document::def_rendered_sketches`]
+    /// per definition, tag-hidden sketches left out); an instance hidden by
+    /// [`Scene::set_hidden`], by eye or by tag, and everything under a
+    /// hidden member, is skipped. The cone and its ranking are
+    /// [`Scene::pick_sketch_edge`]'s, in world space, so a non-uniformly
+    /// scaled placement keeps the screen-angle meaning; each placement is
+    /// tested against the world box of its lines first, so a hover pays
+    /// only for the instances near the ray.
+    ///
+    /// The global inference index leaves a definition's sketches out (they
+    /// would repeat per placement), so this is how a click on such a line
+    /// finds the component it belongs to. Returns the OUTERMOST placement
+    /// in scope, the sketch, and the depth along the ray; `undefined` on a
+    /// miss, a stale scope, or a singular pose. Never throws. Read-only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pick_instance_sketch_edge(
+        &self,
+        ox: f64,
+        oy: f64,
+        oz: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+        scope_instance: Option<u64>,
+    ) -> Option<InstanceSketchPickJs> {
+        let ray = PickRay {
+            origin: Point3::new(ox, oy, oz),
+            direction: kernel::Vec3::new(dx, dy, dz),
+        };
+        let unit = ray.direction.normalized().ok()?;
+        let mut lines = DefLinesMemo::default();
+        // One scene over every candidate placement: a definition's sketch
+        // repeats per placement, so each (placement, sketch) pair is
+        // registered under its own stand-in id, indexing `seen`.
+        let mut local = InferenceScene::default();
+        let mut seen: Vec<(InstanceId, SketchId, Transform)> = Vec::new();
+        for (root, pose, def) in self.instance_sketch_roots(scope_instance) {
+            let entry = lines.get(&self.doc, def);
+            let Some(bounds) = entry.bounds else {
+                continue;
+            };
+            if !ray_meets_posed_box(ray.origin, unit, bounds, &pose, SKETCH_PICK_APERTURE) {
+                continue;
+            }
+            for &(sid, to_def) in &entry.placements {
+                let Some(sketch) = self.doc.sketch(sid) else {
+                    continue;
+                };
+                let to_world = to_def.then(&pose);
+                let segments: Vec<_> = sketch
+                    .edges()
+                    .iter()
+                    .map(|(eid, edge)| {
+                        (
+                            eid,
+                            to_world.apply_point(sketch.vertices()[edge.from].position),
+                            to_world.apply_point(sketch.vertices()[edge.to].position),
+                        )
+                    })
+                    .collect();
+                if segments.is_empty() {
+                    continue;
+                }
+                seen.push((root, sid, to_world));
+                local.add_sketch(
+                    SketchId::from(KeyData::from_ffi(seen.len() as u64)),
+                    &segments,
+                );
+            }
+        }
+        let (stand_in, eid) = local.pick_sketch_edge(&ray, SKETCH_PICK_APERTURE)?;
+        let index = usize::try_from(stand_in.data().as_ffi() & 0xffff_ffff).ok()?;
+        let &(root, sid, to_world) = seen.get(index.checked_sub(1)?)?;
+        let sketch = self.doc.sketch(sid)?;
+        let edge = sketch.edges().get(eid)?;
+        let a = to_world.apply_point(sketch.vertices()[edge.from].position);
+        let b = to_world.apply_point(sketch.vertices()[edge.to].position);
+        Some(InstanceSketchPickJs {
+            instance: root.data().as_ffi(),
+            sketch: sid.data().as_ffi(),
+            depth: segment_ray_depth(ray.origin, ray.direction, a, b),
+        })
+    }
+
+    /// The fill of a region drawn inside a component under the ray, seen
+    /// through any placement — [`Scene::pick_instance_sketch_edge`]'s walk
+    /// and scope, with [`Scene::pick_sketch_region`]'s rule: the nearest
+    /// region whose fill the ray enters, the smaller one on a tie. A loop
+    /// with no face and an imported sketch (drawn as ink, no fill) are
+    /// nothing to pick, and in Wireframe nothing is ([`Scene::set_render_mode`]:
+    /// a fill is a face). Returns the OUTERMOST placement in scope, the
+    /// sketch, and the depth along the ray; `undefined` on a miss, a stale
+    /// scope, or a singular pose. Never throws. Read-only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pick_instance_sketch_region(
+        &self,
+        ox: f64,
+        oy: f64,
+        oz: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+        scope_instance: Option<u64>,
+    ) -> Option<InstanceSketchPickJs> {
+        if !self.inference.face_policy().faces_are_targets() {
+            return None;
+        }
+        let origin = Point3::new(ox, oy, oz);
+        let dir = kernel::Vec3::new(dx, dy, dz);
+        let unit = dir.normalized().ok()?;
+        let mut lines = DefLinesMemo::default();
+        // (t, area, placement, sketch)
+        let mut best: Option<(f64, f64, InstanceId, SketchId)> = None;
+        for (root, pose, def) in self.instance_sketch_roots(scope_instance) {
+            let entry = lines.get(&self.doc, def);
+            let Some(bounds) = entry.bounds else {
+                continue;
+            };
+            if !ray_meets_posed_box(origin, unit, bounds, &pose, 0.0) {
+                continue;
+            }
+            for &(sid, to_def) in &entry.placements {
+                let Some(sketch) = self.doc.sketch(sid) else {
+                    continue;
+                };
+                if sketch.imported() || sketch.regions().iter().all(|(_, r)| r.faceless) {
+                    continue;
+                }
+                let Ok(inv) = to_def.then(&pose).inverse() else {
+                    continue;
+                };
+                let o = inv.apply_point(origin);
+                let d = inv.apply_vector(dir);
+                let plane = sketch.plane();
+                let denom = plane.normal().dot(d);
+                if denom.abs() < kernel::tol::NORMAL_DIRECTION {
+                    continue; // ray parallel to (or grazing) this sketch plane
+                }
+                // The ray's own parameter: an affine map keeps it.
+                let t = -plane.signed_distance(o) / denom;
+                if t <= 0.0 {
+                    continue; // plane is behind the ray origin
+                }
+                let hit = o + d * t;
+                for (rid, _) in sketch.regions().iter().filter(|(_, r)| !r.faceless) {
+                    if !sketch.region_contains_point(rid, hit).unwrap_or(false) {
+                        continue;
+                    }
+                    let area = sketch.region_area(rid).unwrap_or(f64::INFINITY);
+                    if best.is_none_or(|(best_t, best_area, _, _)| {
+                        t < best_t
+                            || ((t - best_t).abs() * dir.length() < kernel::tol::PLANE_DIST
+                                && area < best_area)
+                    }) {
+                        best = Some((t, area, root, sid));
+                    }
+                }
+            }
+        }
+        best.map(|(t, _, root, sid)| InstanceSketchPickJs {
+            instance: root.data().as_ffi(),
+            sketch: sid.data().as_ffi(),
+            depth: t * dir.length(),
+        })
+    }
+
+    /// World bounds `[minx, miny, minz, maxx, maxy, maxz]` of the lines
+    /// drawn inside an instance, nested definitions included, each curve at
+    /// its true extent ([`Document::instance_sketch_bounds`]) — what the
+    /// selection's bounding box and framing add to the instance's solids.
+    /// Empty when the instance is stale or hidden, or draws no line.
+    /// Read-only.
+    pub fn instance_sketch_bounds(&self, instance: u64) -> Vec<f64> {
+        match self.doc.instance_sketch_bounds(instance_id(instance)) {
+            Some((lo, hi)) => vec![lo.x, lo.y, lo.z, hi.x, hi.y, hi.z],
+            None => Vec::new(),
+        }
     }
 
     /// Picks the committed sketch vertex nearest the ray (Phase D per-vertex
@@ -24354,6 +24719,262 @@ mod tests {
                 .pick_sketch_region_in_instance(inst, 0.5, 0.5, 5.0, 0.0, 0.0, -1.0)
                 .is_none(),
             "the region's LOCAL position is not where it sits under the mirrored pose"
+        );
+    }
+
+    /// A unit-cube component whose definition also holds one line beside
+    /// the cube, LOCAL (1.3, 0, 0)–(1.3, 1, 0), drawn through an
+    /// identity placement that is then removed. Returns the definition and
+    /// the line's sketch.
+    fn component_with_a_line_beside_it(scene: &mut Scene) -> (u64, u64) {
+        let (s, r) = ground_unit_square(scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        let line = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        scene
+            .sketch_add_segment(line, 1.3, 0.0, 0.0, 1.3, 1.0, 0.0)
+            .unwrap();
+        scene.delete_node(2, inst).unwrap();
+        (comp, line)
+    }
+
+    /// A straight-down ray at world (x, y) from z = 10.
+    fn down_edge_pick(scene: &Scene, x: f64, y: f64) -> Option<InstanceSketchPickJs> {
+        scene.pick_instance_sketch_edge(x, y, 10.0, 0.0, 0.0, -1.0, None)
+    }
+
+    /// The top-level pick finds a line drawn inside a component through a
+    /// translated placement, names that placement, and measures the depth
+    /// along the ray; the world sketch pick stays blind to it, and the
+    /// line's local position is a miss.
+    #[test]
+    fn pick_instance_sketch_edge_finds_a_definition_line_through_a_translated_pose() {
+        let mut scene = Scene::new();
+        let (comp, line) = component_with_a_line_beside_it(&mut scene);
+        let pose = kernel::Transform::translation(kernel::Vec3::new(5.0, 2.0, 0.0));
+        let inst = scene.place_instance(comp, &pose.to_affine()).unwrap();
+
+        assert!(
+            scene
+                .pick_sketch_edge(6.3, 2.5, 10.0, 0.0, 0.0, -1.0)
+                .is_none(),
+            "the world sketch pick leaves definition sketches out"
+        );
+        let hit = down_edge_pick(&scene, 6.3, 2.5).expect("the posed line is under the ray");
+        assert_eq!(hit.instance(), inst);
+        assert_eq!(hit.sketch(), line);
+        assert!((hit.depth() - 10.0).abs() < 1e-9, "depth {}", hit.depth());
+        assert!(down_edge_pick(&scene, 1.3, 0.5).is_none(), "local position");
+        // A stale scope is a miss, never a throw.
+        assert!(
+            scene
+                .pick_instance_sketch_edge(6.3, 2.5, 10.0, 0.0, 0.0, -1.0, Some(999_999))
+                .is_none()
+        );
+    }
+
+    /// Mirrored and non-uniformly scaled placements map the line too.
+    #[test]
+    fn pick_instance_sketch_edge_maps_mirrored_and_non_uniform_poses() {
+        let mut scene = Scene::new();
+        let (comp, line) = component_with_a_line_beside_it(&mut scene);
+        let mirrored = kernel::Transform::scale(kernel::Vec3::new(-1.0, 1.0, 1.0)).then(
+            &kernel::Transform::translation(kernel::Vec3::new(7.0, 4.0, 0.0)),
+        );
+        let stretched = kernel::Transform::scale(kernel::Vec3::new(2.0, 1.0, 3.0)).then(
+            &kernel::Transform::translation(kernel::Vec3::new(20.0, 0.0, 0.0)),
+        );
+        let m = scene.place_instance(comp, &mirrored.to_affine()).unwrap();
+        let s = scene.place_instance(comp, &stretched.to_affine()).unwrap();
+
+        let at_m = mirrored.apply_point(Point3::new(1.3, 0.5, 0.0));
+        let hit = down_edge_pick(&scene, at_m.x, at_m.y).expect("mirrored line");
+        assert_eq!((hit.instance(), hit.sketch()), (m, line));
+        let at_s = stretched.apply_point(Point3::new(1.3, 0.5, 0.0));
+        let hit = down_edge_pick(&scene, at_s.x, at_s.y).expect("stretched line");
+        assert_eq!((hit.instance(), hit.sketch()), (s, line));
+        // The stretched placement's line is NOT at its unscaled offset.
+        assert!(down_edge_pick(&scene, 21.3, 0.5).is_none());
+    }
+
+    /// A line drawn inside a NESTED definition picks through the outer
+    /// placement and names the outermost instance; inside the outer
+    /// instance's context the member instance is named instead.
+    #[test]
+    fn pick_instance_sketch_edge_names_the_outermost_placement_of_a_nested_line() {
+        let mut scene = Scene::new();
+        let (comp, line) = component_with_a_line_beside_it(&mut scene);
+        let inner = scene
+            .place_instance(
+                comp,
+                &kernel::Transform::translation(kernel::Vec3::new(0.0, 3.0, 0.0)).to_affine(),
+            )
+            .unwrap();
+        let outer = scene.make_component(&[2], &[inner]).unwrap();
+        let outer_comp = scene.instance_def(outer).unwrap();
+        scene.delete_node(2, outer).unwrap();
+        let pose = kernel::Transform::translation(kernel::Vec3::new(10.0, 0.0, 0.0));
+        let outer = scene.place_instance(outer_comp, &pose.to_affine()).unwrap();
+
+        let hit = down_edge_pick(&scene, 11.3, 3.5).expect("nested line through both poses");
+        assert_eq!((hit.instance(), hit.sketch()), (outer, line));
+
+        let member = scene
+            .doc
+            .def_member_nodes(component_id(outer_comp))
+            .unwrap_or_default()
+            .into_iter()
+            .find_map(|n| match n {
+                NodeId::Instance(i) => Some(i.data().as_ffi()),
+                _ => None,
+            })
+            .expect("the nested placement");
+        let scoped = scene
+            .pick_instance_sketch_edge(11.3, 3.5, 10.0, 0.0, 0.0, -1.0, Some(outer))
+            .expect("scoped to the outer context");
+        assert_eq!(scoped.instance(), member);
+    }
+
+    /// Hidden placements are skipped: by `set_hidden`, and by eye.
+    #[test]
+    fn pick_instance_sketch_edge_skips_a_hidden_instance() {
+        let mut scene = Scene::new();
+        let (comp, _) = component_with_a_line_beside_it(&mut scene);
+        let inst = scene
+            .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+        assert!(down_edge_pick(&scene, 1.3, 0.5).is_some());
+        scene.set_hidden(&[], &[inst]);
+        assert!(down_edge_pick(&scene, 1.3, 0.5).is_none(), "set_hidden");
+        scene.set_hidden(&[], &[]);
+        scene.set_node_user_hidden(2, inst, true).unwrap();
+        assert!(down_edge_pick(&scene, 1.3, 0.5).is_none(), "hidden by eye");
+        scene.set_node_user_hidden(2, inst, false).unwrap();
+        assert!(down_edge_pick(&scene, 1.3, 0.5).is_some());
+    }
+
+    /// Two placements under one ray: the nearer one is named, for lines
+    /// and fills alike; Wireframe drops the fill, not the line.
+    #[test]
+    fn instance_sketch_picks_take_the_nearer_placement_and_follow_the_render_mode() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        let drawn = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        for (ax, ay, bx, by) in [
+            (2.0, 0.0, 3.0, 0.0),
+            (3.0, 0.0, 3.0, 1.0),
+            (3.0, 1.0, 2.0, 1.0),
+            (2.0, 1.0, 2.0, 0.0),
+        ] {
+            scene
+                .sketch_add_segment(drawn, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+        scene.delete_node(2, inst).unwrap();
+        let low = scene
+            .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+        let high = scene
+            .place_instance(
+                comp,
+                &kernel::Transform::translation(kernel::Vec3::new(0.0, 0.0, 2.0)).to_affine(),
+            )
+            .unwrap();
+
+        let edge = down_edge_pick(&scene, 3.0, 0.5).expect("the square's side");
+        assert_eq!(edge.instance(), high);
+        assert!((edge.depth() - 8.0).abs() < 1e-9);
+        let region = scene
+            .pick_instance_sketch_region(2.5, 0.5, 10.0, 0.0, 0.0, -1.0, None)
+            .expect("the square's fill");
+        assert_eq!((region.instance(), region.sketch()), (high, drawn));
+        assert!((region.depth() - 8.0).abs() < 1e-9);
+        // From below, the low placement is the nearer.
+        let below = scene
+            .pick_instance_sketch_region(2.5, 0.5, -10.0, 0.0, 0.0, 1.0, None)
+            .expect("the fill from below");
+        assert_eq!(below.instance(), low);
+
+        scene.set_render_mode("wireframe").unwrap();
+        assert!(
+            scene
+                .pick_instance_sketch_region(2.5, 0.5, 10.0, 0.0, 0.0, -1.0, None)
+                .is_none(),
+            "wireframe: a fill is no target"
+        );
+        assert!(down_edge_pick(&scene, 3.0, 0.5).is_some(), "lines stay");
+    }
+
+    /// An instance whose definition holds only a line has bounds, and a
+    /// drawn circle counts at its true extent through a rotation, past
+    /// its facet corners.
+    #[test]
+    fn instance_sketch_bounds_cover_lines_only_instances_and_true_curves() {
+        let mut scene = Scene::new();
+        let (comp, _) = component_with_a_line_beside_it(&mut scene);
+        // Empty the definition of its cube through a session, leaving the line.
+        let inst = scene
+            .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+        scene.open_explode_session(inst).unwrap();
+        for o in scene.explode_session_objects().unwrap() {
+            scene.delete_node(0, o).unwrap();
+        }
+        scene.close_explode_session().unwrap();
+        assert!(scene.component_member_objects(comp).is_empty());
+        let b = scene.instance_sketch_bounds(inst);
+        assert_eq!(b.len(), 6, "a lines-only instance has bounds");
+        for (got, want) in b.iter().zip([1.3, 0.0, 0.0, 1.3, 1.0, 0.0]) {
+            assert!((got - want).abs() < 1e-9, "{b:?}");
+        }
+
+        // A full circle of radius 1 in 16 facets, rotated a part-facet
+        // turn: its corners fall short of ±1, the circle does not.
+        let (s, r) = ground_unit_square_at(&mut scene, 20.0, 0.0);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let ring = scene.make_component(&[0], &[o]).unwrap();
+        let ring_comp = scene.instance_def(ring).unwrap();
+        let circle = scene
+            .begin_sketch_on_plane_in_instance(ring, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        scene
+            .sketch_begin_curve_with(circle, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        let n = 16;
+        for i in 0..n {
+            let a = std::f64::consts::TAU * i as f64 / n as f64;
+            let b = std::f64::consts::TAU * (i + 1) as f64 / n as f64;
+            scene
+                .sketch_add_segment(circle, a.cos(), a.sin(), 0.0, b.cos(), b.sin(), 0.0)
+                .unwrap();
+        }
+        scene.sketch_end_curve(circle).unwrap();
+        scene.delete_node(2, ring).unwrap();
+        let turn = kernel::Transform::rotation(
+            kernel::Vec3::new(0.0, 0.0, 1.0),
+            std::f64::consts::TAU / 32.0,
+        )
+        .unwrap()
+        .then(&kernel::Transform::translation(kernel::Vec3::new(
+            50.0, 0.0, 0.0,
+        )));
+        let placed = scene.place_instance(ring_comp, &turn.to_affine()).unwrap();
+        let b = scene.instance_sketch_bounds(placed);
+        assert!(
+            (b[0] - 49.0).abs() < 1e-9 && (b[3] - 51.0).abs() < 1e-9,
+            "{b:?}"
+        );
+        assert!(
+            (b[1] + 1.0).abs() < 1e-9 && (b[4] - 1.0).abs() < 1e-9,
+            "{b:?}"
         );
     }
 

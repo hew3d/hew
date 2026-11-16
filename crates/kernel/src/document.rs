@@ -21814,6 +21814,107 @@ impl Document {
         }
     }
 
+    /// Every drawn sketch a placement of `def` shows, nested definitions
+    /// included, each with the transform that maps its stored coordinates
+    /// into `def`'s local frame: [`Document::def_rendered_sketches`] for
+    /// `def` itself and for each nested member instance's definition, its
+    /// frame composed with the nesting poses on the way in. A sketch with a
+    /// hidden tag is left out, as the renderer leaves it out; so is
+    /// everything under a member group or nested instance that is hidden
+    /// by eye or tag ([`Document::expanded_def_placements_shown`]'s rule).
+    /// A definition on loan to an open session nests through the session's
+    /// surfaced instances, as [`Document::expanded_def_placements`] does.
+    /// Empty for a stale or hidden component. Read-only; what the picks and
+    /// bounds of drawn lines inside a component walk.
+    pub fn expanded_def_sketch_placements(&self, def: ComponentId) -> Vec<(SketchId, Transform)> {
+        enum Item {
+            Def(ComponentId, Transform, usize),
+            Node(NodeId, Transform, usize),
+        }
+        let mut out = Vec::new();
+        let mut stack = vec![Item::Def(def, Transform::IDENTITY, 0)];
+        while let Some(item) = stack.pop() {
+            match item {
+                Item::Def(d, pose, depth) => {
+                    if depth > MAX_COMPONENT_DEPTH {
+                        continue;
+                    }
+                    if let Some((sketches, frame)) = self.def_rendered_sketches(d) {
+                        let to_def = frame.then(&pose);
+                        for s in sketches {
+                            if self.sketch(s).is_some() && !self.sketch_tags_hidden(s) {
+                                out.push((s, to_def));
+                            }
+                        }
+                    }
+                    if let Some(k) = self.frame_on_loan(d) {
+                        let SessionFrame::Component(sess) = &self.sessions[k] else {
+                            continue;
+                        };
+                        let base = sess.pose_inv.then(&pose);
+                        let (_, instances) = self.frame_content(k);
+                        for &i in instances.iter().rev() {
+                            let Some(rec) = self.instances.get(i) else {
+                                continue;
+                            };
+                            if !self.world_node_hidden(NodeId::Instance(i)) {
+                                stack.push(Item::Def(rec.def, rec.pose.then(&base), depth + 1));
+                            }
+                        }
+                        continue;
+                    }
+                    let Some(c) = self.components.get(d).filter(|c| !c.hidden) else {
+                        continue;
+                    };
+                    for &m in c.members.iter().rev() {
+                        stack.push(Item::Node(m, pose, depth));
+                    }
+                }
+                Item::Node(node, pose, depth) => {
+                    if self.member_node_hidden(node) {
+                        continue;
+                    }
+                    match node {
+                        NodeId::Object(_) => {}
+                        NodeId::Group(gid) => {
+                            if let Some(g) = self.groups.get(gid).filter(|r| !r.hidden) {
+                                for &child in g.members.iter().rev() {
+                                    stack.push(Item::Node(child, pose, depth));
+                                }
+                            }
+                        }
+                        NodeId::Instance(iid) => {
+                            if let Some(rec) = self.instances.get(iid).filter(|r| !r.hidden) {
+                                stack.push(Item::Def(rec.def, rec.pose.then(&pose), depth + 1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The world bounds `(low, high)` of the lines drawn inside a live
+    /// instance, nested definitions included
+    /// ([`Document::expanded_def_sketch_placements`]), each curve at its
+    /// true extent ([`crate::Sketch::bounds_under`]). `None` when the
+    /// instance is stale or hidden, or draws no line. Read-only.
+    pub fn instance_sketch_bounds(&self, instance: InstanceId) -> Option<(Point3, Point3)> {
+        let def = self.instance_def(instance)?;
+        let pose = self.instance_pose(instance)?;
+        let mut acc: Option<(Point3, Point3)> = None;
+        for (s, local) in self.expanded_def_sketch_placements(def) {
+            let Some(sketch) = self.sketch(s) else {
+                continue;
+            };
+            if let Some((lo, hi)) = sketch.bounds_under(&local.then(&pose)) {
+                acc = Some(grow_bounds(Some(grow_bounds(acc, lo)), hi));
+            }
+        }
+        acc
+    }
+
     /// The INNERMOST open frame's own live world sketches, in world
     /// coordinates. Empty when no frame is open. The scoped picks read it
     /// to tell the frame's own drawing from the dimmed context. Read-only.

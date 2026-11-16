@@ -940,6 +940,13 @@ pub fn entity_bbox(ctx: &Ctx, entity: &EntityRef) -> Option<(Point3, Point3)> {
                             .map(|v| local.apply_point(v.position)),
                     )
                 })
+                .chain(
+                    // Its drawn lines, as for an instance.
+                    ctx.doc
+                        .expanded_def_sketch_placements(*id)
+                        .into_iter()
+                        .filter_map(|(s, local)| ctx.doc.sketch(s)?.bounds_under(&local)),
+                )
                 .collect();
             merge_boxes(boxes)
         }
@@ -988,7 +995,10 @@ fn instance_bbox(ctx: &Ctx, id: kernel::InstanceId) -> Option<(Point3, Point3)> 
             })
             .map(move |p| composed.apply_point(p))
     });
-    geom::bbox(points)
+    // The lines drawn inside the definition count too: they are drawn
+    // with the instance, and an instance holding only lines has a box.
+    let lines = ctx.doc.instance_sketch_bounds(id);
+    merge_boxes(geom::bbox(points).into_iter().chain(lines).collect())
 }
 
 fn merge_boxes(boxes: Vec<(Point3, Point3)>) -> Option<(Point3, Point3)> {
