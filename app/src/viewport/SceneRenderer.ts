@@ -80,6 +80,7 @@ import {
   pushCenterTick,
   CENTER_TICK_HALF,
 } from './annotationLayout'
+import { applyAffineToPoint } from '../tools/transformMath'
 import { writeFrameUvs, type UvFrameComponents } from '../tools/uvFrameMath'
 import { shownAnnotationIds } from './shownAnnotations'
 
@@ -3025,22 +3026,22 @@ export class SceneRenderer {
   private _refreshDefSketches(): void {
     this._clearDefSketchGroups()
     for (const instanceId of this.wasmScene.instance_ids()) {
-      const componentId = this.wasmScene.instance_def(instanceId)
-      if (componentId === undefined) continue
-      // `component_rendered_sketches`, not `component_member_sketches`:
-      // while the definition is on loan to an open session this is the
-      // session's live world drawing, and `component_sketch_frame` is the
-      // inverse session pose that brings it back into the definition's
-      // frame — so a live sibling placement shows lines drawn inside the
-      // session as they are drawn (ARCHITECTURE.md 2.11). For a closed
-      // definition the list is its own def-local sketches at identity.
-      const sketchIds = this.wasmScene.component_rendered_sketches(componentId)
-      if (sketchIds.length === 0) continue
       const pose = this.wasmScene.instance_pose(instanceId)
       if (pose === undefined) continue
-      const frame = this.wasmScene.component_sketch_frame(componentId)
-      const composed = this._composeRowMajorPose(rowMajorToMatrix4(pose), rowMajorToMatrix4(frame))
-      this._buildDefSketchGroup(instanceId, composed, sketchIds)
+      // `instance_sketch_placements`: the kernel's one walk of what the
+      // instance draws — its definition's own sketches and every nested
+      // definition's, each with the pose into the instance's frame; a
+      // definition on loan to an open session shows the session's live
+      // drawing at the inverse session pose, so a sibling placement shows
+      // lines drawn inside the session as they are drawn (ARCHITECTURE.md
+      // 2.11). The instance's own visibility is applied below, not there.
+      const placements = this.wasmScene.instance_sketch_placements(instanceId)
+      try {
+        if (placements.is_empty()) continue
+        this._buildDefSketchGroup(instanceId, pose, placements.sketches(), placements.poses())
+      } finally {
+        placements.free()
+      }
     }
   }
 
@@ -3060,16 +3061,20 @@ export class SceneRenderer {
   }
 
   /**
-   * Build one instance's `DefSketchGroup`: a Group transformed by `pose`
-   * (row-major 3×4, same convention as `_pullInstanceRecord`) holding a
-   * merged fat-line for every live sketch's edges plus one fill mesh per
-   * region. `sketchIds` are already definition-local and already filtered to
-   * LIVE ones by the caller.
+   * Build one instance's `DefSketchGroup`: a Group transformed by the
+   * instance's `pose` (row-major 3×4, same convention as
+   * `_pullInstanceRecord`) holding a merged fat-line for every live sketch's
+   * edges plus one fill mesh per region. Each sketch sits at its own
+   * placement pose (`sketchPoses`, 12 floats per sketch, into the instance's
+   * frame): identity for the definition's own, the nested placement's for a
+   * nested definition's — lines are carried through it as they merge, and a
+   * fill mesh takes it as its own matrix.
    */
   private _buildDefSketchGroup(
     instanceId: bigint,
     pose: Float64Array,
     sketchIds: BigUint64Array | bigint[],
+    sketchPoses: Float64Array | number[],
   ): void {
     const group = new THREE.Group()
     group.name = `DefSketch_${instanceId}`
@@ -3086,12 +3091,15 @@ export class SceneRenderer {
     const attachedLinePositions: number[] = []
     const plainLinePositions: number[] = []
     const regionMeshes = new Map<string, THREE.Mesh>()
-    for (const sketchHandle of sketchIds) {
+    for (let k = 0; k < sketchIds.length; k++) {
+      const sketchHandle = sketchIds[k]
+      const placement = Array.from({ length: 12 }, (_, j) => sketchPoses[k * 12 + j])
       const kind = this._sketchDrawKind(sketchHandle)
       const out = kind === 'plain' ? plainLinePositions : kind === 'attached' ? attachedLinePositions : allLinePositions
       const linePositions = this.wasmScene.sketch_lines(sketchHandle)
-      for (let i = 0; i < linePositions.length; i++) {
-        out.push(linePositions[i])
+      for (let i = 0; i + 2 < linePositions.length; i += 3) {
+        const [x, y, z] = applyAffineToPoint(placement, [linePositions[i], linePositions[i + 1], linePositions[i + 2]])
+        out.push(x, y, z)
       }
       if (kind === 'plain') continue // imported: edge ink only, no fill
       const regionHandles = this.wasmScene.sketch_regions(sketchHandle)
@@ -3099,6 +3107,9 @@ export class SceneRenderer {
         const regionHandle = regionHandles[i]
         const mesh = this._buildRegionFillMesh(sketchHandle, regionHandle, kind)
         if (mesh === null) continue
+        mesh.matrixAutoUpdate = false
+        mesh.matrix.copy(rowMajorToMatrix4(placement))
+        mesh.matrixWorldNeedsUpdate = true
         group.add(mesh)
         regionMeshes.set(`${sketchHandle}:${regionHandle}`, mesh)
       }

@@ -115,7 +115,7 @@ function makeScene(opts: {
   const sessionPlacements = opts.sessionPlacements ?? []
   const placementsOf = (inst: { memberIds: bigint[]; placements?: MockPlacement[] }): MockPlacement[] =>
     inst.placements ?? inst.memberIds.map((memberId) => ({ memberId, localPose: IDENTITY_LOCAL_POSE }))
-  return {
+  const scene: Record<string, unknown> = {
     object_ids: () => BigUint64Array.from(Object.keys(objects).map(BigInt)),
     instance_ids: () => BigUint64Array.from(Object.keys(instances).map(BigInt)),
     // vi.fn so the targeted-refresh tests can count exactly which meshes get
@@ -174,7 +174,40 @@ function makeScene(opts: {
     sketch_ids: () => new BigUint64Array(),
     guide_ids: () => new BigUint64Array(),
     guide_dash: () => undefined,
-  } as unknown as WasmScene
+  }
+  // The kernel's one walk of what an instance draws: by default its
+  // definition's rendered sketches, each at the definition's sketch frame
+  // (identity unless a test lends the definition to a session). A test seeds
+  // nested drawing by overriding this.
+  scene.instance_sketch_placements = (instanceId: bigint) => {
+    const def = (scene.instance_def as (id: bigint) => bigint | undefined)(instanceId)
+    const sketches = def === undefined
+      ? new BigUint64Array()
+      : (scene.component_rendered_sketches as (c: bigint) => BigUint64Array)(def)
+    const frame = def === undefined ? [] : Array.from((scene.component_sketch_frame as (c: bigint) => Float64Array)(def))
+    return placementsOfSketches(sketches, sketches.length === 0 ? [] : Array.from(sketches, () => frame).flat())
+  }
+  return scene as unknown as WasmScene
+}
+
+/** The segment endpoints (start, end per segment, xyz) of a group's fat line. */
+function fatLinePositions(group: THREE.Group): Float32Array {
+  const line = group.children.find((c) => 'isLineSegments2' in c) as unknown as {
+    geometry: { attributes: { instanceStart: { data: { array: Float32Array } } } }
+  }
+  return line.geometry.attributes.instanceStart.data.array
+}
+
+/** An `InstanceSketchPlacementsJs` double. */
+function placementsOfSketches(sketches: BigUint64Array | bigint[], poses: number[]): unknown {
+  const ids = BigUint64Array.from(sketches)
+  return {
+    len: () => ids.length,
+    is_empty: () => ids.length === 0,
+    sketches: () => ids,
+    poses: () => Float64Array.from(poses),
+    free: () => {},
+  }
 }
 
 /** Identity pose (row-major 3x4: no rotation/reflection, zero translation). */
@@ -1721,9 +1754,39 @@ describe('SceneRenderer — definition-owned sketch rendering (component-edit-pa
     const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
     renderer.refresh()
 
+    // The kernel's placements carry the inverse session pose, so the drawing
+    // is already back in the instance's frame: the group stays at the
+    // instance's own pose and the lines start at the origin.
     const g10 = renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group
     expect(g10).toBeDefined()
-    expect(g10.matrix.elements[12]).toBe(-5)
+    expect(g10.matrix.elements[12]).toBe(0)
+    expect(Array.from(fatLinePositions(g10)).slice(0, 3)).toEqual([0, 0, 0])
+  })
+
+  it('draws the lines of a nested definition at their placement pose inside the instance, and a fill at its own matrix', () => {
+    const instances = {
+      '10': { def: 100n, pose: [1, 0, 0, 2, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+    }
+    const scene = makeScene({ instances }) as unknown as Record<string, unknown>
+    // Sketch 500 is the definition's own (identity); 501 belongs to a nested
+    // definition placed +3 in y, with a fill.
+    scene.instance_sketch_placements = () =>
+      placementsOfSketches([500n, 501n], [
+        1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+        1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1, 0,
+      ])
+    scene.sketch_lines = (id: bigint) => new Float32Array(id === 500n ? [0, 0, 0, 1, 0, 0] : [0, 0, 0, 0, 1, 0])
+    scene.sketch_regions = (id: bigint) => (id === 501n ? BigUint64Array.from([1n]) : new BigUint64Array())
+    scene.region_boundary = () => new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0])
+    const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
+    renderer.refresh()
+
+    const g = renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group
+    expect(g.matrix.elements[12]).toBe(2)
+    // Both sketches' segments, the nested one carried through its pose.
+    expect(Array.from(fatLinePositions(g))).toEqual([0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 4, 0])
+    const fill = g.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
+    expect(fill.matrix.elements[13]).toBe(3)
   })
 
   it('an undone/deleted def sketch (component_member_sketches no longer reports it) renders NO group', () => {
