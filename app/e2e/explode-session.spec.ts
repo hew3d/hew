@@ -487,3 +487,77 @@ test('explode session: a solid created mid-session is immediately click-selectab
 
   await page.keyboard.press('Escape')
 })
+
+test('explode session: a line folded into a component stays drawn when the component is opened or exploded', async ({
+  page,
+}) => {
+  // A loose line drawn on the ground inside a session, outside the part,
+  // folds into the definition at close: it renders through the instance
+  // from then on. Opening the session again and exploding the instance each
+  // move that drawing back to a world sketch while the instance hides, and
+  // the viewport must redraw the world sketches at that moment: they used
+  // to be redrawn only on the next drawing change, so in a freshly opened
+  // file the line vanished from view while it was still in the document.
+  let ctx = await ready(page).then(() => aim(page, CAMERA))
+  const { component } = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const box = h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    return h.makeComponent([box])
+  })
+  await dblClickWorld(page, ctx, 0.5, 0.5, 1)
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).not.toBeNull()
+  await page.keyboard.press('l')
+  await clickWorld(page, ctx, 2, 0.1, 0)
+  await clickWorld(page, ctx, 2, 0.9, 0)
+  await page.keyboard.press('Escape') // end the line chain
+  await page.keyboard.press('Space')
+  await page.keyboard.press('Escape') // close the session
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBeNull()
+  // The line folded in: a definition sketch, no world sketch.
+  expect(await page.evaluate((c) => window.__hew_test!.getComponentMemberSketches(c), component)).toHaveLength(1)
+  expect(await page.evaluate(() => window.__hew_test!.getSketchIds())).toHaveLength(0)
+  // Where the line landed (the clicks snap); the instance's pose is the
+  // identity, so its definition coordinates are world coordinates.
+  const [sketch] = await page.evaluate((c) => window.__hew_test!.getComponentMemberSketches(c), component)
+  const seg = await page.evaluate((s) => window.__hew_test!.getSketchLines(s), sketch)
+  const mid: [number, number, number] = [(seg[0] + seg[3]) / 2, (seg[1] + seg[4]) / 2, (seg[2] + seg[5]) / 2]
+  const ground: [number, number, number] = [mid[0] + 0.3, mid[1], mid[2]]
+  // The line is drawn when the pixel on it differs clearly from the bare
+  // ground beside it.
+  const lineDrawn = async (): Promise<boolean> =>
+    page.evaluate(
+      ([on, off]) => {
+        const t = window.__hew_test!
+        const a = t.pixelColorAt(on)
+        const b = t.pixelColorAt(off)
+        if (a === null || b === null) return false
+        return Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b) > 60
+      },
+      [mid, ground] as const,
+    )
+  expect(await lineDrawn()).toBe(true)
+
+  // Save and reopen, so nothing drawn during the session lingers on screen.
+  const bytes = await page.evaluate(() => window.__hew_test!.save())
+  await page.evaluate((b) => window.__hew_test!.load(b), bytes)
+  ctx = await aim(page, CAMERA)
+  await expect.poll(lineDrawn).toBe(true)
+
+  // Opening the session bakes it to a world sketch: still drawn.
+  await dblClickWorld(page, ctx, 0.5, 0.5, 1)
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).not.toBeNull()
+  expect(await page.evaluate(() => window.__hew_test!.getSketchIds())).toHaveLength(1)
+  await expect.poll(lineDrawn).toBe(true)
+
+  await page.keyboard.press('Escape')
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBeNull()
+  await expect.poll(lineDrawn).toBe(true)
+
+  // Exploding copies it out as a world sketch: still drawn.
+  await clickWorld(page, ctx, 0.5, 0.5, 1)
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getSelection().map((n) => n.kind))).toEqual(['instance'])
+  await page.getByTestId('menu-bar').getByRole('button', { name: 'Object', exact: true }).click()
+  await page.getByTestId('menu-bar').getByText('Explode', { exact: true }).click()
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getSketchIds())).toHaveLength(1)
+  await expect.poll(lineDrawn).toBe(true)
+})

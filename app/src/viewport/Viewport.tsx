@@ -5957,6 +5957,9 @@ export default function Viewport({
       try {
         const instanceId = wasmScene.make_component(sel.kinds, sel.ids)
         handleSceneRefresh()
+        // Drawing on the folded objects moves into the definition (see
+        // runExplodeInstance).
+        sceneRenderer.refreshAllSketches()
         return instanceId
       } catch (err) {
         const code = parseKernelErrorCode(err)
@@ -5992,6 +5995,13 @@ export default function Viewport({
       try {
         const objectIds = wasmScene.explode_instance(instanceId)
         handleSceneRefresh()
+        // The definition's drawing is copied out as world sketches while the
+        // instance hides. `handleSceneRefresh` redraws only what instances
+        // draw, so redraw the world sketches too, or the drawing is gone from
+        // view until the next drawing change. The same holds wherever drawing
+        // moves between a definition and the world: Make Component and a
+        // component session's open and close.
+        sceneRenderer.refreshAllSketches()
         return Array.from(objectIds)
       } catch (err) {
         const code = parseKernelErrorCode(err)
@@ -6223,6 +6233,9 @@ export default function Viewport({
       }
       handleSceneRefresh()
       refreshSessionScope()
+      // The definition's drawing is baked to world sketches (see
+      // runExplodeInstance).
+      sceneRenderer.refreshAllSketches()
       return true
     }
 
@@ -6272,6 +6285,7 @@ export default function Viewport({
       }
       handleSceneRefresh()
       refreshSessionScope()
+      sceneRenderer.refreshAllSketches()
     }
 
     function runCloseExplodeSession(): boolean {
@@ -6286,6 +6300,9 @@ export default function Viewport({
       }
       handleSceneRefresh()
       refreshSessionScope()
+      // The session's drawing folds back into the definition: drop its
+      // world lines (see runExplodeInstance).
+      sceneRenderer.refreshAllSketches()
       return true
     }
 
@@ -6354,6 +6371,9 @@ export default function Viewport({
       }
       handleSceneRefresh()
       refreshSessionScope()
+      // A component frame's drawing folds back into its definition (see
+      // runCloseExplodeSession).
+      sceneRenderer.refreshAllSketches()
       return true
     }
 
