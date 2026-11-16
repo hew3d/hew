@@ -314,6 +314,29 @@ impl Object {
             if !outer_planar || !holes_planar {
                 return Err(TopologyError::NonPlanarFace { face: face_index });
             }
+            // Holes are disjoint (`TopologyError::HolesOverlap`): checked
+            // here, always, so an import carrying overlapping holes is
+            // refused typed, never built (the validator holds only native
+            // objects to it, so old documents keep opening).
+            if face_holes.len() >= 2 {
+                let rings: Vec<Vec<Point3>> = face_holes
+                    .iter()
+                    .map(|h| {
+                        h.iter()
+                            .filter_map(|&i| positions.get(i).copied())
+                            .collect()
+                    })
+                    .collect();
+                if let Some((hole, other)) =
+                    crate::geom2d::first_overlapping_holes(&rings, plane.normal())
+                {
+                    return Err(TopologyError::OverlappingHoles {
+                        face: face_index,
+                        hole,
+                        other,
+                    });
+                }
+            }
 
             // Create the face + its outer loop, then build outer and inner loops.
             let outer_loop_id = obj.loops.insert(Loop {

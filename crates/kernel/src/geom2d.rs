@@ -430,6 +430,122 @@ pub(crate) fn boundaries_contact_away_from_shared(a: &[Point3], b: &[Point3]) ->
     false
 }
 
+/// Whether two hole rings of one face (on one plane with unit normal
+/// `normal`) overlap: their interiors share area. That is so when an edge of
+/// one properly crosses an edge of the other away from every touch (no end
+/// of either within [`tol::POINT_MERGE`] of the other segment), when a
+/// vertex or an edge midpoint of one lies strictly inside the other (inside,
+/// and not within `POINT_MERGE` of its ring), or when the two trace one
+/// outline (every vertex and edge midpoint of each lies on the other's
+/// ring). Rings meeting at isolated points, or running along each other on
+/// opposite sides of a shared stretch, do not overlap.
+pub(crate) fn hole_rings_overlap(a: &[Point3], b: &[Point3], normal: Vec3) -> bool {
+    let eps = tol::POINT_MERGE;
+    let (na, nb) = (a.len(), b.len());
+    if na < 3 || nb < 3 || !boxes_meet(&ring_box(a), &ring_box(b), eps) {
+        return false;
+    }
+    for i in 0..na {
+        let (p, q) = (a[i], a[(i + 1) % na]);
+        let pq = ring_box(&[p, q]);
+        for j in 0..nb {
+            let (r, s) = (b[j], b[(j + 1) % nb]);
+            if !boxes_meet(&pq, &ring_box(&[r, s]), eps) {
+                continue;
+            }
+            let touching = point_near_segment(p, r, s, eps)
+                || point_near_segment(q, r, s, eps)
+                || point_near_segment(r, p, q, eps)
+                || point_near_segment(s, p, q, eps);
+            if !touching && segments_cross_exactly(p, q, r, s) {
+                return true;
+            }
+        }
+    }
+    // Vertices, then edge midpoints, of each ring.
+    let samples = |ring: &[Point3]| -> Vec<Point3> {
+        let n = ring.len();
+        ring.iter()
+            .copied()
+            .chain((0..n).map(|i| ring[i] + (ring[(i + 1) % n] - ring[i]) * 0.5))
+            .collect()
+    };
+    let (sa, sb) = (samples(a), samples(b));
+    let strictly_inside = |p: Point3, ring: &[Point3]| {
+        !point_on_ring(p, ring) && point_inside_polygon(p, ring, normal)
+    };
+    if sa.iter().any(|&p| strictly_inside(p, b)) || sb.iter().any(|&p| strictly_inside(p, a)) {
+        return true;
+    }
+    sa.iter().all(|&p| point_on_ring(p, b)) && sb.iter().all(|&p| point_on_ring(p, a))
+}
+
+/// The first pair `(i, j)`, `i < j`, of rings in `holes` (one face's
+/// holes, on one plane with unit normal `normal`) that overlap by
+/// [`hole_rings_overlap`], or `None`. Pairs are found by a sweep over the
+/// rings' boxes, so a face with many small holes costs little more than
+/// their count. A ring of fewer than three points (an empty one included)
+/// bounds no area and overlaps nothing, as in `hole_rings_overlap`: it is
+/// passed over here, and refusing it is the caller's (the builder's
+/// `DegenerateFace`).
+pub(crate) fn first_overlapping_holes(
+    holes: &[Vec<Point3>],
+    normal: Vec3,
+) -> Option<(usize, usize)> {
+    let mut order: Vec<usize> = (0..holes.len()).filter(|&i| holes[i].len() >= 3).collect();
+    if order.len() < 2 {
+        return None;
+    }
+    let boxes: Vec<[Point3; 2]> = holes
+        .iter()
+        .map(|h| {
+            if h.len() >= 3 {
+                ring_box(h)
+            } else {
+                [Point3::ORIGIN; 2] // never read: not in `order`
+            }
+        })
+        .collect();
+    order.sort_by(|&i, &j| boxes[i][0].x.total_cmp(&boxes[j][0].x).then(i.cmp(&j)));
+    let mut found: Option<(usize, usize)> = None;
+    for (k, &i) in order.iter().enumerate() {
+        for &j in &order[k + 1..] {
+            if boxes[j][0].x > boxes[i][1].x + tol::POINT_MERGE {
+                break;
+            }
+            if boxes_meet(&boxes[i], &boxes[j], tol::POINT_MERGE)
+                && hole_rings_overlap(&holes[i], &holes[j], normal)
+            {
+                let pair = (i.min(j), i.max(j));
+                found = Some(found.map_or(pair, |f| f.min(pair)));
+            }
+        }
+    }
+    found
+}
+
+/// The axis-aligned box `[min, max]` of `pts`, which must be non-empty
+/// (every caller checks the length first).
+fn ring_box(pts: &[Point3]) -> [Point3; 2] {
+    let mut lo = pts[0];
+    let mut hi = pts[0];
+    for p in &pts[1..] {
+        lo = Point3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+        hi = Point3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+    }
+    [lo, hi]
+}
+
+/// Whether two boxes come within `gap` of each other.
+fn boxes_meet(a: &[Point3; 2], b: &[Point3; 2], gap: f64) -> bool {
+    a[0].x <= b[1].x + gap
+        && b[0].x <= a[1].x + gap
+        && a[0].y <= b[1].y + gap
+        && b[0].y <= a[1].y + gap
+        && a[0].z <= b[1].z + gap
+        && b[0].z <= a[1].z + gap
+}
+
 /// Whether hole ring `hole` leaves the region of outer ring `outer` (both
 /// on one plane with unit normal `normal`): some stretch of a hole edge
 /// lies outside the outer ring by more than `graze`.
@@ -676,6 +792,27 @@ mod tests {
 
     fn xy(pts: &[(f64, f64)]) -> Vec<Point3> {
         pts.iter().map(|&(x, y)| Point3::new(x, y, 0.0)).collect()
+    }
+
+    /// A ring of fewer than three points bounds nothing, so it overlaps no
+    /// hole: the sweep passes over it (an empty one included) and still
+    /// finds the overlapping pair beside it, by its own indices.
+    #[test]
+    fn rings_too_short_to_bound_anything_overlap_no_hole() {
+        let a = xy(&[(1.0, 1.0), (1.0, 3.0), (3.0, 3.0), (3.0, 1.0)]);
+        let b = xy(&[(2.0, 2.0), (2.0, 4.0), (4.0, 4.0), (4.0, 2.0)]);
+        let far = xy(&[(8.0, 8.0), (8.0, 9.0), (9.0, 9.0), (9.0, 8.0)]);
+        let two = xy(&[(1.5, 1.5), (2.5, 2.5)]);
+        assert_eq!(
+            first_overlapping_holes(&[Vec::new(), far.clone()], UP),
+            None
+        );
+        assert_eq!(first_overlapping_holes(&[Vec::new(), Vec::new()], UP), None);
+        assert_eq!(first_overlapping_holes(&[two.clone(), a.clone()], UP), None);
+        assert_eq!(
+            first_overlapping_holes(&[Vec::new(), a, two, far, b], UP),
+            Some((1, 4))
+        );
     }
 
     const UP: Vec3 = Vec3 {

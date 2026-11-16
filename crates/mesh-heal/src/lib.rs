@@ -35,6 +35,9 @@
 
 use kernel::{Plane, Point3, Transform, Vec3, tol};
 
+/// Faces whose hole loops overlap: a hole drawn twice loses its extra copy,
+/// any other overlap leaves the face out (always reported by the caller).
+pub mod holes;
 /// Non-manifold mesh splitting: cut kernel-rejectable meshes into
 /// buildable open shells (never repaired, always reported by the caller).
 pub mod split;

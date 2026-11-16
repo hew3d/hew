@@ -107,7 +107,7 @@ pub use ids::{
 pub use import::{
     DefRecipe, ImportAttrTarget, ImportGuide, ImportNode, ImportReport, ImportScene,
     ImportSceneExtra, ImportSceneRecipe, ImportSketch, ImportTag, MeshExtra, MeshRecipe,
-    SkippedMesh,
+    SkippedMesh, first_overlapping_holes, rings_trace_each_other,
 };
 pub use material::{
     FaceMaterial, ImageFormat, Material, MaterialPalette, Pbr, PbrMap, Rgba8, Texture, UvFrame,

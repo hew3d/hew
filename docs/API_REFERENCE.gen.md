@@ -14461,6 +14461,7 @@ Sweep a profile along an edge-chain path, as the tool does.
 - `path_detached_from_profile` — The path doesn't start on the profile's surface. Start the path at the profile — or, on a loop, cross the profile partway along a straight run, not at a corner.
 - `path_reverses` — The path doubles back on itself — or turns nearly all the way around — so there is no clean corner to turn. Remove the reversal, or soften the corner.
 - `path_too_tight` — The path turns tighter than the profile is wide, so the sweep would fold into itself. Use a smaller profile or gentler turns.
+- `profile_too_wide_for_corner` — The profile is too wide to fit inside this corner, so the sweep would run into itself. Draw the profile at a corner of the path, square to the edge it starts along, and narrower than half the shortest side.
 - `profile_crosses_axis` — This profile crosses the circle's center axis, so revolving it would lose the geometry on one side. Draw the profile entirely on one side of the axis instead.
 - `partial_sweep_on_pole` — A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis.
 - `sweep_self_intersects` — Following this path would make the shape run into itself. Shorten the path or use a smaller profile.

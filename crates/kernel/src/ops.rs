@@ -346,6 +346,18 @@ pub enum FollowMeError {
     /// itself). Also raised for a lathe profile touching its own axis of
     /// revolution on a NON-circular path — the on-axis vertex never advances.
     PathTooTight,
+    /// A closed path's corner profile hanging inside the loop (a rebate
+    /// drawn on a board's end face at a corner of the face it runs around,
+    /// design §2b) is too wide to sit inside the corner: it reaches half the
+    /// length of a side it runs along or more (a side runs between real
+    /// corners; a vertex where the path runs straight on does not end
+    /// one), so the sweeps along the
+    /// shorter side would fold into each other where they meet. The same
+    /// fold [`FollowMeError::PathTooTight`] names, told apart so the person
+    /// hears where the profile has to go. Draw it at a corner of the path,
+    /// square to the edge it starts along, and narrower than half the
+    /// shortest side.
+    ProfileTooWideForCorner,
     /// The profile CROSSES the revolution axis of a drawn-circle path in a way
     /// that cannot be revolved into one faithful solid (design §9.2): only an
     /// analytic circle centered on the axis (the sphere) splits losslessly.
@@ -761,6 +773,10 @@ impl std::fmt::Display for FollowMeError {
             }
             FollowMeError::PathTooTight => {
                 "path bends tighter than the profile is wide; the sweep would fold into itself"
+            }
+            FollowMeError::ProfileTooWideForCorner => {
+                "a corner profile inside the loop reaches half a side it runs along; \
+                 the sweep would fold into itself"
             }
             FollowMeError::ProfileCrossesAxis => {
                 "profile crosses the lathe axis and cannot be revolved into one solid; \
@@ -1481,6 +1497,23 @@ impl Object {
     /// lands on the plane (design §2a) — the sweep starts where the
     /// profile is and follows the path's shape, and any lateral offset is
     /// preserved as-is. The profile itself is never re-oriented (rule 4).
+    /// A closed path may also seam at a CORNER the profile plane passes
+    /// through square to one of its flanks (design §2b): outside the loop,
+    /// the corner's wedge closes the seam; wholly inside it (a rebate drawn
+    /// on a board's end face at a corner of the face it runs around), the
+    /// ring is carried along that flank onto the corner's miter plane and
+    /// the loop closes there — the solid the profile makes slid along the
+    /// flank to mid-run. A profile on both sides of the corner refuses
+    /// [`FollowMeError::PathTooTight`]; an inside one reaching half the
+    /// length of a side it runs along refuses
+    /// [`FollowMeError::ProfileTooWideForCorner`].
+    ///
+    /// A path vertex where the path runs straight on (both its segments
+    /// plain — a face's rim gets one wherever an imprint ends on it) is no
+    /// corner: it stays a station, its walls keeping the joint, unless that
+    /// station folds the sweep, and then the sweep is retried once through
+    /// the path's real corners only — sides are counted between those, and
+    /// a fold that remains refuses as above.
     ///
     /// `path_curves` carries the path's per-segment analytic attribution —
     /// one entry per segment (`path.len() - 1` open, `path.len()` closed
@@ -1623,6 +1656,43 @@ impl Object {
         stop_len: Option<f64>,
         opts: &SweepOptions,
     ) -> Result<Object, FollowMeError> {
+        // A vertex where the path runs straight on is no corner (an
+        // imprint ending on a face's rim leaves one, #75). It stays a
+        // station of the sweep — its walls keep the joint, as they always
+        // have — unless that station is what folds the sweep: one sitting
+        // inside a corner's miter span, nearer the corner than the profile
+        // is wide, reads as a side too short for the profile where the
+        // path runs straight on. Then the sweep reads the path through its
+        // real corners only — every walk below (anchor candidates, the
+        // corner seam and its sides, the fold, the stations, the advance
+        // check) — and a real fold still refuses, now counted between
+        // true corners.
+        match Self::from_follow_me_on(profile, path, closed, path_curves, stop_len, opts) {
+            Err(
+                e @ (FollowMeError::PathTooTight
+                | FollowMeError::ProfileTooWideForCorner
+                | FollowMeError::PathReverses),
+            ) => {
+                let (straight, curves) = drop_straight_path_vertices(path, closed, path_curves);
+                if straight.len() == path.len() {
+                    return Err(e);
+                }
+                Self::from_follow_me_on(profile, &straight, closed, &curves, stop_len, opts)
+            }
+            r => r,
+        }
+    }
+
+    /// The anchor ladder and auto-orientation of
+    /// [`Object::from_follow_me_auto`] on one reading of the path.
+    fn from_follow_me_on(
+        profile: &Profile,
+        path: &[Point3],
+        closed: bool,
+        path_curves: &[Option<crate::sketch::CurveGeom>],
+        stop_len: Option<f64>,
+        opts: &SweepOptions,
+    ) -> Result<Object, FollowMeError> {
         let ladder = |profile: &Profile| -> Result<Object, FollowMeError> {
             // Anchor retry ladder (design §2d): walk candidates nearest-
             // first, stepping past one whose transport folds — a straddled
@@ -1640,7 +1710,11 @@ impl Object {
                     skip,
                     opts,
                 ) {
-                    Err(e @ (FollowMeError::PathTooTight | FollowMeError::PathReverses)) => {
+                    Err(
+                        e @ (FollowMeError::PathTooTight
+                        | FollowMeError::ProfileTooWideForCorner
+                        | FollowMeError::PathReverses),
+                    ) => {
                         if first_err.is_none() {
                             first_err = Some(e);
                         }
@@ -2236,6 +2310,56 @@ impl Object {
                 (pts, band_curves)
             };
 
+        // ---- a corner profile hanging inside the loop (design §2b) ------
+        // The corner seam's wedge closes the loop only for a profile on the
+        // far side of the corner from its incoming flank (outside the
+        // loop): a ring vertex on the near side would have to run backward
+        // across the wedge. A profile wholly on the near side — a rebate
+        // drawn on a board's end face at a corner of the face it runs
+        // around — is the cross-section of the loop's sweep where it leaves
+        // the corner: slid along the perpendicular flank to mid-run, it is
+        // a split seam whose sweep already closes. So the seam moves onto
+        // the corner's own miter plane instead: the ring is carried along
+        // that flank onto it (exactly the transport the sweep itself does)
+        // and the loop closes there, at the corner vertex, with no wedge.
+        // The solid is the mid-run placement's. A profile on both sides of
+        // the corner still refuses through the wedge (the fold it is).
+        let (pts, band_curves, seam_shift) = {
+            let (mut pts, mut band_curves) = (pts, band_curves);
+            let mut seam_shift: Option<(Vec3, Plane)> = None;
+            if closed && corner_seam && pts.len() >= 4 {
+                let last = pts.len() - 1; // pts[last] is the corner again
+                let c = pts[0];
+                let d_out = (pts[1] - c)
+                    .normalized()
+                    .map_err(|_| FollowMeError::PathSegmentTooShort)?;
+                let d_in = (c - pts[last - 1])
+                    .normalized()
+                    .map_err(|_| FollowMeError::PathSegmentTooShort)?;
+                let ring = profile
+                    .outer()
+                    .iter()
+                    .chain(profile.holes().iter().flatten());
+                let sides: Vec<f64> = ring.map(|&p| (p - c).dot(d_in)).collect();
+                let inward = sides.iter().all(|&s| s <= tol::POINT_MERGE)
+                    && sides.iter().any(|&s| s < -tol::POINT_MERGE);
+                if inward {
+                    let miter = (d_in + d_out)
+                        .normalized()
+                        .and_then(|b| Plane::from_point_normal(c, b))
+                        .map_err(|_| FollowMeError::PathReverses)?;
+                    pts.truncate(last);
+                    band_curves.truncate(last);
+                    corner_seam = false;
+                    seam_shift = Some((d_out, miter));
+                }
+            }
+            (pts, band_curves, seam_shift)
+        };
+        // Station 0's plane: the profile's own, or the corner's miter plane
+        // the ring was carried onto (above).
+        let seam_plane = seam_shift.map_or(plane, |(_, miter)| miter);
+
         // Twist stations (true-curves.md §5.2): split each segment into
         // `k_s` collinear sub-segments so a station step turns at most 15°
         // (a scale-only sweep keeps one: a linear scale between two
@@ -2316,7 +2440,7 @@ impl Object {
         // halves of the split anchor segment — its miter plane IS the
         // profile plane, already station 0.)
         let mut station_planes: Vec<Plane> = Vec::with_capacity(m);
-        station_planes.push(plane);
+        station_planes.push(seam_plane);
         for s in 1..m {
             let normal = if closed || s < m - 1 {
                 let bisector = (dirs[s - 1] + dirs[s % seg_count])
@@ -2427,6 +2551,15 @@ impl Object {
             }
         }
 
+        // A seam moved onto a corner's miter plane carries every carrier
+        // there along the flank the sweep leaves by (the corner section).
+        if let Some((d_out, miter)) = seam_shift {
+            let denom = d_out.dot(miter.normal());
+            for v in &mut base {
+                *v = *v + d_out * (-miter.signed_distance(*v) / denom);
+            }
+        }
+
         // The twist pivot (true-curves.md §5.2): the profile's outer-loop
         // area centroid, carried like every other carrier so each station
         // turns and scales about its own transported centroid.
@@ -2462,12 +2595,12 @@ impl Object {
             // identically in exact arithmetic (design §1); a profile only
             // *nearly* perpendicular to its segment fails here.
             let dir = dirs[m - 1];
-            let denom = dir.dot(plane.normal());
+            let denom = dir.dot(seam_plane.normal());
             if denom.abs() < tol::NORMALIZE_MIN_LENGTH {
                 return Err(FollowMeError::PathReverses);
             }
             for (j, &v) in stations[m - 1].iter().take(ring_size).enumerate() {
-                let landed = v + dir * (-plane.signed_distance(v) / denom);
+                let landed = v + dir * (-seam_plane.signed_distance(v) / denom);
                 if !landed.approx_eq(stations[0][j], tol::POINT_MERGE) {
                     return Err(FollowMeError::ProfileNotPerpendicular);
                 }
@@ -2501,7 +2634,15 @@ impl Object {
                     continue;
                 }
                 if adv <= tol::POINT_MERGE {
-                    return Err(FollowMeError::PathTooTight);
+                    // A corner profile carried onto the corner's miter
+                    // plane (inside the loop) folds only by being too wide
+                    // for the corner: say so, so the copy says where the
+                    // profile has to go (#75).
+                    return Err(if seam_shift.is_some() {
+                        FollowMeError::ProfileTooWideForCorner
+                    } else {
+                        FollowMeError::PathTooTight
+                    });
                 }
             }
         }
@@ -3188,7 +3329,13 @@ impl Object {
     ///   neighbor simply extends — the shared ring translates in place, no wall
     ///   is minted. A purely transverse boundary (a box face) keeps the
     ///   bit-identical fast path: pulling a box's top up yields a taller box
-    ///   with 6 faces.
+    ///   with 6 faces. The fast path refuses typed
+    ///   ([`PushPullError::NonManifoldResult`]) only a translation that would
+    ///   fold a neighbor's outline over a fixed part of its own boundary (a
+    ///   step's low top pulled past the high top); a neighbor vertex merely
+    ///   ahead of the face, off to the side, does not limit it.
+    ///   [`Object::push_pull_overshoots`] reports such a fold, so callers take
+    ///   the boolean path instead.
     /// - **Coplanar neighbor** (a `split_face` sibling sub-face) and **slanted
     ///   neighbor** (a wedge/chamfer face, adjacent facets of an N-gon prism,
     ///   any face produced by Slice) are handled identically: the shared edge
@@ -3355,29 +3502,11 @@ impl Object {
         //   build a wall along the shared edge.
         // - otherwise: a slanted neighbor — treated identically to a coplanar
         //   one (unweld and build a wall; see the contract above).
-        let mut edge_kinds: std::collections::BTreeMap<HalfEdgeId, BoundaryEdgeKind> =
-            std::collections::BTreeMap::new();
-        for &loop_id in &boundary_loops {
-            for h in self.loop_half_edges(loop_id) {
-                let Some(twin_h) = self.half_edges[h].twin else {
-                    // No twin means an open boundary edge; ObjectNotSolid above
-                    // should have already refused this, but guard anyway.
-                    return Err(PushPullError::NonManifoldResult);
-                };
-                let neighbor_loop = self.half_edges[twin_h].loop_id;
-                let neighbor_face = self.loops[neighbor_loop].face;
-                let normal_neighbor = self.faces[neighbor_face].plane.normal();
-                let dot = face_normal.dot(normal_neighbor).abs();
-                let kind = if dot <= tol::NORMAL_DIRECTION {
-                    BoundaryEdgeKind::Transverse
-                } else if dot >= 1.0 - tol::NORMAL_DIRECTION {
-                    BoundaryEdgeKind::Coplanar
-                } else {
-                    BoundaryEdgeKind::Slanted
-                };
-                edge_kinds.insert(h, kind);
-            }
-        }
+        // No twin means an open boundary edge; ObjectNotSolid above should
+        // have already refused this, but guard anyway.
+        let edge_kinds = self
+            .boundary_edge_kinds(face, &boundary_loops)
+            .ok_or(PushPullError::NonManifoldResult)?;
         let has_coplanar = edge_kinds
             .values()
             .any(|k| matches!(k, BoundaryEdgeKind::Coplanar));
@@ -3391,21 +3520,6 @@ impl Object {
         // is therefore no longer a special case — every non-transverse edge
         // builds a wall, every transverse one extends its neighbor seamlessly.
         let has_wall = has_coplanar || has_slanted;
-
-        // Endpoints of a Coplanar boundary edge (a `split_face` cut shared
-        // with a sibling sub-face): the coplanar-aware mutation unwelds along
-        // these on purpose, so a "fixed" occurrence of either endpoint on a
-        // neighbor wall is never an obstruction.
-        let coplanar_adjacent_vertices: std::collections::BTreeSet<VertexId> = boundary_loops
-            .iter()
-            .flat_map(|&loop_id| self.loop_half_edges(loop_id))
-            .filter(|h| matches!(edge_kinds[h], BoundaryEdgeKind::Coplanar))
-            .flat_map(|h| {
-                let origin = self.half_edges[h].origin;
-                let dest = self.half_edges[self.half_edges[h].next].origin;
-                [origin, dest]
-            })
-            .collect();
 
         // This sweep may exactly close a step built by an earlier
         // coplanar-aware push ( inverse) — detected structurally, the same
@@ -3457,12 +3571,16 @@ impl Object {
         }
 
         // Interior-obstruction guard, PURE-TRANSLATE (fast path) only: moving
-        // the shared ring in place would fold a neighbor face whose FIXED
-        // vertices sit closer along the sweep than the push depth past them
-        // into a self-intersecting shell — every face stays planar and
-        // manifold, so the validator cannot see it. Refuse at the nearest
-        // fixed neighbor vertex strictly in front of the sweep. Skipped in
-        // three cases:
+        // the shared ring in place would fold a neighbor face whose outline
+        // the moving ring sweeps across into a self-intersecting shell —
+        // every face stays planar and manifold, so the validator cannot see
+        // it. Refuse when the region a neighbor's moving boundary sweeps
+        // holds a fixed part of that neighbor's boundary
+        // ([`Object::translation_folds_a_neighbor`]); a neighbor vertex ahead
+        // of the face but off to the side of that region folds nothing (#93,
+        // KB-35). [`Object::push_pull_overshoots`] asks the same question, so
+        // the app routes such a push to the boolean path first and this is
+        // the backstop. Skipped in three cases:
         //   (1) a collapse;
         //   (2) history replay (GuardMode not Enforced, rule 9) — the
         //       recorded-state proof supersedes this best-effort heuristic,
@@ -3477,34 +3595,16 @@ impl Object {
         //       angle, and both directions are instead bounded by validating
         //       the built result for self-intersection below (which still
         //       catches a distant-geometry collision on a non-convex solid).
-        if !is_collapse && guards == GuardMode::Enforced && !has_wall {
-            let moved_face_plane = self.faces[face].plane;
-            // +1 along the outward normal for an outward push, -1 inward.
-            let along = distance.signum();
-            let mut neighbor_limit = f64::INFINITY;
-            for &nf in &neighbor_faces {
-                let loops: Vec<LoopId> = std::iter::once(self.faces[nf].outer_loop)
-                    .chain(self.faces[nf].inner_loops.iter().copied())
-                    .collect();
-                for loop_id in loops {
-                    for h in self.loop_half_edges(loop_id) {
-                        let vid = self.half_edges[h].origin;
-                        if moved_vertices.contains(&vid)
-                            || coplanar_adjacent_vertices.contains(&vid)
-                        {
-                            continue;
-                        }
-                        let ahead =
-                            along * moved_face_plane.signed_distance(self.vertices[vid].position);
-                        if ahead > tol::POINT_MERGE && ahead < neighbor_limit {
-                            neighbor_limit = ahead;
-                        }
-                    }
-                }
-            }
-            if distance.abs() >= neighbor_limit - tol::POINT_MERGE {
-                return Err(PushPullError::NonManifoldResult);
-            }
+        if !is_collapse
+            && guards == GuardMode::Enforced
+            && !has_wall
+            && self.translation_folds_a_neighbor(
+                &moved_vertices,
+                sweep,
+                &self.faces_reshaped_in_plane(face, &moved_vertices),
+            )
+        {
+            return Err(PushPullError::NonManifoldResult);
         }
 
         // Vertices this sweep translates IN PLACE (every vertex on the fast
@@ -7007,6 +7107,12 @@ impl Object {
     /// vertex is pinned by a face it shares no edge with
     /// ([`Object::moved_ring_is_pinned`]) is through at ANY distance, since
     /// no translation of its ring can leave that other face planar.
+    /// So is a push the flat path would take as a pure in-place translation
+    /// that folds a neighbor face's outline over a fixed part of its own
+    /// boundary ([`Object::translation_folds_a_neighbor`]: a step's low top
+    /// pushed down past a slot that reaches the step) — the flat path can
+    /// only refuse it, while the boolean cuts or grows the solid as it
+    /// should.
     /// Returns `false` for non-solids, stale faces, and attributed cylinder
     /// walls (which never overshoot: push/pull on them is a radial offset of
     /// the whole logical wall, the true-curves design §4.6, and deep pushes
@@ -7020,6 +7126,9 @@ impl Object {
             return false;
         }
         if self.moved_ring_is_pinned(face) {
+            return true;
+        }
+        if self.flat_translation_folds(face, distance) {
             return true;
         }
         let (opposing, blocking, reach) = if distance >= 0.0 {
@@ -7041,6 +7150,200 @@ impl Object {
             (None, None) => return false,
         };
         reach >= depth - tol::POINT_MERGE
+    }
+
+    /// How each boundary half-edge of `face` (over `boundary_loops`, its
+    /// outer loop and holes) relates to the neighbor across it, judged by
+    /// the angle between their normals. `None` if an edge has no twin (an
+    /// open boundary: not a solid).
+    fn boundary_edge_kinds(
+        &self,
+        face: FaceId,
+        boundary_loops: &[LoopId],
+    ) -> Option<std::collections::BTreeMap<HalfEdgeId, BoundaryEdgeKind>> {
+        let face_normal = self.faces[face].plane.normal();
+        let mut kinds = std::collections::BTreeMap::new();
+        for &loop_id in boundary_loops {
+            for h in self.loop_half_edges(loop_id) {
+                let twin_h = self.half_edges[h].twin?;
+                let neighbor_face = self.loops[self.half_edges[twin_h].loop_id].face;
+                let dot = face_normal
+                    .dot(self.faces[neighbor_face].plane.normal())
+                    .abs();
+                let kind = if dot <= tol::NORMAL_DIRECTION {
+                    BoundaryEdgeKind::Transverse
+                } else if dot >= 1.0 - tol::NORMAL_DIRECTION {
+                    BoundaryEdgeKind::Coplanar
+                } else {
+                    BoundaryEdgeKind::Slanted
+                };
+                kinds.insert(h, kind);
+            }
+        }
+        Some(kinds)
+    }
+
+    /// Whether [`Object::push_pull`] of `face` by `distance` would take the
+    /// pure-translate path (every boundary edge transverse, no step to
+    /// collapse) and that translation would fold a neighbor
+    /// ([`Object::translation_folds_a_neighbor`]) — the push its
+    /// obstruction guard refuses. `false` for anything the flat path would
+    /// not translate in place.
+    fn flat_translation_folds(&self, face: FaceId, distance: f64) -> bool {
+        if self.watertight != WatertightState::Watertight
+            || !distance.is_finite()
+            || distance.abs() < tol::POINT_MERGE
+        {
+            return false;
+        }
+        let Some(f) = self.faces.get(face) else {
+            return false;
+        };
+        if f.surface.is_some() {
+            return false;
+        }
+        let boundary_loops: Vec<LoopId> = std::iter::once(f.outer_loop)
+            .chain(f.inner_loops.iter().copied())
+            .collect();
+        let Some(edge_kinds) = self.boundary_edge_kinds(face, &boundary_loops) else {
+            return false;
+        };
+        if edge_kinds
+            .values()
+            .any(|k| !matches!(k, BoundaryEdgeKind::Transverse))
+        {
+            return false;
+        }
+        let sweep = f.plane.normal() * distance;
+        if !find_collapse_plans(self, face, &boundary_loops, &edge_kinds, sweep).is_empty() {
+            return false;
+        }
+        let mut moved: std::collections::BTreeSet<VertexId> = std::collections::BTreeSet::new();
+        for &loop_id in &boundary_loops {
+            for h in self.loop_half_edges(loop_id) {
+                moved.insert(self.half_edges[h].origin);
+            }
+        }
+        let reshaped = self.faces_reshaped_in_plane(face, &moved);
+        self.translation_folds_a_neighbor(&moved, sweep, &reshaped)
+    }
+
+    /// The faces an in-place translation of `face`'s ring (`moved`, along
+    /// its normal) reshapes within their own planes: every other face
+    /// holding a moved vertex whose plane holds the sweep direction. On the
+    /// flat path these are `face`'s edge neighbors and also any face that
+    /// meets `face` at a vertex only — a wall's sub-face below an imprinted
+    /// diagonal from a top corner, whose outline the sinking corner swings
+    /// the diagonal across. Its outline folds the same way an edge
+    /// neighbor's does ([`Object::translation_folds_a_neighbor`]). (A face
+    /// holding a moved vertex whose plane the sweep LEAVES is pinned
+    /// instead, [`Object::moving_vertices_pin_a_face`].) In [`FaceId`]
+    /// order.
+    fn faces_reshaped_in_plane(
+        &self,
+        face: FaceId,
+        moved: &std::collections::BTreeSet<VertexId>,
+    ) -> Vec<FaceId> {
+        let Some(f) = self.faces.get(face) else {
+            return Vec::new();
+        };
+        let normal = f.plane.normal();
+        let mut out: std::collections::BTreeSet<FaceId> = std::collections::BTreeSet::new();
+        for he in self.half_edges.values() {
+            if !moved.contains(&he.origin) {
+                continue;
+            }
+            let other = self.loops[he.loop_id].face;
+            if other != face
+                && self.faces[other].plane.normal().dot(normal).abs() <= tol::NORMAL_DIRECTION
+            {
+                out.insert(other);
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// Whether translating the vertices `moved` by `sweep` folds one of
+    /// `neighbors` (the faces the translation reshapes in their own planes,
+    /// [`Object::faces_reshaped_in_plane`]: those sharing an edge with the
+    /// moved face, and those meeting it at a vertex only). Each neighbor's
+    /// outline changes only where it holds a moved vertex: an edge between
+    /// two moved vertices sweeps the parallelogram between its old and new
+    /// positions, and an edge from a fixed vertex to a moved one sweeps the
+    /// triangle the moving end draws.
+    /// The new outline crosses itself exactly when one of those regions
+    /// holds a fixed part of the neighbor's boundary — a fixed vertex
+    /// (within [`tol::POINT_MERGE`], the region's own fixed corner aside),
+    /// a fixed edge reaching more than that tolerance into it, or the fixed
+    /// end of a moving edge lying on the path its other end travels. A
+    /// fixed vertex ahead of the face but beside every such region (a rim
+    /// vertex of a cylinder's top beside a block's wall, #93; a slot's
+    /// corner beside a step's low top, KB-35) folds nothing.
+    fn translation_folds_a_neighbor(
+        &self,
+        moved: &std::collections::BTreeSet<VertexId>,
+        sweep: Vec3,
+        neighbors: &[FaceId],
+    ) -> bool {
+        let eps = tol::POINT_MERGE;
+        for &nf in neighbors {
+            let (u, v) = crate::geom2d::plane_axes(self.faces[nf].plane.normal());
+            let flat = |p: Point3| [p.to_vec().dot(u), p.to_vec().dot(v)];
+            let s = [sweep.dot(u), sweep.dot(v)];
+            let ahead = |p: [f64; 2]| [p[0] + s[0], p[1] + s[1]];
+            // Regions: the swept polygon, and its fixed corner (a triangle's)
+            // with the moving end whose path it must not lie on.
+            let mut regions: Vec<SweptRegion> = Vec::new();
+            let mut fixed_points: Vec<(VertexId, [f64; 2])> = Vec::new();
+            let mut fixed_edges: Vec<([f64; 2], [f64; 2])> = Vec::new();
+            let face = &self.faces[nf];
+            for loop_id in std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied())
+            {
+                for h in self.loop_half_edges(loop_id) {
+                    let o = self.half_edges[h].origin;
+                    let d = self.half_edges[self.half_edges[h].next].origin;
+                    let (po, pd) = (
+                        flat(self.vertices[o].position),
+                        flat(self.vertices[d].position),
+                    );
+                    match (moved.contains(&o), moved.contains(&d)) {
+                        (true, true) => regions.push((vec![po, pd, ahead(pd), ahead(po)], None)),
+                        (true, false) => {
+                            regions.push((vec![pd, po, ahead(po)], Some((d, po))));
+                        }
+                        (false, true) => {
+                            regions.push((vec![po, pd, ahead(pd)], Some((o, pd))));
+                        }
+                        (false, false) => fixed_edges.push((po, pd)),
+                    }
+                    if !moved.contains(&o) {
+                        fixed_points.push((o, po));
+                    }
+                }
+            }
+            for (poly, corner) in &regions {
+                if let Some((_, from)) = corner {
+                    // The moving end runs into or past the edge's fixed end.
+                    if dist_to_segment_2d(poly[0], *from, ahead(*from)) <= eps {
+                        return true;
+                    }
+                }
+                let own = corner.map(|(c, _)| c);
+                if fixed_points
+                    .iter()
+                    .any(|&(id, q)| Some(id) != own && in_convex_2d(q, poly, eps))
+                {
+                    return true;
+                }
+                if fixed_edges
+                    .iter()
+                    .any(|&(a, b)| segment_enters_convex_2d(a, b, poly, eps))
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Whether translating `face`'s boundary ring in place would drag a
@@ -7440,6 +7743,95 @@ impl Object {
 
 // ============================================================== private helpers
 
+/// One region a neighbor's moving boundary sweeps, in the neighbor's 2D
+/// frame: the polygon, and for a triangle its fixed corner with the
+/// position the edge's other end moves from
+/// ([`Object::translation_folds_a_neighbor`]).
+type SweptRegion = (Vec<[f64; 2]>, Option<(VertexId, [f64; 2])>);
+
+/// Distance from `p` to the closed segment `a`–`b`, in a face's 2D frame.
+fn dist_to_segment_2d(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 <= 0.0 {
+        0.0
+    } else {
+        (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
+    };
+    let (ex, ey) = (p[0] - (a[0] + dx * t), p[1] - (a[1] + dy * t));
+    (ex * ex + ey * ey).sqrt()
+}
+
+/// The convex polygon `poly`'s edges as `(start, unit inward normal)`, or
+/// `None` when it has no area to speak of (a swept triangle whose fixed
+/// corner lies on its moving end's path: a segment).
+fn convex_inward_edges_2d(poly: &[[f64; 2]], tol: f64) -> Option<Vec<([f64; 2], [f64; 2])>> {
+    let n = poly.len();
+    let mut area2 = 0.0;
+    let mut perimeter = 0.0;
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + 1) % n]);
+        area2 += a[0] * b[1] - b[0] * a[1];
+        perimeter += ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+    }
+    if area2.abs() * 0.5 <= tol * perimeter {
+        return None;
+    }
+    let sign = area2.signum();
+    let mut edges = Vec::with_capacity(n);
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + 1) % n]);
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= tol {
+            continue;
+        }
+        // Left of a counter-clockwise edge is inside.
+        edges.push((a, [-dy / len * sign, dx / len * sign]));
+    }
+    Some(edges)
+}
+
+/// Whether `q` lies in the closed convex polygon `poly` or within `tol` of
+/// it (a degenerate polygon: within `tol` of one of its edges).
+fn in_convex_2d(q: [f64; 2], poly: &[[f64; 2]], tol: f64) -> bool {
+    match convex_inward_edges_2d(poly, tol) {
+        Some(edges) => edges
+            .iter()
+            .all(|(a, n)| (q[0] - a[0]) * n[0] + (q[1] - a[1]) * n[1] >= -tol),
+        None => {
+            let k = poly.len();
+            (0..k).any(|i| dist_to_segment_2d(q, poly[i], poly[(i + 1) % k]) <= tol)
+        }
+    }
+}
+
+/// Whether the segment `a`–`b` reaches more than `tol` inside the convex
+/// polygon `poly` (never, for a polygon with no area): clipped to the
+/// polygon shrunk by `tol`, something of it is left.
+fn segment_enters_convex_2d(a: [f64; 2], b: [f64; 2], poly: &[[f64; 2]], tol: f64) -> bool {
+    let Some(edges) = convex_inward_edges_2d(poly, tol) else {
+        return false;
+    };
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    for (p, n) in &edges {
+        let fa = (a[0] - p[0]) * n[0] + (a[1] - p[1]) * n[1] - tol;
+        let fb = (b[0] - p[0]) * n[0] + (b[1] - p[1]) * n[1] - tol;
+        if fa <= 0.0 && fb <= 0.0 {
+            return false;
+        }
+        if fa < 0.0 {
+            lo = lo.max(fa / (fa - fb));
+        } else if fb < 0.0 {
+            hi = hi.min(fa / (fa - fb));
+        }
+        if lo >= hi {
+            return false;
+        }
+    }
+    lo < hi
+}
+
 /// Whether `point` lies on the segment `a`→`b` within `tol` (distance to the
 /// CLAMPED closest point — a point beyond an endpoint measures to that
 /// endpoint, so collinear-but-outside points do not qualify).
@@ -7459,38 +7851,40 @@ fn point_on_segment(point: Point3, a: Point3, b: Point3, tol: f64) -> bool {
 /// outer loop positions, and hole loop positions.
 pub(crate) type ShellFace = (Plane, Vec<Point3>, Vec<Vec<Point3>>);
 
-/// A point strictly inside the simple polygon `poly` (projected along
-/// `normal`), or `None` for a degenerate outline. Candidates are the
-/// vertex average and then the centroid of each corner's triangle
-/// (`p[i-1]`, `p[i]`, `p[i+1]`) — every simple polygon has a convex ear
-/// whose triangle lies inside it — and each is CHECKED with
-/// `point_inside_polygon` before being returned, so a concave outline's
-/// average sitting in its own notch is rejected rather than trusted.
-fn polygon_interior_point(poly: &[Point3], normal: Vec3) -> Option<Point3> {
+/// Points strictly inside the simple flat polygon `poly` (on z = 0, seen
+/// from +z): candidates are the vertex average and the centroid of each
+/// corner's triangle (`p[i-1]`, `p[i]`, `p[i+1]`) — every simple polygon
+/// has a convex ear whose triangle lies inside it — and each is CHECKED to
+/// lie inside and off the boundary, so a concave outline's average sitting
+/// in its own notch is rejected rather than trusted.
+fn polygon_interior_samples(poly: &[Point3]) -> Vec<Point3> {
     let n = poly.len();
     if n < 3 {
-        return None;
+        return Vec::new();
     }
     let nf = n as f64;
     let sum = poly
         .iter()
         .fold(Vec3::new(0.0, 0.0, 0.0), |acc, p| acc + p.to_vec());
-    let mean = Point3::new(sum.x / nf, sum.y / nf, sum.z / nf);
-    if point_inside_polygon(mean, poly, normal) {
-        return Some(mean);
-    }
+    let mut out = vec![Point3::new(sum.x / nf, sum.y / nf, sum.z / nf)];
     for i in 0..n {
         let (a, b, c) = (poly[(i + n - 1) % n], poly[i], poly[(i + 1) % n]);
-        let centroid = Point3::new(
+        out.push(Point3::new(
             (a.x + b.x + c.x) / 3.0,
             (a.y + b.y + c.y) / 3.0,
             (a.z + b.z + c.z) / 3.0,
-        );
-        if point_inside_polygon(centroid, poly, normal) {
-            return Some(centroid);
-        }
+        ));
     }
-    None
+    out.retain(|&p| strictly_inside_flat(p, poly));
+    out
+}
+
+/// Whether `p` lies inside the flat polygon `poly` (on z = 0) and not
+/// within [`tol::POINT_MERGE`] of its boundary, which
+/// [`point_inside_polygon`] would answer either way.
+fn strictly_inside_flat(p: Point3, poly: &[Point3]) -> bool {
+    !crate::geom2d::point_on_ring(p, poly)
+        && point_inside_polygon(p, poly, Vec3::new(0.0, 0.0, 1.0))
 }
 
 /// Whether two face outlines overlap when both are projected along
@@ -7499,37 +7893,44 @@ fn polygon_interior_point(poly: &[Point3], normal: Vec3) -> Option<Point3> {
 /// the other is the plain case; but a sub-face whose every vertex is a
 /// corner of the solid (a diagonal triangle across a box face, a face
 /// split corner to corner) has NO vertex strictly inside the far wall's
-/// outline, nor the far wall's corners inside it, and `point_inside_polygon`
-/// answers boundary points by the luck of edge orientation — so which
-/// triangle counted as "through" was a coin toss. Two more tests settle
-/// it: a point verified to lie strictly INSIDE each outline
-/// (`polygon_interior_point`) tested against the other, and a proper
+/// outline, nor the far wall's corners inside it. Two more tests settle
+/// it: points verified to lie strictly INSIDE each outline
+/// (`polygon_interior_samples`) tested against the other, and a proper
 /// crossing of the two boundaries. Mere boundary CONTACT (a shared edge, a
 /// corner touching an edge) is deliberately not overlap: a face beside the
-/// far wall's footprint slides past it, it does not punch through it. The
-/// interior sample is verified, never assumed: a concave outline's vertex
-/// average can sit in its own notch — and inside some unrelated face
-/// parked there — which would have reported overlap between two outlines
-/// that do not even touch.
+/// far wall's footprint slides past it, it does not punch through it. So
+/// every inside test here excludes points on the other outline's boundary
+/// (within [`tol::POINT_MERGE`]): `point_inside_polygon` answers those by
+/// the luck of edge orientation, which once read a shared edge as overlap
+/// in some orientations and not others (KB-35). The interior samples are
+/// verified, never assumed: a concave outline's vertex average can sit in
+/// its own notch — and inside some unrelated face parked there — which
+/// would have reported overlap between two outlines that do not even touch.
 fn footprints_overlap(a: &[Point3], b: &[Point3], normal: Vec3) -> bool {
-    if a.iter().any(|&p| point_inside_polygon(p, b, normal))
-        || b.iter().any(|&p| point_inside_polygon(p, a, normal))
-    {
-        return true;
-    }
-    if polygon_interior_point(a, normal).is_some_and(|p| point_inside_polygon(p, b, normal))
-        || polygon_interior_point(b, normal).is_some_and(|p| point_inside_polygon(p, a, normal))
-    {
-        return true;
-    }
     let (u, v) = crate::geom2d::plane_axes(normal);
-    let flat = |p: Point3| Point3::new(p.to_vec().dot(u), p.to_vec().dot(v), 0.0);
+    let flat = |p: &Point3| Point3::new(p.to_vec().dot(u), p.to_vec().dot(v), 0.0);
+    let a: Vec<Point3> = a.iter().map(flat).collect();
+    let b: Vec<Point3> = b.iter().map(flat).collect();
+    if a.iter().any(|&p| strictly_inside_flat(p, &b))
+        || b.iter().any(|&p| strictly_inside_flat(p, &a))
+    {
+        return true;
+    }
+    if polygon_interior_samples(&a)
+        .into_iter()
+        .any(|p| strictly_inside_flat(p, &b))
+        || polygon_interior_samples(&b)
+            .into_iter()
+            .any(|p| strictly_inside_flat(p, &a))
+    {
+        return true;
+    }
     let na = a.len();
     let nb = b.len();
     for i in 0..na {
-        let (p, q) = (flat(a[i]), flat(a[(i + 1) % na]));
+        let (p, q) = (a[i], a[(i + 1) % na]);
         for j in 0..nb {
-            let (r, s) = (flat(b[j]), flat(b[(j + 1) % nb]));
+            let (r, s) = (b[j], b[(j + 1) % nb]);
             if crate::geom2d::segments_cross_properly(p, q, r, s) {
                 return true;
             }
@@ -8599,6 +9000,72 @@ impl PoleAxis {
         let d = p - self.center;
         (d - self.dir * d.dot(self.dir)).length()
     }
+}
+
+/// `path` without its STRAIGHT vertices: a vertex lying on the segment
+/// between its two neighbors (within [`tol::POINT_MERGE`]), where the path
+/// runs straight on, and whose two segments carry no curve attribution.
+/// Such a vertex is no corner — a face's rim gets one wherever an imprint
+/// ends on it — and the path through it is the same line either way, so
+/// sweeping the merged segment is reading the path, not repairing it.
+/// As a station inside a corner's miter span it is not harmless: it
+/// splits a side in two, so a corner seam or a profile wider than the
+/// short piece reads as folding where the sweep runs straight (#75).
+/// Attributed segments are left as they are (their tangents are measured
+/// against the drawn curve, and a facet chord is never collinear with its
+/// curve neighbor). An open path's ends always stay; a closed path's wrap
+/// vertex is tested like any other. `path_curves` is kept per segment
+/// (empty stays empty).
+fn drop_straight_path_vertices(
+    path: &[Point3],
+    closed: bool,
+    path_curves: &[Option<crate::sketch::CurveGeom>],
+) -> (Vec<Point3>, Vec<Option<crate::sketch::CurveGeom>>) {
+    let mut pts = path.to_vec();
+    let mut curves = path_curves.to_vec();
+    let attributed = !curves.is_empty();
+    let min = if closed { 3 } else { 2 };
+    // Segment `i - 1` arrives at vertex `i`, segment `i` leaves it.
+    let straight_at = |pts: &[Point3], curves: &[Option<crate::sketch::CurveGeom>], i: usize| {
+        let n = pts.len();
+        let prev = (i + n - 1) % n;
+        if attributed && (curves[prev].is_some() || curves[i].is_some()) {
+            return false;
+        }
+        let (a, v, b) = (pts[prev], pts[i], pts[(i + 1) % n]);
+        let ab = b - a;
+        let len2 = ab.length_squared();
+        if len2 <= tol::POINT_MERGE * tol::POINT_MERGE
+            || v.approx_eq(a, tol::POINT_MERGE)
+            || v.approx_eq(b, tol::POINT_MERGE)
+        {
+            return false;
+        }
+        let t = (v - a).dot(ab) / len2;
+        t > 0.0 && t < 1.0 && (a + ab * t).approx_eq(v, tol::POINT_MERGE)
+    };
+    // One removal at a time, rescanning: dropping a vertex changes its
+    // neighbors' segments. Paths are short and straight runs rare.
+    loop {
+        let n = pts.len();
+        if n <= min {
+            break;
+        }
+        let interior = if closed { 0..n } else { 1..n - 1 };
+        let Some(i) = interior
+            .into_iter()
+            .find(|&i| straight_at(&pts, &curves, i))
+        else {
+            break;
+        };
+        pts.remove(i);
+        if attributed {
+            // The merged segment (prev → next) keeps segment `i - 1`'s
+            // slot; both were unattributed.
+            curves.remove(i);
+        }
+    }
+    (pts, curves)
 }
 
 /// Recovers the revolution axis when `path` is a single drawn CIRCLE — every
@@ -11512,6 +11979,89 @@ mod tests {
     use super::*;
     use crate::math::Vec3;
     use crate::topo::WatertightState;
+
+    /// `footprints_overlap` matches its doc on contact: two footprints that
+    /// only share an edge, part of one, or a corner are not overlap, while
+    /// any overlap of area is — including overlaps whose only evidence is
+    /// boundary contact plus area (collinear edges, nested footprints that
+    /// share an edge, identical ones). Checked in many orientations: the
+    /// boundary points were once answered by the ray-cast's luck, which
+    /// depends on the axes the projection picks (KB-34 residue, KB-35).
+    #[test]
+    fn footprints_overlap_counts_area_not_contact_in_every_orientation() {
+        let rect =
+            |x0: f64, y0: f64, x1: f64, y1: f64| vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+        type Pair = (Vec<(f64, f64)>, Vec<(f64, f64)>);
+        let contact: Vec<Pair> = vec![
+            // A shared edge (the KB-35 slot ceiling beside the low top).
+            (rect(0.0, 0.0, 1.0, 1.0), rect(1.0, 0.0, 2.0, 1.0)),
+            // Part of an edge.
+            (rect(0.0, 0.0, 1.0, 1.0), rect(1.0, 0.25, 2.0, 0.75)),
+            // A longer edge along a shorter one.
+            (rect(0.0, 0.0, 1.0, 1.0), rect(1.0, -1.0, 2.0, 2.0)),
+            // A corner.
+            (rect(0.0, 0.0, 1.0, 1.0), rect(1.0, 1.0, 2.0, 2.0)),
+            // A corner on an edge.
+            (
+                rect(0.0, 0.0, 1.0, 1.0),
+                vec![(1.0, 0.5), (2.0, 0.0), (2.0, 1.0)],
+            ),
+        ];
+        let overlap: Vec<Pair> = vec![
+            (rect(0.0, 0.0, 2.0, 1.0), rect(1.0, 0.0, 3.0, 1.0)),
+            (rect(0.0, 0.0, 10.0, 1.0), rect(9.0, 0.0, 11.0, 1.0)),
+            (rect(0.0, 0.0, 1.0, 1.0), rect(0.0, 0.0, 1.0, 1.0)),
+            (rect(0.0, 0.0, 2.0, 2.0), rect(0.0, 0.0, 1.0, 1.0)),
+            (rect(0.0, 0.0, 2.0, 2.0), rect(1.0, 1.0, 3.0, 3.0)),
+            // A diagonal triangle over its box face: corners only.
+            (
+                vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)],
+                rect(0.0, 0.0, 1.0, 1.0),
+            ),
+        ];
+        let axes = [
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(0.3, -0.5, 0.81),
+        ];
+        for normal in axes {
+            let normal = normal.normalized().unwrap();
+            for turn in 0..8 {
+                let a = f64::from(turn) * 0.7;
+                let (u, v) = crate::geom2d::plane_axes(normal);
+                let (c, s) = (a.cos(), a.sin());
+                // The far footprint sits 0.5 deeper along the normal.
+                let place = |pts: &[(f64, f64)], depth: f64| -> Vec<Point3> {
+                    pts.iter()
+                        .map(|&(x, y)| {
+                            let (x, y) = (x * c - y * s, x * s + y * c);
+                            Point3::ORIGIN + u * x + v * y + normal * depth
+                        })
+                        .collect()
+                };
+                for (i, (p, q)) in contact.iter().enumerate() {
+                    for (p, q) in [(p, q), (q, p)] {
+                        assert!(
+                            !footprints_overlap(&place(p, 0.0), &place(q, -0.5), normal),
+                            "contact case {i} read as overlap at {normal:?} turn {turn}"
+                        );
+                    }
+                }
+                for (i, (p, q)) in overlap.iter().enumerate() {
+                    for (p, q) in [(p, q), (q, p)] {
+                        assert!(
+                            footprints_overlap(&place(p, 0.0), &place(q, -0.5), normal),
+                            "overlap case {i} missed at {normal:?} turn {turn}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     /// The push/pull result checks hold a hole to the same containment the
     /// validator does: a hole whose vertices all sit on the outer ring but

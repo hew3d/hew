@@ -8545,6 +8545,189 @@ fn follow_me_merged_consumes_the_path_solid_in_one_undo_step() {
 }
 
 #[test]
+fn follow_me_merged_cuts_a_rebate_from_a_profile_at_a_corner_of_the_board() {
+    // Issue #75: a board 13 3/8" x 7 3/4" x 3/4", its front face (z = 0)
+    // the path, and a 6 mm square drawn on the end face's plane (x = 0) at
+    // the front face's corner, over the board. Merged, the sweep cuts a 6 x
+    // 6 mm rebate all the way around the front face, in one undo step.
+    let (l, w, t, a) = (0.339725, 0.19685, 0.01905, 0.006);
+    let mut doc = Document::new();
+    let board = extrude_box(&mut doc, 0.0, 0.0, l, w, -t, t);
+    let front = {
+        let obj = doc.object(board).expect("board live");
+        obj.faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .expect("front face")
+    };
+    let ps = doc.add_sketch(profile_plane_x(0.0));
+    draw_profile_rect(&mut doc, ps, 0.0, 0.0, -a, a, 0.0);
+    let region = only_region(&doc, ps);
+    let path = kernel::FollowMePath::FaceLoop {
+        object: board,
+        face: front,
+    };
+    let (merged, _) = doc
+        .follow_me_merged(ps, region, &path, None)
+        .expect("the rebate sweeps and carves");
+    let obj = doc.object(merged).expect("merged live");
+    obj.validate().expect("valid");
+    assert_eq!(obj.watertight(), WatertightState::Watertight);
+    let rebate = (l * w - (l - 2.0 * a) * (w - 2.0 * a)) * a;
+    let v = enclosed_volume(obj);
+    assert!(
+        (v - (l * w * t - rebate)).abs() < 1e-12,
+        "volume {v}, expected {}",
+        l * w * t - rebate
+    );
+    assert_eq!(
+        doc.visible_object_ids(),
+        vec![merged],
+        "one gesture, one solid"
+    );
+    doc.undo().expect("undo the rebate");
+    assert!(doc.visible_object_ids().contains(&board), "board restored");
+    assert!(!doc.visible_object_ids().contains(&merged));
+}
+
+/// The #75 playtest board, 0.34 x 0.20 x 0.019 m, flat on the ground, with
+/// a 6 mm square drawn ON its x = 0 end face at the top corner `y0..y0+a`
+/// (the Rectangle tool's draw-on-face path): the imprint splits the end
+/// face and leaves the top face's outer loop with a fifth, collinear
+/// vertex where the imprint's top edge meets the board edge. Returns the
+/// document, the board, its top face, and the imprinted end-face region.
+fn board_with_end_imprint(y0: f64) -> (Document, kernel::ObjectId, FaceId, FaceId) {
+    let (l, w, t, a) = (0.34, 0.20, 0.019, 0.006);
+    let mut doc = Document::new();
+    let board = extrude_box(&mut doc, 0.0, 0.0, l, w, 0.0, t);
+    let end = {
+        let obj = doc.object(board).expect("board live");
+        obj.faces()
+            .values()
+            .find(|f| f.plane.normal().x < -0.9)
+            .map(|f| f.plane)
+            .expect("end face")
+    };
+    let mut objects = doc.draft_participants(end, None);
+    if !objects.contains(&board) {
+        objects.push(board);
+    }
+    let ring = [
+        Point3::new(0.0, y0, t - a),
+        Point3::new(0.0, y0 + a, t - a),
+        Point3::new(0.0, y0 + a, t),
+        Point3::new(0.0, y0, t),
+    ];
+    doc.draft(end, None, &objects, "Rectangle", |w| {
+        for i in 0..4 {
+            w.add_segment(ring[i], ring[(i + 1) % 4])?;
+        }
+        Ok(())
+    })
+    .expect("the rectangle imprints the end face");
+    let obj = doc.object(board).expect("board live after the imprint");
+    let top = obj
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            f.plane.normal().z > 0.9 && f.plane.signed_distance(Point3::ORIGIN).abs() > 0.01
+        })
+        .map(|(id, _)| id)
+        .expect("top face");
+    assert_eq!(
+        obj.loop_positions(obj.faces()[top].outer_loop).count(),
+        5,
+        "the imprint leaves a collinear vertex on the top face's rim"
+    );
+    let mid = Point3::new(0.0, y0 + a / 2.0, t - a / 2.0);
+    let imprint = obj
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            f.plane.normal().x < -0.9 && {
+                let ring: Vec<Point3> = obj.loop_positions(f.outer_loop).collect();
+                ring.len() == 4 && ring.iter().all(|p| (p.y - mid.y).abs() <= a / 2.0 + 1e-9)
+            }
+        })
+        .map(|(id, _)| id)
+        .expect("the imprinted end-face square");
+    (doc, board, top, imprint)
+}
+
+#[test]
+fn follow_me_rebate_still_sweeps_after_an_imprint_on_the_end_face() {
+    // Playtest of #75: imprinting a 6 mm square on the board's end face
+    // first leaves the top face's rim with a collinear vertex (zero turn).
+    // That vertex is no corner — the path's geometry is unchanged — so a
+    // 6 mm rebate profile at either top corner of either end still sweeps
+    // around the top face and carves the same rebate a clean board gets:
+    // a detached-sketch profile through `follow_me_merged`, and the
+    // imprinted end-face square itself through `follow_me_face`.
+    let (l, w, t, a) = (0.34, 0.20, 0.019, 0.006);
+    let expected = l * w * t - (l * w - (l - 2.0 * a) * (w - 2.0 * a)) * a;
+    let check = |doc: &Document, merged: kernel::ObjectId, what: &str| {
+        let obj = doc.object(merged).expect("merged live");
+        obj.validate()
+            .unwrap_or_else(|e| panic!("{what}: invalid: {e:?}"));
+        assert_eq!(obj.watertight(), WatertightState::Watertight, "{what}");
+        let v = enclosed_volume(obj);
+        assert!(
+            (v - expected).abs() < 1e-12,
+            "{what}: volume {v}, expected {expected}"
+        );
+        assert_eq!(doc.visible_object_ids(), vec![merged], "{what}: one solid");
+    };
+    for imprint_y in [0.0, w - a] {
+        // A detached 6 mm square at every top corner, on the end plane
+        // through it, hanging over the board.
+        for (x, y0) in [(0.0, 0.0), (0.0, w - a), (l, 0.0), (l, w - a)] {
+            let what = format!("imprint at y {imprint_y}, detached profile at ({x}, {y0})");
+            let (mut doc, board, top, _) = board_with_end_imprint(imprint_y);
+            let plane =
+                Plane::from_point_normal(Point3::new(x, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0))
+                    .expect("end plane");
+            let ring = [
+                Point3::new(x, y0, t - a),
+                Point3::new(x, y0 + a, t - a),
+                Point3::new(x, y0 + a, t),
+                Point3::new(x, y0, t),
+            ];
+            let (report, _) = doc
+                .draft_detached_new(plane, None, "Rectangle", |w| {
+                    for i in 0..4 {
+                        w.add_segment(ring[i], ring[(i + 1) % 4])?;
+                    }
+                    Ok(())
+                })
+                .expect("detached profile");
+            let ps = report.sketches[0];
+            let region = only_region(&doc, ps);
+            let path = kernel::FollowMePath::FaceLoop {
+                object: board,
+                face: top,
+            };
+            let (merged, _) = doc
+                .follow_me_merged(ps, region, &path, None)
+                .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+            check(&doc, merged, &what);
+        }
+        // The imprinted square itself as the profile (a face of the board,
+        // so the sweep merges with it).
+        let what = format!("imprinted end-face profile at y {imprint_y}");
+        let (mut doc, board, top, imprint) = board_with_end_imprint(imprint_y);
+        let path = kernel::FollowMePath::FaceLoop {
+            object: board,
+            face: top,
+        };
+        let (merged, _) = doc
+            .follow_me_face(board, imprint, &path, None)
+            .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        check(&doc, merged, &what);
+    }
+}
+
+#[test]
 fn follow_me_sweeps_around_an_instanced_face_in_world_space() {
     // design §2e: a face loop reached through a component instance rides
     // the instance's pose into world space. Box → component; the original

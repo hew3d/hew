@@ -1710,6 +1710,367 @@ fn follow_me_corner_straddling_profile_refuses_the_fold() {
     assert_eq!(err, kernel::FollowMeError::PathTooTight);
 }
 
+// ---- rebate at a corner (issue #75) ----------------------------------------
+
+/// The #75 board's front face, 13 3/8" x 7 3/4", as a closed path at z = 0
+/// (the board lies below it, z in [-3/4", 0]).
+const BOARD_L: f64 = 0.339725;
+const BOARD_W: f64 = 0.19685;
+
+fn board_path() -> Vec<Point3> {
+    vec![
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(BOARD_L, 0.0, 0.0),
+        Point3::new(BOARD_L, BOARD_W, 0.0),
+        Point3::new(0.0, BOARD_W, 0.0),
+    ]
+}
+
+/// A `w` x `d` rectangle profile at path corner `c`, on the plane through
+/// `c` square to the path edge it starts along: `w` from `c` along `inward`
+/// (over the board, along the corner's other edge) and `d` down -z.
+fn corner_rebate_profile(c: Point3, inward: Vec3, w: f64, d: f64) -> Profile {
+    let down = Vec3::new(0.0, 0.0, -d);
+    let ring = vec![c, c + inward * w, c + inward * w + down, c + down];
+    let plane = Plane::from_polygon(&ring).unwrap();
+    Profile::new(plane, ring, vec![]).unwrap()
+}
+
+/// Every corner of the board, each with its two square planes: the end
+/// face's (x = const) and the long side face's (y = const), as (corner,
+/// inward direction along the corner's other edge).
+fn board_corner_placements() -> Vec<(Point3, Vec3)> {
+    let (l, w) = (BOARD_L, BOARD_W);
+    let (px, nx, py, ny) = (
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(-1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(0.0, -1.0, 0.0),
+    );
+    vec![
+        (Point3::new(0.0, 0.0, 0.0), py),
+        (Point3::new(0.0, 0.0, 0.0), px),
+        (Point3::new(l, 0.0, 0.0), py),
+        (Point3::new(l, 0.0, 0.0), nx),
+        (Point3::new(l, w, 0.0), ny),
+        (Point3::new(l, w, 0.0), nx),
+        (Point3::new(0.0, w, 0.0), ny),
+        (Point3::new(0.0, w, 0.0), px),
+    ]
+}
+
+#[test]
+fn follow_me_rebate_profile_at_any_corner_sweeps_like_mid_edge() {
+    // A 6 mm rebate profile on the end face or the side face of a board, at
+    // a corner of its front face and hanging over the board, sweeps around
+    // the front face as if slid along its edge to mid-run: the same
+    // mitered frame, inside the loop, the mid-edge placement already makes.
+    // Every corner, both planes, the path walked either way around.
+    let a = 0.006;
+    let mid = corner_rebate_profile(
+        Point3::new(BOARD_L / 2.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        a,
+        a,
+    );
+    let reference = Object::from_follow_me(&mid, &board_path(), true, &[]).unwrap();
+    let expected = (BOARD_L * BOARD_W - (BOARD_L - 2.0 * a) * (BOARD_W - 2.0 * a)) * a;
+    assert!((signed_volume(&reference) - expected).abs() < 1e-12);
+    for (c, inward) in board_corner_placements() {
+        let profile = corner_rebate_profile(c, inward, a, a);
+        for path in [board_path(), board_path().into_iter().rev().collect()] {
+            let solid = Object::from_follow_me(&profile, &path, true, &[])
+                .unwrap_or_else(|e| panic!("corner {c:?} inward {inward:?}: {e}"));
+            solid.validate().unwrap();
+            assert_eq!(solid.watertight(), WatertightState::Watertight);
+            assert_eq!(euler_poincare(&solid), 0, "a ring: genus one");
+            let v = signed_volume(&solid);
+            assert!(
+                (v - signed_volume(&reference)).abs() < 1e-12,
+                "corner {c:?} inward {inward:?}: volume {v}, mid-edge {expected}"
+            );
+        }
+    }
+}
+
+proptest! {
+    #[test]
+    fn follow_me_inward_corner_profile_is_the_mid_edge_sweep(
+        l in 0.05..2.0f64,
+        w in 0.05..2.0f64,
+        frac in 0.02..0.45f64,
+        depth in 0.001..0.5f64,
+        corner in 0usize..4,
+        reversed in proptest::bool::ANY,
+    ) {
+        // Any rectangle loop, any corner, a profile on the plane square to
+        // the corner's leaving edge, hanging inside the loop and narrower
+        // than half the short side: the closed sweep is the mid-edge
+        // placement's frame, (l·w − (l−2a)(w−2a))·d.
+        let a = frac * l.min(w);
+        let mut path = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(l, 0.0, 0.0),
+            Point3::new(l, w, 0.0),
+            Point3::new(0.0, w, 0.0),
+        ];
+        // On the plane square to the edge leaving corner `c`, inward along
+        // the edge arriving there.
+        let c = path[corner];
+        let inward = (path[(corner + 3) % 4] - c).normalized().unwrap();
+        if reversed {
+            path.reverse();
+        }
+        let down = Vec3::new(0.0, 0.0, -depth);
+        let ring = vec![c, c + inward * a, c + inward * a + down, c + down];
+        let profile = Profile::new(Plane::from_polygon(&ring).unwrap(), ring, vec![]).unwrap();
+        let solid = Object::from_follow_me(&profile, &path, true, &[]).unwrap();
+        solid.validate().unwrap();
+        prop_assert_eq!(solid.watertight(), WatertightState::Watertight);
+        prop_assert_eq!(euler_poincare(&solid), 0);
+        let expected = (l * w - (l - 2.0 * a) * (w - 2.0 * a)) * depth;
+        prop_assert!((signed_volume(&solid) - expected).abs() <= VOLUME_TOL * expected.max(1.0));
+    }
+}
+
+#[test]
+fn follow_me_inward_corner_profile_matches_the_mid_edge_sweep_on_a_square() {
+    // The design-§2b square loop: the corner profile hanging INSIDE the
+    // loop (the mirror of `follow_me_closed_seam_starts_at_a_corner`'s
+    // outward frame) is the inner frame, volume (2² − 1.2²) · 0.4, exactly
+    // the mid-edge placement's.
+    let path = [
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+        Point3::new(0.0, 2.0, 0.0),
+    ];
+    let corner =
+        Object::from_follow_me(&yz_profile(0.0, -0.2, 0.4, 0.2), &path, true, &[]).unwrap();
+    corner.validate().unwrap();
+    assert_eq!(corner.watertight(), WatertightState::Watertight);
+    assert_eq!(euler_poincare(&corner), 0);
+    let mid =
+        Object::from_follow_me(&yz_profile_at(1.0, 0.0, -0.2, 0.4, 0.2), &path, true, &[]).unwrap();
+    let expected = (2.0f64 * 2.0 - 1.2 * 1.2) * 0.4;
+    assert!((signed_volume(&mid) - expected).abs() < 1e-9);
+    assert!((signed_volume(&corner) - expected).abs() < 1e-9);
+}
+
+#[test]
+fn follow_me_inward_corner_profile_reaching_half_the_short_side_refuses() {
+    // As wide as half the board's short side or wider, a corner profile
+    // over the board would fold where the two rebates along the short side
+    // meet: refused typed, as too wide for the corner (its own variant, so
+    // the copy can say where the profile goes, #75). A hair narrower sweeps.
+    let c = Point3::ORIGIN;
+    let up = Vec3::new(0.0, 1.0, 0.0);
+    for w in [BOARD_W / 2.0, BOARD_W / 2.0 + 0.01] {
+        let err = Object::from_follow_me(
+            &corner_rebate_profile(c, up, w, 0.006),
+            &board_path(),
+            true,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            kernel::FollowMeError::ProfileTooWideForCorner,
+            "width {w}"
+        );
+    }
+    let narrow = corner_rebate_profile(c, up, BOARD_W / 2.0 - 0.001, 0.006);
+    let solid = Object::from_follow_me(&narrow, &board_path(), true, &[]).unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+}
+
+/// `path` (closed) with a STRAIGHT vertex inserted `at` along every side
+/// from each of its two ends — where an imprint ending on a face's rim
+/// leaves one (#75 playtest).
+fn with_straight_vertices(path: &[Point3], at: f64) -> Vec<Point3> {
+    let mut out = Vec::new();
+    for (i, &a) in path.iter().enumerate() {
+        let b = path[(i + 1) % path.len()];
+        let d = (b - a).normalized().unwrap();
+        out.push(a);
+        out.push(a + d * at);
+        out.push(b - d * at);
+    }
+    out
+}
+
+#[test]
+fn follow_me_straight_path_vertices_are_not_corners() {
+    // A rim vertex where the path runs straight on is no corner: a 6 mm
+    // rebate profile at any corner sweeps the same solid whether or not
+    // the face loop carries such vertices — here one 6 mm from each corner
+    // on every side, the width of the profile, which read as a 6 mm side
+    // the profile was too wide for.
+    let a = 0.006;
+    for (c, inward) in board_corner_placements() {
+        let profile = corner_rebate_profile(c, inward, a, a);
+        for reversed in [false, true] {
+            let mut clean = board_path();
+            if reversed {
+                clean.reverse();
+            }
+            let reference = Object::from_follow_me(&profile, &clean, true, &[]).unwrap();
+            for at in [a, a / 2.0, 0.05] {
+                let path = with_straight_vertices(&clean, at);
+                let what = format!("corner {c:?} inward {inward:?} reversed {reversed} at {at}");
+                let solid = Object::from_follow_me(&profile, &path, true, &[])
+                    .unwrap_or_else(|e| panic!("{what}: {e}"));
+                solid.validate().unwrap();
+                assert_eq!(solid.watertight(), WatertightState::Watertight, "{what}");
+                assert_eq!(euler_poincare(&solid), 0, "{what}");
+                assert!(
+                    (signed_volume(&solid) - signed_volume(&reference)).abs() < 1e-15,
+                    "{what}"
+                );
+                if at <= a {
+                    // Inside the corner's span the stations would fold:
+                    // the sweep runs through the real corners only, the
+                    // clean loop's solid face for face.
+                    assert_eq!(solid.faces().len(), reference.faces().len(), "{what}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn follow_me_straight_path_vertices_keep_the_corner_refusals() {
+    // Sides are counted between true corners: a profile reaching half the
+    // board's short side still refuses as too wide, a hair narrower still
+    // sweeps, and a profile straddling a corner still folds — with straight
+    // vertices on every side.
+    let c = Point3::ORIGIN;
+    let up = Vec3::new(0.0, 1.0, 0.0);
+    let path = with_straight_vertices(&board_path(), 0.006);
+    let err = Object::from_follow_me(
+        &corner_rebate_profile(c, up, BOARD_W / 2.0, 0.006),
+        &path,
+        true,
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(err, kernel::FollowMeError::ProfileTooWideForCorner);
+    let narrow = corner_rebate_profile(c, up, BOARD_W / 2.0 - 0.001, 0.006);
+    let solid = Object::from_follow_me(&narrow, &path, true, &[]).unwrap();
+    assert_eq!(solid.watertight(), WatertightState::Watertight);
+
+    let square = [
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+        Point3::new(0.0, 2.0, 0.0),
+    ];
+    for at in [0.2, 0.5] {
+        let err = Object::from_follow_me(
+            &yz_profile(-0.2, -0.2, 0.2, 0.2),
+            &with_straight_vertices(&square, at),
+            true,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(err, kernel::FollowMeError::PathTooTight, "at {at}");
+    }
+}
+
+#[test]
+fn follow_me_open_path_straight_vertex_inside_a_corner_span_sweeps() {
+    // An open L whose leg is split 0.1 from the corner (another line
+    // touched it there), swept by a profile 0.4 wide: that station sits
+    // inside the corner's miter span, so keeping it would fold the sweep.
+    // The L sweeps as drawn in two pieces, either leg split; a split far
+    // from the corner keeps its station (the walls carry the joint, as
+    // `follow_me_collinear_joints_sweep_like_one_segment` pins).
+    let profile = yz_profile(-0.2, -0.2, 0.2, 0.2);
+    let two = [
+        Point3::ORIGIN,
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+    ];
+    let reference = Object::from_follow_me(&profile, &two, false, &[]).unwrap();
+    for split in [Point3::new(1.9, 0.0, 0.0), Point3::new(2.0, 0.1, 0.0)] {
+        let mut three = two.to_vec();
+        three.insert(if split.y > 0.0 { 2 } else { 1 }, split);
+        let solid = Object::from_follow_me(&profile, &three, false, &[])
+            .unwrap_or_else(|e| panic!("split at {split:?}: {e}"));
+        solid.validate().unwrap();
+        assert_eq!(solid.watertight(), WatertightState::Watertight);
+        assert_eq!(solid.faces().len(), reference.faces().len());
+        assert!((signed_volume(&solid) - signed_volume(&reference)).abs() < 1e-12);
+    }
+    let far = [
+        Point3::ORIGIN,
+        Point3::new(0.3, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+    ];
+    let kept = Object::from_follow_me(&profile, &far, false, &[]).unwrap();
+    assert_eq!(kept.faces().len(), reference.faces().len() + 4);
+    assert!((signed_volume(&kept) - signed_volume(&reference)).abs() < 1e-12);
+}
+
+proptest! {
+    #[test]
+    fn follow_me_straight_vertices_change_nothing(
+        l in 0.05..2.0f64,
+        w in 0.05..2.0f64,
+        frac in 0.02..0.45f64,
+        corner in 0usize..4,
+        cuts in proptest::collection::vec((0usize..4, 0.01..0.99f64), 1..6),
+    ) {
+        // Any rectangle loop with straight vertices anywhere on its sides,
+        // an inward corner rebate profile: the sweep is the clean loop's.
+        let a = frac * l.min(w);
+        let clean = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(l, 0.0, 0.0),
+            Point3::new(l, w, 0.0),
+            Point3::new(0.0, w, 0.0),
+        ];
+        let mut sides: Vec<Vec<f64>> = vec![Vec::new(); 4];
+        for (s, t) in cuts {
+            sides[s].push(t);
+        }
+        let mut path = Vec::new();
+        for (i, ts) in sides.iter_mut().enumerate() {
+            ts.sort_by(f64::total_cmp);
+            ts.dedup_by(|x, y| (*x - *y).abs() < 1e-3);
+            let (p, q) = (clean[i], clean[(i + 1) % 4]);
+            path.push(p);
+            for &t in ts.iter() {
+                path.push(p + (q - p) * t);
+            }
+        }
+        let c = clean[corner];
+        let inward = (clean[(corner + 3) % 4] - c).normalized().unwrap();
+        let ring = vec![c, c + inward * a, c + inward * a + Vec3::new(0.0, 0.0, -a), c + Vec3::new(0.0, 0.0, -a)];
+        let profile = Profile::new(Plane::from_polygon(&ring).unwrap(), ring, vec![]).unwrap();
+        let reference = Object::from_follow_me(&profile, &clean, true, &[]).unwrap();
+        let solid = Object::from_follow_me(&profile, &path, true, &[]).unwrap();
+        solid.validate().unwrap();
+        prop_assert_eq!(solid.watertight(), WatertightState::Watertight);
+        prop_assert_eq!(euler_poincare(&solid), 0);
+        let v = signed_volume(&reference);
+        prop_assert!((signed_volume(&solid) - v).abs() <= VOLUME_TOL * v.max(1.0));
+    }
+}
+
+#[test]
+fn follow_me_inward_corner_profile_partial_sweep_still_starts_at_the_profile() {
+    // A partial sweep from an inward corner profile is an open sweep from
+    // the profile's own plane (unchanged): 0.1 along the bottom edge is the
+    // straight prism of the profile, 0.1 long.
+    let profile = corner_rebate_profile(Point3::ORIGIN, Vec3::new(0.0, 1.0, 0.0), 0.006, 0.006);
+    let partial = Object::from_follow_me_to(&profile, &board_path(), true, &[], 0.1).unwrap();
+    partial.validate().unwrap();
+    assert_eq!(partial.watertight(), WatertightState::Watertight);
+    assert!((signed_volume(&partial) - 0.006 * 0.006 * 0.1).abs() < 1e-12);
+}
+
 #[test]
 fn follow_me_refuses_self_intersecting_sweep() {
     // A G-shaped path whose last leg re-enters the first leg's swept

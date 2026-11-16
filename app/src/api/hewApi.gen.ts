@@ -2262,7 +2262,7 @@ export interface SolidFilletResult {
 /**
  * `hew.solid.follow_me` (v1) — Sweep a profile along an edge-chain path, as the tool does.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: empty_path, unknown_path_edge, path_branches, path_disconnected, path_segment_too_short, profile_not_perpendicular, follow_me_in_component_unsupported, path_detached_from_profile, path_reverses, path_too_tight, profile_crosses_axis, partial_sweep_on_pole, sweep_self_intersects, sweep_degenerate, twist_needs_open_path, unknown_region, unknown_object, unknown_face, unknown_entity, locator_missed, ambiguous_locator, unimplemented
+ * Refusals: empty_path, unknown_path_edge, path_branches, path_disconnected, path_segment_too_short, profile_not_perpendicular, follow_me_in_component_unsupported, path_detached_from_profile, path_reverses, path_too_tight, profile_too_wide_for_corner, profile_crosses_axis, partial_sweep_on_pole, sweep_self_intersects, sweep_degenerate, twist_needs_open_path, unknown_region, unknown_object, unknown_face, unknown_entity, locator_missed, ambiguous_locator, unimplemented
  * Preview parameters: twist, end_scale, stations, from Follow Me twist and scale (`follow-me-twist`). A production build refuses them `preview_only`.
  */
 export interface SolidFollowMeParams {

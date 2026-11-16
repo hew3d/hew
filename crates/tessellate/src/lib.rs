@@ -47,8 +47,13 @@ pub enum TessellateError {
     /// crossing other geometry, so the face has no honest triangulation
     /// under this algorithm. Unreachable for kernel-valid faces (disjoint
     /// holes strictly inside the outer loop always leave a visible bridge
-    /// target — see [`kernel::triangulate::bridge_holes`]); failing loudly instead
-    /// of emitting a self-crossing ring is DEVELOPMENT.md rule 4.
+    /// target — see [`kernel::triangulate::bridge_holes`]) but one: a face
+    /// of an imported object saved before imports were checked for
+    /// overlapping holes (`kernel::TopologyError::HolesOverlap`, held of
+    /// imports where they are built so such documents still open). A caller
+    /// drawing many objects skips the one that fails rather than failing
+    /// them all. Failing loudly instead of emitting a self-crossing ring is
+    /// DEVELOPMENT.md rule 4.
     UnbridgeableHole {
         /// The offending face.
         face: FaceId,

@@ -6321,6 +6321,7 @@ impl Registry {
                 "path_detached_from_profile",
                 "path_reverses",
                 "path_too_tight",
+                "profile_too_wide_for_corner",
                 "profile_crosses_axis",
                 "partial_sweep_on_pole",
                 "sweep_self_intersects",

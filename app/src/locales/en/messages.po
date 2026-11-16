@@ -10230,6 +10230,10 @@ msgstr "The path turns tighter than the profile is wide, so the sweep would fold
 msgid "The picture would be {w} × {h} m, and each side must be at most {max} m. Drag it out smaller or type a smaller width."
 msgstr "The picture would be {w} × {h} m, and each side must be at most {max} m. Drag it out smaller or type a smaller width."
 
+#: src/kernelErrors.ts
+msgid "The profile is too wide to fit inside this corner, so the sweep would run into itself. Draw the profile at a corner of the path, square to the edge it starts along, and narrower than half the shortest side."
+msgstr "The profile is too wide to fit inside this corner, so the sweep would run into itself. Draw the profile at a corner of the path, square to the edge it starts along, and narrower than half the shortest side."
+
 #: src/tools/FollowMeTool.ts
 msgid "The profile only touches the solid at an edge or corner — left as a separate object."
 msgstr "The profile only touches the solid at an edge or corner — left as a separate object."

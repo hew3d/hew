@@ -24,7 +24,9 @@ impl Object {
     /// native geometry, wider `IMPORT_PLANE_DIST` for imports); every hole
     /// loop lies geometrically inside its face's outer boundary (checked
     /// conservatively: a hole with NO vertex inside the ring is invalid);
-    /// vertices and their `outgoing`
+    /// the holes of a native object's face are disjoint (an imported
+    /// object is held to that where it is built — see
+    /// [`TopologyError::HolesOverlap`]); vertices and their `outgoing`
     /// half-edges agree; every face is in exactly one shell; and the
     /// watertightness flag matches the actual topology; every face and edge
     /// attribute slot names a non-empty dictionary in this Object's table.
@@ -502,7 +504,8 @@ impl Object {
     }
 
     /// One face: its loops agree with it, its boundary is planar, its holes
-    /// lie inside it and its surface claim holds.
+    /// lie inside it and (on a native object) are disjoint, and its surface
+    /// claim holds.
     fn validate_face(
         &self,
         f: crate::ids::FaceId,
@@ -597,6 +600,26 @@ impl Object {
                         loop_id: inner_id,
                     });
                 }
+            }
+        }
+        // Holes are disjoint: no two of one face overlap. Held of native
+        // objects here; an imported object is held to it where it is
+        // built (`OverlappingHoles`), so a document saved before the
+        // check, holding such a face, still opens and edits as before.
+        if face.inner_loops.len() >= 2 && self.planarity_tol <= crate::tol::PLANE_DIST {
+            let holes: Vec<Vec<crate::math::Point3>> = face
+                .inner_loops
+                .iter()
+                .map(|&l| self.loop_positions(l).collect())
+                .collect();
+            if let Some((i, j)) =
+                crate::geom2d::first_overlapping_holes(&holes, face.plane.normal())
+            {
+                return Err(TopologyError::HolesOverlap {
+                    face: f,
+                    loop_id: face.inner_loops[i],
+                    other: face.inner_loops[j],
+                });
             }
         }
         // A present analytic surface must agree with the geometry it
@@ -1273,5 +1296,215 @@ pub(crate) mod tests {
             tet.validate(),
             Err(TopologyError::EdgeCurveMismatch { .. })
         ));
+    }
+
+    // ── Overlapping holes (issue #77) ──────────────────────────────────────
+
+    /// A 20 x 20 one-face object holding the holes `holes` (each a ring wound
+    /// against the face, so CW seen from +Z), built with each hole as a tiny
+    /// copy at its own spot along y = 1 (so the builder accepts them all) and
+    /// then moved onto the given ring. Imported (the wider planarity
+    /// tolerance) unless `native`.
+    pub(crate) fn face_with_holes_moved_onto(holes: &[Vec<(f64, f64)>], native: bool) -> Object {
+        let outer = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)];
+        let mut positions: Vec<Point3> =
+            outer.iter().map(|&(x, y)| Point3::new(x, y, 0.0)).collect();
+        let mut loops = Vec::new();
+        for (k, hole) in holes.iter().enumerate() {
+            let c = hole.iter().fold((0.0, 0.0), |a, h| (a.0 + h.0, a.1 + h.1));
+            let c = (c.0 / hole.len() as f64, c.1 / hole.len() as f64);
+            let anchor = (1.0 + k as f64, 1.0);
+            let base = positions.len();
+            positions.extend(hole.iter().map(|h| {
+                Point3::new(
+                    anchor.0 + 1e-3 * (h.0 - c.0),
+                    anchor.1 + 1e-3 * (h.1 - c.1),
+                    0.0,
+                )
+            }));
+            loops.push((base..base + hole.len()).collect::<Vec<_>>());
+        }
+        let mut obj = Object::from_polygons_with_holes_import(
+            &positions,
+            &[vec![0, 1, 2, 3]],
+            &[loops],
+            &[crate::material::FaceMaterial::default()],
+            &[None],
+        )
+        .expect("the tiny copies build");
+        if native {
+            obj.planarity_tol = crate::tol::PLANE_DIST;
+        }
+        assert!(obj.validate().is_ok(), "valid before the move");
+        let face = obj.faces.keys().next().expect("one face");
+        let inner = obj.faces[face].inner_loops.clone();
+        for (l, hole) in inner.into_iter().zip(holes) {
+            let vids: Vec<_> = obj
+                .loop_half_edges(l)
+                .map(|h| obj.half_edges[h].origin)
+                .collect();
+            for (vid, &(x, y)) in vids.into_iter().zip(hole) {
+                obj.vertices[vid].position = Point3::new(x, y, 0.0);
+            }
+        }
+        obj
+    }
+
+    /// An axis-aligned square hole ring (CW seen from +Z).
+    fn square_hole(x0: f64, y0: f64, side: f64) -> Vec<(f64, f64)> {
+        vec![
+            (x0, y0),
+            (x0, y0 + side),
+            (x0 + side, y0 + side),
+            (x0 + side, y0),
+        ]
+    }
+
+    /// A regular `n`-gon hole ring (CW seen from +Z) about `(cx, cy)`,
+    /// starting `phase` turns around.
+    fn circle_hole(cx: f64, cy: f64, r: f64, n: usize, phase: f64) -> Vec<(f64, f64)> {
+        (0..n)
+            .map(|i| {
+                let a = -std::f64::consts::TAU * (i as f64 / n as f64 + phase);
+                (cx + r * a.cos(), cy + r * a.sin())
+            })
+            .collect()
+    }
+
+    fn overlaps(obj: &Object) -> bool {
+        matches!(obj.validate(), Err(TopologyError::HolesOverlap { .. }))
+    }
+
+    #[test]
+    fn two_holes_crossing_each_other_are_refused() {
+        let obj = face_with_holes_moved_onto(
+            &[square_hole(5.0, 5.0, 4.0), square_hole(7.0, 7.0, 4.0)],
+            true,
+        );
+        assert!(overlaps(&obj), "{:?}", obj.validate());
+    }
+
+    #[test]
+    fn a_hole_inside_another_hole_is_refused() {
+        let obj = face_with_holes_moved_onto(
+            &[square_hole(5.0, 5.0, 6.0), square_hole(7.0, 7.0, 1.0)],
+            true,
+        );
+        assert!(overlaps(&obj), "{:?}", obj.validate());
+        // Listed the other way around, too.
+        let obj = face_with_holes_moved_onto(
+            &[square_hole(7.0, 7.0, 1.0), square_hole(5.0, 5.0, 6.0)],
+            true,
+        );
+        assert!(overlaps(&obj), "{:?}", obj.validate());
+    }
+
+    /// The #77 face: two 24-gon holes that are nearly one circle (about
+    /// 3e-5 apart, starting at different vertices).
+    #[test]
+    fn two_near_duplicate_circles_are_refused() {
+        let obj = face_with_holes_moved_onto(
+            &[
+                circle_hole(10.0, 10.0, 0.004, 24, 0.0),
+                circle_hole(10.0 + 3e-5, 10.0 - 1e-5, 0.004, 24, 0.3),
+            ],
+            true,
+        );
+        assert!(overlaps(&obj), "{:?}", obj.validate());
+    }
+
+    #[test]
+    fn two_holes_tracing_one_outline_are_refused() {
+        // The same square twice, on distinct vertices; and the same square
+        // with one ring carrying an extra vertex on an edge.
+        let a = square_hole(5.0, 5.0, 4.0);
+        let obj = face_with_holes_moved_onto(&[a.clone(), a.clone()], true);
+        assert!(overlaps(&obj), "{:?}", obj.validate());
+        let mut b = a.clone();
+        b.insert(1, (5.0, 7.0));
+        let obj = face_with_holes_moved_onto(&[a, b], true);
+        assert!(overlaps(&obj), "{:?}", obj.validate());
+    }
+
+    #[test]
+    fn disjoint_and_touching_holes_validate() {
+        for holes in [
+            // Apart.
+            vec![square_hole(2.0, 2.0, 3.0), square_hole(10.0, 10.0, 3.0)],
+            // Corner to corner, on distinct vertices.
+            vec![square_hole(2.0, 2.0, 3.0), square_hole(5.0, 5.0, 3.0)],
+            // Side by side along a shared run, offset so no vertex is shared.
+            vec![square_hole(2.0, 2.0, 4.0), square_hole(6.0, 3.0, 2.0)],
+            // A vertex of one touching the middle of the other's edge.
+            vec![
+                square_hole(2.0, 2.0, 4.0),
+                vec![(6.0, 4.0), (8.0, 6.0), (8.0, 2.0)],
+            ],
+        ] {
+            let obj = face_with_holes_moved_onto(&holes, true);
+            assert!(obj.validate().is_ok(), "{holes:?}: {:?}", obj.validate());
+        }
+    }
+
+    /// Imports are held to the check where they are built (the builder
+    /// refuses overlapping holes); an imported object saved before the
+    /// check existed still validates, so its document still opens.
+    #[test]
+    fn an_imported_object_with_overlapping_holes_still_loads() {
+        let obj = face_with_holes_moved_onto(
+            &[
+                circle_hole(10.0, 10.0, 0.004, 24, 0.0),
+                circle_hole(10.0 + 3e-5, 10.0 - 1e-5, 0.004, 24, 0.3),
+            ],
+            false,
+        );
+        assert!(obj.validate().is_ok(), "{:?}", obj.validate());
+        let bytes = obj.encode(&|_| 0);
+        let reopened = Object::decode(&bytes, &|_| None).expect("an old document opens");
+        assert_eq!(reopened.planarity_tol, crate::tol::IMPORT_PLANE_DIST);
+    }
+
+    #[test]
+    fn the_import_builder_refuses_overlapping_holes() {
+        let build = |holes: &[Vec<(f64, f64)>]| {
+            let mut positions = vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(20.0, 0.0, 0.0),
+                Point3::new(20.0, 20.0, 0.0),
+                Point3::new(0.0, 20.0, 0.0),
+            ];
+            let mut loops = Vec::new();
+            for hole in holes {
+                let base = positions.len();
+                positions.extend(hole.iter().map(|&(x, y)| Point3::new(x, y, 0.0)));
+                loops.push((base..base + hole.len()).collect::<Vec<_>>());
+            }
+            Object::from_polygons_with_holes_import(
+                &positions,
+                &[vec![0, 1, 2, 3]],
+                &[loops],
+                &[crate::material::FaceMaterial::default()],
+                &[None],
+            )
+        };
+        let apart = build(&[
+            square_hole(2.0, 2.0, 3.0),
+            square_hole(10.0, 10.0, 3.0),
+            square_hole(2.0, 10.0, 3.0),
+        ]);
+        assert!(apart.is_ok(), "{:?}", apart.err());
+        let crossing = build(&[
+            square_hole(2.0, 2.0, 3.0),
+            square_hole(10.0, 10.0, 3.0),
+            square_hole(11.0, 11.0, 3.0),
+        ]);
+        assert_eq!(
+            crossing.err(),
+            Some(TopologyError::OverlappingHoles {
+                face: 0,
+                hole: 1,
+                other: 2
+            })
+        );
     }
 }

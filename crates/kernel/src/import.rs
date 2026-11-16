@@ -96,6 +96,32 @@ impl MeshRecipe {
     }
 }
 
+/// The first pair `(i, j)`, `i < j`, of one face's hole rings that overlap
+/// (the rule of [`crate::TopologyError::HolesOverlap`]: a proper crossing,
+/// a point of one strictly inside the other, or one outline traced twice),
+/// or `None`. `normal` is the face's unit normal. A ring of fewer than
+/// three points overlaps nothing (the builder refuses it as
+/// [`crate::TopologyError::DegenerateFace`]). The import builder
+/// refuses such a face ([`crate::TopologyError::OverlappingHoles`]); an
+/// importer asks first, to resolve it loudly instead of losing the mesh.
+pub fn first_overlapping_holes(
+    holes: &[Vec<Point3>],
+    normal: crate::math::Vec3,
+) -> Option<(usize, usize)> {
+    crate::geom2d::first_overlapping_holes(holes, normal)
+}
+
+/// Whether every vertex of ring `a` lies within `tol` of ring `b`'s
+/// boundary, and every vertex of `b` within `tol` of `a`'s: the two are
+/// one outline drawn twice, a hair apart.
+pub fn rings_trace_each_other(a: &[Point3], b: &[Point3], tol: f64) -> bool {
+    let on = |p: Point3, ring: &[Point3]| {
+        let n = ring.len();
+        (0..n).any(|i| crate::geom2d::point_near_segment(p, ring[i], ring[(i + 1) % n], tol))
+    };
+    !a.is_empty() && !b.is_empty() && a.iter().all(|&p| on(p, b)) && b.iter().all(|&p| on(p, a))
+}
+
 /// Source claims about a mesh's edges and faces, applied by `ingest` to the
 /// built Object wherever they hold — claims are metadata, never geometry,
 /// so one the built Object contradicts is dropped (the map-or-drop

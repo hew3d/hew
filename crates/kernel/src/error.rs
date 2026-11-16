@@ -46,6 +46,16 @@ pub enum TopologyError {
         /// The unused vertex's index in the input.
         index: usize,
     },
+    /// Two hole loops of face `face` overlap: one crosses the other, lies
+    /// inside it, or traces it (see [`TopologyError::HolesOverlap`]).
+    OverlappingHoles {
+        /// Index of the offending face in the input.
+        face: usize,
+        /// Index of the first hole in the face's hole list.
+        hole: usize,
+        /// Index of the hole it overlaps (greater than `hole`).
+        other: usize,
+    },
 
     // --- validation (handles into kernel storage) ---
     /// A stored handle points at a missing element.
@@ -131,6 +141,22 @@ pub enum TopologyError {
         /// The displaced hole loop.
         loop_id: LoopId,
     },
+    /// Two hole loops of one face overlap: an edge of one properly crosses
+    /// an edge of the other, a point of one lies strictly inside the other,
+    /// or the two trace the same outline. The region between them is no
+    /// face (the tessellator could not bridge it), so holes are disjoint
+    /// but for isolated touching points and runs along each other. Held of
+    /// every native object; an imported object is held to it where it is
+    /// built ([`TopologyError::OverlappingHoles`]), not where it is loaded
+    /// or edited, so a document saved before the check still opens.
+    HolesOverlap {
+        /// The offending face.
+        face: FaceId,
+        /// One of the two holes.
+        loop_id: LoopId,
+        /// The hole it overlaps.
+        other: LoopId,
+    },
     /// A face's analytic [`crate::topo::SurfaceRef`] disagrees with its
     /// geometry: non-unit axis, degenerate radius, a chord plane not
     /// parallel to the axis or farther from it than the radius, or a
@@ -190,6 +216,9 @@ impl std::fmt::Display for TopologyError {
             UnreferencedVertex { index } => {
                 write!(f, "vertex {index} is not used by any face")
             }
+            OverlappingHoles { face, hole, other } => {
+                write!(f, "face {face} has holes {hole} and {other} that overlap")
+            }
             DanglingHandle { context } => write!(f, "dangling handle: {context}"),
             BrokenLink { half_edge } => {
                 write!(
@@ -237,6 +266,16 @@ impl std::fmt::Display for TopologyError {
                 write!(
                     f,
                     "face {face:?} owns hole loop {loop_id:?} that lies outside its outer boundary"
+                )
+            }
+            HolesOverlap {
+                face,
+                loop_id,
+                other,
+            } => {
+                write!(
+                    f,
+                    "face {face:?} has hole loops {loop_id:?} and {other:?} that overlap"
                 )
             }
             FaceSurfaceMismatch { face } => {

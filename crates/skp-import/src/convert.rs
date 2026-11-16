@@ -1527,6 +1527,15 @@ impl Converter {
             } else {
                 heal_mesh_keeping_faces(&positions, &faces, &labels, &no_uvs, &holes, bake)
             };
+        let (positions, faces, healed_labels, healed_uvs, healed_holes) = self
+            .settle_overlapping_holes(
+                &name,
+                positions,
+                faces,
+                healed_labels,
+                healed_uvs,
+                healed_holes,
+            );
         if faces.is_empty() {
             return Vec::new();
         }
@@ -1619,6 +1628,85 @@ impl Converter {
             tags,
             extra,
         )]
+    }
+
+    /// Settle the healed faces whose hole loops overlap
+    /// ([`mesh_heal::holes::resolve_overlapping_holes`]), which the kernel
+    /// would refuse the whole mesh for: a hole drawn twice keeps one copy,
+    /// and a face whose holes overlap otherwise is left out. Either is
+    /// reported in a warning naming the mesh (rule 4: never silent). The
+    /// arrays come back compacted, unchanged when nothing overlapped.
+    #[allow(clippy::type_complexity)]
+    fn settle_overlapping_holes(
+        &mut self,
+        name: &str,
+        positions: Vec<Point3>,
+        faces: Vec<Vec<usize>>,
+        labels: Vec<u32>,
+        uvs: Vec<Vec<[f64; 2]>>,
+        mut holes: Vec<Vec<Vec<usize>>>,
+    ) -> (
+        Vec<Point3>,
+        Vec<Vec<usize>>,
+        Vec<u32>,
+        Vec<Vec<[f64; 2]>>,
+        Vec<Vec<Vec<usize>>>,
+    ) {
+        let out = mesh_heal::holes::resolve_overlapping_holes(&positions, &faces, &mut holes);
+        if out.is_empty() {
+            return (positions, faces, labels, uvs, holes);
+        }
+        let mesh = if name.is_empty() {
+            "unnamed mesh"
+        } else {
+            name
+        };
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        if out.duplicates_dropped > 0 {
+            let n = out.duplicates_dropped;
+            self.warnings.push(format!(
+                "'{mesh}' had {n} hole{} drawn twice, a hair apart, in the same face; \
+                 the extra cop{} left out",
+                plural(n),
+                if n == 1 { "y was" } else { "ies were" },
+            ));
+        }
+        if !out.faces_left_out.is_empty() {
+            let n = out.faces_left_out.len();
+            self.warnings.push(format!(
+                "'{mesh}' had {n} face{} whose holes overlap each other; {} left out, \
+                 so the shape may be open there",
+                plural(n),
+                if n == 1 { "it was" } else { "they were" },
+            ));
+        }
+        let keep = |i: &usize| out.faces_left_out.binary_search(i).is_err();
+        let faces: Vec<Vec<usize>> = faces
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| keep(i))
+            .map(|(_, f)| f)
+            .collect();
+        let labels: Vec<u32> = labels
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| keep(i))
+            .map(|(_, l)| l)
+            .collect();
+        let uvs: Vec<Vec<[f64; 2]>> = uvs
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| keep(i))
+            .map(|(_, u)| u)
+            .collect();
+        let holes: Vec<Vec<Vec<usize>>> = holes
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| keep(i))
+            .map(|(_, h)| h)
+            .collect();
+        let (positions, faces, holes) = mesh_heal::compact_unused(&positions, &faces, &holes);
+        (positions, faces, labels, uvs, holes)
     }
 
     /// Each healed face's paint, front and back, and its corner UVs, from

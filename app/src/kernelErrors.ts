@@ -237,6 +237,8 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`The path doubles back on itself — or turns nearly all the way around — so there is no clean corner to turn. Remove the reversal, or soften the corner.`,
   PathTooTight:
     msg`The path turns tighter than the profile is wide, so the sweep would fold into itself. Use a smaller profile or gentler turns.`,
+  ProfileTooWideForCorner:
+    msg`The profile is too wide to fit inside this corner, so the sweep would run into itself. Draw the profile at a corner of the path, square to the edge it starts along, and narrower than half the shortest side.`,
   ProfileCrossesAxis:
     msg`This profile crosses the circle's center axis, so revolving it would lose the geometry on one side. Draw the profile entirely on one side of the axis instead.`,
   PartialSweepOnPole:
