@@ -20154,12 +20154,17 @@ impl Document {
         })
     }
 
-    /// World axis-aligned bounds `(low, high)` of the leaf geometry under
-    /// `nodes`: world objects, every group's subtree, and every instance's
-    /// expansion through its pose (nested definitions included). Members a
-    /// user has hidden count, since a flip or move carries them too. Stale
-    /// or non-world handles contribute nothing; `None` when nothing listed
-    /// has geometry (or a walk passes [`MAX_OCCURRENCES`]).
+    /// World axis-aligned bounds `(low, high)` of what `nodes` draw: world
+    /// objects, every group's subtree, and every instance's expansion
+    /// through its pose (nested definitions included). Member objects a
+    /// user has hidden count, since a flip or move carries them too. Each
+    /// world instance also counts the lines drawn inside it, exactly as it
+    /// shows them ([`Document::expanded_def_sketch_placements`], each curve
+    /// at its true extent through the pose, [`crate::Sketch::bounds_under`]),
+    /// so an instance holding only lines has bounds, and the box is the
+    /// one a selection of it shows. Stale or non-world handles contribute
+    /// nothing; `None` when nothing listed draws anything (or a walk passes
+    /// [`MAX_OCCURRENCES`]).
     pub fn world_bounds(&self, nodes: &[NodeId]) -> Option<(Point3, Point3)> {
         self.world_bounds_checked(nodes).ok().flatten()
     }
@@ -20180,14 +20185,32 @@ impl Document {
         let rows = self.occurrences(Some(&roots), true)?;
         let mut acc: Option<(Point3, Point3)> = None;
         for r in rows {
-            let NodeId::Object(o) = r.node else {
-                continue;
-            };
-            let Some(obj) = self.object(o) else {
-                continue;
-            };
-            for v in obj.vertices().values() {
-                acc = Some(grow_bounds(acc, r.pose.apply_point(v.position)));
+            match r.node {
+                NodeId::Object(o) => {
+                    let Some(obj) = self.object(o) else {
+                        continue;
+                    };
+                    for v in obj.vertices().values() {
+                        acc = Some(grow_bounds(acc, r.pose.apply_point(v.position)));
+                    }
+                }
+                // A world instance's drawn lines, nested definitions
+                // included by the one walk (so a nested row adds nothing).
+                NodeId::Instance(_) if r.path.is_empty() => {
+                    let Some(def) = r.definition else {
+                        continue;
+                    };
+                    for (s, local) in self.expanded_def_sketch_placements(def) {
+                        let Some((lo, hi)) = self
+                            .sketch(s)
+                            .and_then(|sk| sk.bounds_under(&local.then(&r.pose)))
+                        else {
+                            continue;
+                        };
+                        acc = Some(grow_bounds(Some(grow_bounds(acc, lo)), hi));
+                    }
+                }
+                _ => {}
             }
         }
         Ok(acc)
@@ -20197,7 +20220,8 @@ impl Document {
     /// `normal` (the plane's normal, as SketchUp's Flip Along names it)
     /// through the point `about` picks. [`FlipAbout::Center`] is the center
     /// of the selection's bounds: [`Document::world_bounds`] of `nodes`
-    /// together with the vertices of the listed `sketches`.
+    /// (the lines drawn inside an instance included) together with the
+    /// vertices of the listed `sketches`.
     ///
     /// # Errors
     /// - [`DocumentError::EmptySelection`] — nothing listed, or (for

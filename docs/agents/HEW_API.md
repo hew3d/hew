@@ -672,6 +672,8 @@ a **derived-point locator** naming a point of existing geometry:
 - `{"point": "quadrant", "of": <curve id>, "toward": [x, y, z]}` — the
   quadrant point of a circle or arc in the given direction
 - `{"point": "bbox", "of": <entity id>, "anchor": "center" | "min" | "max"}`
+  — on the entity's extent, the lines drawn inside a component included
+  (§7.4)
 - `{"point": "position", "of": <guide id>}` — a guide *point*'s location
 
 Guides are addressable entities but not box-shaped: a guide *line* is an
@@ -2649,6 +2651,17 @@ walk lists); on an instance it adds `bbox`, `tags`,
 `bounds_local`, `mirrored`, `material` (its own), and
 `material_effective` (its own: an id names no path, so a nested
 placement's inherited material is read from its occurrence rows).
+
+Two boxes, two meanings. A `bbox` (on a `hew.query.scene` node, on
+`hew.query.entity`, and the box a `{"point": "bbox"}` anchor and
+`hew.view.zoom_to` read) is the extent: everything the entity draws.
+For an instance or a component that includes the lines drawn inside the
+definition and its nested definitions, as they are shown (a line on a
+hidden tag, or under a hidden member, is left out), each circle and arc
+at its true extent; an instance holding only lines has a `bbox`.
+`bounds_local` is the part box: the definition's solids only, in its
+own frame, the size a parts list or a shop card reads, and `null` for a
+definition with no solid.
 
 ### 7.5 Materials on faces, objects, and placements
 

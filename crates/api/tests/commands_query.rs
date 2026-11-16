@@ -1121,3 +1121,230 @@ fn raycast_skips_a_user_hidden_world_object() {
     );
     assert_eq!(refusal["refusal"], "locator_missed");
 }
+
+// ------------------------------------------------- lines inside a component
+
+fn public_of(doc: &Document, entity: &kernel::EntityRef) -> String {
+    let sid = doc.sid_of(entity).expect("entity carries a stable id");
+    api::ids::public_id(entity, sid)
+}
+
+fn assert_box(v: &Value, min: [f64; 3], max: [f64; 3]) {
+    for (key, want) in [("min", min), ("max", max)] {
+        let got: Vec<f64> = v[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} in {v}"))
+            .iter()
+            .map(|x| x.as_f64().unwrap())
+            .collect();
+        for k in 0..3 {
+            assert!(
+                (got[k] - want[k]).abs() < 1e-9,
+                "{key}: {got:?} vs {want:?}"
+            );
+        }
+    }
+}
+
+/// A unit-box component (x in [3, 4], from `build_box(3.0)`) whose
+/// definition also holds a line beside the box, LOCAL (6, 0, 0)–(6, 1, 0).
+fn component_with_a_line_beside_its_box(doc: &mut Document) -> kernel::InstanceId {
+    let b = build_box(doc, 3.0);
+    let (_, i, _) = doc.make_component(&[NodeId::Object(b)]).expect("fold");
+    let (s, _) = doc
+        .begin_sketch_on_plane_in_instance(i, ground())
+        .expect("a sketch inside the definition");
+    doc.sketch_mut(s)
+        .unwrap()
+        .add_segment(Point3::new(6.0, 0.0, 0.0), Point3::new(6.0, 1.0, 0.0))
+        .expect("the line");
+    i
+}
+
+/// `bbox` is the extent: an instance's and its definition's boxes take in
+/// the lines drawn inside the definition. `bounds_local` is the part box:
+/// solids only.
+#[test]
+fn an_instance_bbox_merges_its_lines_and_bounds_local_stays_the_solids() {
+    let mut doc = Document::new();
+    let i = component_with_a_line_beside_its_box(&mut doc);
+    let def = doc.instance_def(i).unwrap();
+    let mut conn = Connection::new(Grant::core(), "test");
+    hello_attach(&mut conn, &mut doc);
+    let iid = public_of(&doc, &kernel::EntityRef::Instance(i));
+    let cid = public_of(&doc, &kernel::EntityRef::Component(def));
+
+    let inst = call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.query.entity",
+        json!({ "id": iid }),
+    );
+    assert_box(&inst["bbox"], [3.0, 0.0, 0.0], [6.0, 1.0, 0.5]);
+    assert_box(&inst["bounds_local"], [3.0, 0.0, 0.0], [4.0, 1.0, 0.5]);
+
+    let scene = call_ok(&mut conn, &mut doc, 3, "hew.query.scene", json!({}));
+    let row = scene["tree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == iid)
+        .expect("the instance's tree row");
+    assert_box(&row["bbox"], [3.0, 0.0, 0.0], [6.0, 1.0, 0.5]);
+
+    let comp = call_ok(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.query.entity",
+        json!({ "id": cid }),
+    );
+    assert_box(&comp["bounds_local"], [3.0, 0.0, 0.0], [4.0, 1.0, 0.5]);
+    let corner = call_ok(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.query.resolve",
+        json!({ "point": { "point": "bbox", "of": cid, "anchor": "max" } }),
+    );
+    assert_eq!(
+        corner["point"],
+        json!([6.0, 1.0, 0.5]),
+        "the component's box"
+    );
+}
+
+/// An instance whose definition holds only a line has a box (and no part
+/// box).
+#[test]
+fn a_lines_only_instance_has_a_bbox() {
+    let mut doc = Document::new();
+    let i = component_with_a_line_beside_its_box(&mut doc);
+    doc.open_explode_session(i).unwrap();
+    for o in doc.explode_session_objects().unwrap() {
+        doc.delete_node(NodeId::Object(o)).unwrap();
+    }
+    doc.close_explode_session().unwrap();
+    let mut conn = Connection::new(Grant::core(), "test");
+    hello_attach(&mut conn, &mut doc);
+    let iid = public_of(&doc, &kernel::EntityRef::Instance(i));
+
+    let inst = call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.query.entity",
+        json!({ "id": iid }),
+    );
+    assert_box(&inst["bbox"], [6.0, 0.0, 0.0], [6.0, 1.0, 0.0]);
+    assert!(inst["bounds_local"].is_null(), "no solid, no part box");
+    let center = call_ok(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.query.resolve",
+        json!({ "point": { "point": "bbox", "of": iid, "anchor": "center" } }),
+    );
+    assert_eq!(center["point"], json!([6.0, 0.5, 0.0]));
+}
+
+/// A definition sketch on a hidden tag is not drawn, so it leaves the box.
+#[test]
+fn a_tag_hidden_definition_sketch_leaves_the_instance_bbox() {
+    let layer = vec!["Drafting".to_string()];
+    let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+    let positions = vec![
+        p(0.0, 0.0, 0.0),
+        p(1.0, 0.0, 0.0),
+        p(1.0, 1.0, 0.0),
+        p(0.0, 1.0, 0.0),
+        p(0.0, 0.0, 1.0),
+        p(1.0, 0.0, 1.0),
+        p(1.0, 1.0, 1.0),
+        p(0.0, 1.0, 1.0),
+    ];
+    let faces: Vec<Vec<usize>> = vec![
+        vec![0, 3, 2, 1],
+        vec![4, 5, 6, 7],
+        vec![0, 1, 5, 4],
+        vec![1, 2, 6, 5],
+        vec![2, 3, 7, 6],
+        vec![3, 0, 4, 7],
+    ];
+    let n = faces.len();
+    let cube = kernel::MeshRecipe {
+        name: "Cube".into(),
+        positions,
+        faces,
+        face_materials: vec![kernel::NO_MATERIAL; n],
+        face_uv_frames: vec![None; n],
+        face_holes: vec![Vec::new(); n],
+        base_material: kernel::NO_MATERIAL,
+        tags: Vec::new(),
+        extra: Default::default(),
+    };
+    let line = |x: f64, tags: Vec<Vec<String>>| kernel::ImportSketch {
+        plane: ground(),
+        def: Some(0),
+        group: None,
+        segments: vec![[p(x, 0.0, 0.0), p(x, 1.0, 0.0)]],
+        curves: Vec::new(),
+        tags,
+        filled: Vec::new(),
+        imported: false,
+    };
+    let scene = kernel::ImportScene {
+        geo: None,
+        materials: Vec::new(),
+        defs: vec![kernel::DefRecipe::from_meshes(
+            Some("Panel".into()),
+            vec![cube],
+        )],
+        roots: vec![kernel::ImportNode::Instance {
+            def: 0,
+            pose: kernel::Transform::IDENTITY,
+            name: None,
+            tags: Vec::new(),
+            hidden: false,
+            key: None,
+        }],
+        guides: Vec::new(),
+        tags: vec![kernel::ImportTag {
+            path: layer.clone(),
+            hidden: false,
+        }],
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
+        view_style: None,
+        extra: kernel::ImportSceneExtra {
+            sketches: vec![line(3.0, Vec::new()), line(5.0, vec![layer.clone()])],
+            ..Default::default()
+        },
+    };
+    let mut doc = Document::new();
+    doc.ingest(scene, Vec::new()).expect("ingest");
+    let i = doc.instance_ids()[0];
+    let mut conn = Connection::new(Grant::core(), "test");
+    hello_attach(&mut conn, &mut doc);
+    let iid = public_of(&doc, &kernel::EntityRef::Instance(i));
+
+    let shown = call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.query.entity",
+        json!({ "id": iid }),
+    );
+    assert_box(&shown["bbox"], [0.0, 0.0, 0.0], [5.0, 1.0, 1.0]);
+    doc.set_tag_hidden(layer, true);
+    let hidden = call_ok(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.query.entity",
+        json!({ "id": iid }),
+    );
+    assert_box(&hidden["bbox"], [0.0, 0.0, 0.0], [3.0, 1.0, 1.0]);
+}

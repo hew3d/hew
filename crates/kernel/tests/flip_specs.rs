@@ -429,6 +429,83 @@ fn flip_about_center_uses_the_selection_bounds_center() {
     assert_eq!(doc.world_bounds(&[]), None);
 }
 
+/// A unit cube folded into a component whose definition also holds one
+/// line beside it, LOCAL (3, 0, 0)–(3, 1, 0), placed at x + 10.
+fn component_with_a_line_beside_its_cube(doc: &mut Document) -> kernel::InstanceId {
+    let c = make_box(doc, 0.0, 0.0, 1.0, 1.0, 1.0);
+    let (_, i, _) = doc.make_component(&[NodeId::Object(c)]).unwrap();
+    let (s, _) = doc.begin_sketch_on_plane_in_instance(i, ground()).unwrap();
+    doc.sketch_mut(s)
+        .unwrap()
+        .add_segment(Point3::new(3.0, 0.0, 0.0), Point3::new(3.0, 1.0, 0.0))
+        .unwrap();
+    doc.transform_instance(i, &Transform::translation(Vec3::new(10.0, 0.0, 0.0)))
+        .unwrap();
+    i
+}
+
+#[test]
+fn an_instances_bounds_and_flip_center_count_the_lines_drawn_inside_it() {
+    let mut doc = Document::new();
+    let i = component_with_a_line_beside_its_cube(&mut doc);
+    // The cube spans x in [10, 11]; the line at x = 13 widens the box.
+    let (lo, hi) = doc.world_bounds(&[NodeId::Instance(i)]).unwrap();
+    assert!(near(lo, Point3::new(10.0, 0.0, 0.0), 1e-12), "{lo:?}");
+    assert!(near(hi, Point3::new(13.0, 1.0, 1.0), 1e-12), "{hi:?}");
+    // Center x = 11.5: the line lands on x = 10, the cube on [12, 13].
+    let m = doc
+        .flip_matrix(&[NodeId::Instance(i)], &[], X, FlipAbout::Center)
+        .unwrap();
+    assert!(near(
+        m.apply_point(Point3::new(13.0, 0.0, 0.0)),
+        Point3::new(10.0, 0.0, 0.0),
+        1e-12
+    ));
+    doc.flip_nodes(&[NodeId::Instance(i)], &[], X, FlipAbout::Center)
+        .unwrap();
+    let (lo, hi) = doc.world_bounds(&[NodeId::Instance(i)]).unwrap();
+    assert!(near(lo, Point3::new(10.0, 0.0, 0.0), 1e-12), "{lo:?}");
+    assert!(near(hi, Point3::new(13.0, 1.0, 1.0), 1e-12), "{hi:?}");
+    let pose = doc.instance_pose(i).unwrap();
+    assert!(near(
+        pose.apply_point(Point3::new(3.0, 0.0, 0.0)),
+        Point3::new(10.0, 0.0, 0.0),
+        1e-12
+    ));
+}
+
+#[test]
+fn flip_about_center_works_on_an_instance_holding_only_lines() {
+    let mut doc = Document::new();
+    let i = component_with_a_line_beside_its_cube(&mut doc);
+    // Empty the definition of its cube, leaving the line.
+    doc.open_explode_session(i).unwrap();
+    for o in doc.explode_session_objects().unwrap() {
+        doc.delete_node(NodeId::Object(o)).unwrap();
+    }
+    doc.close_explode_session().unwrap();
+    let def = doc.instance_def(i).unwrap();
+    assert!(
+        doc.expanded_def_placements(def).is_empty(),
+        "no solid is left"
+    );
+    let (lo, hi) = doc.world_bounds(&[NodeId::Instance(i)]).unwrap();
+    assert!(near(lo, Point3::new(13.0, 0.0, 0.0), 1e-12), "{lo:?}");
+    assert!(near(hi, Point3::new(13.0, 1.0, 0.0), 1e-12), "{hi:?}");
+    // A flip along Y about the line's own center leaves it in place.
+    doc.flip_nodes(&[NodeId::Instance(i)], &[], Y, FlipAbout::Center)
+        .expect("a lines-only instance has a center");
+    let pose = doc.instance_pose(i).unwrap();
+    assert!(pose.determinant() < 0.0);
+    let (lo2, hi2) = doc.world_bounds(&[NodeId::Instance(i)]).unwrap();
+    assert!(near(lo2, lo, 1e-12) && near(hi2, hi, 1e-12));
+    assert!(near(
+        pose.apply_point(Point3::new(3.0, 0.0, 0.0)),
+        Point3::new(13.0, 1.0, 0.0),
+        1e-12
+    ));
+}
+
 #[test]
 fn flip_about_origin_and_about_a_point() {
     let mut doc = Document::new();
