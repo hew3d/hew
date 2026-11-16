@@ -84,6 +84,18 @@ async function wasm() {
     return { ok: true, error: null }
   } catch (e) { return { ok: false, error: describe(e) } }
 }
+// What a Worker inside the realm can see of the desktop shell's command
+// bridge: the globals the shell injects into its own pages, and whether the
+// bridge's two request URLs answer. Nothing here is expected to exist.
+async function ipcReach() {
+  const names = ['__TAURI_INTERNALS__', '__TAURI__', '__TAURI_INVOKE_KEY__', 'ipc', 'webkit', 'chrome']
+  const globals = {}
+  for (const n of names) globals[n] = typeof self[n]
+  const fetches = []
+  for (const url of ['ipc://localhost/plugin%3Aapp%7Cversion', 'http://ipc.localhost/plugin%3Aapp%7Cversion'])
+    fetches.push(await attempt('fetch(' + url + ')', 'fetch', () => fetch(url, { method: 'POST', body: '{}' }), false))
+  return { globals, fetches }
+}
 async function serve(m) {
   switch (m.t) {
     case 'echo': port.postMessage({ t: 'echo', n: m.n }); break
@@ -107,6 +119,7 @@ async function serve(m) {
       })
       break
     case 'denials': port.postMessage({ t: 'denials', results: await denials(m.hostOrigin) }); break
+    case 'ipc': port.postMessage({ t: 'ipc', ...(await ipcReach()) }); break
     case 'spin': for (;;) {}
     case 'wasm': port.postMessage({ t: 'wasm', ...(await wasm()) }); break
   }

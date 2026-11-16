@@ -120,6 +120,27 @@
       "dockChips": [],
       "apiCommands": ["hew.solid.remove_degenerate_faces"],
       "behaviors": ["health-remove-degenerate"]
+    },
+    {
+      "id": "plugins",
+      "name": "Plugins",
+      "state": "Runs add-ons made by other people inside Hew. Nothing can be installed yet.",
+      "owner": "plugins",
+      "defaultOn": false,
+      "tools": [],
+      "actions": [],
+      "dockChips": [],
+      "apiCommands": [],
+      "behaviors": [],
+      "loader": {
+        "roots": ["plugin-probe"],
+        "panes": [],
+        "shellCommands": [],
+        "kernelExports": [],
+        "cliCommands": [],
+        "storage": [],
+        "markers": ["plugin-probe", "ProbeRoot", "hew-realm", "hewProbeReport"]
+      }
     }
   ]
 }

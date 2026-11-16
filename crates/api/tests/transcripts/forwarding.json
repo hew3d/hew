@@ -438,7 +438,7 @@
             "detail": {
               "plugin": "com.example.lib"
             },
-            "explanation": "This plugin is installed but not running. Enable it in Settings ▸ Plugins, or reload it."
+            "explanation": "This plugin is not running. Start it or reload it, then try again."
           }
         }
       }

@@ -159,6 +159,12 @@ function sourceFiles(dir: string): string[] {
   return out
 }
 
+const NO_SWITCHES = { off: new Set<string>(), on: new Set<string>() }
+const switches = (off: string[], on: string[] = []) => ({ off: new Set(off), on: new Set(on) })
+/** The ids a preview build has on before anyone touches a switch. */
+const ON_BY_DEFAULT = FEATURES.filter((f) => f.defaultOn !== false).map((f) => f.id)
+const LOADERS = FEATURES.filter((f) => f.loader !== undefined)
+
 describe('the registry file', () => {
   it('has unique feature ids, and no id claimed by two features', () => {
     expect(new Set(FEATURES.map((f) => f.id)).size).toBe(FEATURES.length)
@@ -166,6 +172,49 @@ describe('the registry file', () => {
       const all = FEATURES.flatMap((f) => f[kind])
       expect(all.filter((id, i) => all.indexOf(id) !== i), `${kind} named twice`).toEqual([])
     }
+  })
+  it('names every loader entry point once, and only on a feature that is off until asked for', () => {
+    expect(LOADERS.length).toBeGreaterThan(0)
+    for (const kind of ['roots', 'panes', 'shellCommands', 'kernelExports', 'cliCommands', 'storage'] as const) {
+      const all = LOADERS.flatMap((f) => f.loader![kind])
+      expect(all.filter((id, i) => all.indexOf(id) !== i), `${kind} named twice`).toEqual([])
+    }
+    for (const f of LOADERS) {
+      expect(f.defaultOn, `${f.id} loads code, so its switch starts off`).toBe(false)
+      expect(f.loader!.markers.length, `${f.id} has nothing a production artifact can be scanned for`).toBeGreaterThan(0)
+    }
+  })
+  it('every loader root is selected in main.tsx through the wall, and main.tsx selects no other', () => {
+    const main = readFileSync(join(SRC, 'main.tsx'), 'utf8')
+    const asked = [...main.matchAll(/rootAllowed\('([^']+)'\)/g)].map((m) => m[1])
+    expect([...new Set(asked)].sort()).toEqual(LOADERS.flatMap((f) => f.loader!.roots).sort())
+    // The build literal comes first, so a production bundle drops the root's
+    // name and its import; and the hash is compared with the same id.
+    for (const id of asked) {
+      expect(main, id).toContain(`previewBuild && rootAllowed('${id}') && window.location.hash.startsWith('#${id}')`)
+    }
+  })
+  it('preview-only code is imported only in loaderRoots.ts, each import behind the build literal', () => {
+    // A dynamic import behind a constant from another module still ships its
+    // chunk, so the literal has to be in the importing module itself.
+    const importers = [...sourceFiles(SRC), ...readdirSync(HERE).filter((n) => /\.tsx?$/.test(n) && !/\.test\.tsx?$/.test(n)).map((n) => join(HERE, n))]
+      .filter((f) => !f.includes(`${join(SRC, 'plugins')}/`))
+      .filter((f) => /(from|import\()\s*['"`][./]+\/plugins(\/|['"`])/.test(readFileSync(f, 'utf8')))
+      .map((f) => f.slice(SRC.length + 1))
+    expect(importers).toEqual(['preview/loaderRoots.ts'])
+    const roots = readFileSync(join(HERE, 'loaderRoots.ts'), 'utf8')
+    expect(roots).not.toMatch(/^(import|export) [^\n]*\/plugins(\/|['"`])/m)
+    const imports = [...roots.matchAll(/import\(\s*['"`][^'"`]+['"`]\s*\)/g)]
+    expect(imports.length).toBeGreaterThan(0)
+    for (const m of imports) {
+      const line = roots.slice(roots.lastIndexOf('\nexport const ', m.index), m.index)
+      expect(line, m[0]).toMatch(/=\s*__HEW_PREVIEW__\s*\?\s/)
+    }
+  })
+  it('every loader pane is a Settings pane asked for through the wall', () => {
+    const settings = readFileSync(join(SRC, 'settings/SettingsWindow.tsx'), 'utf8')
+    const asked = [...settings.matchAll(/paneAllowed\('([^']+)'\)/g)].map((m) => m[1])
+    expect([...new Set(asked)].sort()).toEqual(LOADERS.flatMap((f) => f.loader!.panes).sort())
   })
   it('gives every feature an English name and a one-line state', () => {
     for (const f of FEATURES) {
@@ -179,29 +228,28 @@ describe('the registry file', () => {
 describe('createWall', () => {
   const some = FEATURES[0]
   it('withholds everything it lists when the build flag is off', () => {
-    const wall = createWall(false, FEATURES, new Set())
+    const wall = createWall(false, FEATURES, NO_SWITCHES)
     expect(wall.featureEnabled(some.id)).toBe(false)
     expect(wall.features()).toEqual([])
     for (const t of some.tools) expect(wall.toolAllowed(t)).toBe(false)
     expect(wall.toolAllowed('a tool nobody lists')).toBe(true)
   })
   it('honors a switch only in a preview build', () => {
-    const off = new Set([some.id])
-    const preview = createWall(true, FEATURES, off)
+    const preview = createWall(true, FEATURES, switches([some.id]))
     expect(preview.featureEnabled(some.id)).toBe(false)
     for (const t of some.tools) expect(preview.toolAllowed(t)).toBe(false)
-    const other = FEATURES.find((f) => f.id !== some.id)
+    const other = FEATURES.find((f) => f.id !== some.id && f.defaultOn !== false)
     if (other !== undefined) expect(preview.featureEnabled(other.id)).toBe(true)
     // A stored switch means nothing in production, and nothing is switched on there.
-    expect(createWall(false, FEATURES, new Set()).featureEnabled(some.id)).toBe(false)
+    expect(createWall(false, FEATURES, NO_SWITCHES).featureEnabled(some.id)).toBe(false)
   })
   it('hangs the Eraser\'s crease modifier on Smooth, and leaves the Eraser itself public', () => {
     expect(FEATURES.find((f) => f.id === 'smooth')?.behaviors).toContain('eraser-crease')
     expect(FEATURES.find((f) => f.id === 'smooth')?.apiCommands).toContain('hew.object.crease')
     expect(FEATURES.some((f) => f.tools.includes('Eraser') || f.actions.includes('tool-eraser'))).toBe(false)
-    const on = createWall(true, FEATURES, new Set())
-    const smoothOff = createWall(true, FEATURES, new Set(['smooth']))
-    const production = createWall(false, FEATURES, new Set())
+    const on = createWall(true, FEATURES, NO_SWITCHES)
+    const smoothOff = createWall(true, FEATURES, switches(['smooth']))
+    const production = createWall(false, FEATURES, NO_SWITCHES)
     expect(on.behaviorEnabled('eraser-crease')).toBe(true)
     for (const w of [on, smoothOff, production]) {
       expect(w.toolAllowed('Eraser')).toBe(true)
@@ -210,8 +258,44 @@ describe('createWall', () => {
     expect(smoothOff.behaviorEnabled('eraser-crease')).toBe(false)
     expect(production.behaviorEnabled('eraser-crease')).toBe(false)
   })
+  it('keeps a default-off feature off until its switch is turned on, in a preview build only', () => {
+    for (const f of FEATURES.filter((x) => x.defaultOn === false)) {
+      expect(createWall(true, FEATURES, NO_SWITCHES).featureEnabled(f.id), f.id).toBe(false)
+      expect(createWall(true, FEATURES, switches([], [f.id])).featureEnabled(f.id), f.id).toBe(true)
+      // Off wins over on, and a stored switch means nothing in production.
+      expect(createWall(true, FEATURES, switches([f.id], [f.id])).featureEnabled(f.id), f.id).toBe(false)
+      expect(createWall(false, FEATURES, switches([], [f.id])).featureEnabled(f.id), f.id).toBe(false)
+    }
+    // An "on" entry for an ordinary feature changes nothing about it.
+    expect(createWall(true, FEATURES, switches([some.id], [some.id])).featureEnabled(some.id)).toBe(false)
+  })
+  it('answers the loader questions only for a listed id, a preview build and a switch that is on', () => {
+    for (const f of LOADERS) {
+      const walls = {
+        production: createWall(false, FEATURES, switches([], [f.id])),
+        switchOff: createWall(true, FEATURES, NO_SWITCHES),
+        switchedOffAgain: createWall(true, FEATURES, switches([f.id], [f.id])),
+        on: createWall(true, FEATURES, switches([], [f.id])),
+      }
+      for (const [name, wall] of Object.entries(walls)) {
+        const want = name === 'on'
+        expect(wall.loaderEnabled(f.id), `${f.id} ${name}`).toBe(want)
+        for (const id of f.loader!.roots) expect(wall.rootAllowed(id), `${id} ${name}`).toBe(want)
+        for (const id of f.loader!.panes) expect(wall.paneAllowed(id), `${id} ${name}`).toBe(want)
+      }
+    }
+    // Unlike a tool or a command, an unlisted id is refused: nothing these
+    // guard is public, so a typo or a graduated entry cannot open one.
+    const everythingOn = createWall(true, FEATURES, switches([], FEATURES.map((f) => f.id)))
+    expect(everythingOn.rootAllowed('a root nobody lists')).toBe(false)
+    expect(everythingOn.paneAllowed('a pane nobody lists')).toBe(false)
+    expect(everythingOn.loaderEnabled('a feature nobody lists')).toBe(false)
+    // A feature with no loader has no loader to enable.
+    expect(everythingOn.loaderEnabled(some.id)).toBe(some.loader !== undefined)
+    expect(createWall(true, [], NO_SWITCHES).rootAllowed('plugin-probe')).toBe(false)
+  })
   it('treats an id the registry does not list as public (a graduated feature)', () => {
-    const wall = createWall(false, [], new Set())
+    const wall = createWall(false, [], NO_SWITCHES)
     expect(wall.featureEnabled('anything')).toBe(true)
     expect(wall.toolAllowed('Fillet')).toBe(true)
   })
@@ -392,10 +476,14 @@ describe('flag ON: a preview build', () => {
 
   const allToolNames = (): Set<string> => new Set(app.toolRegistry.ALL_TOOL_SPECS.map((t) => t.name as string))
 
-  it('is a preview build with every feature on', () => {
+  it('is a preview build with every feature at its default: on, except one that loads code', () => {
     expect(app.preview.previewBuild).toBe(true)
     expect(app.preview.previewFeatures().map((f) => f.id)).toEqual(FEATURES.map((f) => f.id))
-    expect(app.preview.enabledFeatureIds()).toEqual(FEATURES.map((f) => f.id))
+    expect(app.preview.enabledFeatureIds()).toEqual(ON_BY_DEFAULT)
+    for (const f of LOADERS) {
+      expect(app.preview.loaderEnabled(f.id), f.id).toBe(false)
+      for (const id of f.loader!.roots) expect(app.preview.rootAllowed(id), id).toBe(false)
+    }
   })
 
   it('offers the Eraser\'s crease modifier (the eraser-crease behavior, part of Smooth)', () => {
@@ -523,6 +611,9 @@ describe('the wall at its entry points', () => {
       .map((f) => f.slice(SRC.length + 1))
     expect(offenders).toEqual([])
     expect(readFileSync(join(HERE, 'build.ts'), 'utf8').match(/__HEW_PREVIEW__/g)?.length).toBeGreaterThan(0)
+    // Inside the wall's own folder, only build.ts and the lazy-import table read it.
+    const inWall = readdirSync(HERE).filter((n) => /\.tsx?$/.test(n) && !/\.test\.tsx?$/.test(n) && /__HEW_PREVIEW__/.test(readFileSync(join(HERE, n), 'utf8')))
+    expect(inWall.sort()).toEqual(['build.ts', 'loaderRoots.ts'])
   })
   it('has no run-time way to set the flag (no URL parameter, storage key or global setter)', () => {
     const wallSources = readdirSync(HERE).filter((n) => /\.tsx?$/.test(n) && !n.endsWith('.test.ts'))

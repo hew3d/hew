@@ -1076,7 +1076,7 @@ Deviations from the proposed parent policy in the web runs: Vite's dev
 server inlines a React-refresh preamble, so the Playwright spec adds the
 SHA-256 of each inline script in the served document to `script-src`
 alongside the boot hash; nothing else in the policy changes. The desktop
-run uses the policy in `shells/tauri/src-tauri/probe.conf.json` unmodified.
+run uses the `desktop.probe` policy of `shells/csp/policies.json` unmodified.
 The web runs also add `access-control-allow-origin: *` to responses so a
 fetch from the opaque-origin realm can only fail by policy, not by CORS.
 
@@ -1110,6 +1110,10 @@ that need those are skipped or recorded as not exercised there.
 | latency | recorded: worker p50=0.1 p95=0.2 ms; surface p50=0.1 p95=0.2 ms | recorded: worker p50=1 p95=1 ms; surface p50=0 p95=1 ms | not run | not run | not run | recorded: worker p50=1 p95=1 ms; surface p50=0 p95=1 ms |
 | throughput | recorded: 1000 messages in 19.9 ms (1000 items) | recorded: 1000 messages in 16.0 ms (1000 items) | not run | not run | not run | recorded: 1000 messages in 10.0 ms (1000 items) |
 | transfer | pass | pass | not run | not run | not run | pass |
+| ipc-surface | recorded: not the desktop shell | not run | not run | not run | not run | recorded: no bridge globals, the parent page is unreadable, both bridge URLs blocked by `connect-src`; `webkit.messageHandlers.ipc` takes a message, and the shell does not act on one without its key (window title unchanged; the host page can change it) |
+| ipc-background | recorded: not the desktop shell | not run | not run | not run | not run | recorded: the same as ipc-surface |
+| ipc-worker | recorded: not the desktop shell | not run | not run | not run | not run | recorded: no bridge, no raw channel; both bridge URLs fail, with no policy violation reported inside a Worker on this engine |
+| worker-under-coep | recorded: with the host isolated, the realm Worker and surface still start; frame and Worker are not isolated, no SharedArrayBuffer | not run | not run | not run | not run | not run (browser-only row) |
 | surface-spin | recorded: HOST FROZEN: the page stopped answering while the spinning surface was alive (see fallbacks) | recorded: HOST FROZEN: the page stopped answering while the spinning surface was alive (see fallbacks) | not run | not run | not run | not run (explicit-only) |
 
 ### Fallbacks in force
@@ -1121,6 +1125,7 @@ that need those are skipped or recorded as not exercised there.
 - All engines, surface-navigate-self: the surface's own navigation to the host origin is not blocked by the sandbox (Playwright saw the `/?probe-escape=1` request). The realm must treat a surface navigation to a same-origin URL as reachable and rely on the host's own rules for that URL.
 - All engines, surface-spin: a spinning surface script freezes the host page on both Playwright engines (the driver's evaluate gets no answer and the row never finishes). A surface cannot be assumed to run off the host's thread; the realm design must not rely on a frozen surface leaving the host responsive (kill by removing the frame is only possible when the host itself still runs).
 - WebKit (Playwright), surface-click-activation: `navigator.clipboard.readText()` is refused (no permission API on this engine), so the read half is recorded, not passed.
+- Linux WebKitGTK, ipc-surface and ipc-background: the engine's raw message channel (`window.webkit.messageHandlers.ipc`) exists inside a sandboxed realm frame and accepts a message. The frame has none of the shell's bridge (`__TAURI_INTERNALS__`, the invoke key) and cannot read the host page, and the shell dropped an invoke-shaped message that lacked its key. What keeps a realm frame from the shell's commands on this engine is therefore the key alone, so every desktop command a plugin feature adds checks the calling window's label and the plugin id on the host side, and consent is confirmed outside the webview. A realm Worker has no channel at all. macOS WKWebView and Windows WebView2 are not measured.
 - Cross-origin isolation is not used on any engine: the host sends no COOP/COEP, `hew.supports("wasm.threads")` is false everywhere, and a Worker is required on every engine (no `background.worker` fallback).
 
 ### Rows that failed with no fallback

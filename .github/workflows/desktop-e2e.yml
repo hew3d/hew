@@ -138,8 +138,8 @@ jobs:
       - name: Desktop E2E (tauri-driver, under Xvfb)
         run: xvfb-run -a pnpm --dir shells/tauri e2e
 
-      # Plugin realm probe: rebuilds the same debug binary with the proposed
-      # parent CSP (src-tauri/probe.conf.json), then
+      # Plugin realm probe: rebuilds the debug binary as a preview build with
+      # the probe's parent CSP (`desktop.probe` in shells/csp/policies.json), then
       # records how the webview treats the sandboxed realm. The JSON is the
       # input to docs/agents/PLUGINS.md.
       - name: Build desktop binary (plugin realm probe)

@@ -180,3 +180,67 @@ fn run_and_dispatch_answer_the_wall() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Every subcommand a code-loading Preview feature adds (`loader.cliCommands`).
+fn gated_subcommands() -> Vec<(String, String)> {
+    api::preview::features()
+        .iter()
+        .flat_map(|f| {
+            f.loader
+                .iter()
+                .flat_map(|l| l.cli_commands.iter())
+                .map(|c| (c.clone(), f.id.clone()))
+        })
+        .collect()
+}
+
+/// `hew-cli <args>`: (exit ok, stdout + stderr).
+fn cli(args: &[&str]) -> (bool, String) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_hew-cli"))
+        .args(args)
+        .output()
+        .expect("hew-cli runs");
+    (
+        out.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+/// A subcommand of a code-loading feature is compiled in only in a preview
+/// build: there it is in the usage text and answers its own `--help`; in a
+/// production build the usage text does not name it and typing it is an
+/// unknown subcommand, exactly as for a word that was never a subcommand.
+#[test]
+fn a_loader_subcommand_exists_only_in_a_preview_build() {
+    let (ok, usage) = cli(&["--help"]);
+    assert!(
+        ok && usage.contains("dispatch"),
+        "the usage text was not read: {usage}"
+    );
+    let (_, never) = cli(&["no-such-subcommand-at-all"]);
+    for (command, feature) in gated_subcommands() {
+        let named = usage
+            .lines()
+            .any(|l| l.split_whitespace().any(|w| w == command));
+        let (helped, help) = cli(&[&command, "--help"]);
+        if api::preview::PREVIEW_BUILD {
+            assert!(
+                named,
+                "{command} ({feature}) is not in the preview usage text"
+            );
+            assert!(helped, "{command} --help failed in a preview build: {help}");
+        } else {
+            assert!(!named, "the production usage text names {command}");
+            assert!(!helped, "{command} runs in a production build");
+            assert_eq!(
+                help.replace(&command, "X"),
+                never.replace("no-such-subcommand-at-all", "X"),
+                "{command} is answered differently from an unknown word"
+            );
+        }
+    }
+}

@@ -518,6 +518,10 @@ build. Any other value, or none, makes a production build. It reaches:
 - `crates/api` (its `build.rs` sets `cfg(hew_preview)`), and through it
   `hew-cli`, the MCP server, the WASM module's live API, and the plugin
   host's dispatch;
+- `crates/wasm-api` and `crates/hew-cli`, each with a `build.rs` of its
+  own that sets the same cfg, so an export or a subcommand of a feature
+  that loads code can be left out of a production build. Each crate fails
+  to compile if its flag and the API crate's disagree;
 - the desktop shell (`shells/tauri/src-tauri/build.rs`), for the native
   menu and the updater: a preview build never updates itself;
 - the app, as `__HEW_PREVIEW__` (`app/vite.config.ts`). The dev server
@@ -531,7 +535,8 @@ fails if it finds it set.
 
 **The registry.** `preview-features.json` at the repo root lists every
 Preview feature: an id, a name, a one-line state, an owner, and what it
-gates (`tools`, `actions`, `dockChips`, `apiCommands`, `behaviors`).
+gates (`tools`, `actions`, `dockChips`, `apiCommands`, `behaviors`, and
+for a feature that loads code, `loader`; see "Code loading" below).
 Nothing is gated anywhere else. The app reads it in `app/src/preview/`,
 `crates/api` in `src/preview.rs`, and the desktop shell in
 `src/preview_menu.rs`. In a production build an API command of an entry
@@ -546,6 +551,53 @@ handler neither lists nor touches an item that carries it. Refusal copy a
 handler writes that would name a Preview feature lives in
 `GATED_API_COPY`, with the production wording beside it; the wall test
 fails on any other handler string that names one.
+
+**Code loading.** A feature that loads and runs code (plugins are the
+first) has entry points no table holds, so its entry carries a `loader`
+object and `"defaultOn": false`. Its switch in Settings ▸ Preview starts
+off, and with the switch off a preview build behaves like a production
+one for that feature. The lists in `loader`, and how each is kept out of
+a production build:
+
+| List | What it names | Production build |
+|---|---|---|
+| `roots` | window roots picked by location hash in `app/src/main.tsx` | `previewBuild && rootAllowed('<id>')` ahead of the hash test; the root's lazy import is in `app/src/preview/loaderRoots.ts` behind the build literal, so the bundle has neither |
+| `panes` | Settings panes | `paneAllowed('<id>')` at the one tab table |
+| `shellCommands` | desktop commands | defined under `src/preview_only/`, a module compiled only with `cfg(hew_preview)`, and absent from the handler list every build registers |
+| `kernelExports` | exports of the WASM module | `#[cfg(hew_preview)]` in `crates/wasm-api` |
+| `cliCommands` | `hew-cli` subcommands | `#[cfg(hew_preview)]` on the match arm and the usage text |
+| `storage` | folders, databases and settings-key prefixes | touched only by code in the gated modules |
+| `markers` | strings that must not be in a production artifact | scanned for |
+
+`rootAllowed`, `paneAllowed` and `loaderEnabled` (`app/src/preview/`)
+answer false for an id no entry lists, the reverse of the rule for tools
+and commands: nothing they guard is public in any build. A host that
+loads code asks `loaderEnabled('<feature>')` before it starts anything.
+An event name a loader feature adds is a `GATED_VALUES` row, as for any
+other feature.
+
+Both shells' content security policies live in
+`shells/csp/policies.json`: a `production` and a `preview` policy for
+each shell, and the `probe` policy the realm probe is measured under,
+which no release serves. `shells/web/inject-csp.mjs` picks the web one by
+the flag; `tauri.conf.json` holds the desktop production policy, and
+`shells/csp/tauri-overlay.mjs` writes a `--config` overlay for any other.
+A Preview feature that needs a wider policy widens the preview one. No
+preview desktop build is given an overlay yet, so the check below holds
+`desktop.preview` equal to `desktop.production` until the release
+workflow and the dev script pass one. The
+production policies and the desktop capability files are pinned to copies
+under `shells/csp/baseline/`, so changing one takes an edit in both
+places. Hew sets no cross-origin isolation header on any tier.
+
+`scripts/check-production-artifacts.mjs` runs after the production app
+build in `scripts/verify.sh`, and in the release workflow for a production
+tag. It fails on a production policy or capability file that left its
+baseline, an isolation header, a `markers` string or a feature's state
+line anywhere in the app build, and a `kernelExports` name in the
+production kernel's types. The kernel `.wasm` and the native binaries
+embed the registry's text, so they are checked by export and command
+name, not by scanning for markers.
 
 **Adding a feature.** Add its entry to `preview-features.json` and build
 the feature as usual. The wall tests walk the registry, so the entry is
@@ -580,6 +632,13 @@ build, its body says what. Graduating a feature is the `feat` commit.
 it graduates; `app/src/preview/guidePages.test.ts` checks the unreleased
 changelog, the README, the roadmap and the published guide for the
 names it knows.
+
+**The realm probe.** `/#plugin-probe` in a preview build with the Plugins
+switch on runs the sandbox measurements the plugin design rests on.
+`pnpm --dir app exec playwright test e2e/plugin-realm` runs them in a
+browser under the `web.probe` policy; `pnpm --dir shells/tauri
+e2e:build:probe` then `e2e:probe` runs them in the desktop webview under
+`desktop.probe`.
 
 **Running both builds.** `scripts/verify.sh` and `scripts/verify-full.sh`
 run both on their own; nothing in them skips the production half. By hand:

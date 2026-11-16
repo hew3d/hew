@@ -27,6 +27,26 @@ export interface PreviewFeature {
   readonly apiCommands: readonly string[]
   /** Non-list couplings, named in code as `behaviorEnabled('<id>')`. */
   readonly behaviors: readonly string[]
+  /** The switch's state before the user touches it; absent means on. */
+  readonly defaultOn?: boolean
+  /** Entry points of a feature that loads and runs code. A production build
+   *  strips this whole object: it has none of them to ask about. */
+  readonly loader?: PreviewLoader
+}
+
+/** What a code-loading feature gates beyond the lookup kinds. The app asks
+ *  about `roots` and `panes`; the rest are enforced by the Rust build and by
+ *  `scripts/check-production-artifacts.mjs`. */
+export interface PreviewLoader {
+  /** Window roots selected by location hash (`main.tsx`). */
+  readonly roots: readonly string[]
+  /** Settings panes. */
+  readonly panes: readonly string[]
+  readonly shellCommands: readonly string[]
+  readonly kernelExports: readonly string[]
+  readonly cliCommands: readonly string[]
+  readonly storage: readonly string[]
+  readonly markers: readonly string[]
 }
 
 export const PREVIEW_FEATURES: readonly PreviewFeature[] = registry.features as readonly PreviewFeature[]

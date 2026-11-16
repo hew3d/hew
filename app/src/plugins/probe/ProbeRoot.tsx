@@ -10,9 +10,10 @@ declare global {
 }
 
 /**
- * Dev-only render root for the realm probe (plugin system stage P0). Selected
- * by `#plugin-probe?rows=a,b&interactive=1` in main.tsx, which only honors it
- * in dev or VITE_HEW_TEST builds.
+ * Render root for the realm probe. Selected by
+ * `#plugin-probe?rows=a,b&interactive=1` in main.tsx, which honors it only in
+ * a preview build whose Plugins switch is on (the Preview wall's loader
+ * root `plugin-probe`).
  */
 export function ProbeRoot() {
   const started = useRef(false)

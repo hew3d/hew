@@ -413,6 +413,13 @@ jobs:
             exit 1
           fi
 
+      # The app build this bundle was made from carries nothing of a Preview
+      # feature that loads code (docs/dev/DEVELOPMENT.md "Preview features").
+      - name: Check the production artifacts
+        if: ${{ !contains(github.ref_name, '-pre.') }}
+        shell: bash
+        run: node scripts/check-production-artifacts.mjs --dist app/dist --dts app/src/wasm/pkg/wasm_api.d.ts
+
       # The bundler sweeps the build distro's libwayland into the AppImage
       # as a GTK dependency, and that stale copy breaks EGL display creation
       # against newer hosts' graphics stacks — white window, "Could not
@@ -585,6 +592,17 @@ jobs:
             echo "::error::The built kernel reports preview_build=$have; $TAG needs $want."
             exit 1
           fi
+
+      # A production release carries nothing of a Preview feature that loads
+      # code, and the production content security policy, on the files
+      # about to be deployed (docs/dev/DEVELOPMENT.md "Preview features").
+      - name: Check the production artifacts
+        if: ${{ !contains(github.ref_name, '-pre.') }}
+        run: >
+          node scripts/check-production-artifacts.mjs
+          --dist app/dist
+          --dts app/src/wasm/pkg/wasm_api.d.ts
+          --web-dist shells/web/dist
 
       # The self-hosting artifact: "unzip behind any static file server".
       # Deliberately excludes the Cloudflare-specific _headers file. Carries

@@ -1,8 +1,8 @@
 /**
- * Plugin system stage P0: the realm probe inside the real desktop webview
- * (WebKitGTK under tauri-driver). Run against the probe build
- * (`pnpm --dir shells/tauri e2e:build:probe`), which carries the proposed
- * parent CSP from src-tauri/probe.conf.json.
+ * The realm probe inside the real desktop webview (WebKitGTK under
+ * tauri-driver). Run against the probe build
+ * (`pnpm --dir shells/tauri e2e:build:probe`), a preview build that carries
+ * the `desktop.probe` policy of shells/csp/policies.json.
  *
  * The desktop run cannot grant clipboard permissions, click through frames,
  * or count network requests, so those rows record what the page observed
@@ -46,6 +46,9 @@ const ROWS = [
   'latency',
   'throughput',
   'transfer',
+  'ipc-surface',
+  'ipc-background',
+  'ipc-worker',
 ]
 
 describe('Hew desktop realm probe', () => {
@@ -57,6 +60,8 @@ describe('Hew desktop realm probe', () => {
 
     const rows = ROWS.join(',')
     await browser.execute((r: string) => {
+      // The Plugins switch is off until asked for, and the wall reads it at load.
+      localStorage.setItem('hew.settings.preview', JSON.stringify({ off: [], on: ['plugins'] }))
       window.location.hash = `#plugin-probe?rows=${r}`
       window.location.reload()
     }, rows)
@@ -76,5 +81,12 @@ describe('Hew desktop realm probe', () => {
     // The page must have produced a row for every id; individual outcomes are
     // the record, not assertions (a fallback is a valid result).
     expect(results.rows.map((r) => r.row)).toEqual(ROWS)
+
+    // The exception: the shell-reach rows. This webview is the only place
+    // they measure anything, and a `fail` there means sandboxed code reached
+    // the shell (or the row could not tell), which has no fallback.
+    for (const row of results.rows.filter((r) => r.row.startsWith('ipc-'))) {
+      if (row.status === 'fail') throw new Error(`${row.row}: ${row.detail}`)
+    }
   })
 })

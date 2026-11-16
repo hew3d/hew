@@ -9,6 +9,12 @@
  *    its entry deleted).
  *  - An id the registry lists is reachable only in a preview build, and only
  *    while its feature's switch is on.
+ *  - A feature's switch is on unless the user turned it off, except a feature
+ *    marked `defaultOn: false`, which is off unless the user turned it on.
+ *  - The loader kinds (`rootAllowed`, `paneAllowed`, `loaderEnabled`) are the
+ *    other way round from the rest: they name code that exists only for a
+ *    Preview feature, so an id the registry does NOT list is refused too.
+ *    Nothing they guard is public, in any build.
  */
 
 import type { PreviewFeature } from './registry'
@@ -28,12 +34,26 @@ export interface Wall {
   isPreviewTool(name: string): boolean
   /** Whether the command is a Preview feature's, in a preview build. */
   isPreviewAction(id: string): boolean
+  /** Whether the hash-selected window root `id` may render: a loader root of
+   *  a feature that is on. False for an id no entry lists. */
+  rootAllowed(id: string): boolean
+  /** Whether the Settings pane `id` may be shown; as `rootAllowed`. */
+  paneAllowed(id: string): boolean
+  /** Whether code-loading feature `featureId` may start: it has a loader, the
+   *  build is a preview build, and its switch is on. */
+  loaderEnabled(featureId: string): boolean
+}
+
+/** The stored switches: features turned off, and default-off features turned on. */
+export interface Switches {
+  readonly off: ReadonlySet<string>
+  readonly on: ReadonlySet<string>
 }
 
 export function createWall(
   build: boolean,
   features: readonly PreviewFeature[],
-  switchedOff: ReadonlySet<string>,
+  switches: Switches,
 ): Wall {
   const owner = (pick: (f: PreviewFeature) => readonly string[]): Map<string, string> => {
     const out = new Map<string, string>()
@@ -44,9 +64,24 @@ export function createWall(
   const actionOwner = owner((f) => f.actions)
   const chipOwner = owner((f) => f.dockChips)
   const behaviorOwner = owner((f) => f.behaviors)
-  const known = new Set(features.map((f) => f.id))
+  const rootOwner = owner((f) => f.loader?.roots ?? [])
+  const paneOwner = owner((f) => f.loader?.panes ?? [])
+  const known = new Map(features.map((f) => [f.id, f]))
 
-  const featureEnabled = (id: string): boolean => !known.has(id) || (build && !switchedOff.has(id))
+  const switchOn = (f: PreviewFeature): boolean =>
+    f.defaultOn === false ? switches.on.has(f.id) && !switches.off.has(f.id) : !switches.off.has(f.id)
+  const featureEnabled = (id: string): boolean => {
+    const f = known.get(id)
+    return f === undefined || (build && switchOn(f))
+  }
+  const loaderEnabled = (id: string): boolean => {
+    const f = known.get(id)
+    return build && f !== undefined && f.loader !== undefined && switchOn(f)
+  }
+  const loaderAllowed = (map: Map<string, string>, id: string): boolean => {
+    const f = map.get(id)
+    return f !== undefined && loaderEnabled(f)
+  }
   const allowed = (map: Map<string, string>, id: string): boolean => {
     const f = map.get(id)
     return f === undefined || featureEnabled(f)
@@ -61,5 +96,8 @@ export function createWall(
     behaviorEnabled: (id) => allowed(behaviorOwner, id),
     isPreviewTool: (name) => build && toolOwner.has(name),
     isPreviewAction: (id) => build && actionOwner.has(id),
+    rootAllowed: (id) => loaderAllowed(rootOwner, id),
+    paneAllowed: (id) => loaderAllowed(paneOwner, id),
+    loaderEnabled,
   }
 }

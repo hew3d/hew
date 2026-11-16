@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { requiresPreview } from '../../test/requiresPreview'
 import { BOOT_HASH_LITERAL, BOOT_PROBE_SOURCE } from './bootProbe'
 import { REALM_CSP, createRealmFrame, probeSrcdoc } from './realm'
 
 const NONCE = 'abcdef0123456789abcdef0123456789'
 
 describe('probeSrcdoc', () => {
+  beforeEach((ctx) => requiresPreview(ctx, 'plugins'))
   const doc = probeSrcdoc({ nonce: NONCE, mode: 'surface' })
 
   it('contains exactly one script whose content is the boot source', () => {
@@ -29,6 +31,7 @@ describe('probeSrcdoc', () => {
 })
 
 describe('createRealmFrame', () => {
+  beforeEach((ctx) => requiresPreview(ctx, 'plugins'))
   afterEach(() => {
     vi.restoreAllMocks()
     document.body.innerHTML = ''

@@ -6,26 +6,28 @@
  */
 
 import { featureEnabled, previewFeatures } from '.'
-import { previewSwitches } from './switches'
+import { previewSwitches, switchReadsOn, withSwitch, type StoredSwitches } from './switches'
 import { PREVIEW_SETTINGS } from './copy'
 import { useViewSetting } from '../settings/useViewSetting'
 import { SettingsForm, SettingsNote, SettingsRow } from '../settings/SettingsForm'
 
-const NO_SWITCHES = { get: () => [] as readonly string[], subscribe: () => () => undefined }
+const NONE: StoredSwitches = { off: [], on: [] }
+const NO_SWITCHES = { get: () => NONE, subscribe: () => () => undefined }
 
 export function PreviewPane() {
   const store = previewSwitches ?? NO_SWITCHES
-  const off = useViewSetting<readonly string[]>(store.get, store.subscribe)
+  const stored = useViewSetting<StoredSwitches>(store.get, store.subscribe)
   const features = previewFeatures()
   return (
     <SettingsForm>
       <SettingsNote>{PREVIEW_SETTINGS.intro}</SettingsNote>
       {features.map((f) => {
-        const on = !off.includes(f.id)
+        const defaultOn = f.defaultOn !== false
+        const on = switchReadsOn(stored, f.id, defaultOn)
         // What this window loaded with, against what is stored now.
         const pending = on !== featureEnabled(f.id)
         return (
-          <FeatureRow key={f.id} id={f.id} name={f.name} state={f.state} on={on} pending={pending} />
+          <FeatureRow key={f.id} id={f.id} name={f.name} state={f.state} on={on} defaultOn={defaultOn} pending={pending} />
         )
       })}
     </SettingsForm>
@@ -37,12 +39,14 @@ function FeatureRow({
   name,
   state,
   on,
+  defaultOn,
   pending,
 }: {
   id: string
   name: string
   state: string
   on: boolean
+  defaultOn: boolean
   pending: boolean
 }) {
   const inputId = `preview-switch-${id}`
@@ -57,8 +61,7 @@ function FeatureRow({
             data-preview-switch={id}
             checked={on}
             onChange={(e) => {
-              const next = (previewSwitches?.get() ?? []).filter((x) => x !== id)
-              previewSwitches?.set(e.target.checked ? next : [...next, id])
+              previewSwitches?.set(withSwitch(previewSwitches.get(), id, e.target.checked, defaultOn))
             }}
           />
           <span>{on ? PREVIEW_SETTINGS.on : PREVIEW_SETTINGS.off}</span>

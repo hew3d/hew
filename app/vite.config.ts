@@ -40,7 +40,9 @@ function previewFlag(command: 'build' | 'serve'): boolean {
 }
 
 // With the flag off, the registry is stripped to the ids the wall needs: the
-// feature names, state lines and API names stay out of the production bundle.
+// feature names, state lines and API names stay out of the production bundle,
+// and so does every `loader` object: a production build has none of a
+// code-loading feature's entry points, so nothing there asks about them.
 // Runs before Vite's own JSON handling, so it sees the file's text.
 function stripPreviewRegistry(): Plugin {
   return {

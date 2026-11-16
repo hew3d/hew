@@ -10,13 +10,13 @@
 
 import { previewBuild } from './build'
 import { PREVIEW_FEATURES } from './registry'
-import { switchedOffNow } from './switches'
+import { switchesNow } from './switches'
 import { createWall } from './wall'
 
 export { previewBuild }
 export type { PreviewFeature } from './registry'
 
-const wall = createWall(previewBuild, PREVIEW_FEATURES, switchedOffNow())
+const wall = createWall(previewBuild, PREVIEW_FEATURES, switchesNow())
 
 /** The features in the registry (the Settings list); empty in production. */
 export const previewFeatures = wall.features
@@ -27,6 +27,9 @@ export const chipAllowed = wall.chipAllowed
 export const behaviorEnabled = wall.behaviorEnabled
 export const isPreviewTool = wall.isPreviewTool
 export const isPreviewAction = wall.isPreviewAction
+export const rootAllowed = wall.rootAllowed
+export const paneAllowed = wall.paneAllowed
+export const loaderEnabled = wall.loaderEnabled
 
 /** Ids of the features that are on in this window: what Report Bug stamps. */
 export function enabledFeatureIds(): string[] {

@@ -22,6 +22,8 @@ import { I18nProvider } from '@lingui/react'
 import { startI18n } from './i18n/activate'
 import { seedLocaleLengthUnit } from './shop/localeUnits'
 import { installStrandedPressFix } from './strandedPress'
+import { previewBuild, rootAllowed } from './preview'
+import { ProbeRoot } from './preview/loaderRoots'
 
 // The Settings window (Tauri: a separate webview; web: unused — the modal
 // fallback renders inline in App) loads this same entry with a `#settings`
@@ -31,15 +33,13 @@ import { installStrandedPressFix } from './strandedPress'
 const isSettingsWindow = window.location.hash.startsWith('#settings')
 const isLibraryWindow = window.location.hash.startsWith('#library')
 
-// Dev-only realm probe root (plugin system stage P0): measures sandboxed-frame
-// behavior on the engine it runs in. Inert unless the hash asks for it AND the
-// build is a dev or VITE_HEW_TEST build; a production build never renders it.
-const isProbeBuild = import.meta.env.DEV || import.meta.env.VITE_HEW_TEST === '1'
-const isProbeWindow = isProbeBuild && window.location.hash.startsWith('#plugin-probe')
-// The ternary on a build-time constant lets a production build drop the import.
-const ProbeRoot = isProbeBuild
-  ? React.lazy(() => import('./plugins/probe/ProbeRoot.tsx').then((m) => ({ default: m.ProbeRoot })))
-  : null
+// The realm probe root: measures sandboxed-frame behavior on the engine it
+// runs in. It belongs to the Preview feature "plugins" and the Preview wall is
+// its only gate (docs/dev/DEVELOPMENT.md "Preview features", "Code loading"):
+// the hash selects it only in a preview build whose Plugins switch is on. The
+// build flag comes first so a production build drops the root's name, and the
+// component is `null` there (src/preview/loaderRoots.ts keeps its code out).
+const isProbeWindow = previewBuild && rootAllowed('plugin-probe') && window.location.hash.startsWith('#plugin-probe')
 
 // Shop Mode (`ShopApp`, `shop/shellMode.ts`): a THIRD render root selected
 // the same hash-branch way as Settings/Library above, but — unlike those

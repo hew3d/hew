@@ -166,9 +166,45 @@ pub struct Feature {
     pub dock_chips: Vec<String>,
     pub api_commands: Vec<String>,
     pub behaviors: Vec<String>,
-    /// A code-loading entry point the feature gates (none exists yet).
+    /// The switch's state before the user touches it (Settings > Preview).
+    /// Absent means on. A feature that runs other people's code is off
+    /// until asked for.
+    #[serde(default = "default_on")]
+    pub default_on: bool,
+    /// The entry points of a feature that loads and runs code. Absent for
+    /// every feature that does not.
     #[serde(default)]
-    pub loader: Option<String>,
+    pub loader: Option<Loader>,
+}
+
+fn default_on() -> bool {
+    true
+}
+
+/// What a code-loading feature gates beyond the five lookup kinds: entry
+/// points that sit in no table the wall walks, so each list is held to its
+/// own rule (docs/dev/DEVELOPMENT.md "Preview features", "Code loading").
+/// Every list may be empty. In a production build none of these exists:
+/// the code behind each is compiled out, not refused.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Loader {
+    /// Window roots the app selects by location hash (`app/src/main.tsx`).
+    pub roots: Vec<String>,
+    /// Settings panes.
+    pub panes: Vec<String>,
+    /// Desktop shell commands, compiled only under `cfg(hew_preview)`.
+    pub shell_commands: Vec<String>,
+    /// Exports of the WASM module, compiled only under `cfg(hew_preview)`.
+    pub kernel_exports: Vec<String>,
+    /// `hew-cli` subcommands, compiled only under `cfg(hew_preview)`.
+    pub cli_commands: Vec<String>,
+    /// Folders, databases and settings-key prefixes a production build
+    /// never reads, writes or deletes.
+    pub storage: Vec<String>,
+    /// Strings that must not occur in any production artifact
+    /// (`scripts/check-production-artifacts.mjs`).
+    pub markers: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -195,6 +231,18 @@ pub fn feature_of_command(command: &str) -> Option<&'static Feature> {
     features()
         .iter()
         .find(|f| f.api_commands.iter().any(|c| c == command))
+}
+
+/// The entry whose loader lists `name` under the kind `pick` selects.
+pub fn feature_of_loader_name(
+    pick: fn(&Loader) -> &Vec<String>,
+    name: &str,
+) -> Option<&'static Feature> {
+    features().iter().find(|f| {
+        f.loader
+            .as_ref()
+            .is_some_and(|l| pick(l).iter().any(|n| n == name))
+    })
 }
 
 /// The entry whose `behaviors` names `behavior`.
@@ -495,6 +543,60 @@ mod tests {
             let before = list.len();
             list.dedup();
             assert_eq!(list.len(), before, "a name is listed by two entries");
+        }
+    }
+
+    #[test]
+    fn no_loader_name_is_listed_twice_in_its_kind() {
+        type Pick = fn(&Loader) -> &Vec<String>;
+        let picks: [(&str, Pick); 6] = [
+            ("roots", |l| &l.roots),
+            ("panes", |l| &l.panes),
+            ("shellCommands", |l| &l.shell_commands),
+            ("kernelExports", |l| &l.kernel_exports),
+            ("cliCommands", |l| &l.cli_commands),
+            ("storage", |l| &l.storage),
+        ];
+        for (kind, pick) in picks {
+            let mut names: Vec<&str> = features()
+                .iter()
+                .filter_map(|f| f.loader.as_ref())
+                .flat_map(|l| pick(l).iter().map(String::as_str))
+                .collect();
+            assert!(
+                names.iter().all(|n| !n.trim().is_empty()),
+                "an empty {kind} name"
+            );
+            names.sort_unstable();
+            let before = names.len();
+            names.dedup();
+            assert_eq!(names.len(), before, "a {kind} name is listed twice");
+        }
+    }
+
+    #[test]
+    fn a_feature_that_loads_code_is_off_until_asked_for() {
+        for f in features() {
+            if f.loader.is_some() {
+                assert!(
+                    !f.default_on,
+                    "{} loads code, so its switch must default to off (defaultOn: false)",
+                    f.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_marker_is_long_enough_to_mean_something() {
+        for f in features() {
+            for m in f.loader.iter().flat_map(|l| &l.markers) {
+                assert!(
+                    m.len() >= 8,
+                    "marker {m:?} of {} is too short to scan for",
+                    f.id
+                );
+            }
         }
     }
 

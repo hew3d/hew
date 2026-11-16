@@ -4,10 +4,15 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, test, type Page } from '@playwright/test'
 import { BOOT_PROBE_SOURCE } from '../../src/plugins/probe/bootProbe'
+import { requiresPreview } from '../helpers/preview'
+
+// The probe is the first thing behind the Preview feature "plugins": it
+// exists only in a preview build and renders only with that switch on.
+requiresPreview('plugins')
 
 /**
- * Plugin system stage P0: the realm probe on Playwright's engines. One test
- * per row, in table order. Each test loads the dev-only `#plugin-probe` root
+ * The realm probe on Playwright's engines. One test per row, in table order.
+ * Each test turns the Plugins switch on, loads the `#plugin-probe` root
  * with the proposed parent policy applied by route
  * interception, runs one row, and appends the outcome to
  * results/<project>.json (gitignored), from which docs/agents/PLUGINS.md is
@@ -24,12 +29,17 @@ declare global {
   }
 }
 
+// The policy the probe is measured under: `web.probe` in
+// shells/csp/policies.json, the one file both shells' policies live in. It
+// pins the boot script by hash, so a boot source that no longer matches the
+// file fails here rather than as a row.
 const BOOT_HASH = createHash('sha256').update(BOOT_PROBE_SOURCE).digest('base64')
-const PARENT_CSP =
-  `default-src 'self'; script-src 'self' 'wasm-unsafe-eval' blob: 'sha256-${BOOT_HASH}'; ` +
-  `style-src 'self' 'unsafe-inline' blob:; img-src 'self' data: blob:; font-src 'self' data: blob:; ` +
-  `connect-src 'self' blob: https://plugins.hew3d.org; worker-src 'self' blob:; manifest-src 'self'; ` +
-  `media-src 'self' blob:; object-src 'none'; base-uri 'self'`
+const PARENT_CSP = (
+  JSON.parse(readFileSync(new URL('../../../shells/csp/policies.json', import.meta.url), 'utf8')) as { web: { probe: string } }
+).web.probe
+if (!PARENT_CSP.includes(`'sha256-${BOOT_HASH}'`)) {
+  throw new Error('shells/csp/policies.json web.probe does not pin the probe boot script; update its hash')
+}
 
 const here = dirname(fileURLToPath(import.meta.url))
 const RESULTS_DIR = join(here, 'results')
@@ -62,9 +72,21 @@ let requests: string[] = []
 
 test.describe.configure({ timeout: 60_000 })
 
+/** Set by a test that wants the host document served cross-origin isolated. */
+let isolateHost = false
+
 test.beforeEach(async ({ page, baseURL }) => {
   exampleHits = 0
   requests = []
+  isolateHost = false
+  // The Plugins switch is off until asked for; the wall reads it once, at load.
+  await page.addInitScript(() => {
+    try {
+      localStorage.setItem('hew.settings.preview', JSON.stringify({ off: [], on: ['plugins'] }))
+    } catch {
+      /* an opaque-origin frame has no storage; only the host page needs it */
+    }
+  })
   page.on('request', (r) => requests.push(r.url()))
   if (process.env.PROBE_DEBUG) {
     page.on('console', (m) => console.log('[console]', m.type(), m.text()))
@@ -86,6 +108,13 @@ test.beforeEach(async ({ page, baseURL }) => {
       // Not part of the proposed policy: lets a fetch from the opaque-origin
       // realm succeed unless the CSP stops it, so a block cannot be CORS.
       'access-control-allow-origin': '*',
+    }
+    if (isolateHost) {
+      // Never part of any shipped policy (the host sends neither header):
+      // only the recorded-only isolation row asks for these.
+      headers['cross-origin-opener-policy'] = 'same-origin'
+      headers['cross-origin-embedder-policy'] = 'require-corp'
+      headers['cross-origin-resource-policy'] = 'cross-origin'
     }
     if (req.resourceType() === 'document') {
       // Vite's dev server inlines a React-refresh preamble; hash every inline
@@ -284,6 +313,44 @@ test('offline-boot', async ({ page, context }, ti) => {
   }
   record(ti.project.name, row, { engine: meta.engine, ua: meta.ua, isolatedHost: meta.isolatedHost })
   expect(row.status, row.detail).not.toBe('fail')
+})
+
+// Shell reach: in a browser there is no shell, so these record that; the
+// desktop run (shells/tauri/e2e/probe) is where they measure.
+for (const id of ['ipc-surface', 'ipc-background', 'ipc-worker']) {
+  test(id, async ({ page }, ti) => {
+    await runRow(page, ti.project.name, id)
+  })
+}
+
+// Recorded only, and not a row of the page's own table: what a realm Worker
+// does when the HOST is cross-origin isolated. Hew sends neither isolation
+// header on any tier, so this is the record of the road not taken, kept so a
+// later proposal to isolate the host starts from a measurement.
+test('worker-under-coep', async ({ page }, ti) => {
+  isolateHost = true
+  await load(page, 'worker-blob,worker-isolation,surface-boot')
+  let row: Row
+  // A page that never finishes cannot be asked who it is; keep what the other rows recorded.
+  const file = join(RESULTS_DIR, `${ti.project.name}.json`)
+  const prior = existsSync(file) ? (JSON.parse(readFileSync(file, 'utf8')) as Results) : null
+  let meta: Pick<Results, 'engine' | 'ua' | 'isolatedHost'> = { engine: prior?.engine ?? ti.project.name, ua: prior?.ua ?? '', isolatedHost: prior?.isolatedHost ?? false }
+  try {
+    const results = await finish(page)
+    // This page was served isolated on purpose; the file's own flag describes the ordinary runs.
+    meta = { engine: results.engine, ua: results.ua, isolatedHost: prior?.isolatedHost ?? false }
+    const by = Object.fromEntries(results.rows.map((r) => [r.row, r]))
+    row = {
+      row: 'worker-under-coep',
+      status: 'recorded',
+      detail: `${results.isolatedHost ? 'host isolated' : 'NOT MEASURED, the isolation headers did not isolate the host on this engine'}; worker-blob ${by['worker-blob']?.status} (${by['worker-blob']?.detail}); isolation ${by['worker-isolation']?.detail}; surface-boot ${by['surface-boot']?.status}`,
+      data: { hostIsolated: results.isolatedHost, rows: results.rows },
+    }
+  } catch (e) {
+    row = { row: 'worker-under-coep', status: 'recorded', detail: `the probe page did not finish under host isolation: ${String(e)}`, data: { finished: false } }
+  }
+  record(ti.project.name, row, meta)
+  expect(row.status).toBe('recorded')
 })
 
 for (const id of ['latency', 'throughput', 'transfer']) {

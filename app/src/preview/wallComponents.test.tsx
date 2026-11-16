@@ -163,7 +163,7 @@ describe('preview build', () => {
     const { gatherSystemInfo } = await import('../log/reportBundle')
     const info = gatherSystemInfo('1.0.0', 'web-linux')
     expect(info.preview).toBe(true)
-    expect(info.previewFeatures).toEqual(FEATURES.map((f) => f.id))
+    expect(info.previewFeatures).toEqual(FEATURES.filter((f) => f.defaultOn !== false).map((f) => f.id))
   })
 
   it('crash reproducer: the manifest carries the same stamp', async () => {

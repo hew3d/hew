@@ -47,8 +47,9 @@ preview_crates() {
 #           workflow and by CI's `wasm-release` job, which holds it to its
 #           size ceiling
 #   web     typecheck, lint, i18n, vitest in both builds (each held to
-#           app/scripts/check-unit-skips.mjs), then the production app build
-#           and the site (needs both flavors in target/wasm-flavors; leaves
+#           app/scripts/check-unit-skips.mjs), then the production app build,
+#           the check of what it must not contain
+#           (scripts/check-production-artifacts.mjs), and the site (needs both flavors in target/wasm-flavors; leaves
 #           app/src/wasm/pkg as the preview module, the dev default)
 #   tauri   Tauri host crate fmt, then clippy and tests in both builds
 #           (needs app/dist from the web lane)
@@ -195,6 +196,11 @@ if lane web; then
   # app/vite.config.ts, for this build only.
   echo "=== pnpm --dir app build (production) ==="
   HEW_UNOPTIMIZED_WASM=1 pnpm --dir app build
+
+  # What that build, the production kernel and both shells' policies must
+  # not contain: anything of a Preview feature that loads code.
+  echo "=== production artifacts (policy, capabilities, bundle, kernel exports) ==="
+  node scripts/check-production-artifacts.mjs
   # Back to the preview module, the dev server's default build.
   scripts/wasm-flavors.sh use preview
 

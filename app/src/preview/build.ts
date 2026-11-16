@@ -1,5 +1,6 @@
 /**
- * The one place the build flag is read. `__HEW_PREVIEW__` is a literal
+ * The one place the build flag is read as a value (`loaderRoots.ts` reads the
+ * literal too, only to guard its dynamic imports; see there). `__HEW_PREVIEW__` is a literal
  * `true` or `false` that `vite.config.ts` (or `vitest.config.ts`) defines from
  * the build-time variable `HEW_PREVIEW`; nothing at run time can change it.
  *

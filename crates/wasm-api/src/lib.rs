@@ -170,6 +170,15 @@ pub fn preview_build() -> bool {
     api::preview::PREVIEW_BUILD
 }
 
+// This crate's own `cfg(hew_preview)` (build.rs) and the API crate's are set
+// from the same variable by two build scripts; a build where they disagree
+// would leave a Preview export in a module whose API refuses Preview
+// commands, or the reverse, so it does not compile.
+const _: () = assert!(
+    cfg!(hew_preview) == api::preview::PREVIEW_BUILD,
+    "wasm-api and api disagree about HEW_PREVIEW"
+);
+
 // ------------------------------------------------------- diagnostic logging
 //
 // The wasm half of the log seam (see `log.rs`): install the kernel-side

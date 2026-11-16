@@ -907,7 +907,7 @@ impl Connection {
             ForwardReply::Failed(ForwardFailure::Unavailable) => refused(
                 Refusal::api(
                     "plugin_unavailable",
-                    "This plugin is installed but not running. Enable it in Settings ▸ Plugins, or reload it.",
+                    "This plugin is not running. Start it or reload it, then try again.",
                 )
                 .with_detail(serde_json::json!({ "plugin": plugin })),
             ),
@@ -1845,7 +1845,7 @@ mod tests {
         );
         assert_eq!(
             run(&mut conn, serde_json::json!({"failed": "unavailable"}))["error"],
-            serde_json::json!({"code": -32000, "message": "refused", "data": {"refusal": "plugin_unavailable", "failed_index": 0, "failed_method": method, "detail": {"plugin": base}, "explanation": "This plugin is installed but not running. Enable it in Settings ▸ Plugins, or reload it."}})
+            serde_json::json!({"code": -32000, "message": "refused", "data": {"refusal": "plugin_unavailable", "failed_index": 0, "failed_method": method, "detail": {"plugin": base}, "explanation": "This plugin is not running. Start it or reload it, then try again."}})
         );
         assert_eq!(
             run(&mut conn, serde_json::json!({"failed": "no_handler"}))["error"],

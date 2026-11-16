@@ -78,3 +78,62 @@ export const SURFACE_HIT = `(() => {
   document.body.innerHTML = '<div id="hit" style="position:fixed;inset:0"></div>'
   document.getElementById('hit').addEventListener('pointerdown', (e) => hewProbeReport({ hit: [e.clientX, e.clientY] }))
 })()`
+
+// What a realm frame can see of the desktop shell's command bridge. The shell
+// injects its bridge into its own pages; a sandboxed frame must find none of
+// it. Reported: the bridge's globals, the engine's raw message channels
+// (WebKit's `webkit.messageHandlers`, WebView2's `chrome.webview`) and what
+// posting to one does, a read of the parent's bridge, and whether the bridge's
+// two request URLs answer.
+export const SURFACE_IPC = `(() => {
+  const kind = (f) => { try { return typeof f() } catch (e) { return 'threw ' + String(e && e.name) } }
+  const violations = []
+  document.addEventListener('securitypolicyviolation', (e) => violations.push(e.effectiveDirective || e.violatedDirective))
+  const post = (name, f) => {
+    try {
+      const target = f()
+      if (target === undefined || target === null) return 'absent'
+      // Two invoke-shaped messages with nothing a realm could not write: one
+      // harmless, one that would retitle the main window if the shell acted
+      // on it. The host compares the title before and after.
+      target.postMessage(JSON.stringify({ cmd: 'plugin:app|version', callback: 0, error: 0, payload: {} }))
+      for (const key of [undefined, '', 0]) {
+        target.postMessage(JSON.stringify({
+          cmd: 'plugin:window|set_title', callback: 0, error: 0,
+          payload: { label: 'main', value: 'hew-probe-reached-the-shell' },
+          options: {}, __TAURI_INVOKE_KEY__: key,
+        }))
+      }
+      return 'posted'
+    } catch (e) { return 'threw ' + String(e && e.name) }
+  }
+  const tryFetch = (url) => {
+    const before = violations.length
+    return Promise.race([
+      fetch(url, { method: 'POST', body: '{}' }).then((r) => 'allowed ' + r.status, (e) => 'blocked ' + String(e && e.name)),
+      new Promise((res) => setTimeout(() => res('timeout'), 1500)),
+    ]).then((outcome) => new Promise((res) => setTimeout(() => res(outcome + ' csp=' + (violations.slice(before).join('+') || 'none')), 20)))
+  }
+  const report = {
+    globals: {
+      __TAURI_INTERNALS__: kind(() => window.__TAURI_INTERNALS__),
+      __TAURI__: kind(() => window.__TAURI__),
+      __TAURI_INVOKE_KEY__: kind(() => window.__TAURI_INVOKE_KEY__),
+      ipc: kind(() => window.ipc),
+      webkit: kind(() => window.webkit),
+      messageHandlers: kind(() => window.webkit.messageHandlers),
+      chromeWebview: kind(() => window.chrome.webview),
+    },
+    parentBridge: kind(() => window.parent.__TAURI_INTERNALS__),
+    topBridge: kind(() => window.top.__TAURI_INTERNALS__),
+    posts: {
+      'window.ipc': post('ipc', () => window.ipc),
+      'webkit.messageHandlers.ipc': post('webkit', () => window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ipc),
+      'chrome.webview': post('webview2', () => window.chrome && window.chrome.webview),
+    },
+    fetches: {},
+  }
+  tryFetch('ipc://localhost/plugin%3Aapp%7Cversion')
+    .then((r) => { report.fetches.ipc = r; return tryFetch('http://ipc.localhost/plugin%3Aapp%7Cversion') })
+    .then((r) => { report.fetches.http = r; hewProbeReport(report) })
+})()`

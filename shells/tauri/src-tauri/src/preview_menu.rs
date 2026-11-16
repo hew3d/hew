@@ -437,6 +437,123 @@ mod tests {
         }
     }
 
+    /// Desktop commands of a code-loading Preview feature
+    /// (`loader.shellCommands`). A desktop command answers any window's
+    /// webview, so one of these must not exist in a production build at
+    /// all: it is defined in a module compiled only under
+    /// `cfg(hew_preview)`, and its name is not in the handler list a
+    /// production build registers.
+    #[test]
+    fn a_loader_shell_command_is_in_no_production_handler_list() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Loader {
+            shell_commands: Vec<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            loader: Option<Loader>,
+        }
+        #[derive(serde::Deserialize)]
+        struct File {
+            features: Vec<Entry>,
+        }
+        let names: Vec<String> = serde_json::from_str::<File>(REGISTRY_JSON)
+            .expect("preview-features.json does not parse")
+            .features
+            .into_iter()
+            .filter_map(|f| f.loader)
+            .flat_map(|l| l.shell_commands)
+            .collect();
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let main = std::fs::read_to_string(src.join("main.rs")).expect("main.rs");
+        // The list every build registers: the first `generate_handler!` in
+        // main.rs, up to its closing bracket.
+        let start = main
+            .find("tauri::generate_handler![")
+            .expect("main.rs registers its commands with generate_handler!");
+        let list = &main[start..start + main[start..].find("])").expect("the list closes")];
+        assert!(
+            list.contains("read_file") && list.lines().count() > 10,
+            "the handler list was not read"
+        );
+        // What a production build registers: the list without any entry
+        // that sits under its own `#[cfg(hew_preview)]` line.
+        let mut production_list = String::new();
+        let mut gated_next = false;
+        for line in list.lines() {
+            if line.trim() == "#[cfg(hew_preview)]" {
+                gated_next = true;
+            } else if gated_next {
+                gated_next = false;
+            } else {
+                production_list.push_str(line);
+                production_list.push('\n');
+            }
+        }
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        let named = |text: &str, name: &str| {
+            text.match_indices(name).any(|(i, _)| {
+                !text[..i].chars().next_back().is_some_and(is_ident)
+                    && !text[i + name.len()..].chars().next().is_some_and(is_ident)
+            })
+        };
+        // The gated module tree: `src/preview_only/`, declared in main.rs
+        // only as `#[cfg(hew_preview)] mod preview_only;`.
+        fn sources(dir: &std::path::Path, out: &mut String) {
+            for entry in std::fs::read_dir(dir).expect("a source folder") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    sources(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push_str(&std::fs::read_to_string(&path).expect("source"));
+                }
+            }
+        }
+        let gated_dir = src.join("preview_only");
+        let mut gated_source = String::new();
+        if gated_dir.is_dir() {
+            let declared = main.lines().collect::<Vec<_>>().windows(2).any(|w| {
+                w[0].trim() == "#[cfg(hew_preview)]" && w[1].trim() == "mod preview_only;"
+            });
+            assert!(
+                declared,
+                "src/preview_only exists but main.rs does not declare it under #[cfg(hew_preview)]"
+            );
+            assert_eq!(
+                main.matches("mod preview_only").count(),
+                1,
+                "main.rs declares preview_only more than once"
+            );
+            sources(&gated_dir, &mut gated_source);
+        }
+        // The whole of main.rs must register every name somewhere (under the
+        // cfg), or the command is written but answers nobody.
+        for name in &names {
+            assert!(
+                !named(&production_list, name),
+                "{name} is in the handler list a production build registers"
+            );
+            let defined = gated_source
+                .match_indices(&format!("fn {name}"))
+                .any(|(i, m)| {
+                    gated_source[i + m.len()..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c == '(' || c == '<')
+                });
+            assert!(
+                defined,
+                "{name} is in loader.shellCommands but is not defined under src/preview_only/"
+            );
+            assert!(
+                named(&main, name),
+                "{name} is defined but main.rs never registers it"
+            );
+        }
+    }
+
     #[test]
     fn the_wall_is_on_only_in_a_production_build() {
         assert_eq!(WALL_ON, !cfg!(hew_preview));

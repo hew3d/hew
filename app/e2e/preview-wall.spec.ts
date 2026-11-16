@@ -119,6 +119,7 @@ test.describe('production-shape build', () => {
     const names = await tabs.allTextContents()
     expect(names.length).toBeGreaterThan(5)
     expect(names.map((n) => n.toLowerCase())).not.toContain('preview')
+    for (const f of features) expect(names, f.name).not.toContain(f.name)
     // The controls list carries no withheld command either.
     await page.getByRole('tab', { name: 'Controls' }).click()
     const pane = page.getByRole('tabpanel')
@@ -252,6 +253,19 @@ test.describe('production-shape build', () => {
     expect(after.blends).toBe(before.blends)
     expect(after.hash).toBe(before.hash)
   })
+  test('a loader root is not there: its hash shows the ordinary app, stored switch or not', async ({ page }) => {
+    for (const f of features.filter((x) => x.loader !== undefined)) {
+      await page.evaluate((id) => localStorage.setItem('hew.settings.preview', JSON.stringify({ off: [], on: [id] })), f.id)
+      for (const root of f.loader!.roots) {
+        await page.goto(`/#${root}`)
+        await page.reload()
+        await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, { timeout: 90_000 })
+        await expect(page.getByTestId('menu-bar')).toBeVisible()
+        await expect(page.locator('#probe-mount')).toHaveCount(0)
+      }
+      await page.evaluate(() => localStorage.removeItem('hew.settings.preview'))
+    }
+  })
 })
 
 test.describe('preview build', () => {
@@ -267,14 +281,35 @@ test.describe('preview build', () => {
     await expect(mark).toHaveAttribute('title', /unfinished features/)
   })
 
-  test('Settings > Preview lists every feature with a switch, all on', async ({ page }) => {
+  test('Settings > Preview lists every feature with a switch, on unless it loads code', async ({ page }) => {
     await page.getByRole('button', { name: 'Settings' }).click()
     await page.getByRole('tab', { name: 'Preview' }).click()
     const pane = page.getByRole('tabpanel')
     for (const f of features) {
       await expect(pane.getByText(f.name, { exact: true })).toBeVisible()
       await expect(pane.getByText(f.state, { exact: false })).toBeVisible()
-      await expect(pane.locator(`[data-preview-switch="${f.id}"]`)).toBeChecked()
+      await expect(pane.locator(`[data-preview-switch="${f.id}"]`)).toBeChecked({ checked: f.defaultOn !== false })
+    }
+  })
+
+  test('a loader root shows the ordinary app until its feature is switched on, then its own page after a reload', async ({ page }) => {
+    for (const f of features.filter((x) => x.loader !== undefined)) {
+      for (const root of f.loader!.roots) {
+        await page.goto(`/#${root}`)
+        await page.reload()
+        await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, { timeout: 90_000 })
+        await expect(page.getByTestId('menu-bar')).toBeVisible()
+        // The switch, through the real Settings pane; it applies at the next start.
+        await page.getByRole('button', { name: 'Settings' }).click()
+        await page.getByRole('tab', { name: 'Preview' }).click()
+        await page.getByRole('tabpanel').locator(`[data-preview-switch="${f.id}"]`).check()
+        await expect(page.getByTestId('menu-bar')).toBeVisible()
+        await page.goto(`/#${root}?rows=none`)
+        await page.reload()
+        await expect(page.getByTestId('menu-bar')).toHaveCount(0)
+        await expect(page.locator('#probe-mount')).toBeAttached()
+        await page.evaluate(() => localStorage.removeItem('hew.settings.preview'))
+      }
     }
   })
 

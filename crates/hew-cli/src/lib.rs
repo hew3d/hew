@@ -19,6 +19,15 @@ pub mod run;
 
 pub use host::CliHost;
 
+// This crate's own `cfg(hew_preview)` (build.rs) and the API crate's are set
+// from the same variable by two build scripts; a build where they disagree
+// would compile a Preview subcommand into a binary whose API refuses
+// Preview commands, or the reverse, so it does not compile.
+const _: () = assert!(
+    cfg!(hew_preview) == api::preview::PREVIEW_BUILD,
+    "hew-cli and api disagree about HEW_PREVIEW"
+);
+
 /// The version this binary reports: the release tag's version when the
 /// release workflow stamped one at compile time (`HEW_RELEASE_VERSION`),
 /// else the crate's own.

@@ -39,6 +39,16 @@ export interface RegistryFeature {
   dockChips: string[]
   apiCommands: string[]
   behaviors: string[]
+  defaultOn?: boolean
+  loader?: {
+    roots: string[]
+    panes: string[]
+    shellCommands: string[]
+    kernelExports: string[]
+    cliCommands: string[]
+    storage: string[]
+    markers: string[]
+  }
 }
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')

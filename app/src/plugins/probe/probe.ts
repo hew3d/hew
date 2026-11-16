@@ -8,6 +8,7 @@ import {
   SURFACE_ENV,
   SURFACE_HIT,
   SURFACE_IMG,
+  SURFACE_IPC,
   SURFACE_NAVIGATE_REMOTE,
   SURFACE_NAVIGATE_SELF,
   SURFACE_SPIN,
@@ -62,6 +63,9 @@ export const ROW_IDS = [
   'latency',
   'throughput',
   'transfer',
+  'ipc-surface',
+  'ipc-background',
+  'ipc-worker',
   'surface-spin',
 ] as const
 
@@ -131,9 +135,9 @@ interface SurfaceRun {
 async function runSurface(
   ctx: Ctx,
   script: string,
-  opts: { wantReport?: boolean; ms?: number; parent?: HTMLElement } = {},
+  opts: { wantReport?: boolean; ms?: number; parent?: HTMLElement; mode?: 'background' | 'surface' } = {},
 ): Promise<SurfaceRun> {
-  const h = await realm(ctx, 'surface', opts.parent)
+  const h = await realm(ctx, opts.mode ?? 'surface', opts.parent)
   const from = h.log.length
   h.send({ t: 'surface', html: '<head></head><body></body>', scripts: [{ code: script }] })
   let ready = false
@@ -153,6 +157,77 @@ async function runSurface(
 }
 
 type RowFn = (ctx: Ctx) => Promise<RowResult>
+
+/** The main window's native title, or null where the page cannot ask (a browser, or no permission). */
+async function nativeTitle(): Promise<string | null> {
+  if (!isTauri) return null
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    return await getCurrentWindow().title()
+  } catch {
+    return null
+  }
+}
+
+/** Control for the title check: the host page, which holds the bridge, can
+ *  retitle the window with the same command the frame's message names. Without
+ *  this, an unchanged title could mean the command is simply not permitted. */
+async function hostCanRetitle(): Promise<boolean> {
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    const win = getCurrentWindow()
+    const before = await win.title()
+    await win.setTitle('hew-probe-control')
+    const changed = (await win.title()) === 'hew-probe-control'
+    await win.setTitle(before)
+    return changed && (await win.title()) === before
+  } catch {
+    return false
+  }
+}
+
+async function ipcFrameRow(ctx: Ctx, mode: 'background' | 'surface'): Promise<RowResult> {
+  const control = isTauri ? await hostCanRetitle() : false
+  const titleBefore = control ? await nativeTitle() : null
+  const s = await runSurface(ctx, SURFACE_IPC, { ms: 8000, mode })
+  if (!s.ready || !s.report) return { status: 'fail', detail: 'the reach script never reported; row inconclusive' }
+  const r = s.report as unknown as {
+    globals: Record<string, string>
+    parentBridge: string
+    topBridge: string
+    posts: Record<string, string>
+    fetches: Record<string, string>
+  }
+  await sleep(500)
+  const titleAfter = control ? await nativeTitle() : null
+  const data = { shell: isTauri, mode, hostCanRetitle: control, titleBefore, titleAfter, ...r }
+  if (titleAfter !== titleBefore || titleAfter === 'hew-probe-reached-the-shell')
+    return { status: 'fail', detail: `a ${mode} realm frame ran a shell command: the window title changed to "${titleAfter}"`, data }
+  const present = Object.entries(r.globals).filter(([n, v]) => n.startsWith('__TAURI') && v !== 'undefined').map(([n]) => n)
+  // Reading the parent's bridge must throw (a cross-origin read); any answer
+  // that is a type, `undefined` included on the shell, means the frame can
+  // see into the host page.
+  const sawParent = [r.parentBridge, r.topBridge].some((v) => !v.startsWith('threw'))
+  const answered = Object.entries(r.fetches).filter(([, v]) => v.startsWith('allowed')).map(([n]) => `fetch ${n}`)
+  // A request still pending is not a block, and a block with no policy
+  // violation reported may have reached the shell and been turned away
+  // there: neither is evidence that the bridge URL is out of reach.
+  const stalled = Object.entries(r.fetches).filter(([, v]) => v.startsWith('timeout')).map(([n]) => `fetch ${n}`)
+  const unevidenced = Object.entries(r.fetches).filter(([, v]) => v.startsWith('blocked') && v.endsWith('csp=none')).map(([n]) => `fetch ${n}`)
+  const problems = [...present, ...(sawParent ? ['the parent page is readable'] : []), ...answered]
+  if (problems.length) return { status: 'fail', detail: `a ${mode} realm frame reaches the shell: ${problems.join(', ')}`, data }
+  const posted = Object.entries(r.posts).filter(([, v]) => v === 'posted').map(([n]) => n)
+  if (isTauri && stalled.length)
+    return { status: 'fail', detail: `inconclusive: ${stalled.join(', ')} neither answered nor was blocked in time`, data }
+  if (isTauri && unevidenced.length && !posted.length)
+    return { status: 'recorded', detail: `no bridge and the parent is unreadable; ${unevidenced.join(', ')} failed with no policy violation reported, so the block is not shown to be the policy's`, data }
+  if (!isTauri)
+    return { status: 'recorded', detail: `not the desktop shell: no bridge to reach (raw channels that took a message: ${posted.join(', ') || 'none'})`, data }
+  const acted = titleBefore === null ? 'whether the shell acted on it could not be read here' : 'the shell did not act on it (window title unchanged; the host page can change it)'
+  return posted.length
+    ? { status: 'recorded', detail: `no bridge, the parent is unreadable, neither bridge URL answered; a raw channel took a keyless message (${posted.join(', ')}) and ${acted}`, data }
+    : { status: 'pass', detail: 'no bridge, no raw channel took a message, the parent is unreadable, and neither bridge URL answered', data }
+}
 
 const pass = (detail: string, data?: unknown): RowResult => ({ status: 'pass', detail, data })
 const fail = (detail: string, data?: unknown): RowResult => ({ status: 'fail', detail, data })
@@ -457,6 +532,37 @@ const ROWS: Record<string, RowFn> = {
     return r.byteLength === size && detached && back?.byteLength === size
       ? pass(`transferred, not copied; round trip ${ms.toFixed(1)} ms`, data)
       : fail('buffer was copied or lost', data)
+  },
+
+  // Shell reach. The desktop shell's commands answer any page that holds its
+  // bridge, so a realm must hold none of it. A raw engine channel that takes a
+  // message without the bridge's key is recorded, not failed: the shell
+  // refuses a message without the key, and what the host must then check on
+  // its own side is a design input, so the record has to show it.
+  'ipc-surface': (ctx) => ipcFrameRow(ctx, 'surface'),
+  'ipc-background': (ctx) => ipcFrameRow(ctx, 'background'),
+
+  async 'ipc-worker'(ctx) {
+    const h = await withWorker(ctx)
+    const r = await ask(h, { t: 'ipc' }, 'ipc', 8000)
+    const globals = r.globals as Record<string, string>
+    const fetches = r.fetches as { name: string; outcome: string; detail: string; csp?: string }[]
+    const present = Object.entries(globals).filter(([n, v]) => n.startsWith('__TAURI') && v !== 'undefined').map(([n]) => n)
+    const answered = fetches.filter((f) => f.outcome === 'allowed').map((f) => f.name)
+    const data = { shell: isTauri, globals, fetches }
+    if (present.length || answered.length)
+      return fail(`a realm Worker reaches the shell: ${[...present, ...answered].join(', ')}`, data)
+    const channels = ['ipc', 'webkit', 'chrome'].filter((n) => globals[n] !== 'undefined')
+    if (!isTauri) return recorded(`not the desktop shell: no bridge to reach (channels seen: ${channels.join(', ') || 'none'})`, data)
+    const stalled = fetches.filter((f) => f.outcome !== 'blocked').map((f) => f.name)
+    if (stalled.length) return fail(`inconclusive: ${stalled.join(', ')} neither answered nor was blocked in time`, data)
+    if (channels.length) return recorded(`no bridge and no request answered; raw channel object(s) visible: ${channels.join(', ')}`, data)
+    // As in worker-denials: a block rests on the policy only when a violation
+    // was reported for it, and WebKit reports none inside a Worker.
+    const unevidenced = fetches.filter((f) => f.csp === 'none').map((f) => f.name)
+    return unevidenced.length
+      ? recorded(`no bridge and no raw channel; both bridge URLs failed, ${unevidenced.length} with no policy violation reported on this engine`, data)
+      : pass('no bridge, no raw channel, and both bridge URLs blocked by policy', data)
   },
 
   async 'surface-spin'(ctx) {

@@ -60,6 +60,11 @@ export const AMBIGUOUS: RegExp[] = [
   /\]\(\/learn\/smooth\//,
   /\bSmooth (Off|levels?|1|2|3)\b/,
   /Twist and end scale/i,
+  // "plugin" alone is an ordinary word here (the license exception, the
+  // roadmap); what is held back is loading one inside Hew.
+  /Settings ▸ Plugins/,
+  /Preview ▸ Plugins/,
+  /\binstall(s|ed|ing)? (a|the|your) plugin\b/i,
 ]
 
 interface Chapter {
