@@ -141,6 +141,28 @@ describe('window coverage', () => {
     expect(p.extendScreenBounds(new Float32Array([0, 0, 20]), new THREE.Matrix4(), emptyScreenBounds())).toBe(false)
   })
 
+  it('isScreenCollinear: a single diagonal line, collinear lines and a point have no screen area; a bent pair does', () => {
+    const cam = new THREE.PerspectiveCamera(60, 1, 0.1, 100)
+    cam.position.set(0, 0, 10)
+    cam.updateMatrixWorld()
+    const p = new MarqueeProjector(cam, 200, 200)
+    const I = new THREE.Matrix4()
+    // One diagonal segment: its screen rect is large, its area zero.
+    expect(p.isScreenCollinear(new Float32Array([-3, -2, 0, 3, 2, 0]), I)).toBe(true)
+    // Two segments end to end on one line.
+    expect(p.isScreenCollinear(new Float32Array([-3, -2, 0, 0, 0, 0, 0, 0, 0, 3, 2, 0]), I)).toBe(true)
+    // A point.
+    expect(p.isScreenCollinear(new Float32Array([1, 1, 0, 1, 1, 0]), I)).toBe(true)
+    // Seen edge-on: a segment along the view axis projects to a point.
+    expect(p.isScreenCollinear(new Float32Array([0, 0, 0, 0, 0, 5]), I)).toBe(true)
+    // An L has area.
+    expect(p.isScreenCollinear(new Float32Array([-3, 0, 0, 3, 0, 0, 3, 0, 0, 3, 3, 0]), I)).toBe(false)
+    // Empty and behind-the-camera geometry is not "flat": the strict path
+    // already handles it.
+    expect(p.isScreenCollinear(new Float32Array(0), I)).toBe(false)
+    expect(p.isScreenCollinear(new Float32Array([0, 0, 20, 1, 1, 20]), I)).toBe(false)
+  })
+
   it('boxScreenBounds brackets every vertex of the box and refuses a box behind the camera', () => {
     const cam = new THREE.PerspectiveCamera(60, 1, 0.1, 100)
     cam.position.set(0, 0, 10)

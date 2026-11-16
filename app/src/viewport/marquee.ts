@@ -260,6 +260,49 @@ export class MarqueeProjector {
   }
 
   /**
+   * Whether every vertex projects onto one screen line (or point) within
+   * `tolPx` — a single line, collinear lines, or lines seen edge-on: geometry
+   * with no screen area, whatever its axis-aligned bounding rect looks like
+   * (a diagonal segment has a large rect and zero area). False when empty or
+   * any vertex is behind the near plane (such geometry has no screen extent
+   * and the callers already treat it strictly).
+   */
+  isScreenCollinear(
+    positions: ArrayLike<number>, matrixWorld: THREE.Matrix4, tolPx = 0.5,
+  ): boolean {
+    if (positions.length === 0) return false
+    const e = this.mv.multiplyMatrices(this.view, matrixWorld).elements
+    const n = positions.length / 3
+    const sx = new Float64Array(n)
+    const sy = new Float64Array(n)
+    for (let k = 0; k < n; k++) {
+      const x = positions[3 * k], y = positions[3 * k + 1], z = positions[3 * k + 2]
+      const vx = e[0] * x + e[4] * y + e[8] * z + e[12]
+      const vy = e[1] * x + e[5] * y + e[9] * z + e[13]
+      const vz = e[2] * x + e[6] * y + e[10] * z + e[14]
+      if (!this.inFront(vz)) return false
+      this.projectInto(0, vx, vy, vz)
+      sx[k] = this.px[0]
+      sy[k] = this.px[1]
+    }
+    // Baseline: from the first point to the one farthest from it.
+    let far = 0
+    let best = -1
+    for (let k = 1; k < n; k++) {
+      const d = (sx[k] - sx[0]) ** 2 + (sy[k] - sy[0]) ** 2
+      if (d > best) { best = d; far = k }
+    }
+    if (far === 0 || best <= tolPx * tolPx) return true
+    const len = Math.sqrt(best)
+    const dx = (sx[far] - sx[0]) / len
+    const dy = (sy[far] - sy[0]) / len
+    for (let k = 0; k < n; k++) {
+      if (Math.abs((sx[k] - sx[0]) * dy - (sy[k] - sy[0]) * dx) > tolPx) return false
+    }
+    return true
+  }
+
+  /**
    * Screen bounds of a local-space box's eight corners, written to `out`.
    * Every vertex of the mesh the box encloses projects inside these bounds
    * (perspective maps a convex hull's corners to its extreme screen points

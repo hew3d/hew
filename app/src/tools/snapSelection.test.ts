@@ -842,6 +842,18 @@ describe('resolveSelectableRef — a line drawn inside a component selects the c
     expect(resolveSelectableRef(bareSnap(), DOWN, deps(scene, []))).toEqual(draft('draft-edge', GROUND, K(4)))
   })
 
+  it('a free drawing the cone reports but the pick radius misses does not hide the line', () => {
+    // The kernel's aperture reports the free edge (depth 3, in front), but
+    // it lies a metre from the cursor: far outside the 8 px a click on a
+    // free line needs, so the click cannot take it and the line behind wins.
+    const far: Listing = {
+      units: [{ key: K(950), edges: [{ key: K(4), a: [-1, 1, 0], b: [1, 1, 0], store: FREE_21 }] }],
+      regions: [],
+    }
+    const scene = fakeScene({ placedEdge: LINE, drawn: { 0: far }, edge: { sketch: 11n, edge: 4n, depth: 3 } })
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(scene, []))).toEqual({ kind: 'instance', id: 7n })
+  })
+
   it('in a group context the placement resolves through the context (the group above it)', () => {
     const scene = fakeScene({ placedEdge: LINE })
     const seen: bigint[] = []

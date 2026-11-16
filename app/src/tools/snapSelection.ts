@@ -119,8 +119,9 @@ export interface SelectScene {
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
   ): { sketch(): bigint; edge(): bigint; depth(): number; free(): void } | undefined
   /** The lines / fills drawn inside components under the ray, ranked best
-   *  first, at most one hit per shown top-level instance (parallel arrays;
-   *  `points` is three world floats per hit). Always an object, empty on a
+   *  first: every line of a placement the cone reaches (a placement may
+   *  appear several times, capped per placement), with the cone point and
+   *  depth ranked (parallel arrays; `points` is three world floats per hit). Always an object, empty on a
    *  miss. Every hit must be `free()`d. */
   pick_instance_sketch_edge?(
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
@@ -448,7 +449,11 @@ function noFarther(depth: number, other: number): boolean {
 }
 
 /** The nearest depth of the free drawing under the ray that would take the
- *  click instead of a component's line (the top level's `underRay` picks). */
+ *  click instead of a component's line (the top level's `underRay` picks). A
+ *  pick the kernel's aperture reports only counts when `underRay` would
+ *  select it too, i.e. it lies within the same `DRAFT_PICK_PX` of the cursor
+ *  on its plane (`pickInCtx`); a free line outside that radius cannot be
+ *  clicked and so must not hide a component's line. */
 function nearestFreeDrawingDepth(ray: Ray, deps: ResolveDeps): number {
   if (deps.context.length !== 0) return Infinity
   const args = [ray.origin[0], ray.origin[1], ray.origin[2], ray.direction[0], ray.direction[1], ray.direction[2]] as const
@@ -456,7 +461,10 @@ function nearestFreeDrawingDepth(ray: Ray, deps: ResolveDeps): number {
   for (const p of [deps.scene.pick_sketch_edge(...args), deps.scene.pick_sketch_region(...args)]) {
     if (p === undefined) continue
     try {
-      nearest = Math.min(nearest, p.depth())
+      const depth = p.depth()
+      const at = pointAlongRay(ray, depth)
+      if (pickInCtx(sketchCtxOf(p.sketch(), undefined, deps), ray, at, undefined, deps) === null) continue
+      nearest = Math.min(nearest, depth)
     } finally {
       p.free()
     }
@@ -519,8 +527,8 @@ const instanceSketchMemo: {
  * A line or fill drawn inside a component, under the ray: the placement it is
  * seen through (`instance`, the top-level placement) and the node a click on
  * it selects (`ref`, by `deps.resolveInstance`); `via` says whether it was
- * the line or the fill. The kernel ranks the hits, one per shown instance,
- * lines before fills as everywhere else; this takes the first that is drawn
+ * the line or the fill. The kernel ranks the hits, best first (a placement may appear
+ * several times), lines before fills as everywhere else; this takes the first that is drawn
  * (`scopedSketchVisible`), not behind a face (`lineNotBehindFace`) or a free
  * drawing, and resolves to something selectable in the active context — a
  * hit on an out-of-scope placement resolves to nothing and never masks a

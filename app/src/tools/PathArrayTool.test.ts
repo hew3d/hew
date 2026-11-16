@@ -13,7 +13,7 @@ import type { Ray } from '../viewport/math'
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 const BOX: NodeRef = { kind: 'object', id: 7n }
 
-function makeScene(opts: { arrayThrows?: string; boxLengthX?: number; spacingX?: number } = {}) {
+function makeScene(opts: { arrayThrows?: string; boxLengthX?: number; spacingX?: number; lineReachX?: number } = {}) {
   let generation = 0n
   const calls: unknown[][] = []
   const scene = {
@@ -41,6 +41,12 @@ function makeScene(opts: { arrayThrows?: string; boxLengthX?: number; spacingX?:
       }
       return out
     }),
+    // A component instance (id 9) of that same box, with a drawn line reaching
+    // `lineReachX` along +x: its extent counts the line, the part does not.
+    instance_pose: () => new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]),
+    instance_expanded_members: () => new BigUint64Array([7n]),
+    instance_expanded_local_poses: () => new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]),
+    instance_sketch_bounds: () => new Float64Array([0, 0, 0, opts.lineReachX ?? 0, 0.1, 0.1]),
     ...(opts.boxLengthX !== undefined
       ? { object_bounds: () => new Float64Array([0, 0, 0, opts.boxLengthX ?? 0, 0.1, 0.1]) }
       : {}),
@@ -54,7 +60,7 @@ function makeScene(opts: { arrayThrows?: string; boxLengthX?: number; spacingX?:
   return { scene, calls }
 }
 
-function makeTool(selection: NodeRef[] = [BOX], opts: { arrayThrows?: string; boxLengthX?: number; spacingX?: number } = {}) {
+function makeTool(selection: NodeRef[] = [BOX], opts: { arrayThrows?: string; boxLengthX?: number; spacingX?: number; lineReachX?: number } = {}) {
   const { scene, calls } = makeScene(opts)
   const onCommit = vi.fn()
   const onToast = vi.fn()
@@ -136,6 +142,18 @@ describe('PathArrayTool', () => {
     type(clear.tool, '4')
     enter(clear.tool)
     expect(clear.tool.statusHint()).not.toContain('overlap')
+  })
+
+  it('judges overlap by the part\'s solids, not a line drawn inside the component', () => {
+    // A 0.5 m part with a 5 m line drawn past it; copies 0.75 m apart clear
+    // the part, though they would not clear its extent.
+    const instance: NodeRef = { kind: 'instance', id: 9n }
+    const t = makeTool([instance], { boxLengthX: 0.5, spacingX: 0.75, lineReachX: 5 })
+    t.tool.onPointerDown(null, RAY)
+    type(t.tool, '4')
+    enter(t.tool)
+    expect(t.onCommit).toHaveBeenCalled()
+    expect(t.tool.statusHint()).not.toContain('overlap')
   })
 
   it('judges overlap with the scale ramp: shrinking copies clear what full-size ones would not', () => {

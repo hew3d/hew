@@ -3902,6 +3902,7 @@ export default function Viewport({
 
       const bb: ScreenBounds = { minX: 0, minY: 0, maxX: 0, maxY: 0 }
       const identity = new THREE.Matrix4()
+      const scratchPoint = new THREE.Vector3()
       for (const cand of marqueeCandidates()) {
         const parts = candidateParts(cand)
         // The lines drawn inside the candidate's instances count as drawn
@@ -3940,16 +3941,35 @@ export default function Viewport({
             // are only worth scanning when the rect reaches the object's box
             // at all; a part whose box corner is behind the camera has no box
             // bounds and goes straight to the exact scan. A lines-only
-            // instance gets the same rule; a single line has no screen area,
-            // so it only ever matches by full enclosure.
-            let reaches = true
-            if (lines.length === 0 && bounds.every((b) => b !== null)) {
+            // instance gets the same rule, but one with no screen area (a
+            // single line, collinear lines, seen edge-on: tested on the
+            // projected points, not the axis-aligned rect, which a diagonal
+            // line fills) only ever matches by full enclosure.
+            const flat = parts.length === 0 && projector.isScreenCollinear(lines, identity)
+            let reaches = !flat
+            if (reaches && bounds.every((b) => b !== null)) {
               const u = emptyScreenBounds()
               for (const b of bounds) {
                 u.minX = Math.min(u.minX, b!.minX); u.maxX = Math.max(u.maxX, b!.maxX)
                 u.minY = Math.min(u.minY, b!.minY); u.maxY = Math.max(u.maxY, b!.maxY)
               }
-              reaches = boundsCoverage(u, rect) > 0
+              // The lines' own box joins the cull box, so an instance with
+              // lines still skips the exact scan when the rect misses both.
+              if (lines.length > 0) {
+                const lineBox = new THREE.Box3()
+                for (let i = 0; i + 2 < lines.length; i += 3) {
+                  lineBox.expandByPoint(scratchPoint.set(lines[i], lines[i + 1], lines[i + 2]))
+                }
+                if (projector.boxScreenBounds(lineBox, identity, bb)) {
+                  u.minX = Math.min(u.minX, bb.minX); u.maxX = Math.max(u.maxX, bb.maxX)
+                  u.minY = Math.min(u.minY, bb.minY); u.maxY = Math.max(u.maxY, bb.maxY)
+                  reaches = boundsCoverage(u, rect) > 0
+                } else {
+                  reaches = true
+                }
+              } else {
+                reaches = boundsCoverage(u, rect) > 0
+              }
             }
             if (reaches) {
               const acc = emptyScreenBounds()
@@ -10785,28 +10805,39 @@ export default function Viewport({
       // line lies on or in front of), and answered even with no snap at all:
       // no snap names such a line, so the tip would otherwise read as bare
       // ground while a click selects the component.
-      const placed = ((): InstanceSketchPick | null => {
+      const placedRaw = ((): InstanceSketchPick | null => {
         if (
-          ray === undefined || toolController.activeToolName !== 'Select' || readOnlyRef.current ||
+          ray === undefined || toolController.activeToolName !== 'Select' ||
           toolHasArmedGesture(activeTool) ||
           buttons !== 0 || dragMove !== null || marqueeDrag !== null || deferredTapDrag !== null
         ) {
           return null
         }
+        // Not gated on read-only: a click in Shop Mode selects such a line
+        // through the same resolver, so its hover cue (the dot and the chip's
+        // kind) must show it; only the editor-style identification second
+        // line below stays editor-only.
         return instanceSketchUnderRay(ray, selectionDeps())
       })()
+      // A guide snap follows the click's own precedence
+      // (`dispatchSelectPick`): a component's LINE beats the guide lying
+      // along it, so the tip names the component, not the guide; a component
+      // fill does not, so the guide keeps the tip.
+      const guideSnap = snap?.kind === 'on-guide'
+      const placed = placedRaw !== null && guideSnap && placedRaw.via !== 'edge' ? null : placedRaw
       if (snap === null && placed === null) {
         onInferenceChangeRef.current?.(null)
       } else {
-        const at = snap !== null
-          ? new THREE.Vector3(snap.x, snap.y, snap.z)
+        const snapShown = snap !== null && !(guideSnap && placed !== null)
+        const at = snapShown
+          ? new THREE.Vector3(snap!.x, snap!.y, snap!.z)
           : new THREE.Vector3(placed!.point[0], placed!.point[1], placed!.point[2])
         const p = worldToPixels(at)
         onInferenceChangeRef.current?.({
-          kind: snap !== null ? snap.kind : placed!.via === 'edge' ? 'on-edge' : 'on-face',
+          kind: snapShown ? snap!.kind : placed!.via === 'edge' ? 'on-edge' : 'on-face',
           screenX: p.x,
           screenY: p.y,
-          direction: snap?.direction,
+          direction: snapShown ? snap!.direction : undefined,
           frame: getDrawingAxes(wasmScene),
           projected: activeTool.snapProjected?.() ?? false,
           // A draw tool's drawing plane (view-die design §4): the ring
@@ -11238,7 +11269,7 @@ export default function Viewport({
       // would just be a harmless, redundant re-publish of the same snap
       // there, but the point is to keep this an opt-in seam, not to rely on
       // "harmless" reasoning about the shared path.
-      if (readOnlyRef.current) publishSnapCues(snap, activeTool)
+      if (readOnlyRef.current) publishSnapCues(snap, activeTool, 0, ray)
       // Walk's press-relative drag (camera.md §4) — see Tool.onPointerRawDown's doc.
       if ('onPointerRawDown' in activeTool) {
         const [rawX, rawY] = canvasPoint(ev)

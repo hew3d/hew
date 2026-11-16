@@ -818,3 +818,112 @@ test('ungrouping a hidden group, and undoing it, keeps the lines inside its comp
   await page.keyboard.press('Control+Shift+Z')
   await expect.poll(inStep).toBe(true)
 })
+
+/** A component whose only drawing is one diagonal line from (x0+2, 0.1) to
+ *  (x0+3, 0.9): its box is deleted inside the session, so the placement
+ *  holds lines and no solid. Returns the instance and the line's endpoints. */
+async function lineOnlyComponent(
+  page: Page,
+  ctx: Ctx,
+  x0: number,
+): Promise<{ instance: string; component: string; a: [number, number, number]; b: [number, number, number] }> {
+  const made = await page.evaluate((x) => {
+    const h = window.__hew_test!
+    const box = h.drawBox([x, 0, 0], [x + 1, 1, 0], 1)
+    return { ...h.makeComponent([box]), box }
+  }, x0)
+  await dblClickWorld(page, ctx, x0 + 0.5, 0.5, 1)
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBe(made.instance)
+  await page.keyboard.press('l')
+  await clickWorld(page, ctx, x0 + 2, -1.5, 0)
+  await clickWorld(page, ctx, x0 + 3.5, 2.5, 0)
+  await page.keyboard.press('Escape')
+  await page.keyboard.press('Space')
+  await page.evaluate((id) => window.__hew_test!.deleteObject(id), made.box)
+  await page.keyboard.press('Escape')
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBeNull()
+  const [sketch] = await page.evaluate((c) => window.__hew_test!.getComponentMemberSketches(c), made.component)
+  const seg = await page.evaluate((s) => window.__hew_test!.getSketchLines(s), sketch)
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  return {
+    instance: made.instance,
+    component: made.component,
+    a: [seg[0], seg[1], seg[2]],
+    b: [seg[3], seg[4], seg[5]],
+  }
+}
+
+/** A real left-to-right (window) or right-to-left (crossing) drag between two
+ *  screen points. */
+async function marquee(page: Page, from: { x: number; y: number }, to: { x: number; y: number }): Promise<void> {
+  await page.mouse.move(from.x, from.y)
+  await page.mouse.down()
+  await page.mouse.move(to.x, to.y, { steps: 12 })
+  await page.mouse.up()
+  await page.waitForTimeout(150)
+}
+
+test('a lone diagonal line: a window must enclose all of it, a crossing needs only a touch', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  const { instance, component, a, b } = await lineOnlyComponent(page, ctx, 0)
+  expect(instance).toBeTruthy()
+  // Lines and no solid: the placement is a lines-only instance.
+  expect(await page.evaluate((c) => window.__hew_test!.getComponentMemberObjects(c), component)).toEqual([])
+  expect(await page.evaluate((c) => window.__hew_test!.getComponentMemberSketches(c).length, component)).toBe(1)
+  const pa = px(ctx, a[0], a[1], a[2])
+  const pb = px(ctx, b[0], b[1], b[2])
+  const lo = { x: Math.min(pa.x, pb.x), y: Math.min(pa.y, pb.y) }
+  const hi = { x: Math.max(pa.x, pb.x), y: Math.max(pa.y, pb.y) }
+  // A window around the whole bounding rect but one corner: it swallows 94%
+  // of the line's rect yet leaves one endpoint outside, and a line has no
+  // screen area to "cover": not selected.
+  const w = hi.x - lo.x
+  const h = hi.y - lo.y
+  // The line must read as a true diagonal on screen for this to mean anything.
+  expect(Math.min(w, h)).toBeGreaterThan(60)
+  await marquee(page, { x: lo.x - 20, y: lo.y - 20 }, { x: lo.x + w * 0.97, y: lo.y + h * 0.97 })
+  expect(await selectionKinds(page)).toEqual([])
+  // Enclosing both endpoints: selected.
+  await marquee(page, { x: lo.x - 20, y: lo.y - 20 }, { x: hi.x + 20, y: hi.y + 20 })
+  await expect.poll(() => selectionKinds(page)).toEqual(['instance'])
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  // Crossing whose far corner just passes the line's midpoint: selected.
+  const mid = { x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2 }
+  const len = Math.hypot(pb.x - pa.x, pb.y - pa.y)
+  // 40 px off the line, on the side that makes the drag run right to left.
+  const k = pb.y > pa.y ? -1 : 1
+  const side = { x: (k * -(pb.y - pa.y) / len) * 40, y: (k * (pb.x - pa.x) / len) * 40 }
+  await marquee(page, { x: mid.x + side.x, y: mid.y + side.y }, { x: mid.x - side.x * 0.2, y: mid.y - side.y * 0.2 })
+  await expect.poll(() => selectionKinds(page)).toEqual(['instance'])
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  // Crossing that stays clear of the line (beside its far end): nothing.
+  await marquee(page, { x: hi.x + 60, y: lo.y - 20 }, { x: hi.x + 30, y: lo.y + 10 })
+  expect(await selectionKinds(page)).toEqual([])
+})
+
+test('a component with lines: crossing takes it by a touch on the line alone, and a window covering most of its extent takes it', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  await componentWithLine(page, ctx, 0)
+  const cube: [number, number, number][] = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]]
+  const all = [...cube, [2, 0.1, 0], [2, 0.9, 0]] as [number, number, number][]
+  const ps = all.map((p) => px(ctx, p[0], p[1], p[2]))
+  const minX = Math.min(...ps.map((p) => p.x))
+  const maxX = Math.max(...ps.map((p) => p.x))
+  const minY = Math.min(...ps.map((p) => p.y))
+  const maxY = Math.max(...ps.map((p) => p.y))
+  // Crossing across the outlying line only (clear of the cube): selected.
+  const l = px(ctx, 2, 0.5, 0)
+  await marquee(page, { x: l.x + 15, y: l.y + 15 }, { x: l.x - 3, y: l.y - 3 })
+  await expect.poll(() => selectionKinds(page)).toEqual(['instance'])
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  // A window over ~90% of the extent (cube plus line) leaves the line's far
+  // end out yet covers most of it: taken by coverage.
+  const w = maxX - minX
+  const h = maxY - minY
+  await marquee(page, { x: minX - 20, y: minY - 20 }, { x: minX + w * 0.97, y: minY + h * 0.97 })
+  await expect.poll(() => selectionKinds(page)).toEqual(['instance'])
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  // A window over only half: not enough.
+  await marquee(page, { x: minX - 20, y: minY - 20 }, { x: minX + w * 0.5, y: minY + h * 0.5 })
+  expect(await selectionKinds(page)).toEqual([])
+})
