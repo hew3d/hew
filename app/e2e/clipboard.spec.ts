@@ -181,10 +181,10 @@ test('Cut removes the original and leaves the clipboard pasteable', async ({ pag
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
 })
 
-test('a sketch-only selection refuses Copy with a toast, not a crash', async ({ page }) => {
+test('a sketch-only selection copies as a shape, with a toast', async ({ page }) => {
   const ctx = await setup(page)
   // A detached (never-extruded) rectangle sketch — `drawRectangle` leaves
-  // exactly that behind, the sketch-scoped selection Copy must refuse.
+  // exactly that behind; Copy carries the drawing through the kernel.
   await page.evaluate(() => window.__hew_test!.drawRectangle([0, 0, 0], [1, 1, 0]))
   // Click its fill (a real gesture, not a constructed NodeRef — region/island
   // ids aren't the same numbering) to select the whole island.
@@ -194,7 +194,7 @@ test('a sketch-only selection refuses Copy with a toast, not a crash', async ({ 
     return sel.length === 1 && sel[0].kind === 'draft-island'
   })
   await page.keyboard.press('Control+c')
-  await expect(page.getByText(/Sketch geometry can't be copied yet/)).toBeVisible()
+  await expect(page.getByText('Copied 1 shape', { exact: false })).toBeVisible()
 })
 
 test('Cut of a multi-node selection is ONE undo step — a single Ctrl+Z restores everything', async ({ page }) => {
