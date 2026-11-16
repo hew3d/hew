@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node scripts/stage-cli-sidecar.mjs && tauri dev",
+    "dev": "node scripts/stage-cli-sidecar.mjs && node ../../app/scripts/build-wasm.mjs --dev && tauri dev",
     "build": "node scripts/stage-cli-sidecar.mjs && tauri build",
     "e2e:build": "node scripts/stage-cli-sidecar.mjs && cross-env VITE_HEW_TEST=1 tauri build --debug --no-bundle",
     "e2e:build:probe": "node scripts/stage-cli-sidecar.mjs && cross-env VITE_HEW_TEST=1 tauri build --debug --no-bundle --config src-tauri/probe.conf.json",
