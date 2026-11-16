@@ -107,6 +107,10 @@ export interface HarnessDeps {
   reconcile: () => void
   /** Current object/group/instance selection. */
   getSelection: () => NodeRef[]
+  /** The selected construction guide id, or null. */
+  getSelectedGuide?: () => bigint | null
+  /** The selected annotation id (dimension / leader text), or null. */
+  getSelectedAnnotation?: () => bigint | null
   /** Replace the selection with these object handles. */
   setSelectedObjects: (ids: bigint[]) => void
   /** Replace the selection with arbitrary nodes (objects/groups/instances). */
@@ -311,6 +315,17 @@ export interface HewTestHarness {
   getPartAxesInfo(): { visible: boolean; origins: [number, number, number][] }
   /** Show/hide the ground grid (View ▸ Grid). Same rationale as setAxesVisible. */
   setGridVisible(visible: boolean): void
+  /** The selected guide / annotation id as a decimal string, or null (the
+   *  Select tool's pick of a construction guide, dimension or leader). */
+  getSelectedGuide(): string | null
+  getSelectedAnnotation(): string | null
+  /** Render mode (View ▸ X-ray / Wireframe), through `ViewportApi.setRenderMode`. */
+  setRenderMode(mode: 'shaded' | 'xray' | 'wireframe'): void
+  /** Place a session section plane (`ViewportApi.setSectionPlane`); normal points at the removed side. */
+  setSectionPlane(plane: { origin: Vec3; normal: Vec3; active: boolean } | null): void
+  /** Camera ▸ Parallel Projection toggle (`ViewportApi.toggleProjection`) and the live projection. */
+  toggleProjection(): void
+  getProjection(): 'perspective' | 'parallel'
   /** Show/hide all construction guides (View ▸ Guides). */
   setGuidesVisible(visible: boolean): void
   /** Tangent-edge LineSegments in the viewport: how many exist, how many are
@@ -1889,6 +1904,35 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       return api.getPartAxesInfo()
+    },
+
+    getSelectedGuide: () => {
+      const g = deps.getSelectedGuide?.() ?? null
+      return g === null ? null : g.toString()
+    },
+    getSelectedAnnotation: () => {
+      const a = deps.getSelectedAnnotation?.() ?? null
+      return a === null ? null : a.toString()
+    },
+    setRenderMode: (mode) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      api.setRenderMode(mode)
+    },
+    setSectionPlane: (plane) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      api.setSectionPlane(plane)
+    },
+    toggleProjection: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      api.toggleProjection()
+    },
+    getProjection: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.getProjection()
     },
 
     setGridVisible: (visible) => {

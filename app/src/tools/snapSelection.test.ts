@@ -304,6 +304,17 @@ function deps(
     cameraForward: FORWARD,
     cameraFar: far,
     worldPerPixelAt: () => worldPerPixel,
+    // The drawn-visibility rule, stood in for by "nothing of the fake scene's
+    // nearest face is in front of the point" — the rule itself is covered in
+    // viewport/drawnVisibility.test.ts.
+    drawnPointVisible: (p) => {
+      const face = (scene as unknown as { pick_face: (...a: number[]) => { depth(): number } | undefined })
+        .pick_face(0, 0, 0, 0, 0, -1)
+      if (face === undefined) return true
+      const faceDepth = face.depth()
+      const depth = Math.hypot(p[0], p[1], p[2] - 5) // every test ray starts at (0,0,5)
+      return depth <= faceDepth + Math.max(Math.abs(faceDepth) * 1e-6, 1e-9)
+    },
     ...(imprintEligible ? { imprintEligible } : {}),
   }
 }
@@ -510,6 +521,19 @@ describe('resolveSelectableRef — provenance × context × depth', () => {
     // Shaded, said explicitly, keeps the face in the way.
     const shaded = { ...deps(scene, INSTANCE_CTX, 100, WPP, eligible42), facesOcclude: true }
     expect(resolveSelectableRef(solidSnap(42n, 7n), DOWN, shaded)).toMatchObject({ kind: 'object', id: 42n })
+  })
+
+  it('a definition sketch seen through a dimmed (non-depth-writing) face is selectable', () => {
+    const scene = fakeScene({
+      drawn: { 0: lineThroughOrigin(4, OWNED_42) },
+      instanceEdge: { sketch: 31n, edge: 4n, depth: 9 },
+      face: { object: 42n, instance: 7n, depth: 5 },
+    })
+    // The kernel's face is nearer, but the drawn rule says the frame shows the
+    // sketch through it (the face is dimmed or glass and writes no depth).
+    const seeing = { ...deps(scene, INSTANCE_CTX, 100, WPP, eligible42), drawnPointVisible: () => true }
+    expect(resolveSelectableRef(solidSnap(42n, 7n), DOWN, seeing))
+      .toEqual(draft('draft-edge', INSTANCE_PLANE, K(4)))
   })
 
   it('the fallback solid pick is bounded by the AXIAL far plane, not the radial distance (FIX 2)', () => {

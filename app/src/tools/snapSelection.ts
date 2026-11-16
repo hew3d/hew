@@ -164,6 +164,11 @@ export interface ResolveDeps {
    *  where nothing occludes (the render mode's face policy). Omitted means
    *  they do (Shaded). */
   facesOcclude?: boolean
+  /** Whether a world point is drawn unhidden by the current frame's faces
+   *  (`drawnPointVisible`, `viewport/drawnVisibility.ts`): the one rule that
+   *  decides whether a drawn sketch is selectable behind a face. Omitted
+   *  means nothing hides it. */
+  drawnPointVisible?: (point: readonly [number, number, number]) => boolean
   /** Whether an editing scope is open (an entered context or a component /
    *  group session). In Shaded and X-ray the kernel's face pick then lands on the
    *  nearest face INSIDE the scope, so a snap on an out-of-scope object that
@@ -314,25 +319,18 @@ function withinFarPlane(depth: number, ray: Ray, deps: ResolveDeps): boolean {
 }
 
 /** A scoped sketch is selectable only where it is actually rendered: before
- * the far plane and, when faces occlude (Shaded), not behind the nearest
- * solid face. The relative depth skin
- * mirrors the inference layer's occlusion rule, keeping coplanar linework
- * selectable at every model scale without exposing sketches behind thin walls. */
+ * the far plane and, when faces occlude (Shaded), not covered by a drawn
+ * depth-writing face — the one drawn-visibility rule the guide and annotation
+ * pickers use too (`viewport/drawnVisibility.ts`, injected as
+ * `deps.drawnPointVisible`). X-ray and Wireframe hide nothing. Without the
+ * injected rule nothing is taken to hide the sketch. */
 function scopedSketchVisible(depth: number, ray: Ray, deps: ResolveDeps): boolean {
   if (!withinFarPlane(depth, ray, deps)) return false
   // X-ray and Wireframe: nothing occludes, so no face can hide the sketch.
   if (deps.facesOcclude === false) return true
-  const face = deps.scene.pick_face(
-    ray.origin[0], ray.origin[1], ray.origin[2],
-    ray.direction[0], ray.direction[1], ray.direction[2],
-  )
-  if (face === undefined) return true
-  try {
-    const faceDepth = face.depth()
-    return depth <= faceDepth + Math.max(Math.abs(faceDepth) * 1e-6, 1e-9)
-  } finally {
-    face.free()
-  }
+  if (deps.drawnPointVisible === undefined) return true
+  const at = pointAlongRay(ray, depth)
+  return at === undefined ? false : deps.drawnPointVisible(at)
 }
 
 /** Refine a resolved plain-object pick to the DRAWING under the cursor, if

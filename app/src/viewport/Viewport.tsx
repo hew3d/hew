@@ -116,7 +116,9 @@ import {
 } from './math'
 import { dynamicClipPlanes, groundHitIsUsable, targetAtDepth, zoomFloorFor } from './cameraDepth'
 import { CameraRig, type Projection, isBehindCamera, turnedEyePosition } from './cameraRig'
-import { guideLinePickPx, segmentPickPx } from './screenPick'
+import { guideLinePickSamples, segmentPickSamples, type PickSample } from './screenPick'
+import { drawnPointVisible, meshWritesDepth, type DrawnVisibilityDeps } from './drawnVisibility'
+import { worldFaceNormal } from '../tools/faceDraw'
 import { fovReadoutText, activeCameraToolForName } from './fovReadout'
 import { parseFovEntry } from './fovUnits'
 import {
@@ -3407,9 +3409,54 @@ export default function Viewport({
         worldPerPixelAt: (p) =>
           rig.worldPerPixel(camera.position.distanceTo(new THREE.Vector3(p[0], p[1], p[2])), el.clientHeight),
         facesOcclude: sceneRenderer.getRenderMode() === 'shaded',
+        drawnPointVisible: (p) => drawnPointVisible(p, drawnVisibilityDeps()),
         scopeActive: selectionScopeActive(
           sceneRenderer.getRenderMode(), activeContextRef.current.length, sessionScopeKeysRef.current !== null,
         ),
+      }
+    }
+
+    /** The deps of the drawn-visibility rule (`drawnVisibility.ts`), built live
+     * per call from the camera, the rig, the renderer's face meshes and the
+     * kernel's render-mode-blind face pick. */
+    function drawnVisibilityDeps(): DrawnVisibilityDeps {
+      return {
+        camera,
+        facesOcclude: sceneRenderer.getRenderMode() === 'shaded',
+        worldPerPixelAt: (p) =>
+          rig.worldPerPixel(camera.position.distanceTo(new THREE.Vector3(p[0], p[1], p[2])), el.clientHeight),
+        nearestFaceDepth: (o, d) => {
+          const pick = wasmScene.pick_face_geometry(o[0], o[1], o[2], d[0], d[1], d[2])
+          if (pick === undefined) return null
+          try {
+            return pick.depth()
+          } finally {
+            pick.free()
+          }
+        },
+        faceMeshes: () => sceneRenderer.faceMeshes(),
+        nearestFace: (o, d) => {
+          const pick = wasmScene.pick_face_geometry(o[0], o[1], o[2], d[0], d[1], d[2])
+          if (pick === undefined) return null
+          let object: bigint, face: bigint, instance: bigint | undefined, depth: number
+          try {
+            object = pick.object()
+            face = pick.face()
+            instance = pick.instance()
+            depth = pick.depth()
+          } finally {
+            pick.free()
+          }
+          const normal = worldFaceNormal(wasmScene, object, face, instance ?? null)
+          // No normal (stale handle): a zero normal never takes the shortcut,
+          // so the cast decides.
+          return { depth, normal: normal ?? [0, 0, 0], owner: { object, instance } }
+        },
+        sectionActive: () => sceneRenderer.getSectionClipPlanes().length > 0,
+        ownerWritesDepth: ({ object, instance }) => {
+          const meshes = sceneRenderer.faceMeshesForOwner(object, instance)
+          return meshes !== null && meshes.every(meshWritesDepth)
+        },
       }
     }
 
@@ -10532,22 +10579,31 @@ export default function Viewport({
       const clickY = (-ndcY * 0.5 + 0.5) * h
       let best: bigint | null = null
       let bestDist = GUIDE_PICK_PX
+      const visDeps = drawnVisibilityDeps()
+      /** Pixel distance of the first sample drawn unhidden, else Infinity. */
+      const firstVisibleSamplePx = (samples: PickSample[]): number => {
+        for (const sm of samples) if (drawnPointVisible(sm.point, visDeps)) return sm.px
+        return Infinity
+      }
       for (const id of wasmScene.guide_ids()) {
         const kind = wasmScene.guide_kind(id)
         const geom = wasmScene.guide_geometry(id)
         if (kind === undefined || geom === undefined) continue
-        let d: number
+        // A candidate's distance is that of its nearest sample (spot on the
+        // guide within reach of the click) the camera actually draws
+        // unhidden; with none it is not a candidate (drawnVisibility.ts).
+        let d = Infinity
         if (kind === 'line') {
-          // Clipped at the near plane, not sampled: zoomed in on a guide
-          // running into depth, its whole stretch on screen lies next to
-          // the camera (screenPick.ts).
-          d = guideLinePickPx(camera, w, h, geom, clickX, clickY)
-          if (!Number.isFinite(d)) continue
+          // Clipped at the near plane, not sampled along the whole line:
+          // zoomed in on a guide running into depth, its whole stretch on
+          // screen lies next to the camera (screenPick.ts).
+          d = firstVisibleSamplePx(guideLinePickSamples(camera, w, h, geom, clickX, clickY, bestDist))
         } else if (kind === 'point') {
           const [x, y, z] = geom
           const p = worldToPixels(new THREE.Vector3(x, y, z))
           if (p.behind) continue
-          d = Math.hypot(p.x - clickX, p.y - clickY)
+          const px = Math.hypot(p.x - clickX, p.y - clickY)
+          if (px < bestDist && drawnPointVisible([x, y, z], visDeps)) d = px
         } else {
           continue
         }
@@ -10573,6 +10629,7 @@ export default function Viewport({
       const clickY = (-ndcY * 0.5 + 0.5) * h
       let best: bigint | null = null
       let bestDist = ANNOTATION_PICK_PX
+      const visDeps = drawnVisibilityDeps()
       for (const id of shownAnnotationIds(wasmScene)) {
         const kind = wasmScene.annotation_kind(id)
         if (kind === undefined) continue
@@ -10598,7 +10655,13 @@ export default function Viewport({
           p0 = [anchor[0], anchor[1], anchor[2]]
           p1 = [anchor[0] + offset[0], anchor[1] + offset[1], anchor[2] + offset[2]]
         }
-        const d = segmentPickPx(camera, w, h, p0, p1, clickX, clickY)
+        let d = Infinity
+        for (const sm of segmentPickSamples(camera, w, h, p0, p1, clickX, clickY, bestDist)) {
+          if (drawnPointVisible(sm.point, visDeps)) {
+            d = sm.px
+            break
+          }
+        }
         if (d < bestDist) {
           bestDist = d
           best = id

@@ -4935,6 +4935,37 @@ export class SceneRenderer {
     for (const b of this.batches.values()) set(b.mesh)
   }
 
+  /** Every solid face mesh the renderer draws — object faces, materialized
+   * instance faces, instanced batches (never edges, sketch, or guides). The
+   * set `setFacesLayer` walks; read by the drawn-visibility pick rule
+   * (`drawnVisibility.ts`). */
+  faceMeshes(): THREE.Object3D[] {
+    const out: THREE.Object3D[] = []
+    for (const g of this.objectGroups.values()) out.push(g.facesMesh)
+    for (const g of this.instanceGroups.values()) for (const m of g.facesMeshes) out.push(m)
+    for (const b of this.batches.values()) out.push(b.mesh)
+    return out
+  }
+
+  /** The face meshes that draw one kernel face owner: the world object's mesh,
+   * or, for a definition member picked through `instance`, that instance's
+   * materialized per-placement meshes plus every batch holding one of its
+   * slots. Null when none can be resolved (the caller must then not assume
+   * anything about how the owner is drawn). */
+  faceMeshesForOwner(object: bigint, instance: bigint | undefined): THREE.Object3D[] | null {
+    if (instance === undefined) {
+      const g = this.objectGroups.get(object)
+      return g === undefined ? null : [g.facesMesh]
+    }
+    const out: THREE.Object3D[] = []
+    const g = this.instanceGroups.get(instance)
+    if (g !== undefined) g.memberIds.forEach((m, i) => { if (m === object) out.push(g.facesMeshes[i]) })
+    for (const b of this.batches.values()) {
+      if (b.memberId === object && b.slotOf.has(instance)) out.push(b.mesh)
+    }
+    return out.length === 0 ? null : out
+  }
+
   /** The active section clip plane(s) as the face materials carry them —
    * for an override material that must cut the same way. */
   getSectionClipPlanes(): THREE.Plane[] {

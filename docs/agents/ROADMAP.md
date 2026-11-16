@@ -881,7 +881,10 @@ below.
   their copy toggle copies it, ×N / /N arrays (rows, fans) included,
   each transform or copy one undo step. With nothing else selected, a
   click on a guide starts transforming that guide; a guide taken that
-  way is selected only for the gesture
+  way is selected only for the gesture. A guide, dimension or leader is
+  picked only where it is drawn: a solid in front of it takes the click
+  instead, while glass, dimmed or faded context, X-ray, Wireframe and
+  cut-away section parts hide nothing
 - Tape Measure (point-to-point distance, or drop a parallel guide at an
   offset — sourced from an edge (a plain object's, a group member's, or a
   component instance's), a sketch line, the line where two Objects' faces

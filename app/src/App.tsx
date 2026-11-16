@@ -665,6 +665,11 @@ export default function App() {
    * and guide selection (docs/design/dimensions-text.md). Deleted via the
    * same Edit ▸ Delete / Delete-key path. */
   const [selectedAnnotation, setSelectedAnnotation] = useState<bigint | null>(null)
+  // Live mirrors for the test harness (read at call time).
+  const selectedGuideLive = useRef<bigint | null>(null)
+  selectedGuideLive.current = selectedGuide
+  const selectedAnnotationLive = useRef<bigint | null>(null)
+  selectedAnnotationLive.current = selectedAnnotation
   /** Session-only hidden node set (keyed by nodeKey). Cleared on load/new. */
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set())
   /** Whether Paste/Paste In Place have something to work with — gates the
@@ -2394,6 +2399,8 @@ export default function App() {
       clearIsolation: () => handleClearIsolation(),
       reconcile: () => reconcileRef.current(),
       getSelection: () => selectedIdsRef.current,
+      getSelectedGuide: () => selectedGuideLive.current,
+      getSelectedAnnotation: () => selectedAnnotationLive.current,
       setSelectedObjects: (ids) =>
         setSelectedIds(ids.map((id) => ({ kind: 'object' as const, id }))),
       setSelection: (nodes) => {
