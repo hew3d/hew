@@ -99,6 +99,8 @@ fn insert_at_identity(prov: Option<LibraryProvenance>) -> InsertOptions {
         pose: Transform::IDENTITY,
         provenance: prov,
         origin: None,
+        drawing: kernel::DrawingInsert::Skip,
+        hidden_objects: Default::default(),
     }
 }
 
@@ -438,6 +440,8 @@ fn insert_same_provenance_twice_reuses_the_definition() {
                 pose: Transform::translation(Vec3::new(3.0, 0.0, 0.0)),
                 provenance: prov,
                 origin: None,
+                drawing: kernel::DrawingInsert::Skip,
+                hidden_objects: Default::default(),
             },
         )
         .unwrap();
@@ -585,6 +589,8 @@ fn insert_with_reflecting_pose_bakes_a_mirrored_copy() {
             pose: mirror,
             provenance: None,
             origin: None,
+            drawing: kernel::DrawingInsert::Skip,
+            hidden_objects: Default::default(),
         },
     )
     .expect("a mirrored insert bakes a mirrored copy");
@@ -605,6 +611,8 @@ fn insert_with_reflecting_pose_bakes_a_mirrored_copy() {
                 pose: Transform::IDENTITY,
                 provenance: None,
                 origin: None,
+                drawing: kernel::DrawingInsert::Skip,
+                hidden_objects: Default::default(),
             },
         )
         .unwrap();
@@ -636,6 +644,8 @@ fn insert_unwrapped_object_lands_as_world_object_at_pose() {
                 pose: Transform::translation(Vec3::new(10.0, 0.0, 0.0)),
                 provenance: None,
                 origin: None,
+                drawing: kernel::DrawingInsert::Skip,
+                hidden_objects: Default::default(),
             },
         )
         .unwrap();
@@ -731,7 +741,13 @@ proptest! {
         let mut dst = Document::new();
         let pose = Transform::translation(Vec3::new(tx, ty, tz));
         let (report, _) = dst
-            .insert_document(&item, &InsertOptions { pose, provenance: None, origin: None })
+            .insert_document(&item, &InsertOptions {
+                pose,
+                provenance: None,
+                origin: None,
+                drawing: kernel::DrawingInsert::Skip,
+                hidden_objects: Default::default(),
+            })
             .unwrap();
         let NodeId::Object(new_oid) = report.roots[0] else {
             panic!("expected a world object root");
@@ -1003,6 +1019,8 @@ fn stamp_library_source_makes_reinsert_reuse_the_source_definition() {
                 pose: Transform::translation(Vec3::new(3.0, 0.0, 0.0)),
                 provenance: Some(prov),
                 origin: None,
+                drawing: kernel::DrawingInsert::Skip,
+                hidden_objects: Default::default(),
             },
         )
         .unwrap();
@@ -1186,6 +1204,8 @@ fn nested_insert_is_idempotent_per_definition() {
                 pose: Transform::translation(Vec3::new(5.0, 0.0, 0.0)),
                 provenance: prov,
                 origin: None,
+                drawing: kernel::DrawingInsert::Skip,
+                hidden_objects: Default::default(),
             },
         )
         .unwrap();
@@ -1210,6 +1230,8 @@ fn clipboard_insert(origin: &str, pose: Transform) -> InsertOptions {
         // when no link applies.
         provenance: provenance("clipboard:abc", "abc"),
         origin: Some(origin.to_string()),
+        drawing: kernel::DrawingInsert::Skip,
+        hidden_objects: Default::default(),
     }
 }
 
@@ -1250,6 +1272,8 @@ fn paste_without_an_origin_copies_the_definition() {
                 pose: Transform::translation(Vec3::new(3.0, 0.0, 0.0)),
                 provenance: provenance("clipboard:abc", "abc"),
                 origin: None,
+                drawing: kernel::DrawingInsert::Skip,
+                hidden_objects: Default::default(),
             },
         )
         .unwrap();

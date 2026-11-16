@@ -139,6 +139,10 @@ export function pasteLinked(
         definitionsReused: 0,
         worldSketchesSkipped: 0,
         annotationsSkipped: 0,
+        // A linked paste places nodes only; a copy that carries drawing
+        // never links (App.tsx's doCopy), so there is none to draw.
+        drawn: [],
+        drawingUnchanged: false,
       },
       sources,
     }

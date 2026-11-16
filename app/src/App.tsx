@@ -178,6 +178,7 @@ import { itemFileName } from './library/fileNaming'
 import type { LibraryCategory, LibraryItem } from './library/types'
 import type { LibraryPlacement } from './tools/LibraryPlaceTool'
 import { parseInsertResult } from './tools/LibraryPlaceTool'
+import { alreadyHereToast, clipboardDrawing, copiedToast, cutTargets, isCopyableDrawing, nothingToCopyToast, pastedDrawingRefs } from './clipboard/drawingClipboard'
 import { readImageInfo, pictureName, isPictureFileName } from './tools/imageInfo'
 import {
   getClipboard,
@@ -2895,12 +2896,11 @@ export default function App() {
         libraryStore().available() &&
         selectedIds.length === 1 &&
         (selectedIds[0].kind === 'object' || selectedIds[0].kind === 'group' || selectedIds[0].kind === 'instance'),
-      // Copy/Cut (Lane D): at least one STRUCTURAL node selected — a
-      // sketch-only selection still refuses with a toast (doCopy), but the
-      // command doesn't even light up for one, matching every other
-      // selection-gated command's posture.
+      // Copy/Cut (Lane D, and drawing since v1.5 decisions D3): at least
+      // one node a Copy can take — a structural node, a drawn shape, or a
+      // whole sketch. (The name predates drawing on the clipboard.)
       hasStructuralSelection: selectedIds.some(
-        (n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance',
+        (n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance' || isCopyableDrawing(n),
       ),
       // Paste/Paste In Place: whether this window's clipboard cache has
       // anything (kept fresh on focus — see the `clipboardAvailable` effect).
@@ -6041,24 +6041,30 @@ export default function App() {
   const isStructuralNode = (n: NodeRef): boolean =>
     n.kind === 'object' || n.kind === 'group' || n.kind === 'instance'
 
-  const SKETCH_COPY_TOAST = t`Sketch geometry can't be copied yet — use Move with Option/Alt held`
-
-  /** Copy: `extract_item` (unwrapped — a copied plain box stays a plain box,
-   *  unlike Save to Library's component wrap) of the selection's structural
-   *  subset, then store it. Returns the copied nodes on success (so Cut can
-   *  delete exactly what was actually captured) or `null` on refusal/error —
-   *  Cut must NOT delete anything when this fails, or the geometry is lost
-   *  with no backup on the clipboard. */
+  /** Copy: `extract_clipboard` of the selection — its structural nodes
+   *  (unwrapped, unlike Save to Library's component wrap: a copied plain box
+   *  stays a plain box) and its drawing (v1.5 decisions D3: drawn shapes at
+   *  the granularity Move uses, whole sketches, detached shapes by their
+   *  islands), then store it. Returns what was copied on success (so Cut
+   *  deletes exactly what was captured) or `null` on refusal/error — Cut
+   *  must NOT delete anything when this fails, or the geometry is lost with
+   *  no backup on the clipboard. */
   const doCopy = (): NodeRef[] | null => {
-    const structural = selectedIds.filter(isStructuralNode)
-    if (structural.length === 0) {
-      if (selectedIds.length > 0) handleToast(SKETCH_COPY_TOAST)
-      return null
-    }
     const scene = sceneRef.current
     if (scene === null) return null
-    const sel = structuralSelection(structural)
-    if (sel === null) return null // unreachable — every entry is already structural
+    const structural = selectedIds.filter(isStructuralNode)
+    const drawing = selectedIds.filter(isCopyableDrawing)
+    let named: { json: string; shapes: number }
+    try {
+      named = clipboardDrawing(scene, [...structural, ...drawing])
+    } catch {
+      named = { json: '[]', shapes: 0 }
+    }
+    if (structural.length === 0 && named.shapes === 0) {
+      if (selectedIds.length > 0) handleToast(nothingToCopyToast())
+      return null
+    }
+    const sel = structuralSelection(structural) ?? { kinds: new Uint8Array(0), ids: new BigUint64Array(0) }
     let bytes: Uint8Array
     try {
       // The window nonce makes this a CLIPBOARD copy: the kernel stamps
@@ -6068,39 +6074,53 @@ export default function App() {
       // Move+copy makes — instead of minting an unlinked duplicate. The
       // scene composes its document epoch in, so a copy taken before
       // File ▸ Open/New in this window never links into the new document.
-      bytes = scene.extract_item(sel.kinds, sel.ids, false, undefined, undefined, clipboardSourceIdRef.current)
+      bytes = scene.extract_clipboard(sel.kinds, sel.ids, named.json, clipboardSourceIdRef.current)
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
       return null
     }
-    const kinds = [...new Set(structural.map((n) => n.kind))]
+    const kinds = [...new Set(structural.map((n) => n.kind as string))]
+    if (named.shapes > 0) kinds.push('drawing')
     // Paste In Place's affine (see ClipboardContent.placementAffine): the
     // kernel's own reconstruction of this exact selection's original world
-    // position — `Scene.extract_item_placement` runs the SAME logic
-    // `extract_item` used above (crates/kernel's `extract_placement`/
-    // `visible_world_bottom_center`), covering BOTH the identity-axes
+    // position — `Scene.extract_clipboard_placement` runs the SAME logic
+    // `extract_clipboard` used above (crates/kernel's
+    // `extract_placement_with_drawing`/`visible_world_bottom_center`, which
+    // count the copied drawing too), covering BOTH the identity-axes
     // re-origin case and the moved-axes case, so this can never drift from
-    // what extract_item actually did (hidden-descendant selections
-    // included) and Paste In Place never has to special-case either axes
-    // state itself. `undefined` (no visible content) falls back to `null`.
-    const placement = scene.extract_item_placement(sel.kinds, sel.ids)
-    const placementAffine = placement === undefined ? null : Array.from(placement)
-    const copiedCount = structural.length
-    // Where the copy came from, so a paste back into this document can link
-    // (see clipboard/linkedPaste.ts).
-    const linkSource: LinkSource = {
-      documentId: scene.ensure_document_id(),
-      nonce: clipboardSourceIdRef.current,
-      generation: docGenerationRef.current,
-      nodes: structural.map((n) => ({ kind: n.kind as 'object' | 'group' | 'instance', id: n.id })),
+    // what the copy actually did and Paste In Place never has to
+    // special-case either axes state itself. `undefined` (no visible
+    // content) falls back to `null`.
+    let placement: Float64Array | number[] | undefined
+    try {
+      placement = scene.extract_clipboard_placement(sel.kinds, sel.ids, named.json)
+    } catch {
+      placement = undefined
     }
-    void setClipboardBytes(bytes, structural.length, kinds, clipboardSourceIdRef.current, placementAffine, linkSource).then(() => {
+    const placementAffine = placement === undefined ? null : Array.from(placement)
+    const objects = structural.length
+    const shapes = named.shapes
+    // Where the copy came from, so a paste back into this document can link
+    // (see clipboard/linkedPaste.ts). A copy that carries drawing has none:
+    // a linked paste places only the copied nodes, so it would drop the
+    // shapes; the plain paste draws them (and still places the original
+    // definitions through the window nonce).
+    const linkSource: LinkSource | null =
+      shapes > 0
+        ? null
+        : {
+            documentId: scene.ensure_document_id(),
+            nonce: clipboardSourceIdRef.current,
+            generation: docGenerationRef.current,
+            nodes: structural.map((n) => ({ kind: n.kind as 'object' | 'group' | 'instance', id: n.id })),
+          }
+    void setClipboardBytes(bytes, objects + shapes, kinds, clipboardSourceIdRef.current, placementAffine, linkSource, shapes).then(() => {
       setClipboardAvailable(true)
-      handleToast(plural(copiedCount, { one: 'Copied # object', other: 'Copied # objects' }))
+      handleToast(copiedToast(objects, shapes))
     })
-    return structural
+    return shapes > 0 ? [...structural, ...drawing] : structural
   }
 
   const handleCopy = () => {
@@ -6110,7 +6130,9 @@ export default function App() {
   const handleCut = () => {
     const copied = doCopy()
     if (copied === null) return
-    viewportApi.current?.runDelete(copied)
+    const scene = sceneRef.current
+    // Delete exactly what the copy carried (a picked edge's whole shape).
+    viewportApi.current?.runDelete(scene === null ? copied : cutTargets(scene, copied))
     setSelectedIds((cur) => cur.filter((n) => !copied.some((c) => nodeEq(c, n))))
     setDocRev((r) => r + 1)
   }
@@ -6195,6 +6217,12 @@ export default function App() {
           return
         }
         const result = parseInsertResult(raw)
+        // Paste In Place right after Copy draws the drawing exactly over
+        // itself: the kernel recorded no step, and nothing moved.
+        if (result.drawingUnchanged && result.rootIds.length === 0) {
+          handleToast(alreadyHereToast())
+          return
+        }
         // Additive kernel mutation made outside a tool — refreshScene is the
         // harness's own choke point for exactly this (re-tessellate +
         // reconcile + docRev, see ViewportApi.refreshScene's doc comment).
@@ -6203,6 +6231,8 @@ export default function App() {
           kind: k === 0 ? 'object' as const : k === 1 ? 'group' as const : 'instance' as const,
           id: result.rootIds[i],
         }))
+        // The pasted drawing, found again by geometry (v1.5 decisions D3).
+        refs.push(...pastedDrawingRefs(scene, result.drawn))
         setSelectedGuide(null)
         setSelectedAnnotation(null)
         setSelectedIds(refs)
@@ -6239,7 +6269,7 @@ export default function App() {
         // window nonce, so an instance copied from THIS document places
         // its original definition rather than an unlinked copy.
         origin: pasteOrigin,
-        displayName: t`Pasted objects`,
+        displayName: content.kinds.length === 1 && content.kinds[0] === 'drawing' ? t`Pasted shapes` : t`Pasted objects`,
         ghost: ghost.group,
         bboxMin: ghost.bboxMin,
         bboxMax: ghost.bboxMax,

@@ -344,6 +344,8 @@ fn library_insert_at_a_mirrored_pose_bakes_a_mirrored_copy() {
             pose: mirror_x(),
             provenance: None,
             origin: None,
+            drawing: kernel::DrawingInsert::Skip,
+            hidden_objects: Default::default(),
         },
     )
     .expect("mirrored insert");

@@ -2967,3 +2967,205 @@ fn the_one_pass_listing_finds_an_object_across_a_bucket_edge() {
             .any(|r| r.over.is_some_and(|(o, _)| o == b))
     );
 }
+
+/// A plane rebuilt from its numbers rounded to 1e-12 — the closest point to
+/// the origin and the unit normal — as a caller that names planes by
+/// rounded numbers (the app's context string) rebuilds it: on an oblique
+/// plane it differs from the original in the last bits.
+fn rounded_rebuild(plane: Plane) -> Plane {
+    let r = |x: f64| (x * 1e12).round() / 1e12 + 0.0;
+    let n = plane.normal();
+    let (nx, ny, nz) = (r(n.x), r(n.y), r(n.z));
+    let o = Point3::ORIGIN + n * (-plane.signed_distance(Point3::ORIGIN));
+    let d = o.x * nx + o.y * ny + o.z * nz;
+    Plane::from_point_normal(p(r(nx * d), r(ny * d), r(nz * d)), Vec3::new(nx, ny, nz))
+        .expect("a rounded unit normal is not degenerate")
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// #103: `free_plane_units_on` lists each plane's drawing lifted on the
+    /// plane its caller will open the edit on, so every key it lists — edge,
+    /// unit, and region — is the key a draft on that plane holds, on oblique
+    /// planes too. (Listed on the sketch's own plane instead, the keys of an
+    /// oblique plane's drawing could miss a draft opened on the rounded
+    /// rebuild: the Outliner's "That edge is no longer there".)
+    #[test]
+    fn listing_keys_on_a_rebuilt_plane_name_the_edges_of_a_draft_on_it(
+        nx in -1.0f64..1.0, ny in -1.0f64..1.0, nz in -1.0f64..1.0,
+        ox in -5.0f64..5.0, oy in -5.0f64..5.0, oz in -5.0f64..5.0,
+    ) {
+        let n = Vec3::new(nx, ny, nz);
+        prop_assume!(n.length() > 0.2);
+        let n = n * (1.0 / n.length());
+        let o = p(ox, oy, oz);
+        let plane = Plane::from_point_normal(o, n).unwrap();
+        let helper = if n.x.abs() < 0.9 { Vec3::new(1.0, 0.0, 0.0) } else { Vec3::new(0.0, 1.0, 0.0) };
+        let u = n.cross(helper);
+        let u = u * (1.0 / u.length());
+        let v = n.cross(u);
+        let at = |a: f64, b: f64| o + u * a + v * b;
+
+        let mut doc = Document::new();
+        let s = doc.add_sketch(plane);
+        let sk = doc.sketch_mut(s).unwrap();
+        // A loose line, and a triangle (a region) crossing it.
+        sk.add_segment(at(-1.0, 0.3), at(1.7, 0.9)).unwrap();
+        for (a, b) in [((0.0, 0.0), (1.0, 0.0)), ((1.0, 0.0), (0.2, 1.3)), ((0.2, 1.3), (0.0, 0.0))] {
+            sk.add_segment(at(a.0, a.1), at(b.0, b.1)).unwrap();
+        }
+
+        let all = doc.free_plane_units_on(None, &std::collections::BTreeSet::new(), rounded_rebuild);
+        prop_assert_eq!(all.len(), 1);
+        let (listing, units) = &all[0];
+        prop_assert_eq!(listing.plane(), doc.sketch(s).unwrap().plane(), "the entry names the sketch's own plane");
+        let on = rounded_rebuild(listing.plane());
+
+        let one = doc.plane_units(on, None, &[]).unwrap();
+        prop_assert_eq!(
+            units.units.iter().map(|u| u.key).collect::<Vec<_>>(),
+            one.units.iter().map(|u| u.key).collect::<Vec<_>>()
+        );
+        prop_assert_eq!(
+            units.regions.iter().map(|r| r.key).collect::<Vec<_>>(),
+            one.regions.iter().map(|r| r.key).collect::<Vec<_>>()
+        );
+
+        let keys: Vec<u64> = units.units.iter().flat_map(|u| u.edges.iter().map(|e| e.key)).collect();
+        prop_assert!(!keys.is_empty());
+        doc.begin_draft(on, None, &[], "Erase").unwrap();
+        let (_, missing) = doc.draft_edges_for_keys(&keys);
+        prop_assert!(missing.is_empty(), "keys the draft does not hold: {:?}", missing);
+        doc.cancel_draft();
+    }
+}
+
+/// Every edge of `sketch` as an exact segment key (smaller end first) and
+/// its regions' face states — the whole content a lowering may change.
+fn sketch_content(doc: &Document, sketch: SketchId) -> (Vec<[u64; 6]>, Vec<bool>) {
+    let sk = doc.sketch(sketch).expect("live sketch");
+    let bits = |q: Point3| [q.x.to_bits(), q.y.to_bits(), q.z.to_bits()];
+    let mut edges: Vec<[u64; 6]> = sk
+        .edges()
+        .values()
+        .map(|e| {
+            let (a, b) = (
+                bits(sk.vertices()[e.from].position),
+                bits(sk.vertices()[e.to].position),
+            );
+            let (a, b) = if a <= b { (a, b) } else { (b, a) };
+            [a[0], a[1], a[2], b[0], b[1], b[2]]
+        })
+        .collect();
+    edges.sort_unstable();
+    let mut faces: Vec<bool> = sk.regions().values().map(|r| r.faceless).collect();
+    faces.sort_unstable();
+    (edges, faces)
+}
+
+/// KB-2 (an imported plane a hair below the ground): a `.skp` brings its
+/// ground drawing in as several free sketches on one plane that were
+/// never arranged together, so their lines cross without meeting, and
+/// its loops have no face (sketch rule 6). A shape drawn on the ground
+/// well away from them lowers into the plane's drawing without touching
+/// theirs: no line of theirs is split, moved to another sketch, or
+/// dropped, no sketch of theirs is emptied, and no loop the crossing
+/// lines would close gains a face. Only an edit that reaches their
+/// drawing re-arranges it.
+#[test]
+fn drawing_away_from_imported_drawing_leaves_it_as_it_was() {
+    // The plane the file holds, 1.848e-13 m below the ground.
+    let z = -1.848_093_234_002_59e-13;
+    let below = Plane::from_point_normal(p(0.0, 0.0, z), up()).unwrap();
+    let mut doc = Document::new();
+    // A faceless square, as an import brings a loop in.
+    let square = doc.add_sketch(below);
+    {
+        let sk = doc.sketch_mut(square).unwrap();
+        for (a, b) in [
+            (p(0.0, 0.0, z), p(4.0, 0.0, z)),
+            (p(4.0, 0.0, z), p(4.0, 4.0, z)),
+            (p(4.0, 4.0, z), p(0.0, 4.0, z)),
+            (p(0.0, 4.0, z), p(0.0, 0.0, z)),
+        ] {
+            sk.add_segment(a, b).unwrap();
+        }
+        sk.make_regions_faceless();
+    }
+    // A loose line of another sketch on the same plane, crossing the square
+    // without meeting it.
+    let cross = doc.add_sketch(below);
+    doc.sketch_mut(cross)
+        .unwrap()
+        .add_segment(p(2.0, -1.0, z), p(2.0, 5.0, z))
+        .unwrap();
+    let before = [
+        (square, sketch_content(&doc, square)),
+        (cross, sketch_content(&doc, cross)),
+    ];
+
+    // A circle drawn on the ground (z = 0) well away from both.
+    let report = doc
+        .draft(ground_plane(), None, &[], "Circle", |w| {
+            let c = p(20.0, 20.0, 0.0);
+            w.begin_curve_with(CurveGeom {
+                center: c,
+                radius: 1.0,
+            })?;
+            let n = 24;
+            for i in 0..n {
+                let (t0, t1) = (TAU * f64::from(i) / 24.0, TAU * f64::from(i + 1) / 24.0);
+                w.add_segment(
+                    p(c.x + t0.cos(), c.y + t0.sin(), 0.0),
+                    p(c.x + t1.cos(), c.y + t1.sin(), 0.0),
+                )?;
+            }
+            w.end_curve();
+            Ok(())
+        })
+        .unwrap()
+        .0;
+
+    // Exactly one filled region came of it: the circle's.
+    let filled: Vec<(SketchId, f64)> = doc
+        .sketch_ids()
+        .into_iter()
+        .flat_map(|s| {
+            let sk = doc.sketch(s).unwrap();
+            sk.regions()
+                .iter()
+                .filter(|(_, r)| !r.faceless)
+                .map(|(r, _)| (s, sk.region_area(r).unwrap()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(filled.len(), 1, "only the circle fills: {filled:?}");
+    assert!(
+        (filled[0].1 - std::f64::consts::PI).abs() < 0.1,
+        "the filled region is the circle: {filled:?}"
+    );
+    // The imported drawing is exactly as it was: its lines, unsplit, in
+    // the sketches that held them, its loop still without a face.
+    for (s, content) in &before {
+        let now = doc.sketch(*s).map(|_| sketch_content(&doc, *s));
+        let mut now = now.expect("an imported sketch is not emptied");
+        if *s == filled[0].0 {
+            // The circle lowered into this sketch: set its lines aside.
+            let circle: Vec<[u64; 6]> = now
+                .0
+                .iter()
+                .copied()
+                .filter(|k| f64::from_bits(k[0]) > 10.0)
+                .collect();
+            now.0.retain(|k| !circle.contains(k));
+            now.1.retain(|&faceless| faceless);
+        }
+        assert_eq!(&now, content, "sketch {s:?} changed (report {report:?})");
+    }
+    // One undo step restores the document.
+    assert!(doc.undo().is_ok());
+    for (s, content) in &before {
+        assert_eq!(&sketch_content(&doc, *s), content);
+    }
+}

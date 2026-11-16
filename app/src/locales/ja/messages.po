@@ -70,6 +70,11 @@ msgstr ""
 msgid "{0, plural, one {# station} other {# stations}}"
 msgstr ""
 
+#. placeholder {0}: objects + shapes
+#: src/clipboard/drawingClipboard.ts
+msgid "{0, plural, one {Copied # item} other {Copied # items}}"
+msgstr ""
+
 #. placeholder {0}: r.linked + r.sets
 #: src/linkSimilar.ts
 msgid "{0, plural, one {Linked # copy} other {Linked # copies}}"
@@ -120,8 +125,8 @@ msgid "{chordLabel} stays with {ownerLabel} on this Mac and can’t be a shortcu
 msgstr ""
 
 #: src/App.tsx
-msgid "{copiedCount, plural, one {Copied # object} other {Copied # objects}}"
-msgstr ""
+#~ msgid "{copiedCount, plural, one {Copied # object} other {Copied # objects}}"
+#~ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "{copies, plural, one {# copy} other {# copies}}"
@@ -570,6 +575,10 @@ msgstr ""
 msgid "{objects, plural, one {Close the openings of # object in one step} other {Close the openings of # objects in one step}}"
 msgstr ""
 
+#: src/clipboard/drawingClipboard.ts
+msgid "{objects, plural, one {Copied # object} other {Copied # objects}}"
+msgstr ""
+
 #: src/health/healthCopy.ts
 msgid "{objects, plural, one {Delete the zero-area faces of # object in one step} other {Delete the zero-area faces of # objects in one step}}"
 msgstr ""
@@ -810,6 +819,10 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "{shapes, plural, one {Close the openings in # shape.} other {Close the openings in # shapes.}}"
+msgstr ""
+
+#: src/clipboard/drawingClipboard.ts
+msgid "{shapes, plural, one {Copied # shape} other {Copied # shapes}}"
 msgstr ""
 
 #: src/health/healthCopy.ts
@@ -1331,6 +1344,10 @@ msgstr ""
 #: src/io/tauriFileHost.ts
 #: src/io/webFileHost.ts
 msgid "All supported files"
+msgstr ""
+
+#: src/clipboard/drawingClipboard.ts
+msgid "Already here: the pasted drawing matches what is drawn"
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
@@ -6404,6 +6421,10 @@ msgstr ""
 msgid "Nothing to {steps} here. Tick another step."
 msgstr ""
 
+#: src/clipboard/drawingClipboard.ts
+msgid "Nothing to copy"
+msgstr ""
+
 #: src/App.tsx
 #: src/shop/ShopApp.tsx
 msgid "Nothing to export — the model has no solids."
@@ -7195,6 +7216,7 @@ msgid "Parts left out ({parts})"
 msgstr ""
 
 #: src/clipboard/linkedPaste.ts
+#: src/i18n/historyLabels.ts
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
 #: src/panels/MenuBar.tsx
@@ -7239,6 +7261,10 @@ msgstr ""
 
 #: src/App.tsx
 msgid "Pasted objects"
+msgstr ""
+
+#: src/App.tsx
+msgid "Pasted shapes"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -9186,8 +9212,8 @@ msgid "Sketch {n}"
 msgstr ""
 
 #: src/App.tsx
-msgid "Sketch geometry can't be copied yet — use Move with Option/Alt held"
-msgstr ""
+#~ msgid "Sketch geometry can't be copied yet — use Move with Option/Alt held"
+#~ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "Sketches can't be part of a group or component. Select only objects, groups, or components."

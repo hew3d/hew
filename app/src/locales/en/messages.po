@@ -70,6 +70,11 @@ msgstr "{0, plural, one {# solid} other {# solids}}"
 msgid "{0, plural, one {# station} other {# stations}}"
 msgstr "{0, plural, one {# station} other {# stations}}"
 
+#. placeholder {0}: objects + shapes
+#: src/clipboard/drawingClipboard.ts
+msgid "{0, plural, one {Copied # item} other {Copied # items}}"
+msgstr "{0, plural, one {Copied # item} other {Copied # items}}"
+
 #. placeholder {0}: r.linked + r.sets
 #: src/linkSimilar.ts
 msgid "{0, plural, one {Linked # copy} other {Linked # copies}}"
@@ -120,8 +125,8 @@ msgid "{chordLabel} stays with {ownerLabel} on this Mac and can’t be a shortcu
 msgstr "{chordLabel} stays with {ownerLabel} on this Mac and can’t be a shortcut."
 
 #: src/App.tsx
-msgid "{copiedCount, plural, one {Copied # object} other {Copied # objects}}"
-msgstr "{copiedCount, plural, one {Copied # object} other {Copied # objects}}"
+#~ msgid "{copiedCount, plural, one {Copied # object} other {Copied # objects}}"
+#~ msgstr "{copiedCount, plural, one {Copied # object} other {Copied # objects}}"
 
 #: src/health/healthCopy.ts
 msgid "{copies, plural, one {# copy} other {# copies}}"
@@ -570,6 +575,10 @@ msgstr "{objects, plural, one {Close # object} other {Close # objects}}"
 msgid "{objects, plural, one {Close the openings of # object in one step} other {Close the openings of # objects in one step}}"
 msgstr "{objects, plural, one {Close the openings of # object in one step} other {Close the openings of # objects in one step}}"
 
+#: src/clipboard/drawingClipboard.ts
+msgid "{objects, plural, one {Copied # object} other {Copied # objects}}"
+msgstr "{objects, plural, one {Copied # object} other {Copied # objects}}"
+
 #: src/health/healthCopy.ts
 msgid "{objects, plural, one {Delete the zero-area faces of # object in one step} other {Delete the zero-area faces of # objects in one step}}"
 msgstr "{objects, plural, one {Delete the zero-area faces of # object in one step} other {Delete the zero-area faces of # objects in one step}}"
@@ -811,6 +820,10 @@ msgstr "{shapes, plural, one {# shape was split into pieces: rejoin them.} other
 #: src/health/healthCopy.ts
 msgid "{shapes, plural, one {Close the openings in # shape.} other {Close the openings in # shapes.}}"
 msgstr "{shapes, plural, one {Close the openings in # shape.} other {Close the openings in # shapes.}}"
+
+#: src/clipboard/drawingClipboard.ts
+msgid "{shapes, plural, one {Copied # shape} other {Copied # shapes}}"
+msgstr "{shapes, plural, one {Copied # shape} other {Copied # shapes}}"
 
 #: src/health/healthCopy.ts
 msgid "{shapes, plural, one {Hew couldn't make this one solid:} other {Hew couldn't make these # solid:}}"
@@ -1332,6 +1345,10 @@ msgstr "All of them are solid."
 #: src/io/webFileHost.ts
 msgid "All supported files"
 msgstr "All supported files"
+
+#: src/clipboard/drawingClipboard.ts
+msgid "Already here: the pasted drawing matches what is drawn"
+msgstr "Already here: the pasted drawing matches what is drawn"
 
 #: src/panels/ReportBugDialog.tsx
 msgid "Also open a public GitHub issue"
@@ -6410,6 +6427,10 @@ msgstr "Nothing selected is smooth. Set a Smooth level first."
 msgid "Nothing to {steps} here. Tick another step."
 msgstr "Nothing to {steps} here. Tick another step."
 
+#: src/clipboard/drawingClipboard.ts
+msgid "Nothing to copy"
+msgstr "Nothing to copy"
+
 #: src/App.tsx
 #: src/shop/ShopApp.tsx
 msgid "Nothing to export — the model has no solids."
@@ -7201,6 +7222,7 @@ msgid "Parts left out ({parts})"
 msgstr "Parts left out ({parts})"
 
 #: src/clipboard/linkedPaste.ts
+#: src/i18n/historyLabels.ts
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
 #: src/panels/MenuBar.tsx
@@ -7246,6 +7268,10 @@ msgstr "paste unlinked"
 #: src/App.tsx
 msgid "Pasted objects"
 msgstr "Pasted objects"
+
+#: src/App.tsx
+msgid "Pasted shapes"
+msgstr "Pasted shapes"
 
 #: src/palette/registry.ts
 msgid "path array"
@@ -9192,8 +9218,8 @@ msgid "Sketch {n}"
 msgstr "Sketch {n}"
 
 #: src/App.tsx
-msgid "Sketch geometry can't be copied yet — use Move with Option/Alt held"
-msgstr "Sketch geometry can't be copied yet — use Move with Option/Alt held"
+#~ msgid "Sketch geometry can't be copied yet — use Move with Option/Alt held"
+#~ msgstr "Sketch geometry can't be copied yet — use Move with Option/Alt held"
 
 #: src/kernelErrors.ts
 msgid "Sketches can't be part of a group or component. Select only objects, groups, or components."

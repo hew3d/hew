@@ -126,7 +126,7 @@ Drawn geometry transforms at shape granularity, on the ground and on a solid's f
 
 Move with copy (above) is the fastest way to duplicate something in place, but `⌘C`/`⌘V` work too, and they're the way to carry a selection somewhere the model doesn't reach on its own — a different open document, say.
 
-- **Copy** (`⌘C` / `Ctrl+C`) copies the selected objects, groups, and components. It needs at least one of those in the selection; a sketch-only selection refuses with a reminder to use Move with copy instead, which does carry sketch geometry.
+- **Copy** (`⌘C` / `Ctrl+C`) copies the selected objects, groups, components, and drawn shapes. A selected line or region takes its whole shape with it, the same way Move does.
 - **Paste** (`⌘V` / `Ctrl+V`) arms a placement ghost that follows the cursor with the same inference snapping as Move — click to drop it, `Esc` to cancel. Paste again for another copy at a new spot.
 - **Paste In Place** (`⇧⌘V` / `Ctrl+Shift+V`) drops the copy back exactly where it was cut or copied from, with no click.
 - **Cut** (`⌘X` / `Ctrl+X`) copies, then deletes the selection — one undo step for the delete.
@@ -134,6 +134,8 @@ Move with copy (above) is the fastest way to duplicate something in place, but `
 Paste into the same model and you get a linked copy of what you copied, just as Move with copy makes one: the original and the pasted copy share a shape, so editing one changes both. **Edit ▸ Paste independent** makes a plain copy with no link instead. If you turned off **Copies are linked** in Settings, an ordinary Paste is the independent one and **Edit ▸ Paste linked** is how you ask for a link. Cut and Paste is always independent, since the original is gone; so is pasting into a different model.
 
 Pasting the same clipboard twice doesn't make two shapes; the second paste joins the same set of linked copies.
+
+Pasted shapes behave as if you drew them where they land. Paste a rectangle onto a box's face and it splits the face, ready for Push/Pull; paste it over other lines and they split each other; paste it in empty space and it becomes a new sketch. A pasted shape keeps the orientation it was copied with, so a rectangle copied from the ground stays flat even when you click on a wall. Circles stay true circles, and a shape drawn as a separate shape stays separate. One Undo removes the whole paste, objects and shapes together. Paste In Place right after a copy has nothing to add, so Hew tells you the shapes are already there and leaves the model alone.
 
 ## Deleting
 

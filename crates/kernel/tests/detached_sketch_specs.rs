@@ -672,8 +672,8 @@ fn plane_units_all_lists_a_detached_sketch_as_its_own_entry() {
         .iter()
         .enumerate()
         .filter_map(|(i, (l, _))| match *l {
-            PlaneListing::Detached { sketch, plane } => Some((i, sketch, plane)),
-            PlaneListing::Plane(_) => None,
+            PlaneListing::Detached { sketch, plane, .. } => Some((i, sketch, plane)),
+            PlaneListing::Plane(_) | PlaneListing::Context(_) => None,
         })
         .collect();
     assert_eq!(

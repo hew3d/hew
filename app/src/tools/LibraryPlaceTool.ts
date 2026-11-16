@@ -37,6 +37,21 @@ export interface LibraryInsertResult {
   definitionsReused: number
   worldSketchesSkipped: number
   annotationsSkipped: number
+  /** A clipboard paste's drawing, one entry per pasted sketch (empty for a
+   *  Library insert): where `pastedDrawingRefs` finds the pasted shapes. */
+  drawn: DrawnInsert[]
+  /** Every draw drew nothing new (Paste In Place over the original). */
+  drawingUnchanged: boolean
+}
+
+/** One sketch a paste drew (`insert_item`'s `drawn`, world coordinates). */
+export interface DrawnInsert {
+  /** `[px,py,pz,nx,ny,nz]`: the plane it was drawn on. */
+  plane: number[]
+  /** The new detached sketch, for a detached shape. */
+  detached: bigint | null
+  /** Every pasted segment. */
+  anchors: [V3, V3][]
 }
 
 /** Everything the browser hands the tool. The ghost group's ownership
@@ -264,5 +279,28 @@ export function parseInsertResult(raw: unknown): LibraryInsertResult {
     definitionsReused: num(obj.definitionsReused),
     worldSketchesSkipped: num(obj.worldSketchesSkipped),
     annotationsSkipped: num(obj.annotationsSkipped),
+    drawn: parseDrawn(obj.drawn),
+    drawingUnchanged: obj.drawingUnchanged === true,
   }
+}
+
+/** `insert_item`'s `drawn` entries, parsed. Exported for tests. */
+export function parseDrawn(raw: unknown): DrawnInsert[] {
+  if (!Array.isArray(raw)) return []
+  const out: DrawnInsert[] = []
+  for (const d of raw as unknown[]) {
+    const o = (d ?? {}) as Record<string, unknown>
+    const plane = Array.isArray(o.plane) ? (o.plane as unknown[]).map((x) => (typeof x === 'number' ? x : 0)) : []
+    if (plane.length !== 6) continue
+    const detached = typeof o.detached === 'string' ? BigInt(o.detached) : null
+    const anchors: [V3, V3][] = []
+    for (const seg of Array.isArray(o.anchors) ? (o.anchors as unknown[]) : []) {
+      if (!Array.isArray(seg) || seg.length !== 2) continue
+      const [a, b] = seg as unknown[]
+      if (!Array.isArray(a) || !Array.isArray(b) || a.length !== 3 || b.length !== 3) continue
+      anchors.push([a as V3, b as V3])
+    }
+    out.push({ plane, detached, anchors })
+  }
+  return out
 }

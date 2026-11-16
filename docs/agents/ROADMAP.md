@@ -390,6 +390,14 @@ below.
   to enter. Link identical copies (joining look-alike loose Objects into
   one set) is not built yet: it waits on the query that fingerprints a
   shape.
+- Copy/Cut/Paste and Paste In Place of drawing (KB-46, v1.5 decisions
+  D3): the copied shapes ride in the clipboard item as its world sketches
+  (`Document::extract_clipboard_item_with_drawing`, `DrawnSource`), and a
+  paste draws them at the destination through the drafting engine
+  (`InsertOptions::drawing` = `DrawingInsert::Draw`), so a shape pasted
+  on a face imprints it and one pasted over drawing arranges with it, as
+  Move+copy does; detached shapes stay detached; nodes and drawing are one
+  "Paste" undo step. Copy inside a component session stays refused
 - Slice: cut a solid along a plane into two independent watertight solids
 - Push/pull on any planar face of a solid, not just faces with
   perpendicular neighbors: it follows classic SketchUp translate-and-build —

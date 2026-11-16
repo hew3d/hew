@@ -124,6 +124,69 @@ fn hex(key: u64) -> String {
     format!("{key:016x}")
 }
 
+/// The numbers a listing names `plane` by: `[px,py,pz,nx,ny,nz]`, its point
+/// closest to the world origin and its unit normal.
+fn plane_numbers(plane: &Plane) -> [f64; 6] {
+    let n = plane.normal();
+    let o = Point3::ORIGIN + n * (-plane.signed_distance(Point3::ORIGIN));
+    [o.x, o.y, o.z, n.x, n.y, n.z]
+}
+
+/// The plane a `{"plane":[px,py,pz,nx,ny,nz]}` context names. The one
+/// constructor every plane context goes through, so a listing that keys
+/// against the plane a context will rebuild ([`Scene::plane_units_all_json`])
+/// and the draft opened on that context resolve the identical plane.
+fn plane_of_ctx_numbers(v: [f64; 6]) -> Result<Plane, ApiError> {
+    Plane::from_point_normal(Point3::new(v[0], v[1], v[2]), Vec3::new(v[3], v[4], v[5]))
+        .map_err(|e| api_err(&e, &e))
+}
+
+/// JavaScript's `Math.round`: the nearest integer, a half rounding up
+/// (toward +infinity), unlike [`f64::round`] (away from zero).
+fn js_round(x: f64) -> f64 {
+    let f = x.floor();
+    if x - f >= 0.5 { f + 1.0 } else { f }
+}
+
+/// `Math.hypot` of three finite numbers as V8 and JavaScriptCore compute it:
+/// scaled by the largest magnitude, squares summed with Kahan compensation.
+fn js_hypot3(a: f64, b: f64, c: f64) -> f64 {
+    let abs = [a.abs(), b.abs(), c.abs()];
+    let max = abs.iter().copied().fold(0.0, f64::max);
+    if max == 0.0 {
+        return 0.0;
+    }
+    let (mut sum, mut compensation) = (0.0f64, 0.0f64);
+    for x in abs {
+        let n = x / max;
+        let summand = n * n - compensation;
+        let preliminary = sum + summand;
+        compensation = (preliminary - sum) - summand;
+        sum = preliminary;
+    }
+    sum.sqrt() * max
+}
+
+/// The context numbers the app builds from a listed plane's numbers `e`
+/// (`canonicalPlane` in `app/src/tools/planeUnits.ts`, step for step in
+/// JavaScript's arithmetic): the unit normal and the closest point, rounded
+/// to 1e-12 with -0 folded to 0. `None` for a degenerate normal. The
+/// Outliner opens its edits on exactly this context, so the whole-document
+/// listing keys against the plane rebuilt from it (#103).
+fn app_ctx_numbers(e: [f64; 6]) -> Option<[f64; 6]> {
+    let r12 = |x: f64| {
+        let v = js_round(x * 1e12) / 1e12;
+        if v == 0.0 { 0.0 } else { v }
+    };
+    let len = js_hypot3(e[3], e[4], e[5]);
+    if !(len > 0.0 && len.is_finite()) {
+        return None;
+    }
+    let (nx, ny, nz) = (r12(e[3] / len), r12(e[4] / len), r12(e[5] / len));
+    let d = e[0] * nx + e[1] * ny + e[2] * nz;
+    Some([r12(nx * d), r12(ny * d), r12(nz * d), nx, ny, nz])
+}
+
 fn world_json(pose: Option<Pose>, p: Point3) -> serde_json::Value {
     let w = pose.map_or(p, |pz| pz.to_world(p));
     serde_json::json!([w.x, w.y, w.z])
@@ -228,21 +291,19 @@ impl Scene {
     }
 
     /// The objects that take part in a draft on `plane` in `frame`: those
-    /// with a face on it, minus this session's hidden objects.
+    /// with a face on it, narrowed to an open editing session's own in the
+    /// session frame ([`kernel::Document::draft_participants`], v1.5
+    /// decisions D1), minus this session's hidden objects.
     fn draft_participants(&self, plane: Plane, frame: Option<ComponentId>) -> Vec<ObjectId> {
         self.doc
-            .drawable_objects_on_plane(plane, frame)
+            .draft_participants(plane, frame)
             .into_iter()
             .filter(|o| !self.hidden_objects.contains(o))
             .collect()
     }
 
     fn ctx_plane(&self, world: [f64; 6], instance: Option<u64>) -> Result<DraftCtx, ApiError> {
-        let plane = Plane::from_point_normal(
-            Point3::new(world[0], world[1], world[2]),
-            Vec3::new(world[3], world[4], world[5]),
-        )
-        .map_err(|e| api_err(&e, &e))?;
+        let plane = plane_of_ctx_numbers(world)?;
         let (plane, frame, pose) = match instance {
             Some(i) => {
                 let (def, pose) = self.draft_instance_pose(i)?;
@@ -294,6 +355,11 @@ impl Scene {
         })
     }
 
+    /// A face's context: its plane and the object's frame, with the plane's
+    /// participants. While an editing session is open, a face of an object
+    /// outside it resolves to the session frame's plane context there (the
+    /// object takes no part, v1.5 decisions D1): drawing on an outside face
+    /// makes the session's free drawing on that plane.
     fn ctx_face(
         &self,
         object: u64,
@@ -341,13 +407,19 @@ impl Scene {
 
     /// A sketch's context: its plane and frame. A plain sketch's context is
     /// the whole plane's arrangement; a detached sketch's is the sketch
-    /// alone (detached shapes D5), with no object taking part.
+    /// alone (detached shapes D5), with no object taking part. A sketch of
+    /// the session frame outside an open editing session is refused
+    /// `ExplodeSessionScope` (v1.5 decisions D1; selection is
+    /// session-scoped, so the app never names one).
     fn ctx_sketch(&self, sketch: u64, instance: Option<u64>) -> Result<DraftCtx, ApiError> {
         let sid = sketch_id(sketch);
         let sk = self
             .doc
             .sketch(sid)
             .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
+        if instance.is_none() && !self.doc.draft_scope_holds_sketch(sid) {
+            return Err(doc_err(kernel::DocumentError::ExplodeSessionScope));
+        }
         let (plane, detached) = (sk.plane(), sk.detached());
         let owner = self.doc.sketch_owner_component(sid);
         let (frame, pose) = match instance {
@@ -505,6 +577,91 @@ impl Scene {
             )));
         }
         Ok(edges)
+    }
+
+    /// The drawing a clipboard copy names ([`Scene::extract_clipboard`]):
+    /// a JSON array of `{"sketch":id}` (a whole free sketch),
+    /// `{"sketch":id,"islands":[id,..]}` (some islands of it; how a detached
+    /// shape is named), or `{"ctx":<context>,"keys":["hex",..]}` (the edges
+    /// a context's listing names by key, the context given as
+    /// [`Scene::plane_units_json`] takes it, as a JSON object or a string
+    /// holding one).
+    ///
+    /// # Errors
+    /// `BadDrawing` for malformed JSON; `BadContext` for a bad context or a
+    /// detached sketch's own context (name its islands instead); whatever a
+    /// context refuses.
+    pub(crate) fn drawn_sources(
+        &self,
+        drawing_json: &str,
+    ) -> Result<Vec<kernel::DrawnSource>, ApiError> {
+        let bad = |what: &str| ApiError(format!("BadDrawing: {what}"));
+        let v: serde_json::Value = serde_json::from_str(drawing_json)
+            .map_err(|e| bad(&format!("malformed drawing JSON: {e}")))?;
+        let items = v
+            .as_array()
+            .ok_or_else(|| bad("drawing must be an array"))?;
+        let mut out = Vec::with_capacity(items.len());
+        for it in items {
+            if let Some(ctx) = it.get("ctx") {
+                let ctx = match ctx {
+                    serde_json::Value::String(s) => parse_ctx(s)?,
+                    other => other.clone(),
+                };
+                let ctx = self.ctx_from_value(&ctx)?;
+                if ctx.scope != DraftScope::Plane {
+                    return Err(ApiError::new(
+                        "BadContext",
+                        "a detached shape is named by {\"sketch\":id,\"islands\":[..]}",
+                    ));
+                }
+                let keys = it
+                    .get("keys")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| bad("\"keys\" must be an array"))?
+                    .iter()
+                    .map(|k| match k {
+                        serde_json::Value::String(s) => u64::from_str_radix(s, 16)
+                            .map_err(|_| bad("a key must be a 16-digit hex string")),
+                        other => other
+                            .as_u64()
+                            .ok_or_else(|| bad("a key must be a hex string")),
+                    })
+                    .collect::<Result<Vec<u64>, ApiError>>()?;
+                out.push(kernel::DrawnSource::PlaneKeys {
+                    plane: ctx.plane,
+                    frame: ctx.frame,
+                    objects: ctx.objects,
+                    keys,
+                });
+            } else if let Some(s) = it.get("sketch") {
+                let sid = sketch_id(
+                    s.as_u64()
+                        .ok_or_else(|| bad("\"sketch\" must be an unsigned integer id"))?,
+                );
+                match it.get("islands") {
+                    None | Some(serde_json::Value::Null) => {
+                        out.push(kernel::DrawnSource::Sketch(sid));
+                    }
+                    Some(list) => {
+                        let islands = list
+                            .as_array()
+                            .ok_or_else(|| bad("\"islands\" must be an array"))?
+                            .iter()
+                            .map(|i| {
+                                i.as_u64()
+                                    .map(|i| kernel::SketchIslandId::from(KeyData::from_ffi(i)))
+                                    .ok_or_else(|| bad("an island must be an unsigned integer id"))
+                            })
+                            .collect::<Result<Vec<_>, ApiError>>()?;
+                        out.push(kernel::DrawnSource::Islands(sid, islands));
+                    }
+                }
+            } else {
+                return Err(bad("each entry names a \"ctx\" or a \"sketch\""));
+            }
+        }
+        Ok(out)
     }
 
     fn draft_world_transform(
@@ -1208,9 +1365,7 @@ impl Scene {
     pub fn object_drawing_planes(&self, object: u64) -> Vec<f64> {
         let mut out = Vec::new();
         for p in self.doc.object_drawing_planes(object_id(object)) {
-            let n = p.normal();
-            let o = Point3::ORIGIN + n * (-p.signed_distance(Point3::ORIGIN));
-            out.extend([o.x, o.y, o.z, n.x, n.y, n.z]);
+            out.extend(plane_numbers(&p));
         }
         out
     }
@@ -1251,22 +1406,43 @@ impl Scene {
     ///
     /// A detached sketch (in no plane's arrangement) is its own entry,
     /// after the planes: `{plane, sketch: id, detached: true, units}`.
+    ///
+    /// A plane entry's keys are those `plane_units_json` gives for the
+    /// context the app builds from the entry's `plane` numbers (rounded to
+    /// 1e-12, [`app_ctx_numbers`]), so the Outliner, which seeds its cache
+    /// from this read under that context and opens its edits on it, finds
+    /// every key in the draft — on an oblique plane too, where the rounded
+    /// numbers rebuild a plane that differs from the sketch's in the last
+    /// bits (#103).
+    ///
+    /// While an editing session is open (v1.5 decisions D1), a plane with
+    /// drawing outside the session lists that drawing first, as its own
+    /// entry marked `context: true` (arranged among itself with the outside
+    /// objects; shown dimmed, never opened for editing), then the session's
+    /// drawing on the plane as the ordinary entry, whose keys are the
+    /// draft's. A detached sketch outside the session is marked
+    /// `context: true` too. The flag is omitted otherwise.
     pub fn plane_units_all_json(&self) -> Result<String, ApiError> {
         let mut out = Vec::new();
-        for (listing, units) in self
-            .doc
-            .free_plane_units(None, &self.hidden_objects.iter().copied().collect())
+        let on = |plane: Plane| {
+            app_ctx_numbers(plane_numbers(&plane))
+                .and_then(|c| plane_of_ctx_numbers(c).ok())
+                .unwrap_or(plane)
+        };
+        for (listing, units) in
+            self.doc
+                .free_plane_units_on(None, &self.hidden_objects.iter().copied().collect(), on)
         {
-            let plane = listing.plane();
-            let n = plane.normal();
-            let o = Point3::ORIGIN + n * (-plane.signed_distance(Point3::ORIGIN));
             let mut entry = serde_json::json!({
-                "plane": [o.x, o.y, o.z, n.x, n.y, n.z],
+                "plane": plane_numbers(&listing.plane()),
                 "units": self.units_value(None, &units)?,
             });
             if let kernel::PlaneListing::Detached { sketch, .. } = listing {
                 entry["sketch"] = serde_json::json!(sketch.data().as_ffi());
                 entry["detached"] = serde_json::json!(true);
+            }
+            if listing.is_context() {
+                entry["context"] = serde_json::json!(true);
             }
             out.push(entry);
         }
@@ -2074,6 +2250,133 @@ mod tests {
             (c.approx_eq(a, 1e-12) && d.approx_eq(b, 1e-12))
                 || (c.approx_eq(b, 1e-12) && d.approx_eq(a, 1e-12))
         })
+    }
+
+    /// KB-2: a `.skp` holds its ground drawing as separate sketches on a
+    /// plane a hair below z = 0, lines crossing without meeting and loops
+    /// without a face. A circle drawn on the ground beside it is the region
+    /// every pick a tool makes finds (the fill pick, the plane's own pick,
+    /// the Select snap), it extrudes, and the file's drawing is left exactly
+    /// as it was: no loop of it gains a fill.
+    #[test]
+    fn a_circle_beside_drawing_a_hair_below_the_ground_is_picked() {
+        let z = -1.848_093_234_002_59e-13;
+        let below =
+            Plane::from_point_normal(Point3::new(0.0, 0.0, z), Vec3::new(0.0, 0.0, 1.0)).unwrap();
+        let mut doc = kernel::Document::new();
+        let square = doc.add_sketch(below);
+        {
+            let sk = doc.sketch_mut(square).unwrap();
+            for (a, b) in [
+                ((0.0, 0.0), (4.0, 0.0)),
+                ((4.0, 0.0), (4.0, 4.0)),
+                ((4.0, 4.0), (0.0, 4.0)),
+                ((0.0, 4.0), (0.0, 0.0)),
+            ] {
+                sk.add_segment(Point3::new(a.0, a.1, z), Point3::new(b.0, b.1, z))
+                    .unwrap();
+            }
+            sk.make_regions_faceless();
+        }
+        let cross = doc.add_sketch(below);
+        doc.sketch_mut(cross)
+            .unwrap()
+            .add_segment(Point3::new(2.0, -1.0, z), Point3::new(2.0, 5.0, z))
+            .unwrap();
+        let mut scene = Scene::new();
+        scene.load_core(&doc.save()).unwrap();
+
+        // The Circle tool's ground commit: one draft, one curve bracket.
+        let (cx, cy) = (20.0, 20.0);
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Circle")
+            .unwrap();
+        scene
+            .draft_begin_curve_with(d, &[cx, cy, 0.0], 1.0)
+            .unwrap();
+        for i in 0..24 {
+            let (t0, t1) = (
+                std::f64::consts::TAU * f64::from(i) / 24.0,
+                std::f64::consts::TAU * f64::from(i + 1) / 24.0,
+            );
+            scene
+                .draft_add_segment(
+                    d,
+                    cx + t0.cos(),
+                    cy + t0.sin(),
+                    0.0,
+                    cx + t1.cos(),
+                    cy + t1.sin(),
+                    0.0,
+                )
+                .unwrap();
+        }
+        scene.draft_end_curve(d).unwrap();
+        scene.draft_end(d).unwrap();
+
+        // Push/Pull's fill pick, from above.
+        let hit = scene
+            .pick_sketch_region(cx + 0.3, cy + 0.2, 10.0, 0.0, 0.0, -1.0)
+            .expect("the circle's fill is under the cursor");
+        let sk = scene.doc.sketch(sketch_id(hit.sketch())).unwrap();
+        let rid = kernel::SketchRegionId::from(KeyData::from_ffi(hit.region()));
+        assert!((sk.region_area(rid).unwrap() - std::f64::consts::PI).abs() < 0.1);
+        // Select's snap names that sketch's region.
+        let snap = scene
+            .snap(
+                cx + 0.3,
+                cy + 0.2,
+                10.0,
+                0.0,
+                0.0,
+                -1.0,
+                0.005,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(true),
+                None,
+                None,
+            )
+            .unwrap()
+            .expect("a snap on the circle");
+        assert_eq!(snap.element_kind().as_deref(), Some("sketch-region"));
+        assert_eq!(snap.sketch(), Some(hit.sketch()));
+        // The plane's own pick (Select's drawing pick) finds a region there.
+        let picked = json(
+            &scene
+                .pick_plane_unit(GROUND, &[cx + 0.3, cy + 0.2, 10.0, 0.0, 0.0, -1.0], 0.01)
+                .unwrap(),
+        );
+        assert!(picked["region"].is_string(), "{picked}");
+        // The file's drawing kept its lines and its loop's missing face:
+        // the only fill on the plane is the circle's.
+        let fills: usize = scene
+            .doc
+            .sketch_ids()
+            .into_iter()
+            .map(|s| {
+                let sk = scene.doc.sketch(s).unwrap();
+                sk.regions().values().filter(|r| !r.faceless).count()
+            })
+            .sum();
+        assert_eq!(fills, 1);
+        // (The crossing line is still one line of its own sketch.)
+        assert!(
+            scene
+                .doc
+                .sketch_ids()
+                .into_iter()
+                .any(|s| scene.doc.sketch(s).unwrap().edges().len() == 1)
+        );
+        // And it extrudes.
+        scene
+            .extrude_region(hit.sketch(), hit.region(), 1.0)
+            .unwrap();
     }
 
     /// A vertex drag (Move vertex) lifts its draft without foreign edges, so
@@ -3753,5 +4056,241 @@ mod tests {
         let seg = scene.faces_open_edge_segments(five);
         assert_eq!((seg[0], seg[1]), (0.0, 1.0));
         assert_eq!(seg.len(), 2 + 4 * 6, "the loop's four edges");
+    }
+
+    /// The context string the Outliner builds from a whole-document listing
+    /// entry's plane numbers (`ctxOfPlane` in `app/src/tools/planeUnits.ts`;
+    /// Rust's float formatting is shortest-round-trip, like
+    /// `JSON.stringify`).
+    fn app_ctx_of_listing_plane(e: &[f64]) -> String {
+        let c = app_ctx_numbers(e.try_into().unwrap()).unwrap();
+        format!(
+            r#"{{"plane":[{},{},{},{},{},{}]}}"#,
+            c[0], c[1], c[2], c[3], c[4], c[5]
+        )
+    }
+
+    /// [`app_ctx_numbers`] matches the app's `canonicalPlane` bit for bit;
+    /// the expected values are Node's (V8) output for the same inputs, and
+    /// [`js_round`] rounds a negative half up, as `Math.round` does.
+    // Node's output rounded to 1e-12, not an approximation of 1/sqrt(2).
+    #[allow(clippy::approx_constant)]
+    #[test]
+    fn app_ctx_numbers_match_the_apps_canonical_plane() {
+        assert_eq!(
+            app_ctx_numbers([
+                0.1,
+                -2.3,
+                4.56789,
+                0.2672612419124244,
+                -0.5345224838248488,
+                0.8017837257372732
+            ]),
+            Some([
+                1.314547857141,
+                -2.629095714286,
+                3.943643571426,
+                0.267261241912,
+                -0.534522483825,
+                0.801783725737
+            ])
+        );
+        assert_eq!(
+            app_ctx_numbers([3.0, 4.0, 5.0, 3.0, 4.0, 5.0]),
+            Some([
+                3.000000000001,
+                3.999999999999,
+                5.000000000004,
+                0.424264068712,
+                0.565685424949,
+                0.707106781187
+            ])
+        );
+        assert_eq!(js_hypot3(1e-200, 3e-200, 2e-200), 3.741657386773941e-200);
+        assert_eq!(js_round(-2.5), -2.0);
+        assert_eq!(js_round(2.5), 3.0);
+        assert_eq!(app_ctx_numbers([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), None);
+        // -0 folds to 0, as the app's `r12` does.
+        let c = app_ctx_numbers([0.0, 0.0, 0.0, 0.0, -0.0, 1.0]).unwrap();
+        assert!(c.iter().all(|x| x.is_sign_positive()), "{c:?}");
+    }
+
+    /// #103: the Outliner seeds its listing cache from the whole-document
+    /// read and opens the edit on the context string it builds from each
+    /// entry's plane, so every key that read lists must name an edge in a
+    /// draft opened on that string — on oblique planes too, where the
+    /// string's rounded numbers rebuild a plane that differs from the
+    /// sketch's in the last bits. A sweep over pseudo-random oblique planes
+    /// (a fixed LCG, so a failure names its plane).
+    #[test]
+    fn whole_document_listing_keys_name_edges_in_a_draft_on_the_apps_context() {
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut rnd = move || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((seed >> 11) as f64) / ((1u64 << 53) as f64) * 2.0 - 1.0
+        };
+        let mut failed = Vec::new();
+        for i in 0..300 {
+            let n = Vec3::new(rnd(), rnd(), rnd());
+            if n.length() < 0.2 {
+                continue;
+            }
+            let n = n * (1.0 / n.length());
+            let p = Point3::new(rnd() * 5.0, rnd() * 5.0, rnd() * 5.0);
+            let helper = if n.x.abs() < 0.9 {
+                Vec3::new(1.0, 0.0, 0.0)
+            } else {
+                Vec3::new(0.0, 1.0, 0.0)
+            };
+            let u = n.cross(helper);
+            let u = u * (1.0 / u.length());
+            let v = n.cross(u);
+            let a = p + u * 1.0 + v * 0.3;
+            let b = p + u * -0.7 + v * 1.1;
+            let mut scene = Scene::new();
+            let d = scene
+                .draft_begin_plane(p.x, p.y, p.z, n.x, n.y, n.z, "Line")
+                .unwrap();
+            scene
+                .draft_add_segment(d, a.x, a.y, a.z, b.x, b.y, b.z)
+                .unwrap();
+            scene.draft_end(d).unwrap();
+            let all = json(&scene.plane_units_all_json().unwrap());
+            let entries = all.as_array().unwrap();
+            assert_eq!(entries.len(), 1, "plane {i}: one entry");
+            let plane: Vec<f64> = entries[0]["plane"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_f64().unwrap())
+                .collect();
+            let ctx = app_ctx_of_listing_plane(&plane);
+            let keys = edge_keys(&entries[0]["units"]);
+            assert_eq!(keys.len(), 1, "plane {i}: one edge");
+            let d = scene.draft_begin_ctx(&ctx, "Erase").unwrap();
+            if scene.draft_remove_edges(d, &keys).is_err() {
+                failed.push((i, ctx.clone()));
+            }
+            scene.draft_cancel(d).unwrap();
+            // The per-context read the cache stands in for agrees too.
+            assert_eq!(
+                edge_keys(&units(&scene, &ctx)),
+                keys,
+                "plane {i}: the batch and the context's own listing key alike"
+            );
+        }
+        assert!(
+            failed.is_empty(),
+            "{} planes failed: {failed:?}",
+            failed.len()
+        );
+    }
+
+    /// Copy and paste of drawing (v1.5 decisions D3): a rectangle named by
+    /// its context's listing keys copies to clipboard bytes, its Paste In
+    /// Place affine is its bottom center, and a paste with an origin draws
+    /// it at the destination as one undo step, reporting where it landed.
+    /// The same bytes inserted without an origin (a Library insert) skip it.
+    #[test]
+    fn drawing_copies_and_pastes_through_the_clipboard() {
+        let mut scene = Scene::new();
+        let d = scene.draft_begin_ctx(GROUND, "Rect").unwrap();
+        rect(&mut scene, d, 1.0, 1.0, 2.0, 2.0, 0.0);
+        scene.draft_end(d).unwrap();
+        let keys: Vec<String> = edge_keys(&units(&scene, GROUND))
+            .into_iter()
+            .map(hex)
+            .collect();
+        let drawing = serde_json::json!([{ "ctx": GROUND, "keys": keys }]).to_string();
+        let bytes = scene
+            .extract_clipboard(&[], &[], &drawing, "win".into())
+            .unwrap();
+        let placement = scene
+            .extract_clipboard_placement(&[], &[], &drawing)
+            .unwrap()
+            .expect("a placement");
+        assert_eq!(
+            (placement[3], placement[7], placement[11]),
+            (1.5, 1.5, 0.0),
+            "the bottom center"
+        );
+        // The placement ghost draws the copied lines, and its box is
+        // theirs (item coordinates: the 1 m square around the origin).
+        let ghost = crate::item_ghost_mesh(&bytes).unwrap();
+        assert_eq!(ghost.edge_positions().len(), 4 * 2 * 3);
+        assert_eq!(ghost.bbox(), vec![-0.5, -0.5, 0.0, 0.5, 0.5, 0.0]);
+
+        // Paste 3 m along x from where it was copied.
+        let mut affine = placement.clone();
+        affine[3] += 3.0;
+        let report = scene
+            .insert_item_composed(&bytes, &affine, None, None, Some("win".into()))
+            .unwrap();
+        assert_eq!(report.drawn.len(), 1);
+        assert_eq!(report.drawn[0].anchors.len(), 4);
+        assert!(!report.drawing_unchanged);
+        assert!(
+            report.drawn[0]
+                .anchors
+                .iter()
+                .any(|(a, _)| a.approx_eq(Point3::new(4.0, 1.0, 0.0), 1e-9)),
+            "{:?}",
+            report.drawn[0].anchors
+        );
+        assert_eq!(units(&scene, GROUND)["units"].as_array().unwrap().len(), 2);
+        scene.scene_undo().unwrap();
+        assert_eq!(
+            units(&scene, GROUND)["units"].as_array().unwrap().len(),
+            1,
+            "one undo removes the paste"
+        );
+
+        // A Library insert of the same bytes skips the drawing.
+        let report = scene
+            .insert_item_composed(&bytes, &affine, None, None, None)
+            .unwrap();
+        assert_eq!(report.world_sketches_skipped, 1);
+        assert!(report.drawn.is_empty());
+    }
+
+    /// The drawing JSON's other forms: a detached shape named by its
+    /// islands copies; a detached sketch's own context with keys is refused
+    /// (name its islands); malformed JSON and an empty selection refuse.
+    #[test]
+    fn clipboard_drawing_json_forms() {
+        let mut scene = Scene::new();
+        let s = detached_circle(&mut scene, GROUND, [0.0, 0.0, 0.0], 1.0, 16);
+        let islands = scene.sketch_island_ids(s);
+        let drawing = serde_json::json!([{ "sketch": s, "islands": islands }]).to_string();
+        let bytes = scene
+            .extract_clipboard(&[], &[], &drawing, "win".into())
+            .unwrap();
+        let item = kernel::Document::load(&bytes).unwrap();
+        let carried = item.carried_drawing();
+        assert_eq!(carried.len(), 1);
+        assert!(item.sketch(carried[0]).unwrap().detached());
+
+        let whole = serde_json::json!([{ "sketch": s }]).to_string();
+        assert!(
+            scene
+                .extract_clipboard(&[], &[], &whole, "win".into())
+                .is_ok()
+        );
+
+        let own = serde_json::json!([{ "ctx": sketch_ctx(s), "keys": [] }]).to_string();
+        let err = scene
+            .extract_clipboard(&[], &[], &own, "win".into())
+            .unwrap_err();
+        assert!(err.0.starts_with("BadContext"), "{}", err.0);
+        let err = scene
+            .extract_clipboard(&[], &[], "{", "win".into())
+            .unwrap_err();
+        assert!(err.0.starts_with("BadDrawing"), "{}", err.0);
+        let err = scene
+            .extract_clipboard(&[], &[], "[]", "win".into())
+            .unwrap_err();
+        assert!(err.0.starts_with("EmptyComponent"), "{}", err.0);
     }
 }

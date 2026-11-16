@@ -33,7 +33,13 @@
 //! points (the boxes' corners and points above them), each drafted on a
 //! plane through it as Line re-homes a slanted segment, Detached or not,
 //! and moves and copies of free sketches — the edits that run the close
-//! pass. For each,
+//! pass — at the top level and inside open editing sessions alike (a loose
+//! line on an outside object's face drawn while a component is open once
+//! left the autosave unable to reopen, KB-44). Drafts take their
+//! participants from `Document::draft_participants`, which an open session
+//! narrows to its own objects (v1.5 decisions D1); `OutsideParticipant`
+//! names an object outside the session and expects the typed refusal with
+//! the document untouched. For each,
 //! one undo restores the document exactly and one redo returns the edit's
 //! state. Whole axis-aligned rectangles between lattice points, and Make
 //! Solid on a free sketch's faces, drive the cell search (§5): closed faces
@@ -182,6 +188,13 @@ enum Op {
         at: u8,
         detached: bool,
     },
+    /// A line drafted on the face of a box OUTSIDE the open session, naming
+    /// that box as a participant: refused `ExplodeSessionScope`, nothing
+    /// changed (v1.5 decisions D1). With no session open, or no outside box
+    /// with a face on the plane, it does nothing.
+    OutsideParticipant {
+        sel: usize,
+    },
 }
 
 fn arb_op() -> impl Strategy<Value = Op> {
@@ -221,6 +234,7 @@ fn arb_op() -> impl Strategy<Value = Op> {
         4 => (sel(), sel(), any::<bool>()).prop_map(|(a, b, flip)| Op::Rect3D { a, b, flip }),
         1 => sel().prop_map(|sel| Op::CloseCells { sel }),
         3 => (any::<u8>(), any::<bool>()).prop_map(|(at, detached)| Op::FaceBox { at, detached }),
+        1 => sel().prop_map(|sel| Op::OutsideParticipant { sel }),
     ]
 }
 
@@ -411,24 +425,6 @@ thread_local! {
 /// must never happen is a panic or a document that no longer reopens, both
 /// checked by the caller.
 fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
-    // Drawing waits until every editing session is closed: a loose line
-    // drawn on a member's face inside a component session leaves an owned
-    // sketch that the autosave does not fold with its owner, so the bytes
-    // do not reopen. That defect predates the close pass (reproduced on
-    // the base without it) and is tracked on its own; until it is fixed,
-    // the drawing ops here exercise the close pass at the top level only.
-    if matches!(
-        op,
-        Op::Line3D { .. }
-            | Op::MoveSketch { .. }
-            | Op::CopySketch { .. }
-            | Op::Rect3D { .. }
-            | Op::CloseCells { .. }
-            | Op::FaceBox { .. }
-    ) && !doc.session_stack().is_empty()
-    {
-        return Ok(());
-    }
     let nodes = live_nodes(doc);
     let instances = doc.instance_ids();
     let groups = doc.group_ids();
@@ -685,7 +681,7 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
             let _ = if detached {
                 doc.draft_detached_new(h, None, "Line", edit)
             } else {
-                let objects = doc.drawable_objects_on_plane(h, None);
+                let objects = doc.draft_participants(h, None);
                 doc.draft(h, None, &objects, "Line", edit)
             };
         }
@@ -721,7 +717,7 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
             } else {
                 (Point3::new(b.x, a.y, a.z), Point3::new(a.x, b.y, a.z))
             };
-            let objects = doc.drawable_objects_on_plane(h, None);
+            let objects = doc.draft_participants(h, None);
             let _ = doc.draft(h, None, &objects, "Rectangle", |w| {
                 for (p, q) in [(a, c), (c, b), (b, e), (e, a)] {
                     w.add_segment(p, q)?;
@@ -768,7 +764,7 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
                 let _ = if detached {
                     doc.draft_detached_new(h, None, "Rectangle", edit)
                 } else {
-                    let objects = doc.drawable_objects_on_plane(h, None);
+                    let objects = doc.draft_participants(h, None);
                     doc.draft(h, None, &objects, "Rectangle", edit)
                 };
             }
@@ -789,6 +785,52 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
                     }
                 }
             }
+        }
+        Op::OutsideParticipant { sel } => {
+            if doc.session_stack().is_empty() {
+                return Ok(());
+            }
+            let top =
+                Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0))
+                    .expect("plane");
+            let outside: Vec<ObjectId> = doc
+                .drawable_objects_on_plane(top, None)
+                .into_iter()
+                .filter(|&o| !doc.draft_scope_holds_object(o))
+                .collect();
+            let Some(o) = pick(&outside, sel) else {
+                return Ok(());
+            };
+            let mut objects = doc.draft_participants(top, None);
+            assert!(
+                !objects.contains(&o),
+                "an outside object is never a participant"
+            );
+            objects.push(o);
+            let before = (doc.state_hash(), doc.history_generation());
+            let at = doc
+                .object(o)
+                .and_then(|obj| {
+                    obj.vertices()
+                        .values()
+                        .map(|v| v.position)
+                        .find(|q| q.z > 0.5)
+                })
+                .expect("a box has a top corner");
+            let refused = doc.draft(top, None, &objects, "Line", |w| {
+                w.add_segment(at, at + Vec3::new(0.25, 0.25, 0.0))
+                    .map(|_| ())
+            });
+            assert_eq!(
+                refused.err(),
+                Some(kernel::DocumentError::ExplodeSessionScope),
+                "an outside participant is refused"
+            );
+            assert_eq!(
+                (doc.state_hash(), doc.history_generation()),
+                before,
+                "a refused draft changes nothing"
+            );
         }
         Op::CopySketch { sel, step } => {
             if let Some(s) = pick(&free_sketches(doc), sel) {

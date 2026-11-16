@@ -476,6 +476,8 @@ fn insert_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             pose,
             provenance,
             origin: None,
+            drawing: kernel::DrawingInsert::Skip,
+            hidden_objects: Default::default(),
         },
     )?;
 

@@ -127,7 +127,19 @@ function chain(unit: bigint, edgeKeys: bigint[], at: V3 = [0, 0, 0], store: Fake
   }
 }
 
+interface FakeDimension {
+  id: bigint
+  a: V3
+  b: V3
+  offset: V3
+  /** annotation_anchor_node_kind answer; default -1 (free) */
+  aNode?: number
+  bNode?: number
+}
+
 interface FakeOpts {
+  /** linear dimensions in the document */
+  dimensions?: FakeDimension[]
   /** plane context -> its units. MUTABLE: tests re-assign entries (usually in
    *  `onDraftEnd` / `onTransformIslands`) to simulate what a commit lands. */
   listing?: Record<string, FakeUnit[]>
@@ -278,6 +290,27 @@ function makeScene(opts: FakeOpts = {}) {
     instance_pose: vi.fn(() => new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])),
     // Selected groups expand to their leaves (empty here) when drawing is selected.
     group_members: vi.fn(() => []),
+    annotation_ids: vi.fn(() => (opts.dimensions ?? []).map((d) => d.id)),
+    annotation_kind: vi.fn(() => 'linear'),
+    annotation_anchor_node_kind: vi.fn((id: bigint, which: number) => {
+      const d = (opts.dimensions ?? []).find((x) => x.id === id)
+      return d === undefined ? undefined : (which === 0 ? d.aNode : d.bNode) ?? -1
+    }),
+    annotation_detached: vi.fn(() => false),
+    annotation_anchor_point: vi.fn((id: bigint, which: number) => {
+      const d = (opts.dimensions ?? []).find((x) => x.id === id)
+      return d === undefined ? undefined : new Float64Array(which === 0 ? d.a : d.b)
+    }),
+    annotation_offset: vi.fn((id: bigint) => {
+      const d = (opts.dimensions ?? []).find((x) => x.id === id)
+      return d === undefined ? undefined : new Float64Array(d.offset)
+    }),
+    annotation_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
+    annotation_text_override: vi.fn(() => undefined),
+    update_linear_dimension: vi.fn((...args: unknown[]) => {
+      order.push('update_dimension')
+      calls.push({ name: 'update_linear_dimension', args })
+    }),
     sketch_island_ids: vi.fn((sketch: bigint) => opts.islands?.[String(sketch)] ?? []),
     // The island handle of the shape at these edge positions: the fake treats
     // a unit's key as its island handle.
@@ -289,6 +322,24 @@ function makeScene(opts: FakeOpts = {}) {
           for (const e of u.edges) {
             if ((same(e.a, a) && same(e.b, b)) || (same(e.a, b) && same(e.b, a))) return u.key
           }
+        }
+      }
+      return undefined
+    }),
+    // Every edge in the listing is one segment of the (single) free sketch;
+    // an island handle is its unit's key, an edge handle its edge key.
+    sketch_lines: vi.fn(() =>
+      Float32Array.from(
+        Object.values(listing).flatMap((us) => us.flatMap((u) => u.edges.flatMap((e) => [...e.a, ...e.b]))),
+      ),
+    ),
+    sketch_island_edges: vi.fn((_s: bigint, island: bigint) =>
+      Object.values(listing).flatMap((us) => us.filter((u) => u.key === island).flatMap((u) => u.edges.map((e) => e.key))),
+    ),
+    sketch_edge_endpoints: vi.fn((_s: bigint, edge: bigint) => {
+      for (const us of Object.values(listing)) {
+        for (const u of us) {
+          for (const e of u.edges) if (e.key === edge) return new Float64Array([...e.a, ...e.b])
         }
       }
       return undefined
@@ -1076,6 +1127,7 @@ function makeReplayScene(opts: { failAfterAdds?: number; failDraftCopyAt?: numbe
         for (const [k, v] of draft.before) live.set(k, v)
       }
     }),
+    annotation_ids: vi.fn(() => []),
     sketch_island_ids: vi.fn((s: bigint) =>
       copyIslands.get(s) ?? (s === 3n ? [40n, 41n] : s === 4n ? [50n] : []),
     ),
@@ -1501,6 +1553,7 @@ describe('duplicateSketchSelectionByAffine — data-driven plane routing', () =>
           regions: [],
         }),
       ),
+      annotation_ids: vi.fn(() => []),
       sketch_island_ids: vi.fn((s: bigint) => (s === 1n ? [10n] : s === 900n ? [77n] : [])),
       sketch_edge_island: vi.fn((_s: bigint, e: bigint) => (e >= 200n ? 99n : e === 100n ? 10n : undefined)),
       sketch_plane: vi.fn((s: bigint) =>
@@ -2414,5 +2467,74 @@ describe('detached shapes', () => {
     setDraftSolidSelector(null)
     expect(toasts).toEqual([])
     expect(selected).toEqual([])
+  })
+})
+
+describe('dimensions follow a moved drawing (#98)', () => {
+  // A 2 x 1 rectangle's bottom edge is chain 40 (edges 7, 8) along +X at y = 0.
+  const listing = () => ({ [CTX]: [chain(40n, [7n, 8n]), chain(41n, [10n], [0, 5, 0])] })
+  const dim = (over: Partial<FakeDimension> = {}): FakeDimension => ({
+    id: 77n, a: [0, 0, 0], b: [2, 0, 0], offset: [0, -1, 0], ...over,
+  })
+  const updates = (calls: { name: string; args: unknown[] }[]) => calls.filter((c) => c.name === 'update_linear_dimension')
+
+  it('carries a free dimension whose ends both lie on the moved shape, in the same history step', () => {
+    const { scene, calls, order } = makeScene({ listing: listing(), dimensions: [dim()] })
+    commitSelectionTransform(scene, [di(40n)], AFFINE)
+    const [u] = updates(calls)
+    expect(u.args[0]).toBe(77n)
+    expect([...(u.args[3] as Float64Array)]).toEqual([5, 0, 0])
+    expect([...(u.args[6] as Float64Array)]).toEqual([7, 0, 0])
+    expect([...(u.args[7] as Float64Array)]).toEqual([0, -1, 0]) // the offset is a vector: unmoved
+    expect([...(u.args[8] as Float64Array)]).toEqual([5, 0, 0, 0, 0, 1]) // the plane's point moves
+    // Bracketed, so ONE undo reverts shape and dimension together.
+    expect(order).toContain('bracket_open')
+    expect(order.indexOf('update_dimension')).toBeGreaterThan(order.indexOf('bracket_open'))
+    expect(order.indexOf('update_dimension')).toBeGreaterThan(order.indexOf('transform_edges'))
+    expect(order.at(-1)).toBe('bracket_commit')
+  })
+
+  it('leaves a dimension alone when it measures a shape that did not move', () => {
+    const { scene, calls } = makeScene({ listing: listing(), dimensions: [dim({ a: [0, 5, 0], b: [1, 5, 0] })] })
+    commitSelectionTransform(scene, [di(40n)], AFFINE)
+    expect(updates(calls)).toHaveLength(0)
+  })
+
+  it('a detached island does not carry a dimension measuring a stationary island of the same sketch', () => {
+    const lst: Record<string, FakeUnit[]> = { [CTX]: [chain(40n, [7n]), chain(41n, [8n], [0, 5, 0])] }
+    const { scene, calls } = makeScene({
+      listing: lst,
+      islands: { '3': [40n, 41n] },
+      dimensions: [dim({ id: 78n, a: [0, 5, 0], b: [1, 5, 0] }), dim({ id: 77n, a: [0, 0, 0], b: [1, 0, 0] })],
+    })
+    commitSelectionTransform(scene, [di(40n)], AFFINE_UP)
+    expect(updates(calls).map((c) => c.args[0])).toEqual([77n])
+  })
+
+  it('leaves a dimension alone when only one end is on the moved shape', () => {
+    const { scene, calls } = makeScene({ listing: listing(), dimensions: [dim({ b: [0, 5, 0] })] })
+    commitSelectionTransform(scene, [di(40n)], AFFINE)
+    expect(updates(calls)).toHaveLength(0)
+  })
+
+  it('leaves node-anchored dimensions to the kernel', () => {
+    const { scene, calls } = makeScene({ listing: listing(), dimensions: [dim({ aNode: 0 })] })
+    commitSelectionTransform(scene, [di(40n)], AFFINE)
+    expect(updates(calls)).toHaveLength(0)
+  })
+
+  it('does not follow a scale (the measured length would change)', () => {
+    const { scene, calls } = makeScene({ listing: listing(), dimensions: [dim()] })
+    commitSelectionTransform(scene, [di(40n)], new Float64Array([2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0]))
+    expect(updates(calls)).toHaveLength(0)
+  })
+
+  it('rotates the offset and plane normal with a rotation', () => {
+    const { scene, calls } = makeScene({ listing: listing(), dimensions: [dim()] })
+    // 90 degrees about +Z: x -> y, y -> -x
+    commitSelectionTransform(scene, [di(40n)], new Float64Array([0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0]))
+    const [u] = updates(calls)
+    expect([...(u.args[6] as Float64Array)].map((x) => Math.abs(x) < 1e-12 ? 0 : x)).toEqual([0, 2, 0])
+    expect([...(u.args[7] as Float64Array)].map((x) => Math.abs(x) < 1e-12 ? 0 : x)).toEqual([1, 0, 0])
   })
 })

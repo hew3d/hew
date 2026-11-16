@@ -678,3 +678,51 @@ describe('regionUnderRay on a detached shape', () => {
     expect(hit?.region.key).toBe(K(50))
   })
 })
+
+describe('outside-session (context) listings', () => {
+  const GROUND = ctxGround()
+  const inside = [{ key: 60, edges: [edge(60, [0, 0, 0], [1, 0, 0], { kind: 'free', sketch: 9 })] }]
+  const outside = [{ key: 70, edges: [edge(70, [5, 0, 0], [6, 0, 0], { kind: 'free', sketch: 8 })] }]
+  const detachedOut = [{ key: 80, edges: [edge(80, [9, 0, 0], [9, 1, 0], { kind: 'free', sketch: 5, detached: true })] }]
+  const raw = (us: Parameters<typeof listing>[0]) => JSON.parse(listing(us))
+
+  function sessionScene(entries: unknown[]) {
+    return makeScene({
+      sketch_ids: () => [9n],
+      sketch_plane: () => new Float64Array([0, 0, 0, 0, 0, 1]),
+      plane_units_all_json: () => JSON.stringify(entries),
+      plane_units_json: () => listing([]),
+    })
+  }
+  const entries = [
+    { plane: [0, 0, 0, 0, 0, 1], context: true, units: raw(outside) },
+    { plane: [0, 0, 0, 0, 0, 1], units: raw(inside) },
+  ]
+
+  it('keeps the session entry as the ctx listing and lists outside drawing apart, marked', () => {
+    const { scene } = sessionScene(entries)
+    const d = outlinerDrawing(scene as never, [])
+    expect(readPlaneUnits(scene, GROUND)!.units.map((u) => u.key)).toEqual([K(60)])
+    expect(d.free.map((u) => u.unit.key)).toEqual([K(60)])
+    expect(d.free[0].context).toBeUndefined()
+    expect(d.outside.map((u) => u.unit.key)).toEqual([K(70)])
+    expect(d.outside[0].context).toBe(true)
+  })
+
+  it('does not let a context entry listed AFTER the session entry replace its keys', () => {
+    const { scene } = sessionScene([entries[1], entries[0]])
+    outlinerDrawing(scene as never, [])
+    expect(readPlaneUnits(scene, GROUND)!.units.map((u) => u.key)).toEqual([K(60)])
+  })
+
+  it('lists a detached context sketch as outside, and not among the detached sketches', () => {
+    const { scene } = sessionScene([
+      ...entries,
+      { plane: [0, 0, 0, 0, 0, 1], sketch: 5, detached: true, context: true, units: raw(detachedOut) },
+    ])
+    const d = outlinerDrawing(scene as never, [])
+    expect(d.outside.map((u) => u.unit.key)).toEqual([K(70), K(80)])
+    expect(d.free.map((u) => u.unit.key)).toEqual([K(60)])
+    expect(detachedSketchIds(scene as never).has(5n)).toBe(false)
+  })
+})

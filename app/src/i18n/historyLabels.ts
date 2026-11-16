@@ -71,6 +71,7 @@ const SIMPLE: Record<string, MessageDescriptor> = {
   ungroup: msg`Ungroup`,
   'place-instance': msg`Place instance`,
   copy: msg`Copy`,
+  paste: msg`Paste`,
   guide: msg`Guide`,
   'delete-guide': msg`Delete guide`,
   'move-guide': msg`Move guide`,

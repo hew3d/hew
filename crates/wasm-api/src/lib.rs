@@ -799,6 +799,31 @@ fn insert_report_to_js(report: &kernel::InsertReport) -> JsValue {
     set_num("guidesAdded", report.guides_added);
     set_num("worldSketchesSkipped", report.world_sketches_skipped);
     set_num("annotationsSkipped", report.annotations_skipped);
+    let drawn = serde_json::Value::Array(
+        report
+            .drawn
+            .iter()
+            .map(|d| {
+                let n = d.plane.normal();
+                let o = Point3::ORIGIN + n * (-d.plane.signed_distance(Point3::ORIGIN));
+                serde_json::json!({
+                    "plane": [o.x, o.y, o.z, n.x, n.y, n.z],
+                    "detached": d.detached.map(|s| s.data().as_ffi().to_string()),
+                    "anchors": d.anchors.iter().map(|(a, b)| {
+                        serde_json::json!([[a.x, a.y, a.z], [b.x, b.y, b.z]])
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    );
+    let drawn = js_sys::JSON::parse(&drawn.to_string()).unwrap_or(JsValue::NULL);
+    Reflect::set(&js, &JsValue::from_str("drawn"), &drawn).unwrap();
+    Reflect::set(
+        &js,
+        &JsValue::from_str("drawingUnchanged"),
+        &JsValue::from_bool(report.drawing_unchanged),
+    )
+    .unwrap();
     js.into()
 }
 
@@ -988,6 +1013,22 @@ fn node_id(kind: u8, id: u64) -> Result<NodeId, ApiError> {
             "BadNodeKind: node kind must be 0 (object), 1 (group), or 2 (instance)".to_string(),
         )),
     }
+}
+
+/// Decode parallel `(kinds, ids)` FFI lists into [`NodeId`]s, empty allowed
+/// (a clipboard copy of drawing alone). Mismatched lengths are a boundary
+/// error.
+fn node_list(kinds: &[u8], ids: &[u64]) -> Result<Vec<NodeId>, ApiError> {
+    if kinds.len() != ids.len() {
+        return Err(ApiError(
+            "BadNodeList: kinds and ids must be the same length".to_string(),
+        ));
+    }
+    kinds
+        .iter()
+        .zip(ids)
+        .map(|(&k, &i)| node_id(k, i))
+        .collect()
 }
 
 /// Decode parallel `(kinds, ids)` FFI lists into [`NodeId`]s — the
@@ -1545,7 +1586,27 @@ pub fn item_ghost_mesh(bytes: &[u8]) -> Result<GhostMeshJs, JsError> {
             edge_positions.extend_from_slice(&[p.x as f32, p.y as f32, p.z as f32]);
         }
     }
-    let (lo, hi) = softrender::document_bbox(&doc);
+    let (mut lo, mut hi) = softrender::document_bbox(&doc);
+    // A clipboard item's copied drawing (its world sketches, which a paste
+    // draws): its lines join the stroke and its bounds the box the snap and
+    // the origin cue use (v1.5 decisions D3).
+    let carried = doc.carried_drawing();
+    if !carried.is_empty() && doc.top_level_nodes().is_empty() {
+        // Drawing alone: the empty-document box must not widen it.
+        lo = kernel::Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+        hi = kernel::Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    }
+    for s in carried {
+        let Some(sk) = doc.sketch(s) else { continue };
+        for e in sk.edges().values() {
+            for v in [e.from, e.to] {
+                let p = sk.vertices()[v].position;
+                edge_positions.extend_from_slice(&[p.x as f32, p.y as f32, p.z as f32]);
+                lo = kernel::Point3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+                hi = kernel::Point3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+            }
+        }
+    }
     Ok(GhostMeshJs {
         positions,
         normals,
@@ -12906,6 +12967,58 @@ impl Scene {
             .map(|t| t.to_affine().to_vec()))
     }
 
+    /// The clipboard copy of a selection of nodes AND drawing (v1.5
+    /// decisions D3, [`kernel::Document::extract_clipboard_item_with_drawing`]):
+    /// [`Scene::extract_item`] with `origin` for the nodes (`kinds`/`ids`,
+    /// which may be empty), with the drawing `drawing_json` names carried as
+    /// the item's world sketches, which [`Scene::insert_item`] with an
+    /// origin draws at the destination. `drawing_json` is a JSON array of
+    /// `{"sketch":id}` (a whole free sketch), `{"sketch":id,"islands":[..]}`
+    /// (some of its islands; how a detached shape is named), and
+    /// `{"ctx":<context>,"keys":["hex",..]}` (the edges a context's listing
+    /// names by key, `plane_units_json`'s context). Read-only, not recorded.
+    ///
+    /// # Errors
+    /// As [`Scene::extract_item`]; `EmptyComponent` when nothing is named
+    /// or the drawing names no edge; `ExplodeSessionScope` inside a
+    /// component session or for drawing inside a definition;
+    /// `UnknownSketch`, `Sketch` (a stale island or key), `BadDrawing`,
+    /// `BadContext`.
+    pub fn extract_clipboard(
+        &self,
+        kinds: &[u8],
+        ids: &[u64],
+        drawing_json: &str,
+        origin: String,
+    ) -> Result<Vec<u8>, ApiError> {
+        let nodes = node_list(kinds, ids)?;
+        let drawing = self.drawn_sources(drawing_json)?;
+        let item = self
+            .doc
+            .extract_clipboard_item_with_drawing(&nodes, &drawing, &self.clipboard_origin(&origin))
+            .map_err(doc_err)?;
+        Ok(item.save())
+    }
+
+    /// [`Scene::extract_item_placement`] for [`Scene::extract_clipboard`]'s
+    /// copy of nodes and drawing
+    /// ([`kernel::Document::extract_placement_with_drawing`]): Paste In
+    /// Place's affine. `undefined` when the selection resolves to nothing
+    /// under identity axes.
+    pub fn extract_clipboard_placement(
+        &self,
+        kinds: &[u8],
+        ids: &[u64],
+        drawing_json: &str,
+    ) -> Result<Option<Vec<f64>>, ApiError> {
+        let nodes = node_list(kinds, ids)?;
+        let drawing = self.drawn_sources(drawing_json)?;
+        Ok(self
+            .doc
+            .extract_placement_with_drawing(&nodes, &drawing)
+            .map(|t| t.to_affine().to_vec()))
+    }
+
     /// The whole document as a library "model item": a plain save (open
     /// sessions transparently closed, exactly like [`Scene::save`]) with
     /// `meta_json` stamped into the `hew.library` document attrs, and
@@ -12961,10 +13074,23 @@ impl Scene {
     /// after this window opened another document copy as a new one.
     /// Library placements pass `None`.
     ///
+    /// With an `origin` the insert is a clipboard paste and the item's
+    /// world sketches (copied drawing, [`Scene::extract_clipboard`]) are
+    /// DRAWN at the destination ([`kernel::DrawingInsert::Draw`]): nodes
+    /// and drawing land as one undo step "Paste", and a refusal anywhere
+    /// leaves the document as it was. Without one they are skipped and
+    /// counted, as a Library insert always has.
+    ///
     /// Returns `{ rootKinds: number[], rootIds: string[] (decimal u64),
     /// definitionsAdded, definitionsReused, definitionsLinked,
     /// materialsAdded, materialsReused, objectsAdded, guidesAdded,
-    /// worldSketchesSkipped, annotationsSkipped }`.
+    /// worldSketchesSkipped, annotationsSkipped, drawn, drawingUnchanged }`,
+    /// where `drawn` is one `{ plane: [px,py,pz,nx,ny,nz], detached: string
+    /// (decimal sketch id) | null, anchors: [[[x,y,z],[x,y,z]],..] }` per
+    /// pasted sketch (world coordinates; every pasted segment, for finding
+    /// the pasted shapes again by geometry) and `drawingUnchanged` is true
+    /// when every draw drew nothing new (Paste In Place exactly over the
+    /// original, which records no step when no node was pasted either).
     pub fn insert_item(
         &mut self,
         bytes: &[u8],
@@ -13051,6 +13177,14 @@ impl Scene {
                     pose,
                     provenance,
                     origin: origin.clone(),
+                    // The clipboard path (an origin) draws the copied
+                    // drawing; a Library insert skips it (v1.5 decisions D3).
+                    drawing: if origin.is_some() {
+                        kernel::DrawingInsert::Draw
+                    } else {
+                        kernel::DrawingInsert::Skip
+                    },
+                    hidden_objects: self.hidden_objects.iter().copied().collect(),
                 },
             )
             .map_err(doc_err)?;

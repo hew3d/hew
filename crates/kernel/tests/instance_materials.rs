@@ -427,6 +427,8 @@ fn library_copies_remap_the_instance_material() {
             pose: Transform::IDENTITY,
             provenance: None,
             origin: None,
+            drawing: kernel::DrawingInsert::Skip,
+            hidden_objects: Default::default(),
         },
     )
     .unwrap();

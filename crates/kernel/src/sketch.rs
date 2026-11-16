@@ -1604,7 +1604,7 @@ impl Sketch {
     /// (its members in `edges` order). Curve geometry maps when `t` restricted
     /// to this sketch's plane is a similarity and drops otherwise. `target` is
     /// left partially written on `Err`; callers pass a clone or a fresh sketch.
-    fn replay_edges_into(
+    pub(crate) fn replay_edges_into(
         &self,
         edges: &[SketchEdgeId],
         t: &crate::Transform,

@@ -261,6 +261,7 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
     sketch_plane: vi.fn((sketch: bigint) =>
       sketch === 3n || sketch === 6n || sketch >= 900n ? new Float64Array([0, 0, 0, 0, 0, 1]) : undefined,
     ),
+    annotation_ids: vi.fn(() => []),
     sketch_island_ids: vi.fn((sketch: bigint) =>
       sketch === 3n ? [40n, 41n] : sketch === 6n ? [45n] : sketch >= 900n ? [77n] : [],
     ),

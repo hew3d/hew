@@ -80,6 +80,7 @@ import { SectionPlaneTool } from '../tools/SectionPlaneTool'
 import { EditVertexTool } from '../tools/EditVertexTool'
 import { TextPlaceTool, type TextPlacement } from '../tools/TextPlaceTool'
 import { LibraryPlaceTool, type LibraryPlacement } from '../tools/LibraryPlaceTool'
+import { alreadyHereToast, pastedDrawingRefs } from '../clipboard/drawingClipboard'
 import { PlaceImageTool, type ImagePlacement } from '../tools/PlaceImageTool'
 import { PositionCameraTool } from '../tools/PositionCameraTool'
 import { LookAroundTool, LOOK_AROUND_RAD_PER_PIXEL } from '../tools/LookAroundTool'
@@ -5700,6 +5701,15 @@ export default function Viewport({
 
     function runDelete(nodes: NodeRef[]): void {
       if (nodes.length === 0) return
+      // A delete that touches more than one store (drafts per plane context,
+      // an emptied sketch husk, the world node delete) records several
+      // history entries; one bracket makes the whole delete — and so a Cut —
+      // ONE Undo step. A lone node delete is already one atomic entry.
+      const single = nodes.length === 1 && !isDraftKind(nodes[0].kind) && nodes[0].kind !== 'sketch'
+      inHistoryBracket(wasmScene, t`Delete`, () => runDeleteSteps(nodes), !single)
+    }
+
+    function runDeleteSteps(nodes: NodeRef[]): void {
       // An explicit delete is deliberate and executes — but first disarm the
       // array window so no hot state points at the deleted copies.
       disarmActivePostCommitWindow()
@@ -7753,6 +7763,13 @@ export default function Viewport({
               kind: k === 0 ? 'object' : k === 1 ? 'group' : 'instance',
               id: result.rootIds[i],
             }))
+            // A clipboard paste's drawing: the pasted shapes, found again by
+            // geometry (v1.5 decisions D3).
+            if (result.drawn.length > 0) {
+              sceneRenderer.refreshAllSketches()
+              refs.push(...pastedDrawingRefs(wasmScene, result.drawn))
+              if (result.drawingUnchanged && result.rootIds.length === 0) handleToast(alreadyHereToast())
+            }
             if (refs.length === 1) onSelectRef.current?.(refs[0], 'replace')
             else if (refs.length > 1) onSelectManyRef.current?.(refs, 'replace')
             // v1 scope, reported honestly: loose sketches/annotations in a

@@ -1073,6 +1073,8 @@ fn library_extract_and_insert_carry_the_owned_sketch_with_its_object() {
                 pose: place,
                 provenance: None,
                 origin: None,
+                drawing: kernel::DrawingInsert::Skip,
+                hidden_objects: Default::default(),
             },
         )
         .expect("insert");
@@ -1117,6 +1119,8 @@ fn a_free_world_sketch_is_still_skipped_by_insert_but_an_owned_one_is_not() {
                 pose: Transform::IDENTITY,
                 provenance: None,
                 origin: None,
+                drawing: kernel::DrawingInsert::Skip,
+                hidden_objects: Default::default(),
             },
         )
         .expect("insert");
@@ -1161,6 +1165,8 @@ fn assert_component_item_lands_owned(item: &Document, original: &[Point3], _shif
                 pose: Transform::IDENTITY,
                 provenance: None,
                 origin: None,
+                drawing: kernel::DrawingInsert::Skip,
+                hidden_objects: Default::default(),
             },
         )
         .expect("insert component item");

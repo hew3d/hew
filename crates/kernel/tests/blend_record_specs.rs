@@ -732,6 +732,8 @@ fn a_record_s_materials_follow_the_object_into_another_document() {
             pose: Transform::IDENTITY,
             provenance: None,
             origin: None,
+            drawing: kernel::DrawingInsert::Skip,
+            hidden_objects: Default::default(),
         },
     )
     .unwrap();

@@ -85,11 +85,12 @@ pub use document::{
     AttrTarget, Axis, CellDecline, CellDeclineReason, CellOutcome, CellScope, CellSeed,
     ClosingEdge, CompoundMeta, CompoundOutcome, CompoundToken, DocChange, DocTransaction, Document,
     DocumentError, DraftCurveRun, DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore,
-    DraftUnit, EntityRef, FlipAbout, FollowMePath, HEW_ATTR_NS, HistoryArg, HistoryEntries,
-    HistoryEntryInfo, HistoryKind, HistoryOrigin, IngestJob, IngestProgress, InsertOptions,
-    InsertReport, LINKED_ATTR_KEY, LibraryProvenance, LinkPolicy, LinkedJoin, LinkedWrap,
-    MAX_COMPONENT_DEPTH, MAX_OCCURRENCES, MaterialScope, NodeId, Occurrence, OpenEdges,
-    PendingActionKind, PlaneListing, PlaneUnits, PurgeReport, Remap, RenderRoot, WRAPPED_DEF_SID,
+    DraftUnit, DrawingInsert, DrawnInsert, DrawnSource, EntityRef, FlipAbout, FollowMePath,
+    HEW_ATTR_NS, HistoryArg, HistoryEntries, HistoryEntryInfo, HistoryKind, HistoryOrigin,
+    IngestJob, IngestProgress, InsertOptions, InsertReport, LINKED_ATTR_KEY, LibraryProvenance,
+    LinkPolicy, LinkedJoin, LinkedWrap, MAX_COMPONENT_DEPTH, MAX_OCCURRENCES, MaterialScope,
+    NodeId, Occurrence, OpenEdges, PendingActionKind, PlaneListing, PlaneUnits, PurgeReport, Remap,
+    RenderRoot, WRAPPED_DEF_SID,
 };
 pub use document::{
     DEFAULT_HISTORY_BUDGET_BYTES, DEFAULT_HISTORY_MIN_STEPS, HistoryBudget, HistoryMemory,

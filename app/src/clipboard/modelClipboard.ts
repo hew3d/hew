@@ -1,8 +1,10 @@
 /**
  * modelClipboard — in-memory clipboard for Copy/Cut/Paste/Paste In Place of
- * structural selections (docs/design/v1.1-cycle.md Lane D).
+ * structural selections (docs/design/v1.1-cycle.md Lane D) and drawing
+ * (v1.5 decisions D3: the copied drawing rides as the item's world
+ * sketches, and a paste draws it at the destination — drawingClipboard.ts).
  *
- * Content is `Scene::extract_item` bytes of the copied selection —
+ * Content is `Scene::extract_clipboard` bytes of the copied selection —
  * `wrap_as_component: false`, deliberately NOT Save to Library's wrap, so a
  * pasted plain box stays a plain box rather than becoming an instance of a
  * freshly-minted one-off component. `insert_item` (the paste side) is the
@@ -38,13 +40,18 @@ import { sha256Hex } from '../library/itemFiles'
 
 export interface ClipboardContent {
   bytes: Uint8Array
-  /** How many structural nodes were copied — informational (the "Copied N
-   *  objects" toast); `-1` when reconstructed from the shared shell state
-   *  with no local record of the original selection (cross-window paste). */
+  /** How many items were copied (structural nodes plus drawn shapes) —
+   *  informational (the "Copied N" toast); `-1` when reconstructed from the
+   *  shared shell state with no local record of the original selection
+   *  (cross-window paste). */
   count: number
-  /** Node kinds present in the copy (e.g. `['object']`, `['object','group']`) —
-   *  informational only, same caveat as `count`. */
+  /** Node kinds present in the copy (e.g. `['object']`, `['object','group']`,
+   *  with `'drawing'` when drawn shapes were copied) — informational only,
+   *  same caveat as `count`. */
   kinds: string[]
+  /** How many drawn shapes (and whole sketches) the copy holds; `-1` when
+   *  unknown (cross-window paste), same caveat as `count`. */
+  drawingCount: number
   /** Best-effort origin tag for the copy — informational; unused by
    *  `insert_item` itself, which works from `bytes` alone. */
   sourceDocId: string
@@ -121,9 +128,20 @@ async function withProvenance(
   sourceDocId: string,
   placementAffine: number[] | null,
   linkSource: LinkSource | null,
+  drawingCount: number,
 ): Promise<ClipboardContent> {
   const contentHash = await sha256Hex(bytes)
-  return { bytes, count, kinds, sourceDocId, contentHash, sourceId: `clipboard:${contentHash}`, placementAffine, linkSource }
+  return {
+    bytes,
+    count,
+    kinds,
+    sourceDocId,
+    contentHash,
+    sourceId: `clipboard:${contentHash}`,
+    placementAffine,
+    linkSource,
+    drawingCount,
+  }
 }
 
 /** Copy: build clipboard content from freshly-extracted bytes and a known
@@ -136,8 +154,9 @@ export async function setClipboardBytes(
   sourceDocId: string,
   placementAffine: number[] | null,
   linkSource: LinkSource | null = null,
+  drawingCount = 0,
 ): Promise<ClipboardContent> {
-  const content = await withProvenance(bytes, count, kinds, sourceDocId, placementAffine, linkSource)
+  const content = await withProvenance(bytes, count, kinds, sourceDocId, placementAffine, linkSource, drawingCount)
   current = content
   await pushToShell(bytes)
   return content
@@ -198,7 +217,7 @@ export async function refreshClipboardFromShell(): Promise<void> {
     }
     const bytes = new Uint8Array(raw)
     if (current !== null && bytesEqual(current.bytes, bytes)) return
-    current = await withProvenance(bytes, -1, [], '', null, null)
+    current = await withProvenance(bytes, -1, [], '', null, null, -1)
   } catch {
     /* shell without the command — leave whatever's local alone */
   }

@@ -1008,6 +1008,20 @@ export function DocumentTree({
             />
           )
         })}
+        {/* Drawing outside the open session: shown for orientation, dimmed
+            and inert (the outside is never edited from inside a session). */}
+        {sessionStack.length > 0 && drawing.outside.map((u) => (
+          <Row
+            key={`outside:${nodeKey(u.ref)}`}
+            label={u.label ?? t({ context: 'drawn shape', message: 'Shape' })}
+            icon={<NodeIcon kind="draft-island" />}
+            selected={false}
+            active={false}
+            dimmed
+            indent={0}
+            onClick={() => {}}
+          />
+        ))}
         {filterEmpty && (
           <div
             style={{

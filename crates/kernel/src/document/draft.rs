@@ -24,7 +24,12 @@
 //! reopen) is kept as owned-sketch drawing instead. A loop touching the
 //! face's boundary or another loop at one point is topology: the re-trace
 //! splits its walk there into loops sharing that vertex. Sketch stores are rewritten only when their content
-//! changed. The whole gesture is one labeled undo step.
+//! changed, and an island the edit did not reach stays in its stores
+//! exactly as stored: the lift arranges all of the plane's drawing
+//! together, so sketches never arranged with each other (a file's separate
+//! sketches on one plane) come up split where their lines cross and
+//! closing loops none of them holds, and none of that is the edit's to
+//! write back. The whole gesture is one labeled undo step.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -195,6 +200,33 @@ enum Gather {
     DetachedClose,
 }
 
+/// The wall an open editing session puts around a draft in the session
+/// frame (v1.5 decisions D1): what is inside the innermost frame. A draft
+/// there arranges only with this; everything else is context to snap to.
+/// Built by [`Document::draft_session_scope`], the one definition the
+/// draft, its listings, and the close pass share.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SessionScope {
+    /// The objects inside: for a component frame, the session's members and
+    /// everything created since the open ([`Document::explode_session_scope`]);
+    /// for a group frame, the group session's membership at any depth.
+    objects: BTreeSet<ObjectId>,
+    /// The free (and owned) sketches inside ([`Document::session_frame_sketches`]).
+    sketches: BTreeSet<SketchId>,
+}
+
+impl SessionScope {
+    /// Whether sketch `s` is inside `wall` (always, with no wall).
+    fn holds_sketch(wall: Option<&Self>, s: SketchId) -> bool {
+        wall.is_none_or(|w| w.sketches.contains(&s))
+    }
+
+    /// Whether object `o` is inside `wall` (always, with no wall).
+    fn holds_object(wall: Option<&Self>, o: ObjectId) -> bool {
+        wall.is_none_or(|w| w.objects.contains(&o))
+    }
+}
+
 /// A plane's drawing lifted into one working sketch.
 #[derive(Debug, Clone)]
 pub(crate) struct Lifted {
@@ -260,7 +292,7 @@ pub struct DraftReport {
 pub type ClosingEdge = (SketchId, Point3, Point3);
 
 /// Whether `q` is the same plane as `p` (same-facing, coincident).
-fn planes_coincide(p: &Plane, q: &Plane) -> bool {
+pub(super) fn planes_coincide(p: &Plane, q: &Plane) -> bool {
     let anchor = Point3::ORIGIN + p.normal() * (-p.signed_distance(Point3::ORIGIN));
     (p.normal() - q.normal()).length() < tol::NORMAL_DIRECTION
         && q.signed_distance(anchor).abs() <= tol::PLANE_DIST
@@ -908,7 +940,8 @@ impl Document {
     /// that [`Document::sketch_takes_part`] accepts, and the objects with a
     /// face on it that [`Document::object_takes_part`] accepts — so a
     /// tag-hidden or closed group's line, or a view-hidden solid, closes
-    /// nothing.
+    /// nothing; and, inside an open session's wall (`wall`, v1.5 decisions
+    /// D1), only the session's drawing and objects.
     ///
     /// # Errors
     /// As [`Document::lift_plane`].
@@ -916,23 +949,33 @@ impl Document {
         &self,
         plane: Plane,
         frame: Option<ComponentId>,
+        wall: Option<&SessionScope>,
     ) -> Result<Lifted, DocumentError> {
         let objects: Vec<ObjectId> = self
             .drawable_objects_on_plane(plane, frame)
             .into_iter()
-            .filter(|&o| self.object_takes_part(o, frame))
+            .filter(|&o| self.object_takes_part(o, frame) && SessionScope::holds_object(wall, o))
             .collect();
         let free: Vec<SketchId> = self
             .sketches
             .iter()
             .filter(|&(s, sk)| {
                 self.sketch_takes_part(s, frame)
+                    && SessionScope::holds_sketch(wall, s)
                     && !sk.detached()
                     && planes_coincide(&plane, &sk.plane())
             })
             .map(|(s, _)| s)
             .collect();
-        self.lift_plane_with(plane, frame, &objects, Some(free), Gather::Plane)
+        self.lift_plane_in_wall(
+            plane,
+            frame,
+            &objects,
+            Some(free),
+            Gather::Plane,
+            None,
+            wall,
+        )
     }
 
     /// [`Document::lift_plane`] with the plane's free sketches given
@@ -963,6 +1006,36 @@ impl Document {
         gather: Gather,
         own: Option<&[Point3]>,
     ) -> Result<Lifted, DocumentError> {
+        // The session wall matters only where the lift finds drawing itself.
+        let wall = if free.is_none() || gather != Gather::No {
+            self.draft_session_scope(frame)
+        } else {
+            None
+        };
+        self.lift_plane_in_wall(plane, frame, objects, free, gather, own, wall.as_ref())
+    }
+
+    /// [`Document::lift_plane_with_own`] inside the session wall `wall`
+    /// ([`Document::draft_session_scope`], v1.5 decisions D1), `None` for
+    /// none. With a wall, the lift is on one side of it: the session's,
+    /// unless an object of `objects` is outside (a read-only listing of the
+    /// outside drawing, [`PlaneListing::Context`]). The plane's free
+    /// sketches, when the lift finds them (`free == None`), are that side's
+    /// only; the foreign edges it gathers come from inside the wall only
+    /// (an outside lift gathers none: only a draft or the close pass
+    /// gathers, and both are inside).
+    #[allow(clippy::too_many_arguments)]
+    fn lift_plane_in_wall(
+        &self,
+        plane: Plane,
+        frame: Option<ComponentId>,
+        objects: &[ObjectId],
+        free: Option<Vec<SketchId>>,
+        gather: Gather,
+        own: Option<&[Point3]>,
+        wall: Option<&SessionScope>,
+    ) -> Result<Lifted, DocumentError> {
+        let outside_side = wall.is_some_and(|w| objects.iter().any(|o| !w.objects.contains(o)));
         let mut objs: Vec<ObjectId> = Vec::new();
         for &o in objects {
             if self.objects.get(o).is_none_or(|r| r.hidden)
@@ -1176,6 +1249,8 @@ impl Document {
                         // arrangement: it is its own drafting context.
                         && !sk.detached()
                         && planes_coincide(&plane, &sk.plane())
+                        // The lift's side of an open session's wall (D1).
+                        && wall.is_none_or(|w| w.sketches.contains(&s) != outside_side)
                 })
                 .map(|(s, _)| s)
                 .collect(),
@@ -1221,16 +1296,21 @@ impl Document {
                         .map(|s| (s.a, s.b)),
                 )
                 .collect();
-            let found = self.gather_foreign(
-                &plane,
-                frame,
-                gather,
-                &sketch_ids,
-                &objs,
-                &held,
-                &boundary,
-                own,
-            );
+            let found = if outside_side {
+                Vec::new()
+            } else {
+                self.gather_foreign(
+                    &plane,
+                    frame,
+                    gather,
+                    &sketch_ids,
+                    &objs,
+                    &held,
+                    &boundary,
+                    own,
+                    wall,
+                )
+            };
             if !found.is_empty() {
                 foreign = add_foreign(&mut work, found);
                 fixed.extend(foreign.iter().map(|f| (f.a, f.b)));
@@ -1305,6 +1385,10 @@ impl Document {
     /// One pass over the frame's sketches and objects: a sketch parallel to
     /// the plane and off it, and an object whose bounding box the plane
     /// misses, are skipped whole; every other edge costs two dot products.
+    ///
+    /// Inside an open session's wall (`wall`, v1.5 decisions D1) only the
+    /// session's sketches and objects lend edges: a loop never closes with
+    /// an outside line or an outside object's edge.
     #[allow(clippy::too_many_arguments)]
     fn gather_foreign(
         &self,
@@ -1316,14 +1400,19 @@ impl Document {
         held: &[(Point3, Point3)],
         boundary: &[(Point3, Point3)],
         own: Option<&[Point3]>,
+        wall: Option<&SessionScope>,
     ) -> Vec<Foreign> {
         let on = |p: Point3| plane.signed_distance(p).abs() <= tol::PLANE_DIST;
         let mut candidates: Vec<(Point3, Point3, Option<SketchId>)> = Vec::new();
         let mut cand_curve: Vec<Option<ForeignCurve>> = Vec::new();
         for (s, sk) in self.sketches.iter() {
             // Only drawing that takes part lends edges (§16 R11): not a
-            // tag-hidden sketch, nor a closed group's.
-            if lifted.contains(&s) || !self.sketch_takes_part(s, frame) {
+            // tag-hidden sketch, nor a closed group's, nor one outside an
+            // open session (D1).
+            if lifted.contains(&s)
+                || !self.sketch_takes_part(s, frame)
+                || !SessionScope::holds_sketch(wall, s)
+            {
                 continue;
             }
             let sp = sk.plane();
@@ -1401,7 +1490,10 @@ impl Document {
         };
         let of_shape = |p: Point3| shape.iter().any(|&q| q.approx_eq(p, tol::POINT_MERGE));
         for (id, rec) in self.objects.iter() {
-            if (detached && shape.is_empty()) || !self.object_takes_part(id, frame) {
+            if (detached && shape.is_empty())
+                || !self.object_takes_part(id, frame)
+                || !SessionScope::holds_object(wall, id)
+            {
                 continue;
             }
             let obj = &rec.object;
@@ -1570,13 +1662,27 @@ impl Document {
         gather: Gather,
         own: Option<&[Point3]>,
     ) -> Result<Lifted, DocumentError> {
+        let wall = self.draft_session_scope(frame);
+        self.lift_detached_new_in_wall(plane, frame, gather, own, wall.as_ref())
+    }
+
+    /// [`Document::lift_detached_new_with`] inside the session wall `wall`
+    /// (v1.5 decisions D1), as the close pass holds it.
+    fn lift_detached_new_in_wall(
+        &self,
+        plane: Plane,
+        frame: Option<ComponentId>,
+        gather: Gather,
+        own: Option<&[Point3]>,
+        wall: Option<&SessionScope>,
+    ) -> Result<Lifted, DocumentError> {
         if let Some(c) = frame
             && self.components.get(c).is_none_or(|r| r.hidden)
         {
             return Err(DocumentError::UnknownComponent);
         }
         let mut lifted =
-            self.lift_plane_with_own(plane, frame, &[], Some(Vec::new()), gather, own)?;
+            self.lift_plane_in_wall(plane, frame, &[], Some(Vec::new()), gather, own, wall)?;
         lifted.detached = true;
         Ok(lifted)
     }
@@ -1587,9 +1693,18 @@ impl Document {
     /// method; [`Document::end_draft`] lowers the edit back as one undo step
     /// labeled `label`. Exactly one draft may be open.
     ///
+    /// While an editing session is open, a draft in the session frame
+    /// (`frame == None`) arranges only with what is inside the session
+    /// (v1.5 decisions D1): the plane's free drawing and the foreign edges
+    /// it lifts are the session's alone, and `objects` must all be inside
+    /// it ([`Document::draft_participants`] lists them).
+    ///
     /// # Errors
-    /// [`DocumentError::DraftAlreadyOpen`]; anything [`Document::lift_plane`]
-    /// refuses.
+    /// [`DocumentError::DraftAlreadyOpen`];
+    /// [`DocumentError::ExplodeSessionScope`] when a live object of
+    /// `objects` is outside the open session (refused, not dropped: a caller
+    /// naming one has a bug), before anything is lifted; anything
+    /// [`Document::lift_plane`] refuses.
     pub fn begin_draft(
         &mut self,
         plane: Plane,
@@ -1600,6 +1715,15 @@ impl Document {
         // A stale draft (the document changed under it) is simply replaced.
         if self.current_draft().is_some() {
             return Err(DocumentError::DraftAlreadyOpen);
+        }
+        if let Some(wall) = self.draft_session_scope(frame) {
+            // A stale or hidden object is the lift's to refuse (UnknownObject).
+            let outside = objects.iter().any(|&o| {
+                self.objects.get(o).is_some_and(|r| !r.hidden) && !wall.objects.contains(&o)
+            });
+            if outside {
+                return Err(DocumentError::ExplodeSessionScope);
+            }
         }
         let lifted = self.lift_plane_for_draft(plane, frame, objects)?;
         self.open_draft(lifted, label);
@@ -1616,7 +1740,10 @@ impl Document {
     ///
     /// # Errors
     /// [`DocumentError::DraftAlreadyOpen`]; [`DocumentError::UnknownSketch`]
-    /// for a stale, deleted, object-owned, or non-detached sketch.
+    /// for a stale, deleted, object-owned, or non-detached sketch;
+    /// [`DocumentError::ExplodeSessionScope`] for a sketch of the session
+    /// frame outside the open session, under a component or a group frame
+    /// alike (v1.5 decisions D1).
     pub fn begin_draft_detached(
         &mut self,
         sketch: SketchId,
@@ -1626,6 +1753,9 @@ impl Document {
             return Err(DocumentError::DraftAlreadyOpen);
         }
         let lifted = self.lift_detached_with(sketch, Gather::Detached)?;
+        if !self.draft_scope_holds_sketch(sketch) {
+            return Err(DocumentError::ExplodeSessionScope);
+        }
         self.open_draft(lifted, label);
         Ok(())
     }
@@ -2007,6 +2137,7 @@ impl Document {
             .map(|e| (pos(e.from), pos(e.to)))
             .collect();
         let (_, own) = drawn_shape(&work, &lifted.fixed);
+        let wall = self.draft_session_scope(lifted.frame);
         let found: Vec<Foreign> = self
             .gather_foreign(
                 &lifted.plane,
@@ -2017,6 +2148,7 @@ impl Document {
                 &held,
                 &[],
                 Some(&own),
+                wall.as_ref(),
             )
             .into_iter()
             .filter(|f| f.home.is_none())
@@ -2329,6 +2461,79 @@ impl Document {
             }
         }
 
+        // ---- islands whose stores are written ----
+        // The affected islands, and those bounding a loop the edit gave or
+        // took a face without changing an edge, a region the close pass
+        // forces, or one a detached draft completes: their rings are written
+        // whatever the edit drew. Every other island stays in its stores
+        // exactly as stored (KB-2): the lift arranges ALL of the plane's
+        // drawing together, so a file's separate sketches on one plane, never
+        // arranged with each other, come up split where their lines cross
+        // and closing loops neither holds — none of which the edit did.
+        let mut written: BTreeSet<usize> = affected.clone();
+        {
+            let mut ringed: BTreeSet<SketchRegionId> = face_state_changes(before, after);
+            ringed.extend(force.iter().copied());
+            ringed.extend(completes.iter().copied());
+            if !ringed.is_empty() {
+                for &e in &drawing {
+                    if sides
+                        .get(&e)
+                        .is_some_and(|rs| rs.iter().any(|r| ringed.contains(r)))
+                    {
+                        written.insert(comp_of[&e]);
+                    }
+                }
+            }
+        }
+        // Which stored drawing edges are rewritten: one with a piece in a
+        // written island; one no drawing edge holds and no fixed edge
+        // carries (erased); one a fixed edge carries (a solid's edge copied
+        // into a free sketch to close a region) with an end on a written
+        // island or on drawing the edit removed. The rest are kept verbatim
+        // by their stores.
+        let written_points: Vec<Point3> = drawing
+            .iter()
+            .filter(|e| written.contains(&comp_of[*e]))
+            .flat_map(|&e| {
+                let ed = after.edges()[e];
+                [pos(ed.from), pos(ed.to)]
+            })
+            .chain(touched_points.iter().copied())
+            .collect();
+        let mut pieced = vec![false; stored.len()];
+        let mut reached = vec![false; stored.len()];
+        for &e in &drawing {
+            let ed = after.edges()[e];
+            let (a, b) = (pos(ed.from), pos(ed.to));
+            let w = written.contains(&comp_of[&e]);
+            for (i, s) in stored.iter().enumerate() {
+                if matches!(s.store, Store::Sketch(_)) && along(a, b, s.a, s.b) {
+                    pieced[i] = true;
+                    reached[i] |= w;
+                }
+            }
+        }
+        let rewritten: BTreeSet<(SketchId, SegKey)> = stored
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let Store::Sketch(sid) = s.store else {
+                    return None;
+                };
+                let hit = if pieced[i] {
+                    reached[i]
+                } else if fixed.iter().any(|&(c, d)| along(s.a, s.b, c, d)) {
+                    written_points.iter().any(|&q| {
+                        q.approx_eq(s.a, tol::POINT_MERGE) || q.approx_eq(s.b, tol::POINT_MERGE)
+                    })
+                } else {
+                    true
+                };
+                hit.then_some((sid, seg_key(s.a, s.b)))
+            })
+            .collect();
+
         // ---- each drawing edge's target ----
         let current_store = |a: Point3, b: Point3| {
             stored
@@ -2564,6 +2769,10 @@ impl Document {
             let ed = after.edges()[e];
             let (a, b) = (pos(ed.from), pos(ed.to));
             let here = current_store(a, b);
+            // An island no store is written for stays where it is stored.
+            if !written.contains(&comp_of[&e]) && matches!(here, Some(Store::Sketch(_))) {
+                continue;
+            }
             match target[&e] {
                 Target::Topo(_) => {}
                 Target::Owned(o) => {
@@ -2600,9 +2809,11 @@ impl Document {
             // void: it is written whatever its ring holds; so is one a
             // detached draft completes, §16 R24.)
             let forced = force.contains(&rid) || completes.contains(&rid);
+            // (A region of islands kept as stored keeps its stores' own
+            // copies of such stretches.)
             let drawn_free = ring_edges
                 .iter()
-                .any(|e| target.get(e) == Some(&Target::Free));
+                .any(|e| target.get(e) == Some(&Target::Free) && written.contains(&comp_of[e]));
             if !drawn_free && !forced {
                 continue;
             }
@@ -2807,6 +3018,32 @@ impl Document {
                 cur.detached()
             );
             let cur_keys: BTreeSet<SegKey> = cur.edges().keys().map(|e| key_of(cur, e)).collect();
+            // The store's edges kept as stored: those of islands no store is
+            // written for (KB-2).
+            let kept: Vec<SketchEdgeId> = cur
+                .edges()
+                .keys()
+                .filter(|&e| !rewritten.contains(&(s, key_of(cur, e))))
+                .collect();
+            if !kept.is_empty() {
+                if kept.len() == cur.edges().len() && edges.is_empty() {
+                    continue; // the edit reached nothing of this store
+                }
+                // What it keeps, verbatim with its face states, then what the
+                // edit gives it.
+                let mut fresh = cur.blank_like();
+                replay_edges(cur, &kept, &mut fresh).map_err(DocumentError::Sketch)?;
+                fresh.carry_faceless_from(cur, &|p| p, &[]);
+                let kept_faced = fresh.faced_rings();
+                replay_edges(after, &edges, &mut fresh).map_err(DocumentError::Sketch)?;
+                fresh.carry_faceless_from(after, &|p| p, &kept_faced);
+                let fresh_keys: BTreeSet<SegKey> =
+                    fresh.edges().keys().map(|e| key_of(&fresh, e)).collect();
+                if fresh_keys != cur_keys || face_state_changed(cur, &fresh) {
+                    rewrites.push((s, fresh));
+                }
+                continue;
+            }
             let new_keys: BTreeSet<SegKey> = edges.iter().map(|&e| key_of(after, e)).collect();
             // (A loop given its face by drawing over an edge changes no edge,
             // but the sketch all the same.)
@@ -3232,11 +3469,19 @@ impl Document {
         detached_home: bool,
     ) -> ClosePass {
         let mut out = ClosePass::default();
+        // Inside an open session (v1.5 decisions D1) the pass closes the
+        // session's drawing with the session's alone: an outside seed (a
+        // group frame lets an outside sketch be moved) closes nothing, and
+        // no outside line, object or face is a partner, a facing, or lifted.
+        // The wall grows by the sketches the pass itself writes, which are
+        // the session's but not yet recorded.
+        let mut wall = self.draft_session_scope(frame);
         let seeds: Vec<Seed> = seeds
             .iter()
             .filter_map(|&(s, a, b)| {
                 let sk = self.sketches.get(s)?;
-                let live = self.sketch_takes_part(s, frame);
+                let live = self.sketch_takes_part(s, frame)
+                    && SessionScope::holds_sketch(wall.as_ref(), s);
                 (live && !a.approx_eq(b, tol::POINT_MERGE)).then(|| Seed {
                     a,
                     b,
@@ -3256,7 +3501,7 @@ impl Document {
         let m = tol::POINT_MERGE;
         for (i, sd) in seeds.iter().enumerate() {
             let set = partners[usize::from(sd.detached)]
-                .get_or_insert_with(|| self.frame_edges(frame, sd.detached));
+                .get_or_insert_with(|| self.frame_edges(frame, sd.detached, wall.as_ref()));
             let ab = sd.b - sd.a;
             let len = ab.length();
             let off_line = |q: Point3| ab.cross(q - sd.a).length() / len;
@@ -3268,9 +3513,9 @@ impl Document {
             let home_too = keep_home
                 || (detached_home
                     && sd.detached
-                    && *linked_home
-                        .entry(sd.sketch)
-                        .or_insert_with(|| self.detached_shares_a_corner(sd.sketch, frame)));
+                    && *linked_home.entry(sd.sketch).or_insert_with(|| {
+                        self.detached_shares_a_corner(sd.sketch, frame, wall.as_ref())
+                    }));
             let in_home =
                 |q: Point3| !home_too && sd.home.signed_distance(q).abs() <= tol::PLANE_DIST;
             for p in [sd.a, sd.b] {
@@ -3316,7 +3561,7 @@ impl Document {
         }
         // ---- 2 and 3, plane by plane: lift, find, write ----
         for cand in cands {
-            let q = self.closing_plane(cand.plane, frame, cand.detached);
+            let q = self.closing_plane(cand.plane, frame, cand.detached, wall.as_ref());
             let on = |p: Point3| q.signed_distance(p).abs() <= tol::PLANE_DIST;
             let through: Vec<(Point3, Point3)> = cand
                 .seeds
@@ -3335,9 +3580,15 @@ impl Document {
                 // are written, and none a detached loop already holds, so a
                 // separate shape on the plane is never arranged with.
                 let own: Vec<Point3> = through.iter().flat_map(|&(a, b)| [a, b]).collect();
-                self.lift_detached_new_with(q, frame, Gather::DetachedClose, Some(&own))
+                self.lift_detached_new_in_wall(
+                    q,
+                    frame,
+                    Gather::DetachedClose,
+                    Some(&own),
+                    wall.as_ref(),
+                )
             } else {
-                self.lift_plane_for_close(q, frame)
+                self.lift_plane_for_close(q, frame, wall.as_ref())
             };
             let Ok(lift) = lift else {
                 continue;
@@ -3352,9 +3603,9 @@ impl Document {
                     .map(|&i| (seeds[i].a, seeds[i].b))
                     .filter(|&(a, b)| on(a) && on(b))
                     .collect();
-                self.detached_regions_to_close(&lift, &off_home)
+                self.detached_regions_to_close(&lift, &off_home, wall.as_ref())
             } else {
-                self.regions_to_close(&lift, &through)
+                self.regions_to_close(&lift, &through, wall.as_ref())
             };
             if forced.is_empty() {
                 continue;
@@ -3369,6 +3620,9 @@ impl Document {
                 }
             }
             for s in lowered.report.sketches {
+                if let Some(w) = wall.as_mut() {
+                    w.sketches.insert(s);
+                }
                 if !out.touched.contains(&s) {
                     out.touched.push(s);
                 }
@@ -3379,11 +3633,19 @@ impl Document {
 
     /// Every edge of `frame` a closing edge can share a plane with: the
     /// edges of its free sketches of the kind (`detached`) that take part,
-    /// then of its objects that take part (§16 R11).
-    fn frame_edges(&self, frame: Option<ComponentId>, detached: bool) -> Vec<(Point3, Point3)> {
+    /// then of its objects that take part (§16 R11), inside `wall` (D1).
+    fn frame_edges(
+        &self,
+        frame: Option<ComponentId>,
+        detached: bool,
+        wall: Option<&SessionScope>,
+    ) -> Vec<(Point3, Point3)> {
         let mut out = Vec::new();
         for (s, sk) in self.sketches.iter() {
-            if !self.sketch_takes_part(s, frame) || sk.detached() != detached {
+            if !self.sketch_takes_part(s, frame)
+                || sk.detached() != detached
+                || !SessionScope::holds_sketch(wall, s)
+            {
                 continue;
             }
             for e in sk.edges().values() {
@@ -3391,7 +3653,7 @@ impl Document {
             }
         }
         for (id, rec) in self.objects.iter() {
-            if !self.object_takes_part(id, frame) {
+            if !self.object_takes_part(id, frame) || !SessionScope::holds_object(wall, id) {
                 continue;
             }
             for eid in rec.object.edges().keys() {
@@ -3404,10 +3666,17 @@ impl Document {
     }
 
     /// `q` facing the way a face closed on it faces (see
-    /// [`Document::close_faces_through`]).
-    fn closing_plane(&self, q: Plane, frame: Option<ComponentId>, detached: bool) -> Plane {
+    /// [`Document::close_faces_through`]), judged inside `wall` (D1).
+    fn closing_plane(
+        &self,
+        q: Plane,
+        frame: Option<ComponentId>,
+        detached: bool,
+        wall: Option<&SessionScope>,
+    ) -> Plane {
         for (s, sk) in self.sketches.iter() {
             if self.sketch_takes_part(s, frame)
+                && SessionScope::holds_sketch(wall, s)
                 && sk.detached() == detached
                 && planes_coincide_either(&q, &sk.plane())
             {
@@ -3419,7 +3688,9 @@ impl Document {
                 .drawable_objects_on_plane(q, frame)
                 .into_iter()
                 .chain(self.drawable_objects_on_plane(q.flipped(), frame))
-                .filter(|&o| self.object_takes_part(o, frame))
+                .filter(|&o| {
+                    self.object_takes_part(o, frame) && SessionScope::holds_object(wall, o)
+                })
             {
                 let obj = &self.objects[o].object;
                 if let Some(f) = obj
@@ -3439,11 +3710,13 @@ impl Document {
     /// along one of `through` and holding a foreign edge, over no object's
     /// face on the plane (either facing), and not already a faced region of
     /// an ordinary free sketch on the plane (either facing). A detached
-    /// plane's are [`Document::detached_regions_to_close`].
+    /// plane's are [`Document::detached_regions_to_close`]. Objects and
+    /// sketches are those inside `wall` (D1).
     fn regions_to_close(
         &self,
         lift: &Lifted,
         through: &[(Point3, Point3)],
+        wall: Option<&SessionScope>,
     ) -> BTreeSet<SketchRegionId> {
         let plane = lift.plane;
         let frame = lift.frame;
@@ -3453,11 +3726,12 @@ impl Document {
             .drawable_objects_on_plane(plane, frame)
             .into_iter()
             .chain(self.drawable_objects_on_plane(plane.flipped(), frame))
-            .filter(|&o| self.object_takes_part(o, frame))
+            .filter(|&o| self.object_takes_part(o, frame) && SessionScope::holds_object(wall, o))
             .collect();
         let mut faced: Vec<(Vec<Point3>, Vec<Vec<Point3>>)> = Vec::new();
         for (s, sk) in self.sketches.iter() {
             if !self.sketch_takes_part(s, frame)
+                || !SessionScope::holds_sketch(wall, s)
                 || sk.detached()
                 || !planes_coincide_either(&plane, &sk.plane())
             {
@@ -3540,6 +3814,7 @@ impl Document {
         &self,
         lift: &Lifted,
         through: &[(Point3, Point3)],
+        wall: Option<&SessionScope>,
     ) -> BTreeSet<SketchRegionId> {
         let plane = lift.plane;
         let frame = lift.frame;
@@ -3590,7 +3865,7 @@ impl Document {
             };
             // No Object face covers a detached shape: it is its own context
             // (§16 R31); a face over one is a loose face lying on it.
-            if !self.detached_loop_holds(&plane, frame, sample, &set) {
+            if !self.detached_loop_holds(&plane, frame, sample, &set, wall) {
                 out.insert(rid);
             }
         }
@@ -3649,6 +3924,7 @@ impl Document {
         if members.is_empty() {
             return out;
         }
+        let wall = self.draft_session_scope(lifted.frame);
         let pos = |v: SketchVertexId| after.vertices()[v].position;
         for (rid, r) in after.regions().iter() {
             if r.faceless {
@@ -3673,7 +3949,8 @@ impl Document {
             else {
                 continue;
             };
-            if !self.detached_loop_holds(&lifted.plane, lifted.frame, sample, &shape) {
+            if !self.detached_loop_holds(&lifted.plane, lifted.frame, sample, &shape, wall.as_ref())
+            {
                 out.insert(rid);
             }
         }
@@ -3685,8 +3962,13 @@ impl Document {
     /// at a vertex of `s` (within [`tol::POINT_MERGE`]), or an object's
     /// edge lying in that plane ends, both ends, on vertices of `s`: whether
     /// the connected set of `s`'s drawing on its plane (§16 R23) reaches
-    /// beyond `s` itself.
-    fn detached_shares_a_corner(&self, s: SketchId, frame: Option<ComponentId>) -> bool {
+    /// beyond `s` itself. Only drawing and objects inside `wall` count (D1).
+    fn detached_shares_a_corner(
+        &self,
+        s: SketchId,
+        frame: Option<ComponentId>,
+        wall: Option<&SessionScope>,
+    ) -> bool {
         let Some(own) = self.sketches.get(s) else {
             return false;
         };
@@ -3715,6 +3997,7 @@ impl Document {
                 && sk.detached()
                 && planes_coincide_either(&plane, &sk.plane())
                 && self.sketch_takes_part(o, frame)
+                && SessionScope::holds_sketch(wall, o)
                 && sk.vertices().values().any(|v| at(v.position))
         });
         // An object's edge with both ends on `s` (§16 R8) closes against it
@@ -3722,6 +4005,7 @@ impl Document {
         shape
             || self.objects.iter().any(|(id, rec)| {
                 self.object_takes_part(id, frame)
+                    && SessionScope::holds_object(wall, id)
                     && rec.object.edges().keys().any(|e| {
                         rec.object.edge_endpoints(e).is_some_and(|(a, b)| {
                             plane.signed_distance(a).abs() <= tol::PLANE_DIST
@@ -3742,12 +4026,14 @@ impl Document {
     /// share a corner and overlap stay as drawn, while a loop the set does
     /// not reach is a separate shape and never blocks one (a small square
     /// inside a big ring, each its own lines, both fill, in either order).
+    /// Only sketches inside `wall` count (D1).
     fn detached_loop_holds(
         &self,
         plane: &Plane,
         frame: Option<ComponentId>,
         p: Point3,
         set: &[Point3],
+        wall: Option<&SessionScope>,
     ) -> bool {
         let of_set = |sk: &Sketch| {
             sk.vertices().values().any(|v| {
@@ -3759,6 +4045,7 @@ impl Document {
             sk.detached()
                 && planes_coincide_either(plane, &sk.plane())
                 && self.sketch_takes_part(s, frame)
+                && SessionScope::holds_sketch(wall, s)
                 && sk
                     .regions()
                     .keys()
@@ -3766,6 +4053,25 @@ impl Document {
                 && of_set(sk)
         })
     }
+}
+
+/// The regions of `after` whose outer ring is a region of `before` with the
+/// other face state: the loops an edit gave or took a face without changing
+/// an edge (drawing over a faceless loop's edge, sketch rule 6).
+fn face_state_changes(before: &Sketch, after: &Sketch) -> BTreeSet<SketchRegionId> {
+    let ring = |sk: &Sketch, r: &crate::sketch::SketchRegion| -> Vec<Point3> {
+        r.outer.iter().map(|&v| sk.vertices()[v].position).collect()
+    };
+    let mut out = BTreeSet::new();
+    for r in before.regions().values() {
+        let before_ring = ring(before, r);
+        for (rid, ar) in after.regions().iter() {
+            if ar.faceless != r.faceless && same_ring(&before_ring, &ring(after, ar)) {
+                out.insert(rid);
+            }
+        }
+    }
+    out
 }
 
 /// Whether a loop of `cur` has a face in `after` and none in `cur`, or the
@@ -4275,17 +4581,43 @@ pub struct PlaneUnits {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlaneListing {
     /// A plane's arrangement: its free drawing with the objects taking part.
+    /// While an editing session is open, the session's arrangement only,
+    /// lifted exactly as a draft on the plane lifts it (v1.5 decisions D1).
     Plane(Plane),
+    /// While an editing session is open: the drawing on a plane OUTSIDE the
+    /// session, arranged among itself with the outside objects on the plane
+    /// (v1.5 decisions D1). Context to show dimmed, never opened for
+    /// editing: a draft on the plane is the session's
+    /// ([`PlaneListing::Plane`]).
+    Context(Plane),
     /// One detached sketch, in its own context
-    /// ([`Document::detached_sketch_units`]).
-    Detached { sketch: SketchId, plane: Plane },
+    /// ([`Document::detached_sketch_units`]); `context` while an editing
+    /// session is open and the sketch is outside it (it cannot be drafted
+    /// on until the session closes).
+    Detached {
+        sketch: SketchId,
+        plane: Plane,
+        context: bool,
+    },
 }
 
 impl PlaneListing {
     /// The plane the entry's drawing lies on.
     pub fn plane(&self) -> Plane {
         match *self {
-            PlaneListing::Plane(plane) | PlaneListing::Detached { plane, .. } => plane,
+            PlaneListing::Plane(plane)
+            | PlaneListing::Context(plane)
+            | PlaneListing::Detached { plane, .. } => plane,
+        }
+    }
+
+    /// Whether the entry is outside an open editing session: shown, never
+    /// edited (v1.5 decisions D1).
+    pub fn is_context(&self) -> bool {
+        match *self {
+            PlaneListing::Plane(_) => false,
+            PlaneListing::Context(_) => true,
+            PlaneListing::Detached { context, .. } => context,
         }
     }
 }
@@ -4322,10 +4654,39 @@ impl Document {
     /// sketch of the frame is listed on its own
     /// ([`PlaneListing::Detached`], [`Document::detached_sketch_units`]), in
     /// [`SketchId`] order: it belongs to no plane's arrangement.
+    ///
+    /// While an editing session is open, the world frame's listing splits
+    /// at the session's wall (v1.5 decisions D1): a plane with drawing on
+    /// both sides lists twice, first the outside drawing with the outside
+    /// objects ([`PlaneListing::Context`]), then the session's with the
+    /// session's objects ([`PlaneListing::Plane`]), each lifted among
+    /// itself. Every key of a session entry names an edge of the draft
+    /// opened on that plane; a detached sketch outside the session is
+    /// marked `context`.
     pub fn free_plane_units(
         &self,
         frame: Option<ComponentId>,
         excluded: &BTreeSet<ObjectId>,
+    ) -> Vec<(PlaneListing, PlaneUnits)> {
+        self.free_plane_units_on(frame, excluded, |plane| plane)
+    }
+
+    /// [`Document::free_plane_units`], each plane's drawing lifted on
+    /// `on(plane)` rather than on the plane itself, while the entry still
+    /// names the plane. For a caller that names a plane by numbers it
+    /// rounds and later opens the edit on the plane rebuilt from them (the
+    /// app's context string): the keys are hashed in the lifted plane's
+    /// coordinates, so listing on that same rebuilt plane is what makes
+    /// every key it lists name an edge of the draft, bit for bit, on an
+    /// oblique plane too (#103). `on` must return a plane that coincides
+    /// with its argument within tolerance. Detached entries are listed in
+    /// their sketch's own context, as before: a caller opens those by
+    /// sketch, not by plane.
+    pub fn free_plane_units_on(
+        &self,
+        frame: Option<ComponentId>,
+        excluded: &BTreeSet<ObjectId>,
+        on: impl Fn(Plane) -> Plane,
     ) -> Vec<(PlaneListing, PlaneUnits)> {
         // A plane's bucket: its normal and offset at a grain of a
         // millionth, a thousand times coarser than the tolerances two
@@ -4353,8 +4714,13 @@ impl Document {
             }
             out
         };
-        // Free sketches by plane, in sketch order; detached ones apart.
-        let mut groups: Vec<(Plane, Vec<SketchId>)> = Vec::new();
+        // An open session's wall (v1.5 decisions D1): each plane lists the
+        // session's arrangement and the outside one apart, each lifted
+        // among itself, so a session entry's keys are the draft's.
+        let wall = self.draft_session_scope(frame);
+        // Free sketches by plane, in sketch order (outside the session's
+        // wall, then inside it); detached ones apart.
+        let mut groups: Vec<(Plane, [Vec<SketchId>; 2])> = Vec::new();
         let mut group_of: BTreeMap<[i64; 4], Vec<usize>> = BTreeMap::new();
         let mut detached: Vec<SketchId> = Vec::new();
         for (s, sk) in self.sketches.iter() {
@@ -4368,6 +4734,7 @@ impl Document {
                 detached.push(s);
                 continue;
             }
+            let side = usize::from(SessionScope::holds_sketch(wall.as_ref(), s));
             let plane = sk.plane();
             let key = key_of(&plane);
             let found = around(key).into_iter().find_map(|k| {
@@ -4378,10 +4745,12 @@ impl Document {
                     .find(|&g| planes_coincide(&groups[g].0, &plane))
             });
             match found {
-                Some(g) => groups[g].1.push(s),
+                Some(g) => groups[g].1[side].push(s),
                 None => {
                     group_of.entry(key).or_default().push(groups.len());
-                    groups.push((plane, vec![s]));
+                    let mut sides: [Vec<SketchId>; 2] = [Vec::new(), Vec::new()];
+                    sides[side].push(s);
+                    groups.push((plane, sides));
                 }
             }
         }
@@ -4419,7 +4788,7 @@ impl Document {
             }
         }
         let mut out = Vec::with_capacity(groups.len());
-        for (plane, sketches) in groups {
+        for (plane, sides) in groups {
             let mut objects: Vec<ObjectId> = Vec::new();
             for k in around(key_of(&plane)) {
                 for &o in objects_by_plane.get(&k).into_iter().flatten() {
@@ -4433,15 +4802,47 @@ impl Document {
                 }
             }
             objects.sort_unstable();
-            let Ok(lifted) =
-                self.lift_plane_with(plane, frame, &objects, Some(sketches), Gather::No)
-            else {
-                continue;
-            };
-            let Ok(units) = self.plane_units_of(&lifted) else {
-                continue;
-            };
-            out.push((PlaneListing::Plane(plane), units));
+            let at = on(plane);
+            debug_assert!(
+                planes_coincide(&at, &plane),
+                "free_plane_units_on: `on` moved the plane off itself — caller bug"
+            );
+            // The outside entry first, so a reader that keys entries by
+            // plane alone keeps the session's (the one a draft opens).
+            for (side, sketches) in sides.into_iter().enumerate() {
+                if sketches.is_empty() {
+                    continue;
+                }
+                let inside = side == 1;
+                let objects: Vec<ObjectId> = objects
+                    .iter()
+                    .copied()
+                    .filter(|&o| {
+                        wall.as_ref()
+                            .is_none_or(|w| w.objects.contains(&o) == inside)
+                    })
+                    .collect();
+                let Ok(lifted) = self.lift_plane_in_wall(
+                    at,
+                    frame,
+                    &objects,
+                    Some(sketches),
+                    Gather::No,
+                    None,
+                    None,
+                ) else {
+                    continue;
+                };
+                let Ok(units) = self.plane_units_of(&lifted) else {
+                    continue;
+                };
+                let listing = if inside {
+                    PlaneListing::Plane(plane)
+                } else {
+                    PlaneListing::Context(plane)
+                };
+                out.push((listing, units));
+            }
         }
         detached.sort_unstable();
         for s in detached {
@@ -4452,6 +4853,7 @@ impl Document {
                 PlaneListing::Detached {
                     sketch: s,
                     plane: self.sketches[s].plane(),
+                    context: !SessionScope::holds_sketch(wall.as_ref(), s),
                 },
                 units,
             ));
@@ -4755,6 +5157,51 @@ impl Document {
             .collect();
         (edges, missing)
     }
+
+    /// The drawing on `plane` in `frame` over `objects` that the listing
+    /// keys `keys` name ([`Document::plane_units`]'s [`DraftEdge::key`]), as
+    /// a fresh plain sketch on the lifted plane: those edges replayed alone,
+    /// curve chains kept with their analytic circles (the clipboard copy of
+    /// drawing, v1.5 decisions D3). A solid's own boundary edges are never
+    /// named. Read-only.
+    ///
+    /// # Errors
+    /// As [`Document::lift_plane`]; [`SketchError::UnknownEdge`] (as
+    /// [`DocumentError::Sketch`]) for a key that names no drawing edge of
+    /// the lift, so a stale selection is refused rather than dropped.
+    pub(crate) fn plane_drawing_by_keys(
+        &self,
+        plane: Plane,
+        frame: Option<ComponentId>,
+        objects: &[ObjectId],
+        keys: &[u64],
+    ) -> Result<Sketch, DocumentError> {
+        let lifted = self.lift_plane(plane, frame, objects)?;
+        let w = &lifted.before;
+        let lplane = lifted.plane;
+        let wanted: BTreeSet<u64> = keys.iter().copied().collect();
+        let fixed = |a: Point3, b: Point3| lifted.fixed.iter().any(|&(c, d)| along(a, b, c, d));
+        let mut found: BTreeSet<u64> = BTreeSet::new();
+        let mut edges: Vec<SketchEdgeId> = Vec::new();
+        for (id, e) in w.edges().iter() {
+            let (a, b) = (w.vertices()[e.from].position, w.vertices()[e.to].position);
+            if fixed(a, b) {
+                continue;
+            }
+            let k = crate::unit_key::edge_key(&lplane, a, b);
+            if wanted.contains(&k) {
+                found.insert(k);
+                edges.push(id);
+            }
+        }
+        if found.len() != wanted.len() {
+            return Err(DocumentError::Sketch(SketchError::UnknownEdge));
+        }
+        let mut out = Sketch::on_plane(w.plane());
+        w.replay_edges_into(&edges, &Transform::IDENTITY, &mut out)
+            .map_err(DocumentError::Sketch)?;
+        Ok(out)
+    }
 }
 
 impl Document {
@@ -4829,6 +5276,71 @@ impl Document {
             })
             .map(|(id, _)| id)
             .collect()
+    }
+
+    /// The objects a draft on `plane` in `frame` takes part with:
+    /// [`Document::drawable_objects_on_plane`], narrowed to the open
+    /// session when the draft is in the session frame (`frame == None`
+    /// while a session is open, v1.5 decisions D1). An object outside the
+    /// session is context to snap to, never a participant: drawing on its
+    /// face makes free drawing of the session on that plane, and the
+    /// object is untouched. A draft addressed to a definition frame
+    /// (`Some(def)`) is not narrowed. Read-only.
+    pub fn draft_participants(&self, plane: Plane, frame: Option<ComponentId>) -> Vec<ObjectId> {
+        let objects = self.drawable_objects_on_plane(plane, frame);
+        match self.draft_session_scope(frame) {
+            Some(wall) => objects
+                .into_iter()
+                .filter(|o| wall.objects.contains(o))
+                .collect(),
+            None => objects,
+        }
+    }
+
+    /// Whether object `object` may take part in a draft in its own frame:
+    /// always, unless a session is open, the object is a world object, and
+    /// it is outside the session (v1.5 decisions D1). What
+    /// [`Document::begin_draft`] refuses with
+    /// [`DocumentError::ExplodeSessionScope`]. Read-only.
+    pub fn draft_scope_holds_object(&self, object: ObjectId) -> bool {
+        let frame = self.object_owner_component(object);
+        self.draft_session_scope(frame)
+            .is_none_or(|wall| wall.objects.contains(&object))
+    }
+
+    /// [`Document::draft_scope_holds_object`] for sketch `sketch`, judged in
+    /// the sketch's own frame: what [`Document::begin_draft_detached`]
+    /// refuses. Read-only.
+    pub fn draft_scope_holds_sketch(&self, sketch: SketchId) -> bool {
+        let frame = self.def_sketches.get(&sketch).copied();
+        self.draft_session_scope(frame)
+            .is_none_or(|wall| wall.sketches.contains(&sketch))
+    }
+
+    /// The session wall a draft in `frame` sits inside (v1.5 decisions
+    /// D1): `Some` only for the session frame, `frame == None` while a
+    /// session is open. Objects: [`Document::explode_session_scope`] for a
+    /// component frame, the group session's membership (at any depth) for
+    /// a group frame. Sketches: [`Document::session_frame_sketches`] for
+    /// either.
+    pub(crate) fn draft_session_scope(&self, frame: Option<ComponentId>) -> Option<SessionScope> {
+        if frame.is_some() {
+            return None;
+        }
+        let objects: BTreeSet<ObjectId> = match self.sessions.last()? {
+            SessionFrame::Component(_) => self.explode_session_scope()?.0,
+            SessionFrame::Group(_) => {
+                let scope = self.group_session_scope()?;
+                self.objects
+                    .keys()
+                    .filter(|&o| self.node_in_group_scope(&scope, NodeId::Object(o)))
+                    .collect()
+            }
+        };
+        Some(SessionScope {
+            objects,
+            sketches: self.session_frame_sketches().into_iter().collect(),
+        })
     }
 
     /// The open draft's vertex at `at` (within [`tol::POINT_MERGE`]).
@@ -5012,5 +5524,89 @@ impl Document {
             .into_iter()
             .filter(|&c| crate::unit_key::chain_key(w, c) == Some(key))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ground() -> Plane {
+        Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+            .expect("ground")
+    }
+
+    fn build_box(doc: &mut Document, x0: f64, y0: f64, x1: f64, y1: f64) -> ObjectId {
+        let s = doc.add_sketch(ground());
+        let c = [
+            Point3::new(x0, y0, 0.0),
+            Point3::new(x1, y0, 0.0),
+            Point3::new(x1, y1, 0.0),
+            Point3::new(x0, y1, 0.0),
+        ];
+        let sk = doc.sketch_mut(s).expect("sketch is live");
+        for i in 0..4 {
+            sk.add_segment(c[i], c[(i + 1) % 4]).expect("segment");
+        }
+        let region = doc.extrudable_regions(s).expect("live")[0];
+        doc.extrude_region(s, region, 1.0).expect("extrude").0
+    }
+
+    /// The KB-44 backstop in `exit_explode_session`, kept although no
+    /// public draft can reach it since v1.5 decisions D1: a sketch created
+    /// mid-session and owned by an object OUTSIDE the definition stays with
+    /// its world owner at the close (folding it would list a world object's
+    /// sketch in the definition, a file the loader refuses). The state is
+    /// built directly — a session-frame lift over the outside object,
+    /// opened past `begin_draft`'s refusal — the way some future op that
+    /// hands a sketch to an outside object would build it.
+    #[test]
+    fn a_mid_session_sketch_owned_by_an_outside_object_stays_with_it_at_close() {
+        let mut doc = Document::new();
+        doc.set_torture_mode(true);
+        let a = build_box(&mut doc, 0.0, 0.0, 2.0, 2.0);
+        let outside = build_box(&mut doc, 10.0, 0.0, 12.0, 2.0);
+        let (component, _, _) = doc.make_component(&[NodeId::Object(a)]).expect("component");
+        let (placed, _) = doc
+            .place_instance(component, Transform::translation(Vec3::new(0.0, 10.0, 0.0)))
+            .expect("place");
+        doc.open_explode_session(placed).expect("open");
+
+        let top = Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0))
+            .expect("plane");
+        assert_eq!(
+            doc.begin_draft(top, None, &[outside], "Line").unwrap_err(),
+            DocumentError::ExplodeSessionScope,
+            "no public draft reaches this state"
+        );
+        let lifted = doc
+            .lift_plane_with(top, None, &[outside], None, Gather::Plane)
+            .expect("lift over the outside object");
+        doc.open_draft(lifted, "Line");
+        let (p, q) = (Point3::new(10.5, 0.5, 1.0), Point3::new(11.0, 1.5, 1.0));
+        doc.draft_sketch_mut()
+            .expect("open")
+            .add_segment(p, q)
+            .expect("segment");
+        let (report, _) = doc.end_draft().expect("lowers");
+        let line = report.sketches[0];
+        assert_eq!(doc.sketch_owner_object(line), Some(outside));
+
+        Document::load(&doc.save_for_persistence()).expect("the autosave reopens");
+        doc.close_explode_session().expect("close");
+        assert_eq!(doc.sketch_owner_object(line), Some(outside));
+        assert_eq!(doc.sketch_owner_component(line), None, "stays in the world");
+        let mut pts: Vec<Point3> = doc.sketches[line]
+            .vertices()
+            .values()
+            .map(|v| v.position)
+            .collect();
+        pts.sort_by(|u, v| u.x.total_cmp(&v.x));
+        assert_eq!(pts, vec![p, q], "the line did not move");
+        Document::load(&doc.save()).expect("the closed document reopens");
+        doc.undo().expect("undo the close");
+        doc.redo().expect("redo the close");
+        assert_eq!(doc.sketch_owner_object(line), Some(outside));
+        Document::load(&doc.save()).expect("the redone close reopens");
     }
 }

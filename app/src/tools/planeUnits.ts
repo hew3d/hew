@@ -856,6 +856,13 @@ export interface OutlinerUnit {
   unit: PlaneUnit
   /** Distinct objects the unit's topology/owned edges belong to. */
   objects: bigint[]
+  /** Set on a unit of drawing OUTSIDE the open editing session (listed apart,
+   *  in `OutlinerDrawing.outside`): shown dimmed, never selected or edited,
+   *  and its `ref` must not be handed to an edit — its keys name a listing
+   *  the session's ctx does not hold. */
+  context?: true
+  /** Row label of a `context` unit (numbered among the outside units). */
+  label?: string
 }
 
 export interface OutlinerDrawing {
@@ -864,6 +871,10 @@ export interface OutlinerDrawing {
   byObject: Map<string, OutlinerUnit[]>
   /** Units entirely in free sketches, in sketch order. */
   free: OutlinerUnit[]
+  /** Drawing outside the open editing session (`plane_units_all_json`'s
+   *  `context` entries), each marked `context`. Never in `byObject`/`free`
+   *  and never in the ctx cache. Empty outside a session. */
+  outside: OutlinerUnit[]
   /** Row label of every unit listed under an object, by `nodeKey` of its
    *  ref: its `unitName`, numbered 1-based when one object carries several
    *  of one name. */
@@ -938,6 +949,10 @@ interface AllListingEntry {
   plane: number[]
   sketch?: number
   detached?: boolean
+  /** Drawing outside the open editing session: a separate, dimmed listing
+   *  that shares its plane (or is a detached sketch) with the session's
+   *  ordinary entry and is never opened for editing. */
+  context?: boolean
   units: unknown
 }
 
@@ -965,7 +980,7 @@ function readAllListings(scene: { plane_units_all_json?(): string; history_gener
 export function detachedSketchIds(scene: { plane_units_all_json?(): string; history_generation?(): bigint }): ReadonlySet<bigint> {
   const out = new Set<bigint>()
   for (const e of readAllListings(scene)) {
-    if (e.detached === true && typeof e.sketch === 'number') out.add(BigInt(e.sketch))
+    if (e.context !== true && e.detached === true && typeof e.sketch === 'number') out.add(BigInt(e.sketch))
   }
   return out
 }
@@ -998,6 +1013,9 @@ export function outlinerDrawing(scene: OutlinerScene, objects: readonly bigint[]
   // edges) took minutes plane by plane.
   if (scene.plane_units_all_json !== undefined) {
     for (const entry of readAllListings(scene)) {
+      // Outside-session drawing shares its plane's ctx with the session's
+      // own entry: it must not take the cache slot the edits read.
+      if (entry.context === true) continue
       // A detached shape lists as its own context, after the planes.
       const ctx = entry.detached === true && typeof entry.sketch === 'number'
         ? ctxOfSketchOnly(entry.sketch)
@@ -1020,6 +1038,21 @@ export function outlinerDrawing(scene: OutlinerScene, objects: readonly bigint[]
   }
   const byObject = new Map<string, OutlinerUnit[]>()
   const free: OutlinerUnit[] = []
+  const outside: OutlinerUnit[] = []
+  if (scene.plane_units_all_json !== undefined) {
+    for (const entry of readAllListings(scene)) {
+      if (entry.context !== true) continue
+      const ctx = entry.detached === true && typeof entry.sketch === 'number'
+        ? ctxOfSketchOnly(entry.sketch)
+        : ctxOfPlane([entry.plane[0], entry.plane[1], entry.plane[2]], [entry.plane[3], entry.plane[4], entry.plane[5]])
+      if (ctx === null) continue
+      for (const unit of parsePlaneUnits(ctx, JSON.stringify(entry.units)).units) {
+        outside.push({ ref: draftRef('draft-island', ctx, unit.key), unit, objects: [], context: true })
+      }
+    }
+    const names = numberedLabels(outside.map((u) => unitName(u.unit)))
+    outside.forEach((u, i) => { u.label = names[i] })
+  }
   for (const ctx of ctxs) {
     const pu = readPlaneUnits(scene, ctx)
     if (pu === null) continue
@@ -1044,7 +1077,7 @@ export function outlinerDrawing(scene: OutlinerScene, objects: readonly bigint[]
     const named = numberedLabels(list.map((u) => unitName(u.unit)))
     list.forEach((u, i) => labels.set(`${u.ref.kind}:${u.ref.ctx}:${u.ref.key}`, named[i]))
   }
-  return { byObject, free, labels }
+  return { byObject, free, outside, labels }
 }
 
 /** A drawing row's name: one word per ref kind. */

@@ -78,6 +78,7 @@ import {
 } from './planeUnits'
 import { runDraft, noteSketchTransformReport, resetSketchTransformReports, type DraftReport } from './draftCommit'
 import { applyAffine3x4, invertAffine3x4 } from '../viewport/geoHelpers'
+import { planDimensionCarry, applyDimensionCarry } from './carryDimensions'
 import { t } from '@lingui/core/macro'
 
 type V3 = [number, number, number]
@@ -530,6 +531,40 @@ function repointGroups(
   committed.splice(0, committed.length, ...out)
 }
 
+/** The segments of exactly the islands `group` moves. */
+function islandSegments(wasmScene: WasmScene, group: SketchIslandGroup): [V3, V3][] {
+  const out: [V3, V3][] = []
+  for (const island of group.islands) {
+    let edges: Iterable<bigint>
+    try {
+      edges = wasmScene.sketch_island_edges(group.sketch, island)
+    } catch {
+      continue
+    }
+    for (const edge of edges) {
+      const e = wasmScene.sketch_edge_endpoints(group.sketch, edge)
+      if (e === undefined) continue
+      out.push([[e[0], e[1], e[2]], [e[3], e[4], e[5]]])
+    }
+  }
+  return out
+}
+
+/** A whole sketch's segments (the kernel lists them as f32 pairs). */
+function sketchSegments(wasmScene: WasmScene, sketch: bigint): [V3, V3][] {
+  let lines: ArrayLike<number>
+  try {
+    lines = wasmScene.sketch_lines(sketch)
+  } catch {
+    return []
+  }
+  const out: [V3, V3][] = []
+  for (let i = 0; i + 5 < lines.length; i += 6) {
+    out.push([[lines[i], lines[i + 1], lines[i + 2]], [lines[i + 3], lines[i + 4], lines[i + 5]]])
+  }
+  return out
+}
+
 /**
  * Commit one affine to the whole selection: drawn shapes per plane context
  * through drafts, whole sketches and everything else via a single
@@ -641,6 +676,17 @@ function commitSelectionTransformInner(
     .filter((n) => isDraftRef(n) && !planned.has(n))
     .map((n) => ({ node: n, segs: segmentsOf(wasmScene, n) }))
   const ridingFound = new Map<NodeRef, NodeRef[]>()
+  // Dimensions measuring the moving drawing follow it (#98), in the same
+  // history step; read from the pre-move positions.
+  const moving: [V3, V3][] = [
+    ...groups.flatMap((g) => g.edges.map((e) => [e.a, e.b] as [V3, V3])),
+    ...riding.flatMap((r) => r.segs),
+    // Whole sketches move whole; a detached island moves ONLY its own edges
+    // — the sketch's stationary islands must not drag their dimensions along.
+    ...[...sketches, ...post.sketches].flatMap((sk) => sketchSegments(wasmScene, sk)),
+    ...[...islands, ...post.islands].flatMap((g) => islandSegments(wasmScene, g)),
+  ]
+  const dimensionCarry = planDimensionCarry(wasmScene, moving, affineF64)
   inHistoryBracket(
     wasmScene,
     label,
@@ -715,13 +761,14 @@ function commitSelectionTransformInner(
       for (const g of detaching) {
         found.set(g, refsAfterLeavingPlane(wasmScene, g, affineF64))
       }
+      applyDimensionCarry(wasmScene, dimensionCarry, affineF64)
       for (const { node, segs } of riding) {
         if (!isDraftRef(node) || segs.length === 0) continue
         const anchors = segs.map(([a, b]) => [applyAffineToPoint(affineF64, a), applyAffineToPoint(affineF64, b)] as [V3, V3])
         ridingFound.set(node, refsAtAnchors(wasmScene, ridingCtx(node.ctx, affineF64), anchors))
       }
     },
-    steps > 1,
+    steps + (dimensionCarry.length > 0 ? 1 : 0) > 1,
   )
   repointGroups(committed, groups, found)
   if (ridingFound.size > 0) {

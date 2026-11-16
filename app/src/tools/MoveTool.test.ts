@@ -177,6 +177,7 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
     // --- sketch replay surface (whole-sketch Move+Alt copies). One sketch with
     // two single-edge islands: 40 (edge 10) and 41 (edge 20); replayed
     // edges get fresh ids >= 500 and land in island 77.
+    annotation_ids: vi.fn(() => []),
     sketch_island_ids: vi.fn(() => [40n, 41n]),
     sketch_island_edges: vi.fn((_s: bigint, island: bigint) =>
       island === 40n ? [10n] : island === 41n ? [20n] : [],

@@ -35,12 +35,14 @@ use std::num::NonZeroU32;
 
 mod cells;
 mod change_sets;
+mod clipboard;
 mod curves;
 mod draft;
 mod history_budget;
 mod member_ops;
 mod occurrences;
 pub use cells::{CellDecline, CellDeclineReason, CellOutcome, CellScope, CellSeed, OpenEdges};
+pub use clipboard::{DrawingInsert, DrawnInsert, DrawnSource};
 pub use curves::{
     BlendPreview, LoftSource, MAX_ARRAY_COUNT, PathArraySpec, ReshapeReport, ReshapeSpec,
     RevolveProfile, RevolveSpec,
@@ -1012,6 +1014,7 @@ pub fn render_history_label(kind: &HistoryKind) -> String {
     match kind.id {
         "labeled" => text("label").to_string(),
         "edit" => "Edit".to_string(),
+        "paste" => "Paste".to_string(),
         "repeat" => format!("{} ×{}", inner(), count("count")),
         "bundle" => format!("{} (+{} more)", inner(), count("more")),
         "text-3d" => "3D Text".to_string(),
@@ -3532,6 +3535,13 @@ fn visible_world_bottom_center(doc: &Document) -> Option<Point3> {
             }
         }
     }
+    // A clipboard copy's carried drawing (its world sketches,
+    // `extract_clipboard_item_with_drawing`); a Library item has none.
+    for s in doc.carried_drawing() {
+        for v in doc.sketches[s].vertices().values() {
+            extend(v.position);
+        }
+    }
     if !lo.x.is_finite() {
         return None;
     }
@@ -4237,6 +4247,16 @@ pub struct InsertOptions {
     /// definition is gone, falls through to the ordinary copy. `None` for a
     /// library insert.
     pub origin: Option<String>,
+    /// What happens to the item's world sketches:
+    /// [`DrawingInsert::Skip`] (a Library insert) counts them in
+    /// [`InsertReport::world_sketches_skipped`]; [`DrawingInsert::Draw`] (a
+    /// clipboard paste) draws each one at the destination, through the
+    /// drafting engine on its posed plane (v1.5 decisions D3).
+    pub drawing: DrawingInsert,
+    /// Under [`DrawingInsert::Draw`], objects the caller shows hidden: they
+    /// take no part in the drawn drawing, as in a draft the caller opens
+    /// itself. Ignored under [`DrawingInsert::Skip`].
+    pub hidden_objects: BTreeSet<ObjectId>,
 }
 
 /// What [`Document::purge_unused`] removed.
@@ -4276,9 +4296,18 @@ pub struct InsertReport {
     pub guides_added: usize,
     /// World-owned sketches the insert did NOT carry (v1 scope: an item's
     /// loose drafting geometry is dropped and reported, never repaired).
+    /// Always zero under [`DrawingInsert::Draw`], which draws them.
     pub world_sketches_skipped: usize,
     /// Annotations the insert did NOT carry (v1 scope).
     pub annotations_skipped: usize,
+    /// Under [`DrawingInsert::Draw`], one entry per carried sketch, in item
+    /// order: the plane it was drawn on and its pasted segments, so a
+    /// caller finds the pasted shapes again by geometry. Empty otherwise.
+    pub drawn: Vec<DrawnInsert>,
+    /// Whether every draw of [`InsertReport::drawn`] drew nothing new (a
+    /// Paste In Place exactly over the original). `false` when nothing was
+    /// drawn.
+    pub drawing_unchanged: bool,
 }
 
 /// The authoritative model: the tree of Sketches and solid Objects plus the
@@ -7774,11 +7803,27 @@ impl Document {
     /// A linked definition is not part of the undo step (undo hides only
     /// what the insert created).
     ///
-    /// v1 scope, reported and never repaired: the item's world-owned
-    /// sketches and its annotations are not carried
-    /// ([`InsertReport::world_sketches_skipped`] /
-    /// [`InsertReport::annotations_skipped`]). Definition-owned sketches DO
-    /// carry with their definitions.
+    /// Under [`DrawingInsert::Skip`] (a Library insert), the item's
+    /// world-owned sketches are not carried
+    /// ([`InsertReport::world_sketches_skipped`]). Under
+    /// [`DrawingInsert::Draw`] (a clipboard paste, v1.5 decisions D3) each
+    /// is drawn at the destination after the nodes are inserted: posed by
+    /// `options.pose` and drawn through the drafting engine on the posed
+    /// plane in the world frame, the plane's participants
+    /// ([`Document::draft_participants`], so an open group session scopes
+    /// it to the group) taking part, minus `options.hidden_objects`; a
+    /// detached sketch lands as one new detached sketch
+    /// ([`Document::draft_detached_new`]). The nodes and the drawing are
+    /// then ONE undo step labeled "Paste" (a history bracket), redone
+    /// whole; any refusal in any part leaves the document exactly as it
+    /// was. A paste that changes nothing (drawing only, landing exactly
+    /// over itself) records no step ([`InsertReport::drawing_unchanged`]).
+    /// The pose should be a similarity, as for nodes: under any other a
+    /// circle's analytic identity is dropped (its facets stay).
+    ///
+    /// Reported and never repaired: the item's annotations are not carried
+    /// ([`InsertReport::annotations_skipped`]). Definition-owned sketches
+    /// DO carry with their definitions.
     ///
     /// # Errors
     /// - [`DocumentError::ExplodeSessionScope`] — a component session is
@@ -7788,8 +7833,79 @@ impl Document {
     /// - [`DocumentError::Transform`] — `options.pose` is singular
     ///   ([`TransformError::Singular`]). Refused before anything mutates
     ///   (the strong guarantee). A reflecting pose bakes a mirrored copy
-    ///   (every face is turned over; see `Object::apply_transform`).
+    ///   (every face is turned over; see `Object::apply_transform`), and
+    ///   carried drawing lands mirrored on the plane mapped keeping its
+    ///   side ([`Transform::apply_plane_keeping_side`]).
+    /// - Under [`DrawingInsert::Draw`], whatever a draft of the posed
+    ///   drawing refuses (for instance [`DocumentError::Sketch`] for a pose
+    ///   that collapses a segment under tolerance).
     pub fn insert_document(
+        &mut self,
+        item: &Document,
+        options: &InsertOptions,
+    ) -> Result<(InsertReport, DocChange), DocumentError> {
+        let carried = match options.drawing {
+            DrawingInsert::Skip => Vec::new(),
+            DrawingInsert::Draw => item.carried_drawing(),
+        };
+        if carried.is_empty() {
+            return self.insert_document_nodes(item, options);
+        }
+        info!(target: "kernel::op", op = "insert_document", drawing = carried.len());
+        self.refuse_during_component_session()?;
+        options.pose.inverse().map_err(DocumentError::Transform)?;
+        let txn = self.begin_transaction();
+        let done = self.insert_document_drawing(item, options, &carried);
+        match done {
+            Ok(out) => {
+                self.commit_transaction(
+                    txn,
+                    CompoundMeta {
+                        label: clipboard::PASTE_LABEL.to_string(),
+                        origin: HistoryOrigin::User,
+                        coalesce: None,
+                    },
+                )?;
+                Ok(out)
+            }
+            Err(e) => {
+                self.abort_transaction(txn);
+                Err(e)
+            }
+        }
+    }
+
+    /// [`Document::insert_document`] under [`DrawingInsert::Draw`], inside
+    /// the caller's history bracket: the nodes (when the item has any),
+    /// then the `carried` drawing drawn at the destination.
+    fn insert_document_drawing(
+        &mut self,
+        item: &Document,
+        options: &InsertOptions,
+        carried: &[SketchId],
+    ) -> Result<(InsertReport, DocChange), DocumentError> {
+        // An item of drawing alone inserts no nodes, and records no empty
+        // import step that would make an unchanged paste a step.
+        let has_nodes = !item.top_level_nodes().is_empty()
+            || item.guides.iter().any(|(_, r)| !r.hidden)
+            || item.components.iter().any(|(_, d)| !d.hidden);
+        let (mut report, mut change) = if has_nodes {
+            self.insert_document_nodes(item, options)?
+        } else {
+            (InsertReport::default(), DocChange::default())
+        };
+        let (drawn, ch, changed) =
+            self.draw_carried(item, carried, &options.pose, &options.hidden_objects)?;
+        clipboard::merge_change(&mut change, ch);
+        report.world_sketches_skipped = 0;
+        report.drawing_unchanged = !drawn.is_empty() && !changed;
+        report.drawn = drawn;
+        Ok((report, change))
+    }
+
+    /// [`Document::insert_document`]'s nodes, guides, and tags, as one
+    /// import step; the item's world sketches are counted as skipped.
+    fn insert_document_nodes(
         &mut self,
         item: &Document,
         options: &InsertOptions,
@@ -7908,7 +8024,6 @@ impl Document {
         }
 
         // ── 5. v1-scope skips, counted honestly ───────────────────────────
-        // Object-owned sketches travelled with their objects.
         // Object-owned sketches travelled with their objects, group-held
         // ones with their groups.
         ctx.report.world_sketches_skipped = item
@@ -8173,7 +8288,7 @@ impl Document {
         roots: &[NodeId],
         wrap_as_component: bool,
     ) -> Result<Document, DocumentError> {
-        self.extract_item_origin(roots, wrap_as_component, None)
+        self.extract_item_origin(roots, &[], wrap_as_component, None)
     }
 
     /// The clipboard copy: [`Document::extract_item`] unwrapped (a copied
@@ -8202,12 +8317,14 @@ impl Document {
         roots: &[NodeId],
         origin: &str,
     ) -> Result<Document, DocumentError> {
-        self.extract_item_origin(roots, false, Some(origin))
+        self.extract_item_origin(roots, &[], false, Some(origin))
     }
 
     /// What a clipboard paste of `item` would place in this document right
     /// now, for a preview: a scratch copy of this document holding ONLY the
-    /// pasted roots, at the item's own coordinates (identity pose), so the
+    /// pasted roots and the item's carried drawing as copied (its world
+    /// sketches, which a paste draws), at the item's own coordinates
+    /// (identity pose), so the
     /// geometry and bounds read back are in item space. A definition the
     /// paste links shows its LIVE content, which may have been edited since
     /// the copy; the copy-time bytes would show the old shape. This
@@ -8231,6 +8348,8 @@ impl Document {
                 pose: Transform::IDENTITY,
                 provenance: None,
                 origin: Some(origin.to_string()),
+                drawing: DrawingInsert::Skip,
+                hidden_objects: BTreeSet::new(),
             },
         )?;
         if report.definitions_linked == 0 {
@@ -8241,16 +8360,25 @@ impl Document {
                 scratch.delete_node(node)?;
             }
         }
+        // The pasted drawing, as copied (a paste draws it, so its preview
+        // is the item's own sketches), and none of this document's.
+        for s in scratch.carried_drawing() {
+            scratch.delete_sketch(s)?;
+        }
+        for s in item.carried_drawing() {
+            scratch.insert_sketch_record(item.sketches[s].clone());
+        }
         Ok(Some(scratch))
     }
 
     fn extract_item_origin(
         &self,
         roots: &[NodeId],
+        drawing: &[DrawnSource],
         wrap_as_component: bool,
         origin: Option<&str>,
     ) -> Result<Document, DocumentError> {
-        let mut item = self.extract_item_copy(roots, wrap_as_component, origin)?;
+        let mut item = self.extract_item_copy_drawing(roots, drawing, wrap_as_component, origin)?;
 
         // Re-origin (playtest round 2): with the drawing axes UNMOVED — the
         // overwhelmingly common case — "insert at the axes origin" means
@@ -8290,7 +8418,10 @@ impl Document {
                     .apply_transform(&shift)
                     .map_err(DocumentError::Transform)?;
             }
-            for sid in owned_sketches {
+            // So does the carried drawing (a clipboard copy's world
+            // sketches, `extract_clipboard_item_with_drawing`).
+            let carried = item.carried_drawing();
+            for sid in owned_sketches.into_iter().chain(carried) {
                 item.sketches[sid]
                     .apply_transform(&shift)
                     .map_err(DocumentError::Transform)?;
@@ -8364,9 +8495,21 @@ impl Document {
     /// axes-at-identity branch, since the axes-moved branch never needs to
     /// look at the content at all.
     pub fn extract_placement(&self, nodes: &[NodeId]) -> Option<Transform> {
+        self.extract_placement_drawing(nodes, &[])
+    }
+
+    /// [`Document::extract_placement`] of a copy of `nodes` and `drawing`
+    /// ([`Document::extract_placement_with_drawing`]).
+    fn extract_placement_drawing(
+        &self,
+        nodes: &[NodeId],
+        drawing: &[DrawnSource],
+    ) -> Option<Transform> {
         let axes = self.axes();
         if axes == AxesFrame::IDENTITY {
-            let item = self.extract_item_copy(nodes, false, None).ok()?;
+            let item = self
+                .extract_item_copy_drawing(nodes, drawing, false, None)
+                .ok()?;
             let anchor = visible_world_bottom_center(&item)?;
             return Some(Transform::translation(Vec3::new(
                 anchor.x, anchor.y, anchor.z,
@@ -8409,6 +8552,61 @@ impl Document {
     ///
     /// # Errors
     /// Same as [`Document::extract_item`] (this IS its validation).
+    fn extract_item_copy_drawing(
+        &self,
+        roots: &[NodeId],
+        drawing: &[DrawnSource],
+        wrap_as_component: bool,
+        origin: Option<&str>,
+    ) -> Result<Document, DocumentError> {
+        if drawing.is_empty() {
+            return self.extract_item_copy(roots, wrap_as_component, origin);
+        }
+        self.refuse_during_component_session()?;
+        // The drawing first: a stale source refuses before anything is
+        // copied.
+        let sketches = self.clipboard_drawing(drawing)?;
+        if roots.is_empty() && sketches.is_empty() {
+            return Err(DocumentError::EmptyComponent);
+        }
+        let mut item = if roots.is_empty() {
+            Document::new()
+        } else {
+            self.extract_item_copy(roots, wrap_as_component, origin)?
+        };
+        let frame = self.axes_world_to_item();
+        for mut sk in sketches {
+            sk.apply_transform(&frame)
+                .map_err(DocumentError::Transform)?;
+            item.insert_sketch_record(sk);
+        }
+        Ok(item)
+    }
+
+    /// The world → item transform of a copy: the inverse of the drawing-axes
+    /// frame. The frame is orthonormal right-handed (`AxesFrame`'s
+    /// constructors enforce it), so the inverse's rows are simply the basis
+    /// directions.
+    fn axes_world_to_item(&self) -> Transform {
+        let axes = self.axes();
+        let (o, x, y, z) = (axes.origin, axes.x, axes.y, axes.z());
+        Transform::from_affine(&[
+            x.x,
+            x.y,
+            x.z,
+            -(x.x * o.x + x.y * o.y + x.z * o.z),
+            y.x,
+            y.y,
+            y.z,
+            -(y.x * o.x + y.y * o.y + y.z * o.z),
+            z.x,
+            z.y,
+            z.z,
+            -(z.x * o.x + z.y * o.y + z.z * o.z),
+        ])
+    }
+
+    /// The nodes half of [`Document::extract_item_copy_drawing`].
     fn extract_item_copy(
         &self,
         roots: &[NodeId],
@@ -8461,25 +8659,8 @@ impl Document {
             }
         }
 
-        // world → item: the inverse of the drawing-axes frame. The frame is
-        // orthonormal right-handed (AxesFrame's constructors enforce it), so
-        // the inverse's rows are simply the basis directions.
-        let axes = self.axes();
-        let (o, x, y, z) = (axes.origin, axes.x, axes.y, axes.z());
-        let frame = Transform::from_affine(&[
-            x.x,
-            x.y,
-            x.z,
-            -(x.x * o.x + x.y * o.y + x.z * o.z),
-            y.x,
-            y.y,
-            y.z,
-            -(y.x * o.x + y.y * o.y + y.z * o.z),
-            z.x,
-            z.y,
-            z.z,
-            -(z.x * o.x + z.y * o.y + z.z * o.z),
-        ]);
+        // world → item: the inverse of the drawing-axes frame.
+        let frame = self.axes_world_to_item();
         // Every copied world solid bakes `frame`: check them all before
         // copying anything, so a refusal is typed rather than a panic in
         // the copy below. (A rigid frame preserves areas, but not to the
@@ -20727,6 +20908,8 @@ impl Document {
     ///   operand; [`Document::make_unique_by_path`] forks one by its path).
     /// - [`DocumentError::ExplodeSessionOpen`] — the definition is on loan
     ///   to an open session.
+    /// - [`DocumentError::ExplodeSessionScope`] — an editing session is open
+    ///   and the instance is not session geometry.
     ///
     /// On `Err` the document is untouched.
     pub fn make_unique(
@@ -20745,6 +20928,11 @@ impl Document {
         // as def-local ones (ARCHITECTURE.md 2.11). This entry point keeps
         // its own refusal; the path form answers `ExplodeSessionScope`.
         self.refuse_def_on_loan(def)?;
+        // Like every whole-node operation, an instance outside an open
+        // editing session is not an operand (KB-36). After the loan check,
+        // so a live sibling of the session's definition keeps its
+        // `ExplodeSessionOpen` answer.
+        self.explode_scope_node(NodeId::Instance(instance))?;
         let (new_def, _, _, change) = self.make_unique_by_path(&[instance], true, false)?;
         Ok((new_def, change))
     }
@@ -22170,6 +22358,20 @@ impl Document {
             let is_new_world_sketch =
                 !self.sketch_tombstoned(&s) && !self.def_sketches.contains_key(&s);
             if !is_new_world_sketch {
+                continue;
+            }
+            // The same rule from the other side: a sketch created mid-session
+            // but owned by an object that is NOT in the definition — a loose
+            // line drafted on an outside object's face, which the draft gave
+            // to that object — stays with its world owner, where it was drawn.
+            // Folding it would list a world object's sketch in the definition
+            // (and move it through the inverse pose): a file the loader
+            // refuses (KB-44).
+            if self
+                .object_sketches
+                .get(&s)
+                .is_some_and(|&o| self.object_owner_component(o) != Some(session.component))
+            {
                 continue;
             }
             self.sketches[s].apply_transform(&session.pose_inv).expect(
@@ -24396,6 +24598,14 @@ impl Document {
     fn describe_action(&self, action: &DocAction, undo_index: Option<usize>) -> HistoryKind {
         let k = HistoryKind::new;
         match action {
+            // A clipboard paste of drawing ([`Document::insert_document`]
+            // under `DrawingInsert::Draw`): its own kind, so the app words
+            // it in the person's language.
+            DocAction::Compound {
+                meta: Some(meta), ..
+            } if meta.label == clipboard::PASTE_LABEL && meta.origin == HistoryOrigin::User => {
+                k("paste")
+            }
             DocAction::Compound {
                 meta: Some(meta), ..
             } => k("labeled").text("label", meta.label.clone()),

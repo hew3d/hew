@@ -1047,6 +1047,36 @@ fn the_session_frame_sketches_are_the_sibling_rendered_set() {
     }
 }
 
+/// **Make Unique honors the session scope** (KB-36): with a session open, an
+/// instance of an unrelated definition is outside it and refuses
+/// `ExplodeSessionScope`, document untouched; with no session it still
+/// works.
+#[test]
+fn make_unique_refuses_an_out_of_scope_instance_mid_session() {
+    let mut doc = Document::new();
+    let (_component, instance_a, _a, _b) = two_member_component(&mut doc);
+    let lone = build_box(&mut doc, 40.0, 0.0, 0.0, 41.0, 1.0, 1.0);
+    let (_other_def, outside, _) = doc
+        .make_component(&[NodeId::Object(lone)])
+        .expect("make_component");
+
+    doc.open_explode_session(instance_a).expect("open");
+    let before = doc.save_for_persistence();
+    assert_eq!(
+        doc.make_unique(outside).unwrap_err(),
+        DocumentError::ExplodeSessionScope
+    );
+    assert_eq!(
+        doc.save_for_persistence(),
+        before,
+        "the document is untouched"
+    );
+
+    doc.close_explode_session().expect("close");
+    doc.make_unique(outside)
+        .expect("with no session open it is fine");
+}
+
 /// **A sibling is not an operand while its definition is on loan**: the
 /// definition-level surfaces addressed through a live sibling (or by
 /// component id) refuse typed with `ExplodeSessionOpen`, document
@@ -1982,4 +2012,155 @@ fn ungrouping_an_outside_group_refuses_under_a_component_frame_on_a_group_frame(
         !members.contains(&NodeId::Object(w1)) && !members.contains(&NodeId::Object(w2)),
         "the outside group's boxes never joined the session group: {members:?}"
     );
+}
+
+// ------------------------------------------------------- KB-44 regression
+
+/// The sketch vertex positions of `s`, sorted, for an exact before/after
+/// comparison.
+fn sketch_points(doc: &Document, s: kernel::SketchId) -> Vec<(f64, f64, f64)> {
+    let mut v: Vec<(f64, f64, f64)> = doc
+        .sketch(s)
+        .expect("sketch is live")
+        .vertices()
+        .values()
+        .map(|v| (v.position.x, v.position.y, v.position.z))
+        .collect();
+    v.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+    v
+}
+
+/// KB-44, first half (v1.5 decisions D1): naming an object OUTSIDE the
+/// open component as a draft participant is refused
+/// `ExplodeSessionScope`, and the document is untouched. (The draft once
+/// gave a loose line there to the outside object, and the close folded a
+/// world object's sketch into the definition: the autosave did not reopen.)
+#[test]
+fn naming_an_outside_object_as_a_draft_participant_mid_session_is_refused() {
+    let mut doc = Document::new();
+    doc.set_torture_mode(true);
+    let (component, _first, _a, _b) = two_member_component(&mut doc);
+    let outside = build_box(&mut doc, 10.0, 0.0, 0.0, 12.0, 2.0, 1.0);
+    let (instance, _) = doc
+        .place_instance(component, Transform::translation(Vec3::new(0.0, 10.0, 0.0)))
+        .expect("place");
+    doc.open_explode_session(instance).expect("open");
+
+    let top = Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0))
+        .expect("plane");
+    let objects = doc.drawable_objects_on_plane(top, None);
+    assert!(
+        objects.contains(&outside),
+        "the outside box has a face on the plane"
+    );
+    let before = doc.state_hash();
+    let err = doc
+        .draft(top, None, &objects, "Line", |w| {
+            w.add_segment(Point3::new(10.5, 0.5, 1.0), Point3::new(11.0, 1.5, 1.0))
+                .map(|_| ())
+        })
+        .unwrap_err();
+    assert_eq!(err, DocumentError::ExplodeSessionScope);
+    assert_eq!(doc.state_hash(), before, "the document is untouched");
+    assert!(doc.object_owned_sketches(outside).is_empty());
+    Document::load(&doc.save_for_persistence()).expect("the autosave reopens");
+}
+
+/// KB-44, second half: the same line drawn with the session's own
+/// participants ([`Document::draft_participants`]) is a free session
+/// sketch. The close folds it into the definition through the inverse
+/// pose; the autosave reopens; undo and redo across the close agree; the
+/// outside box owns no sketch and its faces are unsplit.
+#[test]
+fn a_loose_line_on_an_outside_face_mid_session_is_session_drawing() {
+    let mut doc = Document::new();
+    doc.set_torture_mode(true);
+    let (component, _first, _a, _b) = two_member_component(&mut doc);
+    let outside = build_box(&mut doc, 10.0, 0.0, 0.0, 12.0, 2.0, 1.0);
+    let faces = doc.object(outside).expect("live").faces().len();
+    // Enter a TRANSLATED placement, so the fold through its inverse pose
+    // visibly moves the line.
+    let (instance, _) = doc
+        .place_instance(component, Transform::translation(Vec3::new(0.0, 10.0, 0.0)))
+        .expect("place");
+    doc.open_explode_session(instance).expect("open");
+
+    let top = Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0))
+        .expect("plane");
+    let objects = doc.draft_participants(top, None);
+    assert!(!objects.contains(&outside), "the outside box takes no part");
+    let (report, _) = doc
+        .draft(top, None, &objects, "Line", |w| {
+            w.add_segment(Point3::new(10.5, 0.5, 1.0), Point3::new(11.0, 1.5, 1.0))
+                .map(|_| ())
+        })
+        .expect("draft a loose line on the outside box's face");
+    assert_eq!(report.sketches.len(), 1, "one sketch: {report:?}");
+    assert!(report.objects.is_empty(), "no face topology changed");
+    let line = report.sketches[0];
+    assert_eq!(doc.sketch_owner_object(line), None, "a free sketch");
+    assert_eq!(
+        sketch_points(&doc, line),
+        vec![(10.5, 0.5, 1.0), (11.0, 1.5, 1.0)]
+    );
+    Document::load(&doc.save_for_persistence()).expect("the autosave reopens");
+
+    doc.close_explode_session().expect("close");
+    let local = vec![(10.5, -9.5, 1.0), (11.0, -8.5, 1.0)];
+    assert_eq!(doc.sketch_owner_component(line), Some(component));
+    assert_eq!(
+        sketch_points(&doc, line),
+        local,
+        "folded through the inverse pose"
+    );
+    assert!(doc.object_owned_sketches(outside).is_empty());
+    assert_eq!(doc.object(outside).expect("live").faces().len(), faces);
+    Document::load(&doc.save()).expect("the closed document reopens");
+    doc.undo().expect("undo the close");
+    assert_eq!(
+        sketch_points(&doc, line),
+        vec![(10.5, 0.5, 1.0), (11.0, 1.5, 1.0)]
+    );
+    assert_eq!(doc.sketch_owner_component(line), None);
+    doc.redo().expect("redo the close");
+    assert_eq!(doc.sketch_owner_component(line), Some(component));
+    assert_eq!(sketch_points(&doc, line), local);
+    Document::load(&doc.save()).expect("the redone close reopens");
+}
+
+/// The member's-face counterpart: a loose line drafted on a session
+/// member's face is owned by the member and folds into the definition
+/// with it, and the autosave reopens.
+#[test]
+fn a_loose_line_on_a_member_mid_session_folds_in_with_its_owner() {
+    let mut doc = Document::new();
+    doc.set_torture_mode(true);
+    let (component, _first, member_a, _b) = two_member_component(&mut doc);
+    let (instance, _) = doc
+        .place_instance(component, Transform::translation(Vec3::new(0.0, 10.0, 0.0)))
+        .expect("place");
+    doc.open_explode_session(instance).expect("open");
+
+    let top = Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0))
+        .expect("plane");
+    let objects = doc.drawable_objects_on_plane(top, None);
+    let (report, _) = doc
+        .draft(top, None, &objects, "Line", |w| {
+            w.add_segment(Point3::new(0.5, 10.5, 1.0), Point3::new(1.0, 11.5, 1.0))
+                .map(|_| ())
+        })
+        .expect("draft a loose line on the member");
+    let line = report.sketches[0];
+    assert_eq!(doc.sketch_owner_object(line), Some(member_a));
+    Document::load(&doc.save_for_persistence()).expect("the autosave reopens");
+
+    doc.close_explode_session().expect("close");
+    assert_eq!(doc.sketch_owner_object(line), Some(member_a));
+    assert_eq!(doc.sketch_owner_component(line), Some(component));
+    assert_eq!(
+        sketch_points(&doc, line),
+        vec![(0.5, 0.5, 1.0), (1.0, 1.5, 1.0)],
+        "folded into the definition's local frame"
+    );
+    Document::load(&doc.save()).expect("the closed document reopens");
 }

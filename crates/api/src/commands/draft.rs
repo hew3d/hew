@@ -76,17 +76,21 @@ pub(super) struct DraftCtx {
 
 /// `addressed` is the object whose face the caller named: it always takes
 /// part, even where the plane's drawable set leaves it out (a group member,
-/// which the UI only draws on once the group is entered).
+/// which the UI only draws on once the group is entered) — unless an
+/// editing session is open and the object is outside it: then the face
+/// only gives the plane, and the drawing is the session's
+/// (`Document::draft_participants`, which narrows the rest the same way).
 pub(super) fn context_of(
     ctx: &Ctx,
     plane: Plane,
     frame: Option<ComponentId>,
     addressed: Option<ObjectId>,
 ) -> DraftCtx {
-    let mut objects = ctx.doc.drawable_objects_on_plane(plane, frame);
+    let mut objects = ctx.doc.draft_participants(plane, frame);
     if let Some(o) = addressed
         && !objects.contains(&o)
         && ctx.doc.object(o).is_some()
+        && ctx.doc.draft_scope_holds_object(o)
     {
         objects.push(o);
     }
