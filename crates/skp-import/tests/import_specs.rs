@@ -1284,3 +1284,28 @@ fn radial_dimension_leader_ends_where_the_file_puts_it() {
         "an outward leader points away from the center"
     );
 }
+
+/// A file SketchUp wrote is foreign: its solids and its loose drawing come
+/// in marked imported, so a viewer draws their edges as the source's, not
+/// as drawing made in Hew. Both containers.
+#[test]
+fn a_sketchup_file_s_solids_and_drawing_come_in_marked_imported() {
+    for name in ["box.skp", "2026/box.skp"] {
+        let (_, doc) = ingest(name);
+        let objects = doc.visible_object_ids();
+        assert!(!objects.is_empty(), "{name}");
+        assert!(
+            objects.iter().all(|&o| doc.object_is_imported(o)),
+            "{name}: every solid is marked"
+        );
+    }
+    for name in ["lines-group.skp", "2026/lines-group.skp"] {
+        let (report, doc) = ingest(name);
+        let sketches: Vec<_> = report.sketches.iter().flatten().copied().collect();
+        assert!(!sketches.is_empty(), "{name}");
+        assert!(
+            sketches.iter().all(|&s| doc.sketch_is_imported(s)),
+            "{name}: every sketch is marked"
+        );
+    }
+}

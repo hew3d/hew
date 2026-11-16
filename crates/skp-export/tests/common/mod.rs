@@ -297,7 +297,8 @@ pub struct DocD {
 }
 
 /// A sketch: its plane, its segments (unordered, each end-sorted), the
-/// regions it closes, and each welded curve's members and claim.
+/// regions it closes and how many of them have a face (the rest are
+/// loops of edges alone), and each welded curve's members and claim.
 fn sketch_digest(doc: &Document, id: kernel::SketchId) -> String {
     let sk = doc.sketch(id).unwrap();
     let pl = sk.plane();
@@ -338,10 +339,12 @@ fn sketch_digest(doc: &Document, id: kernel::SketchId) -> String {
         .collect();
     curves.sort();
     format!(
-        "plane {:?} d {} segs {segs:?} regions {} curves {curves:?} tags {:?}",
+        "plane {:?} d {} segs {segs:?} regions {} filled {:?} curves {curves:?} tags {:?}",
         [q(n.x), q(n.y), q(n.z)],
         q(pl.signed_distance(Point3::ORIGIN)),
         sk.regions().len(),
+        // As letters, not a number: `near` lets a number differ by one.
+        "F".repeat(sk.regions().values().filter(|r| !r.faceless).count()),
         doc.sketch_tags(id)
     )
 }

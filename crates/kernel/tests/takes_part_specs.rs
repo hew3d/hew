@@ -120,7 +120,9 @@ fn import_line(
         group: None,
         segments: vec![[a, b]],
         curves: Vec::new(),
+        filled: Vec::new(),
         tags: vec![vec![tag.into()]],
+        imported: false,
     });
     let (report, _) = doc.ingest(scene, Vec::new()).unwrap();
     report.sketches[0].expect("the line imported")

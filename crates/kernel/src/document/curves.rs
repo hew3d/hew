@@ -585,6 +585,9 @@ impl Document {
         let rec = &mut self.objects[object];
         let before = std::mem::replace(&mut rec.object, out.after);
         let (owner, name, tags) = (rec.owner, rec.name.clone(), rec.tags.clone());
+        // Split-off pieces are the object's own geometry: an imported
+        // object's pieces stay imported, as a slice's do.
+        let imported = rec.imported;
         let parent = match owner {
             ObjectOwner::World { parent } | ObjectOwner::Definition { parent, .. } => parent,
         };
@@ -597,6 +600,7 @@ impl Document {
                 owner,
                 name: name.clone(),
                 tags: tags.clone(),
+                imported,
             });
             match (owner, parent) {
                 (_, Some(g)) => self.groups[g].members.push(NodeId::Object(id)),
@@ -842,6 +846,7 @@ impl Document {
             },
             name: None,
             tags: Vec::new(),
+            imported: false,
         });
         self.components[component].members.push(NodeId::Object(id));
         self.undo.push(DocAction::FollowMeFace {
@@ -878,6 +883,7 @@ impl Document {
             owner: ObjectOwner::World { parent },
             name: None,
             tags: Vec::new(),
+            imported: false,
         });
         if let Some(g) = parent {
             self.groups[g].members.push(NodeId::Object(id));

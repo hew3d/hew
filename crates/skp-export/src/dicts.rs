@@ -16,6 +16,11 @@
 //! | definition | `unnamed` | true: the definition's geometry is a solid that had no name of its own |
 //! | definition | `built` | true: Hew wrote the definition's geometry (a reader takes it as written, unrepaired) |
 //! | model | `loose_built` | true: Hew wrote the model's loose geometry (likewise) |
+//! | model | `view_style` | true: the display settings were written from the document's view style (absent: it had none) |
+//! | model | `imported_marks` | true: the file records which solids and sketches are still a foreign file's (the two keys below); a reader marks those imported, and also the geometry a save back carried as the file's own (a list without `built` / `loose_built`). Absent (an earlier Hew): nothing is marked |
+//! | definition | `imported` | true: the definition's geometry is one Object still imported (a foreign file's solid the user had not drawn on) |
+//! | model, definition | `imported_sketches` | `[index, …]` into the list's `sketch_planes`: the sketches still imported (a foreign file's drawing the user had not drawn in) |
+//! | model | `fov_across` | true: a camera that holds an aspect ratio stores its angle across the frame, as SketchUp does (a file an earlier Hew wrote stored the vertical angle there, without this key) |
 //! | placement | `kind` | `"object"` or `"group"` |
 //! | placement | `unnamed` | true: the node had no name (the definition's is SketchUp's own) |
 //! | placement | `tags` | `[[segment, …], …]` when the node had more than one tag |

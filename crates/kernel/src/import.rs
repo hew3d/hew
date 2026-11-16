@@ -149,6 +149,12 @@ pub struct MeshExtra {
     /// (`NO_MATERIAL` for none; empty for a mesh with none): a `.skp`
     /// face painted on its back (see [`crate::topo::Face::back_material`]).
     pub face_back_materials: Vec<u32>,
+    /// In a native import ([`ImportSceneExtra::native`]: a `.skp` Hew
+    /// wrote), the mesh is still a foreign file's solid the user had not
+    /// drawn on when Hew saved it, and its Object is marked imported again
+    /// ([`crate::Document::object_is_imported`]). A foreign import marks
+    /// every Object whatever this says.
+    pub imported: bool,
 }
 
 /// A drawn, unextruded sketch carried by an import: one planar set of
@@ -170,11 +176,26 @@ pub struct ImportSketch {
     /// Welded curves: the segment indices of each chain, and the circle it
     /// was drawn from when it has one.
     pub curves: Vec<(Vec<usize>, Option<CurveAnalytic>)>,
+    /// The outer rings of the faces the source drew on these segments (a
+    /// `.skp` Hew wrote holds each filled region as a face on its edges).
+    /// A closed region whose outer ring coincides with one of them — the
+    /// same corners within [`tol::POINT_MERGE`](crate::tol::POINT_MERGE),
+    /// from any start, in either direction — keeps its face; every other
+    /// region is a loop of edges alone ([`crate::SketchRegion::faceless`]).
+    /// A ring matching no region changes nothing. Empty for bare edges,
+    /// the drawing a foreign file brings (its faces arrive as solids).
+    pub filled: Vec<Vec<Point3>>,
     /// Tag paths the sketch carries (a `.skp` edge's layer), root-first:
     /// it is not shown while one of them, or a tag above one, is hidden.
     /// Empty for none. An import declares the tags it uses
     /// ([`ImportScene::tags`]).
     pub tags: Vec<Vec<String>>,
+    /// In a native import ([`ImportSceneExtra::native`]: a `.skp` Hew
+    /// wrote), the sketch is still a foreign file's drawing the user had
+    /// not drawn in when Hew saved it, and is marked imported again
+    /// ([`crate::Sketch::imported`]). A foreign import marks every sketch
+    /// whatever this says.
+    pub imported: bool,
 }
 
 /// What an imported attribute dictionary hangs on.
@@ -208,6 +229,15 @@ pub struct ImportSceneExtra {
     /// Each annotation's tag paths, parallel to `annotations` (empty, or
     /// short, for none).
     pub annotation_tags: Vec<Vec<Vec<String>>>,
+    /// The import is Hew's own work, not a foreign file's: a `.skp` Hew
+    /// wrote (its `hew` dictionary says so) or a picture Hew placed. Its
+    /// objects and sketches are the user's, so it marks imported only the
+    /// ones its recipes say still are ([`MeshExtra::imported`],
+    /// [`ImportSketch::imported`]). `false` (the default) for a foreign
+    /// file: every object and sketch it builds is marked
+    /// ([`crate::Document::object_is_imported`], [`crate::Sketch::imported`])
+    /// until the user draws on it.
+    pub native: bool,
 }
 
 /// A shared definition recipe: a subtree in definition-local coords.

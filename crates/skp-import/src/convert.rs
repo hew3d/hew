@@ -509,10 +509,7 @@ impl ConvertJob {
         // entity / hidden layer sets as node keys (persistent ids) and tag
         // paths. Ids that name faces or edges carry no node and drop out in
         // `ingest`; the default layer (list-first) has no tag to hide.
-        let camera = model
-            .camera
-            .as_ref()
-            .map(|c| camera_state(c, cv.hew.written_by_hew));
+        let camera = model.camera.as_ref().map(|c| camera_state(c, &cv.hew));
         let tag_paths: BTreeSet<&Vec<String>> = tags.iter().map(|t| &t.path).collect();
         // Section planes live in their owning entity list's local frame; a
         // scene's active-section id resolves through the run holding it and
@@ -556,10 +553,7 @@ impl ConvertJob {
                 transition_s: page_of(si).and_then(|e| e.transition_s),
                 delay_s: page_of(si).and_then(|e| e.delay_s),
                 description: s.description.clone(),
-                camera: s
-                    .camera
-                    .as_ref()
-                    .map(|c| camera_state(c, cv.hew.written_by_hew)),
+                camera: s.camera.as_ref().map(|c| camera_state(c, &cv.hew)),
                 // A hidden set is captured only when the page saved it; a
                 // page that did not leaves visibility alone (`None`).
                 hidden_keys: saves_hidden_geometry(s)
@@ -671,6 +665,9 @@ impl ConvertJob {
         if let Some(note) = kept_unshown_note(&model.features) {
             warnings.push(note);
         }
+        // A file Hew wrote holds the user's own work: nothing it builds is
+        // marked imported (`ImportSceneExtra::native`).
+        let native = cv.hew.written_by_hew;
         let Converter {
             mats,
             defs,
@@ -695,6 +692,7 @@ impl ConvertJob {
                     attrs,
                     annotations,
                     annotation_tags,
+                    native,
                 },
             },
             textures_missing: mats.textures_missing,
@@ -1142,6 +1140,9 @@ impl Converter {
             free.push(([p, q], e.curve, e.layer));
         }
         let mut out: Vec<ImportSketch> = Vec::new();
+        // In a file that records imported marks, edges read this way are a
+        // list Hew carried as the file's own: still the file's drawing.
+        let imported = self.carried_as_files_own(run_idx);
         // Each sketch's layer, parallel to `out`: a sketch holds one
         // layer's edges, so the layer can be its tag.
         let mut layers: Vec<u16> = Vec::new();
@@ -1155,7 +1156,9 @@ impl Converter {
                     group,
                     segments: Vec::new(),
                     curves: Vec::new(),
+                    filled: Vec::new(),
                     tags,
+                    imported,
                 });
                 layers.push(layer);
                 out.len() - 1
@@ -1450,8 +1453,55 @@ impl Converter {
     }
 
     /// [`Self::mesh_recipes`] over some of the run's faces only (by index),
-    /// tagged as given.
+    /// tagged as given. In a file that records imported marks, each recipe
+    /// says whether its solid is still a foreign file's: the list says so
+    /// (`imported`), or it is a list Hew carried as the file's own.
     fn mesh_recipes_of(
+        &mut self,
+        run_idx: usize,
+        name: String,
+        eff_slot: u16,
+        bake: &Transform,
+        key: Option<u64>,
+        part: Option<LoosePart<'_>>,
+    ) -> Vec<MeshRecipe> {
+        let imported = self.carried_as_files_own(run_idx)
+            || (self.hew.written_by_hew
+                && self.hew.imported_marks
+                && self
+                    .def_owner(run_idx)
+                    .and_then(|o| self.dicts.hew_entry(o, "imported"))
+                    == Some(&Value::Bool(true)));
+        let mut recipes = self.mesh_recipes_built(run_idx, name, eff_slot, bake, key, part);
+        for r in &mut recipes {
+            r.extra.imported = imported;
+        }
+        recipes
+    }
+
+    /// Whether run `run_idx` is geometry Hew built and wrote itself (its
+    /// definition says `built`, or the loose geometry `loose_built`), not
+    /// a file's own records a save back carried.
+    fn run_built(&self, run_idx: usize) -> bool {
+        match self.model.geometry[run_idx].def_index {
+            None => self.hew.loose_built,
+            Some(_) => {
+                self.def_owner(run_idx)
+                    .and_then(|o| self.dicts.hew_entry(o, "built"))
+                    == Some(&Value::Bool(true))
+            }
+        }
+    }
+
+    /// In a Hew-written file that records imported marks, whether run
+    /// `run_idx` is a list Hew carried as the file's own records — the
+    /// source file's geometry, still a foreign file's.
+    fn carried_as_files_own(&self, run_idx: usize) -> bool {
+        self.hew.written_by_hew && self.hew.imported_marks && !self.run_built(run_idx)
+    }
+
+    /// [`Self::mesh_recipes_of`] before the imported mark.
+    fn mesh_recipes_built(
         &mut self,
         run_idx: usize,
         name: String,
@@ -1513,14 +1563,7 @@ impl Converter {
         // would turn faces over or merge duplicates Hew kept; a mesh that is
         // not manifold still splits below, faces as they are. A file's own
         // geometry a save back carried is repaired as on any open.
-        let built = match self.model.geometry[run_idx].def_index {
-            None => self.hew.loose_built,
-            Some(_) => {
-                self.def_owner(run_idx)
-                    .and_then(|o| self.dicts.hew_entry(o, "built"))
-                    == Some(&Value::Bool(true))
-            }
-        };
+        let built = self.run_built(run_idx);
         let (positions, faces, healed_labels, healed_uvs, healed_holes) =
             if self.hew.written_by_hew && built {
                 heal_mesh_as_written(&positions, &faces, &labels, &no_uvs, &holes, bake)
@@ -2201,21 +2244,43 @@ impl Converter {
             Point3::new(v[0], v[1], v[2])
         };
         const ON: f64 = 1e-7;
+        // The sketches the list records as still a foreign file's.
+        let still_imported: BTreeSet<usize> = if self.hew.written_by_hew && self.hew.imported_marks
+        {
+            let owner = self.def_owner(run_idx).unwrap_or(Owner::Model);
+            match self.dicts.hew_entry(owner, "imported_sketches") {
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .filter_map(|v| match v {
+                        Value::Int(i) => usize::try_from(*i).ok(),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => BTreeSet::new(),
+            }
+        } else {
+            BTreeSet::new()
+        };
         let mut out: Vec<ImportSketch> = planes
             .iter()
-            .map(|&plane| ImportSketch {
+            .enumerate()
+            .map(|(i, &plane)| ImportSketch {
                 plane,
                 def,
                 group: None,
                 segments: Vec::new(),
                 curves: Vec::new(),
+                filled: Vec::new(),
                 tags: Vec::new(),
+                imported: still_imported.contains(&i),
             })
             .collect();
         // The layers of each sketch's edges, parallel to `out`.
         let mut layers: Vec<BTreeSet<u16>> = vec![BTreeSet::new(); planes.len()];
         // curve index -> (sketch, its segment indices)
         let mut chains: BTreeMap<(usize, u32), Vec<usize>> = BTreeMap::new();
+        // Each edge's sketch, by its ends' vertex indices (sorted).
+        let mut edge_sketch: BTreeMap<(u32, u32), usize> = BTreeMap::new();
         let mut off = 0usize;
         for (ei, e) in mesh.edges.iter().enumerate() {
             let (p, q) = (at(e.v0), at(e.v1));
@@ -2236,6 +2301,7 @@ impl Converter {
             };
             let seg = out[si].segments.len();
             out[si].segments.push([p, q]);
+            edge_sketch.insert((e.v0.min(e.v1), e.v0.max(e.v1)), si);
             layers[si].insert(e.layer);
             if let Some(c) = e.curve {
                 chains.entry((si, c)).or_default().push(seg);
@@ -2279,6 +2345,33 @@ impl Converter {
                 })
             });
             out[si].curves.push((members, analytic));
+        }
+        // A face on the edges is a region the sketch filled (the writer
+        // puts one on every region with a face, and none on a loop alone):
+        // its outer ring goes to each sketch holding one of the ring's
+        // edges, where the region it bounds keeps its face.
+        for f in &mesh.faces {
+            let n = f.outer.len();
+            let owners: BTreeSet<usize> = (0..n)
+                .filter_map(|k| {
+                    let (a, b) = (f.outer[k], f.outer[(k + 1) % n]);
+                    edge_sketch.get(&(a.min(b), a.max(b))).copied()
+                })
+                .collect();
+            if owners.is_empty() {
+                continue;
+            }
+            let Some(ring) = f
+                .outer
+                .iter()
+                .map(|&i| mesh.vertices.get(i as usize).map(|_| at(i)))
+                .collect::<Option<Vec<Point3>>>()
+            else {
+                continue;
+            };
+            for si in owners {
+                out[si].filled.push(ring.clone());
+            }
         }
         if off > 0 {
             self.warnings.push(format!(
@@ -2560,6 +2653,9 @@ fn bake_sketch(s: &mut ImportSketch, t: &Transform) -> bool {
     for seg in &mut s.segments {
         seg[0] = t.apply_point(seg[0]);
         seg[1] = t.apply_point(seg[1]);
+    }
+    for p in s.filled.iter_mut().flatten() {
+        *p = t.apply_point(*p);
     }
     let scale = uniform_scale(t);
     for (_, analytic) in &mut s.curves {
@@ -3189,15 +3285,22 @@ fn view_style_of(r: &skpwright::RenderingOptions) -> kernel::ViewStyle {
 /// takes the height it spans at the target (the file's stored height is
 /// stale under perspective — SketchUp writes its default there), unless
 /// Hew wrote the file, whose perspective cameras store the height they
-/// mean.
-fn camera_state(c: &skpwright::Camera, hew_written: bool) -> CameraState {
+/// mean. The stored angle beside a ratio is across the frame, except in a
+/// file an earlier Hew wrote, which stored the vertical angle there.
+fn camera_state(c: &skpwright::Camera, hew: &HewModel) -> CameraState {
     let m = |v: [f64; 3]| Point3::new(v[0], v[1], v[2]);
     let (eye, target) = (m(c.eye_m), m(c.target_m));
     let h = c.parallel_height_m;
-    let parallel_height = if (!c.perspective || hew_written) && h.is_finite() && h > 0.0 {
+    let aspect_ratio = Some(c.aspect_ratio).filter(|r| r.is_finite() && *r > 0.0);
+    let fov_deg = if hew.fov_stored_across() {
+        vertical_fov_deg(c.fov_deg, aspect_ratio)
+    } else {
+        c.fov_deg
+    };
+    let parallel_height = if (!c.perspective || hew.written_by_hew) && h.is_finite() && h > 0.0 {
         h
     } else {
-        CameraState::height_at_target(eye, target, c.fov_deg)
+        CameraState::height_at_target(eye, target, fov_deg)
     };
     CameraState {
         projection: if c.perspective {
@@ -3205,7 +3308,7 @@ fn camera_state(c: &skpwright::Camera, hew_written: bool) -> CameraState {
         } else {
             CameraProjection::Parallel
         },
-        fov_deg: c.fov_deg,
+        fov_deg,
         parallel_height,
         eye,
         target,
@@ -3213,7 +3316,21 @@ fn camera_state(c: &skpwright::Camera, hew_written: bool) -> CameraState {
         // Match Photo's image width (stored in inches) and ratio; zero is
         // what a file stores for unset.
         image_width: Some(c.image_width / skpwright::INCH).filter(|w| w.is_finite() && *w > 0.0),
-        aspect_ratio: Some(c.aspect_ratio).filter(|r| r.is_finite() && *r > 0.0),
+        aspect_ratio,
+    }
+}
+
+/// The vertical angle of a file camera's field of view. A camera that
+/// stores an aspect ratio (a Match Photo or fixed-ratio scene) keeps its
+/// angle across the frame; one with none stores it up the frame, which is
+/// what Hew's `fov_deg` is. `2·atan(tan(fov/2) / aspect)` (KB-27). The
+/// `skp-export` writer applies the inverse.
+fn vertical_fov_deg(fov_deg: f64, aspect_ratio: Option<f64>) -> f64 {
+    match aspect_ratio {
+        Some(a) if fov_deg > 0.0 && fov_deg < 180.0 => {
+            2.0 * ((fov_deg.to_radians() / 2.0).tan() / a).atan().to_degrees()
+        }
+        _ => fov_deg,
     }
 }
 
@@ -3601,12 +3718,12 @@ mod tests {
     fn a_parallel_view_keeps_sketchups_height() {
         // Eye 155 m up, 20 m of plan in view: both stay as the file has
         // them; the height is the view's, not the eye distance's.
-        let s = camera_state(&parallel([0.0, 0.0, 155.0], 20.0), false);
+        let s = camera_state(&parallel([0.0, 0.0, 155.0], 20.0), &HewModel::default());
         assert_eq!(s.eye, Point3::new(0.0, 0.0, 155.0));
         assert_eq!(s.parallel_height, 20.0);
         assert_eq!(s.fov_deg, 35.0);
         // A height the file does not give takes the perspective view's.
-        let s = camera_state(&parallel([0.0, 0.0, 5.0], 0.0), false);
+        let s = camera_state(&parallel([0.0, 0.0, 5.0], 0.0), &HewModel::default());
         assert!(
             (s.parallel_height - CameraState::height_at_target(s.eye, s.target, 35.0)).abs()
                 < 1e-12
@@ -4032,7 +4149,7 @@ mod tests {
     fn a_perspective_view_is_as_stored() {
         let mut c = parallel([0.0, 0.0, 155.0], 20.0);
         c.perspective = true;
-        let s = camera_state(&c, false);
+        let s = camera_state(&c, &HewModel::default());
         assert_eq!((s.eye, s.fov_deg), (Point3::new(0.0, 0.0, 155.0), 35.0));
         // The file's parallel height is not a perspective view's: the
         // height is what this view spans at its target.
@@ -4041,7 +4158,11 @@ mod tests {
                 < 1e-12
         );
         // A file Hew wrote stores the height its perspective camera means.
-        let s = camera_state(&c, true);
+        let hew = HewModel {
+            written_by_hew: true,
+            ..HewModel::default()
+        };
+        let s = camera_state(&c, &hew);
         assert_eq!(s.parallel_height, 20.0);
     }
 
@@ -4074,9 +4195,58 @@ mod tests {
     }
 
     #[test]
+    fn a_camera_with_an_aspect_ratio_opens_with_its_vertical_angle() {
+        // KB-27: the stored angle is across the frame when a ratio is set.
+        let mut c = parallel([0.0, 0.0, 5.0], 0.0);
+        c.perspective = true;
+        c.fov_deg = 83.97;
+        c.aspect_ratio = 2.0;
+        let s = camera_state(&c, &HewModel::default());
+        let want = 2.0
+            * ((83.97f64.to_radians() / 2.0).tan() / 2.0)
+                .atan()
+                .to_degrees();
+        assert!((s.fov_deg - want).abs() < 1e-9, "{}", s.fov_deg);
+        assert!((s.fov_deg - 48.4).abs() < 0.1, "{}", s.fov_deg);
+        // The framing height follows the vertical angle.
+        assert!(
+            (s.parallel_height - CameraState::height_at_target(s.eye, s.target, s.fov_deg)).abs()
+                < 1e-12
+        );
+        // No ratio: the angle is already vertical and stays.
+        c.aspect_ratio = 0.0;
+        assert_eq!(camera_state(&c, &HewModel::default()).fov_deg, 83.97);
+    }
+
+    #[test]
+    fn a_camera_an_earlier_hew_wrote_with_a_ratio_keeps_its_stored_angle() {
+        // An earlier Hew wrote its vertical angle beside a ratio, with no
+        // `fov_across` mark: the angle opens as stored. Today's Hew marks
+        // its files, and the angle is across the frame again.
+        let mut c = parallel([0.0, 0.0, 5.0], 0.0);
+        c.perspective = true;
+        c.fov_deg = 35.0;
+        c.aspect_ratio = 1.5;
+        let old = HewModel {
+            written_by_hew: true,
+            ..HewModel::default()
+        };
+        assert_eq!(camera_state(&c, &old).fov_deg, 35.0);
+        let new = HewModel {
+            written_by_hew: true,
+            fov_across: true,
+            ..HewModel::default()
+        };
+        let want = 2.0 * ((35f64.to_radians() / 2.0).tan() / 1.5).atan().to_degrees();
+        assert!((camera_state(&c, &new).fov_deg - want).abs() < 1e-9);
+        // A file Hew did not write is across the frame, mark or none.
+        assert!((camera_state(&c, &HewModel::default()).fov_deg - want).abs() < 1e-9);
+    }
+
+    #[test]
     fn a_match_photo_cameras_image_width_and_ratio_open_in_meters() {
         let mut c = parallel([0.0, 0.0, 155.0], 20.0);
-        let s = camera_state(&c, false);
+        let s = camera_state(&c, &HewModel::default());
         assert_eq!(
             (s.image_width, s.aspect_ratio),
             (None, None),
@@ -4085,7 +4255,7 @@ mod tests {
         // The file stores the width in inches.
         c.image_width = 1000.0;
         c.aspect_ratio = 1.5;
-        let s = camera_state(&c, false);
+        let s = camera_state(&c, &HewModel::default());
         assert!(
             (s.image_width.unwrap() - 25.4).abs() < 1e-9,
             "{:?}",
@@ -4095,7 +4265,7 @@ mod tests {
         // Garbage is unset, not carried.
         c.image_width = f64::NAN;
         c.aspect_ratio = -1.0;
-        let s = camera_state(&c, false);
+        let s = camera_state(&c, &HewModel::default());
         assert_eq!((s.image_width, s.aspect_ratio), (None, None));
     }
 }

@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `31`**, and **geometry buffer format version `10`**. Both are covered
+version `32`**, and **geometry buffer format version `10`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,7 +59,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 31,
+  "format_version": 32,
   "geometry_version": 10,
   "app": "hew",
   "app_version": "1.2.1",
@@ -85,10 +85,10 @@ ascending dense-id order (the array index equals the entry's own `id` field).
         "com.example.shelving": { "part_no": "SHLF-204", "load_kg": 35.5 }
       },
       "blends": [ { "id": 1, "seq": 0, "spec": { /* ... */ },
-                    "trimmed": [ /* ... */ ], "marks": [ /* ... */ ] } ]
+                    "trimmed": [ /* ... */ ], "marks": [ /* ... */ ] } ],
                                      // v31+; what each fillet on the object
                                      // replaced (§4.3); omitted when none
-    }
+      "imported": true }             // v32+, optional; omitted = not imported (§4.3)
   ],
   "groups": [
     { "id": 0, "sid": 4, "members": [ {"kind":"object","id":0}, {"kind":"group","id":1} ],
@@ -132,8 +132,9 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "vertices": [ {"id":0, "p":[5.0, 0.0, 0.0]} ],
       "edges":    [ {"id":0, "from":0, "to":1} ],
       "regions":  [ {"id":0, "outer":[0,1,2], "holes":[]} ],
-      "detached": true // v23+, optional; omitted = the sketch joins its
+      "detached": true, // v23+, optional; omitted = the sketch joins its
                        // plane's arrangement. Never with "owner_object"
+      "imported": true // v32+, optional; omitted = drawing made in Hew (§4.6)
     }
   ],
   "guides": [
@@ -197,7 +198,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `31`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `32`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `10`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -364,6 +365,7 @@ of the manifest:
 | `document_id` (top-level string) | 29 | absent: the document has no id yet; the next save mints one |
 | `sketches[].curves[].kind = "smooth"` (an entry with no `center` and no `radius`) | 30 | no chain is marked smooth; a chain without a `curves[]` entry is identity-only |
 | `objects[].blends` | 31 | empty list: every blend on the object restores by derivation from its tagged faces (§4.3), as every blend did before v31 |
+| `objects[].imported`, `sketches[].imported` | 32 | `false`: nothing is marked imported. An older file is never marked retroactively on load |
 
 Manifest v28 adds no manifest field: it marks geometry buffer v9 (face
 and edge attribute dictionaries, §3), so a v28 manifest names
@@ -849,6 +851,17 @@ optional `name`, and optional `tags` ().
 An object's faces and edges may each carry an attribute dictionary
 (geometry buffer v9, §3.1), stored with the geometry rather than in the
 manifest because faces and edges have no stable id there.
+`imported` (v32+, `bool`, optional, omitted when `false`) marks an object
+built from a **foreign file's mesh** (a `.skp` Hew did not write, an
+`.stl`, `.obj`, `.dae`, glTF and the like) that the user has not drawn on
+since. It is provenance, not geometry: the edges that split such an
+object's faces are the source file's own, and a viewer draws them as
+ordinary edges rather than as shapes drawn in Hew. The first drawing made
+on the object clears it (erasing or moving nothing new does not); copies,
+slices, push-through pieces and boolean results of an imported object
+carry it. A reader MUST reject a file declaring `format_version < 32`
+whose `objects[]` sets `imported` (reject-not-repair), and MUST NOT mark
+anything imported when loading an older file.
 
 **`blends`** (v31+, optional, omitted when empty) holds, for every fillet,
 chamfer or profile blend whose faces carry a blend tag in the object's
@@ -1160,6 +1173,15 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   manifest, and MUST reject a manifest declaring `format_version < 23`
   that sets `detached` (reject-not-repair: a pre-v23 writer could not
   have produced it).
+- `imported` (v32+, optional, omitted when false) — the sketch is a
+  **foreign file's drawing** (a `.skp`'s loose edges, from a file Hew did
+  not write) that the user has not drawn in since: a viewer draws its
+  lines as the source's ordinary edges, not as drawing made in Hew. The
+  first drawing that adds to or reshapes the sketch clears it (erasing
+  from it does not); moving, copying, tagging and grouping it keep it. A
+  reader MUST reject a manifest declaring `format_version < 32` that sets
+  `imported`, and MUST NOT mark anything imported when loading an older
+  file.
 
 - `owner_group` (v19+, optional) — the dense `groups[]` id of the group the
   sketch is drawn in: a `.skp` group of edges, or lines drawn while

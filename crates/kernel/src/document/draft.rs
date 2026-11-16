@@ -2878,12 +2878,33 @@ impl Document {
                     *tally.entry(i).or_default() += 1;
                 }
             }
-            // Most edges wins; the earlier sketch breaks a tie.
+            // Most edges wins; the earlier sketch breaks a tie. Drawing that
+            // touches no free sketch goes to the plane's first one, so it
+            // nests with what is there (a rectangle around a circle is a
+            // ring) — but an imported sketch it lies entirely clear of is
+            // passed over (joining would make the file's drawing the
+            // user's): the next one, else a new sketch.
+            let group_points: Vec<Point3> = edges
+                .iter()
+                .flat_map(|&e| {
+                    let ed = after.edges()[e];
+                    [pos(ed.from), pos(ed.to)]
+                })
+                .collect();
             let chosen = tally
                 .iter()
                 .max_by(|x, y| x.1.cmp(y.1).then(y.0.cmp(x.0)))
                 .map(|(&i, _)| free[i])
-                .or_else(|| free.first().copied());
+                .or_else(|| {
+                    free.iter().copied().find(|&s| {
+                        let sk = &self.sketches[s];
+                        !sk.imported()
+                            || extents_meet(
+                                sk.vertices().values().map(|v| v.position),
+                                group_points.iter().copied(),
+                            )
+                    })
+                });
             match chosen {
                 Some(sid) => desired.entry(Store::Sketch(sid)).or_default().extend(edges),
                 None => new_free.extend(edges),
@@ -3081,7 +3102,13 @@ impl Document {
         // ---- commit (nothing below can fail: every op was rehearsed) ----
         let mut actions: Vec<DocAction> = Vec::new();
         let mut on_plane: Vec<SketchId> = Vec::new();
+        // The objects this edit draws on: a shape in a face, or drawing
+        // over a face kept as the object's own sketch (a dangling line).
+        let mut drawn_on: BTreeSet<ObjectId> = BTreeSet::new();
         for (o, ops) in object_ops {
+            if ops.iter().any(draws_on_face) {
+                drawn_on.insert(o);
+            }
             for op in ops {
                 let rec = &mut self.objects[o];
                 rec.history
@@ -3097,7 +3124,17 @@ impl Document {
             }
             report.objects.push(o);
         }
-        for (s, fresh) in rewrites {
+        for (s, mut fresh) in rewrites {
+            // Drawing into an imported sketch makes it the user's; only
+            // erasing from it leaves it as it came. The snapshots below
+            // carry the flag, so undo restores it.
+            let drew = drew_into(&self.sketches[s], &fresh);
+            if fresh.imported() && drew {
+                fresh.set_imported(false);
+            }
+            if drew && let Some(&o) = self.object_sketches.get(&s) {
+                drawn_on.insert(o);
+            }
             let before_sk = std::mem::replace(&mut self.sketches[s], fresh);
             let emptied = self.sketches[s].edges().is_empty();
             actions.push(DocAction::SketchGesture {
@@ -3125,6 +3162,7 @@ impl Document {
             }
             if let Some(o) = owner {
                 self.object_sketches.insert(s, o);
+                drawn_on.insert(o);
             } else {
                 created_free = Some(s);
             }
@@ -3137,6 +3175,15 @@ impl Document {
             self.sketches[s] = fresh;
             report.sketches.push(s);
             on_plane.push(s);
+        }
+        // The first drawing on an imported object makes it the user's: its
+        // face edges show as drawing from here on, inside this step.
+        // Erasing, or moving nothing new, leaves it as it came.
+        for o in drawn_on {
+            if self.objects[o].imported {
+                self.objects[o].imported = false;
+                actions.push(DocAction::ObjectImportCleared { object: o });
+            }
         }
         for (h, fresh) in take_rewrites {
             let before_sk = std::mem::replace(&mut self.sketches[h], fresh);
@@ -4089,6 +4136,59 @@ fn face_state_changed(cur: &Sketch, after: &Sketch) -> bool {
             .values()
             .any(|ar| ar.faceless != r.faceless && same_ring(&cur_ring, &ring(after, ar)))
     })
+}
+
+/// Whether a lowering op draws on its face: a re-trace that inserts (a
+/// shape drawn, or drawing moved), or a split. One that only removes
+/// (erasing a drawn shape) draws nothing.
+fn draws_on_face(op: &KernelOp) -> bool {
+    match op {
+        KernelOp::RetraceFace { insert, .. } => !insert.is_empty(),
+        KernelOp::SplitFace { .. } | KernelOp::SplitFaceInner { .. } => true,
+        _ => false,
+    }
+}
+
+/// Whether the axis-aligned extents of two point sets on one plane overlap
+/// or touch, within [`tol::POINT_MERGE`]. One set enclosing the other is an
+/// overlap. An empty set meets nothing.
+fn extents_meet(a: impl Iterator<Item = Point3>, b: impl Iterator<Item = Point3>) -> bool {
+    fn extent(pts: impl Iterator<Item = Point3>) -> Option<(Point3, Point3)> {
+        pts.fold(None, |acc, p| {
+            Some(match acc {
+                None => (p, p),
+                Some((lo, hi)) => (
+                    Point3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z)),
+                    Point3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z)),
+                ),
+            })
+        })
+    }
+    let (Some((alo, ahi)), Some((blo, bhi))) = (extent(a), extent(b)) else {
+        return false;
+    };
+    let t = tol::POINT_MERGE;
+    alo.x <= bhi.x + t
+        && blo.x <= ahi.x + t
+        && alo.y <= bhi.y + t
+        && blo.y <= ahi.y + t
+        && alo.z <= bhi.z + t
+        && blo.z <= ahi.z + t
+}
+
+/// Whether rewriting sketch `before` as `after` drew into it: `after`
+/// holds an edge `before` did not, or holds the same edges with a loop
+/// given its face by drawing over one of them. A rewrite that only removes
+/// edges drew nothing.
+pub(super) fn drew_into(before: &Sketch, after: &Sketch) -> bool {
+    let keys = |sk: &Sketch| -> BTreeSet<SegKey> {
+        sk.edges()
+            .values()
+            .map(|e| seg_key(sk.vertices()[e.from].position, sk.vertices()[e.to].position))
+            .collect()
+    };
+    let (had, has) = (keys(before), keys(after));
+    !has.is_subset(&had) || (has == had && face_state_changed(before, after))
 }
 
 /// Whether working sketch `a` still holds exactly the drawing of `b` (the

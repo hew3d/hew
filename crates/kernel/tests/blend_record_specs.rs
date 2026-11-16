@@ -523,7 +523,7 @@ fn records_ride_through_save_and_load() {
     let bytes = doc.save();
     assert_eq!(bytes, doc.save(), "saving is deterministic");
     let m = manifest_of(&bytes);
-    assert_eq!(m["format_version"], 31);
+    assert_eq!(m["format_version"], 32);
     let blends = m["objects"][0]["blends"].as_array().unwrap();
     assert_eq!(blends.len(), 1);
     assert_eq!(blends[0]["id"], report.blends[0].0);

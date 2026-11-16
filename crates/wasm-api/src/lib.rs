@@ -5224,6 +5224,16 @@ impl Scene {
             .is_some_and(kernel::Sketch::detached)
     }
 
+    /// Whether `sketch` is a foreign file's drawing the user has not drawn
+    /// in since (`kernel::Sketch::imported`): its lines draw in the neutral
+    /// edge color, not as drawing made in Hew. `false` for an unknown or
+    /// deleted sketch. Answers for a world, group-held or
+    /// component-definition sketch alike (every handle `sketch_lines`
+    /// takes). Read-only.
+    pub fn sketch_is_imported(&self, sketch: u64) -> bool {
+        self.doc.sketch_is_imported(sketch_id(sketch))
+    }
+
     /// The Object that owns `sketch`'s edges (a loose sketch drawn on a
     /// solid's face), or `None` when the sketch is unowned (a world,
     /// detached, group-held or component-member sketch) or unknown. Read-only;
@@ -9402,6 +9412,16 @@ impl Scene {
             .object(object_id(object))
             .ok_or_else(|| stale("UnknownObject", "object"))?;
         Ok(object.watertight() == WatertightState::Watertight)
+    }
+
+    /// Whether `object` was built from a foreign file's mesh and has not
+    /// been drawn on since (`kernel::Document::object_is_imported`): the
+    /// edges that split its faces are the source's, so its drawing overlay
+    /// shows them in the neutral edge color rather than as shapes drawn in
+    /// Hew. `false` for an unknown or hidden object. Answers for a world
+    /// object or a component-definition member alike. Read-only.
+    pub fn object_is_imported(&self, object: u64) -> bool {
+        self.doc.object_is_imported(object_id(object))
     }
 
     /// World-space outer-loop vertices (flat xyz) of a sketch region — for
@@ -28206,5 +28226,160 @@ mod preview_wall_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod imported_mark_tests {
+    use super::Scene;
+    use kernel::{
+        Document, ImportNode, ImportScene, ImportSceneExtra, ImportSketch, MeshRecipe, Plane,
+        Point3, Vec3,
+    };
+    use slotmap::Key as _;
+
+    /// A foreign import's solid and loose drawing answer imported through
+    /// the scene; drawing made in Hew and a stale handle answer not.
+    #[test]
+    fn imported_solids_and_sketches_say_so() {
+        let ground = Plane::from_point_normal(Point3::ORIGIN, Vec3::new(0.0, 0.0, 1.0)).unwrap();
+        let quad = MeshRecipe {
+            name: "Panel".to_string(),
+            positions: vec![
+                Point3::new(0.0, 0.0, 1.0),
+                Point3::new(1.0, 0.0, 1.0),
+                Point3::new(1.0, 1.0, 1.0),
+                Point3::new(0.0, 1.0, 1.0),
+            ],
+            faces: vec![vec![0, 1, 2, 3]],
+            face_materials: vec![kernel::NO_MATERIAL],
+            face_uv_frames: vec![None],
+            face_holes: vec![Vec::new()],
+            base_material: kernel::NO_MATERIAL,
+            tags: Vec::new(),
+            extra: Default::default(),
+        };
+        let mut doc = Document::new();
+        doc.ingest(
+            ImportScene {
+                materials: Vec::new(),
+                defs: Vec::new(),
+                roots: vec![ImportNode::Mesh(quad)],
+                guides: Vec::new(),
+                tags: Vec::new(),
+                camera: None,
+                scenes: Vec::new(),
+                section: None,
+                view_style: None,
+                extra: ImportSceneExtra {
+                    sketches: vec![ImportSketch {
+                        plane: ground,
+                        def: None,
+                        group: None,
+                        segments: vec![[Point3::new(3.0, 0.0, 0.0), Point3::new(4.0, 0.0, 0.0)]],
+                        curves: Vec::new(),
+                        filled: Vec::new(),
+                        tags: Vec::new(),
+                        imported: false,
+                    }],
+                    ..Default::default()
+                },
+                geo: None,
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        let mut scene = Scene::new();
+        scene.load(&doc.save()).unwrap();
+        let object = scene.doc.visible_object_ids()[0].data().as_ffi();
+        let sketch = scene.doc.sketch_ids()[0].data().as_ffi();
+        assert!(scene.object_is_imported(object));
+        assert!(scene.sketch_is_imported(sketch));
+        assert!(!scene.object_is_imported(u64::MAX), "a stale object");
+        assert!(!scene.sketch_is_imported(u64::MAX), "a stale sketch");
+
+        let mut doc = Document::new();
+        let s = doc.add_sketch(ground);
+        doc.begin_sketch_gesture(s).unwrap();
+        doc.sketch_mut(s)
+            .unwrap()
+            .add_segment(Point3::ORIGIN, Point3::new(1.0, 0.0, 0.0))
+            .unwrap();
+        doc.end_sketch_gesture(s).unwrap();
+        let mut scene = Scene::new();
+        scene.load(&doc.save()).unwrap();
+        let sketch = scene.doc.sketch_ids()[0].data().as_ffi();
+        assert!(!scene.sketch_is_imported(sketch), "drawing made in Hew");
+    }
+
+    /// Removing a line from an imported sketch through the eraser's
+    /// gesture path (`sketch_begin_gesture` / `sketch_remove_edge` /
+    /// `sketch_end_gesture`) draws nothing, so the sketch stays marked;
+    /// adding one through the same path clears it.
+    #[test]
+    fn the_gesture_path_clears_the_mark_only_when_it_draws() {
+        let ground = Plane::from_point_normal(Point3::ORIGIN, Vec3::new(0.0, 0.0, 1.0)).unwrap();
+        let mut doc = Document::new();
+        doc.ingest(
+            ImportScene {
+                materials: Vec::new(),
+                defs: Vec::new(),
+                roots: Vec::new(),
+                guides: Vec::new(),
+                tags: Vec::new(),
+                camera: None,
+                scenes: Vec::new(),
+                section: None,
+                view_style: None,
+                extra: ImportSceneExtra {
+                    sketches: vec![ImportSketch {
+                        plane: ground,
+                        def: None,
+                        group: None,
+                        segments: vec![
+                            [Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)],
+                            [Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)],
+                        ],
+                        curves: Vec::new(),
+                        filled: Vec::new(),
+                        tags: Vec::new(),
+                        imported: false,
+                    }],
+                    ..Default::default()
+                },
+                geo: None,
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        let mut scene = Scene::new();
+        scene.load(&doc.save()).unwrap();
+        let sid = scene.doc.sketch_ids()[0];
+        let sketch = sid.data().as_ffi();
+        let edge = scene
+            .doc
+            .sketch(sid)
+            .unwrap()
+            .edges()
+            .keys()
+            .next()
+            .unwrap();
+        scene.sketch_begin_gesture(sketch).unwrap();
+        scene
+            .sketch_remove_edge(sketch, edge.data().as_ffi())
+            .unwrap();
+        scene.sketch_end_gesture(sketch).unwrap();
+        assert_eq!(scene.doc.sketch(sid).unwrap().edges().len(), 1);
+        assert!(scene.sketch_is_imported(sketch), "erasing drew nothing");
+
+        scene.sketch_begin_gesture(sketch).unwrap();
+        scene
+            .sketch_add_segment(sketch, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0)
+            .unwrap();
+        scene.sketch_end_gesture(sketch).unwrap();
+        assert!(
+            !scene.sketch_is_imported(sketch),
+            "drawing made it the user's"
+        );
     }
 }

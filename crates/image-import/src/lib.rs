@@ -565,7 +565,12 @@ pub fn import(
         scenes: Vec::new(),
         section: None,
         view_style: None,
-        extra: Default::default(),
+        // A picture is Hew's own construction, not a foreign file's mesh:
+        // nothing it builds is marked imported.
+        extra: kernel::ImportSceneExtra {
+            native: true,
+            ..Default::default()
+        },
         geo: None,
     };
     check(&scene)?;

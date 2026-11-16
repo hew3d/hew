@@ -510,6 +510,8 @@ fn set_refuses_what_a_tag_or_a_group_hides() {
                 ],
                 curves: Vec::new(),
                 tags: vec![vec!["Walls".into(), "Sketches".into()]],
+                filled: Vec::new(),
+                imported: false,
             }],
             ..Default::default()
         },

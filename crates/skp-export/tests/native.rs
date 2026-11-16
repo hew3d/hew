@@ -691,3 +691,39 @@ fn every_release_writes_and_reopens() {
         );
     }
 }
+
+/// A `.skp` Hew wrote holds the user's own work: reopened, none of its
+/// solids or loose sketches is marked imported (they keep drawing as made
+/// in Hew), in every container.
+#[test]
+fn a_file_hew_wrote_reopens_with_nothing_marked_imported() {
+    let doc = native();
+    for target in common::all_targets() {
+        let out = export(
+            &doc,
+            target,
+            WriteEnv {
+                unix_time: 1_800_000_000,
+                seed: 9,
+            },
+        )
+        .unwrap();
+        let back = skp_import::import(&out.bytes).unwrap();
+        let mut d2 = Document::new();
+        let (report, _) = d2.ingest(back.scene, back.textures_missing).unwrap();
+        let objects = d2.visible_object_ids();
+        let sketches: Vec<_> = report.sketches.iter().flatten().copied().collect();
+        assert!(
+            !objects.is_empty() && !sketches.is_empty(),
+            "{target:?}: the file holds solids and loose sketches"
+        );
+        assert!(
+            objects.iter().all(|&o| !d2.object_is_imported(o)),
+            "{target:?}: no solid is marked"
+        );
+        assert!(
+            sketches.iter().all(|&s| !d2.sketch_is_imported(s)),
+            "{target:?}: no sketch is marked"
+        );
+    }
+}

@@ -575,6 +575,14 @@ pub struct Sketch {
     /// an object-owned sketch (invariant I9). Every rebuild of an existing
     /// sketch starts from [`Sketch::blank_like`], which carries it.
     detached: bool,
+    /// **Imported drawing** (persisted, part of equality): the sketch came
+    /// in from a foreign file (a `.skp`'s loose edges, built by
+    /// [`crate::Document::ingest`]) and the user has not drawn in it since,
+    /// so a viewer shows its lines as the source's own, not as drawing made
+    /// in Hew. Every rebuild from [`Sketch::blank_like`] carries it, so a
+    /// move, copy or split keeps it; the document clears it when the user
+    /// adds to or edits the sketch (a draft or gesture that draws into it).
+    imported: bool,
     vertices: SlotMap<SketchVertexId, SketchVertex>,
     edges: SlotMap<SketchEdgeId, SketchEdge>,
     regions: SlotMap<SketchRegionId, SketchRegion>,
@@ -700,19 +708,36 @@ impl Sketch {
         self.detached
     }
 
-    /// An empty sketch on this sketch's plane with its `detached` flag:
-    /// what every rebuild of an existing sketch starts from, so the flag is
-    /// carried structurally. Transient drafting state (curve bracket, bulk
-    /// insertion cells, snapping, seams, rigid lines) is NOT copied.
+    /// Whether this sketch is imported drawing the user has not drawn in
+    /// since (see the field `imported`).
+    pub fn imported(&self) -> bool {
+        self.imported
+    }
+
+    /// Marks or clears this sketch as imported drawing (see the field
+    /// `imported`).
+    pub(crate) fn set_imported(&mut self, imported: bool) {
+        self.imported = imported;
+    }
+
+    /// An empty sketch on this sketch's plane with its `detached` and
+    /// `imported` flags: what every rebuild of an existing sketch starts
+    /// from, so the flags are carried structurally. Transient drafting
+    /// state (curve bracket, bulk insertion cells, snapping, seams, rigid
+    /// lines) is NOT copied.
     pub fn blank_like(&self) -> Sketch {
-        Self::blank(self.plane, self.detached)
+        let mut s = Self::blank(self.plane, self.detached);
+        s.imported = self.imported;
+        s
     }
 
     /// [`Sketch::blank_like`] on another plane: an empty sketch on `plane`
-    /// carrying this sketch's `detached` flag — the start of a rebuild that
-    /// lands this sketch's drawing on a transformed plane.
+    /// carrying this sketch's `detached` and `imported` flags — the start
+    /// of a rebuild that lands this sketch's drawing on a transformed plane.
     pub(crate) fn blank_like_on(&self, plane: Plane) -> Sketch {
-        Self::blank(plane, self.detached)
+        let mut s = Self::blank(plane, self.detached);
+        s.imported = self.imported;
+        s
     }
 
     /// The one empty-sketch constructor every other one goes through.
@@ -720,6 +745,7 @@ impl Sketch {
         Sketch {
             plane,
             detached,
+            imported: false,
             vertices: SlotMap::with_key(),
             edges: SlotMap::with_key(),
             regions: SlotMap::with_key(),
@@ -1921,6 +1947,48 @@ impl Sketch {
             .filter(|r| !r.faceless)
             .map(|r| r.outer.iter().map(|&v| self.vertices[v].position).collect())
             .collect()
+    }
+
+    /// Give its face back to every faceless region whose outer ring
+    /// coincides with one of `rings` (the same corners within
+    /// [`tol::POINT_MERGE`], from any start, in either direction): an
+    /// import's record of the faces its source drew on the edges
+    /// ([`crate::ImportSketch::filled`]). A ring matching no region changes
+    /// nothing; no geometry moves.
+    pub(crate) fn fill_regions_on_rings(&mut self, rings: &[Vec<Point3>]) {
+        // Two coinciding rings pair their corners within the tolerance, so
+        // their least x differ by no more than it: each region is tried
+        // only against the rings whose least x lies in a window about its
+        // own (a file's floor plan can hold thousands of filled regions
+        // in one sketch). The window is twice the tolerance, for rounding;
+        // `rings_coincide` decides.
+        let min_x = |ring: &[Point3]| ring.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+        let mut keyed: Vec<(f64, &[Point3])> = rings
+            .iter()
+            .map(|k| (min_x(k), k.as_slice()))
+            .filter(|(x, _)| x.is_finite())
+            .collect();
+        if keyed.is_empty() {
+            return;
+        }
+        keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let window = 2.0 * tol::POINT_MERGE;
+        let vertices = &self.vertices;
+        for r in self.regions.values_mut().filter(|r| r.faceless) {
+            let ring: Vec<Point3> = r.outer.iter().map(|&v| vertices[v].position).collect();
+            let x = min_x(&ring);
+            if !x.is_finite() {
+                continue;
+            }
+            let from = keyed.partition_point(|(k, _)| *k < x - window);
+            if keyed[from..]
+                .iter()
+                .take_while(|(k, _)| *k <= x + window)
+                .any(|(_, k)| rings_coincide(k, &ring))
+            {
+                r.faceless = false;
+            }
+        }
     }
 
     /// Make faceless every region whose outer ring is a faceless loop of
@@ -3302,7 +3370,7 @@ impl Sketch {
     }
 }
 
-/// Content equality: same plane, same `detached` flag, and identical
+/// Content equality: same plane, same `detached` and `imported` flags, and identical
 /// vertex/edge/region storage, **including handle identity** (same `SlotMap`
 /// keys). Gesture undo snapshots (see `Document::end_sketch_gesture`) rely
 /// on the handle-identity part — restoring a snapshot must keep every
@@ -3318,6 +3386,7 @@ impl PartialEq for Sketch {
         }
         self.plane == other.plane
             && self.detached == other.detached
+            && self.imported == other.imported
             && slotmaps_eq(&self.vertices, &other.vertices)
             && slotmaps_eq(&self.edges, &other.edges)
             && slotmaps_eq(&self.regions, &other.regions)

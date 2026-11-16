@@ -3281,6 +3281,28 @@ describe('SceneRenderer — draw color language (free blue / attached orange)', 
     expect(lines).toContainEqual({ kind: 'attached', color: ATTACHED })
     expect(lines).toContainEqual({ kind: 'free', color: FREE })
   })
+
+  it('an imported sketch draws in the neutral edge colour at native width, with no fill', () => {
+    const scene = makeScene({}) as unknown as Record<string, unknown>
+    scene.sketch_ids = () => BigUint64Array.from([5n, 6n])
+    scene.sketch_owner_object = () => undefined
+    scene.sketch_is_imported = (s: bigint) => s === 5n
+    scene.sketch_lines = () => SQUARE
+    scene.sketch_regions = () => BigUint64Array.from([1n])
+    scene.region_boundary = () => new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0])
+    const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
+    renderer.refresh()
+    renderer.refreshAllSketches()
+    const lines = drawingLines(renderer)
+    expect(lines).toContainEqual({ kind: 'plain', color: 0x1a1a1a })
+    expect(lines).toContainEqual({ kind: 'free', color: FREE })
+    // only the free sketch's region is filled
+    expect((renderer as unknown as { sketchRegionMeshes: Map<unknown, unknown> }).sketchRegionMeshes.size).toBe(1)
+    // the mark is re-read on every rebuild: clearing it brings the ink back
+    scene.sketch_is_imported = () => false
+    renderer.refreshAllSketches()
+    expect(drawingLines(renderer).every((l) => l.kind === 'free')).toBe(true)
+  })
 })
 
 describe('SceneRenderer — face mask (Fillet preview)', () => {

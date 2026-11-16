@@ -1242,8 +1242,9 @@ below.
   guides, the section plane, camera, axes, attributes, dimensions and
   leader text come along. A `hew` attribute dictionary carries what the
   format has no field for (tag paths, sketches, curved-surface claims,
-  scene display toggles), so a file Hew wrote reopens in Hew with
-  nothing lost — the round-trip suite holds every corpus file and a
+  scene display toggles, which solids and sketches are still a foreign
+  file's so they keep drawing as the file's own), so a file Hew wrote
+  reopens in Hew with nothing lost — the round-trip suite holds every corpus file and a
   native document to that. Saving back over an opened `.skp` builds on
   the file: everything unchanged (a group's or component's geometry with
   every soft edge, curve, texture placement and per-face layer, whole

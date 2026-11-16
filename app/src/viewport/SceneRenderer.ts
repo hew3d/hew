@@ -42,6 +42,7 @@ import {
 import { invalidatePlaneUnits, readPlaneUnits } from '../tools/planeUnits'
 import { readPreviewTint } from '../tools/previewTint'
 import { DEPTH_BIAS } from './depthPolicy'
+import { drawKindFor, type DrawKind } from './drawKind'
 import type { HealthOverlay } from '../health/healthReport'
 import type { IsolationFade } from './isolation'
 import { srgbColorsToLinear } from './colorSpace'
@@ -112,7 +113,6 @@ const DRAW_FREE_FALLBACK = 0x2266cc
 const DRAW_FREE_FILL_FALLBACK = 0x88aadd
 const DRAW_ATTACHED_FALLBACK = 0xe0761c
 const DRAW_ATTACHED_FILL_FALLBACK = 0xe8a66a
-type DrawKind = 'free' | 'attached'
 interface DrawColors {
   free: number
   freeFill: number
@@ -121,6 +121,8 @@ interface DrawColors {
 }
 /** Sketch line width in px (matches the `makeFatSegments` call in `refreshAllSketches`). */
 const SKETCH_LINE_WIDTH_PX = 2.2
+/** Imported (plain) sketch lines draw at the native edge width. */
+const PLAIN_LINE_WIDTH_PX = 1
 /** Section-cut outlines (where the active section passes through a solid):
  * heavy black lines on the plane, as SketchUp draws a cut profile, so a
  * post cut through reads as a square instead of vanishing into the floor
@@ -490,6 +492,8 @@ interface DefSketchGroup {
   lines: LineSegments2 | null
   /** Lines of object-owned (attached, orange) sketches, when any. */
   linesAttached: LineSegments2 | null
+  /** Lines of imported sketches (plain edge ink), when any. */
+  linesPlain: LineSegments2 | null
   /** Fill meshes, keyed `${sketchHandle}:${regionHandle}` (region handles
    *  are per-sketch, so they can collide across sketches). */
   regionMeshes: Map<string, THREE.Mesh>
@@ -812,6 +816,8 @@ export class SceneRenderer {
   private sketchLines: LineSegments2 | null = null
   /** Edges of object-owned sketches (part of a solid's face): orange. */
   private sketchLinesAttached: LineSegments2 | null = null
+  /** Edges of imported sketches that have not been drawn on since: plain edge ink. */
+  private sketchLinesPlain: LineSegments2 | null = null
   /** The current draw-color tokens (see `_readDrawColors`). */
   private drawColors: DrawColors = this._readDrawColors()
   /** One fill mesh per sketch region, keyed by `${sketchHandle}:${regionHandle}`
@@ -2605,6 +2611,11 @@ export class SceneRenderer {
    */
   private _buildImprintOverlay(objectId: bigint): THREE.Group | null {
     // (lines and fills are the attached/orange pair)
+    // A foreign file's topology edges and faces draw as plain native edges;
+    // the overlay returns the moment the user draws on the object (the
+    // kernel clears the mark, and the rebuild re-reads it).
+    const importedFn = (this.wasmScene as { object_is_imported?: (o: bigint) => boolean }).object_is_imported
+    if (importedFn !== undefined && importedFn.call(this.wasmScene, objectId)) return null
     const planes = objectDrawingPlanes(this.wasmScene, objectId)
     if (planes.length === 0) return null
     const group = new THREE.Group()
@@ -2881,14 +2892,17 @@ export class SceneRenderer {
 
     const allLinePositions: number[] = []
     const attachedLinePositions: number[] = []
+    const plainLinePositions: number[] = []
     for (const sketchHandle of this.wasmScene.sketch_ids()) {
-      const attached = this._sketchIsAttached(sketchHandle)
-      const out = attached ? attachedLinePositions : allLinePositions
+      // Read per rebuild, never cached: a kernel edit clears the mark.
+      const kind = this._sketchDrawKind(sketchHandle)
+      const out = kind === 'plain' ? plainLinePositions : kind === 'attached' ? attachedLinePositions : allLinePositions
       const linePositions = this.wasmScene.sketch_lines(sketchHandle)
       for (let i = 0; i < linePositions.length; i++) {
         out.push(linePositions[i])
       }
-      this._buildRegionFills(sketchHandle, attached ? 'attached' : 'free')
+      // Imported drawing is plain edge ink: no region fill.
+      if (kind !== 'plain') this._buildRegionFills(sketchHandle, kind)
     }
 
     if (allLinePositions.length > 0) {
@@ -2908,6 +2922,10 @@ export class SceneRenderer {
     if (attachedLinePositions.length > 0) {
       this.sketchLinesAttached = this._drawLine(attachedLinePositions, 'attached')
       this.sketchGroup.add(this.sketchLinesAttached)
+    }
+    if (plainLinePositions.length > 0) {
+      this.sketchLinesPlain = this._drawLine(plainLinePositions, 'plain')
+      this.sketchGroup.add(this.sketchLinesPlain)
     }
 
     // Sketches DRAWN INSIDE A COMPONENT (component-edit-parity.md Finding 1)
@@ -2977,6 +2995,7 @@ export class SceneRenderer {
     for (const g of this.defSketchGroups.values()) {
       if (g.lines !== null) disposeFatSegments(g.lines)
       if (g.linesAttached !== null) disposeFatSegments(g.linesAttached)
+      if (g.linesPlain !== null) disposeFatSegments(g.linesPlain)
       for (const mesh of g.regionMeshes.values()) {
         mesh.geometry.dispose()
         ;(mesh.material as THREE.Material).dispose()
@@ -3011,18 +3030,20 @@ export class SceneRenderer {
 
     const allLinePositions: number[] = []
     const attachedLinePositions: number[] = []
+    const plainLinePositions: number[] = []
     const regionMeshes = new Map<string, THREE.Mesh>()
     for (const sketchHandle of sketchIds) {
-      const attached = this._sketchIsAttached(sketchHandle)
-      const out = attached ? attachedLinePositions : allLinePositions
+      const kind = this._sketchDrawKind(sketchHandle)
+      const out = kind === 'plain' ? plainLinePositions : kind === 'attached' ? attachedLinePositions : allLinePositions
       const linePositions = this.wasmScene.sketch_lines(sketchHandle)
       for (let i = 0; i < linePositions.length; i++) {
         out.push(linePositions[i])
       }
+      if (kind === 'plain') continue // imported: edge ink only, no fill
       const regionHandles = this.wasmScene.sketch_regions(sketchHandle)
       for (let i = 0; i < regionHandles.length; i++) {
         const regionHandle = regionHandles[i]
-        const mesh = this._buildRegionFillMesh(sketchHandle, regionHandle, attached ? 'attached' : 'free')
+        const mesh = this._buildRegionFillMesh(sketchHandle, regionHandle, kind)
         if (mesh === null) continue
         group.add(mesh)
         regionMeshes.set(`${sketchHandle}:${regionHandle}`, mesh)
@@ -3039,11 +3060,16 @@ export class SceneRenderer {
       linesAttached = this._drawLine(attachedLinePositions, 'attached')
       group.add(linesAttached)
     }
+    let linesPlain: LineSegments2 | null = null
+    if (plainLinePositions.length > 0) {
+      linesPlain = this._drawLine(plainLinePositions, 'plain')
+      group.add(linesPlain)
+    }
 
-    if (lines === null && linesAttached === null && regionMeshes.size === 0) return // nothing to show
+    if (lines === null && linesAttached === null && linesPlain === null && regionMeshes.size === 0) return // nothing to show
 
     this.sketchGroup.add(group)
-    this.defSketchGroups.set(instanceId, { group, lines, linesAttached, regionMeshes })
+    this.defSketchGroups.set(instanceId, { group, lines, linesAttached, linesPlain, regionMeshes })
   }
 
   /**
@@ -4545,9 +4571,11 @@ export class SceneRenderer {
       }
       setWidth(this.sketchLines)
       setWidth(this.sketchLinesAttached)
+      setWidth(this.sketchLinesPlain)
       for (const d of this.defSketchGroups.values()) {
         setWidth(d.lines)
         setWidth(d.linesAttached)
+        setWidth(d.linesPlain)
       }
     }
 
@@ -4599,9 +4627,11 @@ export class SceneRenderer {
       }
       inkLine(this.sketchLines)
       inkLine(this.sketchLinesAttached)
+      inkLine(this.sketchLinesPlain)
       for (const d of this.defSketchGroups.values()) {
         inkLine(d.lines)
         inkLine(d.linesAttached)
+        inkLine(d.linesPlain)
       }
       undo.push(() => {
         for (const m of cache.values()) m.dispose()
@@ -5098,10 +5128,12 @@ export class SceneRenderer {
     }
     if (this.sketchLines !== null) touch(this.sketchLines.material)
     if (this.sketchLinesAttached !== null) touch(this.sketchLinesAttached.material)
+    if (this.sketchLinesPlain !== null) touch(this.sketchLinesPlain.material)
     for (const mesh of this.sketchRegionMeshes.values()) touch(mesh.material)
     for (const g of this.defSketchGroups.values()) {
       if (g.lines !== null) touch(g.lines.material)
       if (g.linesAttached !== null) touch(g.linesAttached.material)
+      if (g.linesPlain !== null) touch(g.linesPlain.material)
       for (const mesh of g.regionMeshes.values()) touch(mesh.material)
     }
     for (const g of this.objectGroups.values()) {
@@ -5739,6 +5771,7 @@ export class SceneRenderer {
   }
 
   private _drawColor(kind: DrawKind, fill: boolean): number {
+    if (kind === 'plain') return this._edgeColor()
     const c = this.drawColors
     return kind === 'free' ? (fill ? c.freeFill : c.free) : fill ? c.attachedFill : c.attached
   }
@@ -5751,7 +5784,7 @@ export class SceneRenderer {
     // by the fat-line registry (makeFatSegments registers the material).
     const line = makeFatSegments(new Float32Array(positions), {
       color: this._drawColor(kind, false),
-      widthPx: SKETCH_LINE_WIDTH_PX,
+      widthPx: kind === 'plain' ? PLAIN_LINE_WIDTH_PX : SKETCH_LINE_WIDTH_PX,
       transparent: true,
       depthBias: DEPTH_BIAS.SKETCH_LINE,
     })
@@ -5761,6 +5794,12 @@ export class SceneRenderer {
 
   /** Whether `sketch`'s edges are owned by an Object (part of a solid's
    *  face: orange) rather than free (world, detached, group-held, member). */
+  private _sketchDrawKind(sketch: bigint): DrawKind {
+    const fn = (this.wasmScene as { sketch_is_imported?: (s: bigint) => boolean }).sketch_is_imported
+    const imported = fn !== undefined && fn.call(this.wasmScene, sketch)
+    return drawKindFor(imported, this._sketchIsAttached(sketch))
+  }
+
   private _sketchIsAttached(sketch: bigint): boolean {
     const fn = (this.wasmScene as { sketch_owner_object?: (s: bigint) => bigint | undefined }).sketch_owner_object
     return fn !== undefined && fn.call(this.wasmScene, sketch) !== undefined
@@ -5769,6 +5808,7 @@ export class SceneRenderer {
   /** Re-read the draw tokens and recolor every drawing material in place
    *  (a theme switch changes them; geometry is untouched). */
   private _recolorDrawing(): void {
+    this._recolorPlainDrawing()
     const next = this._readDrawColors()
     const c = this.drawColors
     if (next.free === c.free && next.freeFill === c.freeFill && next.attached === c.attached && next.attachedFill === c.attachedFill) return
@@ -5791,6 +5831,16 @@ export class SceneRenderer {
     for (const g of this.objectGroups.values()) if (g.imprints !== null) for (const child of g.imprints.children) paint(child)
   }
 
+  /** Imported (plain) sketch lines follow the edge colour, not the draw tokens. */
+  private _recolorPlainDrawing(): void {
+    const hex = this._edgeColor()
+    const paint = (line: LineSegments2 | null): void => {
+      if (line !== null) (line.material as LineMaterial).color.setHex(hex)
+    }
+    paint(this.sketchLinesPlain)
+    for (const g of this.defSketchGroups.values()) paint(g.linesPlain)
+  }
+
   /** The plain (unselected) edge color right now. */
   private _edgeColor(): number {
     return edgeColorFor(this.renderMode, this.edgeTheme)
@@ -5800,6 +5850,7 @@ export class SceneRenderer {
    *  selection orange stays where it is. */
   private _recolorPlainEdges(): void {
     const plain = this._edgeColor()
+    this._recolorPlainDrawing()
     for (const batch of this.batches.values()) {
       ;(batch.edges.material as THREE.LineBasicMaterial).color.setHex(plain)
     }
@@ -5926,7 +5977,7 @@ export class SceneRenderer {
   private _applySketchIsolation(): void {
     const anyContextActive = this.activeLitSet !== null || this.activeLitInstanceSet !== null
     const dim = this._dimOpacity()
-    for (const lines of [this.sketchLines, this.sketchLinesAttached]) {
+    for (const lines of [this.sketchLines, this.sketchLinesAttached, this.sketchLinesPlain]) {
       if (lines === null) continue
       const mat = lines.material as LineMaterial
       mat.opacity = anyContextActive ? dim : 1
@@ -5939,7 +5990,7 @@ export class SceneRenderer {
     for (const [instanceId, g] of this.defSketchGroups) {
       const isLit = this.activeLitInstanceSet !== null && this.activeLitInstanceSet.has(instanceId)
       const dimmed = anyContextActive && !isLit
-      for (const lines of [g.lines, g.linesAttached]) {
+      for (const lines of [g.lines, g.linesAttached, g.linesPlain]) {
         if (lines === null) continue
         const mat = lines.material as LineMaterial
         mat.opacity = dimmed ? dim : 1
@@ -6240,6 +6291,11 @@ export class SceneRenderer {
       disposeFatSegments(this.sketchLinesAttached)
       this.sketchGroup.remove(this.sketchLinesAttached)
       this.sketchLinesAttached = null
+    }
+    if (this.sketchLinesPlain !== null) {
+      disposeFatSegments(this.sketchLinesPlain)
+      this.sketchGroup.remove(this.sketchLinesPlain)
+      this.sketchLinesPlain = null
     }
   }
 

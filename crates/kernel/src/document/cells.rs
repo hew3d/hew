@@ -1353,6 +1353,8 @@ impl Document {
                         owner,
                         name,
                         tags,
+                        // Drawing closed it: the grown solid is the user's.
+                        imported: false,
                     });
                     // The grown solid takes the old one's place: in a group
                     // it replaces it in the member list (never reached while
@@ -1393,6 +1395,7 @@ impl Document {
                         owner,
                         name: None,
                         tags: Vec::new(),
+                        imported: false,
                     });
                     self.join_owner(id, owner, out);
                     object_rows.push(DocAction::CreatedObjectFromFaces { id });

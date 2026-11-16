@@ -1770,7 +1770,9 @@ fn a_sketchs_tag_is_its_edges_layer_and_comes_back() {
             kernel::Point3::new(x, 1.0, 0.0),
         ]],
         curves: Vec::new(),
+        filled: Vec::new(),
         tags,
+        imported: false,
     };
     let site = vec!["Site".to_string()];
     let digging = vec!["Digging plan".to_string()];
@@ -2420,6 +2422,10 @@ fn a_match_photo_camera_keeps_its_image_width_ratio_and_2d_state_through_a_save_
     let held = opened.camera_state().expect("a camera");
     assert!((held.image_width.unwrap() - 25.4).abs() < 1e-9);
     assert_eq!(held.aspect_ratio, Some(1.5));
+    // KB-27: with a ratio the file's 35 degrees is across the frame; Hew
+    // holds the vertical angle and writes the across-frame one back.
+    let vertical = 2.0 * ((35f64.to_radians() / 2.0).tan() / 1.5).atan().to_degrees();
+    assert!((held.fov_deg - vertical).abs() < 1e-9, "{}", held.fov_deg);
 
     let back = |d: &Document| {
         let saved = save(d, Target::Skp2026, env(), Some(&src)).unwrap();
@@ -2434,6 +2440,7 @@ fn a_match_photo_camera_keeps_its_image_width_ratio_and_2d_state_through_a_save_
     let c = back(&opened);
     assert!((c.image_width - 1000.0).abs() < 1e-6, "{}", c.image_width);
     assert_eq!(c.aspect_ratio, 1.5);
+    assert!((c.fov_deg - 35.0).abs() < 1e-9, "{}", c.fov_deg);
     assert!(c.two_point_perspective);
     assert_eq!((c.scale_2d, c.offset_2d), (2.0, [0.25, -0.125]));
 
@@ -2454,6 +2461,71 @@ fn a_match_photo_camera_keeps_its_image_width_ratio_and_2d_state_through_a_save_
     let fresh = skp_export::author(&opened).model.camera.unwrap();
     assert!((fresh.image_width - 1000.0).abs() < 1e-6);
     assert_eq!(fresh.aspect_ratio, 1.5);
+}
+
+#[test]
+fn a_hew_written_camera_with_a_ratio_reopens_at_its_angle_old_file_or_new() {
+    // Hew writes the angle across the frame beside a ratio and marks the
+    // file so; a file an earlier Hew wrote stored the vertical angle there
+    // with no mark, and opens with that angle as it is.
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/zoo.hew");
+    let mut doc = Document::load(&std::fs::read(p).unwrap()).unwrap();
+    doc.set_camera_state(kernel::CameraState {
+        aspect_ratio: Some(1.5),
+        ..kernel::CameraState::framed(
+            kernel::CameraProjection::Perspective,
+            35.0,
+            kernel::Point3::new(4.0, -6.0, 3.0),
+            kernel::Point3::new(0.0, 0.0, 0.0),
+            kernel::Vec3::new(0.0, 0.0, 1.0),
+        )
+    });
+    let reopened = |model: &Model| {
+        let bytes = skpwright::Document::from_model(model)
+            .unwrap()
+            .write()
+            .unwrap();
+        open(&bytes).unwrap().0.camera_state().expect("a camera")
+    };
+    let across = 2.0 * ((35f64.to_radians() / 2.0).tan() * 1.5).atan().to_degrees();
+
+    // Today's writer: across the frame in the file, 35 degrees back.
+    let model = skp_export::author(&doc).model;
+    let cam = model.camera.as_ref().expect("a camera is written");
+    assert!((cam.fov_deg - across).abs() < 1e-9, "{}", cam.fov_deg);
+    let held = reopened(&model);
+    assert!((held.fov_deg - 35.0).abs() < 1e-9, "{}", held.fov_deg);
+    assert_eq!(held.aspect_ratio, Some(1.5));
+
+    // An earlier Hew's file: the vertical angle, no mark.
+    let mut old = model.clone();
+    old.camera.as_mut().unwrap().fov_deg = 35.0;
+    for a in old
+        .dictionaries
+        .iter_mut()
+        .filter(|a| a.owner == Owner::Model)
+    {
+        for d in a.dictionaries.iter_mut().filter(|d| d.name == "hew") {
+            let before = d.entries.len();
+            d.entries.retain(|(k, _)| k != "fov_across");
+            assert_eq!(d.entries.len() + 1, before, "the writer marks the file");
+        }
+    }
+    let held = reopened(&old);
+    assert!((held.fov_deg - 35.0).abs() < 1e-9, "{}", held.fov_deg);
+
+    // A save back over the old file writes today's form, marked.
+    let bytes = skpwright::Document::from_model(&old)
+        .unwrap()
+        .write()
+        .unwrap();
+    let (opened, src) = open(&bytes).unwrap();
+    let saved = save(&opened, Target::Skp2026, env(), Some(&src)).unwrap();
+    let back = Model::parse(&saved.export.bytes).unwrap();
+    let c = back.camera.as_ref().unwrap();
+    assert!((c.fov_deg - across).abs() < 1e-9, "{}", c.fov_deg);
+    let held = reopened(&back);
+    assert!((held.fov_deg - 35.0).abs() < 1e-9, "{}", held.fov_deg);
 }
 
 #[test]

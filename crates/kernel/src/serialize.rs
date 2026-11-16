@@ -355,7 +355,19 @@ pub(crate) const CURVES_GEOMETRY_VERSION: u32 = 10;
 /// Resize replay stored geometry. Omitted for an object with no blend, so
 /// such a document writes the same manifest as v30 apart from the version.
 /// Gated by [`BLEND_RECORDS_MIN_VERSION`]. Geometry buffer unchanged.
-pub const MANIFEST_FORMAT_VERSION: u32 = 31;
+/// **v32**: `objects[].imported` and `sketches[].imported` — the object
+/// was built from a foreign file's mesh, or the sketch is a foreign file's
+/// drawing, and the user has not drawn on it since: a viewer shows its
+/// lines as the source's, not as drawing made in Hew. Optional and omitted
+/// when false, so a document with nothing imported writes the same manifest
+/// as v31 apart from the version; a file older than v32 loads with nothing
+/// marked (no retroactive marking). Gated by [`IMPORTED_MIN_VERSION`].
+pub const MANIFEST_FORMAT_VERSION: u32 = 32;
+
+/// The manifest version at which `objects[].imported` and
+/// `sketches[].imported` were introduced. A file declaring an older version
+/// that sets either is rejected (reject-not-repair).
+pub(crate) const IMPORTED_MIN_VERSION: u32 = 32;
 
 /// The manifest version at which `materials[].pbr` was introduced. A file
 /// declaring an older version that carries one is rejected
@@ -3291,6 +3303,10 @@ pub(crate) struct ObjectDto {
     /// blend id. Absent/empty → every blend restores by derivation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blends: Vec<BlendRecordDto>,
+    /// Built from a foreign file's mesh and not drawn on since (manifest
+    /// v32+). Omitted when false; `true` in an older file is rejected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub imported: bool,
 }
 
 /// What one blend replaced on its object (`objects[].blends[]`, manifest
@@ -4129,6 +4145,11 @@ pub(crate) struct SketchDto {
     /// older file, or together with `owner_object`, is rejected.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub detached: bool,
+    /// A foreign file's drawing the user has not drawn in since (manifest
+    /// v32+, `Sketch::imported`). Omitted when false; `true` in an older
+    /// file is rejected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub imported: bool,
     /// The GROUP the sketch is drawn in (manifest v19+): the dense
     /// `groups[]` id of the group that holds it — a `.skp` group of edges,
     /// or lines drawn while editing a group. The sketch keeps its frame
@@ -4382,6 +4403,9 @@ pub(crate) struct DocSaveData {
     /// USER-hidden flags keyed by id (manifest v6), same key spaces as the
     /// name/tag maps.
     pub obj_hidden: std::collections::BTreeSet<ObjectId>,
+    /// Objects built from a foreign file's mesh and not drawn on since
+    /// (manifest v32+), same key space as `obj_hidden`.
+    pub obj_imported: std::collections::BTreeSet<ObjectId>,
     pub group_hidden: std::collections::BTreeSet<GroupId>,
     pub instance_hidden: std::collections::BTreeSet<InstanceId>,
     /// The working camera view at last save (manifest v13+; docs/design/
@@ -4556,6 +4580,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 tags: data.obj_tags.get(oid).cloned().unwrap_or_default(),
                 hidden: data.obj_hidden.contains(oid),
                 blends: blend_records_to_dtos(obj, &material_dense),
+                imported: data.obj_imported.contains(oid),
             }
         })
         .collect();
@@ -4925,6 +4950,7 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
         owner: None,
         owner_object: None, // patched by the caller (`encode_document`), like `id`
         detached: sk.detached(),
+        imported: sk.imported(),
         owner_group: None, // patched by the caller, like `owner_object`
         tags: Vec::new(),  // likewise
     }
@@ -5140,6 +5166,9 @@ pub(crate) struct DocLoadRaw {
     /// USER-hidden flags per object/group/instance dense id (manifest v6+;
     /// all false for older files).
     pub obj_hidden: Vec<bool>,
+    /// Imported flags per object dense id (manifest v32+; all false for
+    /// older files).
+    pub obj_imported: Vec<bool>,
     pub group_hidden: Vec<bool>,
     pub instance_hidden: Vec<bool>,
     /// The working camera view at last save (manifest v13+; `None` for
@@ -5545,6 +5574,17 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         }
     }
 
+    if manifest.format_version < IMPORTED_MIN_VERSION
+        && let Some(o) = manifest.objects.iter().find(|o| o.imported)
+    {
+        return Err(LoadError::MalformedManifest {
+            what: format!(
+                "object {} is imported in a v{} manifest (introduced at v{})",
+                o.id, manifest.format_version, IMPORTED_MIN_VERSION
+            ),
+        });
+    }
+
     let group_names = manifest.groups.iter().map(|g| g.name.clone()).collect();
     let component_names = manifest.components.iter().map(|c| c.name.clone()).collect();
     let instance_names = manifest.instances.iter().map(|i| i.name.clone()).collect();
@@ -5782,6 +5822,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
             .map(|t| (t.path.clone(), t.hidden))
             .collect(),
         obj_hidden: manifest.objects.iter().map(|o| o.hidden).collect(),
+        obj_imported: manifest.objects.iter().map(|o| o.imported).collect(),
         group_hidden: manifest.groups.iter().map(|g| g.hidden).collect(),
         instance_hidden: manifest.instances.iter().map(|i| i.hidden).collect(),
         camera,
@@ -5943,6 +5984,14 @@ fn validate_manifest_references(
         {
             return Err(LoadError::DanglingReference {
                 what: format!("sketch {} owner object id {} out of range", sk.id, owner),
+            });
+        }
+        if sk.imported && manifest.format_version < IMPORTED_MIN_VERSION {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "sketch {} is imported in a v{} manifest (introduced at v{})",
+                    sk.id, manifest.format_version, IMPORTED_MIN_VERSION
+                ),
             });
         }
         if sk.detached && manifest.format_version < DETACHED_SKETCH_MIN_VERSION {
@@ -6235,6 +6284,7 @@ pub(crate) fn decode_sketch(
     })?;
 
     let mut sk = Sketch::reconstruct(plane, dto.detached);
+    sk.set_imported(dto.imported);
 
     // Insert vertices in dense id order.
     let mut vert_ids: Vec<SketchVertexId> = Vec::with_capacity(dto.vertices.len());

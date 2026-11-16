@@ -183,6 +183,16 @@ struct ObjectRecord {
     /// Per-node tag paths (root-first segment lists, e.g. `["Structure","Roof"]`).
     /// Empty by default; set by import decode or user ops. No global tag registry.
     tags: Vec<Vec<String>>,
+    /// The object was built from a foreign file's mesh ([`Document::ingest`]
+    /// of a `.skp`, `.stl`, `.obj`, `.dae`, glTF... not one Hew wrote) and
+    /// the user has not drawn on it since: the lines that split its faces
+    /// are the source's edges, not shapes drawn in Hew, and a viewer shows
+    /// them as such. Copies, slices and boolean results of an imported
+    /// object carry it; moving, tagging and grouping leave it alone; the
+    /// first draft that draws on the object clears it, inside that draft's
+    /// undo step ([`DocAction::ObjectImportCleared`]). Persisted as
+    /// `objects[].imported` (manifest v30+).
+    imported: bool,
 }
 
 /// The owned-sketch drawing that rides with a pushed face
@@ -1562,6 +1572,11 @@ enum DocAction {
         prev: Option<GroupId>,
         next: Option<GroupId>,
     },
+    /// A draft drew on an imported Object ([`ObjectRecord::imported`]) and
+    /// so cleared its imported mark. Always recorded inside the draft's own
+    /// compound, beside the object's [`DocAction::ObjectOp`]: undo marks it
+    /// imported again, redo clears it; the geometry never changes here.
+    ObjectImportCleared { object: ObjectId },
     /// A move/rotate/scale applied to a whole mixed selection in one step
     /// (`transform_selection`: select-all → Move). Baked into every world
     /// leaf object and listed sketch; composed into every leaf instance's
@@ -2818,6 +2833,7 @@ impl DocAction {
             | DocAction::CopiedSketchIslands { .. }
             | DocAction::SketchOwnerChanged { .. }
             | DocAction::SketchGroupChanged { .. } => Vec::new(),
+            DocAction::ObjectImportCleared { object } => vec![*object],
             DocAction::TransformSelection { objects, .. } => {
                 objects.iter().map(|&(id, _)| id).collect()
             }
@@ -2988,6 +3004,7 @@ impl DocAction {
             DocAction::CopiedSketchIslands { copy } => vec![*copy],
             DocAction::SketchOwnerChanged { sketch, .. }
             | DocAction::SketchGroupChanged { sketch, .. } => vec![*sketch],
+            DocAction::ObjectImportCleared { .. } => Vec::new(),
             DocAction::TransformSelection { sketches, .. } => {
                 sketches.iter().map(|&(id, _)| id).collect()
             }
@@ -5709,6 +5726,12 @@ impl Document {
             obj_tags,
             tag_meta,
             obj_hidden: self.user_hidden_objects.clone(),
+            obj_imported: self
+                .objects
+                .iter()
+                .filter(|(_, r)| r.imported)
+                .map(|(id, _)| id)
+                .collect(),
             group_hidden: self.user_hidden_groups.clone(),
             instance_hidden: self.user_hidden_instances.clone(),
             camera: self.camera,
@@ -5837,6 +5860,7 @@ impl Document {
                 owner,
                 name: raw.obj_names.get(i).cloned().flatten(),
                 tags: raw.obj_tags.get(i).cloned().unwrap_or_default(),
+                imported: raw.obj_imported.get(i).copied().unwrap_or(false),
             });
             dense_obj_ids.push(oid);
         }
@@ -6866,6 +6890,15 @@ impl Document {
 
         let objects_created = all_objects.len();
         let health = self.health_report(Some(&all_objects)).counts();
+        // A foreign file's solids are marked imported (`ObjectRecord::
+        // imported`): the edges that split their faces are the source's.
+        // Hew's own files (`ImportSceneExtra::native`) mark only what their
+        // recipes say (`MeshExtra::imported`), set as each object was built.
+        if !extra.native {
+            for &o in &all_objects {
+                self.objects[o].imported = true;
+            }
+        }
 
         // ── 4. Construction guides ─────────────────────────────────
         // Inserted directly (not via add_guide_line/point, which would push
@@ -6992,8 +7025,14 @@ impl Document {
                     // The source's bare edges bound no face (edges that do
                     // arrive as a solid), so a loop they close is a loop
                     // alone — a wire frame, a light rig — until one of its
-                    // edges is drawn over (`sketch.rs` rule 6).
+                    // edges is drawn over (`sketch.rs` rule 6). A loop the
+                    // source filled (a region a `.skp` Hew wrote holds as a
+                    // face on its edges) keeps its face.
                     sketch.make_regions_faceless();
+                    sketch.fill_regions_on_rings(&recipe.filled);
+                    // A foreign file's drawing is the source's, not the
+                    // user's, until they draw in it (`Sketch::imported`).
+                    sketch.set_imported(!extra.native || recipe.imported);
                     let id = self.insert_sketch_record(sketch);
                     if let Some(c) = owner {
                         self.def_sketches.insert(id, c);
@@ -9119,6 +9158,12 @@ impl Document {
         if *s == *pending.before {
             return Ok(DocChange::default());
         }
+        // A gesture that drew in an imported sketch makes it the user's
+        // from here on (`before` keeps the mark for undo); one that only
+        // removed edges drew nothing and keeps it, as the eraser does.
+        if draft::drew_into(&pending.before, &self.sketches[sketch]) {
+            self.sketches[sketch].set_imported(false);
+        }
         let after = Box::new(self.sketches[sketch].clone());
         self.undo.push(DocAction::SketchGesture {
             sketch,
@@ -9382,6 +9427,22 @@ impl Document {
     /// stale id.
     pub fn sketch_owner_object(&self, id: SketchId) -> Option<ObjectId> {
         self.object_sketches.get(&id).copied()
+    }
+
+    /// Whether sketch `id` is imported drawing the user has not drawn in
+    /// since ([`Sketch::imported`]): a world, group-held or definition
+    /// sketch alike. `false` for a stale or hidden (deleted) id.
+    pub fn sketch_is_imported(&self, id: SketchId) -> bool {
+        self.sketch(id).is_some_and(Sketch::imported)
+    }
+
+    /// Whether Object `id` was built from a foreign file's mesh and has not
+    /// been drawn on since ([`ObjectRecord::imported`]): a world object or a
+    /// definition member alike. `false` for a stale or hidden id.
+    pub fn object_is_imported(&self, id: ObjectId) -> bool {
+        self.objects
+            .get(id)
+            .is_some_and(|r| !r.hidden && r.imported)
     }
 
     /// The live sketches `object` owns, in sketch-key order (empty for a
@@ -13903,6 +13964,7 @@ impl Document {
                 owner: ObjectOwner::World { parent: None },
                 name: None,
                 tags: Vec::new(),
+                imported: false,
             });
             self.undo.push(DocAction::FollowMeFace {
                 result: id,
@@ -13936,6 +13998,8 @@ impl Document {
         // contributes none (exactly `Document::boolean`'s treatment).
         let preserve = base.coplanar_edge_segments();
         result.merge_coplanar_faces(&preserve);
+        // The merged solid keeps the base's imprints, so its provenance too.
+        let base_imported = base_rec.imported;
 
         let id = self.insert_object_record(ObjectRecord {
             object: result,
@@ -13944,6 +14008,7 @@ impl Document {
             owner: ObjectOwner::World { parent: None },
             name: None,
             tags: Vec::new(),
+            imported: base_imported,
         });
         self.objects[object].hidden = true;
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
@@ -14240,6 +14305,7 @@ impl Document {
                 },
                 name: None,
                 tags: Vec::new(),
+                imported: false,
             });
             self.components[component].members.push(NodeId::Object(id));
             self.undo.push(DocAction::FollowMeFace {
@@ -14266,6 +14332,8 @@ impl Document {
         let mut result = merge_sweep(base, &swept).map_err(DocumentError::Boolean)?;
         let preserve = base.coplanar_edge_segments();
         result.merge_coplanar_faces(&preserve);
+        // The merged solid keeps the base's imprints, so its provenance too.
+        let base_imported = base_rec.imported;
 
         let id = self.insert_object_record(ObjectRecord {
             object: result,
@@ -14277,6 +14345,7 @@ impl Document {
             },
             name: None,
             tags: Vec::new(),
+            imported: base_imported,
         });
         self.objects[object].hidden = true;
         self.components[component].members.push(NodeId::Object(id));
@@ -14358,6 +14427,7 @@ impl Document {
             owner: ObjectOwner::World { parent: None },
             name: None,
             tags: Vec::new(),
+            imported: false,
         });
         self.undo.push(DocAction::FollowMeFace {
             result: id,
@@ -14608,6 +14678,7 @@ impl Document {
             owner,
             name: None,
             tags: Vec::new(),
+            imported: false,
         });
         let mut groups_touched = Vec::new();
         let mut components_touched = Vec::new();
@@ -15003,6 +15074,9 @@ impl Document {
         // The result carries operand `a`'s identity (a board cut by a tool
         // is still that board); `b`'s is consumed with it.
         let (name, tags) = (rec_a.name.clone(), rec_a.tags.clone());
+        // The result keeps the operands' imprints, so an imported operand's
+        // edges stay its source's.
+        let imported = rec_a.imported || rec_b.imported;
 
         let id = self.insert_object_record(ObjectRecord {
             object: result,
@@ -15011,6 +15085,7 @@ impl Document {
             owner: ObjectOwner::World { parent: None },
             name,
             tags,
+            imported,
         });
         self.copy_identity_attrs(&EntityRef::Object(a), EntityRef::Object(id));
         self.drop_copied_smooth_level(id);
@@ -15150,6 +15225,9 @@ impl Document {
             let first = &self.objects[operands[0]];
             (first.name.clone(), first.tags.clone())
         };
+        // The result keeps the operands' imprints, so an imported operand's
+        // edges stay its source's.
+        let imported = operands.iter().any(|&o| self.objects[o].imported);
 
         let id = self.insert_object_record(ObjectRecord {
             object: result,
@@ -15161,6 +15239,7 @@ impl Document {
             },
             name,
             tags,
+            imported,
         });
         self.copy_identity_attrs(&EntityRef::Object(operands[0]), EntityRef::Object(id));
         self.drop_copied_smooth_level(id);
@@ -15331,6 +15410,7 @@ impl Document {
             .flat_map(|&o| self.objects[o].object.coplanar_edge_segments())
             .collect();
         result.merge_coplanar_faces(&preserve);
+        let imported = leaves.iter().flatten().any(|&o| self.objects[o].imported);
         // Split disjoint volumes into discrete solids. A hollowing subtract
         // leaves cavity walls as their own negative-volume component;
         // `split_solids` assigns each cavity to the positive shell that
@@ -15406,6 +15486,7 @@ impl Document {
                 },
                 name: a_name.clone(),
                 tags: a_tags.clone(),
+                imported,
             });
             result_objects.push(id);
         }
@@ -15552,6 +15633,7 @@ impl Document {
             return Err(DocumentError::GroupedOperand);
         }
         let (positive, negative) = rec.object.slice(plane).map_err(DocumentError::Slice)?;
+        let imported = rec.imported;
 
         let a = self.insert_object_record(ObjectRecord {
             object: positive,
@@ -15560,6 +15642,7 @@ impl Document {
             owner: ObjectOwner::World { parent: None },
             name: None,
             tags: Vec::new(),
+            imported,
         });
         let b = self.insert_object_record(ObjectRecord {
             object: negative,
@@ -15568,6 +15651,7 @@ impl Document {
             owner: ObjectOwner::World { parent: None },
             name: None,
             tags: Vec::new(),
+            imported,
         });
         self.objects[object].hidden = true;
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
@@ -15670,6 +15754,7 @@ impl Document {
             .object
             .slice(&local_plane)
             .map_err(DocumentError::Slice)?;
+        let imported = rec.imported;
 
         let a = self.insert_object_record(ObjectRecord {
             object: positive,
@@ -15681,6 +15766,7 @@ impl Document {
             },
             name: None,
             tags: Vec::new(),
+            imported,
         });
         let b = self.insert_object_record(ObjectRecord {
             object: negative,
@@ -15692,6 +15778,7 @@ impl Document {
             },
             name: None,
             tags: Vec::new(),
+            imported,
         });
         self.objects[object].hidden = true;
         // Shared-geometry birth (component-edit-parity.md phase K2): see
@@ -15766,7 +15853,7 @@ impl Document {
         let pieces = result.split_connected_components();
         // Every piece keeps the source's name and tags (wireframe faces
         // §5.6): tags are membership, and names are not unique.
-        let (name, tags) = (rec.name.clone(), rec.tags.clone());
+        let (name, tags, imported) = (rec.name.clone(), rec.tags.clone(), rec.imported);
 
         let mut results: Vec<ObjectId> = Vec::with_capacity(pieces.len());
         for piece in pieces {
@@ -15777,6 +15864,7 @@ impl Document {
                 owner: ObjectOwner::World { parent: None },
                 name: name.clone(),
                 tags: tags.clone(),
+                imported,
             });
             results.push(id);
         }
@@ -15860,7 +15948,7 @@ impl Document {
         let pieces = result.split_connected_components();
         // As in `push_pull_through`: every piece keeps the source's name
         // and tags (wireframe faces §5.6).
-        let (name, tags) = (rec.name.clone(), rec.tags.clone());
+        let (name, tags, imported) = (rec.name.clone(), rec.tags.clone(), rec.imported);
 
         let mut results = Vec::with_capacity(pieces.len());
         for piece in pieces {
@@ -15874,6 +15962,7 @@ impl Document {
                 },
                 name: name.clone(),
                 tags: tags.clone(),
+                imported,
             });
             self.components[component].members.push(NodeId::Object(id));
             results.push(id);
@@ -16332,7 +16421,8 @@ impl Document {
     ) -> DocChange {
         let rec = &mut self.objects[object];
         let before = std::mem::replace(&mut rec.object, after.clone());
-        let (owner, name, tags) = (rec.owner, rec.name.clone(), rec.tags.clone());
+        let (owner, name, tags, imported) =
+            (rec.owner, rec.name.clone(), rec.tags.clone(), rec.imported);
         let parent = match owner {
             ObjectOwner::World { parent } | ObjectOwner::Definition { parent, .. } => parent,
         };
@@ -16345,6 +16435,7 @@ impl Document {
                 owner,
                 name: name.clone(),
                 tags: tags.clone(),
+                imported,
             });
             match (owner, parent) {
                 (_, Some(g)) => self.groups[g].members.push(NodeId::Object(id)),
@@ -17086,7 +17177,12 @@ impl Document {
             .move_vertex_arranging(vertex, new_pos)
             .map_err(DocumentError::Sketch)?;
         let seeds = self.sketch_edges_new_since(sketch, Some(&before));
-        if moved.rearranged {
+        // Dragging a point of an imported sketch is drawing in it: it is the
+        // user's from here on. Recorded as a snapshot so undo restores the
+        // mark with the point.
+        let drew_imported = before.imported();
+        self.sketches[sketch].set_imported(false);
+        if moved.rearranged || drew_imported {
             let after = self.sketches[sketch].clone();
             self.undo.push(DocAction::RearrangedSketchVertex {
                 sketch,
@@ -20447,6 +20543,7 @@ impl Document {
                         owner: ObjectOwner::World { parent },
                         name,
                         tags: self.objects[o].tags.clone(),
+                        imported: self.objects[o].imported,
                     });
                     self.copy_attrs(&EntityRef::Object(o), EntityRef::Object(id));
                     member_copies.insert(o, id);
@@ -20699,7 +20796,12 @@ impl Document {
         copied: &mut Vec<(EntityRef, EntityRef)>,
     ) -> ObjectId {
         let rec = &self.objects[src];
-        let (object, name, tags) = (rec.object.clone(), rec.name.clone(), rec.tags.clone());
+        let (object, name, tags, imported) = (
+            rec.object.clone(),
+            rec.name.clone(),
+            rec.tags.clone(),
+            rec.imported,
+        );
         let id = self.insert_object_record(ObjectRecord {
             object,
             history: History::new(),
@@ -20710,6 +20812,7 @@ impl Document {
             },
             name,
             tags,
+            imported,
         });
         self.copy_identity_attrs(&EntityRef::Object(src), EntityRef::Object(id));
         if self.user_hidden_objects.contains(&src) {
@@ -20835,7 +20938,7 @@ impl Document {
                         continue;
                     };
                     let mut object = rec.object.clone();
-                    let (name, tags) = (rec.name.clone(), rec.tags.clone());
+                    let (name, tags, imported) = (rec.name.clone(), rec.tags.clone(), rec.imported);
                     object
                         .apply_transform(outer)
                         .map_err(DocumentError::Transform)?;
@@ -20846,6 +20949,7 @@ impl Document {
                         owner: ObjectOwner::World { parent: Some(gid) },
                         name,
                         tags,
+                        imported,
                     });
                     self.copy_attrs(&EntityRef::Object(o), EntityRef::Object(id));
                     member_copies.insert(o, id);
@@ -23841,6 +23945,7 @@ impl Document {
                 let mut object = src.object.clone();
                 let name = src.name.clone();
                 let tags = src.tags.clone();
+                let imported = src.imported;
                 object
                     .apply_transform(placement)
                     .map_err(DocumentError::Transform)?;
@@ -23871,6 +23976,7 @@ impl Document {
                     owner,
                     name,
                     tags,
+                    imported,
                 });
                 created.objects.push(new_id);
                 created
@@ -24669,6 +24775,10 @@ impl Document {
             DocAction::CopiedSketchIslands { .. } => k("copy-sketch"),
             DocAction::SketchOwnerChanged { .. } => k("attach-sketch"),
             DocAction::SketchGroupChanged { .. } => k("group-sketch"),
+            // Only ever inside a draft's labeled compound.
+            DocAction::ObjectImportCleared { object } => {
+                self.describe_object_op(*object, undo_index)
+            }
             DocAction::TransformSelection {
                 objects,
                 sketches,
@@ -26101,6 +26211,13 @@ impl Document {
                 self.apply_sketch_group(sketch, prev);
                 DocChange {
                     sketches_touched: vec![sketch],
+                    ..Default::default()
+                }
+            }
+            &DocAction::ObjectImportCleared { object } => {
+                self.objects[object].imported = true;
+                DocChange {
+                    objects_touched: vec![object],
                     ..Default::default()
                 }
             }
@@ -28043,6 +28160,13 @@ impl Document {
                 self.apply_sketch_group(sketch, next);
                 DocChange {
                     sketches_touched: vec![sketch],
+                    ..Default::default()
+                }
+            }
+            &DocAction::ObjectImportCleared { object } => {
+                self.objects[object].imported = false;
+                DocChange {
+                    objects_touched: vec![object],
                     ..Default::default()
                 }
             }
@@ -30334,6 +30458,9 @@ fn ingest_build_mesh(
                 // An empty name is no name, as for an imported group.
                 name: (!recipe.name.is_empty()).then_some(recipe.name),
                 tags: recipe.tags,
+                // As the recipe says; `ingest_finish` marks every object of
+                // a foreign import (`ImportSceneExtra::native`).
+                imported: recipe.extra.imported,
             });
             all_objects.push(oid);
             Some(oid)
@@ -30694,6 +30821,7 @@ fn library_copy_object(
         owner,
         name: rec.name.clone(),
         tags: rec.tags.clone(),
+        imported: rec.imported,
     });
     library_copy_entity_attrs(
         dst,

@@ -618,6 +618,7 @@ impl<'d> Author<'d> {
             });
         }
         let planes = std::mem::take(&mut run.sketch_planes);
+        let imported_sketches = std::mem::take(&mut run.imported_sketches);
         if planes.len() > 1 {
             let mut seen = BTreeSet::new();
             for (ei, si) in std::mem::take(&mut run.sketch_edges) {
@@ -649,11 +650,24 @@ impl<'d> Author<'d> {
                 if !planes.is_empty() {
                     h.set("sketch_planes", Value::Array(planes));
                 }
+                if !imported_sketches.is_empty() {
+                    h.set("imported_sketches", Value::Array(imported_sketches));
+                }
+                if run.imported {
+                    h.set("imported", Value::Bool(true));
+                }
                 self.def_dicts
                     .extend(h.into_dictionary().map(|d| (map, vec![d])));
             }
-            None if !planes.is_empty() => self.model_hew.set("sketch_planes", Value::Array(planes)),
-            None => {}
+            None => {
+                if !planes.is_empty() {
+                    self.model_hew.set("sketch_planes", Value::Array(planes));
+                }
+                if !imported_sketches.is_empty() {
+                    self.model_hew
+                        .set("imported_sketches", Value::Array(imported_sketches));
+                }
+            }
         }
         // The root list in reuse mode, and a definition rewritten in its
         // file record's place, replace the file's run: what the document
@@ -780,6 +794,15 @@ impl<'d> Author<'d> {
             self.attrs(AttrTarget::Document)
         };
         self.model_hew.set("version", Value::Int(1));
+        // Every camera here stores its angle across the frame when it holds
+        // a ratio (`frame_fov_deg`); an earlier Hew stored the vertical
+        // angle there, and its files carry no such mark.
+        self.model_hew.set("fov_across", Value::Bool(true));
+        // This writer records which solids and sketches are still a foreign
+        // file's (`imported`, `imported_sketches`): a reader marks exactly
+        // those, and what this writer carried as the file's own records.
+        // An earlier Hew's files carry no such mark and reopen unmarked.
+        self.model_hew.set("imported_marks", Value::Bool(true));
         if let Some(h) = std::mem::take(&mut self.model_hew).into_dictionary() {
             model.push(h);
         }
@@ -1060,7 +1083,10 @@ impl<'d> Author<'d> {
         let name = self.doc.object_name(id).map(str::to_string);
         let def_name = self.group_def_name(name.as_deref());
         let map = self.definition(def_name, DefinitionKind::Group);
-        let mut run = RunBuf::default();
+        let mut run = RunBuf {
+            imported: self.doc.object_is_imported(id),
+            ..RunBuf::default()
+        };
         // A world Object's group sits at the identity: its arcs are where a
         // world radius dimension can hang.
         self.arc_run = matches!(frame, Frame::World).then_some(map);
@@ -1244,6 +1270,7 @@ impl<'d> Author<'d> {
                     self.object_into_with_base(&mut run, obj, base);
                 }
                 run.loose = Some("object");
+                run.imported = self.doc.object_is_imported(o);
                 // The definition's geometry takes the definition's name in
                 // a reader; record that the solid had none of its own.
                 if self.doc.object_name(o).is_none_or(str::is_empty) {
@@ -1475,6 +1502,9 @@ impl<'d> Author<'d> {
         let n = sk.plane().normal();
         let o = sk.plane().point();
         let sketch_index = run.sketch_planes.len();
+        if self.doc.sketch_is_imported(id) {
+            run.imported_sketches.push(Value::Int(sketch_index as i32));
+        }
         run.sketch_planes.push(Value::Array(
             [o.x, o.y, o.z, n.x, n.y, n.z]
                 .into_iter()
@@ -2105,6 +2135,12 @@ struct RunBuf {
     /// sketch_planes)`: written per edge when the list holds more than one
     /// sketch, since two sketches can share a plane.
     sketch_edges: Vec<(usize, usize)>,
+    /// The indexes into `sketch_planes` of the sketches still imported
+    /// (a foreign file's drawing the user has not drawn in).
+    imported_sketches: Vec<Value>,
+    /// The list's geometry is one Object still imported (a foreign file's
+    /// solid the user has not drawn on).
+    imported: bool,
 }
 
 impl RunBuf {
@@ -2494,7 +2530,7 @@ fn camera(c: &kernel::CameraState) -> skpwright::Camera {
         target_m: target,
         up: [up.x, up.y, up.z],
         perspective: c.projection == CameraProjection::Perspective,
-        fov_deg: c.fov_deg,
+        fov_deg: frame_fov_deg(c.fov_deg, c.aspect_ratio),
         parallel_height_m: c.parallel_height,
         two_point_perspective: false,
         description: String::new(),
@@ -2504,6 +2540,32 @@ fn camera(c: &kernel::CameraState) -> skpwright::Camera {
         scale_2d: 1.0,
         offset_2d: [0.0, 0.0],
         image_width: c.image_width.map_or(0.0, |w| w * skpwright::INCH),
+    }
+}
+
+/// The angle a file stores for a camera: across the frame when it holds an
+/// aspect ratio, up the frame when it holds none. Hew's `fov_deg` is always
+/// vertical; this is the inverse of `skp-import`'s `vertical_fov_deg`.
+fn frame_fov_deg(vertical_deg: f64, aspect_ratio: Option<f64>) -> f64 {
+    match aspect_ratio {
+        Some(a) if a > 0.0 && vertical_deg > 0.0 && vertical_deg < 180.0 => {
+            2.0 * ((vertical_deg.to_radians() / 2.0).tan() * a)
+                .atan()
+                .to_degrees()
+        }
+        _ => vertical_deg,
+    }
+}
+
+/// The vertical angle of a file camera (`skp-import`'s reading of it).
+fn vertical_fov_deg(c: &skpwright::Camera) -> f64 {
+    let a = c.aspect_ratio;
+    if a > 0.0 && c.fov_deg > 0.0 && c.fov_deg < 180.0 {
+        2.0 * ((c.fov_deg.to_radians() / 2.0).tan() / a)
+            .atan()
+            .to_degrees()
+    } else {
+        c.fov_deg
     }
 }
 
@@ -2522,7 +2584,7 @@ fn same_look(a: &skpwright::Camera, b: &skpwright::Camera) -> bool {
     };
     let close = |x: [f64; 3], y: [f64; 3]| (0..3).all(|i| (x[i] - y[i]).abs() < 1e-6);
     a.perspective == b.perspective
-        && (a.fov_deg - b.fov_deg).abs() < 1e-6
+        && (vertical_fov_deg(a) - vertical_fov_deg(b)).abs() < 1e-6
         && close(a.eye_m, b.eye_m)
         && close(a.up, b.up)
         && close(v(a), v(b))

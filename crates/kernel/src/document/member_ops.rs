@@ -595,6 +595,9 @@ impl Document {
             .map_err(DocumentError::Boolean)?;
 
         let (name, tags) = (rec_host.name.clone(), rec_host.tags.clone());
+        // The result keeps the operands' imprints, so an imported operand's
+        // edges stay its source's.
+        let imported = rec_host.imported || tool_id.is_some_and(|t| self.objects[t].imported);
         let id = self.insert_object_record(ObjectRecord {
             object: result,
             history: History::new(),
@@ -605,6 +608,7 @@ impl Document {
             },
             name,
             tags,
+            imported,
         });
         self.copy_identity_attrs(&EntityRef::Object(host), EntityRef::Object(id));
         self.drop_copied_smooth_level(id);

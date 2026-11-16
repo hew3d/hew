@@ -365,3 +365,208 @@ fn a_hole_touching_its_faces_outer_loop_survives_hew_to_skp_to_hew() {
         }
     }
 }
+
+/// Each sketch's regions as `(outer ring length, holes, has a face)`,
+/// sorted, with its plane (a definition's in its own frame) and imported
+/// mark; world sketches and every definition's.
+fn faced_regions(doc: &Document) -> Vec<String> {
+    let mut out: Vec<String> = doc
+        .sketch_ids()
+        .into_iter()
+        .chain(
+            doc.component_ids()
+                .into_iter()
+                .flat_map(|c| doc.def_member_sketches(c).unwrap_or_default()),
+        )
+        .map(|s| {
+            let sk = doc.sketch(s).unwrap();
+            let mut regions: Vec<(usize, usize, bool)> = sk
+                .regions()
+                .values()
+                .map(|r| (r.outer.len(), r.holes.len(), !r.faceless))
+                .collect();
+            regions.sort();
+            let n = sk.plane().normal();
+            format!(
+                "n [{:.3} {:.3} {:.3}] d {:.4} imported {} regions {regions:?}",
+                n.x,
+                n.y,
+                n.z,
+                sk.plane().signed_distance(kernel::Point3::ORIGIN),
+                doc.sketch_is_imported(s),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Drawing made in Hew: a rectangle with a rectangular hole (the hole's
+/// own region filled too), a circle on a wall, a hexagon, a closed arc
+/// segment, one loop of bare edges with no face, and a rectangle in a
+/// group and in a placed component.
+fn drawn_regions_doc() -> Document {
+    use kernel::{CurveGeom, Plane, Point3, SketchCurveKind, Vec3};
+    let p = Point3::new;
+    let mut doc = Document::new();
+    let ring = |pts: &[Point3]| -> Vec<(Point3, Point3)> {
+        (0..pts.len())
+            .map(|i| (pts[i], pts[(i + 1) % pts.len()]))
+            .collect()
+    };
+    // The rectangle with a hole, on the ground.
+    let ground = Plane::from_point_normal(Point3::ORIGIN, Vec3::new(0., 0., 1.)).unwrap();
+    let s = doc.add_sketch(ground);
+    let sk = doc.sketch_mut(s).unwrap();
+    for (a, b) in ring(&[p(0., 0., 0.), p(2., 0., 0.), p(2., 1., 0.), p(0., 1., 0.)])
+        .into_iter()
+        .chain(ring(&[
+            p(0.5, 0.25, 0.),
+            p(1.0, 0.25, 0.),
+            p(1.0, 0.75, 0.),
+            p(0.5, 0.75, 0.),
+        ]))
+    {
+        sk.add_segment(a, b).unwrap();
+    }
+    // A circle on the wall x = 5.
+    let wall = Plane::from_point_normal(p(5., 0., 0.), Vec3::new(1., 0., 0.)).unwrap();
+    let s = doc.add_sketch(wall);
+    let sk = doc.sketch_mut(s).unwrap();
+    let (c, r, n) = (p(5., 1., 1.), 0.4, 24);
+    sk.begin_curve_with(CurveGeom {
+        center: c,
+        radius: r,
+    })
+    .unwrap();
+    let rim: Vec<Point3> = (0..n)
+        .map(|i| {
+            let t = std::f64::consts::TAU * f64::from(i) / f64::from(n);
+            p(5., c.y + r * t.cos(), c.z + r * t.sin())
+        })
+        .collect();
+    for (a, b) in ring(&rim) {
+        sk.add_segment(a, b).unwrap();
+    }
+    sk.end_curve();
+    // A hexagon (a polygon claim) on a raised plane.
+    let raised = Plane::from_point_normal(p(0., 0., 2.), Vec3::new(0., 0., 1.)).unwrap();
+    let s = doc.add_sketch(raised);
+    let sk = doc.sketch_mut(s).unwrap();
+    let (c, r) = (p(0., 5., 2.), 0.5);
+    sk.begin_curve_with_kind(
+        CurveGeom {
+            center: c,
+            radius: r,
+        },
+        SketchCurveKind::Polygon,
+    )
+    .unwrap();
+    let hex: Vec<Point3> = (0..6)
+        .map(|i| {
+            let t = std::f64::consts::TAU * f64::from(i) / 6.;
+            p(c.x + r * t.cos(), c.y + r * t.sin(), 2.)
+        })
+        .collect();
+    for (a, b) in ring(&hex) {
+        sk.add_segment(a, b).unwrap();
+    }
+    sk.end_curve();
+    // A closed arc segment (a half disk: the arc and its chord), on the
+    // wall y = 8.
+    let back = Plane::from_point_normal(p(0., 8., 0.), Vec3::new(0., 1., 0.)).unwrap();
+    let s = doc.add_sketch(back);
+    let sk = doc.sketch_mut(s).unwrap();
+    let (c, r) = (p(3., 8., 1.), 0.5);
+    sk.begin_curve_with(CurveGeom {
+        center: c,
+        radius: r,
+    })
+    .unwrap();
+    let arc: Vec<Point3> = (0..=12)
+        .map(|i| {
+            let t = std::f64::consts::PI * f64::from(i) / 12.;
+            p(c.x + r * t.cos(), 8., c.z + r * t.sin())
+        })
+        .collect();
+    for w in arc.windows(2) {
+        sk.add_segment(w[0], w[1]).unwrap();
+    }
+    sk.end_curve();
+    sk.add_segment(arc[12], arc[0]).unwrap();
+    // A loop of bare edges with no face, on a plane of its own.
+    let high = Plane::from_point_normal(p(0., 0., 4.), Vec3::new(0., 0., 1.)).unwrap();
+    let s = doc.add_sketch(high);
+    let sk = doc.sketch_mut(s).unwrap();
+    for (a, b) in ring(&[p(0., 0., 4.), p(1., 0., 4.), p(1., 1., 4.), p(0., 1., 4.)]) {
+        sk.add_segment(a, b).unwrap();
+    }
+    sk.make_regions_faceless();
+    // A filled rectangle in a group, and one in a component placed off
+    // the origin: each list's drawing reads back in its own frame.
+    let mut boxed = |x0: f64| {
+        let foot = Plane::from_point_normal(p(x0, 0., 0.), Vec3::new(0., 0., 1.)).unwrap();
+        let s = doc.add_sketch(foot);
+        let sk = doc.sketch_mut(s).unwrap();
+        for (a, b) in ring(&[
+            p(x0, 0., 0.),
+            p(x0 + 1., 0., 0.),
+            p(x0 + 1., 1., 0.),
+            p(x0, 1., 0.),
+        ]) {
+            sk.add_segment(a, b).unwrap();
+        }
+        let region = sk.regions().keys().next().unwrap();
+        let (o, _) = doc.extrude_region(s, region, 1.).unwrap();
+        let (g, _) = doc.group_nodes(&[kernel::NodeId::Object(o)]).unwrap();
+        let lid = Plane::from_point_normal(p(x0, 0., 3.), Vec3::new(0., 0., 1.)).unwrap();
+        let s = doc.add_sketch(lid);
+        let sk = doc.sketch_mut(s).unwrap();
+        for (a, b) in ring(&[
+            p(x0, 0., 3.),
+            p(x0 + 0.5, 0., 3.),
+            p(x0 + 0.5, 0.5, 3.),
+            p(x0, 0.5, 3.),
+        ]) {
+            sk.add_segment(a, b).unwrap();
+        }
+        doc.set_sketch_group(s, Some(g)).unwrap();
+        g
+    };
+    boxed(20.);
+    let g = boxed(30.);
+    let (_, inst, _) = doc.make_component(&[kernel::NodeId::Group(g)]).unwrap();
+    doc.transform_instance(
+        inst,
+        &kernel::Transform::translation(Vec3::new(0., 10., 0.5)),
+    )
+    .unwrap();
+    doc
+}
+
+/// A region drawn in Hew has a face, and a `.skp` Hew writes holds it as
+/// a SketchUp face on the region's edges: reopened, the region is filled
+/// again, exactly as before the save. A loop with no face stays a loop
+/// alone, and nothing drawn in Hew comes back marked imported.
+#[test]
+fn drawn_regions_reopen_with_their_faces() {
+    let source = drawn_regions_doc();
+    let before = faced_regions(&source);
+    assert_eq!(
+        before.iter().filter(|s| s.contains("true)")).count(),
+        6,
+        "six filled shapes: {before:#?}"
+    );
+    assert!(
+        before
+            .iter()
+            .any(|s| s.contains("d -4.0000") && s.contains("(4, 0, false)")),
+        "the bare loop has no face: {before:#?}"
+    );
+    for target in common::all_targets() {
+        let written = export(&source, target, WriteEnv::system()).expect("writes");
+        let back = import(&written.bytes);
+        assert_eq!(faced_regions(&back), before, "{target:?}");
+        round_trip("drawn regions", &source, target).unwrap_or_else(|e| panic!("{e}"));
+    }
+}

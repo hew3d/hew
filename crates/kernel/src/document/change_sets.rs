@@ -268,7 +268,9 @@ impl Document {
                 b.owner_defs(&[*from, *to], &[], &[]);
                 b.reanchored(reanchored);
             }
-            DocAction::ObjectOp { object } => b.object(Modified, *object),
+            DocAction::ObjectOp { object } | DocAction::ObjectImportCleared { object } => {
+                b.object(Modified, *object)
+            }
             DocAction::Boolean {
                 result,
                 operands,

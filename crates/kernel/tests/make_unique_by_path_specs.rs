@@ -744,6 +744,8 @@ fn copied_definition_sketches_and_their_tags_follow_the_forked_definition() {
                 segments: vec![[Point3::new(3.0, 0.0, 0.0), Point3::new(3.0, 1.0, 0.0)]],
                 curves: Vec::new(),
                 tags: vec![layer.clone()],
+                filled: Vec::new(),
+                imported: false,
             }],
             ..Default::default()
         },

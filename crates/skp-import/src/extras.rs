@@ -255,9 +255,23 @@ pub(crate) struct HewModel {
     pub view_style: bool,
     /// Scene name -> display toggles.
     pub scene_display: BTreeMap<String, DisplayState>,
+    /// The file's cameras store their angle across the frame when they
+    /// hold an aspect ratio, as SketchUp does. An earlier Hew wrote the
+    /// vertical angle there and left this unset.
+    pub fov_across: bool,
+    /// The file records which solids and sketches are still a foreign
+    /// file's (`imported`, `imported_sketches`). An earlier Hew left it
+    /// unset, and its files reopen with nothing marked imported.
+    pub imported_marks: bool,
 }
 
 impl HewModel {
+    /// Whether a camera angle stored beside an aspect ratio is across the
+    /// frame: always, except in a file an earlier Hew wrote.
+    pub(crate) fn fov_stored_across(&self) -> bool {
+        !self.written_by_hew || self.fov_across
+    }
+
     pub(crate) fn of(dicts: &Dicts) -> HewModel {
         let Some(d) = dicts.hew(Owner::Model) else {
             return HewModel::default();
@@ -283,6 +297,8 @@ impl HewModel {
         out.loose_sketches = entry(d, "loose") == Some(&Value::Text("sketches".into()));
         out.loose_built = entry(d, "loose_built") == Some(&Value::Bool(true));
         out.view_style = entry(d, "view_style") == Some(&Value::Bool(true));
+        out.fov_across = entry(d, "fov_across") == Some(&Value::Bool(true));
+        out.imported_marks = entry(d, "imported_marks") == Some(&Value::Bool(true));
         if let Some(Value::Array(items)) = entry(d, "scene_display") {
             for item in items {
                 if let Value::Array(v) = item
