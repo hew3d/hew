@@ -627,3 +627,194 @@ test('a line folded into a component selects the component: hover names it, a cl
   await page.mouse.up()
   await expect.poll(async () => page.evaluate(() => window.__hew_test!.getSelection().map((n) => n.kind))).toEqual(['instance'])
 })
+
+/** Folds a line into a fresh component of one unit box at (x0, 0): opens its
+ *  session by a real double-click, draws a line along x = x0 + 2 (outside the
+ *  cube), and closes. Returns the instance, definition and the line's
+ *  endpoints in world space (the instance sits at the identity pose). */
+async function componentWithLine(
+  page: Page,
+  ctx: Ctx,
+  x0: number,
+): Promise<{ instance: string; component: string; mid: [number, number, number] }> {
+  const { instance, component } = await page.evaluate((x) => {
+    const h = window.__hew_test!
+    const box = h.drawBox([x, 0, 0], [x + 1, 1, 0], 1)
+    return h.makeComponent([box])
+  }, x0)
+  await dblClickWorld(page, ctx, x0 + 0.5, 0.5, 1)
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBe(instance)
+  await page.keyboard.press('l')
+  await clickWorld(page, ctx, x0 + 2, 0.1, 0)
+  await clickWorld(page, ctx, x0 + 2, 0.9, 0)
+  await page.keyboard.press('Escape') // end the line chain
+  await page.keyboard.press('Space')
+  await page.keyboard.press('Escape') // close the session
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBeNull()
+  const [sketch] = await page.evaluate((c) => window.__hew_test!.getComponentMemberSketches(c), component)
+  const seg = await page.evaluate((s) => window.__hew_test!.getSketchLines(s), sketch)
+  const mid: [number, number, number] = [(seg[0] + seg[3]) / 2, (seg[1] + seg[4]) / 2, (seg[2] + seg[5]) / 2]
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  return { instance, component, mid }
+}
+
+const selectionKinds = async (page: Page): Promise<string[]> =>
+  page.evaluate(() => window.__hew_test!.getSelection().map((n) => n.kind))
+
+test('double-clicking a component\'s line opens the component, even over a solid face the line lies on', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  const { instance, mid } = await componentWithLine(page, ctx, 0)
+  // A solid whose top face lies in the line's own plane, under the line: the
+  // face is under the cursor too, and must not take the double-click.
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    h.drawBox([1.5, -0.5, 0], [2.5, 1.5, 0], -1)
+  })
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  const at = px(ctx, mid[0], mid[1], mid[2])
+  await page.mouse.move(at.x - 4, at.y - 4)
+  await page.mouse.move(at.x, at.y)
+  await page.waitForTimeout(150)
+  await page.mouse.click(at.x, at.y, { clickCount: 2 })
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBe(instance)
+})
+
+test('a component\'s line under the cursor beats a guide lying along it', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  const { mid } = await componentWithLine(page, ctx, 0)
+  // A guide along the line, as guides are often placed on edges.
+  await page.evaluate((m) => window.__hew_test!.addGuideLine(m[0], 0, m[2], 0, 1, 0), mid)
+  await clickWorld(page, ctx, mid[0], mid[1], mid[2])
+  await expect.poll(() => selectionKinds(page)).toEqual(['instance'])
+  expect(await page.evaluate(() => window.__hew_test!.getSelectedGuide())).toBeNull()
+  // Off the line the guide is still selectable.
+  await clickWorld(page, ctx, mid[0], 3, mid[2])
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getSelectedGuide())).not.toBeNull()
+})
+
+test('a window marquee counts a component\'s outlying line in its extent', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  await componentWithLine(page, ctx, 0)
+  const drag = async (from: { x: number; y: number }, to: { x: number; y: number }): Promise<void> => {
+    await page.mouse.move(from.x, from.y)
+    await page.mouse.down()
+    await page.mouse.move(to.x, to.y, { steps: 12 })
+    await page.mouse.up()
+    await page.waitForTimeout(150)
+  }
+  const corners = (pts: [number, number, number][], pad: number) => {
+    const ps = pts.map((p) => px(ctx, p[0], p[1], p[2]))
+    return {
+      min: { x: Math.min(...ps.map((p) => p.x)) - pad, y: Math.min(...ps.map((p) => p.y)) - pad },
+      max: { x: Math.max(...ps.map((p) => p.x)) + pad, y: Math.max(...ps.map((p) => p.y)) + pad },
+    }
+  }
+  const cube: [number, number, number][] = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]]
+  // Left to right around the cube alone: the line two metres out is a drawn
+  // part of the component, so the window neither encloses nor covers it.
+  const tight = corners(cube, 12)
+  await drag(tight.min, tight.max)
+  expect(await selectionKinds(page)).toEqual([])
+  // Around the cube and the line: enclosed.
+  const all = corners([...cube, [2, 0.1, 0], [2, 0.9, 0]], 14)
+  await drag(all.min, all.max)
+  await expect.poll(() => selectionKinds(page)).toEqual(['instance'])
+})
+
+test('in a group, a line inside a component outside the group is out of scope and masks nothing', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  const a = await componentWithLine(page, ctx, 0)
+  const b = await componentWithLine(page, ctx, 3)
+  // A holds a group with another box; B stays at the top level.
+  const filler = await page.evaluate(() => window.__hew_test!.drawBox([0, 3, 0], [1, 4, 0], 1))
+  const group = await page.evaluate(
+    ([inst, obj]) => window.__hew_test!.groupNodes([{ kind: 'instance', id: inst }, { kind: 'object', id: obj }]),
+    [a.instance, filler] as const,
+  )
+  await dblClickWorld(page, ctx, 0.5, 3.5, 1) // enter the group
+  await page.waitForTimeout(250)
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  // B's line (outside the group): nothing.
+  await clickWorld(page, ctx, b.mid[0], b.mid[1], b.mid[2])
+  expect(await selectionKinds(page)).toEqual([])
+  // A's line (inside it): the component.
+  await clickWorld(page, ctx, a.mid[0], a.mid[1], a.mid[2])
+  await expect.poll(() => selectionKinds(page)).toEqual(['instance'])
+  expect(group).toBeTruthy()
+})
+
+test('a line drawn in a nested component draws, and picks, through the outer component', async ({ page }) => {
+  const camera: CameraParams = {
+    position: { x: 8, y: -8, z: 8 }, target: { x: 2.5, y: 1.5, z: 0 }, up: { x: 0, y: 0, z: 1 }, fovDeg: 50, near: 0.1, far: 1000,
+  }
+  const ctx = await ready(page).then(() => aim(page, camera))
+  const part = await componentWithLine(page, ctx, 0)
+  const { assembly, assemblyInstance } = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const box = h.drawBox([3, 0, 0], [4, 1, 0], 1)
+    const r = h.makeComponent([box])
+    return { assembly: r.component, assemblyInstance: r.instance }
+  })
+  // Fold a placed part (with its line) into the assembly as a nested member.
+  await dblClickWorld(page, ctx, 3.5, 0.5, 1)
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBe(assemblyInstance)
+  await page.evaluate(([c]) => window.__hew_test!.placeInstance(c, 3, 3, 0), [part.component] as const)
+  await page.keyboard.press('Escape')
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBeNull()
+  expect(assembly).toBeTruthy()
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  // The nested part's line sits at world (5, 3.5) through the assembly's
+  // nested placement (+3, +3): clicking there selects the assembly.
+  const lineMid: [number, number, number] = [part.mid[0] + 3, part.mid[1] + 3, part.mid[2]]
+  const lineDrawn = async (): Promise<boolean> =>
+    page.evaluate(
+      ([on, off]) => {
+        const t = window.__hew_test!
+        const a = t.pixelColorAt(on)
+        const b = t.pixelColorAt(off)
+        if (a === null || b === null) return false
+        return Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b) > 60
+      },
+      [lineMid, [lineMid[0] + 0.3, lineMid[1], lineMid[2]]] as const,
+    )
+  await expect.poll(lineDrawn).toBe(true)
+  await clickWorld(page, ctx, lineMid[0], lineMid[1], lineMid[2])
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getSelection().map((n) => n.id))).toEqual([assemblyInstance])
+})
+
+test('ungrouping a hidden group, and undoing it, keeps the lines inside its components in step with the component', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  const { instance, mid } = await componentWithLine(page, ctx, 0)
+  const differs = (a: [number, number, number], b: [number, number, number]) =>
+    page.evaluate(
+      ([on, off]) => {
+        const t = window.__hew_test!
+        const p = t.pixelColorAt(on)
+        const q = t.pixelColorAt(off)
+        if (p === null || q === null) return false
+        return Math.abs(p.r - q.r) + Math.abs(p.g - q.g) + Math.abs(p.b - q.b) > 60
+      },
+      [a, b] as const,
+    )
+  const lineDrawn = (): Promise<boolean> => differs(mid, [mid[0] + 0.3, mid[1], mid[2]])
+  const cubeDrawn = (): Promise<boolean> => differs([0.5, 0.5, 1], [0.5, 0.5, 1.6])
+  // The line is drawn exactly when its component is.
+  const inStep = async (): Promise<boolean> => (await lineDrawn()) === (await cubeDrawn())
+  const group = await page.evaluate((i) => window.__hew_test!.groupNodes([{ kind: 'instance', id: i }]), instance)
+  await expect.poll(lineDrawn).toBe(true)
+  await expect.poll(cubeDrawn).toBe(true)
+  await page.evaluate((g) => window.__hew_test!.toggleNodeHidden({ kind: 'group', id: g }), group)
+  await expect.poll(lineDrawn).toBe(false)
+  await expect.poll(cubeDrawn).toBe(false)
+  await page.evaluate((g) => window.__hew_test!.selectNodes([{ kind: 'group', id: g }]), group)
+  await expect.poll(() => selectionKinds(page)).toEqual(['group'])
+  await page.getByTestId('menu-bar').getByRole('button', { name: 'Object', exact: true }).click()
+  await page.getByTestId('menu-bar').getByText('Ungroup', { exact: true }).click()
+  await expect.poll(() => selectionKinds(page)).toEqual([])
+  await expect.poll(inStep).toBe(true)
+  // Undo brings the group back; the line follows the component again.
+  await page.keyboard.press('Control+z')
+  await expect.poll(inStep).toBe(true)
+  await page.keyboard.press('Control+Shift+Z')
+  await expect.poll(inStep).toBe(true)
+})

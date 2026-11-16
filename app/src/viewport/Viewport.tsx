@@ -162,7 +162,7 @@ import {
 import { CleanModifierTap } from './cleanModifierTap'
 import { MultiClickTracker } from './multiClick'
 import { highlightSetsFor, type HighlightDeps } from './highlightSets'
-import { instanceSketchUnderRay, resolveSelectableRef, selectionScopeActive, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
+import { instanceSketchUnderRay, resolveSelectableRef, selectionScopeActive, type InstanceSketchPick, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
 import { SMOOTH_BOOLEAN_NOTE, operandsHaveSmooth } from '../panels/smoothActions'
 import {
   draftRef,
@@ -3426,6 +3426,7 @@ export default function Viewport({
         },
         cameraForward: [cameraForwardV.x, cameraForwardV.y, cameraForwardV.z],
         cameraFar: camera.far,
+        memoKey: `${sceneRenderer.getRenderMode()}|${hiddenInstanceIdsRef.current.size}|${hiddenObjectIdsRef.current.size}|${sessionScopeKeysRef.current === null ? '' : [...sessionScopeKeysRef.current].join(',')}`,
         worldPerPixelAt: (p) =>
           rig.worldPerPixel(camera.position.distanceTo(new THREE.Vector3(p[0], p[1], p[2])), el.clientHeight),
         facesOcclude: sceneRenderer.getRenderMode() === 'shaded',
@@ -3822,27 +3823,33 @@ export default function Viewport({
     }
 
     /** World endpoints (xyz pairs) of the lines drawn inside each of the
-     *  leaf instances: the definition drawing the renderer shows for a
-     *  placement (`component_rendered_sketches`, through `instance_pose ×
-     *  component_sketch_frame`). A lines-only instance has no face part but
-     *  is drawn all the same, so a marquee must be able to reach it. */
+     *  leaf instances: the kernel's one walk of what a placement draws
+     *  (`instance_sketch_placements`, nested definitions and loans included),
+     *  each sketch through `instance_pose × its placement pose`. A lines-only
+     *  instance has no face part but is drawn all the same, so a marquee must
+     *  be able to reach it. */
     function instanceDrawnSegments(instances: readonly bigint[]): number[] {
       const out: number[] = []
       for (const id of instances) {
-        const comp = wasmScene.instance_def(id)
-        const pose = wasmScene.instance_pose(id)
-        if (comp === undefined || pose === undefined) continue
-        const sketches = wasmScene.component_rendered_sketches(comp)
-        if (sketches.length === 0) continue
-        const toWorld = composeAffine(
-          Array.from(wasmScene.component_sketch_frame(comp)) as unknown as Affine,
-          Array.from(pose) as unknown as Affine,
-        )
-        for (const s of sketches) {
-          const lines = wasmScene.sketch_lines(s)
-          for (let i = 0; i + 2 < lines.length; i += 3) {
-            out.push(...applyAffineToPoint(toWorld, [lines[i], lines[i + 1], lines[i + 2]]))
+        const instancePose = wasmScene.instance_pose(id)
+        if (instancePose === undefined) continue
+        const placements = wasmScene.instance_sketch_placements(id)
+        try {
+          if (placements.is_empty()) continue
+          const sketches = placements.sketches()
+          const poses = placements.poses()
+          for (let k = 0; k < sketches.length; k++) {
+            const toWorld = composeAffine(
+              Array.from(poses.subarray(k * 12, k * 12 + 12)) as unknown as Affine,
+              Array.from(instancePose) as unknown as Affine,
+            )
+            const lines = wasmScene.sketch_lines(sketches[k])
+            for (let i = 0; i + 2 < lines.length; i += 3) {
+              out.push(...applyAffineToPoint(toWorld, [lines[i], lines[i + 1], lines[i + 2]]))
+            }
           }
+        } finally {
+          placements.free()
         }
       }
       return out
@@ -3916,11 +3923,9 @@ export default function Viewport({
           return projector.meshTouchesRect(parts[i].positions, parts[i].index, parts[i].matrixWorld, rect)
         }
         const linesInside = lines.length === 0 || projector.allVerticesInRect(lines, identity, rect)
+        const linesTouch = (): boolean => lines.length > 0 && projector.segmentsTouchRect(lines, identity, rect)
         let hit = false
-        if (parts.length === 0) {
-          // Lines only: enclosed in a window, touched in a crossing.
-          hit = mode === 'window' ? linesInside : projector.segmentsTouchRect(lines, identity, rect)
-        } else if (mode === 'window') {
+        if (mode === 'window') {
           hit = linesInside && parts.every((pt, i) => {
             // Box inside the rect proves every vertex is; a box that pokes out
             // (rotated geometry overshoots its corners) still needs the scan.
@@ -3930,12 +3935,15 @@ export default function Viewport({
           })
           if (!hit) {
             // Not fully enclosed: still picked when the window swallows most
-            // of the object (WINDOW_COVERAGE_MIN of its on-screen extent). The
-            // exact extents are only worth scanning when the rect reaches the
-            // object's box at all; a part whose box corner is behind the
-            // camera has no box bounds and goes straight to the exact scan.
+            // of the object (WINDOW_COVERAGE_MIN of its on-screen extent),
+            // lines drawn inside it counted as parts of it. The exact extents
+            // are only worth scanning when the rect reaches the object's box
+            // at all; a part whose box corner is behind the camera has no box
+            // bounds and goes straight to the exact scan. A lines-only
+            // instance gets the same rule; a single line has no screen area,
+            // so it only ever matches by full enclosure.
             let reaches = true
-            if (bounds.every((b) => b !== null)) {
+            if (lines.length === 0 && bounds.every((b) => b !== null)) {
               const u = emptyScreenBounds()
               for (const b of bounds) {
                 u.minX = Math.min(u.minX, b!.minX); u.maxX = Math.max(u.maxX, b!.maxX)
@@ -3945,16 +3953,17 @@ export default function Viewport({
             }
             if (reaches) {
               const acc = emptyScreenBounds()
-              const allFront = parts.every((pt) => projector.extendScreenBounds(pt.positions, pt.matrixWorld, acc))
+              const allFront = parts.every((pt) => projector.extendScreenBounds(pt.positions, pt.matrixWorld, acc)) &&
+                (lines.length === 0 || projector.extendScreenBounds(lines, identity, acc))
               // The window must also touch the object itself: a ring or frame
               // can have most of its bounding box empty, and a window drawn
               // inside the hole is not aimed at it.
-              hit = allFront && boundsCoverage(acc, rect) >= WINDOW_COVERAGE_MIN && parts.some((_, i) => touches(i))
+              hit = allFront && boundsCoverage(acc, rect) >= WINDOW_COVERAGE_MIN &&
+                (parts.some((_, i) => touches(i)) || linesTouch())
             }
           }
         } else {
-          hit = parts.some((_, i) => touches(i)) ||
-            (lines.length > 0 && projector.segmentsTouchRect(lines, identity, rect))
+          hit = parts.some((_, i) => touches(i)) || linesTouch()
         }
         if (hit) out.push(cand.node)
       }
@@ -4016,6 +4025,12 @@ export default function Viewport({
       return snap?.kind === 'on-axis' ? null : snap
     }
 
+    /** Whether a LINE (not a fill) drawn inside a component is what a click
+     *  at `ray` would take: like a free line, it beats a guide lying along it. */
+    function componentLineUnder(ray: Ray): boolean {
+      return instanceSketchUnderRay(ray, selectionDeps())?.via === 'edge'
+    }
+
     function dispatchSelectPick(ndcX: number, ndcY: number, ray: Ray): void {
       const { snap: rawSnap } = snapService.resolve(
         ray, el.clientHeight, apertureBasis(),
@@ -4030,7 +4045,8 @@ export default function Viewport({
       // a shape was drawn to, and the line is what the click is for. The
       // guide stays selectable anywhere else along its length.
       const under = g !== null ? resolveSelectableRef(snap, ray, selectionDeps()) : null
-      const lineUnder = under !== null && (under.kind === 'draft-edge' || under.kind === 'draft-curve')
+      const lineUnder = (under !== null && (under.kind === 'draft-edge' || under.kind === 'draft-curve')) ||
+        (g !== null && componentLineUnder(ray))
       if (g !== null && !lineUnder) {
         onSelectGuideRef.current?.(g)
         scheduleRender()
@@ -4293,6 +4309,7 @@ export default function Viewport({
       )
       const under = resolveSelectableRef(snap, ray, selectionDeps())
       if (under !== null && (under.kind === 'draft-edge' || under.kind === 'draft-curve')) return null
+      if (componentLineUnder(ray)) return null
       return g
     }
 
@@ -5817,6 +5834,9 @@ export default function Viewport({
       try {
         wasmScene.ungroup(groupId)
         handleSceneRefresh()
+        // What a group hides or shows (the lines inside its components) changes
+        // with its structure, not with any solid.
+        sceneRenderer.refreshAllSketches()
       } catch (err) {
         const code = parseKernelErrorCode(err)
         const rawMsg = err instanceof Error ? err.message : String(err)
@@ -6535,7 +6555,13 @@ export default function Viewport({
             componentIds: Array.from(change.components_touched()),
           })
         }
-        if (change.sketches_touched().length > 0 || change.objects_touched().length > 0) {
+        // A group's structure or an instance's membership changes what draws
+        // (the lines inside a component hide with the group or instance
+        // holding it) with no sketch or solid touched.
+        if (
+          change.sketches_touched().length > 0 || change.objects_touched().length > 0 ||
+          change.groups_touched().length > 0 || change.instances_touched().length > 0
+        ) {
           sceneRenderer.refreshAllSketches()
         }
         if (change.guides_touched().length > 0) {
@@ -10754,15 +10780,33 @@ export default function Viewport({
       // snap while the cursor drifts off it (that "resistance" is invisible if
       // the dot just tracks the cursor). snap.direction passes through
       // unprocessed for the tooltip to resolve its own axis/color.
-      if (snap === null) {
+      // A line drawn inside a component under the cursor: the component, as a
+      // click on it selects. Asked BEFORE the snap's own object (a face the
+      // line lies on or in front of), and answered even with no snap at all:
+      // no snap names such a line, so the tip would otherwise read as bare
+      // ground while a click selects the component.
+      const placed = ((): InstanceSketchPick | null => {
+        if (
+          ray === undefined || toolController.activeToolName !== 'Select' || readOnlyRef.current ||
+          toolHasArmedGesture(activeTool) ||
+          buttons !== 0 || dragMove !== null || marqueeDrag !== null || deferredTapDrag !== null
+        ) {
+          return null
+        }
+        return instanceSketchUnderRay(ray, selectionDeps())
+      })()
+      if (snap === null && placed === null) {
         onInferenceChangeRef.current?.(null)
       } else {
-        const p = worldToPixels(new THREE.Vector3(snap.x, snap.y, snap.z))
+        const at = snap !== null
+          ? new THREE.Vector3(snap.x, snap.y, snap.z)
+          : new THREE.Vector3(placed!.point[0], placed!.point[1], placed!.point[2])
+        const p = worldToPixels(at)
         onInferenceChangeRef.current?.({
-          kind: snap.kind,
+          kind: snap !== null ? snap.kind : placed!.via === 'edge' ? 'on-edge' : 'on-face',
           screenX: p.x,
           screenY: p.y,
-          direction: snap.direction,
+          direction: snap?.direction,
           frame: getDrawingAxes(wasmScene),
           projected: activeTool.snapProjected?.() ?? false,
           // A draw tool's drawing plane (view-die design §4): the ring
@@ -10786,12 +10830,8 @@ export default function Viewport({
             ) {
               return {}
             }
-            if (snap.object !== undefined) return { object: snap.object, instance: snap.instance }
-            // A line drawn inside a component: the component, as a click
-            // on it selects.
-            if (ray === undefined) return {}
-            const placed = instanceSketchUnderRay(ray, activeInstanceOf(activeContextRef.current) ?? undefined, selectionDeps())
-            return placed === null ? {} : { instance: placed.instance }
+            if (placed !== null) return { instance: placed.instance }
+            return snap?.object !== undefined ? { object: snap.object, instance: snap.instance } : {}
           })(),
         })
       }
@@ -11301,6 +11341,58 @@ export default function Viewport({
         }
       }
 
+      // Opens what a click on `selectable` selects: an object context, a group
+      // session or a component session.
+      const enterSelectable = (selectable: NodeRef | null): void => {
+        if (selectable !== null) {
+          if (activeContextRef.current.length > 0) {
+            // Already drilled into an object/K1-K2-instance context on top
+            // of whatever session (if any) sits beneath it — the resolved
+            // selectable can only be a plain object at this depth
+            // (`resolvePickToSelectableUnscoped`'s in-context branches),
+            // so this is always a further object-context push, same as
+            // before groups/nested sessions existed.
+            onEnterContextRef.current?.(selectable)
+          } else if (selectable.kind === 'group') {
+            // A group at the current depth opens a GROUP session
+            // (docs/design/group-session.md) instead of a K1/K2 context
+            // push — reachable even while another session is ALREADY
+            // open (nesting: the kernel's LIFO stack composes group→
+            // group→…→optionally one component at the very end), unlike
+            // the old single-explode-session model where a session made
+            // any further entry unreachable.
+            runOpenGroupSession(selectable.id)
+          } else if (selectable.kind === 'instance') {
+            // A component instance opens an explode session — silently
+            // falling back to the ordinary "enter this instance's edit
+            // context" gesture (K1/K2) when the instance's pose can't
+            // support one (non-uniform scale), or a sibling
+            // placement sits inside a group. Works with a group session
+            // already open beneath it now too — only ANOTHER component
+            // frame already open (always innermost) refuses.
+            openExplodeSessionOrFallback(selectable.id, selectable)
+          } else {
+            // A plain object at the current depth: an object-context push
+            // is now allowed even while a session is open (design: it
+            // sits logically inside the innermost frame).
+            onEnterContextRef.current?.(selectable)
+          }
+        }
+      }
+
+      // A line drawn inside a component under the cursor is what the click
+      // selected (the component, or the group around it): open that, through
+      // the same branches as a solid hit, and let no solid behind the line
+      // take the gesture or send it to the empty-space pop below. The probe
+      // already leaves a line behind a face to the face.
+      if (toolController.activeToolName === 'Select') {
+        const placed = instanceSketchUnderRay(ray, selectionDeps())
+        if (placed !== null) {
+          enterSelectable(placed.ref)
+          return
+        }
+      }
+
       const pick = wasmScene.pick_face(
         ray.origin[0], ray.origin[1], ray.origin[2],
         ray.direction[0], ray.direction[1], ray.direction[2],
@@ -11316,40 +11408,7 @@ export default function Viewport({
           const selectable = resolvePickToSelectable(
             wasmScene, objectId, activeContextRef.current, instanceId, sessionScopeFor(activeContextRef.current),
           )
-          if (selectable !== null) {
-            if (activeContextRef.current.length > 0) {
-              // Already drilled into an object/K1-K2-instance context on top
-              // of whatever session (if any) sits beneath it — the resolved
-              // selectable can only be a plain object at this depth
-              // (`resolvePickToSelectableUnscoped`'s in-context branches),
-              // so this is always a further object-context push, same as
-              // before groups/nested sessions existed.
-              onEnterContextRef.current?.(selectable)
-            } else if (selectable.kind === 'group') {
-              // A group at the current depth opens a GROUP session
-              // (docs/design/group-session.md) instead of a K1/K2 context
-              // push — reachable even while another session is ALREADY
-              // open (nesting: the kernel's LIFO stack composes group→
-              // group→…→optionally one component at the very end), unlike
-              // the old single-explode-session model where a session made
-              // any further entry unreachable.
-              runOpenGroupSession(selectable.id)
-            } else if (selectable.kind === 'instance') {
-              // A component instance opens an explode session — silently
-              // falling back to the ordinary "enter this instance's edit
-              // context" gesture (K1/K2) when the instance's pose can't
-              // support one (non-uniform scale), or a sibling
-              // placement sits inside a group. Works with a group session
-              // already open beneath it now too — only ANOTHER component
-              // frame already open (always innermost) refuses.
-              openExplodeSessionOrFallback(selectable.id, selectable)
-            } else {
-              // A plain object at the current depth: an object-context push
-              // is now allowed even while a session is open (design: it
-              // sits logically inside the innermost frame).
-              onEnterContextRef.current?.(selectable)
-            }
-          }
+          enterSelectable(selectable)
         } finally {
           pick.free()
         }

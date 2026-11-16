@@ -118,17 +118,16 @@ export interface SelectScene {
     instance: bigint,
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
   ): { sketch(): bigint; edge(): bigint; depth(): number; free(): void } | undefined
-  /** The line / fill drawn inside a component under the ray, through any
-   *  shown placement (or the members of `scope`, an open instance context):
-   *  the outermost placement in scope, the sketch, the depth. */
+  /** The lines / fills drawn inside components under the ray, ranked best
+   *  first, at most one hit per shown top-level instance (parallel arrays;
+   *  `points` is three world floats per hit). Always an object, empty on a
+   *  miss. Every hit must be `free()`d. */
   pick_instance_sketch_edge?(
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
-    scope?: bigint,
-  ): { instance(): bigint; sketch(): bigint; depth(): number; free(): void } | undefined
+  ): InstanceSketchHits
   pick_instance_sketch_region?(
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
-    scope?: bigint,
-  ): { instance(): bigint; sketch(): bigint; depth(): number; free(): void } | undefined
+  ): InstanceSketchHits
   pick_face(
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
   ): { object(): bigint; face?(): bigint; instance(): bigint | undefined; depth(): number; free(): void } | undefined
@@ -146,6 +145,17 @@ export interface SelectScene {
   plane_units_json?(ctx: string): string
   pick_plane_unit?(ctx: string, ray: Float64Array, tolerance: number): string
   history_generation?(): bigint
+}
+
+/** The ranked hits of `pick_instance_sketch_edge` / `_region`. */
+export interface InstanceSketchHits {
+  len(): number
+  is_empty(): boolean
+  instances(): BigUint64Array | bigint[]
+  sketches(): BigUint64Array | bigint[]
+  depths(): Float64Array | number[]
+  points(): Float64Array | number[]
+  free(): void
 }
 
 /** Everything `resolveSelectableRef` needs from its host, so the resolution is
@@ -192,6 +202,10 @@ export interface ResolveDeps {
    *  resolves to nothing falls through to that scoped pick instead of
    *  selecting nothing. Omitted means no scope. */
   scopeActive?: boolean
+  /** Anything outside the ray and the context that changes what a component
+   *  line resolves to (render mode, hidden sets). Part of the memo key of the
+   *  per-pointer-move component-line resolution; omitted means none. */
+  memoKey?: string
 }
 
 /** The `scopeActive` dep: the kernel scopes picks wherever faces are pick
@@ -433,44 +447,89 @@ function noFarther(depth: number, other: number): boolean {
   return depth <= other + Math.max(Math.abs(other) * 1e-6, 1e-9)
 }
 
-/** The nearest depth of what else is drawn under the ray and would take the
- *  click instead: the nearest solid face and, at the top level, the nearest
- *  free drawing (the only drawing `underRay` picks there). */
-function nearestOtherDepth(ray: Ray, topLevel: boolean, deps: ResolveDeps): number {
+/** The nearest depth of the free drawing under the ray that would take the
+ *  click instead of a component's line (the top level's `underRay` picks). */
+function nearestFreeDrawingDepth(ray: Ray, deps: ResolveDeps): number {
+  if (deps.context.length !== 0) return Infinity
   const args = [ray.origin[0], ray.origin[1], ray.origin[2], ray.direction[0], ray.direction[1], ray.direction[2]] as const
   let nearest = Infinity
-  const take = (p: { depth(): number; free(): void } | undefined): void => {
-    if (p === undefined) return
+  for (const p of [deps.scene.pick_sketch_edge(...args), deps.scene.pick_sketch_region(...args)]) {
+    if (p === undefined) continue
     try {
       nearest = Math.min(nearest, p.depth())
     } finally {
       p.free()
     }
   }
-  take(deps.scene.pick_face(...args))
-  if (topLevel) {
-    take(deps.scene.pick_sketch_edge(...args))
-    take(deps.scene.pick_sketch_region(...args))
-  }
   return nearest
 }
 
 /**
- * A line or fill drawn inside a component, under the ray: the placement it is
- * seen through (`instance`, the outermost in scope — a top-level instance, or
- * a member of the open instance context `scope`) and the node a click on it
- * selects (`ref`, by `deps.resolveInstance`). The line comes before the fill,
- * as everywhere else. Taken only where it is drawn (`scopedSketchVisible`) and
- * when nothing else under the ray is nearer — a solid in front, or a free
- * drawing in front, keeps the click. Null when there is no such drawing, the
- * host has no instance-sketch picks, or the placement resolves to nothing
- * selectable here.
+ * Whether no solid face hides the world point `point` of a component's line
+ * from the cursor. The nearest face under the ray keeps the click in every
+ * render mode (X-ray included), but a line lying ON that face is the point of
+ * the click, and on a face seen at a grazing angle the line's nearest point
+ * is off the ray, so comparing ray depths misjudges it. So the test is made
+ * against the face's own surface: the ray moved to pass through `point` meets
+ * the face plane exactly where the line lies when it lies on it. The line
+ * wins when it is no deeper than the face there (on it, or in front), or no
+ * deeper than the face on the cursor's own ray.
  */
-export function instanceSketchUnderRay(
-  ray: Ray,
-  scope: bigint | undefined,
-  deps: ResolveDeps,
-): { instance: bigint; ref: NodeRef } | null {
+function lineNotBehindFace(point: readonly [number, number, number], ray: Ray, deps: ResolveDeps): boolean {
+  const args = (r: Ray) => [r.origin[0], r.origin[1], r.origin[2], r.direction[0], r.direction[1], r.direction[2]] as const
+  const cursorPick = deps.scene.pick_face(...args(ray))
+  if (cursorPick === undefined) return true
+  let cursorDepth: number
+  try {
+    cursorDepth = cursorPick.depth()
+  } finally {
+    cursorPick.free()
+  }
+  const [dx, dy, dz] = ray.direction
+  const len = Math.hypot(dx, dy, dz)
+  if (!(len > 0)) return true
+  const through = rayThrough(ray, point)
+  // Where the point sits along the unit ray.
+  const at = Math.hypot(point[0] - through.origin[0], point[1] - through.origin[1], point[2] - through.origin[2])
+  if (noFarther(at, cursorDepth)) return true
+  const columnPick = deps.scene.pick_face(...args(through))
+  if (columnPick === undefined) return true
+  try {
+    return noFarther(at, columnPick.depth())
+  } finally {
+    columnPick.free()
+  }
+}
+
+/** `point` is the world point of the drawing the ray found. */
+export type InstanceSketchPick = {
+  instance: bigint
+  ref: NodeRef
+  via: 'edge' | 'region'
+  point: readonly [number, number, number]
+}
+const instanceSketchMemo: {
+  key: string | null
+  context: readonly NodeRef[] | null
+  scene: unknown
+  value: InstanceSketchPick | null
+} = { key: null, context: null, scene: null, value: null }
+
+/**
+ * A line or fill drawn inside a component, under the ray: the placement it is
+ * seen through (`instance`, the top-level placement) and the node a click on
+ * it selects (`ref`, by `deps.resolveInstance`); `via` says whether it was
+ * the line or the fill. The kernel ranks the hits, one per shown instance,
+ * lines before fills as everywhere else; this takes the first that is drawn
+ * (`scopedSketchVisible`), not behind a face (`lineNotBehindFace`) or a free
+ * drawing, and resolves to something selectable in the active context — a
+ * hit on an out-of-scope placement resolves to nothing and never masks a
+ * hit in scope. Inside an instance context there is no probe at all: its
+ * own members are picked by the context's scoped probes. Null when none
+ * qualifies or the host has no instance-sketch picks. One resolution per
+ * ray: hover highlight, tip and click share it.
+ */
+export function instanceSketchUnderRay(ray: Ray, deps: ResolveDeps): InstanceSketchPick | null {
   const scene = deps.scene
   if (
     scene.pick_instance_sketch_edge === undefined ||
@@ -479,24 +538,54 @@ export function instanceSketchUnderRay(
   ) {
     return null
   }
+  const deepest = deps.context.length === 0 ? undefined : deps.context[deps.context.length - 1]
+  if (deepest?.kind === 'instance') return null
+  const key = [
+    ...ray.origin, ...ray.direction, deps.cameraFar, deps.memoKey ?? '',
+    scene.history_generation?.()?.toString() ?? '',
+  ].join(',')
+  if (instanceSketchMemo.key === key && instanceSketchMemo.context === deps.context && instanceSketchMemo.scene === scene) {
+    return instanceSketchMemo.value
+  }
+  const value = resolveInstanceSketch(ray, deps, scene.pick_instance_sketch_edge, scene.pick_instance_sketch_region, deps.resolveInstance)
+  instanceSketchMemo.key = key
+  instanceSketchMemo.context = deps.context
+  instanceSketchMemo.scene = scene
+  instanceSketchMemo.value = value
+  return value
+}
+
+function resolveInstanceSketch(
+  ray: Ray,
+  deps: ResolveDeps,
+  edges: NonNullable<SelectScene['pick_instance_sketch_edge']>,
+  regions: NonNullable<SelectScene['pick_instance_sketch_region']>,
+  resolveInstance: (instanceId: bigint) => NodeRef | null,
+): InstanceSketchPick | null {
   const args = [ray.origin[0], ray.origin[1], ray.origin[2], ray.direction[0], ray.direction[1], ray.direction[2]] as const
-  let others: number | undefined
-  for (const probe of [scene.pick_instance_sketch_edge, scene.pick_instance_sketch_region]) {
-    const hit = probe.call(scene, ...args, scope)
-    if (hit === undefined) continue
-    let instance: bigint
-    let depth: number
+  let free: number | undefined
+  const probes: ['edge' | 'region', typeof edges][] = [['edge', edges], ['region', regions]]
+  for (const [via, probe] of probes) {
+    const hits = probe.call(deps.scene, ...args) as InstanceSketchHits | undefined
+    if (hits === undefined) continue
+    let found: Omit<InstanceSketchPick, 'via'> | null = null
     try {
-      instance = hit.instance()
-      depth = hit.depth()
+      const instances = hits.instances()
+      const depths = hits.depths()
+      const points = hits.points()
+      for (let i = 0; i < hits.len() && found === null; i++) {
+        if (!scopedSketchVisible(depths[i], ray, deps)) continue
+        free ??= nearestFreeDrawingDepth(ray, deps)
+        if (!noFarther(depths[i], free)) continue
+        const point: [number, number, number] = [points[3 * i], points[3 * i + 1], points[3 * i + 2]]
+        if (!lineNotBehindFace(point, ray, deps)) continue
+        const ref = resolveInstance(instances[i])
+        if (ref !== null) found = { instance: instances[i], ref, point }
+      }
     } finally {
-      hit.free()
+      hits.free()
     }
-    if (!scopedSketchVisible(depth, ray, deps)) continue
-    others ??= nearestOtherDepth(ray, deps.context.length === 0, deps)
-    if (!noFarther(depth, others)) continue
-    const ref = deps.resolveInstance(instance)
-    if (ref !== null) return { instance, ref }
+    if (found !== null) return { ...found, via }
   }
   return null
 }
@@ -569,7 +658,7 @@ export function resolveSelectableRef(
   // A line or fill drawn inside a closed component selects the component,
   // as a click on any of its entities does in SketchUp. The inference index
   // leaves definition drawing out, so no snap names it: ask the kernel.
-  const placed = instanceSketchUnderRay(ray, activeInstance, deps)
+  const placed = instanceSketchUnderRay(ray, deps)
   if (placed !== null) return placed.ref
   const pick = classifySnapPick(snap)
   switch (pick.kind) {
