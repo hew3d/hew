@@ -772,11 +772,18 @@ fn circles_over_two_imprints_on_a_lattice_match_the_ground() {
 // ------------------------------------ transforms that cannot be reopened
 
 #[test]
-fn a_near_singular_scale_whose_plane_cannot_map_refuses_typed() {
-    // A 1 km cube squashed by (1e6, 1e-7, 1e-6): invertible (det 1e-7) and
-    // every face's ring keeps a reopenable area, but a unit triangle on an
-    // x-facing plane maps to twice-area 1e-13 — its plane has no direction.
-    // Refused before any vertex moves, never a panic.
+fn a_near_singular_squash_maps_the_solid_and_refuses_the_sketch_typed() {
+    // A 1 km cube squashed by (1e6, 1e-9, 1e-8): invertible (det 1e-11)
+    // and every face's ring keeps a reopenable area, but the inverse-
+    // transpose map of an x-facing normal comes out 1e-17 long — that
+    // plane has no direction. Each face takes the refit of its mapped ring
+    // instead, which exists and holds its points: the squash is accepted
+    // and valid. Only a face that neither plane fits is refused typed,
+    // before any vertex moves, never a panic (`face_plane_specs::
+    // a_plane_the_map_squashes_to_no_direction_falls_back_to_the_refit`).
+    // (The squash (1e6, 1e-7, 1e-6) is kept either way.) A sketch on an
+    // x-facing plane has no ring to fall back to, and the same squash
+    // refuses it `Singular`, leaving it untouched.
     let mut doc = Document::new();
     let s = doc.add_sketch(ground());
     {
@@ -793,10 +800,20 @@ fn a_near_singular_scale_whose_plane_cannot_map_refuses_typed() {
     }
     let region = doc.extrudable_regions(s).expect("regions")[0];
     let (id, _) = doc.extrude_region(s, region, 1000.0).expect("extrude");
-    let xf = Transform::scale(Vec3::new(1e6, 1e-7, 1e-6));
-    let mut obj = doc.object(id).expect("object").clone();
-    assert_eq!(obj.apply_transform(&xf), Err(TransformError::Singular));
-    assert!(objects_equivalent(&obj, doc.object(id).expect("object")));
+    let xf = Transform::scale(Vec3::new(1e6, 1e-9, 1e-8));
+    let obj = doc.object(id).expect("object").clone();
+    let mut mapped = obj.clone();
+    mapped
+        .apply_transform(&xf)
+        .expect("derived planes map through their rings");
+    mapped.validate().expect("valid");
+    let kept = Transform::scale(Vec3::new(1e6, 1e-7, 1e-6));
+    let mut squashed = obj.clone();
+    squashed.apply_transform(&kept).expect("kept now");
+    squashed.validate().expect("valid");
+    let bytes = squashed.encode(&|_| 0);
+    let back = Object::decode(&bytes, &|_| None).expect("reopens");
+    assert_eq!(back.encode(&|_| 0), bytes, "reopens identically");
     let mut sk = Sketch::on_plane(
         Plane::from_polygon(&[
             Point3::new(0.0, 0.0, 0.0),
@@ -808,8 +825,10 @@ fn a_near_singular_scale_whose_plane_cannot_map_refuses_typed() {
     sk.add_segment(Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 1000.0, 0.0))
         .expect("segment");
     let plane = sk.plane();
+    let mut sk_kept = sk.clone();
     assert_eq!(sk.apply_transform(&xf), Err(TransformError::Singular));
     assert_eq!(sk.plane(), plane, "the sketch is untouched");
+    sk_kept.apply_transform(&kept).expect("kept now");
 }
 
 /// A document with one 10 mm cube.

@@ -172,7 +172,7 @@ export interface ComponentCreateResult {
 /**
  * `hew.component.explode` (v1) — Bake an instance into world geometry.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, unknown_instance, cannot_explode_reflected
+ * Refusals: unknown_entity, unknown_instance, cannot_explode_reflected, face_not_flat
  */
 export interface ComponentExplodeParams {
   instance: string
@@ -185,7 +185,7 @@ export interface ComponentExplodeResult {
 /**
  * `hew.component.flip_instance` (v1) — Mirror one world instance across one of its definition's local axes.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity
+ * Refusals: unknown_entity, face_not_flat
  */
 export interface ComponentFlipInstanceParams {
   /** the definition-local axis to mirror across (the plane normal to it, through the local origin) */
@@ -256,7 +256,7 @@ export interface ComponentMakeUniqueResult {
 /**
  * `hew.component.place` (v1) — Place an instance of a definition at a pose.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, unknown_component, singular
+ * Refusals: unknown_entity, unknown_component, singular, face_not_flat
  */
 export interface ComponentPlaceParams {
   component: string
@@ -286,7 +286,7 @@ export interface ComponentPromoteResult {
 /**
  * `hew.component.rebase` (v1) — Re-express a definition in a new frame; every placement is compensated, so nothing moves on screen.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, invalid_frame, rebase_during_session
+ * Refusals: unknown_entity, invalid_frame, rebase_during_session, face_not_flat
  */
 export interface ComponentRebaseParams {
   /** a definition ("cmp_…"), or an instance ("ins_…") meaning its definition */
@@ -308,7 +308,7 @@ export interface ComponentRebaseResult {
 /**
  * `hew.compute.boolean` (v1) — Union, subtract, or intersect two solids without touching the document; answers the result's measure, mesh, topology, or shell count.
  * Tier: Standard · Class: read-only · Served: kernel
- * Refusals: unknown_entity, unknown_occurrence, not_an_object, mirrored_pose, compute_busy, compute_too_large, mesh_too_large, operand_not_solid, degenerate_contact, nothing_removed, singular_transform
+ * Refusals: unknown_entity, unknown_occurrence, not_an_object, mirrored_pose, compute_busy, compute_too_large, mesh_too_large, face_not_flat, operand_not_solid, degenerate_contact, nothing_removed, singular_transform
  */
 export interface ComputeBooleanParams {
   /** SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}} */
@@ -333,7 +333,7 @@ export interface ComputeBooleanResult {
 /**
  * `hew.compute.measure` (v1) — Volume, surface area, bounding box, and centroid of a solid.
  * Tier: Standard · Class: read-only · Served: kernel
- * Refusals: unknown_entity, unknown_occurrence, not_an_object, mirrored_pose, compute_busy, compute_too_large
+ * Refusals: unknown_entity, unknown_occurrence, not_an_object, mirrored_pose, compute_busy, compute_too_large, face_not_flat
  */
 export interface ComputeMeasureParams {
   /** SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}} */
@@ -408,7 +408,7 @@ export interface ComputeProjectResult {
 /**
  * `hew.compute.shells` (v1) — Split a solid into its connected pieces without touching the document.
  * Tier: Standard · Class: read-only · Served: kernel
- * Refusals: unknown_entity, unknown_occurrence, not_an_object, mirrored_pose, compute_busy, compute_too_large, mesh_too_large
+ * Refusals: unknown_entity, unknown_occurrence, not_an_object, mirrored_pose, compute_busy, compute_too_large, mesh_too_large, face_not_flat
  */
 export interface ComputeShellsParams {
   /** SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}} */
@@ -425,7 +425,7 @@ export interface ComputeShellsResult {
 /**
  * `hew.compute.slice` (v1) — Cut a solid by a plane without touching the document; answers both pieces.
  * Tier: Standard · Class: read-only · Served: kernel
- * Refusals: unknown_entity, unknown_occurrence, not_an_object, mirrored_pose, compute_busy, compute_too_large, mesh_too_large, not_solid, plane_misses_solid, degenerate
+ * Refusals: unknown_entity, unknown_occurrence, not_an_object, mirrored_pose, compute_busy, compute_too_large, mesh_too_large, face_not_flat, not_solid, plane_misses_solid, degenerate
  */
 export interface ComputeSliceParams {
   /** world coordinates */
@@ -465,7 +465,7 @@ export interface ComputeStretchResult {
 /**
  * `hew.context.enter` (v1) — Open a group/component editing frame (transaction-balanced only).
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, explode_session_open, explode_session_nested_group, explode_session_pose_unsupported, explode_session_grouped_instance, unknown_group, unknown_instance
+ * Refusals: unknown_entity, explode_session_open, explode_session_nested_group, explode_session_pose_unsupported, explode_session_grouped_instance, unknown_group, unknown_instance, face_not_flat
  */
 export interface ContextEnterParams {
   id: string
@@ -476,7 +476,7 @@ export interface ContextEnterResult {}
 /**
  * `hew.context.exit` (v1) — Close the innermost frame this envelope opened.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: explode_session_not_open
+ * Refusals: explode_session_not_open, face_not_flat
  */
 export interface ContextExitParams {}
 
@@ -721,7 +721,7 @@ export interface EntityDeleteResult {}
 /**
  * `hew.entity.flip` (v1) — Mirror a selection across a plane (Flip Along an axis through its center, the origin, or a point; or a given plane), in place or as one mirrored copy that links by default.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, sketch_copy_unsupported, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_occurrence, unknown_component, explode_session_scope, component_expansion_exceeded, too_many_occurrences, singular, degenerate_axis, degenerate_texture_frame
+ * Refusals: unknown_entity, sketch_copy_unsupported, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_occurrence, unknown_component, explode_session_scope, component_expansion_exceeded, too_many_occurrences, singular, degenerate_axis, degenerate_texture_frame, face_not_flat
  */
 export interface EntityFlipParams {
   /** where an axis plane passes: center (the default, the selection's world bounding-box center), origin, or a point */
@@ -746,7 +746,7 @@ export interface EntityFlipResult {
 /**
  * `hew.entity.move` (v1) — Translate (with copy/array forms) by vector or from→to points; ids may be paths to members of one definition, moved in world terms with every placement following.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, mixed_selection_unsupported, sketch_copy_unsupported, array_count_too_large, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_occurrence, unknown_component, explode_session_scope, component_expansion_exceeded
+ * Refusals: unknown_entity, mixed_selection_unsupported, sketch_copy_unsupported, array_count_too_large, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_occurrence, unknown_component, explode_session_scope, component_expansion_exceeded, face_not_flat
  */
 export interface EntityMoveParams {
   copy?: { count?: number; grid?: { count: number; step: [number, number, number] }[]; linked?: boolean }
@@ -779,7 +779,7 @@ export interface EntityRenameResult {}
 /**
  * `hew.entity.rotate` (v1) — Rotate about a pivot and axis by an angle; ids may be paths to members of one definition, turned in world terms with every placement following.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, mixed_selection_unsupported, sketch_copy_unsupported, array_count_too_large, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_occurrence, unknown_component, explode_session_scope, component_expansion_exceeded
+ * Refusals: unknown_entity, mixed_selection_unsupported, sketch_copy_unsupported, array_count_too_large, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_occurrence, unknown_component, explode_session_scope, component_expansion_exceeded, face_not_flat
  */
 export interface EntityRotateParams {
   /** radians, right-handed about axis */
@@ -800,7 +800,7 @@ export interface EntityRotateResult {
 /**
  * `hew.entity.scale` (v1) — Scale about an anchor with per-axis factors; a negative factor mirrors. ids may be paths to members of one definition, scaled in world terms with every placement following.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, mixed_selection_unsupported, empty_selection, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_occurrence, unknown_component, explode_session_scope
+ * Refusals: unknown_entity, mixed_selection_unsupported, empty_selection, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_occurrence, unknown_component, explode_session_scope, face_not_flat
  */
 export interface EntityScaleParams {
   anchor: UnspecifiedShape
@@ -1042,7 +1042,7 @@ export interface LibraryDescribeResult {
 /**
  * `hew.library.insert` (v1) — Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement; a material item goes into the palette instead, recording no undo entry (§6.4).
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: host_capability_missing, unknown_library_item, load_failed, component_expansion_exceeded, singular, degenerate_axis, explode_session_scope, profile_not_insertable
+ * Refusals: host_capability_missing, unknown_library_item, load_failed, component_expansion_exceeded, singular, degenerate_axis, explode_session_scope, profile_not_insertable, face_not_flat
  */
 export interface LibraryInsertParams {
   /** a translation applied to the item's world roots; identity when omitted */
@@ -1106,7 +1106,7 @@ export interface LibraryRemoveResult {
 /**
  * `hew.library.save` (v1) — Save a selection, one material, or the whole document to the library. Records no undo entry (§6.4).
  * Tier: Standard · Class: read-only · Served: kernel
- * Refusals: host_capability_missing, unknown_entity, empty_component, duplicate_member, unknown_object, unknown_group, unknown_instance, explode_session_scope, save_failed, unknown_library_item, invalid_profile, locator_missed, ambiguous_locator
+ * Refusals: host_capability_missing, unknown_entity, empty_component, duplicate_member, unknown_object, unknown_group, unknown_instance, explode_session_scope, face_not_flat, save_failed, unknown_library_item, invalid_profile, locator_missed, ambiguous_locator
  * Preview parameters: profile_chain, from Fillet and Chamfer (`fillet`). A production build refuses them `preview_only`.
  * Preview values of category: profile, from Fillet and Chamfer (`fillet`). A production build neither accepts nor reports them.
  */
@@ -2315,7 +2315,7 @@ export interface SolidImprintsResult {
 /**
  * `hew.solid.intersect` (v1) — Boolean intersection of two or more solids: the material in all of them.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, non_planar_input, degenerate_input, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, would_unlink
+ * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, non_planar_input, degenerate_input, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, face_not_flat, would_unlink
  */
 export interface SolidIntersectParams {
   /** a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows */
@@ -2666,7 +2666,7 @@ export interface SolidSoftenResult {
 /**
  * `hew.solid.subtract` (v1) — Boolean subtraction: the first solid minus every other one; a may be a path to a definition member, cut through that placement so every placement shows the cut, by a world object or a transient prism or box.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, non_planar_input, degenerate_input, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, nothing_removed, mirrored_pose, compute_too_large
+ * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, non_planar_input, degenerate_input, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, face_not_flat, nothing_removed, mirrored_pose, compute_too_large
  */
 export interface SolidSubtractParams {
   /** a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows */
@@ -2709,7 +2709,7 @@ export interface SolidThickenResult {
 /**
  * `hew.solid.union` (v1) — Boolean union of two or more solids: the material in any of them.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, non_planar_input, degenerate_input, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, would_unlink
+ * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, non_planar_input, degenerate_input, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, face_not_flat, would_unlink
  */
 export interface SolidUnionParams {
   /** a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows */

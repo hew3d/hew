@@ -273,8 +273,7 @@ impl Object {
                 .map(|v| v.as_slice())
                 .unwrap_or(&no_holes);
 
-            // Plane is fit from the outer loop; planarity is checked for the
-            // outer loop AND every hole vertex (a hole must lie in the face).
+            // Plane is fit from the outer loop.
             let pts: Vec<Point3> = polygon
                 .iter()
                 .map(|&i| {
@@ -290,7 +289,7 @@ impl Object {
             // An imported face may be a ring smaller than the area cutoff
             // (D-70): the plane the file format accepts for it is its plane.
             let imported = lenient;
-            let plane = Plane::from_polygon(&pts)
+            let fit = Plane::from_polygon(&pts)
                 .or_else(|e| {
                     if imported {
                         crate::serialize::outer_ring_plane(&pts, true)
@@ -300,20 +299,31 @@ impl Object {
                 })
                 .map_err(|_| TopologyError::DegenerateFace { face: face_index })?;
             // The plane a saved file recomputes for this face must exist too
-            // (the validator holds every live face to it).
-            if crate::serialize::outer_ring_plane(&pts, imported).is_err() {
-                return Err(TopologyError::DegenerateFace { face: face_index });
-            }
-            let on_plane = |i: usize| {
-                positions
-                    .get(i)
-                    .is_some_and(|&p| plane.signed_distance(p).abs() <= plane_tol)
+            // (the validator holds every live face to it). It is the face's
+            // plane whenever every point fits it, so a file need not store
+            // it (HEW_FILE_FORMAT.md §3.1); else the fit in ring order, as
+            // a face far from the origin can need
+            // ([`crate::serialize::own_ring_plane`]).
+            let refit = crate::serialize::outer_ring_plane(&pts, imported)
+                .map_err(|_| TopologyError::DegenerateFace { face: face_index })?;
+            let fits = |plane: &Plane| {
+                pts.iter()
+                    .all(|&p| plane.signed_distance(p).abs() <= plane_tol)
+                    && face_holes.iter().flatten().all(|&i| {
+                        positions
+                            .get(i)
+                            .is_some_and(|&p| plane.signed_distance(p).abs() <= plane_tol)
+                    })
             };
-            let outer_planar = polygon.iter().all(|&i| on_plane(i));
-            let holes_planar = face_holes.iter().flatten().all(|&i| on_plane(i));
-            if !outer_planar || !holes_planar {
+            // Planarity is checked for the outer loop AND every hole vertex
+            // (a hole must lie in the face).
+            let plane = if fits(&refit) {
+                refit
+            } else if fits(&fit) {
+                fit
+            } else {
                 return Err(TopologyError::NonPlanarFace { face: face_index });
-            }
+            };
             // Holes are disjoint (`TopologyError::HolesOverlap`): checked
             // here, always, so an import carrying overlapping holes is
             // refused typed, never built (the validator holds only native

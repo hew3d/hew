@@ -304,6 +304,8 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`The rotation axis needs two distinct points. Pick a second point further from the first.`,
   DegenerateTextureFrame:
     msg`That would stretch a picture or texture on the object so far it couldn't stay on its face, so it was refused. Try a smaller stretch.`,
+  FaceNotFlat:
+    msg`That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.`,
   InvalidRescaleFactor:
     msg`That resize factor isn't valid. Pick two points that aren't on top of each other and type a positive distance.`,
 

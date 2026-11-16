@@ -48,6 +48,9 @@ struct FaceAt {
     crease: usize,
     /// The v10 blend flag byte (absent below v10).
     blend: usize,
+    /// The v11 plane flag byte, right after the hole loops (absent below
+    /// v11).
+    plane: Option<usize>,
     end: usize,
 }
 
@@ -89,6 +92,11 @@ fn walk(b: &[u8]) -> (usize, Vec<FaceAt>) {
             let j = u32_at(p);
             p += 4 + 4 * j;
             edges += j;
+        }
+        // the face's plane (v11)
+        let plane = (version >= 11).then_some(p);
+        if version >= 11 {
+            p += 1 + if b[p] == 1 { 32 } else { 0 };
         }
         // soft
         let any = b[p];
@@ -142,6 +150,7 @@ fn walk(b: &[u8]) -> (usize, Vec<FaceAt>) {
             attrs,
             crease,
             blend,
+            plane,
             end: p,
         });
     }
@@ -149,10 +158,10 @@ fn walk(b: &[u8]) -> (usize, Vec<FaceAt>) {
     (header, faces)
 }
 
-/// A v10 buffer with no v9 or v10 content, rewritten as the v8 buffer the
-/// previous encoders wrote: header version 8, and each face's four trailing
-/// zero bytes (no face or edge dictionary, no creases, no blend tag)
-/// stripped.
+/// A current buffer with no v9, v10 or v11 content, rewritten as the v8
+/// buffer the previous encoders wrote: header version 8, each face's plane
+/// flag (no stored plane) and its four trailing zero bytes (no face or edge
+/// dictionary, no creases, no blend tag) stripped.
 fn as_v8(b: &[u8]) -> Vec<u8> {
     let (header, faces) = walk(b);
     let mut out = b[..header].to_vec();
@@ -165,7 +174,14 @@ fn as_v8(b: &[u8]) -> Vec<u8> {
             "no v9 or v10 content"
         );
         assert_eq!(f.end, f.attrs + 4);
-        out.extend_from_slice(&b[f.start..f.attrs]);
+        match f.plane {
+            Some(at) => {
+                assert_eq!(b[at], 0, "no stored plane");
+                out.extend_from_slice(&b[f.start..at]);
+                out.extend_from_slice(&b[at + 1..f.attrs]);
+            }
+            None => out.extend_from_slice(&b[f.start..f.attrs]),
+        }
     }
     out
 }
@@ -440,8 +456,12 @@ fn crease_with_soft_fails_validation() {
     }
 }
 
-/// The soft-block "any" byte of face `f` (right after its hole loops).
+/// The soft-block "any" byte of face `f` (right after its hole loops, and
+/// from v11 after its plane flag).
 fn soft_any_offset(b: &[u8], f: &FaceAt) -> usize {
+    if let Some(at) = f.plane {
+        return at + 1 + if b[at] == 1 { 32 } else { 0 };
+    }
     let u32_at = |p: usize| u32::from_le_bytes(b[p..p + 4].try_into().unwrap()) as usize;
     let mut p = f.kind;
     p += 1 + 8 * match b[f.kind] {
@@ -626,7 +646,7 @@ fn v22_document_saves_byte_identical_sketch_entries() {
     let doc = Document::load(&v8_file).unwrap();
     let before = manifest_of(&v8_file);
     let after = manifest_of(&doc.save());
-    assert_eq!(after["format_version"], 31);
+    assert_eq!(after["format_version"], 32);
     assert_eq!(after["sketches"], before["sketches"]);
 }
 
@@ -638,7 +658,7 @@ fn real_v8_file_loads_and_resaves() {
     assert_eq!(manifest_of(&v8_file)["geometry_version"], 8);
     let doc = Document::load(&v8_file).unwrap();
     let resaved = doc.save();
-    assert_eq!(manifest_of(&resaved)["geometry_version"], 10);
+    assert_eq!(manifest_of(&resaved)["geometry_version"], 11);
     let again = Document::load(&resaved).unwrap();
     let ids = doc.visible_object_ids();
     assert_eq!(ids.len(), again.visible_object_ids().len());

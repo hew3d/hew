@@ -495,8 +495,23 @@ pub fn diameter(points: &[Point3]) -> f64 {
     (b - a).length()
 }
 
+/// Whether an object held to planarity tolerance `tol` is imported
+/// geometry or built from it ([`Object::planarity_tol`]): native geometry
+/// is held to [`crate::tol::PLANE_DIST`], imports to the looser
+/// [`crate::tol::IMPORT_PLANE_DIST`].
+pub(crate) fn imported_tol(tol: f64) -> bool {
+    tol > crate::tol::PLANE_DIST
+}
+
 /// The points' Newell plane through their centroid, when every point lies
 /// within `tol` of it.
+///
+/// A ring too small in area for a normal of its own still has a plane by
+/// the kernel's face rule when it is wide enough ([`Plane::from_polygon`]'s
+/// width branch), so a rim a face could close gets one. Imported geometry
+/// (held to more than [`crate::tol::PLANE_DIST`], see [`imported_tol`]) keeps the
+/// area floor alone, the rule the importers heal with, so its health
+/// reads exactly as it always has.
 pub(crate) fn planar_fit(points: &[Point3], tol: f64) -> Option<Plane> {
     if points.len() < 3 {
         return None;
@@ -504,7 +519,11 @@ pub(crate) fn planar_fit(points: &[Point3], tol: f64) -> Option<Plane> {
     let n = newell(points);
     let c = points.iter().fold(Vec3::ZERO, |c, p| c + p.to_vec());
     let centroid = Point3::ORIGIN + c * (1.0 / points.len() as f64);
-    let plane = Plane::from_point_normal(centroid, n.normalized().ok()?).ok()?;
+    let plane = match n.normalized() {
+        Ok(unit) => Plane::from_point_normal(centroid, unit).ok()?,
+        Err(_) if !imported_tol(tol) => Plane::from_polygon(points).ok()?,
+        Err(_) => return None,
+    };
     points
         .iter()
         .all(|&p| plane.signed_distance(p).abs() <= tol)
@@ -1017,6 +1036,52 @@ mod tests {
             .collect();
         let obj = Object::from_polygons(&positions, &[vec![0, 1, 2, 3]]).unwrap();
         assert_eq!(diagnose(&obj).verdict, Verdict::FlatSheet { holes: 0 });
+    }
+
+    /// A rim under the area floor but wide enough for the kernel's face
+    /// rule (1 µm by 30 nm: twice the area 6e-14 m², width about 58 nm)
+    /// is flat, as the face that closes it would be: an open box with
+    /// that opening caps, and a sheet that size is a flat sheet. Imported
+    /// geometry keeps the area floor, so the same box imported reads as
+    /// it always has.
+    #[test]
+    fn a_rim_in_the_width_band_has_a_plane() {
+        let size = [1e-6, 3e-8, 1e-6];
+        let pts = [
+            p(0.0, 0.0, 0.0),
+            p(size[0], 0.0, 0.0),
+            p(size[0], size[1], 0.0),
+            p(0.0, size[1], 0.0),
+        ];
+        assert!(newell(&pts).length() < crate::tol::NORMALIZE_MIN_LENGTH);
+        assert!(Plane::from_polygon(&pts).is_ok(), "the face rule keeps it");
+
+        let obj = open_box(size, 1, &|v| v, Point3::ORIGIN);
+        let d = diagnose(&obj);
+        assert_eq!(d.rims.len(), 1);
+        assert!(d.rims[0].plane.is_some(), "the opening is flat");
+        assert_eq!(d.verdict, Verdict::Cappable);
+        let mut capped = obj.clone();
+        capped.cap_rims(&[0]).expect("the opening caps");
+        assert_eq!(capped.watertight, WatertightState::Watertight);
+
+        let sheet = Object::from_polygons(&pts, &[vec![0, 1, 2, 3]]).unwrap();
+        let d = diagnose(&sheet);
+        assert!(d.rims[0].plane.is_some());
+        assert_eq!(d.verdict, Verdict::FlatSheet { holes: 0 });
+        assert_ne!(
+            sheet.clone().cap_rims(&[0]).unwrap_err(),
+            crate::repair::RepairError::RimNotPlanar
+        );
+
+        let mut imported = obj;
+        imported.planarity_tol = crate::tol::IMPORT_PLANE_DIST;
+        let d = diagnose(&imported);
+        assert!(d.rims[0].plane.is_none(), "imports keep the area floor");
+        assert_eq!(
+            imported.cap_rims(&[0]).unwrap_err(),
+            crate::repair::RepairError::RimNotPlanar
+        );
     }
 
     #[test]

@@ -344,6 +344,7 @@ pub fn build_prism(plane: Plane, rings: &[Vec<Point3>], distance: f64) -> Result
         return Err(params_err("distance must be a finite, non-zero number"));
     }
     too_large(prism_triangle_bound(rings), COMPUTE_MAX_TRIANGLES)?;
+    check_prism_planes_finite(plane, rings, distance)?;
     let (mut doc, s, region) = scratch_region(plane, rings)?;
     let (object, _) = doc.extrude_region(s, region, distance)?;
     let object = doc
@@ -352,6 +353,45 @@ pub fn build_prism(plane: Plane, rings: &[Vec<Point3>], distance: f64) -> Result
         .ok_or_else(|| CmdError::Internal("the extruded prism vanished".into()))?;
     check_finite_measure(&object)?;
     Ok(object)
+}
+
+/// `-32602` when a face of the prism `rings` swept by `distance` along
+/// `plane`'s normal would be too large for its plane to be computed: the
+/// Newell vector of a cap or of a side quad (twice its area, in squared
+/// meters) overflows its length at about 1e154. The kernel would answer
+/// that with a typed refusal once its plane check fails, but at this size
+/// the honest report is the one [`check_finite_measure`] gives, so it is
+/// made here, before anything is built.
+fn check_prism_planes_finite(
+    plane: Plane,
+    rings: &[Vec<Point3>],
+    distance: f64,
+) -> Result<(), CmdError> {
+    let lift = plane.normal() * distance;
+    let too_big = |face: &[Point3]| {
+        let mut n = Vec3::ZERO;
+        for (i, &p) in face.iter().enumerate() {
+            let q = face[(i + 1) % face.len()];
+            n.x += (p.y - q.y) * (p.z + q.z);
+            n.y += (p.z - q.z) * (p.x + q.x);
+            n.z += (p.x - q.x) * (p.y + q.y);
+        }
+        !n.length().is_finite()
+    };
+    for ring in rings {
+        let top: Vec<Point3> = ring.iter().map(|&p| p + lift).collect();
+        let mut too_large = too_big(ring) || too_big(&top);
+        for (i, &a) in ring.iter().enumerate() {
+            let b = ring[(i + 1) % ring.len()];
+            too_large = too_large || too_big(&[a, b, b + lift, a + lift]);
+        }
+        if too_large {
+            return Err(params_err(
+                "that solid is too large to measure: its area or volume is past the largest number there is; scale it down",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `-32602` unless an Object's area, volume, and bounding box are finite:

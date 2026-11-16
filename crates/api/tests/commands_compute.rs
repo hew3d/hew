@@ -964,3 +964,21 @@ fn a_prism_cutter_machines_every_placement_in_one_call() {
     let r = s.call("hew.solid.subtract", json!({ "a": w, "b": unit_box() }));
     assert_eq!(r["error"]["code"], -32602, "{r}");
 }
+
+/// The overflow guard sits where a face's Newell vector stops being
+/// representable. A unit square swept by `d` has side quads of Newell length
+/// `2d`, whose squared length overflows at `d` of about 6.7039e153
+/// (`sqrt(f64::MAX) / 2`, found by bisection). Just under that the prism
+/// builds and measures; just over it is the same `-32602` "too large" as
+/// 1e200.
+#[test]
+fn the_prism_overflow_guard_sits_at_the_newell_overflow_limit() {
+    let mut s = Session::new();
+    let square = json!([rect(0.0, 0.0, 1.0, 1.0, 0.0)]);
+    let r = prism_measure(&mut s, square.clone(), 6.70e153).unwrap();
+    close(&r["volume"], 6.70e153, 1e-6);
+    let msg = prism_measure(&mut s, square.clone(), 6.71e153).unwrap_err();
+    assert!(msg.contains("too large"), "{msg}");
+    let msg = prism_measure(&mut s, square, 1e155).unwrap_err();
+    assert!(msg.contains("too large"), "{msg}");
+}

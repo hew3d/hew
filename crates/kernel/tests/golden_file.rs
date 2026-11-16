@@ -722,3 +722,60 @@ fn golden_document_id_file() {
         build_face_edge_attrs_doc().state_hash()
     );
 }
+
+/// The fixtures as geometry buffer v9 wrote them (planes refit from each
+/// face's outer ring, none stored), kept as read fixtures when v11 began
+/// storing planes: each still opens to the state of the document the
+/// matching builder makes. Face planes are not hashed, so the hash holds
+/// though v9 refits a plane the builder's face may carry with other bits.
+/// The representative builder has since gained content only v10 can hold
+/// (a sphere claim, a blend tag, a crease), so its v9 file is only opened.
+#[test]
+fn geometry_v9_goldens_still_open() {
+    older_goldens_still_open("tests/golden/geometry_v9", 9, &["representative.hew"]);
+}
+
+/// The fixtures as geometry buffer v10 (manifest v31) wrote them: the
+/// v9 layout with the crease and blend blocks, planes still refit, kept as
+/// read fixtures when v11 began storing planes.
+#[test]
+fn geometry_v10_goldens_still_open() {
+    older_goldens_still_open("tests/golden/geometry_v10", 10, &[]);
+}
+
+/// Opens each fixture in `dir`, checks its buffers are at `version`, and
+/// compares its state with the matching builder's, except for the files in
+/// `open_only`, which must open as valid documents.
+fn older_goldens_still_open(dir: &str, version: u32, open_only: &[&str]) {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(dir);
+    type Build = fn() -> Document;
+    let cases: [(&str, Build); 4] = [
+        ("representative.hew", build_representative_doc),
+        ("instance_material.hew", build_instance_material_doc),
+        ("face_edge_attrs.hew", build_face_edge_attrs_doc),
+        ("document_id.hew", build_document_id_doc),
+    ];
+    for (name, build) in cases {
+        let bytes = std::fs::read(dir.join(name)).unwrap();
+        let geometry = entries_without_app_version(&bytes)
+            .into_iter()
+            .filter(|(entry, _)| entry.starts_with("geometry/"))
+            .collect::<Vec<_>>();
+        assert!(!geometry.is_empty(), "{name}: has geometry");
+        for (entry, buf) in &geometry {
+            assert_eq!(
+                &buf[4..8],
+                &version.to_le_bytes(),
+                "{name}: {entry} is v{version}"
+            );
+        }
+        let loaded = Document::load(&bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        if open_only.contains(&name) {
+            for o in loaded.visible_object_ids() {
+                loaded.object(o).unwrap().validate().unwrap();
+            }
+            continue;
+        }
+        assert_eq!(loaded.state_hash(), build().state_hash(), "{name}");
+    }
+}

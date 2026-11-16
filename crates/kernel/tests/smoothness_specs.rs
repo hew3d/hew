@@ -45,7 +45,13 @@ fn boolean_without_claims_is_byte_identical() {
         if std::env::var("REGENERATE_SMOOTHNESS_FIXTURES").is_ok() {
             std::fs::write(&path, &bytes).unwrap();
         }
-        let expected = std::fs::read(&path).expect("fixture captured before re-derivation");
+        let captured = std::fs::read(&path).expect("fixture captured before re-derivation");
+        // Captured as a v10 buffer: read back and written by today's
+        // writer, so only the layout's newer per-face flags move, never
+        // the geometry.
+        let expected = Object::decode(&captured, &|_| None)
+            .expect("the fixture opens")
+            .encode(&|_| 0);
         assert_eq!(bytes, expected, "{name}: a claim-free boolean is unchanged");
     }
 }

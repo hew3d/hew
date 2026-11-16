@@ -272,6 +272,40 @@ fn lines_drawn_toward_the_point_close_the_same_face() {
     reopens(&doc);
 }
 
+/// A triangle under the area floor but wide enough for the kernel's face
+/// rule (10 µm long, its tip 50 nm off the base: twice the area 5e-13 m²,
+/// width 50 nm) closes like any other: the seed and the far end of the
+/// line it meets span too little area for a cross product's direction,
+/// and the candidate plane comes from the face rule instead.
+#[test]
+fn a_triangle_in_the_width_band_closes() {
+    let mut doc = Document::new();
+    doc.set_torture_mode(true);
+    let (a, b) = (p(0., 0., 0.), p(1e-5, 0., 0.));
+    let tip = p(5e-6, 3e-8, 4e-8);
+    let tri = [tip, a, b];
+    let twice_area = (b - a).cross(tip - a).length();
+    assert!(twice_area < 1e-12, "{twice_area:e}");
+    assert!(Plane::from_polygon(&tri).is_ok(), "the face rule keeps it");
+    draw(&mut doc, ground(), &[(a, b)]);
+    line(&mut doc, tip, a);
+    let before = doc.state_hash();
+    let r = line(&mut doc, tip, b);
+    assert_eq!(
+        r.faces_closed.len(),
+        1,
+        "the second line closes the triangle"
+    );
+    let face = r.faces_closed[0];
+    assert_eq!(face_with(&doc, &tri), Some(face));
+    let n = doc.sketch(face).unwrap().plane();
+    for q in tri {
+        assert!(n.signed_distance(q).abs() <= 1e-9);
+    }
+    one_step(&mut doc, before);
+    reopens(&doc);
+}
+
 // ------------------------------------------------------------ wire cube
 
 /// §11: a cube from twelve lines, each on a plane that is no face of the

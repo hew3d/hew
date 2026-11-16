@@ -1401,3 +1401,61 @@ fn a_member_boolean_by_path_refuses_a_grouped_operand() {
     }
     assert_eq!(doc.save(), bytes);
 }
+
+// ------------------------------------------------- far from the origin
+
+/// A 48-sided cylinder drawn and extruded 1,000 km from the origin, then
+/// turned 0.7 rad about (1, 1, 0) and scaled 1.5 about its middle: each
+/// step commits, the document validates and reopens from its saved bytes
+/// to the same state. Turning it once committed a wall facet whose
+/// cylinder claim disagreed with its plane, a document its own loader
+/// refused to open.
+#[test]
+fn a_cylinder_far_out_turns_and_scales_and_the_file_reopens() {
+    let mut doc = Document::new();
+    let mut conn = Connection::new(Grant::core(), "test");
+    hello_attach(&mut conn, &mut doc);
+    let far = 1.0e6;
+    let r = call(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.doc.transact",
+        json!({ "commands": [
+            { "method": "hew.sketch.draw_circle", "as": "c", "params": {
+                "plane": { "origin": [far, far, 0.0], "normal": [0.0, 0.0, 1.0] },
+                "center": [far, far, 0.0], "radius": 0.25, "segments": 48 } },
+            { "method": "hew.solid.extrude", "as": "x", "params": {
+                "region": { "$ref": "c#/region_id" }, "distance": 0.4 } }
+        ] }),
+    );
+    assert!(r.error.is_none(), "{:?}", r.error);
+    let id = r.result.unwrap()["results"][1]["object_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let pivot = [far, far, 0.2];
+    for (n, (method, params)) in [
+        (
+            "hew.entity.rotate",
+            json!({ "ids": [id], "pivot": pivot, "axis": [1.0, 1.0, 0.0], "angle": 0.7 }),
+        ),
+        (
+            "hew.entity.scale",
+            json!({ "ids": [id], "anchor": pivot, "factors": [1.5, 1.5, 1.5] }),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        call_ok(&mut conn, &mut doc, 3 + n as i64, method, params);
+        for o in doc.visible_object_ids() {
+            doc.object(o)
+                .unwrap()
+                .validate()
+                .unwrap_or_else(|e| panic!("{method}: {e:?}"));
+        }
+        let back = Document::load(&doc.save()).unwrap_or_else(|e| panic!("{method}: {e:?}"));
+        assert_eq!(back.state_hash(), doc.state_hash(), "{method}: reopens");
+    }
+}

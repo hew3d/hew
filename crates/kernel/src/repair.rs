@@ -596,9 +596,11 @@ impl Object {
                 f
             })
         };
-        let plane_of = |ring: &[usize], positions: &[Point3]| {
+        let tol = self.planarity_tol;
+        let plane_of = |ring: &[usize], holes: &[Vec<usize>], positions: &[Point3]| {
             let pts: Vec<Point3> = ring.iter().map(|&i| positions[i]).collect();
-            Plane::from_polygon(&pts).map_err(|_| {
+            let hole_pts: Vec<Point3> = holes.iter().flatten().map(|&i| positions[i]).collect();
+            crate::serialize::own_ring_plane(&pts, &hole_pts, tol).map_err(|_| {
                 tracing::warn!(target: "kernel::op", "thicken: degenerate face ring");
                 RepairError::Invalid
             })
@@ -619,7 +621,7 @@ impl Object {
             }
             for (mut rings, by) in [(lower_rings, lo), (upper_rings, hi)] {
                 let outer = rings.remove(0);
-                let plane = plane_of(&outer, &positions)?;
+                let plane = plane_of(&outer, &rings, &positions)?;
                 // The lower copy faces the way the sheet's back did, and
                 // shows the back's paint.
                 let material = if by == lo {
@@ -646,7 +648,7 @@ impl Object {
                     let (a_lo, a_hi) = at(he[h].origin, &mut positions);
                     let (b_lo, b_hi) = at(he[he[h].next].origin, &mut positions);
                     let wall = vec![a_lo, b_lo, b_hi, a_hi];
-                    let plane = plane_of(&wall, &positions)?;
+                    let plane = plane_of(&wall, &[], &positions)?;
                     specs.push((
                         wall,
                         Vec::new(),
@@ -1001,7 +1003,7 @@ impl Object {
         }
         let at = |k: usize| self.vertices[self.half_edges[rim.half_edges[k]].origin].position;
         let points: Vec<Point3> = std::iter::once(at(0)).chain((1..n).rev().map(at)).collect();
-        let plane = Plane::from_polygon(&points).ok()?;
+        let plane = crate::serialize::own_ring_plane(&points, &[], self.planarity_tol).ok()?;
         Some(CapLoop { points, plane })
     }
 
@@ -1033,8 +1035,19 @@ impl Object {
                 area(*p).total_cmp(&area(*q))
             })
             .unwrap_or(a);
-        let Ok(plane) = Plane::from_point_normal(a, (b - a).cross(c - a)) else {
-            return false;
+        // Three points too close to one line for a normal of their own
+        // still span a plane by the kernel's face rule when the triangle
+        // they make is wide enough (as `health::planar_fit` judges the
+        // rim); imported geometry keeps the area floor alone.
+        let plane = match Plane::from_point_normal(a, (b - a).cross(c - a)) {
+            Ok(plane) => plane,
+            Err(_) if !crate::health::imported_tol(self.planarity_tol) => {
+                match Plane::from_polygon(&[a, b, c]) {
+                    Ok(plane) => plane,
+                    Err(_) => return false,
+                }
+            }
+            Err(_) => return false,
         };
         pts.iter()
             .all(|&p| plane.signed_distance(p).abs() <= self.planarity_tol)
@@ -1222,6 +1235,36 @@ mod tests {
         ];
         let faces = vec![vec![0, 1, 2, 3, 4, 5], vec![5, 4, 6, 3, 2, 7, 8]];
         Object::from_polygons(&positions, &faces).unwrap()
+    }
+
+    /// A bow-tie rim (planar, crossing itself, no net area) 1 µm long and
+    /// 30 nm wide under a four-triangle tent: its three spread corners are
+    /// too close to one line for a normal of their own but wide enough for
+    /// the face rule, so it reads as crossing itself, not as warped. An
+    /// imported copy keeps the area floor and the old answer.
+    #[test]
+    fn a_band_width_rim_that_crosses_itself_is_not_called_warped() {
+        let (l, w) = (1e-6, 3e-8);
+        let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+        let positions = vec![
+            p(0.0, 0.0, 0.0),
+            p(l, w, 0.0),
+            p(l, 0.0, 0.0),
+            p(0.0, w, 0.0),
+            p(l / 2.0, w / 2.0, 2e-6),
+        ];
+        let faces = vec![vec![0, 1, 4], vec![1, 2, 4], vec![2, 3, 4], vec![3, 0, 4]];
+        let obj = Object::from_polygons(&positions, &faces).unwrap();
+        assert_eq!(
+            obj.clone().cap_rims(&[0]).unwrap_err(),
+            RepairError::RimSelfIntersecting
+        );
+        let mut imported = obj;
+        imported.planarity_tol = crate::tol::IMPORT_PLANE_DIST;
+        assert_eq!(
+            imported.cap_rims(&[0]).unwrap_err(),
+            RepairError::RimNotPlanar
+        );
     }
 
     #[test]

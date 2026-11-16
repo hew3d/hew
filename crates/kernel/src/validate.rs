@@ -168,7 +168,10 @@ impl Object {
         // Last, after every structural check: the file loader recomputes a
         // face's plane from its outer loop, and a face it could not
         // recompute would make the saved document unopenable — so the
-        // loader's own predicate holds for every live face.
+        // loader's own predicate holds for every live face. The plane the
+        // face carries must be one the file stores against that refit
+        // (finite, unit, facing with the loop's winding); the writer leaves
+        // any other out, and the face would reopen on the refit instead.
         for (f, face) in &self.faces {
             self.validate_reopens(f, face)?;
         }
@@ -662,20 +665,26 @@ impl Object {
         Ok(())
     }
 
-    /// The plane a saved file recomputes for one face exists.
+    /// The plane a saved file recomputes for one face exists, and the plane
+    /// the face carries is one the file can store against it.
     fn validate_reopens(
         &self,
         f: crate::ids::FaceId,
         face: &crate::topo::Face,
     ) -> Result<(), TopologyError> {
         let outer_ring: Vec<crate::math::Point3> = self.loop_positions(face.outer_loop).collect();
-        if crate::serialize::outer_ring_plane(
+        let Ok(refit) = crate::serialize::outer_ring_plane(
             &outer_ring,
             self.planarity_tol > crate::tol::PLANE_DIST,
-        )
-        .is_err()
-        {
+        ) else {
             return Err(TopologyError::FaceTooSmallToReopen { face: f });
+        };
+        // The plane the face carries must be one the file stores against
+        // that refit (finite, unit, facing with the loop's winding); the
+        // writer leaves any other out, and the face would reopen on the
+        // refit instead.
+        if crate::serialize::stored_plane_fault(&face.plane, &refit).is_some() {
+            return Err(TopologyError::FacePlaneInvalid { face: f });
         }
         Ok(())
     }
@@ -684,8 +693,8 @@ impl Object {
     /// mutation. Compiles to nothing in release builds.
     ///
     /// A face too small to reopen from a file is not a broken invariant but
-    /// geometry user input can reach (a cut a fraction of a micron from a
-    /// corner, a tiny scale): every mutation's always-on `validate()`
+    /// geometry user input can reach (a cut a few nanometers from a corner,
+    /// a tiny scale): every mutation's always-on `validate()`
     /// backstop refuses it typed, so this debug check lets it through to
     /// that refusal. It is reported last, so nothing structural hides
     /// behind it.
@@ -749,6 +758,60 @@ pub(crate) mod tests {
             tet.validate(),
             Err(TopologyError::VertexOutgoingMismatch { .. } | TopologyError::OrphanVertex { .. })
         ));
+    }
+
+    /// A unit cube, and the id of its top face.
+    fn cube_and_top() -> (Object, crate::FaceId) {
+        let obj = Object::from_polygons(
+            &[
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(0.0, 0.0, 1.0),
+                Point3::new(1.0, 0.0, 1.0),
+                Point3::new(1.0, 1.0, 1.0),
+                Point3::new(0.0, 1.0, 1.0),
+            ],
+            &[
+                vec![0, 3, 2, 1],
+                vec![4, 5, 6, 7],
+                vec![0, 1, 5, 4],
+                vec![1, 2, 6, 5],
+                vec![2, 3, 7, 6],
+                vec![3, 0, 4, 7],
+            ],
+        )
+        .unwrap();
+        let top = obj
+            .faces
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .unwrap();
+        (obj, top)
+    }
+
+    #[test]
+    fn validator_catches_a_plane_facing_against_its_winding() {
+        // Every point of the top still lies on its plane flipped, but the
+        // plane faces against the loop's winding: a file would not store it.
+        let (mut obj, top) = cube_and_top();
+        obj.validate().unwrap();
+        obj.faces[top].plane = obj.faces[top].plane.flipped();
+        assert_eq!(
+            obj.validate(),
+            Err(TopologyError::FacePlaneInvalid { face: top })
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "kernel invariant violated")]
+    fn a_plane_facing_against_its_winding_is_a_broken_invariant() {
+        let (mut obj, top) = cube_and_top();
+        obj.faces[top].plane = obj.faces[top].plane.flipped();
+        obj.check_invariants();
     }
 
     #[test]

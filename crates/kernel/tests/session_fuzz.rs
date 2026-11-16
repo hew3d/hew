@@ -115,6 +115,15 @@ enum Op {
         comp: usize,
         sel: usize,
     },
+    /// KB-25: a definition member shrunk to sub-micron size (`shrink`), or
+    /// moved a fraction of a micron, so faces under the old 1e-12 m² area
+    /// floor (kept now when at least 10 nm wide) go through sessions,
+    /// structure ops, undo and the reopen check.
+    MicroTransformDefMember {
+        comp: usize,
+        sel: usize,
+        shrink: bool,
+    },
     /// Copy a member of a definition into the same definition, twice
     /// (`duplicate_def_members_array`).
     DuplicateDefMembers {
@@ -215,6 +224,8 @@ fn arb_op() -> impl Strategy<Value = Op> {
         1 => sel().prop_map(|sel| Op::DeleteSelection { sel }),
         1 => sel().prop_map(|comp| Op::DeleteDefinition { comp }),
         2 => (sel(), sel()).prop_map(|(comp, sel)| Op::TransformDefMember { comp, sel }),
+        1 => (sel(), sel(), any::<bool>())
+            .prop_map(|(comp, sel, shrink)| Op::MicroTransformDefMember { comp, sel, shrink }),
         1 => (sel(), sel()).prop_map(|(comp, sel)| Op::DuplicateDefMembers { comp, sel }),
         3 => sel().prop_map(|sel| Op::OpenComponentSession { sel }),
         3 => sel().prop_map(|sel| Op::OpenGroupSession { sel }),
@@ -507,6 +518,20 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
                 let t = Transform::rotation(Vec3::new(0.0, 0.0, 1.0), 0.25)
                     .expect("rotation")
                     .then(&Transform::translation(Vec3::new(0.3, -0.2, 0.1)));
+                let _ = doc.transform_def_members(c, &[n], &t);
+            }
+        }
+        Op::MicroTransformDefMember { comp, sel, shrink } => {
+            if let Some(c) = pick(&comps, comp)
+                && let Some(n) = pick(&doc.def_member_nodes(c).unwrap_or_default(), sel)
+            {
+                // A 1 m box at 3e-7 has 0.3 µm faces: twice their area is
+                // 9e-14 m², deep in the width band.
+                let t = if shrink {
+                    Transform::uniform_scale(3e-7)
+                } else {
+                    Transform::translation(Vec3::new(3e-7, -2e-7, 1e-7))
+                };
                 let _ = doc.transform_def_members(c, &[n], &t);
             }
         }
@@ -897,16 +922,22 @@ fn check_reopens(doc: &Document, step: usize, op: &Op) -> Result<(), TestCaseErr
             "step {step} ({op:?}): the autosave bytes do not reopen: {e}"
         )));
     }
-    let closed = doc
-        .session_stack()
-        .is_empty()
-        .then(|| Document::load(&doc.save()));
-    if let Some(Err(e)) = closed {
-        return Err(TestCaseError::fail(format!(
-            "step {step} ({op:?}): the saved bytes do not reopen: {e}"
-        )));
+    if !doc.session_stack().is_empty() {
+        return Ok(());
     }
-    Ok(())
+    let saved = doc.save();
+    match Document::load(&saved) {
+        Err(e) => Err(TestCaseError::fail(format!(
+            "step {step} ({op:?}): the saved bytes do not reopen: {e}"
+        ))),
+        // The file stores every plane the reader would not refit bit for
+        // bit, so the reopened document saves the same bytes: every face
+        // came back on the plane it was validated against.
+        Ok(back) if back.save() != saved => Err(TestCaseError::fail(format!(
+            "step {step} ({op:?}): the reopened document saves other bytes"
+        ))),
+        Ok(_) => Ok(()),
+    }
 }
 
 /// Live sibling placements (ARCHITECTURE.md 2.11): with a component frame

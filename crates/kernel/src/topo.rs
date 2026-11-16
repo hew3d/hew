@@ -569,6 +569,14 @@ impl Object {
         ]
     }
 
+    /// The planarity tolerance this object's faces are held to (meters):
+    /// [`tol::PLANE_DIST`](crate::tol::PLANE_DIST) for native geometry,
+    /// [`tol::IMPORT_PLANE_DIST`](crate::tol::IMPORT_PLANE_DIST) for
+    /// imported geometry and anything built from it.
+    pub fn planarity_tol(&self) -> f64 {
+        self.planarity_tol
+    }
+
     /// Vertex storage (read-only).
     pub fn vertices(&self) -> &SlotMap<VertexId, Vertex> {
         &self.vertices

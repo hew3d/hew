@@ -10022,6 +10022,10 @@ msgid "That shape is no longer there — the model changed since it was picked. 
 msgstr ""
 
 #: src/kernelErrors.ts
+msgid "That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change."
+msgstr ""
+
+#: src/kernelErrors.ts
 msgid "That shape is too thin to push or pull — the face can't hold a sliver that small."
 msgstr ""
 

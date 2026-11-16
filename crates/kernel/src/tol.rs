@@ -36,8 +36,8 @@ pub const LINK_POSE_MATCH: f64 = 2.0 * SIGNATURE_QUANTUM;
 pub const NORMALIZE_MIN_LENGTH: f64 = 1e-12;
 
 /// The shortest edge a ring under the area cutoff may have and still give a
-/// face its plane (meters; `serialize::outer_ring_plane`): ten times
-/// [`POINT_MERGE`]. Far above the rounding of any coordinate Hew models at
+/// face of an imported object its plane (meters;
+/// `serialize::outer_ring_plane`): ten times [`POINT_MERGE`]. Far above the rounding of any coordinate Hew models at
 /// (2e-12 m at 10 km), so the ring's shape, and the verdict, do not depend
 /// on where it sits.
 pub const SMALL_RING_MIN_EDGE: f64 = 10.0 * POINT_MERGE;
@@ -48,6 +48,25 @@ pub const SMALL_RING_MIN_EDGE: f64 = 10.0 * POINT_MERGE;
 /// least this times its perimeter squared — a triangle at least a
 /// millionth as tall as it is wide.
 pub const SMALL_RING_MIN_SHAPE: f64 = 1e-6;
+
+/// The narrowest face that keeps a plane when its area alone is too small
+/// (meters; [`POINT_MERGE`] × 10).
+///
+/// `math::Plane::from_polygon` accepts a ring whose Newell vector (twice
+/// its area) reaches [`NORMALIZE_MIN_LENGTH`], and otherwise one whose
+/// width (the Newell length over half the perimeter: a triangle's height
+/// over its long side, a strip's short side) reaches this. The area floor
+/// alone refused every face under about a micron square however well its
+/// plane was known, so a cut passing a fraction of a micron from a mesh
+/// vertex could not be kept. Width is a property of the ring alone, so the
+/// builder, the validator and the file loader agree on it by construction.
+///
+/// Why ten nanometers: a vertex may sit [`PLANE_DIST`] off its face's
+/// plane, and on a strip of width `w` that much noise tilts the Newell
+/// normal by about `PLANE_DIST / w`. At 10 nm the worst case is 0.1 rad, so
+/// the normal cannot flip or turn sideways (which would leave the face
+/// impossible to triangulate for display); near 1 nm it could.
+pub const MIN_FACE_WIDTH: f64 = 10.0 * POINT_MERGE;
 
 /// Two unit normals whose difference is shorter than this are considered the
 /// same direction (dimensionless).

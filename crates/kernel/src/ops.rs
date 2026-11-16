@@ -953,9 +953,13 @@ impl Eq for BooleanError {}
 
 impl Object {
     /// Bakes an affine `transform` into this object's geometry: every vertex is
-    /// moved by `transform` and every face plane is remapped (the
-    /// inverse-transpose rule via
-    /// [`Transform::apply_plane_following_winding`]), in place.
+    /// moved by `transform` and every face plane is remapped, in place: a
+    /// plane that is its outer ring's refit becomes the mapped ring's refit,
+    /// any other is mapped by the inverse-transpose rule
+    /// ([`Transform::apply_plane_following_winding`]), and either falls
+    /// back to the other when the face would not reopen on it from a file
+    /// (a point off it beyond the planarity tolerance, or a plane the
+    /// writer would not store).
     ///
     /// Topology is untouched — no element is added or removed — so all handles
     /// stay valid and the watertightness state is preserved. This is what
@@ -974,12 +978,21 @@ impl Object {
     /// refused before any vertex moves, so
     /// the object is never left half-transformed. A shrink that
     /// would leave some face too small for a saved file to recompute its
-    /// plane (twice its area under 1e-12 m²) is singular at this geometry's
-    /// scale and refused [`TransformError::Singular`] the same way, as is an
+    /// plane (twice its area under 1e-12 m² and narrower than
+    /// [`tol::MIN_FACE_WIDTH`](crate::tol::MIN_FACE_WIDTH), the
+    /// [`crate::math::Plane::from_polygon`] rule) is singular at this
+    /// geometry's scale and refused [`TransformError::Singular`] the same way, as is an
     /// invertible but extremely anisotropic map that squashes some face's
-    /// plane to no direction. A map that would leave a face's texture frame
+    /// plane to no direction when its mapped ring's refit will not do
+    /// either. A map that would leave a face's texture frame
     /// degenerate (an extreme stretch) is
-    /// [`TransformError::DegenerateTextureFrame`], refused the same way.
+    /// [`TransformError::DegenerateTextureFrame`], refused the same way. A
+    /// map that leaves some face with no plane it would reopen on, its
+    /// points off both its mapped plane and its mapped ring's refit beyond
+    /// the planarity tolerance (rounding, for a face far from the origin),
+    /// is [`TransformError::FaceNotFlat`], refused the same way, as is one
+    /// that leaves a face whose analytic surface maps along with no such
+    /// plane that surface also agrees with.
     /// [`Object::check_transform`] answers the same question without
     /// moving anything.
     pub fn apply_transform(&mut self, transform: &Transform) -> Result<(), TransformError> {
@@ -1053,15 +1066,40 @@ impl Object {
     /// The validation half of [`Object::apply_transform`]: every face's
     /// plane under `transform`, in face order, or the refusal. A singular
     /// linear part, a face ring too small afterwards
-    /// for a saved file to recompute its plane, a plane the map squashes
-    /// to no direction (an invertible but extremely anisotropic scale), or
-    /// a texture frame it squashes (checked with the ring, so a session's
-    /// replay bake skips it as it skips the ring) are all refused here,
-    /// before any vertex moves.
+    /// for a saved file to recompute its plane, a texture frame the map
+    /// squashes, or a face with no plane it would reopen on (neither its
+    /// mapped plane nor its mapped ring's refit:
+    /// [`TransformError::Singular`] when the mapped plane has no
+    /// direction, else [`TransformError::FaceNotFlat`]) are all refused
+    /// here, before any vertex moves. The last three are
+    /// checked with the ring, so a session's replay bake skips them as it
+    /// skips the ring.
     fn transformed_planes(&self, transform: &Transform) -> Result<Vec<Plane>, TransformError> {
         self.transformed_planes_impl(transform, true)
     }
 
+    /// Every face's plane under `transform`, in face order, as the plane
+    /// stored next to its mapped (not yet turned over) loop.
+    ///
+    /// Each face has two candidates: the refit of its mapped outer ring
+    /// ([`crate::serialize::outer_ring_plane`]) and its plane mapped
+    /// ([`Transform::apply_plane_following_winding_near`] through its first
+    /// outer vertex, so rounding far from the origin stays at the scale of
+    /// the face). A face whose plane is its ring's refit (bit for bit)
+    /// tries the refit first, so it keeps that property and a file still
+    /// omits its plane; any other face (one carrying a plane from
+    /// elsewhere, such as a boolean piece on its source face's plane)
+    /// tries its mapped plane first. With `reopen_check`, the face takes
+    /// the first candidate it would reopen on from a file
+    /// ([`crate::serialize::face_plane_reopens`]: every mapped boundary
+    /// point within the planarity tolerance, and a plane the writer
+    /// stores) and that its mapped analytic surface, if it keeps one,
+    /// agrees with ([`crate::surface::validate_face_claim`]); with
+    /// neither, the map is refused, [`TransformError::Singular`]
+    /// when the mapped plane has no direction and
+    /// [`TransformError::FaceNotFlat`] otherwise. Without it (a session's
+    /// replay bake) the face takes the first candidate that exists, one
+    /// holding every mapped point preferred.
     fn transformed_planes_impl(
         &self,
         transform: &Transform,
@@ -1070,16 +1108,40 @@ impl Object {
         // `inverse()` fails iff the linear part is singular. A negative
         // determinant is accepted: `apply_transform` turns the faces over.
         transform.inverse()?;
+        let reflects = transform.determinant() < 0.0;
+        let tol = self.planarity_tol;
+        // The claims ride along under a similarity (`apply_transform`), and
+        // the validator holds each to its face's plane and points.
+        let scale = transform.similarity_scale();
+        let mut claim_points: Vec<Point3> = Vec::new();
         let mut planes = Vec::with_capacity(self.faces.len());
+        let mut old_ring: Vec<Point3> = Vec::new();
+        let mut ring: Vec<Point3> = Vec::new();
+        let mut holes: Vec<Point3> = Vec::new();
         for face in self.faces.values() {
+            old_ring.clear();
+            old_ring.extend(self.loop_positions(face.outer_loop));
+            ring.clear();
+            ring.extend(old_ring.iter().map(|&p| transform.apply_point(p)));
+            holes.clear();
+            holes.extend(
+                face.inner_loops
+                    .iter()
+                    .flat_map(|&l| self.loop_positions(l))
+                    .map(|p| transform.apply_point(p)),
+            );
+            // The refit a file gives the face once it is turned over (a
+            // reflection runs the loop the other way), stated for the loop
+            // as mapped: `apply_transform` flips it back exactly.
+            let imported = tol > crate::tol::PLANE_DIST;
+            let refit = if reflects {
+                let reversed: Vec<Point3> = ring.iter().rev().copied().collect();
+                crate::serialize::outer_ring_plane(&reversed, imported).map(|p| p.flipped())
+            } else {
+                crate::serialize::outer_ring_plane(&ring, imported)
+            };
             if reopen_check {
-                let ring: Vec<Point3> = self
-                    .loop_positions(face.outer_loop)
-                    .map(|p| transform.apply_point(p))
-                    .collect();
-                if crate::serialize::outer_ring_plane(&ring, self.planarity_tol > tol::PLANE_DIST)
-                    .is_err()
-                {
+                if refit.is_err() {
                     return Err(TransformError::Singular);
                 }
                 // A valid texture frame must stay valid: the map is
@@ -1093,11 +1155,70 @@ impl Object {
                     return Err(TransformError::DegenerateTextureFrame);
                 }
             }
+            let points = || ring.iter().chain(&holes).copied();
+            let derived = crate::serialize::outer_ring_plane(&old_ring, imported)
+                .is_ok_and(|p| p.same_bits(&face.plane));
             // Winding-following on purpose: each plane is stored next to
             // its mapped loop, and under a reflection `apply_transform`
             // then turns face, plane and loop over together, which lands
             // the plane on the outward side.
-            planes.push(transform.apply_plane_following_winding(&face.plane)?);
+            let mapped = transform.apply_plane_following_winding_near(&face.plane, old_ring[0]);
+            // The candidates, best first: a face on its ring's refit stays
+            // on the mapped ring's refit, any other keeps its own plane
+            // mapped; either falls back to the other.
+            let candidates = if derived {
+                [refit.as_ref().ok().copied(), mapped.as_ref().ok().copied()]
+            } else {
+                [mapped.as_ref().ok().copied(), refit.as_ref().ok().copied()]
+            };
+            // A face's analytic surface, mapped as `apply_transform` maps
+            // it, must agree with the plane the face takes: the validator
+            // (and a file's reader) hold the claim's axis parallel to that
+            // plane. Far from the origin the ring's refit tilts by its
+            // vertices' rounding over the width of a narrow facet, past
+            // what a cylinder wall allows, while the mapped plane keeps the
+            // exact turn of the normal; so a claimed face takes the first
+            // candidate its claim also holds on.
+            let claim = map_surface(face.surface, transform, scale);
+            if claim.is_some() {
+                claim_points.clear();
+                claim_points.extend(points());
+            }
+            let claim_holds = |plane: &Plane| {
+                claim.is_none_or(|c| {
+                    crate::surface::validate_face_claim(&c, plane, &claim_points, tol)
+                })
+            };
+            let plane = if let Ok(refit) = &refit
+                && reopen_check
+            {
+                // The first plane the face reopens on from a file: one the
+                // writer stores, holding every mapped point (and the
+                // face's mapped claim).
+                let reopens =
+                    |c: &Plane| crate::serialize::face_plane_reopens(c, refit, points(), tol);
+                let found = candidates
+                    .into_iter()
+                    .flatten()
+                    .find(|c| reopens(c) && claim_holds(c));
+                match (found, &mapped) {
+                    (Some(plane), _) => plane,
+                    (None, Err(_)) => return Err(TransformError::Singular),
+                    (None, Ok(_)) => return Err(TransformError::FaceNotFlat),
+                }
+            } else {
+                // A replay bake: the first candidate that exists, one that
+                // holds the mapped points (and the mapped claim) preferred.
+                let holds = |plane: &Plane| points().all(|p| plane.signed_distance(p).abs() <= tol);
+                let mut existing = candidates.into_iter().flatten();
+                let first = existing.clone().next();
+                let both = existing.clone().find(|c| holds(c) && claim_holds(c));
+                match both.or_else(|| existing.find(holds)).or(first) {
+                    Some(plane) => plane,
+                    None => return Err(mapped.err().unwrap_or(TransformError::Singular)),
+                }
+            };
+            planes.push(plane);
         }
         Ok(planes)
     }
@@ -1300,7 +1421,12 @@ impl Object {
             // Near cap plane: same as profile plane but with inverted normal.
             // Build from the reversed outer boundary.
             let rev_outer: Vec<Point3> = outer.iter().rev().copied().collect();
-            Plane::from_polygon(&rev_outer).map_err(|_| ExtrudeError::DegenerateGeometry)?
+            crate::serialize::own_ring_plane(
+                &rev_outer,
+                &positions[n_outer..total_near],
+                crate::tol::PLANE_DIST,
+            )
+            .map_err(|_| ExtrudeError::DegenerateGeometry)?
         };
 
         let near_outer_reversed: Vec<usize> = (0..n_outer).rev().collect();
@@ -1335,7 +1461,12 @@ impl Object {
         let far_cap_plane = {
             let far_outer_pts: Vec<Point3> =
                 (0..n_outer).map(|i| positions[total_near + i]).collect();
-            Plane::from_polygon(&far_outer_pts).map_err(|_| ExtrudeError::DegenerateGeometry)?
+            crate::serialize::own_ring_plane(
+                &far_outer_pts,
+                &positions[total_near + n_outer..],
+                crate::tol::PLANE_DIST,
+            )
+            .map_err(|_| ExtrudeError::DegenerateGeometry)?
         };
 
         face_specs.push((far_outer, far_inner_loops, far_cap_plane, None));
@@ -1355,7 +1486,8 @@ impl Object {
                 positions[a_far],
             ];
             let wall_plane =
-                Plane::from_polygon(&wall_pts).map_err(|_| ExtrudeError::DegenerateGeometry)?;
+                crate::serialize::own_ring_plane(&wall_pts, &[], crate::tol::PLANE_DIST)
+                    .map_err(|_| ExtrudeError::DegenerateGeometry)?;
             face_specs.push((
                 vec![a_near, b_near, b_far, a_far],
                 vec![],
@@ -1383,7 +1515,8 @@ impl Object {
                     positions[a_far],
                 ];
                 let wall_plane =
-                    Plane::from_polygon(&wall_pts).map_err(|_| ExtrudeError::DegenerateGeometry)?;
+                    crate::serialize::own_ring_plane(&wall_pts, &[], crate::tol::PLANE_DIST)
+                        .map_err(|_| ExtrudeError::DegenerateGeometry)?;
                 face_specs.push((
                     vec![a_near, b_near, b_far, a_far],
                     vec![],
@@ -1408,8 +1541,11 @@ impl Object {
                         .map(|l| l.into_iter().rev().collect())
                         .collect();
                     let pts: Vec<Point3> = rev_outer.iter().map(|&i| positions[i]).collect();
+                    let hole_pts: Vec<Point3> =
+                        rev_inners.iter().flatten().map(|&i| positions[i]).collect();
                     let plane =
-                        Plane::from_polygon(&pts).map_err(|_| ExtrudeError::DegenerateGeometry)?;
+                        crate::serialize::own_ring_plane(&pts, &hole_pts, crate::tol::PLANE_DIST)
+                            .map_err(|_| ExtrudeError::DegenerateGeometry)?;
                     Ok((rev_outer, rev_inners, plane, surface))
                 })
                 .collect::<Result<Vec<_>, ExtrudeError>>()?;
@@ -2879,8 +3015,9 @@ impl Object {
                         continue; // fully on-axis wall: interior, suppressed.
                     }
                     let ring_pts: Vec<Point3> = ring.iter().map(|&g| positions[g]).collect();
-                    let wall_plane = Plane::from_polygon(&ring_pts)
-                        .map_err(|_| FollowMeError::SweepDegenerate)?;
+                    let wall_plane =
+                        crate::serialize::own_ring_plane(&ring_pts, &[], crate::tol::PLANE_DIST)
+                            .map_err(|_| FollowMeError::SweepDegenerate)?;
                     // Cylinder stamps apply only to a full, un-collapsed quad.
                     let surface = if ring.len() == 4 {
                         we.curve
@@ -2970,8 +3107,9 @@ impl Object {
                         continue; // fully hinge-welded wall: nothing to emit.
                     }
                     let ring_pts: Vec<Point3> = ring.iter().map(|&g| positions[g]).collect();
-                    let wall_plane = Plane::from_polygon(&ring_pts)
-                        .map_err(|_| FollowMeError::SweepDegenerate)?;
+                    let wall_plane =
+                        crate::serialize::own_ring_plane(&ring_pts, &[], crate::tol::PLANE_DIST)
+                            .map_err(|_| FollowMeError::SweepDegenerate)?;
                     // Cylinder stamps apply only to a full, un-collapsed quad.
                     let surface = if ring.len() == 4 {
                         we.curve
@@ -3033,8 +3171,17 @@ impl Object {
                     .map(|(i, h)| (0..h.len()).rev().map(|k| hole_starts[i] + k).collect())
                     .collect();
                 let near_pts: Vec<Point3> = near_outer.iter().map(|&j| positions[j]).collect();
-                let near_plane =
-                    Plane::from_polygon(&near_pts).map_err(|_| FollowMeError::SweepDegenerate)?;
+                let near_holes: Vec<Point3> = near_inners
+                    .iter()
+                    .flatten()
+                    .map(|&j| positions[j])
+                    .collect();
+                let near_plane = crate::serialize::own_ring_plane(
+                    &near_pts,
+                    &near_holes,
+                    crate::tol::PLANE_DIST,
+                )
+                .map_err(|_| FollowMeError::SweepDegenerate)?;
                 face_specs.push((near_outer, near_inners, near_plane, None));
 
                 let far = m - 1;
@@ -3045,8 +3192,11 @@ impl Object {
                     .map(|(i, h)| (0..h.len()).map(|k| idx(far, hole_starts[i] + k)).collect())
                     .collect();
                 let far_pts: Vec<Point3> = far_outer.iter().map(|&j| positions[j]).collect();
+                let far_holes: Vec<Point3> =
+                    far_inners.iter().flatten().map(|&j| positions[j]).collect();
                 let far_plane =
-                    Plane::from_polygon(&far_pts).map_err(|_| FollowMeError::SweepDegenerate)?;
+                    crate::serialize::own_ring_plane(&far_pts, &far_holes, crate::tol::PLANE_DIST)
+                        .map_err(|_| FollowMeError::SweepDegenerate)?;
                 face_specs.push((far_outer, far_inners, far_plane, None));
             }
 
@@ -3060,8 +3210,9 @@ impl Object {
                         idx(s_next, we.a),
                     ];
                     let quad_pts: Vec<Point3> = quad.iter().map(|&j| positions[j]).collect();
-                    let wall_plane = Plane::from_polygon(&quad_pts)
-                        .map_err(|_| FollowMeError::SweepDegenerate)?;
+                    let wall_plane =
+                        crate::serialize::own_ring_plane(&quad_pts, &[], crate::tol::PLANE_DIST)
+                            .map_err(|_| FollowMeError::SweepDegenerate)?;
                     let surface = we
                         .curve
                         .and_then(|(center_idx, radius)| {
@@ -3110,8 +3261,14 @@ impl Object {
                         .map(|l| l.into_iter().rev().collect())
                         .collect();
                     let pts_rev: Vec<Point3> = rev_outer.iter().map(|&i| positions[i]).collect();
-                    let plane = Plane::from_polygon(&pts_rev)
-                        .map_err(|_| FollowMeError::SweepDegenerate)?;
+                    let hole_pts: Vec<Point3> =
+                        rev_inners.iter().flatten().map(|&i| positions[i]).collect();
+                    let plane = crate::serialize::own_ring_plane(
+                        &pts_rev,
+                        &hole_pts,
+                        crate::tol::PLANE_DIST,
+                    )
+                    .map_err(|_| FollowMeError::SweepDegenerate)?;
                     Ok((rev_outer, rev_inners, plane, surface))
                 })
                 .collect::<Result<Vec<_>, FollowMeError>>()?;
@@ -5479,8 +5636,8 @@ impl Object {
                 obj.vertices[a[k]].position,
                 obj.vertices[a[(k + 1) % n]].position,
             ];
-            let plane =
-                Plane::from_polygon(&wall_pts).map_err(|_| PushPullError::NonManifoldResult)?;
+            let plane = crate::serialize::own_ring_plane(&wall_pts, &[], obj.planarity_tol)
+                .map_err(|_| PushPullError::NonManifoldResult)?;
             let wface = obj.faces.insert(Face {
                 outer_loop: wloop,
                 inner_loops: Vec::new(),
@@ -8817,7 +8974,13 @@ fn refit_face_plane(obj: &mut Object, face: FaceId) -> Result<(), PushPullError>
     if !polygon_is_simple(&pts) {
         return Err(PushPullError::NonManifoldResult);
     }
-    let new_plane = ring_plane(obj, &pts).map_err(|_| PushPullError::NonManifoldResult)?;
+    let hole_pts: Vec<Point3> = obj.faces[face]
+        .inner_loops
+        .iter()
+        .flat_map(|&l| obj.loop_positions(l))
+        .collect();
+    let new_plane = crate::serialize::own_ring_plane(&pts, &hole_pts, obj.planarity_tol)
+        .map_err(|_| PushPullError::NonManifoldResult)?;
     if new_plane.normal().dot(obj.faces[face].plane.normal()) <= 0.0 {
         return Err(PushPullError::NonManifoldResult);
     }
@@ -10326,7 +10489,8 @@ fn build_coplanar_wall(
         obj.vertices[v_a].position,
         obj.vertices[v_b].position,
     ];
-    let plane = Plane::from_polygon(&wall_pts).map_err(|_| PushPullError::NonManifoldResult)?;
+    let plane = crate::serialize::own_ring_plane(&wall_pts, &[], obj.planarity_tol)
+        .map_err(|_| PushPullError::NonManifoldResult)?;
     let wface = obj.faces.insert(Face {
         outer_loop: wloop,
         inner_loops: Vec::new(),
@@ -11573,7 +11737,14 @@ fn do_merge_faces(
         }
         pts
     };
-    if let Ok(new_plane) = Plane::from_polygon(&boundary_pts) {
+    let hole_pts: Vec<Point3> = obj.faces[face_a]
+        .inner_loops
+        .iter()
+        .flat_map(|&l| obj.loop_positions(l))
+        .collect();
+    if let Ok(new_plane) =
+        crate::serialize::own_ring_plane(&boundary_pts, &hole_pts, obj.planarity_tol)
+    {
         obj.faces[face_a].plane = new_plane;
     }
     // The survivor keeps its analytic surface only when BOTH faces claimed
@@ -12965,6 +13136,73 @@ mod tests {
         cube.apply_session_pose(&pose.inverse().unwrap());
         for (a, b) in before.iter().zip(&corner_uvs(&cube)) {
             assert!((a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9);
+        }
+    }
+
+    /// A cylinder of radius 0.25 m in 48 facets, 0.4 m tall, drawn on the
+    /// ground at `(far, far)`: every wall facet claims the cylinder.
+    fn far_cylinder(far: f64) -> Object {
+        use crate::document::Document;
+        let c = Point3::new(far, far, 0.0);
+        let mut doc = Document::new();
+        let s = doc.add_sketch(Plane::from_point_normal(c, Vec3::new(0.0, 0.0, 1.0)).unwrap());
+        let sk = doc.sketch_mut(s).unwrap();
+        sk.begin_curve_with(crate::sketch::CurveGeom {
+            center: c,
+            radius: 0.25,
+        })
+        .unwrap();
+        let p = |i: usize| {
+            let a = std::f64::consts::TAU * (i % 48) as f64 / 48.0;
+            Point3::new(far + 0.25 * a.cos(), far + 0.25 * a.sin(), 0.0)
+        };
+        for i in 0..48 {
+            sk.add_segment(p(i), p(i + 1)).unwrap();
+        }
+        sk.end_curve();
+        let r = doc.extrudable_regions(s).unwrap()[0];
+        let id = doc.extrude_region(s, r, 0.4).unwrap().0;
+        doc.object(id).unwrap().clone()
+    }
+
+    /// A session pose bakes a far-out claimed cylinder (the explode-session
+    /// close and its undo) onto, for each face, the first plane its claim
+    /// agrees with: 1,000 km out the wall facets' refit tilts past what the
+    /// cylinder allows, so taking the first candidate unchecked broke the
+    /// object's invariants, while the preference lands on the exactly
+    /// mapped plane and the object stays valid with every claim.
+    #[test]
+    fn a_session_pose_bake_far_out_prefers_the_plane_its_claim_agrees_with() {
+        let far = 1e6;
+        let pivot = Point3::new(far, far, 0.2);
+        for (axis, angle) in [
+            (Vec3::new(1.0, 1.0, 0.0), 0.7),
+            (Vec3::new(0.2, -1.0, 0.4), 1.3),
+        ] {
+            let pose = Transform::translation(Point3::ORIGIN - pivot)
+                .then(&Transform::rotation(axis, angle).unwrap())
+                .then(&Transform::translation(pivot - Point3::ORIGIN));
+            let mut obj = far_cylinder(far);
+            let claims = obj.faces.values().filter(|f| f.surface.is_some()).count();
+            assert_eq!(claims, 48);
+            obj.apply_session_pose(&pose);
+            obj.validate().unwrap();
+            assert_eq!(
+                obj.faces.values().filter(|f| f.surface.is_some()).count(),
+                claims
+            );
+            for f in obj.faces.values() {
+                if let Some(c) = f.surface {
+                    let pts: Vec<Point3> = obj.loop_positions(f.outer_loop).collect();
+                    assert!(
+                        crate::surface::validate_face_claim(&c, &f.plane, &pts, obj.planarity_tol),
+                        "{axis:?} by {angle}: a claimed face sits on a plane its claim refuses"
+                    );
+                }
+            }
+            // And back, as the close's undo bakes the inverse.
+            obj.apply_session_pose(&pose.inverse().unwrap());
+            obj.validate().unwrap();
         }
     }
 }

@@ -111,10 +111,20 @@ pub enum TopologyError {
         /// The offending face.
         face: FaceId,
     },
-    /// A face's outer loop encloses too little area for its plane to be
-    /// recomputed from its vertices, as the file loader does: the state
-    /// could be saved but never reopened, so it is never committed.
+    /// A face's outer loop is too small for its plane to be recomputed from
+    /// its vertices, as the file loader does (twice its area under 1e-12 m²
+    /// and narrower than [`crate::tol::MIN_FACE_WIDTH`]): the state could be
+    /// saved but never reopened, so it is never committed.
     FaceTooSmallToReopen {
+        /// The offending face.
+        face: FaceId,
+    },
+    /// A face's stored plane is not one a file stores for its outer loop:
+    /// not finite, its normal not a unit vector, or facing against the
+    /// winding of the loop (`serialize::stored_plane_fault`). The
+    /// writer leaves such a plane out and the reader refits one, so the
+    /// face would reopen on a different plane; no operation commits it.
+    FacePlaneInvalid {
         /// The offending face.
         face: FaceId,
     },
@@ -253,7 +263,14 @@ impl std::fmt::Display for TopologyError {
             FaceTooSmallToReopen { face } => {
                 write!(
                     f,
-                    "face {face:?} encloses too little area to recompute its plane on load"
+                    "face {face:?} is too small to recompute its plane on load"
+                )
+            }
+            FacePlaneInvalid { face } => {
+                write!(
+                    f,
+                    "face {face:?}: the face's plane is not one a file stores for its \
+                     outer loop: not unit, or facing against the loop's winding"
                 )
             }
             LoopNotSimple { loop_id } => {

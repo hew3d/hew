@@ -132,21 +132,63 @@ fn ingest_degenerate_mesh_is_skipped_not_fatal() {
     assert_eq!(report.skipped[0].name, "bad");
 }
 
+/// A mesh so large its faces have no plane (a cube 1e100 m on a side: each
+/// face's Newell vector overflows its length) is skipped with a reason, as
+/// any mesh that cannot build is, and the document keeps a good mesh beside
+/// it and still saves and reopens. A cube 1e50 m on a side imports.
+#[test]
+fn ingest_skips_a_mesh_too_large_for_its_face_planes() {
+    let scaled = |name: &str, s: f64| {
+        let mut r = box_recipe(name);
+        for p in &mut r.positions {
+            *p = Point3::new(p.x * s, p.y * s, p.z * s);
+        }
+        r
+    };
+    let huge = scaled("huge", 1e100);
+    assert!(huge.check_builds().is_err(), "the check agrees with ingest");
+    let mut doc = Document::new();
+    let scene = empty_scene(vec![
+        ImportNode::Mesh(box_recipe("good")),
+        ImportNode::Mesh(huge),
+        ImportNode::Mesh(scaled("large", 1e50)),
+    ]);
+    let (report, _change) = doc.ingest(scene, vec![]).unwrap();
+    assert_eq!(report.objects_created, 2, "good and large built");
+    assert_eq!(report.watertight, 2);
+    assert_eq!(report.skipped.len(), 1);
+    assert_eq!(report.skipped[0].name, "huge");
+    assert!(
+        report.skipped[0].reason.contains("degenerate"),
+        "a reason a person can read: {}",
+        report.skipped[0].reason
+    );
+    let loaded = Document::load(&doc.save()).expect("the document reopens");
+    assert_eq!(loaded.visible_object_ids().len(), 2);
+}
+
 /// `MeshRecipe::check_builds` answers, without a document, exactly what
 /// `ingest` does with the mesh: a mesh it builds checks `Ok`, and a mesh it
 /// skips checks as the error whose text is the skip's reason — a degenerate
-/// face, and a quad too small for its plane to be found.
+/// face, and a quad too small for its plane to be found (5 nm squares:
+/// twice their area under 1e-12 m² and narrower than `tol::MIN_FACE_WIDTH`).
+/// A box of 0.1 µm squares, which the area floor alone used to refuse, is
+/// 0.1 µm wide and builds now.
 #[test]
 fn check_builds_agrees_with_ingest() {
-    let mut tiny = box_recipe("tiny");
-    for p in &mut tiny.positions {
-        *p = Point3::new(p.x * 1e-7, p.y * 1e-7, p.z * 1e-7);
-    }
+    let scaled = |name: &str, k: f64| {
+        let mut r = box_recipe(name);
+        for p in &mut r.positions {
+            *p = Point3::new(p.x * k, p.y * k, p.z * k);
+        }
+        r
+    };
     for (recipe, builds) in [
         (box_recipe("good"), true),
         (open_box_recipe("open"), true),
         (degenerate_recipe("bad"), false),
-        (tiny, false),
+        (scaled("tiny", 5e-9), false),
+        (scaled("sub-micron", 1e-7), true),
     ] {
         let name = recipe.name.clone();
         let check = recipe.check_builds();

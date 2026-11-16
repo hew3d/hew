@@ -273,6 +273,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "DegenerateTextureFrame" => {
             "That would stretch a picture or texture on the object so far it couldn't stay on its face, so it was refused. Try a smaller stretch."
         }
+        "FaceNotFlat" => {
+            "That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change."
+        }
         "InvalidRescaleFactor" => {
             "That resize factor isn't valid. Pick two points that aren't on top of each other and type a positive distance."
         }

@@ -1896,12 +1896,17 @@ fn heal(
     //    (step 3) gates on effective HEIGHT relative to `weld_tol` — the source's
     //    coincidence precision — but `Object::from_polygons`'s degeneracy gate is
     //    `Plane::from_polygon`, which fails when the Newell normal magnitude (= 2×
-    //    area) falls below the ABSOLUTE floor `tol::NORMALIZE_MIN_LENGTH`. A small
-    //    sliver can clear the height gate yet trip the absolute one, and because
-    //    `Document::ingest` builds each object all-or-nothing, ONE such face out of
-    //    ~110k skips the ENTIRE model (as a 3DBenchy-class real-world STL routinely
-    //    does). Filter with the kernel's OWN predicate here so the healer's output
-    //    is buildable by construction — the two agree, no threshold drift. This is
+    //    area) falls below the ABSOLUTE floor `tol::NORMALIZE_MIN_LENGTH` and the
+    //    face is also under `tol::MIN_FACE_WIDTH` wide. A small sliver can clear
+    //    the height gate yet trip that, and because `Document::ingest` builds
+    //    each object all-or-nothing, ONE such face out of ~110k skips the ENTIRE
+    //    model (as a 3DBenchy-class real-world STL routinely does). Filter here
+    //    with `Plane::from_polygon_import`, the import boundary's own floor (the
+    //    area floor alone, about 5e-13 m²): it rejects every face the kernel's
+    //    predicate rejects and more, so the healer's output is buildable by
+    //    construction (a face too large for its Newell length to be finite
+    //    excepted: it passes, and the kernel refuses the mesh typed, a
+    //    reported skip), and a file heals to the same face set it always has. This is
     //    import-boundary normalization (foreign-input artefact), not silent kernel
     //    repair; a dropped face may open the shell, and the object then arrives
     //    honestly LEAKY rather than skipped. The count is returned so callers put
@@ -2020,8 +2025,13 @@ fn drop_zero_area_faces(
             longest_edge_sq = longest_edge_sq.max(e.length_squared());
         }
         // Keep iff effective height 2A/longest_edge exceeds weld_tol,
-        // i.e. (2A)² > longest_edge² · weld_tol².
-        if area2 * area2 > longest_edge_sq * weld_tol * weld_tol {
+        // i.e. (2A)² > longest_edge² · weld_tol². A face so large that both
+        // sides overflow (a scale-relative weld tolerance on a mesh some
+        // 1e80 m across) cannot be measured here and is no sliver: it is
+        // kept, so the kernel refuses the mesh typed (its plane fit
+        // overflows too) rather than the mesh vanishing without a word.
+        let (height_sq, gate_sq) = (area2 * area2, longest_edge_sq * weld_tol * weld_tol);
+        if height_sq > gate_sq || (height_sq == f64::INFINITY && gate_sq == f64::INFINITY) {
             out_faces.push(face.clone());
             out_mats.push(mat);
             out_uvs.push(corner_uvs.clone());
@@ -2034,18 +2044,24 @@ fn drop_zero_area_faces(
     (out_faces, out_mats, out_uvs, out_holes)
 }
 
-/// Drop any face the kernel's `Object::from_polygons` would reject as a
-/// `DegenerateFace` — i.e. one whose outer loop `Plane::from_polygon` cannot
-/// fit a plane through (Newell normal magnitude below the ABSOLUTE floor
-/// `tol::NORMALIZE_MIN_LENGTH`). Uses the kernel's own predicate so the healer
-/// and the kernel agree exactly, with no threshold drift: a near-degenerate
+/// Drop any face whose outer loop is under the import boundary's area floor:
+/// `Plane::from_polygon_import` cannot fit a plane through it (Newell normal
+/// magnitude below the ABSOLUTE floor `tol::NORMALIZE_MIN_LENGTH`, about
+/// 5e-13 m² of area). The kernel's own predicate, `Plane::from_polygon`,
+/// also keeps faces under that floor that are at least `tol::MIN_FACE_WIDTH`
+/// wide; the import boundary keeps a floor of its own so a file heals to the
+/// same face set it always has, and every face kept here builds, because the
+/// kernel's rule accepts everything this one does, except a face so large its
+/// Newell vector overflows its length: this keeps it, on a zero normal, and
+/// the kernel refuses its mesh typed, so the import reports the mesh skipped
+/// with a reason instead of dropping its faces. A near-degenerate
 /// sliver that clears `drop_zero_area_faces`'s scale-relative height gate but
-/// trips the kernel's absolute one is removed HERE, at the import boundary,
+/// trips the absolute one is removed HERE, at the import boundary,
 /// instead of skipping the whole object at ingest (which is all-or-nothing per
 /// object — one bad face out of a real STL's ~110k would drop the entire
 /// model).
 ///
-/// Only the OUTER loop is tested (that is what `Plane::from_polygon` fits in
+/// Only the OUTER loop is tested (that is what the kernel's plane fit uses in
 /// `from_polygons_impl`); hole loops ride with their face. A dropped face may
 /// open the shell — the object then arrives honestly leaky, never patched or
 /// silently repaired (DEVELOPMENT.md rule 4 governs kernel operations; this is
@@ -2088,9 +2104,9 @@ fn drop_kernel_degenerate_faces(
         )
     {
         let pts: Vec<Point3> = face.iter().map(|&i| positions[i]).collect();
-        // Keep iff the kernel could fit a plane through the outer loop — the
-        // exact `from_polygons` DegenerateFace criterion.
-        if Plane::from_polygon(&pts).is_ok() {
+        // Keep iff the outer loop clears the import boundary's area floor, a
+        // stricter test than the kernel's `from_polygons` DegenerateFace one.
+        if Plane::from_polygon_import(&pts).is_ok() {
             out_faces.push(face.clone());
             out_mats.push(mat);
             out_uvs.push(corner_uvs.clone());
@@ -3203,8 +3219,8 @@ mod tests {
         );
     }
 
-    /// `drop_kernel_degenerate_faces` removes exactly the faces the kernel's
-    /// `Plane::from_polygon` would reject (Newell normal below
+    /// `drop_kernel_degenerate_faces` removes exactly the faces under the
+    /// import floor, `Plane::from_polygon_import` (Newell normal below
     /// `tol::NORMALIZE_MIN_LENGTH`), keeping well-formed faces — so no face the
     /// kernel calls `DegenerateFace` ever reaches `from_polygons`.
     #[test]
@@ -3215,7 +3231,7 @@ mod tests {
             Point3::new(1.0, 0.0, 0.0),
             Point3::new(0.0, 1.0, 0.0),
             // A near-degenerate sliver: base 1e-5, height 1e-8 → 2·area = 1e-13,
-            // below NORMALIZE_MIN_LENGTH (1e-12), so Plane::from_polygon fails.
+            // below NORMALIZE_MIN_LENGTH (1e-12), so Plane::from_polygon_import fails.
             Point3::new(0.0, 0.0, 1.0),
             Point3::new(1e-5, 0.0, 1.0),
             Point3::new(5e-6, 1e-8, 1.0),
@@ -3226,8 +3242,8 @@ mod tests {
         let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(), Vec::new()];
 
         // The sliver really is kernel-degenerate; the good triangle is not.
-        assert!(Plane::from_polygon(&[positions[0], positions[1], positions[2]]).is_ok());
-        assert!(Plane::from_polygon(&[positions[3], positions[4], positions[5]]).is_err());
+        assert!(Plane::from_polygon_import(&[positions[0], positions[1], positions[2]]).is_ok());
+        assert!(Plane::from_polygon_import(&[positions[3], positions[4], positions[5]]).is_err());
 
         let (out_faces, out_mats, _uvs, _holes) =
             drop_kernel_degenerate_faces(&faces, &mats, &uvs, &holes, &positions);

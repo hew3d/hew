@@ -564,6 +564,7 @@ Bake an instance into world geometry.
 - `unknown_entity`
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `cannot_explode_reflected`
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 
 ### `hew.component.flip_instance`
 
@@ -638,6 +639,7 @@ Mirror one world instance across one of its definition's local axes.
 **Refusals:**
 
 - `unknown_entity`
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 
 ### `hew.component.import_definition`
 
@@ -883,6 +885,7 @@ Place an instance of a definition at a pose.
 - `unknown_entity`
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `singular` — That transform would scale the object down to nothing, so it was refused.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 
 ### `hew.component.promote`
 
@@ -1025,6 +1028,7 @@ Re-express a definition in a new frame; every placement is compensated, so nothi
 - `unknown_entity`
 - `invalid_frame` — That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions.
 - `rebase_during_session` — Finish editing the component before changing its axes.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 
 ## hew.compute
 
@@ -1594,6 +1598,7 @@ Union, subtract, or intersect two solids without touching the document; answers 
 - `compute_busy`
 - `compute_too_large`
 - `mesh_too_large`
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 - `operand_not_solid` — Combining needs a solid on both sides. To make it solid, select it and choose Object ▸ Make Solid…
 - `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
 - `nothing_removed` — Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting.
@@ -1859,6 +1864,7 @@ Volume, surface area, bounding box, and centroid of a solid.
 - `mirrored_pose`
 - `compute_busy`
 - `compute_too_large`
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 
 ### `hew.compute.offset`
 
@@ -2985,6 +2991,7 @@ Split a solid into its connected pieces without touching the document.
 - `compute_busy`
 - `compute_too_large`
 - `mesh_too_large`
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 
 ### `hew.compute.slice`
 
@@ -3590,6 +3597,7 @@ Cut a solid by a plane without touching the document; answers both pieces.
 - `compute_busy`
 - `compute_too_large`
 - `mesh_too_large`
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 - `not_solid` — Only a solid can be sliced. To make it solid, select it and choose Object ▸ Make Solid…
 - `plane_misses_solid` — The slicing plane doesn't pass through the object. Position the cut so it goes through the solid.
 - `degenerate` — The cut lines up exactly with an existing face or edge, so it wouldn't create two pieces. Move the cut slightly.
@@ -3840,6 +3848,7 @@ Open a group/component editing frame (transaction-balanced only).
 - `explode_session_grouped_instance` — This instance sits inside a group, so it opens in the in-context editing mode instead.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 
 ### `hew.context.exit`
 
@@ -3874,6 +3883,7 @@ Close the innermost frame this envelope opened.
 **Refusals:**
 
 - `explode_session_not_open` — No component is currently open for editing.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 
 ## hew.doc
 
@@ -5347,6 +5357,7 @@ Mirror a selection across a plane (Flip Along an axis through its center, the or
 - `singular` — That transform would scale the object down to nothing, so it was refused.
 - `degenerate_axis` — The rotation axis needs two distinct points. Pick a second point further from the first.
 - `degenerate_texture_frame` — That would stretch a picture or texture on the object so far it couldn't stay on its face, so it was refused. Try a smaller stretch.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 
 ### `hew.entity.move`
 
@@ -5512,6 +5523,7 @@ Translate (with copy/array forms) by vector or from→to points; ids may be path
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 
 ### `hew.entity.rename`
 
@@ -5706,6 +5718,7 @@ Rotate about a pivot and axis by an angle; ids may be paths to members of one de
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 
 ### `hew.entity.scale`
 
@@ -5792,6 +5805,7 @@ Scale about an anchor with per-axis factors; a negative factor mirrors. ids may 
 - `unknown_occurrence`
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 
 ### `hew.entity.set_frame`
 
@@ -7025,6 +7039,7 @@ Insert a library item into the attached document, wired for idempotent re-insert
 - `degenerate_axis` — The rotation axis needs two distinct points. Pick a second point further from the first.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `profile_not_insertable`
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 
 ### `hew.library.list`
 
@@ -7320,6 +7335,7 @@ Save a selection, one material, or the whole document to the library. Records no
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 - `save_failed`
 - `unknown_library_item`
 - `invalid_profile` — This profile shape isn't valid. Redraw it as one open chain.
@@ -14812,6 +14828,7 @@ Boolean intersection of two or more solids: the material in all of them.
 - `unknown_occurrence`
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 - `would_unlink`
 
 ### `hew.solid.loft`
@@ -16375,6 +16392,7 @@ Boolean subtraction: the first solid minus every other one; a may be a path to a
 - `unknown_occurrence`
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 - `nothing_removed` — Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting.
 - `mirrored_pose`
 - `compute_too_large`
@@ -16580,6 +16598,7 @@ Boolean union of two or more solids: the material in any of them.
 - `unknown_occurrence`
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 - `would_unlink`
 
 ## hew.tag

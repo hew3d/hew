@@ -86,7 +86,7 @@ pub fn resolve_overlapping_holes(
         if holes.len() < 2 {
             continue;
         }
-        let Ok(plane) = Plane::from_polygon(&ring(outer)) else {
+        let Ok(plane) = Plane::from_polygon_import(&ring(outer)) else {
             continue; // the builder refuses the face itself
         };
         loop {

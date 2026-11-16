@@ -1007,9 +1007,9 @@ fn save_load_round_trips_face_and_edge_dictionaries() {
 }
 
 #[test]
-fn the_writer_records_geometry_v10_and_manifest_v32() {
+fn the_writer_records_geometry_v11_and_manifest_v32() {
     use std::io::Read as _;
-    assert_eq!(kernel::GEOMETRY_FORMAT_VERSION, 10);
+    assert_eq!(kernel::GEOMETRY_FORMAT_VERSION, 11);
     assert_eq!(kernel::MANIFEST_FORMAT_VERSION, 32);
     let (doc, _) = decorated();
     let bytes = doc.save();
@@ -1021,7 +1021,7 @@ fn the_writer_records_geometry_v10_and_manifest_v32() {
         .unwrap();
     let m: serde_json::Value = serde_json::from_str(&manifest).unwrap();
     assert_eq!(m["format_version"], 32);
-    assert_eq!(m["geometry_version"], 10);
+    assert_eq!(m["geometry_version"], 11);
 }
 
 /// The first occurrence of `needle` in `hay`.

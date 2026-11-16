@@ -92,8 +92,8 @@ below.
   ordinary `split_face` cuts and re-traces; a piece outside an imprint
   cuts the face around it from the imprint's hole back to it). A circle overshooting a rectangle drawn a
   few microns short leaves a sliver, as on the ground; a sliver too small
-  for a saved file to reopen (under about half a square micron) is
-  refused, and the validator holds every operation to the same limit. A
+  for a saved file to reopen (under about half a square micron and
+  narrower than 10 nm) is refused, and the validator holds every operation to the same limit. A
   shape whose pieces join two different boundaries of one face (a circle
   overlapping two separate imprints, a rectangle from the face's edge
   across an imprint, a rectangle flush between two imprints) cuts that
@@ -152,7 +152,7 @@ below.
   facet a crossing cuts mid-way keeps no circle claim in the solid (the
   drafting engine still lists it with its circle), so pushing that
   region leaves one flat wall among the cylinder's; and a sliver under
-  about half a square micron is refused. The Arc tool's open arc, and the API's
+  about half a square micron and narrower than 10 nm is refused. The Arc tool's open arc, and the API's
   face-mode `draw_line` and open `draw_arc`, go through the same drafting
   engine, so they cross shapes on a face too; `hew.solid.imprints`
   lists cut-apart curves in `curve_units`

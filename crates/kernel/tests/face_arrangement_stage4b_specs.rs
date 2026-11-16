@@ -890,7 +890,44 @@ proptest! {
         prop_assert!(report.kept_as_sketch.is_empty(), "nothing kept as drawing");
         prop_assert!(!ground_has_pinch(&sk), "the ground's rings are simple");
         assert_group_matches_ground(&w, &sk);
-        assert_invariants(&mut w, &before, &bytes0, depth0);
+        // A chain lying wholly on one boundary of the wall (every point on
+        // its bottom edge, or every point on its top edge) draws nothing
+        // new: the draw succeeds and changes nothing, so it adds no undo
+        // entry (`a_chain_wholly_on_a_boundary_changes_nothing`). Every
+        // other chain keeps I1–I7, one undo entry included.
+        let all_on = |y: u32| y0 == y && y1 == y && ys.iter().all(|&v| v == y);
+        if all_on(0) || all_on(20) {
+            prop_assert_eq!(w.doc.undo_depth(), depth0, "no undo entry");
+            prop_assert_eq!(w.doc.save(), bytes0, "the bytes are unchanged");
+        } else {
+            assert_invariants(&mut w, &before, &bytes0, depth0);
+        }
+    }
+}
+
+/// The shrunk `line_chains_match_the_ground` case (rx = ry = rw = rh = 2,
+/// every y = 0): a chain lying wholly on the wall's bottom edge, then the
+/// same along its top edge. The ground keeps the face as it was, so the
+/// draw is Ok and changes nothing: the bytes and the undo depth are as
+/// before, and no drawing is kept.
+#[test]
+fn a_chain_wholly_on_a_boundary_changes_nothing() {
+    for y in [0.0, 10.0] {
+        let mut w = front_wall();
+        let wall = w.face;
+        imprint_mm(&mut w, wall, 1.0, 1.0, 1.0, 1.0);
+        let path = vec![mm(&w, 0.0, y), mm(&w, 10.0, y), mm(&w, 20.0, y)];
+        let before = w.obj().clone();
+        let bytes0 = w.doc.save();
+        let depth0 = w.doc.undo_depth();
+        let sk = ground_edit(w.plane, &before, &path, &[]);
+        let (report, _) = draw_path(&mut w.doc, None, w.id, wall, &path, &[])
+            .expect("a chain on the boundary draws");
+        assert!(report.kept_as_sketch.is_empty(), "y = {y}: nothing kept");
+        assert_group_matches_ground(&w, &sk);
+        assert_eq!(w.doc.undo_depth(), depth0, "y = {y}: no undo entry");
+        assert_eq!(w.doc.save(), bytes0, "y = {y}: the bytes are unchanged");
+        assert!(objects_equivalent(w.obj(), &before), "y = {y}: unchanged");
     }
 }
 

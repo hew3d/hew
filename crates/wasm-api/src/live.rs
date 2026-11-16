@@ -1849,8 +1849,10 @@ mod tests {
         let kernel::ImportNode::Mesh(mesh) = &mut out.scene.defs[0].children[0] else {
             panic!("the definition holds the picture's mesh");
         };
+        // A 10 × 3.3 nm picture: twice its area under 1e-12 m² and narrower
+        // than `kernel::tol::MIN_FACE_WIDTH`.
         for p in &mut mesh.positions {
-            *p = kernel::Point3::new(p.x * 1e-7, p.y * 1e-7, 0.0);
+            *p = kernel::Point3::new(p.x * 1e-8, p.y * 1e-8, 0.0);
         }
         let Err(refusal) = ingest_picture(&mut doc, "speck.png", out.scene) else {
             panic!("a face the kernel would skip is refused");
@@ -1866,5 +1868,17 @@ mod tests {
         assert_eq!(doc.material_ids().len(), materials, "no material left");
         doc.redo().unwrap();
         assert_eq!(doc.instance_ids().len(), 2, "the undone picture redoes");
+        // The 0.1 × 0.033 µm picture the area floor alone used to refuse is
+        // 50 nm wide: it is kept now, and the document reopens.
+        let mut out = recipe();
+        let kernel::ImportNode::Mesh(mesh) = &mut out.scene.defs[0].children[0] else {
+            panic!("the definition holds the picture's mesh");
+        };
+        for p in &mut mesh.positions {
+            *p = kernel::Point3::new(p.x * 1e-7, p.y * 1e-7, 0.0);
+        }
+        assert!(ingest_picture(&mut doc, "speck.png", out.scene).is_ok());
+        assert_eq!(doc.instance_ids().len(), 3);
+        kernel::Document::load(&doc.save()).expect("reopens");
     }
 }

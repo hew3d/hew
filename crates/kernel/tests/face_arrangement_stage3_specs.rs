@@ -340,16 +340,22 @@ fn an_inscribed_circle_overshooting_a_short_rectangle_by_microns_matches_the_gro
     // thin sliver of the circle outside the rectangle, cut from the wall: a
     // triangle `h` high on a base of 2h / tan 7.5°. A saved file recomputes
     // each face's plane from its outer loop, which needs twice its area to
-    // reach 1e-12 m² — h above about 0.26 µm. So 0.5 µm one-sided slivers
-    // are faces, while 0.25 µm per side (0.5 µm centered) is too small for a
-    // face: the circle stays as the rectangle's owned-sketch drawing and the
-    // solid is untouched.
-    for short in [10.3e-6, 5e-6, 0.5e-6] {
+    // reach 1e-12 m², or, failing that, the sliver to be at least 10 nm
+    // wide (`tol::MIN_FACE_WIDTH`; the width of this one is just under h).
+    // So 0.5 µm slivers both ways round are faces now, and so is 0.25 µm per
+    // side (0.5 µm centered), which the area floor alone used to refuse: it
+    // is kept and reopens. 15 nm one-sided is a face; 7.5 nm per side (15 nm
+    // centered) is too thin for one: the circle stays as the rectangle's
+    // owned-sketch drawing and the solid is untouched.
+    for short in [10.3e-6, 5e-6, 0.5e-6, 15e-9] {
         for centered in [false, true] {
             for wall in [front_wall as fn() -> Wall, tilted_wall] {
                 let (mut w, s, ring, g) = overshoot_case(wall(), short, centered);
                 let h = if centered { short / 2.0 } else { short };
-                if 2.0 * h * h / (PI / 24.0).tan() < 1e-12 {
+                let base = 2.0 * h / (PI / 24.0).tan();
+                let twice_area = base * h;
+                let width = twice_area / ((base + 2.0 * (base * base / 4.0 + h * h).sqrt()) / 2.0);
+                if twice_area < 1e-12 && width < tol::MIN_FACE_WIDTH {
                     let owned = kept_and_check(&mut w, s, &ring, Some(g));
                     assert_eq!(owned, 28, "the circle and its four splits");
                     assert_eq!(claims_on(w.obj(), g), 0, "no solid edge claims it");
@@ -830,25 +836,42 @@ fn corner_overlap(d: f64) -> (Wall, Vec<Point3>) {
 #[test]
 fn a_corner_face_too_small_to_reopen_stays_owned_drawing() {
     // A face's plane is recomputed from its outer loop when a file opens,
-    // which needs twice its area to reach 1e-12 m²: a 1 µm square corner
-    // (1e-12 m²) reopens; 0.7, 0.5, and 0.1 µm squares would not, so the
-    // rectangle stays as the object's owned-sketch drawing (its four sides
-    // and the two splits where it meets the imprint) and the solid is
-    // untouched.
+    // which needs twice its area to reach 1e-12 m², or the face to be at
+    // least 10 nm wide (`tol::MIN_FACE_WIDTH`; a square is as wide as its
+    // side): a 1 µm square corner reopens, and so do the 0.7, 0.5 and 0.1 µm
+    // squares the area floor alone used to refuse. 7 and 5 nm squares would
+    // not, so the rectangle stays as the object's owned-sketch drawing (its
+    // four sides and the two splits where it meets the imprint) and the
+    // solid is untouched.
     let (mut w, rect) = corner_overlap(1e-3);
     let wall = w.face;
     cross_and_check(&mut w, wall, rect, None);
+    let faces = group_faces(w.obj(), &w.plane).len();
     for d in [7e-4, 5e-4, 1e-4] {
+        // Kept now, and reopens (`cross_and_check` reopens the result).
+        let (mut w, rect) = corner_overlap(d);
+        let wall = w.face;
+        cross_and_check(&mut w, wall, rect, None);
+        assert_eq!(group_faces(w.obj(), &w.plane).len(), faces, "d {d}");
+    }
+    for d in [7e-6, 5e-6] {
         let (mut w, rect) = corner_overlap(d);
         let wall = w.face;
         let owned = kept_and_check(&mut w, wall, &rect, None);
         assert_eq!(owned, 6, "d {d}");
         assert_eq!(group_faces(w.obj(), &w.plane).len(), 2, "d {d}");
     }
+    // The same 0.1 µm corner reached off the lattice: kept now.
     let mut w = front_wall();
     let wall = w.face;
     imprint_mm(&mut w, wall, 3.03, 2.0001, 9.0, 4.0);
     let rect = w.rect(12.0299 * MM, 6.0 * MM, 2.0 * MM, 1.0 * MM);
+    cross_and_check(&mut w, wall, rect, None);
+    // And a 5 nm one: too thin, kept as drawing.
+    let mut w = front_wall();
+    let wall = w.face;
+    imprint_mm(&mut w, wall, 3.03, 2.000005, 9.0, 4.0);
+    let rect = w.rect(12.029995 * MM, 6.0 * MM, 2.0 * MM, 1.0 * MM);
     let owned = kept_and_check(&mut w, wall, &rect, None);
     assert_eq!(owned, 6);
     assert_eq!(group_faces(w.obj(), &w.plane).len(), 2);
@@ -857,9 +880,12 @@ fn a_corner_face_too_small_to_reopen_stays_owned_drawing() {
 #[test]
 fn no_shrink_leaves_a_face_too_small_to_reopen() {
     // A transform is checked up front: a shrink that would leave a face
-    // under the loader's limit is singular at that scale, refused before
-    // any vertex moves. (The box's 10 mm × 10 mm walls at 1e-4 are 1 µm
-    // squares, which reopen; at 5e-5 they would not.)
+    // under the loader's limit (twice its area under 1e-12 m² and narrower
+    // than 10 nm) is singular at that scale, refused before any vertex
+    // moves. A uniform shrink below 1e-4 is refused by the transform's own
+    // determinant floor before any face is looked at, so the face limit is
+    // reached by squashing one axis: the box's 10 mm × 10 mm end walls at
+    // (5e-4, 3e-7) are 5 µm × 3 nm, too thin to reopen.
     let w = front_wall();
     let mut obj = w.obj().clone();
     assert_eq!(
@@ -867,6 +893,21 @@ fn no_shrink_leaves_a_face_too_small_to_reopen() {
         Err(kernel::TransformError::Singular)
     );
     assert!(objects_equivalent(&obj, w.obj()), "untouched");
+    let squash = |y: f64, z: f64| kernel::Transform::scale(kernel::Vec3::new(1.0, y, z));
+    assert_eq!(
+        obj.apply_transform(&squash(5e-4, 3e-7)),
+        Err(kernel::TransformError::Singular)
+    );
+    assert!(objects_equivalent(&obj, w.obj()), "untouched");
+    // 5 µm × 30 nm end walls (twice the area 3e-13 m², under the old area
+    // floor, but 30 nm wide) are kept now, and reopen.
+    let mut thin = obj.clone();
+    thin.apply_transform(&squash(5e-4, 3e-6))
+        .expect("a 30 nm wide wall is kept");
+    thin.validate().expect("valid");
+    let bytes = thin.encode(&|_| 0);
+    let back = Object::decode(&bytes, &|_| None).expect("reopens");
+    assert_eq!(back.encode(&|_| 0), bytes, "reopens identically");
     obj.apply_transform(&kernel::Transform::uniform_scale(1e-4))
         .expect("a 1 µm square wall reopens");
     obj.validate().expect("valid");
@@ -875,10 +916,11 @@ fn no_shrink_leaves_a_face_too_small_to_reopen() {
 #[test]
 fn no_cut_commits_a_face_too_small_to_reopen() {
     // Defence in depth below the planner: a raw cut that would leave a
-    // 0.5 µm corner triangle of the imprint is refused by the always-on
-    // validator, on the object and through the document alike.
+    // 5 nm corner triangle of the imprint (about 3 nm wide, under
+    // `tol::MIN_FACE_WIDTH`) is refused by the always-on validator, on the
+    // object and through the document alike.
     let (mut w, s) = wall_with_rect();
-    let d = 0.5e-6;
+    let d = 5e-9;
     let (x1, y1) = (RX + RW, RY + RH);
     let path = vec![w.at(x1 - d, y1), w.at(x1, y1 - d)];
     let mut obj = w.obj().clone();
@@ -887,6 +929,14 @@ fn no_cut_commits_a_face_too_small_to_reopen() {
         Err(StickyError::WouldCorrupt)
     );
     assert_op_refused(&mut w, split_op(s, path), StickyError::WouldCorrupt);
+    // 0.5 µm, which the area floor alone used to refuse, is kept now: it
+    // reopens and commits.
+    {
+        let (mut w, s) = wall_with_rect();
+        let d = 0.5e-6;
+        let path = vec![w.at(x1 - d, y1), w.at(x1, y1 - d)];
+        split_and_check(&mut w, s, path);
+    }
     // 2 µm reopens and commits.
     let d = 2e-6;
     let path = vec![w.at(x1 - d, y1), w.at(x1, y1 - d)];
@@ -928,8 +978,9 @@ fn twice_area(ring: &[(f64, f64)]) -> f64 {
 /// draw lands as face topology with I1–I7 and ground parity, or is kept as
 /// the object's owned-sketch drawing with the solid untouched where the
 /// ground says it must or may be: a pinch, a region too small to reopen
-/// (twice its area under 1e-12 m², with a 20 % band), or features within
-/// 3 nm (a sliver the merge tolerance cannot separate). Never refused.
+/// (twice its area under 1e-12 m² and narrower than 10 nm, each with a
+/// 20 % band), or features within 3 nm (a sliver the merge tolerance
+/// cannot separate). Never refused.
 #[test]
 fn micron_offset_crossings_match_the_ground_or_stay_drawing_as_predicted() {
     let mut rng = Rng(0x0dd5_eed5_1c0f_fee5);
@@ -1010,17 +1061,33 @@ fn micron_offset_crossings_match_the_ground_or_stay_drawing_as_predicted() {
             .filter(|&&p| on_loop(p) && ring_dist(p, &imprint) <= tol::POINT_MERGE)
             .count();
         let pinch = sites == 1;
-        let smallest = ground_regions(&sk)
+        // Each region's twice-area and width (that over half its perimeter).
+        let sizes: Vec<(f64, f64)> = ground_regions(&sk)
             .iter()
-            .map(|(outer, _)| twice_area(&outer.iter().map(|&p| xy(&w, p)).collect::<Vec<_>>()))
-            .fold(f64::INFINITY, f64::min);
+            .map(|(outer, _)| {
+                let ring: Vec<(f64, f64)> = outer.iter().map(|&p| xy(&w, p)).collect();
+                let a2 = twice_area(&ring);
+                let perimeter: f64 = (0..ring.len())
+                    .map(|i| {
+                        let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                        (b.0 - a.0).hypot(b.1 - a.1)
+                    })
+                    .sum();
+                (a2, a2 / (perimeter / 2.0))
+            })
+            .collect();
+        let too_small = |band: f64| {
+            sizes
+                .iter()
+                .any(|&(a2, wd)| a2 < band * 1e-12 && wd < band * tol::MIN_FACE_WIDTH)
+        };
         let tight = sk.edges().values().any(|e| {
             let (a, b) = (pos(e.from), pos(e.to));
             gv.iter()
                 .any(|&p| !p.approx_eq(a, 0.0) && !p.approx_eq(b, 0.0) && seg_dist(p, a, b) < 3e-9)
         });
-        let must_refuse = pinch || smallest < 0.8e-12;
-        let may_refuse = must_refuse || smallest < 1.2e-12 || tight;
+        let must_refuse = pinch || too_small(0.8);
+        let may_refuse = must_refuse || too_small(1.2) || tight;
 
         let bytes0 = w.doc.save();
         let depth0 = w.doc.undo_depth();

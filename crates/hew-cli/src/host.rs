@@ -943,8 +943,9 @@ mod tests {
     /// is touched: the saved bytes, the undo depth, the redo history (an
     /// earlier undone picture still redoes) and the palette all stay as
     /// they were. Reached two ways: a width so large the face's area
-    /// overflows, through the ordinary import, and a recipe shrunk past
-    /// what the kernel can find a plane for, through `ingest_picture`.
+    /// overflows, through the ordinary import, and a recipe shrunk to
+    /// 10 × 3.3 nm (5 nm wide, under `MIN_FACE_WIDTH`), through
+    /// `ingest_picture`. Shrunk ten times less, the picture builds.
     #[test]
     fn a_picture_the_kernel_would_not_build_is_refused_before_anything_changes() {
         let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
@@ -989,8 +990,13 @@ mod tests {
         let kernel::ImportNode::Mesh(mesh) = &mut out.scene.defs[0].children[0] else {
             panic!("the definition holds the picture's mesh");
         };
+        // A 10 × 3.3 nm picture. A face's width is twice its area over its
+        // half-perimeter, 2ab / (a + b) for this rectangle: 5 nm, under
+        // `kernel::tol::MIN_FACE_WIDTH` (10 nm). Twice its area, 6.7e-17 m²,
+        // is also under `tol::NORMALIZE_MIN_LENGTH` (1e-12), so neither
+        // rule gives the face a plane and it is refused.
         for p in &mut mesh.positions {
-            *p = kernel::Point3::new(p.x * 1e-7, p.y * 1e-7, 0.0);
+            *p = kernel::Point3::new(p.x * 1e-8, p.y * 1e-8, 0.0);
         }
         let Err(err) = ingest_picture(&mut doc, "/pics/speck.png", out.scene) else {
             panic!("a face the kernel would skip is refused");
@@ -1005,6 +1011,22 @@ mod tests {
 
         doc.redo().unwrap();
         assert_eq!(doc.instance_ids().len(), 2, "the undone picture redoes");
+        // The 100 × 33 nm picture is 50 nm wide, over `MIN_FACE_WIDTH`.
+        // Twice its area, 6.7e-15 m², is still under `NORMALIZE_MIN_LENGTH`,
+        // so only the width rule gives it a plane (the area floor alone
+        // used to refuse it): it is kept, and the document reopens.
+        let mut out =
+            image_import::import(&png, None, "speck", &image_import::Placement::ground(1.0))
+                .unwrap();
+        let kernel::ImportNode::Mesh(mesh) = &mut out.scene.defs[0].children[0] else {
+            panic!("the definition holds the picture's mesh");
+        };
+        for p in &mut mesh.positions {
+            *p = kernel::Point3::new(p.x * 1e-7, p.y * 1e-7, 0.0);
+        }
+        assert!(ingest_picture(&mut doc, "/pics/speck.png", out.scene).is_ok());
+        assert_eq!(doc.instance_ids().len(), 3);
+        Document::load(&doc.save()).expect("reopens");
     }
 
     /// `hew.doc.new`, `open`, and `revert` replace the document, and the

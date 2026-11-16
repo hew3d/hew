@@ -537,10 +537,26 @@ fn a_failed_placement_rolls_back_owned_sketch_copies_too() {
     let depth = doc.undo_depth();
     let placements = [
         Transform::translation(Vec3::new(3.0, 0.0, 0.0)),
-        // Invertible, but it squashes the box's faces below what a saved
-        // file could reopen, so the bake refuses mid-way through the copies.
-        Transform::scale(Vec3::new(1e-7, 1e-7, 1e3)),
+        // Invertible, but it squashes the box's top and bottom to 3 nm
+        // squares, below what a saved file could reopen (twice the area
+        // under 1e-12 m² and narrower than 10 nm), so the bake refuses
+        // mid-way through the copies.
+        Transform::scale(Vec3::new(3e-9, 3e-9, 1e6)),
     ];
+    // The squash this used to use, to 0.1 µm squares, is kept now: it
+    // copies, and the document reopens.
+    {
+        let mut kept = doc.clone();
+        let old = [placements[0], Transform::scale(Vec3::new(1e-7, 1e-7, 1e3))];
+        kept.duplicate_nodes_placements(
+            &[NodeId::Object(a)],
+            &old,
+            kernel::LinkPolicy::Independent,
+        )
+        .expect("0.1 µm squares are kept");
+        let reopened = Document::load(&kept.save()).expect("reopens");
+        assert_eq!(reopened.state_hash(), kept.state_hash());
+    }
     assert!(matches!(
         doc.duplicate_nodes_placements(
             &[NodeId::Object(a)],

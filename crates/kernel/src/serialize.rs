@@ -91,7 +91,23 @@ use crate::transform::Transform;
 /// / 2 runout). A face carrying neither grows by two zero bytes. A shared
 /// edge's two crease flags must agree. Absent in v1-v9 buffers → no
 /// creases, no blend tags, and only cylinder claims.
-pub const GEOMETRY_FORMAT_VERSION: u32 = 10;
+/// v10 → v11: each face's plane ([`crate::topo::Face::plane`]), right after
+/// its hole loops: a `u8` flag, and when 1 the unit normal and offset
+/// (4×f64). 0 means the face's plane is the loader's refit from the outer
+/// ring ([`outer_ring_plane`]); 1 means it is the stored plane. The writer
+/// omits a plane the refit gives bit for bit, and one the reader would
+/// refuse (so that face reopens as v10 refit it). Only an invalid state
+/// carries such a plane: [`Object::validate`] rejects a face off its plane
+/// (`FaceGeometryNotPlanar`) and one whose plane fails
+/// [`stored_plane_fault`] against its outer ring's refit
+/// (`FacePlaneInvalid`), so no operation commits one. The reader uses the
+/// stored plane, so a face reopens on exactly the plane it was validated
+/// against. Absent in v1-v10 buffers → the refit, with the fixed fallback
+/// list of [`legacy_face_plane`] for a face whose points stray from it.
+pub const GEOMETRY_FORMAT_VERSION: u32 = 11;
+
+/// The geometry buffer version at which each face's plane is stored.
+pub(crate) const FACE_PLANE_GEOMETRY_VERSION: u32 = 11;
 
 /// The geometry buffer version [`Document::state_hash`](crate::Document::state_hash)
 /// encodes an Object with when that Object carries no face or edge
@@ -362,6 +378,9 @@ pub(crate) const CURVES_GEOMETRY_VERSION: u32 = 10;
 /// when false, so a document with nothing imported writes the same manifest
 /// as v31 apart from the version; a file older than v32 loads with nothing
 /// marked (no retroactive marking). Gated by [`IMPORTED_MIN_VERSION`].
+/// The same version also marks geometry buffer v11 (each face's plane
+/// stored, HEW_FILE_FORMAT.md §3), introduced with it: a v32 manifest
+/// names `geometry_version` 11.
 pub const MANIFEST_FORMAT_VERSION: u32 = 32;
 
 /// The manifest version at which `objects[].imported` and
@@ -1028,28 +1047,31 @@ fn canonical_rotation(ring: &[Point3]) -> usize {
     best
 }
 
-/// The plane a face's outer loop gets when a file is opened: Newell's
-/// best-fit plane through the ring in the order the writer emits it
-/// (rotated to its canonical start). The Newell vector `n` is twice the
-/// enclosed area; the ring spans a plane when `|n|` is at least
-/// [`crate::tol::NORMALIZE_MIN_LENGTH`] m², or, on an `imported` object
-/// (one held to the import planarity tolerance), for a smaller ring when
-/// every edge is at least [`crate::tol::SMALL_RING_MIN_EDGE`] and `n`, taken
-/// about the ring's first vertex, is at least
-/// [`crate::tol::SMALL_RING_MIN_SHAPE`] times the perimeter squared. Both
-/// tests read the ring's own shape, so moving a face never changes the
-/// verdict beyond rounding. (A boolean cutting a dense scan's facets can
-/// leave a sub-micron triangle whose normal is perfectly well defined. On
-/// native geometry the area cutoff stands: a drawn corner that small stays
-/// drawing.)
-/// The loader decodes every face with it and [`Object::validate`] requires
-/// every live face to pass it, so one predicate decides both and no
-/// committed state can be one the file format cannot reopen.
+/// The plane a face's outer loop refits to when a file is opened: Newell's
+/// best-fit plane ([`Plane::from_polygon`]) through the ring in the order
+/// the writer emits it (rotated to its canonical start). The Newell vector
+/// `n` is twice the enclosed area; the ring spans a plane when `|n|` is at
+/// least [`crate::tol::NORMALIZE_MIN_LENGTH`] m², or when its width (`|n|`
+/// over half its perimeter) is at least [`crate::tol::MIN_FACE_WIDTH`], or,
+/// on an `imported` object (one held to the import planarity tolerance),
+/// for a smaller ring when every edge is at least
+/// [`crate::tol::SMALL_RING_MIN_EDGE`] and `n`, taken about the ring's first
+/// vertex, is at least [`crate::tol::SMALL_RING_MIN_SHAPE`] times the
+/// perimeter squared. Every test reads the ring's own shape, so moving a
+/// face never changes the verdict beyond rounding. (A boolean cutting a
+/// dense scan's facets can leave a sub-micron triangle whose normal is
+/// perfectly well defined. On native geometry the area and width floors
+/// stand: a drawn corner that small stays drawing.)
+/// The loader refits every face with it (the plane of a face whose file
+/// omits it, and the winding a stored plane must face with) and
+/// [`Object::validate`] requires every live face to pass it, so one
+/// predicate decides both and no committed state can be one the file
+/// format cannot reopen.
 pub(crate) fn outer_ring_plane(
     ring: &[Point3],
     imported: bool,
 ) -> Result<Plane, crate::math::MathError> {
-    let rotated = canonically_rotated(ring);
+    let rotated = canonical_ring(ring);
     Plane::from_polygon(&rotated).or_else(|e| {
         if imported {
             small_ring_plane(&rotated).ok_or(e)
@@ -1059,15 +1081,44 @@ pub(crate) fn outer_ring_plane(
     })
 }
 
-/// [`outer_ring_plane`] without the small-ring allowance: the plane only
-/// when the ring encloses at least the area cutoff. The blend planner uses
-/// it to judge a shrinking cap collapsed to a point (closed by a pole),
-/// which is a question of size, not of what a file can reopen.
+/// [`outer_ring_plane`] without the width and small-ring allowances: the
+/// plane only when the ring encloses at least the area cutoff. The blend
+/// planner uses it to judge a shrinking cap collapsed to a point (closed by
+/// a pole), which is a question of size, not of what a file can reopen.
 pub(crate) fn outer_ring_area_plane(ring: &[Point3]) -> Result<Plane, crate::math::MathError> {
-    Plane::from_polygon(&canonically_rotated(ring))
+    Plane::from_polygon_import(&canonical_ring(ring))
 }
 
-fn canonically_rotated(ring: &[Point3]) -> Vec<Point3> {
+/// The plane to give a face fit from its own outer ring `outer`, whose
+/// other boundary points (its holes') are `holes`: the plane a file refits
+/// from that ring ([`outer_ring_plane`], with the imported allowance when
+/// `tol` is the import tolerance) when every point lies within `tol` of it,
+/// so a file need not store the plane; otherwise Newell's fit over the ring
+/// in its own order ([`Plane::from_polygon`]), the plane such a face always
+/// had. Far from the origin the two can differ by more than the tolerance,
+/// and either may be the one the face's points fit.
+pub(crate) fn own_ring_plane(
+    outer: &[Point3],
+    holes: &[Point3],
+    tol: f64,
+) -> Result<Plane, crate::math::MathError> {
+    let refit = outer_ring_plane(outer, tol > crate::tol::PLANE_DIST);
+    match refit {
+        Ok(refit)
+            if outer
+                .iter()
+                .chain(holes)
+                .all(|&p| refit.signed_distance(p).abs() <= tol) =>
+        {
+            Ok(refit)
+        }
+        // A ring only the imported allowance gives a plane keeps that one.
+        _ => Plane::from_polygon(outer).or_else(|e| refit.map_err(|_| e)),
+    }
+}
+
+/// `ring` rotated to its canonical start ([`canonical_rotation`]).
+fn canonical_ring(ring: &[Point3]) -> Vec<Point3> {
     let start = canonical_rotation(ring);
     let n = ring.len();
     (0..n).map(|k| ring[(start + k) % n]).collect()
@@ -1107,6 +1158,195 @@ fn small_ring_plane(ring: &[Point3]) -> Option<Plane> {
     Plane::from_point_normal(centroid, nv / largest).ok()
 }
 
+/// What is wrong with `plane` as the stored plane of a face whose outer
+/// ring refits to `refit` ([`outer_ring_plane`]), or `None` when nothing
+/// is: the normal and offset are finite, the normal is unit length within
+/// [`crate::tol::NORMAL_DIRECTION`], and it lies on the same side as the
+/// ring's Newell vector (the face's winding) whenever that refit is finite.
+/// The v11 reader rejects a stored plane that fails this, and the writer
+/// stores none that does: a face carrying such a plane is written for the
+/// refit, so it reopens as a v10 file refit it.
+pub(crate) fn stored_plane_fault(plane: &Plane, refit: &Plane) -> Option<&'static str> {
+    let n = plane.normal();
+    if !(n.x.is_finite() && n.y.is_finite() && n.z.is_finite() && plane.offset().is_finite()) {
+        return Some("stored face plane is not finite");
+    }
+    if (n.length() - 1.0).abs() > crate::tol::NORMAL_DIRECTION {
+        return Some("stored face plane normal is not a unit vector");
+    }
+    // A ring so large its Newell vector overflows its length has no refit
+    // (`Plane::from_polygon` refuses it), so it never reaches here. Only a
+    // refit with a non-finite normal is skipped.
+    let w = refit.normal();
+    if w.x.is_finite() && w.y.is_finite() && w.z.is_finite() && n.dot(w) <= 0.0 {
+        return Some("stored face plane faces against its outer loop's winding");
+    }
+    None
+}
+
+/// Whether a face whose outer ring refits to `refit` ([`outer_ring_plane`])
+/// and whose boundary points (outer ring and holes) are `points` reopens on
+/// `plane` when a file stores it: the reader accepts it
+/// ([`stored_plane_fault`]) and every point lies within `tol` of it. The
+/// writer stores a plane only when this holds, a pre-v11 reader takes a
+/// fallback plane only when it does, and a transform maps a face onto one
+/// only when it does, so the three agree on which planes a file keeps.
+pub(crate) fn face_plane_reopens(
+    plane: &Plane,
+    refit: &Plane,
+    points: impl IntoIterator<Item = Point3>,
+    tol: f64,
+) -> bool {
+    stored_plane_fault(plane, refit).is_none()
+        && points
+            .into_iter()
+            .all(|p| plane.signed_distance(p).abs() <= tol)
+}
+
+/// The most vertices a ring may have for the largest-triple candidate of
+/// [`legacy_face_plane`]: the search is cubic in the ring's length, and a
+/// crafted file of many long rings that all miss the refit would otherwise
+/// hang the reader (64 vertices is about 42,000 triples a face; 512 was
+/// about 22 million), so a longer ring skips that candidate.
+const LEGACY_TRIPLE_MAX_RING: usize = 64;
+
+/// The plane a face of a pre-v11 buffer reopens on. Those buffers do not
+/// store planes, so the reader refits one from the outer ring (`refit`,
+/// [`outer_ring_plane`]). When some boundary point (`points`: the outer
+/// ring's and every hole's) strays from it beyond `tol`, the file never
+/// said which plane the face had, so a fixed, ordered list of other
+/// candidates is tried: the least-squares plane through the outer ring,
+/// then the plane through the ring's largest-area vertex triple. The first
+/// that holds every point within `tol`, oriented with the ring's winding,
+/// is the face's plane. No point moves. When none fits, `refit` comes
+/// back and the validator rejects the face as not flat, as it always has.
+pub(crate) fn legacy_face_plane(
+    refit: Plane,
+    outer: &[Point3],
+    points: &[Point3],
+    tol: f64,
+) -> Plane {
+    let fits = |plane: &Plane| {
+        points
+            .iter()
+            .all(|&p| plane.signed_distance(p).abs() <= tol)
+    };
+    if fits(&refit) {
+        return refit;
+    }
+    let ring = canonical_ring(outer);
+    let winding = refit.normal();
+    // A candidate normal turned to the winding's side, through `at`.
+    let oriented = |normal: Vec3, at: Vec3| -> Option<Plane> {
+        let len = normal.length();
+        if !(len.is_finite() && len > 0.0) {
+            return None;
+        }
+        let unit = normal / len;
+        let side = unit.dot(winding);
+        let unit = if side > 0.0 {
+            unit
+        } else if side < 0.0 {
+            -unit
+        } else {
+            return None;
+        };
+        Plane::from_unit_normal_offset(unit, unit.dot(at)).ok()
+    };
+    [
+        least_squares_normal(&ring, winding),
+        largest_triple_normal(&ring),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|(normal, at)| oriented(normal, at))
+    .find(|plane| face_plane_reopens(plane, &refit, points.iter().copied(), tol))
+    .unwrap_or(refit)
+}
+
+/// The least-squares plane through `ring` as `(normal, a point on it)`:
+/// heights along `axis` (the ring's Newell normal) fitted as a linear
+/// function of the two in-plane coordinates about the ring's centroid.
+/// `None` when the fit is singular.
+fn least_squares_normal(ring: &[Point3], axis: Vec3) -> Option<(Vec3, Vec3)> {
+    // An in-plane frame: the world axis least aligned with `axis`, crossed.
+    let (ax, ay, az) = (axis.x.abs(), axis.y.abs(), axis.z.abs());
+    let pick = if ax <= ay && ax <= az {
+        Vec3::new(1.0, 0.0, 0.0)
+    } else if ay <= az {
+        Vec3::new(0.0, 1.0, 0.0)
+    } else {
+        Vec3::new(0.0, 0.0, 1.0)
+    };
+    let u = axis.cross(pick).normalized().ok()?;
+    let v = axis.cross(u);
+    let count = ring.len() as f64;
+    let centroid = ring
+        .iter()
+        .fold(Vec3::new(0.0, 0.0, 0.0), |s, p| s + p.to_vec())
+        / count;
+    let (mut sxx, mut sxy, mut syy, mut sx, mut sy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    let (mut sxh, mut syh, mut sh) = (0.0, 0.0, 0.0);
+    for p in ring {
+        let q = p.to_vec() - centroid;
+        let (x, y, h) = (q.dot(u), q.dot(v), q.dot(axis));
+        sxx += x * x;
+        sxy += x * y;
+        syy += y * y;
+        sx += x;
+        sy += y;
+        sxh += x * h;
+        syh += y * h;
+        sh += h;
+    }
+    // [sxx sxy sx; sxy syy sy; sx sy n] [a b d]ᵀ = [sxh syh sh]ᵀ, by Cramer.
+    let det3 = |m: [[f64; 3]; 3]| {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    };
+    let m = [[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, count]];
+    let rhs = [sxh, syh, sh];
+    let det = det3(m);
+    if !(det.is_finite() && det != 0.0) {
+        return None;
+    }
+    let with = |col: usize| {
+        let mut c = m;
+        for (row, r) in c.iter_mut().zip(rhs) {
+            row[col] = r;
+        }
+        det3(c) / det
+    };
+    let (a, b, d) = (with(0), with(1), with(2));
+    let normal = axis - u * a - v * b;
+    Some((normal, centroid + axis * d))
+}
+
+/// The normal of the vertex triple of `ring` spanning the largest area,
+/// as `(normal, one of its vertices)`: the first such triple in ring order
+/// on a tie. `None` for a ring longer than [`LEGACY_TRIPLE_MAX_RING`] or
+/// one whose triples span no area.
+fn largest_triple_normal(ring: &[Point3]) -> Option<(Vec3, Vec3)> {
+    let n = ring.len();
+    if n > LEGACY_TRIPLE_MAX_RING {
+        return None;
+    }
+    let mut best: Option<(f64, Vec3, Vec3)> = None;
+    for i in 0..n {
+        for j in i + 1..n {
+            for k in j + 1..n {
+                let cross = (ring[j] - ring[i]).cross(ring[k] - ring[i]);
+                let area = cross.length_squared();
+                if area > best.map_or(0.0, |b| b.0) {
+                    best = Some((area, cross, ring[i].to_vec()));
+                }
+            }
+        }
+    }
+    best.map(|(_, normal, at)| (normal, at))
+}
+
 impl Object {
     /// Encodes this Object's geometry as a versioned, deterministic binary
     /// buffer (HEW_FILE_FORMAT.md; see module docs for the obligations).
@@ -1142,7 +1382,8 @@ impl Object {
     /// without the dictionary blocks, and v9 is v10 without the crease and
     /// blend blocks). An Object that carries a dictionary is always written
     /// at v9 or later, and one that carries curve data at v10 or later, so
-    /// nothing is ever dropped.
+    /// nothing is ever dropped. Face planes (v11) are not part of a hash:
+    /// the v8 to v10 layouts omit them.
     pub(crate) fn encode_version(
         &self,
         material_dense: &impl Fn(MaterialId) -> u32,
@@ -1257,6 +1498,11 @@ impl Object {
             hole_crease: Vec<Vec<bool>>,
             /// The blend tag (v10). Participates in the sort key (last).
             blend: Option<crate::topo::BlendTag>,
+            /// The face's plane when it is stored (v11): `None` when the
+            /// loader's refit from the outer ring gives it bit for bit, and
+            /// always `None` below v11. Participates in the sort key (after
+            /// the v10 payloads).
+            plane: Option<Plane>,
             /// Ordinal of the owning connected component (derived from twin
             /// adjacency, NOT the stored shell list, which may lump
             /// disconnected components together); replaced by the
@@ -1384,6 +1630,27 @@ impl Object {
                 .then_with(|| a.outer_crease.cmp(&b.outer_crease))
                 .then_with(|| a.hole_crease.cmp(&b.hole_crease))
                 .then_with(|| blend_cmp(&a.blend, &b.blend))
+                // The stored plane (v11): omitted before stored, stored by
+                // normal then offset. Last, so below v11 (always omitted)
+                // the order is the v10 order.
+                .then_with(|| plane_cmp(&a.plane, &b.plane))
+        }
+        fn plane_cmp(a: &Option<Plane>, b: &Option<Plane>) -> std::cmp::Ordering {
+            let key = |p: &Plane| {
+                let n = p.normal();
+                [n.x, n.y, n.z, p.offset()]
+            };
+            match (a, b) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(pa), Some(pb)) => key(pa)
+                    .iter()
+                    .zip(key(pb))
+                    .map(|(x, y)| x.total_cmp(&y))
+                    .find(|o| *o != std::cmp::Ordering::Equal)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            }
         }
 
         // Connected components over faces, via twin adjacency (union-find).
@@ -1504,6 +1771,18 @@ impl Object {
                     .collect()
             };
 
+        // The planarity tolerance the reader gives this Object: the buffer
+        // stores only whether it is imported.
+        let reopen_tol = if self.planarity_tol > crate::tol::PLANE_DIST {
+            crate::tol::IMPORT_PLANE_DIST
+        } else {
+            crate::tol::PLANE_DIST
+        };
+        // Faces written for the refit though they carry another plane, or
+        // without the analytic-surface claim they carry, because the reader
+        // would refuse it: only an invalid state has one (reported once
+        // below).
+        let left_to_refit = std::cell::Cell::new(0usize);
         let mut canonical_faces: Vec<CanonicalFace> = self
             .faces
             .iter()
@@ -1559,7 +1838,57 @@ impl Object {
                     .into_iter()
                     .map(|(_, _, _, sflags, ..)| sflags)
                     .collect();
+                // Stored unless the loader's refit gives it bit for bit, and
+                // only when the reader accepts it: a plane its own points
+                // stray from (a state the validator rejects) is left to the
+                // refit, which reopens such a face as a v10 file always has.
+                // A ring with no refit fails the reader either way.
+                let mut written_short = false;
+                let boundary = || {
+                    outer_ring
+                        .iter()
+                        .chain(holes.iter().flat_map(|(_, ring)| ring))
+                        .copied()
+                };
+                let (plane, reopen_plane) = if version < FACE_PLANE_GEOMETRY_VERSION {
+                    (None, None)
+                } else {
+                    match outer_ring_plane(&outer_ring, reopen_tol > crate::tol::PLANE_DIST) {
+                        Ok(refit) if refit.same_bits(&face.plane) => (None, Some(refit)),
+                        Ok(refit)
+                            if !face_plane_reopens(&face.plane, &refit, boundary(), reopen_tol) =>
+                        {
+                            written_short = true;
+                            (None, Some(refit))
+                        }
+                        _ => (Some(face.plane), Some(face.plane)),
+                    }
+                };
+                // An analytic-surface claim is written only when the reader's
+                // validator accepts it on the plane the face reopens on
+                // (`surface::validate_face_claim`, the check it runs on each
+                // face's claim alone): a claim its geometry has drifted from
+                // (an invalid state, e.g. a rotation far from the origin) is
+                // dropped, so the face reopens as a plain facet instead of
+                // making the whole file unreadable. Faces without a claim
+                // (every imported mesh face) skip the check.
+                let surface = match (face.surface, reopen_plane) {
+                    (Some(claim), Some(on)) => {
+                        let points: Vec<Point3> = boundary().collect();
+                        if crate::surface::validate_face_claim(&claim, &on, &points, reopen_tol) {
+                            Some(claim)
+                        } else {
+                            written_short = true;
+                            None
+                        }
+                    }
+                    (claim, _) => claim,
+                };
+                if written_short {
+                    left_to_refit.set(left_to_refit.get() + 1);
+                }
                 CanonicalFace {
+                    plane,
                     outer_verts,
                     outer_ring,
                     holes,
@@ -1572,7 +1901,7 @@ impl Object {
                         None => NO_MATERIAL,
                     },
                     uv_frame: face.uv_frame,
-                    surface: face.surface,
+                    surface,
                     outer_curves,
                     hole_curves,
                     outer_polys,
@@ -1589,6 +1918,15 @@ impl Object {
                 }
             })
             .collect();
+        if left_to_refit.get() > 0 {
+            tracing::warn!(
+                target: "kernel::save",
+                faces = left_to_refit.get(),
+                "faces written without their plane or surface claim: it is not one \
+                 the reader accepts (a point strays from it, it fails the stored-plane \
+                 checks, or the face's geometry disagrees with its claimed surface)"
+            );
+        }
 
         // Faces on DIFFERENT components can tie on the full face key
         // (coincident components), and resolving such ties per-face would
@@ -1628,7 +1966,21 @@ impl Object {
             cf.shell = component_rank[cf.shell];
         }
 
-        canonical_faces.sort_by(|a, b| face_key_cmp(a, b).then_with(|| a.shell.cmp(&b.shell)));
+        // Sorted by index, then moved into place once: a face's record is
+        // large, and a sort that moves records costs more than the
+        // comparisons on a mesh of half a million faces. The sort is
+        // stable, so ties keep their order exactly as sorting the records
+        // would.
+        let mut order: Vec<usize> = (0..canonical_faces.len()).collect();
+        order.sort_by(|&i, &j| {
+            let (a, b) = (&canonical_faces[i], &canonical_faces[j]);
+            face_key_cmp(a, b).then_with(|| a.shell.cmp(&b.shell))
+        });
+        let mut slots: Vec<Option<CanonicalFace>> = canonical_faces.into_iter().map(Some).collect();
+        let canonical_faces: Vec<CanonicalFace> = order
+            .into_iter()
+            .map(|i| slots[i].take().expect("each index once"))
+            .collect();
 
         // Vertex order: first appearance in the canonical face walk. Valid
         // topology references every vertex from some loop; any vertex that
@@ -1732,6 +2084,22 @@ impl Object {
                 buf.extend_from_slice(&hole_vertex_count.to_le_bytes());
                 for &vid in hole_verts {
                     buf.extend_from_slice(&vertex_index[vid].to_le_bytes());
+                }
+            }
+
+            // per-face plane (v11): u8 flag (0 = the loader's refit from
+            // the outer ring is the plane bit for bit, 1 = stored) + the
+            // unit normal xyz and offset as 4×f64 LE.
+            if version >= FACE_PLANE_GEOMETRY_VERSION {
+                match cf.plane {
+                    None => buf.push(0u8),
+                    Some(p) => {
+                        buf.push(1u8);
+                        let n = p.normal();
+                        for c in [n.x, n.y, n.z, p.offset()] {
+                            buf.extend_from_slice(&c.to_le_bytes());
+                        }
+                    }
                 }
             }
 
@@ -2131,9 +2499,12 @@ impl Object {
                 outer.push(vi);
             }
 
-            // Recompute face plane from outer-loop vertices (HEW_FILE_FORMAT.md).
+            // Refit the face plane from the outer-loop vertices
+            // (HEW_FILE_FORMAT.md): the plane of a pre-v11 face, and of a v11
+            // face that does not store one; its winding is the side a stored
+            // plane must face.
             let outer_pts: Vec<Point3> = outer.iter().map(|&i| positions[i]).collect();
-            let plane = outer_ring_plane(&outer_pts, planarity_tol > crate::tol::PLANE_DIST)
+            let refit = outer_ring_plane(&outer_pts, planarity_tol > crate::tol::PLANE_DIST)
                 .map_err(|_| DecodeError::Corrupt {
                     offset: r.pos,
                     what: "outer loop vertices do not span a plane",
@@ -2162,6 +2533,43 @@ impl Object {
                 }
                 holes.push(hole);
             }
+
+            // v11: the face's plane (flag + optional unit normal and
+            // offset), right after the hole loops. Before v11 the refit,
+            // or the first of the fixed fallbacks that fits the face.
+            let plane = if version >= FACE_PLANE_GEOMETRY_VERSION {
+                match r.read_u8()? {
+                    0 => refit,
+                    1 => {
+                        let at = r.pos;
+                        let (nx, ny, nz) = (r.read_f64()?, r.read_f64()?, r.read_f64()?);
+                        let offset = r.read_f64()?;
+                        let normal = Vec3::new(nx, ny, nz);
+                        let corrupt = |what| DecodeError::Corrupt { offset: at, what };
+                        let plane =
+                            Plane::from_unit_normal_offset(normal, offset).map_err(|_| {
+                                corrupt("stored face plane normal is not a unit vector")
+                            })?;
+                        if let Some(what) = stored_plane_fault(&plane, &refit) {
+                            return Err(corrupt(what));
+                        }
+                        plane
+                    }
+                    _ => {
+                        return Err(DecodeError::Corrupt {
+                            offset: r.pos - 1,
+                            what: "face plane flag must be 0 or 1",
+                        });
+                    }
+                }
+            } else {
+                let points: Vec<Point3> = outer
+                    .iter()
+                    .chain(holes.iter().flatten())
+                    .map(|&i| positions[i])
+                    .collect();
+                legacy_face_plane(refit, &outer_pts, &points, planarity_tol)
+            };
 
             // v6: per-face SOFT flags, appended after the hole loops and
             // BEFORE the edge-curve block (write order). A u8 "any" flag;
@@ -7723,10 +8131,22 @@ mod small_ring_tests {
         }
     }
 
+    /// Native geometry has no small-ring allowance: a ring under the area
+    /// floor keeps a plane only by the width floor
+    /// ([`crate::tol::MIN_FACE_WIDTH`]), which the 0.4 µm triangle (about
+    /// 0.3 µm wide) clears. A sliver with long enough edges and shape for
+    /// the imported allowance but narrower than 10 nm has none natively.
     #[test]
-    fn native_geometry_keeps_the_area_cutoff() {
-        assert!(outer_ring_plane(&tri([0.0127, 0.0126, 0.0045], 4e-7), false).is_err());
+    fn native_geometry_keeps_the_area_and_width_floors() {
+        assert!(outer_ring_plane(&tri([0.0127, 0.0126, 0.0045], 4e-7), false).is_ok());
         assert!(outer_ring_plane(&tri([0.0127, 0.0126, 0.0045], 2e-6), false).is_ok());
+        let sliver = vec![
+            Point3::new(0.0127, 0.0126, 0.0045),
+            Point3::new(0.0127 + 1e-6, 0.0126, 0.0045),
+            Point3::new(0.0127 + 5e-7, 0.0126 + 5e-9, 0.0045),
+        ];
+        assert!(outer_ring_plane(&sliver, true).is_ok());
+        assert!(outer_ring_plane(&sliver, false).is_err());
     }
 
     #[test]
@@ -7737,5 +8157,260 @@ mod small_ring_tests {
             Point3::new(5e-7, 1e-13, 0.0),
         ];
         assert!(outer_ring_plane(&ring, true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod face_plane_writer_tests {
+    use crate::math::{Plane, Point3, Vec3};
+    use crate::topo::Object;
+
+    fn cube() -> Object {
+        let positions: Vec<Point3> = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ]
+        .into_iter()
+        .map(|[x, y, z]| Point3::new(x, y, z))
+        .collect();
+        let faces: Vec<Vec<usize>> = vec![
+            vec![4, 5, 6, 7],
+            vec![0, 3, 2, 1],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ];
+        Object::from_polygons(&positions, &faces).unwrap()
+    }
+
+    /// A face carrying a plane the reader would refuse (its points 10 nm
+    /// off it, or the plane facing against its loop's winding: states only
+    /// an invalid object has) is written for the refit, flag 0, as if it
+    /// carried the refit: the buffer is the plain cube's bytes, it reopens
+    /// valid, and it saves to the same bytes again.
+    #[test]
+    fn a_plane_the_reader_would_refuse_is_written_as_the_refit() {
+        let plain = cube().encode(&|_| 0);
+        let mut obj = cube();
+        let ids: Vec<_> = obj.faces.keys().collect();
+        let top = ids
+            .iter()
+            .copied()
+            .find(|&f| obj.faces[f].plane.normal().z > 0.5)
+            .unwrap();
+        let bottom = ids
+            .iter()
+            .copied()
+            .find(|&f| obj.faces[f].plane.normal().z < -0.5)
+            .unwrap();
+        obj.faces[top].plane =
+            Plane::from_unit_normal_offset(Vec3::new(0.0, 0.0, 1.0), 1.0 + 1e-8).unwrap();
+        obj.faces[bottom].plane = obj.faces[bottom].plane.flipped();
+        assert!(obj.validate().is_err(), "the state is invalid");
+        let bytes = obj.encode(&|_| 0);
+        assert_eq!(bytes, plain, "both faces written as flag 0");
+        let back = Object::decode(&bytes, &|_| None).unwrap();
+        back.validate().unwrap();
+        assert_eq!(back.encode(&|_| 0), bytes, "re-saves to the same bytes");
+    }
+
+    /// A face carrying an analytic-surface claim its geometry disagrees
+    /// with (a state only an invalid object has, e.g. after a rotation far
+    /// from the origin) is written without the claim: the buffer is the
+    /// plain cube's bytes, it reopens valid instead of refusing the whole
+    /// file, and it saves to the same bytes again. A claim the geometry
+    /// does agree with is kept through the same round trip.
+    #[test]
+    fn a_surface_claim_the_reader_would_refuse_is_written_without_it() {
+        use crate::topo::SurfaceRef;
+        let plain = cube().encode(&|_| 0);
+        let mut obj = cube();
+        let ids: Vec<_> = obj.faces.keys().collect();
+        let top = ids
+            .iter()
+            .copied()
+            .find(|&f| obj.faces[f].plane.normal().z > 0.5)
+            .unwrap();
+        let bottom = ids
+            .iter()
+            .copied()
+            .find(|&f| obj.faces[f].plane.normal().z < -0.5)
+            .unwrap();
+        // The top's corners sit between 9 and 10 m from this axis
+        // (sqrt(81 + 1) to sqrt(100 + 1)), far past its 1 mm radius.
+        obj.faces[top].surface = Some(SurfaceRef::Cylinder {
+            axis_point: Point3::new(10.0, 10.0, 0.0),
+            axis: Vec3::new(1.0, 0.0, 0.0),
+            radius: 0.001,
+        });
+        assert!(obj.validate().is_err(), "the state is invalid");
+        let bytes = obj.encode(&|_| 0);
+        assert_eq!(bytes, plain, "the lying claim is not written");
+        let back = Object::decode(&bytes, &|_| None).unwrap();
+        back.validate().unwrap();
+        assert!(back.faces.values().all(|f| f.surface.is_none()));
+        assert_eq!(back.encode(&|_| 0), bytes, "re-saves to the same bytes");
+
+        // A claim the bottom's chord facet satisfies survives.
+        let mut kept = cube();
+        let claim = SurfaceRef::Cylinder {
+            axis_point: Point3::new(0.0, 0.5, 0.5),
+            axis: Vec3::new(1.0, 0.0, 0.0),
+            radius: 2.0,
+        };
+        kept.faces[bottom].surface = Some(claim);
+        kept.validate().unwrap();
+        let bytes = kept.encode(&|_| 0);
+        assert_ne!(bytes, plain);
+        let back = Object::decode(&bytes, &|_| None).unwrap();
+        back.validate().unwrap();
+        assert_eq!(
+            back.faces
+                .values()
+                .filter(|f| f.surface == Some(claim))
+                .count(),
+            1
+        );
+    }
+
+    /// A tracing subscriber that keeps the `faces` count of every
+    /// `kernel::save` warning.
+    struct SaveWarnings(std::sync::Arc<std::sync::Mutex<Vec<u64>>>);
+
+    impl tracing::Subscriber for SaveWarnings {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Faces(Option<u64>);
+            impl tracing::field::Visit for Faces {
+                fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                    if field.name() == "faces" {
+                        self.0 = Some(value);
+                    }
+                }
+                fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+            }
+            if event.metadata().target() == "kernel::save" {
+                let mut v = Faces(None);
+                event.record(&mut v);
+                self.0.lock().unwrap().extend(v.0);
+            }
+        }
+    }
+
+    /// A 4 x 4 x 1 block with a 1 x 1 square tunnel through it: ten faces,
+    /// the top and bottom each holding one hole.
+    fn tunnelled_block() -> Object {
+        let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+        let mut positions = Vec::new();
+        for z in [0.0, 1.0] {
+            positions.extend([
+                p(-2.0, -2.0, z),
+                p(2.0, -2.0, z),
+                p(2.0, 2.0, z),
+                p(-2.0, 2.0, z),
+            ]);
+        }
+        for z in [0.0, 1.0] {
+            positions.extend([
+                p(-0.5, -0.5, z),
+                p(0.5, -0.5, z),
+                p(0.5, 0.5, z),
+                p(-0.5, 0.5, z),
+            ]);
+        }
+        let faces: Vec<Vec<usize>> = vec![
+            vec![4, 5, 6, 7],
+            vec![0, 3, 2, 1],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+            vec![8, 12, 13, 9],
+            vec![9, 13, 14, 10],
+            vec![10, 14, 15, 11],
+            vec![11, 15, 12, 8],
+        ];
+        let mut holes = vec![Vec::new(); faces.len()];
+        holes[0] = vec![vec![12, 15, 14, 13]];
+        holes[1] = vec![vec![8, 9, 10, 11]];
+        Object::from_polygons_with_holes(&positions, &faces, &holes).unwrap()
+    }
+
+    /// A face's hole points are part of the check on its surface claim, and
+    /// a face that loses both its plane and its claim is counted once in the
+    /// save warning. The block's top carries a torus claim whose tube runs
+    /// through the four outer corners (so the claim holds for the outer
+    /// ring alone) but not through the hole's corners; its plane is also
+    /// 10 nm off its points, so the writer drops the plane too. The bottom
+    /// loses only its plane. The file opens, the top reopens a plain facet,
+    /// and the warning counts two faces, not three.
+    #[test]
+    fn a_hole_that_fails_a_claim_drops_it_and_the_face_is_counted_once() {
+        use crate::topo::SurfaceRef;
+        let plain = tunnelled_block();
+        plain.validate().unwrap();
+        let plain_bytes = plain.encode(&|_| 0);
+
+        let mut obj = tunnelled_block();
+        let ids: Vec<_> = obj.faces.keys().collect();
+        let top = ids
+            .iter()
+            .copied()
+            .find(|&f| obj.faces[f].plane.normal().z > 0.5)
+            .unwrap();
+        let bottom = ids
+            .iter()
+            .copied()
+            .find(|&f| obj.faces[f].plane.normal().z < -0.5)
+            .unwrap();
+        let claim = SurfaceRef::Torus {
+            center: Point3::new(0.0, 0.0, 1.0),
+            axis: Vec3::new(0.0, 0.0, 1.0),
+            major_radius: 8.0_f64.sqrt(),
+            minor_radius: 0.01,
+        };
+        let tol = obj.planarity_tol;
+        let outer: Vec<Point3> = obj.loop_positions(obj.faces[top].outer_loop).collect();
+        let hole: Vec<Point3> = obj.loop_positions(obj.faces[top].inner_loops[0]).collect();
+        let both: Vec<Point3> = outer.iter().chain(&hole).copied().collect();
+        let plane = obj.faces[top].plane;
+        assert!(
+            crate::surface::validate_face_claim(&claim, &plane, &outer, tol),
+            "the claim holds for the outer ring alone"
+        );
+        assert!(
+            !crate::surface::validate_face_claim(&claim, &plane, &both, tol),
+            "and fails once the hole's points are counted"
+        );
+        obj.faces[top].surface = Some(claim);
+        obj.faces[top].plane =
+            Plane::from_unit_normal_offset(Vec3::new(0.0, 0.0, 1.0), 1.0 + 1e-8).unwrap();
+        obj.faces[bottom].plane = obj.faces[bottom].plane.flipped();
+        assert!(obj.validate().is_err(), "the state is invalid");
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bytes =
+            tracing::subscriber::with_default(SaveWarnings(seen.clone()), || obj.encode(&|_| 0));
+        assert_eq!(bytes, plain_bytes, "written as the plain block");
+        assert_eq!(*seen.lock().unwrap(), vec![2], "two faces, each once");
+        let back = Object::decode(&bytes, &|_| None).unwrap();
+        back.validate().unwrap();
+        assert!(back.faces.values().all(|f| f.surface.is_none()));
     }
 }

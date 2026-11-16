@@ -3435,6 +3435,7 @@ impl Registry {
                 "degenerate_axis",
                 "explode_session_scope",
                 "profile_not_insertable",
+                "face_not_flat",
             ];
         }
         {
@@ -3478,6 +3479,7 @@ impl Registry {
                 "unknown_group",
                 "unknown_instance",
                 "explode_session_scope",
+                "face_not_flat",
                 "save_failed",
                 "unknown_library_item",
                 "invalid_profile",
@@ -4041,6 +4043,7 @@ impl Registry {
                 "unknown_component",
                 "explode_session_scope",
                 "component_expansion_exceeded",
+                "face_not_flat",
             ];
         }
         {
@@ -4089,6 +4092,7 @@ impl Registry {
                 "unknown_component",
                 "explode_session_scope",
                 "component_expansion_exceeded",
+                "face_not_flat",
             ];
         }
         {
@@ -4152,6 +4156,7 @@ impl Registry {
                 "singular",
                 "degenerate_axis",
                 "degenerate_texture_frame",
+                "face_not_flat",
             ];
         }
         {
@@ -4185,6 +4190,7 @@ impl Registry {
                 "unknown_occurrence",
                 "unknown_component",
                 "explode_session_scope",
+                "face_not_flat",
             ];
         }
         {
@@ -4211,6 +4217,7 @@ impl Registry {
                 "explode_session_grouped_instance",
                 "unknown_group",
                 "unknown_instance",
+                "face_not_flat",
             ];
         }
         {
@@ -4228,7 +4235,7 @@ impl Registry {
                 "properties": {},
                 "additionalProperties": false
             });
-            cmd.refusals = vec!["explode_session_not_open"];
+            cmd.refusals = vec!["explode_session_not_open", "face_not_flat"];
         }
         {
             let cmd = commands
@@ -4348,7 +4355,12 @@ impl Registry {
                 "properties": { "instance": { "type": "string" } },
                 "required": ["instance"]
             });
-            cmd.refusals = vec!["unknown_entity", "unknown_component", "singular"];
+            cmd.refusals = vec![
+                "unknown_entity",
+                "unknown_component",
+                "singular",
+                "face_not_flat",
+            ];
         }
         {
             let cmd = commands
@@ -4490,6 +4502,7 @@ impl Registry {
                 "unknown_entity",
                 "unknown_instance",
                 "cannot_explode_reflected",
+                "face_not_flat",
             ];
         }
         {
@@ -4518,7 +4531,12 @@ impl Registry {
                 "required": ["component", "instances_updated"],
                 "additionalProperties": false
             });
-            cmd.refusals = vec!["unknown_entity", "invalid_frame", "rebase_during_session"];
+            cmd.refusals = vec![
+                "unknown_entity",
+                "invalid_frame",
+                "rebase_during_session",
+                "face_not_flat",
+            ];
 
             let cmd = commands
                 .get_mut("hew.component.flip_instance")
@@ -4543,7 +4561,7 @@ impl Registry {
                 "required": ["instance", "pose", "mirrored"],
                 "additionalProperties": false
             });
-            cmd.refusals = vec!["unknown_entity"];
+            cmd.refusals = vec!["unknown_entity", "face_not_flat"];
 
             let cmd = commands
                 .get_mut("hew.entity.set_frame")
@@ -6198,6 +6216,7 @@ impl Registry {
                     "unknown_occurrence",
                     "unknown_component",
                     "explode_session_scope",
+                    "face_not_flat",
                 ]
             };
 
@@ -7219,6 +7238,7 @@ impl Registry {
                     "compute_busy",
                     "compute_too_large",
                     "mesh_too_large",
+                    "face_not_flat",
                 ]
             };
             let edge = serde_json::json!({

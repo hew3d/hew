@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `32`**, and **geometry buffer format version `10`**. Both are covered
+version `32`**, and **geometry buffer format version `11`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -60,7 +60,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 ```jsonc
 {
   "format_version": 32,
-  "geometry_version": 10,
+  "geometry_version": 11,
   "app": "hew",
   "app_version": "1.2.1",
   "document_id": "3f2c9107-5ed4-40a8-806b-1ec297405d83", // v29+, optional;
@@ -200,7 +200,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 - **`format_version`** (`u32`, required) — manifest schema version. Current: `32`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
-  used by every entry under `geometry/` in this file. Current: `10`.
+  used by every entry under `geometry/` in this file. Current: `11`.
   Redundant with the per-buffer version in each buffer's own header (),
   but lets a reader reject a whole file up front without opening buffers.
 - **`app`**, **`app_version`** (`string`, required) — free-form writer
@@ -377,6 +377,9 @@ names `geometry_version` 10. A manifest at v27 to v29 never carries a
 smooth chain entry or blend records, and its geometry buffers are at most
 v9, whatever a reader of a newer version expects.
 
+Manifest v32 also marks geometry buffer v11 (each face's plane stored,
+§3), introduced with it: a v32 manifest names `geometry_version` 11.
+
 `document_id` (v29) is version-gated the usual single direction: a file
 declaring a version older than 29 that carries it is malformed for its own
 declared version and MUST be rejected. At v29+ it is optional, but a
@@ -476,12 +479,12 @@ All multi-byte integers and all floats are **little-endian**. Material ids
 inside a buffer are the same dense ids used by `manifest.json`'s `materials`
 array — one shared id space, not a buffer-local one.
 
-### 3.1 Layout (current version, `10`)
+### 3.1 Layout (current version, `11`)
 
 ```
 offset  type                field
 0       u8[4]               magic = "HEWG" (0x48 0x45 0x57 0x47)
-4       u32                 version (currently 9)
+4       u32                 version (currently 11)
 8       u8                  watertight: 0 = Open (leaky), 1 = Watertight
 9       u32                 base_material id (0xFFFFFFFF = none)
 13      u8                  imported flag: 0 = strict native tolerance, 1 = imported tolerance
@@ -506,6 +509,9 @@ offset  type                field
         --- repeated H times: ---
         u32                 hole_vertex_count (J)
         u32[J]              hole-loop vertex indices
+        u8                  plane flag (v11): 0 = the plane is the one the reader refits from the outer loop (§3.3), 1 = the plane follows
+        f64[4]              plane, present only when the flag above is 1:
+                             normal.x .y .z  offset   (unit normal; points p on the face have normal·p = offset)
         u8                  soft_edges flag (v6): 0 = no edge of this face is soft, 1 = per-edge flags follow
         --- present only when the soft_edges flag is 1: ---
         --- one entry per outer edge (K entries), then per hole edge (J per hole, in hole order): ---
@@ -573,6 +579,33 @@ editing wrongly. A reader that ignores it loses only the grouping, never
 shape. A face carrying neither a crease nor a tag grows by two zero bytes
 over v9.
 
+A face's **plane** (v11) is the oriented plane the face lies on. Flag `0`
+means the face's plane is the reader's refit from its outer loop (§3.3,
+"Face plane recomputation"); flag `1` means the plane is the unit normal
+and offset that follow. Either way a reader gives the face exactly that
+plane, so a face reopens on the plane the writer had for it.
+
+When a writer omits a plane is writer policy, not part of the format. Hew
+writes flag `0` when the refit equals the face's plane bit for bit, and
+flag `1` otherwise. Hew never stores a plane a reader would refuse: for a
+face whose points stray from its plane beyond the tolerance, or whose
+plane fails §3.3's stored-plane checks, it writes flag `0` and logs how
+many faces it wrote so, and the reader refits that face as a v10 reader
+would. Only an invalid object carries such a face: Hew's validator
+rejects a face off its plane, and a face whose plane fails the
+stored-plane checks against its own outer loop's refit, so no operation
+commits one. Hew gives a face it fits
+from its own outer loop (a drawn or extruded face, an imported polygon)
+the refit as its plane whenever every point fits it, and a move, turn or
+scale keeps that, so such faces cost the one flag byte. A face cut by a
+boolean keeps the plane of the face it was cut from, which its loop
+refits only to within rounding, and then the plane is stored. Likewise,
+when writing buffer version 11 and later, Hew never writes an analytic-surface claim the reader's validator would
+reject on the plane the face reopens on (an invalid state, such as a
+curved face turned far from the origin): it writes surface kind `0` for
+that face, counted in the same log, and the face reopens as a plain
+planar facet rather than leaving the file unreadable.
+
 A face's back paint (v8) is the material on its back side: a `.skp` face
 can be painted on each side. Renderers draw it where the back can be seen
 (an open shell, a cut); it never changes shape or watertightness. Any flag
@@ -628,12 +661,14 @@ order over the raw f64 bit patterns (IEEE 754 `totalOrder`; Rust
   lexicographically), then the per-edge dictionaries (the outer loop's
   entry sequence, then each hole's, absent before present, present by
   bytes), then the crease flags (v10; outer, then holes), then the blend
-  tag (v10; untagged first, then by id, kind, role). Each version's keys
+  tag (v10; untagged first, then by id, kind, role), then the stored plane
+  (v11; omitted before stored, stored compared elementwise
+  `normal.x y z offset` under the f64 total order). Each version's keys
   come after the older ones, so a buffer without the newer payloads sorts
   exactly as it did. Coincident faces on disjoint shells can tie on
   geometry alone, so every emitted payload — ring, holes, material, UV
-  frame, surface, edge claims, dictionaries, creases and blend tags —
-  participates in the key;
+  frame, surface, edge claims, dictionaries, creases, blend tags and
+  plane — participates in the key;
 - vertices are numbered by first appearance while walking the faces in that
   order (each face's outer loop, then its holes); a vertex several loops
   share (a touching hole) takes the number of its first appearance and is
@@ -715,6 +750,20 @@ present at every version:
 | per-face `face_attrs` and `edge_attrs` blocks | 9 | neither flag byte nor any payload is present — the next face's material id (or the buffer's end) follows the back paint block directly | no face or edge carries a dictionary |
 | per-face surface kinds 2–4 (sphere, torus, cone) | 10 | a kind byte other than 0 or 1 is malformed | only cylinder claims |
 | per-face creases flag + payload and blend flag + tag | 10 | neither flag byte nor any payload is present — the next face's material id (or the buffer's end) follows the `edge_attrs` block directly | no edge is creased, no face belongs to a blend |
+| per-face plane flag + payload | 11 | flag byte and payload are not present at all — the `soft_edges` flag (v6) follows the last hole loop directly | the plane refit from the outer loop, with the fallbacks of §3.3 |
+
+Buffer version 9 also widens which faces a reader accepts, with no layout
+change: §3.3's face plane rule keeps a loop under the 1e-12 m² area floor
+when it is at least 1e-8 m wide. The reader applies the one rule to every
+buffer version; a buffer of version 8 or older written by Hew cannot
+contain such a face, so the wider rule changes nothing for it. Pre-release
+readers of version 9 that predate the rule reject such a face as corrupt.
+
+A reader of version 11 also opens more buffers of version 10 and older: a
+face whose points stray from the refit plane gets the first of §3.3's
+fallback planes that holds them all, where earlier readers rejected it as
+not flat. Every face an earlier reader accepted keeps the plane it gave
+it, since the refit comes first.
 
 All gates shift subsequent byte offsets, so a reader must branch on the
 buffer's own `version` at each gated point rather than assume fixed offsets
@@ -734,15 +783,15 @@ contents do not describe valid geometry.
   vertices (`outer_count`/`hole_vertex_count < 3`), any flag byte outside
   its 0-1 range (`watertight`, `imported`, `uv_frame`, `soft_edges` and each
   soft flag, `edge_curves` and each edge-curve flag, `edge_polygons` and each
-  polygon flag, back paint, `creases` and each crease flag, blend), a
-  surface kind outside 0-1 below v10 or outside 0-4 at v10, a surface payload
-  whose axis is not unit length (within 1e-9) or whose radius is not finite
-  and strictly positive (cylinder and sphere radius; both torus radii), a
-  cone half-angle outside `(0, π/2)`, a blend kind or role outside 0-2, an
-  edge-curve or polygon payload whose `radius` is not finite and strictly
-  positive, two faces of a shared edge that store different circle or
-  polygon claims or different crease flags — is a fatal error reported with
-  the byte offset and what was wrong. Never a panic, never best-effort
+  polygon flag, back paint, `creases` and each crease flag, blend, `plane`),
+  a surface kind outside 0-1 below v10 or outside 0-4 from v10, a surface
+  payload whose axis is not unit length (within 1e-9) or whose radius is not
+  finite and strictly positive (cylinder and sphere radius; both torus
+  radii), a cone half-angle outside `(0, π/2)`, a blend kind or role outside
+  0-2, an edge-curve or polygon payload whose `radius` is not finite and
+  strictly positive, two faces of a shared edge that store different circle
+  or polygon claims or different crease flags — is a fatal error reported
+  with the byte offset and what was wrong. Never a panic, never best-effort
   recovery. (After rebuild, the validator additionally rejects an edge-curve
   claim whose endpoints are not within tolerance of `radius` from `center`,
   a lying `surface` by the per-class conditions above, a crease on a
@@ -759,20 +808,55 @@ contents do not describe valid geometry.
   write the same dictionary entry for it (both absent, or equal
   dictionaries). A disagreement is a tampered or corrupt file, rejected
   as such, never resolved by which face was read last.
-- **Face plane recomputation.** Planes are *not* stored; a reader must
-  recompute each face's best-fit plane from its outer-loop vertices (Newell's
-  method over the loop in the order the writer emits it, rotated to its
-  canonical start) and reject a loop that doesn't span a plane — a Newell
-  vector `n` (twice the enclosed area) shorter than 1e-12 m², unless the
-  object is `imported` and every edge of the loop is at least 1e-8 m long
-  and `n`, accumulated about the loop's first vertex, is at least 1e-6
-  times the perimeter squared (a small loop of a scan that is no sliver;
-  normalized after scaling by its largest component) — or whose vertices
-  stray from it beyond tolerance (gated by `imported`). The kernel's
-  validator holds every live face to the same predicate, so no operation
-  commits a face, however small, that a saved file could not reopen. This is safe because a baked reflection reverses every
-  face's loops (), so the recomputed plane's normal always matches how the
-  geometry was authored.
+- **Face plane recomputation.** For every face a reader refits a plane
+  from its outer-loop vertices: Newell's method over the loop in the order
+  the writer emits it, rotated to its canonical start, the normal being the
+  Newell vector divided by its length. It rejects a loop that doesn't span
+  a plane: a Newell vector `n` (twice the enclosed area) shorter than
+  1e-12 m² **and** shorter than 1e-8 m times half the loop's perimeter
+  (the loop is under 10 nm wide), unless the object is `imported` and
+  every edge of the loop is at least 1e-8 m long and `n`, accumulated about
+  the loop's first vertex, is at least 1e-6 times the perimeter squared (a
+  small loop of a scan that is no sliver; normalized after scaling by its
+  largest component, and taken as the refit). Which plane the face then
+  gets depends on the buffer version:
+  - **v11 and later.** With plane flag `0` the face's plane is the refit.
+    With flag `1` it is the stored plane, taken as written (never
+    renormalized), and the reader rejects as corrupt a stored plane whose
+    normal or offset is not finite, whose normal's length is more than
+    1e-9 from 1, or whose normal points away from the refit's (a
+    non-positive dot product: the plane faces against the loop's winding;
+    checked when the refit is finite, which a loop too large for its
+    Newell sum to be represented is not).
+  - **v10 and earlier.** Planes were not stored, so the face's plane is the
+    refit, unless one of its boundary points (outer loop or hole) is
+    farther from it than the planarity tolerance (gated by `imported`).
+    Then the reader tries, in this order, the least-squares plane through
+    the outer loop (heights along the refit normal fitted as a linear
+    function of the two in-plane coordinates, about the loop's vertex
+    centroid) and the plane through the loop's vertex triple of largest
+    area (the first in loop order on a tie, tried only for a loop of at
+    most 64 vertices: the search is cubic in the loop's length, and a file
+    of many long loops that all miss the refit would otherwise take hours
+    to open), each oriented with the refit's normal. The first
+    that holds every boundary point within the tolerance is the face's
+    plane; no point moves, since the file never said which plane the face
+    had. When none fits, the face fails the planarity check below as not
+    flat.
+
+  Every boundary point must then lie within the planarity tolerance of
+  the face's plane (the validator's check). The kernel's validator holds
+  every live face to the same predicates (the loop spans a plane, every
+  point lies within tolerance of the plane the face carries, and that
+  plane passes the v11 stored-plane checks above against the loop's
+  refit), and the
+  writer stores that plane, so no operation commits a face, however small,
+  that a saved file could not reopen on the very plane it was checked
+  against. This is safe because a
+  baked reflection reverses every face's loops (the transform turns every
+  face over once it has mapped the vertices, so the loops wind
+  counter-clockwise from the outward normal again), so the refit's normal
+  always matches how the geometry was authored.
 - **Watertightness cross-check.** The stored `watertight` byte must equal
   what the reader's own topology reconstruction computes — a mismatch is a
   fatal error (cheap tamper detection), never silently corrected.

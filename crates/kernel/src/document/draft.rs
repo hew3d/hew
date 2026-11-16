@@ -34,7 +34,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
-use crate::geom2d::{interior_point_of_loops, point_near_segment, signed_area_on_plane};
+use crate::geom2d::{interior_point_of_loops, point_near_segment};
 use crate::history::KernelOp;
 use crate::retrace::RetracePath;
 use crate::sketch::{CurveGeom, SketchCurveKind, SketchEdgeId, SketchVertexId};
@@ -824,16 +824,16 @@ fn heal_seams(work: &Sketch, fixed: &[(Point3, Point3)]) -> Option<Sketch> {
 }
 
 /// Why a region over a solid is not one of its faces: a [`DraftRegionWhy::
-/// Sliver`] by area, else [`DraftRegionWhy::Other`]. (A region touching
-/// itself, another shape, or the face's edge at a single point is a face:
-/// its face holds loops sharing that vertex.)
-fn region_why(outer: &[Point3], holes: &[Vec<Point3>], normal: Vec3) -> DraftRegionWhy {
-    let area = signed_area_on_plane(outer, normal).abs()
-        - holes
-            .iter()
-            .map(|h| signed_area_on_plane(h, normal).abs())
-            .sum::<f64>();
-    if area < 1e-12 {
+/// Sliver`] when its outer ring is too small for a face by the kernel's
+/// own rule (the one the builder, the validator and the file loader share,
+/// [`crate::serialize::outer_ring_plane`]: twice the area under the floor
+/// and narrower than [`tol::MIN_FACE_WIDTH`]), else [`DraftRegionWhy::
+/// Other`]. A face is kept or refused by its outer ring alone, so a region
+/// whose ring the rule keeps is no sliver, however much of it its holes
+/// take. (A region touching itself, another shape, or the face's edge at a
+/// single point is a face: its face holds loops sharing that vertex.)
+fn region_why(outer: &[Point3]) -> DraftRegionWhy {
+    if crate::serialize::outer_ring_plane(outer, false).is_err() {
         return DraftRegionWhy::Sliver;
     }
     DraftRegionWhy::Other
@@ -3582,7 +3582,17 @@ impl Document {
                     if off_line(far) <= m {
                         continue; // collinear with `e`
                     }
-                    let Ok(q) = Plane::from_point_normal(sd.a, ab.cross(far - sd.a)) else {
+                    // The plane of the seed and the partner's far end. A
+                    // short seed and a near end can span too little area
+                    // for that cross product to have a direction, yet make
+                    // a triangle wide enough for the kernel's face rule
+                    // ([`Plane::from_polygon`]), so a face that small can
+                    // still close: its normal, through the seed's start.
+                    let q = Plane::from_point_normal(sd.a, ab.cross(far - sd.a)).or_else(|_| {
+                        Plane::from_polygon(&[sd.a, sd.b, far])
+                            .and_then(|t| Plane::from_point_normal(sd.a, t.normal()))
+                    });
+                    let Ok(q) = q else {
                         continue;
                     };
                     if !home_too && planes_coincide_either(&q, &sd.home) {
@@ -4646,7 +4656,8 @@ pub struct DraftCurveRun {
 /// or pull), for the message that says what to change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DraftRegionWhy {
-    /// Its area is too small for a face (under about a square micron).
+    /// It is too small for a face by the kernel's face rule: under about
+    /// a square micron in area and narrower than 10 nm.
     Sliver,
     /// Anything else the face cannot hold as drawn (part of its outline is
     /// drawing the solid does not keep as face structure).
@@ -5157,8 +5168,7 @@ impl Document {
                     (None, found)
                 }
             };
-            let why =
-                matches!(over, Some((_, None))).then(|| region_why(&outer, &holes, plane.normal()));
+            let why = matches!(over, Some((_, None))).then(|| region_why(&outer));
             regions.push(DraftRegion {
                 key,
                 outer,
@@ -5630,6 +5640,26 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A region is a sliver exactly when the kernel's face rule refuses
+    /// its outer ring: a 1 µm by 30 nm strip (under the area floor, 58 nm
+    /// wide) is a face the solid could hold, so it is no sliver; at 5 nm
+    /// wide it is.
+    #[test]
+    fn region_why_calls_a_sliver_what_the_face_rule_refuses() {
+        let strip = |w: f64| {
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1e-6, 0.0, 0.0),
+                Point3::new(1e-6, w, 0.0),
+                Point3::new(0.0, w, 0.0),
+            ]
+        };
+        const { assert!(2.0 * 1e-6 * 3e-8 < tol::NORMALIZE_MIN_LENGTH) };
+        assert_eq!(region_why(&strip(3e-8)), DraftRegionWhy::Other);
+        assert_eq!(region_why(&strip(5e-9)), DraftRegionWhy::Sliver);
+        assert_eq!(region_why(&strip(1.0)), DraftRegionWhy::Other);
+    }
 
     fn ground() -> Plane {
         Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))

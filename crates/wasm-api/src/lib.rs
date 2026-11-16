@@ -27328,20 +27328,26 @@ mod tests {
         let (undo, redo) = (scene.doc.undo_depth(), scene.doc.redo_depth());
         let materials = scene.doc.material_ids().len();
 
-        let mut out = image_import::import(
-            &png_stub(300, 100),
-            None,
-            "speck",
-            &image_import::Placement::ground(1.0),
-        )
-        .unwrap();
-        // Shrink the face past what the kernel can find a plane for.
-        let kernel::ImportNode::Mesh(mesh) = &mut out.scene.defs[0].children[0] else {
-            panic!("the definition holds the picture's mesh");
+        // Shrink the face past what the kernel can find a plane for: a
+        // 10 × 3.3 nm picture, twice its area under 1e-12 m² and narrower
+        // than `kernel::tol::MIN_FACE_WIDTH`.
+        let shrunk = |k: f64| {
+            let mut out = image_import::import(
+                &png_stub(300, 100),
+                None,
+                "speck",
+                &image_import::Placement::ground(1.0),
+            )
+            .unwrap();
+            let kernel::ImportNode::Mesh(mesh) = &mut out.scene.defs[0].children[0] else {
+                panic!("the definition holds the picture's mesh");
+            };
+            for p in &mut mesh.positions {
+                *p = Point3::new(p.x * k, p.y * k, 0.0);
+            }
+            out
         };
-        for p in &mut mesh.positions {
-            *p = Point3::new(p.x * 1e-7, p.y * 1e-7, 0.0);
-        }
+        let out = shrunk(1e-8);
         let err = scene.ingest_picture(out.scene).unwrap_err();
         assert!(err.0.starts_with("ImageTooSmall: "), "{}", err.0);
         assert!(err.0.contains("can't be built"), "{}", err.0);
@@ -27359,6 +27365,11 @@ mod tests {
         // The earlier undone placement is still the one redo brings back.
         scene.scene_redo().unwrap();
         assert_eq!(scene.doc.instance_ids().len(), 2);
+        // The 0.1 × 0.033 µm picture the area floor alone used to refuse is
+        // 50 nm wide: it is kept now, and the document reopens.
+        scene.ingest_picture(shrunk(1e-7).scene).unwrap();
+        assert_eq!(scene.doc.instance_ids().len(), 3);
+        kernel::Document::load(&scene.save()).expect("reopens");
     }
 
     /// `RecordedCall::PlaceImage` replays: the bytes, name, frame and width
