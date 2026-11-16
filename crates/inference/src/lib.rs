@@ -5135,8 +5135,11 @@ fn record_fallback_branch_hit() {
 /// Finds the closest point on the segment [a, b] to the pick ray, and returns
 /// `(position, angular_distance, depth)` if that point lies within `aperture`.
 ///
-/// `dir` must already be normalized.
-fn segment_cone_hit(
+/// `dir` must already be normalized. The test every sketch-edge pick ranks
+/// by ([`InferenceScene::pick_sketch_edge`]); public so a pick over drawing
+/// the index does not hold (a definition's lines, seen per placement)
+/// ranks by exactly the same cone.
+pub fn segment_cone_hit(
     origin: Point3,
     dir: Vec3,
     a: Point3,

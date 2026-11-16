@@ -58,6 +58,13 @@ const SKETCH_PICK_APERTURE: f64 = 0.02;
 
 fn segment_ray_depth(origin: Point3, direction: kernel::Vec3, a: Point3, b: Point3) -> f64 {
     let dir = direction.normalized().unwrap_or(direction);
+    (segment_ray_closest(origin, dir, a, b) - origin).dot(dir)
+}
+
+/// The point of segment `[a, b]` nearest the line of a ray with unit
+/// direction `dir` (an end when the nearest point of the segment's line
+/// falls past it, `a` for a degenerate or parallel segment).
+fn segment_ray_closest(origin: Point3, dir: kernel::Vec3, a: Point3, b: Point3) -> Point3 {
     let seg = b - a;
     let seg_len_sq = seg.length_squared();
     let s = if seg_len_sq <= kernel::tol::NORMALIZE_MIN_LENGTH.powi(2) {
@@ -72,7 +79,28 @@ fn segment_ray_depth(origin: Point3, direction: kernel::Vec3, a: Point3, b: Poin
             ((seg.dot(w) - ray_seg * dir.dot(w)) / denom).clamp(0.0, 1.0)
         }
     };
-    ((a + seg * s) - origin).dot(dir)
+    a + seg * s
+}
+
+/// How a pose scales areas on a plane with unit `normal`: the area of the
+/// image of a unit square in the plane. A region's world area is its own
+/// area times this.
+fn in_plane_area_scale(pose: &Transform, normal: kernel::Vec3) -> f64 {
+    // Any in-plane axis: the normal crossed with the world axis it leans
+    // on least.
+    let (x, y, z) = (normal.x.abs(), normal.y.abs(), normal.z.abs());
+    let seed = if x <= y && x <= z {
+        kernel::Vec3::new(1.0, 0.0, 0.0)
+    } else if y <= z {
+        kernel::Vec3::new(0.0, 1.0, 0.0)
+    } else {
+        kernel::Vec3::new(0.0, 0.0, 1.0)
+    };
+    let Ok(u) = normal.cross(seed).normalized() else {
+        return 1.0;
+    };
+    let v = normal.cross(u);
+    pose.apply_vector(u).cross(pose.apply_vector(v)).length()
 }
 
 // Persist a panic message where the UI can read it after the wasm instance is
@@ -2459,35 +2487,99 @@ impl SketchEdgePickJs {
     }
 }
 
-/// A line or fill drawn inside a component, picked through a placement
+/// The lines or fills drawn inside components under a pick ray, RANKED
 /// (`Scene::pick_instance_sketch_edge`, `Scene::pick_instance_sketch_region`):
-/// the placement it was drawn through, the definition's sketch, and how
-/// far along the ray.
+/// at most one hit per shown top-level instance, best first. Parallel
+/// arrays, one entry per hit: `instances()` the top-level placement the
+/// drawing is seen through, `sketches()` the sketch holding it (the
+/// definition's own, or a nested definition's), `depths()` the distance
+/// along the normalized ray, and `points()` the world point hit, three
+/// floats per hit (on the line for an edge pick, on the fill for a region
+/// pick). Empty on a miss.
 #[wasm_bindgen]
-pub struct InstanceSketchPickJs {
-    instance: u64,
-    sketch: u64,
-    depth: f64,
+#[derive(Default)]
+pub struct InstanceSketchHitsJs {
+    instances: Vec<u64>,
+    sketches: Vec<u64>,
+    depths: Vec<f64>,
+    points: Vec<f64>,
 }
 
 #[wasm_bindgen]
-impl InstanceSketchPickJs {
-    /// The OUTERMOST placement the drawing was seen through, in the pick's
-    /// scope: a top-level instance, or a member instance of the scope
-    /// instance's definition.
-    pub fn instance(&self) -> u64 {
-        self.instance
+impl InstanceSketchHitsJs {
+    /// How many hits, best first.
+    pub fn len(&self) -> usize {
+        self.instances.len()
     }
 
-    /// The sketch holding the picked drawing (a definition's own sketch,
-    /// or a nested definition's).
-    pub fn sketch(&self) -> u64 {
-        self.sketch
+    /// Whether nothing was hit.
+    pub fn is_empty(&self) -> bool {
+        self.instances.is_empty()
     }
 
-    /// Radial distance along the normalized pick ray.
-    pub fn depth(&self) -> f64 {
-        self.depth
+    /// The top-level placement of each hit (`BigUint64Array`).
+    pub fn instances(&self) -> Vec<u64> {
+        self.instances.clone()
+    }
+
+    /// The sketch of each hit (`BigUint64Array`).
+    pub fn sketches(&self) -> Vec<u64> {
+        self.sketches.clone()
+    }
+
+    /// The distance of each hit along the normalized ray (`Float64Array`).
+    pub fn depths(&self) -> Vec<f64> {
+        self.depths.clone()
+    }
+
+    /// The world point of each hit, `[x, y, z]` per hit (`Float64Array`).
+    pub fn points(&self) -> Vec<f64> {
+        self.points.clone()
+    }
+}
+
+impl InstanceSketchHitsJs {
+    fn push(&mut self, instance: InstanceId, sketch: SketchId, depth: f64, point: Point3) {
+        self.instances.push(instance.data().as_ffi());
+        self.sketches.push(sketch.data().as_ffi());
+        self.depths.push(depth);
+        self.points.extend([point.x, point.y, point.z]);
+    }
+}
+
+/// The lines drawn inside one placement (`Scene::instance_sketch_placements`):
+/// one entry per drawn sketch, nested definitions included. `sketches()`
+/// the sketch ids; `poses()` one row-major 3×4 affine per sketch (12
+/// floats each, concatenated) mapping the sketch's stored coordinates into
+/// the placement's own frame, so it draws at `instance_pose × pose`.
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct InstanceSketchPlacementsJs {
+    sketches: Vec<u64>,
+    poses: Vec<f64>,
+}
+
+#[wasm_bindgen]
+impl InstanceSketchPlacementsJs {
+    /// How many sketches.
+    pub fn len(&self) -> usize {
+        self.sketches.len()
+    }
+
+    /// Whether the placement draws no line.
+    pub fn is_empty(&self) -> bool {
+        self.sketches.is_empty()
+    }
+
+    /// The sketch ids (`BigUint64Array`).
+    pub fn sketches(&self) -> Vec<u64> {
+        self.sketches.clone()
+    }
+
+    /// 12 floats per sketch, row-major 3×4, into the placement's frame
+    /// (`Float64Array`).
+    pub fn poses(&self) -> Vec<f64> {
+        self.poses.clone()
     }
 }
 
@@ -10486,57 +10578,18 @@ impl Scene {
     /// The placements [`Scene::pick_instance_sketch_edge`] and
     /// [`Scene::pick_instance_sketch_region`] walk, each as (placement,
     /// world pose, definition): every top-level instance not hidden by
-    /// [`Scene::set_hidden`], by eye or by tag; or, with `scope_instance`,
-    /// every member instance of that instance's definition (through its
-    /// member groups) not hidden there, at its pose composed with the
-    /// scope's. Empty for a stale or hidden scope.
-    fn instance_sketch_roots(
-        &self,
-        scope_instance: Option<u64>,
-    ) -> Vec<(InstanceId, Transform, ComponentId)> {
-        let Some(scope) = scope_instance.map(instance_id) else {
-            return self
-                .doc
-                .instance_ids()
-                .into_iter()
-                .filter(|i| {
-                    !self.hidden_instances.contains(i)
-                        && !self.doc.node_effectively_hidden(NodeId::Instance(*i))
-                })
-                .filter_map(|i| Some((i, self.doc.instance_pose(i)?, self.doc.instance_def(i)?)))
-                .collect();
-        };
-        let (Some(scope_pose), Some(scope_def)) =
-            (self.doc.instance_pose(scope), self.doc.instance_def(scope))
-        else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        let mut stack: Vec<NodeId> = self.doc.def_member_nodes(scope_def).unwrap_or_default();
-        stack.reverse();
-        while let Some(node) = stack.pop() {
-            // Hidden by eye or tag, itself or through a member group above
-            // it (the walk stops at the definition's root).
-            if self.doc.node_effectively_hidden(node) {
-                continue;
-            }
-            match node {
-                NodeId::Object(_) => {}
-                NodeId::Group(g) => {
-                    let mut members = self.doc.group_members(g).unwrap_or_default();
-                    members.reverse();
-                    stack.extend(members);
-                }
-                NodeId::Instance(i) => {
-                    if let (Some(pose), Some(def)) =
-                        (self.doc.instance_pose(i), self.doc.instance_def(i))
-                    {
-                        out.push((i, pose.then(&scope_pose), def));
-                    }
-                }
-            }
-        }
-        out
+    /// [`Scene::set_hidden`], by eye or by tag. A caller that scopes the
+    /// picks (an open editing context) filters the ranked hits itself.
+    fn instance_sketch_roots(&self) -> Vec<(InstanceId, Transform, ComponentId)> {
+        self.doc
+            .instance_ids()
+            .into_iter()
+            .filter(|i| {
+                !self.hidden_instances.contains(i)
+                    && !self.doc.node_effectively_hidden(NodeId::Instance(*i))
+            })
+            .filter_map(|i| Some((i, self.doc.instance_pose(i)?, self.doc.instance_def(i)?)))
+            .collect()
     }
 }
 
@@ -10768,26 +10821,31 @@ impl Scene {
             })
     }
 
-    /// The line drawn inside a component nearest the ray, seen through
-    /// any placement: every shown top-level instance, or — with
-    /// `scope_instance`, the instance whose editing context is open — every
-    /// shown member instance of its definition, each walked into its
-    /// nested definitions with the poses composed. The drawing is what the
-    /// renderer draws for a placement ([`Document::def_rendered_sketches`]
-    /// per definition, tag-hidden sketches left out); an instance hidden by
-    /// [`Scene::set_hidden`], by eye or by tag, and everything under a
-    /// hidden member, is skipped. The cone and its ranking are
-    /// [`Scene::pick_sketch_edge`]'s, in world space, so a non-uniformly
-    /// scaled placement keeps the screen-angle meaning; each placement is
-    /// tested against the world box of its lines first, so a hover pays
-    /// only for the instances near the ray.
+    /// The lines drawn inside components under the ray, RANKED: for every
+    /// shown top-level instance (not hidden by [`Scene::set_hidden`], by
+    /// eye or by tag) its best line, walked into nested definitions with
+    /// the poses composed, then those per-placement bests in order, best
+    /// first. The drawing is exactly what the renderer draws for a
+    /// placement ([`Scene::instance_sketch_placements`]: the one kernel walk,
+    /// [`Document::expanded_def_sketch_placements`], so nothing hidden by
+    /// tag, under a hidden member, or off a definition on loan is ever
+    /// picked). The cone is [`Scene::pick_sketch_edge`]'s, in world space,
+    /// so a non-uniformly scaled placement keeps the screen-angle meaning;
+    /// the ranking is its angle from the ray, then depth, with angles
+    /// within [`inference::RANK_TIE_FRACTION`] of the cone counted equal
+    /// (the snap ranking's rule: the line in front wins). Each placement is
+    /// culled against the world box of its lines first, and a document
+    /// with no drawing inside any definition answers at once, so a hover
+    /// pays only for the instances near the ray.
     ///
     /// The global inference index leaves a definition's sketches out (they
     /// would repeat per placement), so this is how a click on such a line
-    /// finds the component it belongs to. Returns the OUTERMOST placement
-    /// in scope, the sketch, and the depth along the ray; `undefined` on a
-    /// miss, a stale scope, or a singular pose. Never throws. Read-only.
-    #[allow(clippy::too_many_arguments)]
+    /// finds the component it belongs to. The ranking is unscoped: a caller
+    /// inside an editing context takes the first hit in its scope, so an
+    /// out-of-scope placement's nearer line never masks an in-scope one.
+    /// Each hit carries the top-level instance, the sketch, the depth along
+    /// the normalized ray of the line's point nearest the ray, and that
+    /// world point. Empty on a miss. Never throws. Read-only.
     pub fn pick_instance_sketch_edge(
         &self,
         ox: f64,
@@ -10796,77 +10854,81 @@ impl Scene {
         dx: f64,
         dy: f64,
         dz: f64,
-        scope_instance: Option<u64>,
-    ) -> Option<InstanceSketchPickJs> {
-        let ray = PickRay {
-            origin: Point3::new(ox, oy, oz),
-            direction: kernel::Vec3::new(dx, dy, dz),
+    ) -> InstanceSketchHitsJs {
+        let mut out = InstanceSketchHitsJs::default();
+        if !self.doc.has_definition_drawing() {
+            return out;
+        }
+        let origin = Point3::new(ox, oy, oz);
+        let Ok(unit) = kernel::Vec3::new(dx, dy, dz).normalized() else {
+            return out;
         };
-        let unit = ray.direction.normalized().ok()?;
         let mut lines = DefLinesMemo::default();
-        // One scene over every candidate placement: a definition's sketch
-        // repeats per placement, so each (placement, sketch) pair is
-        // registered under its own stand-in id, indexing `seen`.
-        let mut local = InferenceScene::default();
-        let mut seen: Vec<(InstanceId, SketchId, Transform)> = Vec::new();
-        for (root, pose, def) in self.instance_sketch_roots(scope_instance) {
+        // Angles within a pixel or so of each other are the same target, and
+        // the one in front wins (the snap ranking's rule): a bucket is an
+        // integer, so the order is total and a hair of pose noise between
+        // two placements never decides it.
+        let tie = SKETCH_PICK_APERTURE * inference::RANK_TIE_FRACTION;
+        // (angle bucket, depth, placement, sketch, a, b): the best per
+        // placement.
+        type Best = (i64, f64, InstanceId, SketchId, Point3, Point3);
+        let mut ranked: Vec<Best> = Vec::new();
+        for (root, pose, def) in self.instance_sketch_roots() {
             let entry = lines.get(&self.doc, def);
             let Some(bounds) = entry.bounds else {
                 continue;
             };
-            if !ray_meets_posed_box(ray.origin, unit, bounds, &pose, SKETCH_PICK_APERTURE) {
+            if !ray_meets_posed_box(origin, unit, bounds, &pose, SKETCH_PICK_APERTURE) {
                 continue;
             }
+            let mut best: Option<Best> = None;
             for &(sid, to_def) in &entry.placements {
                 let Some(sketch) = self.doc.sketch(sid) else {
                     continue;
                 };
                 let to_world = to_def.then(&pose);
-                let segments: Vec<_> = sketch
-                    .edges()
-                    .iter()
-                    .map(|(eid, edge)| {
-                        (
-                            eid,
-                            to_world.apply_point(sketch.vertices()[edge.from].position),
-                            to_world.apply_point(sketch.vertices()[edge.to].position),
-                        )
-                    })
-                    .collect();
-                if segments.is_empty() {
-                    continue;
+                for (_, edge) in sketch.edges().iter() {
+                    let a = to_world.apply_point(sketch.vertices()[edge.from].position);
+                    let b = to_world.apply_point(sketch.vertices()[edge.to].position);
+                    let Some((_, ang, depth)) = inference::segment_cone_hit(
+                        origin,
+                        unit,
+                        a,
+                        b,
+                        SKETCH_PICK_APERTURE,
+                        ApertureMode::Cone,
+                    ) else {
+                        continue;
+                    };
+                    let bucket = inference::rank_distance_bucket(ang, tie);
+                    if best.is_none_or(|(bb, bd, ..)| (bucket, depth) < (bb, bd)) {
+                        best = Some((bucket, depth, root, sid, a, b));
+                    }
                 }
-                seen.push((root, sid, to_world));
-                local.add_sketch(
-                    SketchId::from(KeyData::from_ffi(seen.len() as u64)),
-                    &segments,
-                );
             }
+            ranked.extend(best);
         }
-        let (stand_in, eid) = local.pick_sketch_edge(&ray, SKETCH_PICK_APERTURE)?;
-        let index = usize::try_from(stand_in.data().as_ffi() & 0xffff_ffff).ok()?;
-        let &(root, sid, to_world) = seen.get(index.checked_sub(1)?)?;
-        let sketch = self.doc.sketch(sid)?;
-        let edge = sketch.edges().get(eid)?;
-        let a = to_world.apply_point(sketch.vertices()[edge.from].position);
-        let b = to_world.apply_point(sketch.vertices()[edge.to].position);
-        Some(InstanceSketchPickJs {
-            instance: root.data().as_ffi(),
-            sketch: sid.data().as_ffi(),
-            depth: segment_ray_depth(ray.origin, ray.direction, a, b),
-        })
+        ranked.sort_by(|x, y| x.0.cmp(&y.0).then(x.1.total_cmp(&y.1)));
+        for (_, _, root, sid, a, b) in ranked {
+            let point = segment_ray_closest(origin, unit, a, b);
+            out.push(root, sid, (point - origin).dot(unit), point);
+        }
+        out
     }
 
-    /// The fill of a region drawn inside a component under the ray, seen
-    /// through any placement — [`Scene::pick_instance_sketch_edge`]'s walk
-    /// and scope, with [`Scene::pick_sketch_region`]'s rule: the nearest
-    /// region whose fill the ray enters, the smaller one on a tie. A loop
-    /// with no face and an imported sketch (drawn as ink, no fill) are
-    /// nothing to pick, and in Wireframe nothing is ([`Scene::set_render_mode`]:
-    /// a fill is a face). Returns the OUTERMOST placement in scope, the
-    /// sketch, and the depth along the ray; `undefined` on a miss, a stale
-    /// scope, or a singular pose. Never throws. Read-only.
-    #[allow(clippy::too_many_arguments)]
+    /// The fills of regions drawn inside components under the ray, RANKED
+    /// as [`Scene::pick_instance_sketch_edge`] ranks lines (its walk, its
+    /// cull, its early answer, unscoped): for every shown top-level
+    /// instance the region whose fill the ray enters nearest, the smaller
+    /// on a tie, then those per-placement bests nearest first, the smaller
+    /// first among ties. Areas compare in the WORLD: a region's own area
+    /// times its placement's in-plane area scale, so a scaled placement's
+    /// fill ranks by the size it is drawn at. A loop with no face and an
+    /// imported sketch (drawn as ink, no fill) are nothing to pick, and in
+    /// Wireframe nothing is ([`Scene::set_render_mode`]: a fill is a face).
+    /// Each hit carries the top-level instance, the sketch, the depth along
+    /// the normalized ray, and the world point where the ray meets the
+    /// fill. Empty on a miss. Never throws. Read-only.
     pub fn pick_instance_sketch_region(
         &self,
         ox: f64,
@@ -10875,18 +10937,23 @@ impl Scene {
         dx: f64,
         dy: f64,
         dz: f64,
-        scope_instance: Option<u64>,
-    ) -> Option<InstanceSketchPickJs> {
-        if !self.inference.face_policy().faces_are_targets() {
-            return None;
+    ) -> InstanceSketchHitsJs {
+        let mut out = InstanceSketchHitsJs::default();
+        if !self.inference.face_policy().faces_are_targets() || !self.doc.has_definition_drawing() {
+            return out;
         }
         let origin = Point3::new(ox, oy, oz);
         let dir = kernel::Vec3::new(dx, dy, dz);
-        let unit = dir.normalized().ok()?;
+        let Ok(unit) = dir.normalized() else {
+            return out;
+        };
+        let length = dir.length();
+        let ties = |a: f64, b: f64| (a - b).abs() < kernel::tol::PLANE_DIST;
         let mut lines = DefLinesMemo::default();
-        // (t, area, placement, sketch)
-        let mut best: Option<(f64, f64, InstanceId, SketchId)> = None;
-        for (root, pose, def) in self.instance_sketch_roots(scope_instance) {
+        // (depth, world area, placement, sketch, world point)
+        type Best = (f64, f64, InstanceId, SketchId, Point3);
+        let mut ranked: Vec<Best> = Vec::new();
+        for (root, pose, def) in self.instance_sketch_roots() {
             let entry = lines.get(&self.doc, def);
             let Some(bounds) = entry.bounds else {
                 continue;
@@ -10894,6 +10961,7 @@ impl Scene {
             if !ray_meets_posed_box(origin, unit, bounds, &pose, 0.0) {
                 continue;
             }
+            let mut best: Option<Best> = None;
             for &(sid, to_def) in &entry.placements {
                 let Some(sketch) = self.doc.sketch(sid) else {
                     continue;
@@ -10901,7 +10969,8 @@ impl Scene {
                 if sketch.imported() || sketch.regions().iter().all(|(_, r)| r.faceless) {
                     continue;
                 }
-                let Ok(inv) = to_def.then(&pose).inverse() else {
+                let to_world = to_def.then(&pose);
+                let Ok(inv) = to_world.inverse() else {
                     continue;
                 };
                 let o = inv.apply_point(origin);
@@ -10917,26 +10986,63 @@ impl Scene {
                     continue; // plane is behind the ray origin
                 }
                 let hit = o + d * t;
+                let depth = t * length;
+                let scale = in_plane_area_scale(&to_world, plane.normal());
                 for (rid, _) in sketch.regions().iter().filter(|(_, r)| !r.faceless) {
                     if !sketch.region_contains_point(rid, hit).unwrap_or(false) {
                         continue;
                     }
-                    let area = sketch.region_area(rid).unwrap_or(f64::INFINITY);
-                    if best.is_none_or(|(best_t, best_area, _, _)| {
-                        t < best_t
-                            || ((t - best_t).abs() * dir.length() < kernel::tol::PLANE_DIST
-                                && area < best_area)
+                    let area = sketch.region_area(rid).unwrap_or(f64::INFINITY) * scale;
+                    if best.is_none_or(|(bd, ba, ..)| {
+                        (depth < bd && !ties(depth, bd)) || (ties(depth, bd) && area < ba)
                     }) {
-                        best = Some((t, area, root, sid));
+                        best = Some((depth, area, root, sid, origin + dir * t));
                     }
                 }
             }
+            ranked.extend(best);
         }
-        best.map(|(t, _, root, sid)| InstanceSketchPickJs {
-            instance: root.data().as_ffi(),
-            sketch: sid.data().as_ffi(),
-            depth: t * dir.length(),
-        })
+        // Nearest first; a run of hits within the tie distance of its first
+        // ranks smaller area first (a total order, so the sort is sound).
+        ranked.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let mut start = 0;
+        while start < ranked.len() {
+            let lead = ranked[start].0;
+            let end = ranked[start..]
+                .iter()
+                .position(|h| !ties(h.0, lead))
+                .map_or(ranked.len(), |k| start + k);
+            ranked[start..end].sort_by(|x, y| x.1.total_cmp(&y.1));
+            start = end;
+        }
+        for (depth, _, root, sid, point) in ranked {
+            out.push(root, sid, depth, point);
+        }
+        out
+    }
+
+    /// The lines drawn inside one placement, as the renderer draws them and
+    /// the picks and marquee test them: every sketch the instance shows,
+    /// nested definitions included, each with the row-major 3×4 affine that
+    /// maps its stored coordinates into the instance's own frame (draw at
+    /// `instance_pose × pose`). The one kernel walk
+    /// ([`Document::expanded_def_sketch_placements`]): a sketch on a hidden
+    /// tag, and everything under a member group or nested instance hidden
+    /// by eye or tag, is left out; a definition on loan to an open session
+    /// shows the session's drawing at the inverse session pose. The
+    /// instance's OWN visibility is the caller's to apply, as for its
+    /// solids. Empty for a stale or hidden instance, or one drawing no
+    /// line. Read-only.
+    pub fn instance_sketch_placements(&self, instance: u64) -> InstanceSketchPlacementsJs {
+        let mut out = InstanceSketchPlacementsJs::default();
+        let Some(def) = self.doc.instance_def(instance_id(instance)) else {
+            return out;
+        };
+        for (sid, to_def) in self.doc.expanded_def_sketch_placements(def) {
+            out.sketches.push(sid.data().as_ffi());
+            out.poses.extend(to_def.to_affine());
+        }
+        out
     }
 
     /// World bounds `[minx, miny, minz, maxx, maxy, maxz]` of the lines
@@ -24741,17 +24847,66 @@ mod tests {
         (comp, line)
     }
 
-    /// A straight-down ray at world (x, y) from z = 10.
-    fn down_edge_pick(scene: &Scene, x: f64, y: f64) -> Option<InstanceSketchPickJs> {
-        scene.pick_instance_sketch_edge(x, y, 10.0, 0.0, 0.0, -1.0, None)
+    /// A ranked hit list as `(instance, sketch, depth, point)` rows.
+    fn hit_rows(hits: &InstanceSketchHitsJs) -> Vec<(u64, u64, f64, Point3)> {
+        let (inst, sk, dep, pts) = (
+            hits.instances(),
+            hits.sketches(),
+            hits.depths(),
+            hits.points(),
+        );
+        assert_eq!(hits.len(), inst.len());
+        assert_eq!(
+            (sk.len(), dep.len(), pts.len()),
+            (inst.len(), inst.len(), 3 * inst.len())
+        );
+        (0..inst.len())
+            .map(|k| {
+                (
+                    inst[k],
+                    sk[k],
+                    dep[k],
+                    Point3::new(pts[3 * k], pts[3 * k + 1], pts[3 * k + 2]),
+                )
+            })
+            .collect()
+    }
+
+    /// The best line under a straight-down ray at world (x, y) from z = 10.
+    fn down_edge_pick(scene: &Scene, x: f64, y: f64) -> Option<(u64, u64, f64, Point3)> {
+        hit_rows(&scene.pick_instance_sketch_edge(x, y, 10.0, 0.0, 0.0, -1.0))
+            .into_iter()
+            .next()
+    }
+
+    /// The ranked fills under a vertical ray at world (x, y) from z = `z`
+    /// heading `dz`.
+    fn region_rows(scene: &Scene, x: f64, y: f64, z: f64, dz: f64) -> Vec<(u64, u64, f64, Point3)> {
+        hit_rows(&scene.pick_instance_sketch_region(x, y, z, 0.0, 0.0, dz))
+    }
+
+    fn near3(a: Point3, b: Point3) -> bool {
+        (a - b).length() < 1e-9
     }
 
     /// The top-level pick finds a line drawn inside a component through a
-    /// translated placement, names that placement, and measures the depth
-    /// along the ray; the world sketch pick stays blind to it, and the
-    /// line's local position is a miss.
+    /// translated placement, names that placement, and reports the depth
+    /// and the world point on the line; the world sketch pick stays blind
+    /// to it, and the line's local position is a miss. A document with no
+    /// drawing in any definition answers empty.
     #[test]
     fn pick_instance_sketch_edge_finds_a_definition_line_through_a_translated_pose() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        scene.make_component(&[0], &[o]).unwrap();
+        assert!(!scene.doc.has_definition_drawing());
+        assert!(
+            scene
+                .pick_instance_sketch_edge(0.5, 0.0, 10.0, 0.0, 0.0, -1.0)
+                .is_empty()
+        );
+
         let mut scene = Scene::new();
         let (comp, line) = component_with_a_line_beside_it(&mut scene);
         let pose = kernel::Transform::translation(kernel::Vec3::new(5.0, 2.0, 0.0));
@@ -24763,17 +24918,11 @@ mod tests {
                 .is_none(),
             "the world sketch pick leaves definition sketches out"
         );
-        let hit = down_edge_pick(&scene, 6.3, 2.5).expect("the posed line is under the ray");
-        assert_eq!(hit.instance(), inst);
-        assert_eq!(hit.sketch(), line);
-        assert!((hit.depth() - 10.0).abs() < 1e-9, "depth {}", hit.depth());
+        let (i, s, depth, at) = down_edge_pick(&scene, 6.3, 2.5).expect("the posed line");
+        assert_eq!((i, s), (inst, line));
+        assert!((depth - 10.0).abs() < 1e-9, "depth {depth}");
+        assert!(near3(at, Point3::new(6.3, 2.5, 0.0)), "{at:?}");
         assert!(down_edge_pick(&scene, 1.3, 0.5).is_none(), "local position");
-        // A stale scope is a miss, never a throw.
-        assert!(
-            scene
-                .pick_instance_sketch_edge(6.3, 2.5, 10.0, 0.0, 0.0, -1.0, Some(999_999))
-                .is_none()
-        );
     }
 
     /// Mirrored and non-uniformly scaled placements map the line too.
@@ -24792,19 +24941,21 @@ mod tests {
 
         let at_m = mirrored.apply_point(Point3::new(1.3, 0.5, 0.0));
         let hit = down_edge_pick(&scene, at_m.x, at_m.y).expect("mirrored line");
-        assert_eq!((hit.instance(), hit.sketch()), (m, line));
+        assert_eq!((hit.0, hit.1), (m, line));
+        assert!(near3(hit.3, at_m));
         let at_s = stretched.apply_point(Point3::new(1.3, 0.5, 0.0));
         let hit = down_edge_pick(&scene, at_s.x, at_s.y).expect("stretched line");
-        assert_eq!((hit.instance(), hit.sketch()), (s, line));
+        assert_eq!((hit.0, hit.1), (s, line));
         // The stretched placement's line is NOT at its unscaled offset.
         assert!(down_edge_pick(&scene, 21.3, 0.5).is_none());
     }
 
     /// A line drawn inside a NESTED definition picks through the outer
-    /// placement and names the outermost instance; inside the outer
-    /// instance's context the member instance is named instead.
+    /// placement and names the outermost (top-level) instance; the
+    /// placements export lists it at the nesting pose in the outer
+    /// instance's frame, the same walk the pick reads.
     #[test]
-    fn pick_instance_sketch_edge_names_the_outermost_placement_of_a_nested_line() {
+    fn a_nested_line_picks_through_the_outer_placement_and_exports_its_nesting_pose() {
         let mut scene = Scene::new();
         let (comp, line) = component_with_a_line_beside_it(&mut scene);
         let inner = scene
@@ -24815,13 +24966,47 @@ mod tests {
             .unwrap();
         let outer = scene.make_component(&[2], &[inner]).unwrap();
         let outer_comp = scene.instance_def(outer).unwrap();
+        // A line of the outer definition's own, beside the nested one.
+        let own = scene
+            .begin_sketch_on_plane_in_instance(outer, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        scene
+            .sketch_add_segment(own, 5.0, 0.0, 0.0, 5.0, 1.0, 0.0)
+            .unwrap();
         scene.delete_node(2, outer).unwrap();
         let pose = kernel::Transform::translation(kernel::Vec3::new(10.0, 0.0, 0.0));
         let outer = scene.place_instance(outer_comp, &pose.to_affine()).unwrap();
 
         let hit = down_edge_pick(&scene, 11.3, 3.5).expect("nested line through both poses");
-        assert_eq!((hit.instance(), hit.sketch()), (outer, line));
+        assert_eq!((hit.0, hit.1), (outer, line));
 
+        let placements = scene.instance_sketch_placements(outer);
+        let (sketches, poses) = (placements.sketches(), placements.poses());
+        assert_eq!(placements.len(), 2);
+        assert_eq!(poses.len(), 24, "12 floats per sketch");
+        let pose_of = |s: u64| {
+            let k = sketches.iter().position(|&x| x == s).expect("listed");
+            poses[12 * k..12 * k + 12].to_vec()
+        };
+        let identity = kernel::Transform::IDENTITY.to_affine().to_vec();
+        let nested = kernel::Transform::translation(kernel::Vec3::new(0.0, 3.0, 0.0))
+            .to_affine()
+            .to_vec();
+        assert_eq!(pose_of(own), identity, "the outer definition's own line");
+        assert_eq!(pose_of(line), nested, "the nested line at its nesting pose");
+        // The direct placement of the inner definition shows only its line.
+        let direct = scene
+            .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+        let direct = scene.instance_sketch_placements(direct);
+        assert_eq!(direct.sketches(), vec![line]);
+        assert_eq!(direct.poses(), identity);
+        assert!(
+            scene.instance_sketch_placements(999_999).is_empty(),
+            "stale"
+        );
+
+        // Hiding the nested member by eye drops its line from both.
         let member = scene
             .doc
             .def_member_nodes(component_id(outer_comp))
@@ -24832,10 +25017,12 @@ mod tests {
                 _ => None,
             })
             .expect("the nested placement");
-        let scoped = scene
-            .pick_instance_sketch_edge(11.3, 3.5, 10.0, 0.0, 0.0, -1.0, Some(outer))
-            .expect("scoped to the outer context");
-        assert_eq!(scoped.instance(), member);
+        scene.set_node_user_hidden(2, member, true).unwrap();
+        assert_eq!(
+            scene.instance_sketch_placements(outer).sketches(),
+            vec![own]
+        );
+        assert!(down_edge_pick(&scene, 11.3, 3.5).is_none(), "hidden member");
     }
 
     /// Hidden placements are skipped: by `set_hidden`, and by eye.
@@ -24856,29 +25043,40 @@ mod tests {
         assert!(down_edge_pick(&scene, 1.3, 0.5).is_some());
     }
 
-    /// Two placements under one ray: the nearer one is named, for lines
-    /// and fills alike; Wireframe drops the fill, not the line.
-    #[test]
-    fn instance_sketch_picks_take_the_nearer_placement_and_follow_the_render_mode() {
-        let mut scene = Scene::new();
-        let (s, r) = ground_unit_square(&mut scene);
+    /// A component whose definition holds a filled square drawn on its
+    /// ground, LOCAL x in [x0, x0 + side], y in [0, side], beside a unit
+    /// cube at x = 20 (out of the way), drawn through an identity placement
+    /// that is then removed. Returns the definition and the square's
+    /// sketch.
+    fn component_with_a_square(scene: &mut Scene, x0: f64, side: f64) -> (u64, u64) {
+        let (s, r) = ground_unit_square_at(scene, 20.0, 0.0);
         let o = scene.extrude_region(s, r, 1.0).unwrap();
         let inst = scene.make_component(&[0], &[o]).unwrap();
         let comp = scene.instance_def(inst).unwrap();
         let drawn = scene
             .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
             .unwrap();
+        let x1 = x0 + side;
         for (ax, ay, bx, by) in [
-            (2.0, 0.0, 3.0, 0.0),
-            (3.0, 0.0, 3.0, 1.0),
-            (3.0, 1.0, 2.0, 1.0),
-            (2.0, 1.0, 2.0, 0.0),
+            (x0, 0.0, x1, 0.0),
+            (x1, 0.0, x1, side),
+            (x1, side, x0, side),
+            (x0, side, x0, 0.0),
         ] {
             scene
                 .sketch_add_segment(drawn, ax, ay, 0.0, bx, by, 0.0)
                 .unwrap();
         }
         scene.delete_node(2, inst).unwrap();
+        (comp, drawn)
+    }
+
+    /// Two placements under one ray: both are listed, the nearer first,
+    /// for lines and fills alike; Wireframe drops the fills, not the lines.
+    #[test]
+    fn instance_sketch_picks_rank_every_placement_nearest_first() {
+        let mut scene = Scene::new();
+        let (comp, drawn) = component_with_a_square(&mut scene, 2.0, 1.0);
         let low = scene
             .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
             .unwrap();
@@ -24889,28 +25087,105 @@ mod tests {
             )
             .unwrap();
 
-        let edge = down_edge_pick(&scene, 3.0, 0.5).expect("the square's side");
-        assert_eq!(edge.instance(), high);
-        assert!((edge.depth() - 8.0).abs() < 1e-9);
-        let region = scene
-            .pick_instance_sketch_region(2.5, 0.5, 10.0, 0.0, 0.0, -1.0, None)
-            .expect("the square's fill");
-        assert_eq!((region.instance(), region.sketch()), (high, drawn));
-        assert!((region.depth() - 8.0).abs() < 1e-9);
+        let edges = hit_rows(&scene.pick_instance_sketch_edge(3.0, 0.5, 10.0, 0.0, 0.0, -1.0));
+        assert_eq!(
+            edges.iter().map(|h| h.0).collect::<Vec<_>>(),
+            vec![high, low]
+        );
+        assert!((edges[0].2 - 8.0).abs() < 1e-9 && (edges[1].2 - 10.0).abs() < 1e-9);
+        assert!(near3(edges[0].3, Point3::new(3.0, 0.5, 2.0)));
+        let fills = region_rows(&scene, 2.5, 0.5, 10.0, -1.0);
+        assert_eq!(
+            fills.iter().map(|h| (h.0, h.1)).collect::<Vec<_>>(),
+            vec![(high, drawn), (low, drawn)]
+        );
+        assert!((fills[0].2 - 8.0).abs() < 1e-9);
+        assert!(near3(fills[0].3, Point3::new(2.5, 0.5, 2.0)));
         // From below, the low placement is the nearer.
-        let below = scene
-            .pick_instance_sketch_region(2.5, 0.5, -10.0, 0.0, 0.0, 1.0, None)
-            .expect("the fill from below");
-        assert_eq!(below.instance(), low);
+        let below = region_rows(&scene, 2.5, 0.5, -10.0, 1.0);
+        assert_eq!(
+            below.iter().map(|h| h.0).collect::<Vec<_>>(),
+            vec![low, high]
+        );
 
         scene.set_render_mode("wireframe").unwrap();
         assert!(
-            scene
-                .pick_instance_sketch_region(2.5, 0.5, 10.0, 0.0, 0.0, -1.0, None)
-                .is_none(),
+            region_rows(&scene, 2.5, 0.5, 10.0, -1.0).is_empty(),
             "wireframe: a fill is no target"
         );
         assert!(down_edge_pick(&scene, 3.0, 0.5).is_some(), "lines stay");
+    }
+
+    /// Ranking is unscoped, so a caller scoped to one placement still finds
+    /// its line when ANOTHER placement's line is nearer under the ray: the
+    /// out-of-scope hit ranks first but does not mask the in-scope one.
+    #[test]
+    fn an_out_of_scope_nearer_line_does_not_mask_an_in_scope_one() {
+        let mut scene = Scene::new();
+        let (near_comp, near_line) = component_with_a_line_beside_it(&mut scene);
+        let (far_comp, far_line) = component_with_a_square(&mut scene, 0.0, 2.0);
+        // The square's side x = 0 runs under the ray at (1.3, 0.5) only if
+        // moved there: place it so its x = 0 side lies along x = 1.3.
+        let far = scene
+            .place_instance(
+                far_comp,
+                &kernel::Transform::translation(kernel::Vec3::new(1.3, -0.5, 0.0)).to_affine(),
+            )
+            .unwrap();
+        let near = scene
+            .place_instance(
+                near_comp,
+                &kernel::Transform::translation(kernel::Vec3::new(0.0, 0.0, 3.0)).to_affine(),
+            )
+            .unwrap();
+        let rows = hit_rows(&scene.pick_instance_sketch_edge(1.3, 0.5, 10.0, 0.0, 0.0, -1.0));
+        assert_eq!(
+            rows.iter().map(|h| (h.0, h.1)).collect::<Vec<_>>(),
+            vec![(near, near_line), (far, far_line)]
+        );
+        // Scoped to `far` (say, inside a group that holds only it), the
+        // first in-scope hit is its own line, at its own depth.
+        let scoped = rows.iter().find(|h| h.0 == far).expect("in scope");
+        assert!((scoped.2 - 10.0).abs() < 1e-9);
+        assert!(near3(scoped.3, Point3::new(1.3, 0.5, 0.0)));
+    }
+
+    /// Coplanar fills from two placements tie on depth and rank by WORLD
+    /// area: a unit square placed at 3x scale (world area 9) ranks after a
+    /// 2 x 2 square at identity (world area 4), though its own area (1) is
+    /// the smaller.
+    #[test]
+    fn coplanar_fills_tie_break_on_world_area_not_local_area() {
+        let mut scene = Scene::new();
+        let (small_comp, small) = component_with_a_square(&mut scene, 0.0, 1.0);
+        let (big_comp, big) = component_with_a_square(&mut scene, 0.0, 2.0);
+        let scaled = scene
+            .place_instance(
+                small_comp,
+                &kernel::Transform::scale(kernel::Vec3::new(3.0, 3.0, 1.0)).to_affine(),
+            )
+            .unwrap();
+        let plain = scene
+            .place_instance(big_comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+        let rows = region_rows(&scene, 0.5, 0.5, 10.0, -1.0);
+        assert_eq!(
+            rows.iter().map(|h| (h.0, h.1)).collect::<Vec<_>>(),
+            vec![(plain, big), (scaled, small)]
+        );
+        // Grow the plain one past the scaled one's world area: the order
+        // flips.
+        scene
+            .transform_instance(
+                plain,
+                &kernel::Transform::scale(kernel::Vec3::new(2.0, 2.0, 1.0)).to_affine(),
+            )
+            .unwrap();
+        let rows = region_rows(&scene, 0.5, 0.5, 10.0, -1.0);
+        assert_eq!(
+            rows.iter().map(|h| h.0).collect::<Vec<_>>(),
+            vec![scaled, plain]
+        );
     }
 
     /// An instance whose definition holds only a line has bounds, and a

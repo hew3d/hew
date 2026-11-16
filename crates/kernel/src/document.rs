@@ -21919,6 +21919,21 @@ impl Document {
         out
     }
 
+    /// Whether any placement could draw a line from inside a definition: a
+    /// definition owns a sketch (live or not), or a component session is
+    /// open (its world drawing shows through the sibling placements,
+    /// [`Document::def_rendered_sketches`]). `false` means
+    /// [`Document::expanded_def_sketch_placements`] is empty for every
+    /// definition, so a per-pointer-move pick over placements can answer
+    /// at once. Conservative; read-only and O(1).
+    pub fn has_definition_drawing(&self) -> bool {
+        !self.def_sketches.is_empty()
+            || self
+                .sessions
+                .iter()
+                .any(|f| matches!(f, SessionFrame::Component(_)))
+    }
+
     /// The world bounds `(low, high)` of the lines drawn inside a live
     /// instance, nested definitions included
     /// ([`Document::expanded_def_sketch_placements`]), each curve at its
