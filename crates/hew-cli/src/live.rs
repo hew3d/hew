@@ -577,9 +577,15 @@ mod transport {
         /// socket allows (a zero socket timeout is refused).
         fn read_line(&mut self, timeout: Option<Duration>) -> Result<String, LiveError> {
             let timeout = timeout.map(|t| t.max(Duration::from_micros(1)));
-            self.stream
-                .set_read_timeout(timeout)
-                .map_err(LiveError::io)?;
+            // macOS refuses to set a timeout on a socket whose peer has
+            // closed (EINVAL). Read anyway: a closed peer reads as end of
+            // stream, which is the `Closed` answer below.
+            match self.stream.set_read_timeout(timeout) {
+                Err(e) if e.kind() != std::io::ErrorKind::InvalidInput => {
+                    return Err(LiveError::io(e));
+                }
+                _ => {}
+            }
             let read = self.reader.read_until(b'\n', &mut self.partial);
             // Back to the default, so nothing else inherits a forever wait.
             let _ = self.stream.set_read_timeout(Some(REPLY_TIMEOUT));
