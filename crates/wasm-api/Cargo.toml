@@ -17,6 +17,11 @@ api.workspace = true
 # Plugin command declarations the app registers on the shared registry
 # (docs/agents/PLUGINS.md "Commands"); pure, already in `api`'s tree.
 plugin-manifest.workspace = true
+# The plugin install store's pure half (package reading, consent) for the
+# web build. Plugins are a Preview feature that loads code: the crate is
+# empty in a production build and this crate uses it only under
+# `cfg(hew_preview)`.
+plugin-host.workspace = true
 kernel.workspace = true
 inference.workspace = true
 tessellate.workspace = true
@@ -46,3 +51,8 @@ serde_json.workspace = true
 # see the workspace-level `sha2` entry's doc comment. Pure Rust, no
 # randomness, compiles cleanly for wasm32-unknown-unknown.
 sha2.workspace = true
+
+[dev-dependencies]
+# Stored `.hewplugin` fixtures for the plugin install exports' tests; the
+# version the kernel already uses.
+zip.workspace = true

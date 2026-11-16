@@ -23,3 +23,7 @@ type Root = LazyExoticComponent<ComponentType> | null
 export const ProbeRoot: Root = __HEW_PREVIEW__
   ? lazy(() => import('../plugins/probe/ProbeRoot.tsx').then((m) => ({ default: m.ProbeRoot })))
   : null
+
+export const PluginsPane: Root = __HEW_PREVIEW__
+  ? lazy(() => import('../plugins/PluginsPane.tsx').then((m) => ({ default: m.PluginsPane })))
+  : null

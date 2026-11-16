@@ -48,6 +48,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "api"
+version = "1.4.0"
+dependencies = [
+ "kernel",
+ "plugin-manifest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "slotmap",
+ "tessellate",
+]
+
+[[package]]
 name = "arboard"
 version = "3.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1603,6 +1616,8 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "objc2-web-kit",
+ "plugin-host",
+ "plugin-manifest",
  "qrcode",
  "reqwest",
  "rustls",
@@ -2823,6 +2838,27 @@ dependencies = [
  "quick-xml",
  "serde",
  "time",
+]
+
+[[package]]
+name = "plugin-host"
+version = "1.4.0"
+dependencies = [
+ "api",
+ "plugin-manifest",
+ "semver",
+ "serde",
+ "serde_json",
+ "zip",
+]
+
+[[package]]
+name = "plugin-manifest"
+version = "1.4.0"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4264,6 +4300,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5fed54709c5b3a53d09bb1c113ea4f5ceafd1e772ddcb0030a82e1d56c087b08"
 dependencies = [
  "new_debug_unreachable",
+]
+
+[[package]]
+name = "tessellate"
+version = "1.4.0"
+dependencies = [
+ "kernel",
 ]
 
 [[package]]
@@ -5867,9 +5910,9 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.0.4"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a954114b47a54df49f83d2722814e86b23d4bb1b54a1b90fb7d92b41619ddc22"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
  "crc32fast",
  "indexmap 2.14.0",

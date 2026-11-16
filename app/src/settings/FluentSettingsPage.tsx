@@ -19,7 +19,9 @@
  * sync across windows; no OK/Cancel.
  */
 
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
+import { Suspense, useEffect, useState, type CSSProperties, type ReactNode } from 'react'
+import { paneAllowed, previewBuild } from '../preview'
+import { PluginsPane } from '../preview/loaderRoots'
 import {
   getLengthUnit,
   setLengthUnit,
@@ -625,6 +627,16 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
           </div>
 
           <ServerSection />
+
+          {previewBuild && paneAllowed('plugins') && PluginsPane !== null && (
+            <>
+              {/* oxlint-disable-next-line lingui/no-unlocalized-strings -- Preview copy, exempt from the catalogs */}
+              <div style={sectionHeaderStyle}>Plugins</div>
+              <Suspense fallback={null}>
+                <PluginsPane />
+              </Suspense>
+            </>
+          )}
 
           <div style={sectionHeaderStyle}>{t`Debug`}</div>
           <SettingsCard

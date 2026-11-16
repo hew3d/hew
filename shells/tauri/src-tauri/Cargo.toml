@@ -23,6 +23,14 @@ tauri-build = { version = "2.6.2", features = [] }
 # (+ its own `kernel`/`serde_json`/`sha2`), never the wasm boundary or
 # anything UI-facing.
 library = { path = "../../../crates/library" }
+# The plugin install store (src/preview_only/plugins.rs): reading packages,
+# the consent text, and the on-disk store under the app's data folder.
+# Plugins are a Preview feature and this crate compiles to nothing in a
+# production build, so a production shell carries none of it; the shell
+# uses it only under `cfg(hew_preview)`. `plugin-manifest` supplies the
+# plugin id grammar every command checks first.
+plugin-host = { path = "../../../crates/plugin-host", features = ["fs"] }
+plugin-manifest = { path = "../../../crates/plugin-manifest" }
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-dialog = "2.7.1"
 tauri-plugin-clipboard-manager = "2"

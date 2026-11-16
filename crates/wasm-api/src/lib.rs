@@ -27,6 +27,10 @@ mod geo_api;
 mod health;
 mod live;
 mod log;
+// The plugin install exports exist only in a preview build
+// (`loader.kernelExports` of the "plugins" entry of preview-features.json).
+#[cfg(hew_preview)]
+mod plugins_api;
 mod recording;
 mod scenes_api;
 

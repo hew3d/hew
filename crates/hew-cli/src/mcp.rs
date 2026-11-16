@@ -34,6 +34,42 @@ const QUERY_BY_NAME: [&str; 3] = [
     "hew.history.status",
 ];
 
+/// The plugin management commands an agent may call: reading what is
+/// installed. Installing, confirming, enabling, disabling, rolling back,
+/// uninstalling and changing a grant are the user's decisions, made in
+/// Settings, so every other `hew.plugin.*` command is refused before
+/// dispatch.
+const AGENT_PLUGIN_COMMANDS: [&str; 1] = ["hew.plugin.list"];
+
+/// Refuses an agent's call that names a `hew.plugin.*` command other than
+/// [`AGENT_PLUGIN_COMMANDS`], as `method` itself or anywhere in a
+/// transaction's `commands` (dry runs included), with `invalid_params`
+/// before anything is dispatched, whether or not the command exists yet.
+/// Only a preview build refuses: plugins are a Preview feature, and a
+/// production build answers such a name as it answers any unknown method.
+fn refuse_plugin_management(method: &str, params: &Value) -> Result<(), JsonRpcErr> {
+    let denied = |m: &str| {
+        m.starts_with("hew.plugin.")
+            && !AGENT_PLUGIN_COMMANDS.contains(&m)
+            && api::preview::PREVIEW_BUILD
+    };
+    if denied(method) {
+        return Err(JsonRpcErr::invalid_params(format!(
+            "{method} is not available to agents: the person using Hew installs and manages plugins in Settings (hew.plugin.list is available)"
+        )));
+    }
+    if method == "hew.doc.transact"
+        && let Some(commands) = params.get("commands").and_then(Value::as_array)
+    {
+        for command in commands {
+            let inner = command.get("method").and_then(Value::as_str).unwrap_or("");
+            let inner_params = command.get("params").unwrap_or(&Value::Null);
+            refuse_plugin_management(inner, inner_params)?;
+        }
+    }
+    Ok(())
+}
+
 /// A JSON-RPC error `{code, message}` — the MCP layer's own errors
 /// (unknown method, bad params), distinct from a `hew.*` refusal (which
 /// travels as a normal tool-call *result*, per §13: refusals are answers).
@@ -489,6 +525,7 @@ impl McpServer {
                     .get("method")
                     .and_then(Value::as_str)
                     .ok_or_else(|| JsonRpcErr::invalid_params("hew_query needs a \"method\""))?;
+                refuse_plugin_management(method, &Value::Null)?;
                 // The one `hew_query` rule: the registry's read-only class
                 // minus any command that mutates the document
                 // (`hew.library.save` is class read-only but stamps
@@ -548,6 +585,7 @@ impl McpServer {
         params: Value,
         document: Option<String>,
     ) -> Result<Value, JsonRpcErr> {
+        refuse_plugin_management(method, &params)?;
         let live = matches!(self.backend, Backend::Live(_));
 
         // `hew.library.list`/`describe`/`remove`/`update_meta` never touch
@@ -1546,6 +1584,91 @@ mod tests {
         let text = v["result"]["content"][0]["text"].as_str().unwrap();
         let inner: Value = serde_json::from_str(text).unwrap();
         assert!(inner["result"]["commands"].as_array().unwrap().len() >= 50);
+    }
+
+    /// Agents may read which plugins are installed and nothing more: any
+    /// other `hew.plugin.*` name, declared or not, is refused
+    /// `invalid_params` before dispatch, called directly, inside a
+    /// transaction (first or not), and in a dry run. `hew.plugin.list` is
+    /// not refused by this rule and reaches the dispatcher.
+    #[cfg(hew_preview)]
+    #[test]
+    fn agents_cannot_manage_plugins() {
+        let denied = [
+            "hew.plugin.install",
+            "hew.plugin.confirm",
+            "hew.plugin.enable",
+            "hew.plugin.disable",
+            "hew.plugin.uninstall",
+            "hew.plugin.rollback",
+            "hew.plugin.set_grant",
+            "hew.plugin.anything_later",
+        ];
+        const DENIAL: &str = "not available to agents";
+        let refused = |frame: &Value, path: &str| {
+            assert_eq!(frame["error"]["code"], -32602, "{path}: {frame}");
+            let message = frame["error"]["message"].as_str().unwrap_or_default();
+            assert!(message.contains(DENIAL), "{path}: {message}");
+        };
+        let draw = json!({ "method": "hew.sketch.draw_rect", "params": {
+            "plane": { "ground": true }, "corner_a": [0, 0, 0], "corner_b": [1, 1, 0] } });
+        for method in denied {
+            let mut server = McpServer::new();
+            let one = json!({ "method": method, "params": { "id": "com.example.x" } });
+            let direct = tool_frame(&mut server, 1, "hew_query", json!({ "method": method }));
+            refused(&direct, &format!("{method} direct"));
+            for (label, arguments) in [
+                ("transaction", json!({ "commands": [one] })),
+                (
+                    "second in a transaction",
+                    json!({ "commands": [draw, one] }),
+                ),
+                ("dry run", json!({ "dry_run": true, "commands": [one] })),
+            ] {
+                let frame = tool_frame(&mut server, 2, "hew_transact", arguments);
+                refused(&frame, &format!("{method} {label}"));
+            }
+            // Nothing ran: the draw ahead of it in the transaction did not.
+            let scene = tool_result(&tool_frame(
+                &mut server,
+                3,
+                "hew_query",
+                json!({ "method": "hew.query.scene" }),
+            ));
+            assert_eq!(scene["result"]["tree"], json!([]), "{method}");
+        }
+        // `hew.plugin.list` passes this rule and reaches the dispatcher,
+        // which answers it as it answers any name it does not hold.
+        let mut server = McpServer::new();
+        let frame = tool_frame(
+            &mut server,
+            4,
+            "hew_transact",
+            json!({ "commands": [{ "method": "hew.plugin.list", "params": {} }] }),
+        );
+        assert!(frame.get("error").is_none(), "{frame}");
+        let inner = tool_result(&frame);
+        assert!(inner["error"].is_object(), "{inner}");
+        assert!(
+            !inner["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(DENIAL),
+            "{inner}"
+        );
+        let direct = tool_frame(
+            &mut server,
+            5,
+            "hew_query",
+            json!({ "method": "hew.plugin.list" }),
+        );
+        assert!(
+            !direct["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(DENIAL),
+            "{direct}"
+        );
     }
 
     #[test]

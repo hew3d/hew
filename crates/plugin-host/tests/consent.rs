@@ -1,0 +1,605 @@
+//! The consent payload: every permission line, both warnings, the update
+//! diff, the unsigned and replacement lines, how plugin text is cleaned,
+//! and the checks an install makes against what is installed.
+
+#![cfg(hew_preview)]
+
+use plugin_host::{
+    ConsentPayload, InstallError, InstallSource, Installed, MAX_NAME_CHARS, MAX_REASON_CHARS,
+    UNSIGNED_LINE, check_requires, check_source_id, clean_text, consent, consent_summary,
+    hew_version_ok, permission_line, replaces_line,
+};
+use plugin_manifest::{Manifest, PermissionName};
+use serde_json::json;
+
+fn manifest(extra: serde_json::Value) -> Manifest {
+    let mut m = json!({
+        "manifest": 1, "id": "com.example.fixture", "name": "Fixture",
+        "version": "2.0.0", "api": 1, "main": "main.js"
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        m[k] = v.clone();
+    }
+    plugin_manifest::parse(&m.to_string()).expect("a valid manifest")
+}
+
+fn file() -> InstallSource {
+    InstallSource::File {
+        name: "fixture.hewplugin".into(),
+    }
+}
+
+fn p(name: &str) -> PermissionName {
+    PermissionName::parse(name).unwrap()
+}
+
+fn installed(id: &str, version: &str, grant: &[&str]) -> Installed {
+    serde_json::from_value(json!({
+        "schema": 1, "id": id, "version": version, "source": { "kind": "file", "name": "x" },
+        "installed_at_ms": 1, "grant": grant, "enabled": true, "data_version": 1
+    }))
+    .unwrap()
+}
+
+#[test]
+fn every_permission_line_reads_exactly() {
+    let table = [
+        (
+            "model.read",
+            "Read the model: every object, component, material, tag, and attribute",
+        ),
+        (
+            "model.write",
+            "Change the model: draw, move, delete, and edit geometry",
+        ),
+        (
+            "attributes.write",
+            "Store its own data on parts, materials, and the document",
+        ),
+        (
+            "attributes.write:com.other.app",
+            "Store data under the \"com.other.app\" namespace",
+        ),
+        (
+            "view",
+            "Change the selection, hide and show parts, and move the camera",
+        ),
+        ("documents.save", "Save, export, and import files"),
+        ("documents.discard", "Close or revert documents"),
+        (
+            "documents.other",
+            "Act on every open document, not only the current one",
+        ),
+        ("files", "Ask you to pick files, and save files you choose"),
+        ("clipboard", "Read and write the clipboard"),
+        ("library", "Add to and change your Library"),
+        (
+            "network:api.example.com",
+            "Connect to api.example.com (checked by Hew)",
+        ),
+    ];
+    for (name, text) in table {
+        let line = permission_line(&p(name));
+        assert_eq!(line.name, name);
+        assert_eq!(line.text, text, "{name}");
+    }
+    // Every bare name in the vocabulary has a line of its own.
+    for name in plugin_manifest::PERMISSION_NAMES {
+        assert_ne!(permission_line(&p(name)).text, *name, "{name} has no copy");
+    }
+}
+
+#[test]
+fn the_model_and_network_warning() {
+    let m = manifest(
+        json!({ "permissions": ["model.read", "network:a.example.com", "network:b.example.com"] }),
+    );
+    let c = consent(&m, &file(), None, None, None);
+    assert_eq!(
+        c.warnings,
+        ["Can send what it reads from your model to a.example.com, b.example.com."]
+    );
+}
+
+#[test]
+fn the_files_and_network_warning() {
+    let m = manifest(json!({ "permissions": ["files", "network:up.example.com"] }));
+    let c = consent(&m, &file(), None, None, None);
+    assert_eq!(c.warnings, ["Can send files you choose to up.example.com."]);
+}
+
+#[test]
+fn both_warnings_and_optional_permissions_count() {
+    // The host only among optional permissions, model.read only among
+    // required ones: still warned, because the plugin may ask later.
+    let m = manifest(json!({
+        "permissions": ["model.read", "files"],
+        "optionalPermissions": ["network:x.example.com"]
+    }));
+    let c = consent(&m, &file(), None, None, None);
+    assert_eq!(
+        c.warnings,
+        [
+            "Can send what it reads from your model to x.example.com.",
+            "Can send files you choose to x.example.com."
+        ]
+    );
+    assert_eq!(c.optional.len(), 1);
+    // No network, no warning.
+    let m = manifest(json!({ "permissions": ["model.read", "files"] }));
+    assert!(consent(&m, &file(), None, None, None).warnings.is_empty());
+}
+
+#[test]
+fn a_fresh_install_is_unsigned_and_replaces_nothing() {
+    let m = manifest(json!({ "permissions": ["model.read"] }));
+    let c = consent(&m, &file(), None, None, None);
+    assert!(c.unsigned);
+    assert_eq!(c.signer, None);
+    assert_eq!(c.replaces, None);
+    assert_eq!(c.update, None);
+    assert_eq!(c.name, "Fixture");
+    assert_eq!(c.version, "2.0.0");
+    assert_eq!(UNSIGNED_LINE, "Unsigned. Hew cannot tell who made this.");
+    let signed = consent(&m, &file(), None, None, Some("Example Co"));
+    assert!(!signed.unsigned);
+    assert_eq!(signed.signer.as_deref(), Some("Example Co"));
+}
+
+#[test]
+fn the_update_diff_and_the_replacement_line() {
+    let old = manifest(json!({
+        "version": "1.0.0",
+        "name": "Old Name",
+        "permissions": ["model.read"],
+        "optionalPermissions": ["clipboard"]
+    }));
+    let new = manifest(json!({
+        "permissions": ["model.read", "model.write"],
+        "optionalPermissions": ["clipboard", "library"],
+        "activation": ["on_command", "on_startup"],
+        "activationReason": "Keeps the cut list current."
+    }));
+    let previous = installed("com.example.fixture", "1.0.0", &["model.read"]);
+    let c = consent(&new, &file(), Some(&previous), Some(&old), None);
+    let update = c.update.expect("an update");
+    assert_eq!(
+        update
+            .added
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect::<Vec<_>>(),
+        ["model.write"]
+    );
+    assert_eq!(
+        update
+            .new_optional
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect::<Vec<_>>(),
+        ["library"]
+    );
+    assert!(update.startup_newly);
+    assert_eq!(update.from_version, "1.0.0");
+    let replaces = c.replaces.expect("a replacement");
+    assert_eq!(replaces.name, "Old Name");
+    assert_eq!(replaces.version, "1.0.0");
+    assert_eq!(
+        replaces_line(&replaces),
+        "Replaces Old Name v1.0.0. Hew cannot check it is the same author."
+    );
+    // Without the previous manifest every optional permission is new and
+    // the previous name falls back to the id.
+    let c = consent(&new, &file(), Some(&previous), None, None);
+    assert_eq!(c.update.unwrap().new_optional.len(), 2);
+    assert_eq!(c.replaces.unwrap().name, "com.example.fixture");
+    // A grant already holding everything adds nothing; startup declared
+    // before is not new.
+    let held = installed(
+        "com.example.fixture",
+        "1.0.0",
+        &["model.read", "model.write"],
+    );
+    let c = consent(&new, &file(), Some(&held), Some(&new), None);
+    let u = c.update.unwrap();
+    assert!(u.added.is_empty() && u.new_optional.is_empty() && !u.startup_newly);
+}
+
+#[test]
+fn plugin_text_is_cleaned_and_kept_apart() {
+    let m = manifest(json!({
+        "name": "Cut\u{202E}List\u{200B}  Pro\n",
+        "activation": ["on_startup"],
+        "activationReason": format!("Hew says:\u{2066} trust\u{0007} me {}", "x".repeat(400))
+    }));
+    let c = consent(&m, &file(), None, None, None);
+    assert_eq!(c.name, "CutList Pro");
+    let reason = c.activation_reason.expect("a reason");
+    assert!(reason.starts_with("Hew says: trust me x"), "{reason}");
+    assert_eq!(reason.chars().count(), MAX_REASON_CHARS);
+    assert!(reason.ends_with('…'));
+    assert!(c.on_startup);
+    // Hew's own lines never carry plugin text.
+    for w in &c.warnings {
+        assert!(!w.contains("trust"));
+    }
+}
+
+#[test]
+fn clean_text_rules() {
+    assert_eq!(clean_text("  a \t\n b  ", 64), "a b");
+    assert_eq!(
+        clean_text("a\u{202A}b\u{202C}c\u{FEFF}d\u{2069}", 64),
+        "abcd"
+    );
+    assert_eq!(clean_text("\u{0}\u{1b}[31mred", 64), "[31mred");
+    assert_eq!(clean_text("\u{200B}\u{200D}", 64), "");
+    let long = "y".repeat(100);
+    let cut = clean_text(&long, MAX_NAME_CHARS);
+    assert_eq!(cut.chars().count(), MAX_NAME_CHARS);
+    assert!(cut.ends_with('…'));
+    assert_eq!(clean_text("日本語の名前", 64), "日本語の名前");
+}
+
+#[test]
+fn a_name_given_by_catalog_key_or_that_cleans_to_nothing_shows_the_id() {
+    let keyed = manifest(json!({ "name": { "$t": "plugin.name" } }));
+    assert_eq!(
+        consent(&keyed, &file(), None, None, None).name,
+        "com.example.fixture"
+    );
+    let empty = manifest(json!({ "name": "\u{200B}" }));
+    assert_eq!(
+        consent(&empty, &file(), None, None, None).name,
+        "com.example.fixture"
+    );
+    let by_locale = manifest(json!({ "name": { "ja": "切り出し", "en": "Cut List" } }));
+    assert_eq!(
+        consent(&by_locale, &file(), None, None, None).name,
+        "Cut List"
+    );
+}
+
+#[test]
+fn the_source_shown_is_cleaned() {
+    let m = manifest(json!({}));
+    let source = InstallSource::File {
+        name: "invoice\u{202E}gpj.hewplugin".into(),
+    };
+    let c = consent(&m, &source, None, None, None);
+    assert_eq!(
+        c.source,
+        InstallSource::File {
+            name: "invoicegpj.hewplugin".into()
+        }
+    );
+}
+
+#[test]
+fn the_payload_serializes_with_hew_lines_and_plugin_text_in_separate_fields() {
+    let m = manifest(json!({
+        "permissions": ["model.read", "network:api.example.com"],
+        "activation": ["on_startup"],
+        "activationReason": "Because."
+    }));
+    let c: ConsentPayload = consent(&m, &file(), None, None, None);
+    let v = serde_json::to_value(&c).unwrap();
+    for key in [
+        "id",
+        "name",
+        "version",
+        "permissions",
+        "optional",
+        "warnings",
+        "on_startup",
+        "activation_reason",
+        "signer",
+        "unsigned",
+        "source",
+        "replaces",
+        "update",
+    ] {
+        assert!(v.get(key).is_some(), "{key}");
+    }
+    assert_eq!(
+        v["source"],
+        json!({ "kind": "file", "name": "fixture.hewplugin" })
+    );
+    assert_eq!(
+        v["permissions"][0],
+        json!({ "name": "model.read", "text": "Read the model: every object, component, material, tag, and attribute" })
+    );
+    let summary = consent_summary(&c);
+    assert!(summary.contains(UNSIGNED_LINE));
+    assert!(summary.contains("Read the model"));
+    assert!(summary.contains("Can send what it reads"));
+    assert!(summary.trim_end().ends_with("The plugin says:\nBecause."));
+}
+
+#[test]
+fn reserved_ids_are_refused_from_files_and_folders() {
+    let m = manifest(json!({ "id": "org.hew3d.cutlist" }));
+    for source in [
+        file(),
+        InstallSource::Dir {
+            path: "/tmp/x".into(),
+        },
+    ] {
+        assert_eq!(
+            check_source_id(&m, &source),
+            Err(InstallError::ReservedId("org.hew3d.cutlist".into()))
+        );
+    }
+    assert!(
+        check_source_id(
+            &m,
+            &InstallSource::Index {
+                id: "x".into(),
+                url: "u".into()
+            }
+        )
+        .is_ok()
+    );
+    assert!(check_source_id(&manifest(json!({ "id": "org.hew3dx.cutlist" })), &file()).is_ok());
+}
+
+#[test]
+fn hew_version_ranges() {
+    let any = manifest(json!({}));
+    let v = |s: &str| semver::Version::parse(s).unwrap();
+    assert!(hew_version_ok(&any, &v("0.1.0")));
+    let m = manifest(json!({ "hew": ">=1.4, <2" }));
+    assert!(hew_version_ok(&m, &v("1.4.0")));
+    assert!(hew_version_ok(&m, &v("1.9.3")));
+    assert!(!hew_version_ok(&m, &v("1.3.9")));
+    assert!(!hew_version_ok(&m, &v("2.0.0")));
+    // A preview build of 1.5.0 counts as 1.5.0.
+    assert!(hew_version_ok(&m, &v("1.5.0-pre.2")));
+}
+
+fn with_requires(id: &str, version: &str, requires: &[(&str, &str)]) -> (Installed, Manifest) {
+    let m = manifest(json!({
+        "id": id,
+        "version": version,
+        "requires": requires.iter().map(|(i, r)| json!({ "id": i, "range": r })).collect::<Vec<_>>()
+    }));
+    (installed(id, version, &[]), m)
+}
+
+#[test]
+fn a_missing_dependency_is_refused() {
+    let m = manifest(json!({ "requires": [
+        { "id": "com.example.base", "range": "^1" },
+        { "id": "com.example.other", "range": "*" }
+    ] }));
+    let base_old = with_requires("com.example.base", "0.9.0", &[]);
+    assert_eq!(
+        check_requires(&m, &[base_old]),
+        Err(InstallError::DependencyMissing(vec![
+            "com.example.base ^1".into(),
+            "com.example.other *".into()
+        ]))
+    );
+    let base = with_requires("com.example.base", "1.2.0", &[]);
+    let other = with_requires("com.example.other", "3.0.0", &[]);
+    assert_eq!(check_requires(&m, &[base, other]), Ok(()));
+}
+
+#[test]
+fn a_dependency_cycle_is_refused_and_named() {
+    // fixture → a → b → fixture
+    let a = with_requires("com.example.a", "1.0.0", &[("com.example.b", "*")]);
+    let b = with_requires("com.example.b", "1.0.0", &[("com.example.fixture", "*")]);
+    let old_self = with_requires("com.example.fixture", "1.0.0", &[]);
+    let m = manifest(json!({ "requires": [{ "id": "com.example.a", "range": "*" }] }));
+    assert_eq!(
+        check_requires(&m, &[a.clone(), b.clone(), old_self]),
+        Err(InstallError::DependencyCycle(vec![
+            "com.example.fixture".into(),
+            "com.example.a".into(),
+            "com.example.b".into(),
+            "com.example.fixture".into()
+        ]))
+    );
+    // Without the edge back there is no cycle.
+    let b_free = with_requires("com.example.b", "1.0.0", &[]);
+    let old_self = with_requires("com.example.fixture", "1.0.0", &[]);
+    assert_eq!(check_requires(&m, &[a, b_free, old_self]), Ok(()));
+}
+
+#[test]
+fn installed_records_keep_unknown_fields_and_refuse_newer_schemas() {
+    let text = json!({
+        "schema": 1, "id": "com.example.fixture", "version": "1.0.0",
+        "source": { "kind": "dir", "path": "/x" }, "installed_at_ms": 5,
+        "grant": ["model.read"], "enabled": false, "data_version": 3,
+        "future_field": { "kept": [1, 2] }
+    })
+    .to_string();
+    let record = Installed::from_json("com.example.fixture", text.as_bytes()).unwrap();
+    assert!(!record.startup_allowed, "absent means not allowed");
+    assert_eq!(record.extra["future_field"], json!({ "kept": [1, 2] }));
+    let back: serde_json::Value = serde_json::from_slice(&record.to_json()).unwrap();
+    assert_eq!(back["future_field"], json!({ "kept": [1, 2] }));
+    let written = String::from_utf8(record.to_json()).unwrap();
+    assert!(
+        written.trim_start().starts_with("{\n  \"schema\": 1,"),
+        "schema first: {written}"
+    );
+
+    let newer = json!({ "schema": 2, "id": "com.example.fixture", "anything": "else" }).to_string();
+    assert_eq!(
+        Installed::from_json("com.example.fixture", newer.as_bytes())
+            .unwrap_err()
+            .name(),
+        "installed_unreadable"
+    );
+    let unnumbered = json!({ "id": "com.example.fixture" }).to_string();
+    assert!(Installed::from_json("com.example.fixture", unnumbered.as_bytes()).is_err());
+    assert!(Installed::from_json("com.example.other", text.as_bytes()).is_err());
+}
+
+#[test]
+fn the_rollback_summary() {
+    let current = installed(
+        "com.example.fixture",
+        "2.0.0",
+        &["model.read", "model.write"],
+    );
+    let mut previous = installed("com.example.fixture", "1.0.0", &["model.read"]);
+    previous.optional_granted = vec![p("clipboard")];
+    let m = manifest(json!({ "version": "1.0.0", "name": "Cut\u{202E}List" }));
+    assert_eq!(
+        plugin_host::rollback_summary(&current, &previous, &m),
+        "CutList v2.0.0 goes back to v1.0.0.\n\nIt will be able to:\n\
+         • Read the model: every object, component, material, tag, and attribute\n\
+         • Read and write the clipboard\n"
+    );
+    let bare = installed("com.example.fixture", "1.0.0", &[]);
+    assert_eq!(
+        plugin_host::rollback_summary(&current, &bare, &m),
+        "CutList v2.0.0 goes back to v1.0.0.\n"
+    );
+}
+
+#[test]
+fn clean_text_matches_the_shared_fixture() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/clean_text.json"
+    ))
+    .unwrap();
+    let cases: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap();
+    assert!(cases.len() >= 20);
+    for case in cases {
+        let input = case["in"].as_str().unwrap();
+        let max = case["max"].as_u64().unwrap() as usize;
+        assert_eq!(
+            clean_text(input, max),
+            case["out"].as_str().unwrap(),
+            "{}: {input:?}",
+            case["note"]
+        );
+    }
+}
+
+#[test]
+fn the_consent_summary_carries_the_sheet_in_order() {
+    let old = manifest(json!({
+        "version": "1.0.0",
+        "permissions": ["model.read"]
+    }));
+    let new = manifest(json!({
+        "permissions": ["model.read", "files", "network:a.example.com"],
+        "optionalPermissions": ["clipboard"],
+        "activation": ["on_startup"],
+        "activationReason": "Syncs the cut list."
+    }));
+    let previous = installed("com.example.fixture", "1.0.0", &["model.read"]);
+    let source = InstallSource::Dir {
+        path: "/home/me/fixture".into(),
+    };
+    let c = consent(&new, &source, Some(&previous), Some(&old), None);
+    assert_eq!(
+        consent_summary(&c),
+        "Fixture 2.0.0\n\
+         Unpacked: /home/me/fixture\n\
+         The files in this folder can change after you install.\n\
+         Unsigned. Hew cannot tell who made this.\n\
+         Replaces Fixture v1.0.0. Hew cannot check it is the same author.\n\
+         \n\
+         ⚠ Can send what it reads from your model to a.example.com.\n\
+         ⚠ Can send files you choose to a.example.com.\n\
+         \n\
+         New since v1.0.0:\n\
+         • Ask you to pick files, and save files you choose\n\
+         • Connect to a.example.com (checked by Hew)\n\
+         • Read and write the clipboard\n\
+         \n\
+         Now starts with Hew.\n\
+         \n\
+         It can:\n\
+         • Read the model: every object, component, material, tag, and attribute\n\
+         • Ask you to pick files, and save files you choose\n\
+         • Connect to a.example.com (checked by Hew)\n\
+         \n\
+         May ask for later:\n\
+         • Read and write the clipboard\n\
+         \n\
+         The plugin says:\n\
+         Syncs the cut list.\n"
+    );
+    // A fresh install from a file that starts with Hew: no folder line, no
+    // update list, "Starts with Hew."
+    let fresh = consent(&new, &file(), None, None, None);
+    let text = consent_summary(&fresh);
+    assert!(text.contains("From file: fixture.hewplugin\n"));
+    assert!(!text.contains("folder can change"));
+    assert!(!text.contains("New since"));
+    assert!(text.contains("\nStarts with Hew.\n"));
+}
+
+#[test]
+fn summaries_stay_bounded() {
+    let many: Vec<String> = (0..20)
+        .map(|i| format!("network:h{i}.example.com"))
+        .collect();
+    let mut permissions = vec!["model.read".to_string()];
+    permissions.extend(many.iter().cloned());
+    let m = manifest(json!({ "permissions": permissions }));
+    let c = consent(&m, &file(), None, None, None);
+    assert_eq!(
+        c.warnings,
+        [
+            "Can send what it reads from your model to h0.example.com, h1.example.com, \
+          h2.example.com, h3.example.com, h4.example.com, and 15 more."
+        ]
+    );
+    let text = consent_summary(&c);
+    assert_eq!(text.matches("\n• ").count(), 12, "{text}");
+    assert!(text.contains("…and 9 more\n"), "{text}");
+}
+
+#[test]
+fn the_rollback_summary_warns_from_the_previous_manifest() {
+    let current = installed("com.example.fixture", "2.0.0", &["model.read"]);
+    let previous = installed(
+        "com.example.fixture",
+        "1.0.0",
+        &["model.read", "network:x.example.com"],
+    );
+    let m = manifest(json!({
+        "version": "1.0.0",
+        "permissions": ["model.read", "network:x.example.com"]
+    }));
+    assert_eq!(
+        plugin_host::rollback_summary(&current, &previous, &m),
+        "Fixture v2.0.0 goes back to v1.0.0.\n\
+         \n\
+         ⚠ Can send what it reads from your model to x.example.com.\n\
+         \n\
+         It will be able to:\n\
+         • Read the model: every object, component, material, tag, and attribute\n\
+         • Connect to x.example.com (checked by Hew)\n"
+    );
+}
+
+#[test]
+fn the_grant_change_summary_lists_what_is_added_and_warns_on_the_result() {
+    let added = [p("network:up.example.com")];
+    let resulting = [p("files"), p("network:up.example.com")];
+    assert_eq!(
+        plugin_host::grant_change_summary("Fixture 2.0.0", &added, &resulting),
+        "Fixture 2.0.0\n\
+         \n\
+         It will also be able to:\n\
+         • Connect to up.example.com (checked by Hew)\n\
+         \n\
+         ⚠ Can send files you choose to up.example.com.\n"
+    );
+    // Nothing that warns, no warning.
+    assert_eq!(
+        plugin_host::grant_change_summary("Fixture 2.0.0", &[p("view")], &[p("view")]),
+        "Fixture 2.0.0\n\nIt will also be able to:\n• Change the selection, hide and show parts, and move the camera\n"
+    );
+}

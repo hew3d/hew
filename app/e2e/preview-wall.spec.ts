@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WALL_SKIP, buildUnderTest, isProductionShape, previewFeatures, type RegistryFeature } from './helpers/preview'
 import { settleFrame } from './helpers/render'
+import { dumpPluginStore, seedPluginStore } from './helpers/pluginStore'
 
 declare global {
   interface Window {
@@ -124,6 +125,29 @@ test.describe('production-shape build', () => {
     await page.getByRole('tab', { name: 'Controls' }).click()
     const pane = page.getByRole('tabpanel')
     for (const f of features) for (const n of namesOf(f)) await expect(pane.getByText(word(n))).toHaveCount(0)
+  })
+
+  test('browser storage a plugin store would use is never read, written or listed, and Settings has no Plugins tab', async ({ page }) => {
+    // What a preview build's plugin store leaves behind: a record, a file, a
+    // staging entry and a settings key. The production app must not know the
+    // store exists, so after a fresh load every byte is where it was.
+    await seedPluginStore(page)
+    const before = await dumpPluginStore(page)
+    expect(Object.keys(before)).toHaveLength(5)
+    await page.reload()
+    await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, { timeout: 90_000 })
+    await page.getByRole('button', { name: 'Settings' }).click()
+    const names = (await page.getByRole('tab').allTextContents()).map((n) => n.toLowerCase())
+    expect(names.length).toBeGreaterThan(5)
+    expect(names).not.toContain('plugins')
+    // Even with the switch stored on, a production build shows nothing.
+    await page.evaluate(() => localStorage.setItem('hew.settings.preview', JSON.stringify({ off: [], on: ['plugins'] })))
+    await page.reload()
+    await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, { timeout: 90_000 })
+    await page.getByRole('button', { name: 'Settings' }).click()
+    expect((await page.getByRole('tab').allTextContents()).map((n) => n.toLowerCase())).not.toContain('plugins')
+    expect(await dumpPluginStore(page)).toEqual(before)
+    await page.evaluate(() => localStorage.removeItem('hew.settings.preview'))
   })
 
   for (const f of features) {

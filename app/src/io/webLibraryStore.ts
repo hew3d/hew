@@ -42,6 +42,7 @@
 import { t } from '@lingui/core/macro'
 import type { LibraryFileEntry } from '../library/types'
 import type { LibraryStore } from './libraryStore'
+import { readFileIn, subdir, writeFileIn } from './opfs'
 
 /* oxlint-disable lingui/no-unlocalized-strings -- on-disk folder names and storage keys, identifiers */
 /** The category subfolders, identical to the desktop store's. */
@@ -168,38 +169,6 @@ async function configSet(idb: IDBFactory | undefined, key: string, value: unknow
 // ---------------------------------------------------------------------------
 // Directory-handle helpers (shared by both roots).
 // ---------------------------------------------------------------------------
-
-async function subdir(
-  root: FileSystemDirectoryHandle,
-  name: string,
-  create: boolean,
-): Promise<FileSystemDirectoryHandle | null> {
-  try {
-    return await root.getDirectoryHandle(name, { create })
-  } catch {
-    return null
-  }
-}
-
-async function readFileIn(dir: FileSystemDirectoryHandle, base: string): Promise<Uint8Array> {
-  const handle = await dir.getFileHandle(base)
-  const file = await handle.getFile()
-  return new Uint8Array(await file.arrayBuffer())
-}
-
-async function writeFileIn(
-  dir: FileSystemDirectoryHandle,
-  base: string,
-  bytes: Uint8Array,
-): Promise<void> {
-  const handle = await dir.getFileHandle(base, { create: true })
-  const writable = await handle.createWritable()
-  // Copy into a fresh ArrayBuffer-backed view: `bytes` may be a view into a
-  // larger (or SharedArrayBuffer-backed, on some wasm paths) buffer, which
-  // FileSystemWritableFileStream.write would either over-write or reject.
-  await writable.write(new Uint8Array(bytes).buffer as ArrayBuffer)
-  await writable.close()
-}
 
 /** An entry that is already gone — DOMException NotFoundError, however the
  * environment spells it. */

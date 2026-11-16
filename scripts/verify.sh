@@ -98,6 +98,15 @@ if lane rust; then
   echo "=== cargo test --workspace (production) ==="
   cargo test --workspace
 
+  # The plugin store's filesystem half sits behind plugin-host's `fs`
+  # feature, which no workspace crate enables, so the lines above never
+  # build it. In a production build the crate is empty; this proves it.
+  echo "=== cargo clippy -p plugin-host --all-features --all-targets -- -D warnings (production) ==="
+  cargo clippy -p plugin-host --all-features --all-targets -- -D warnings
+
+  echo "=== cargo test -p plugin-host --all-features (production) ==="
+  cargo test -p plugin-host --all-features
+
   PREVIEW_CRATES="$(preview_crates)"
   echo "=== HEW_PREVIEW=1 cargo clippy $PREVIEW_CRATES--all-targets -- -D warnings (preview) ==="
   # shellcheck disable=SC2086 # one -p per crate
@@ -106,6 +115,12 @@ if lane rust; then
   echo "=== HEW_PREVIEW=1 cargo test $PREVIEW_CRATES(preview) ==="
   # shellcheck disable=SC2086
   HEW_PREVIEW=1 CARGO_TARGET_DIR="$PREVIEW_TARGET" cargo test $PREVIEW_CRATES
+
+  echo "=== HEW_PREVIEW=1 cargo clippy -p plugin-host --all-features --all-targets -- -D warnings (preview) ==="
+  HEW_PREVIEW=1 CARGO_TARGET_DIR="$PREVIEW_TARGET" cargo clippy -p plugin-host --all-features --all-targets -- -D warnings
+
+  echo "=== HEW_PREVIEW=1 cargo test -p plugin-host --all-features (preview) ==="
+  HEW_PREVIEW=1 CARGO_TARGET_DIR="$PREVIEW_TARGET" cargo test -p plugin-host --all-features
 fi
 
 # Only when asked for by name: the rust and tauri lanes already run these.

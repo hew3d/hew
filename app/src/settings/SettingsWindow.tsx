@@ -14,7 +14,7 @@
  * on `currentColor` (same hand-drawn stroke style as TitleBar.tsx's glyphs).
  */
 
-import { useState, type CSSProperties, type ReactElement } from 'react'
+import { Suspense, useState, type CSSProperties, type ReactElement } from 'react'
 import { msg } from '@lingui/core/macro'
 import type { MessageDescriptor } from '@lingui/core'
 import { useLingui } from '@lingui/react/macro'
@@ -27,7 +27,8 @@ import { LanguagePane } from './LanguagePane'
 import { DebugPane } from './DebugPane'
 import { FoldersPane } from './FoldersPane'
 import { AdvancedPane } from './AdvancedPane'
-import { previewBuild } from '../preview'
+import { paneAllowed, previewBuild } from '../preview'
+import { PluginsPane } from '../preview/loaderRoots'
 import { PREVIEW_SETTINGS } from '../preview/copy'
 import { PreviewPane } from '../preview/PreviewPane'
 import { useTextFieldMenuActions } from '../clipboard/useTextFieldMenuActions'
@@ -43,6 +44,7 @@ type Category =
   | 'advanced'
   | 'debug'
   | 'preview'
+  | 'plugins'
 
 const iconProps = {
   width: 22,
@@ -158,6 +160,15 @@ function PreviewIcon() {
   )
 }
 
+/** Puzzle piece — Plugins (a Preview feature, so English only). */
+function PluginsIcon() {
+  return (
+    <svg {...iconProps} data-plugins-tab-icon="">
+      <path d="M9.5 4.5a2 2 0 0 1 4 0V6h3.5v3.5h1.5a2 2 0 0 1 0 4H17V17h-3.5v-1.5a2 2 0 0 0-4 0V17H6v-3.5H4.5a2 2 0 0 1 0-4H6V6h3.5z" />
+    </svg>
+  )
+}
+
 /** A tab's label: a catalog message, or plain English for the Preview tab. */
 const TABS: { id: Category; label: MessageDescriptor | string; icon: ReactElement }[] = [
   { id: 'units', label: msg`Units`, icon: <UnitsIcon /> },
@@ -167,6 +178,9 @@ const TABS: { id: Category; label: MessageDescriptor | string; icon: ReactElemen
   { id: 'theme', label: msg`Theme`, icon: <ThemeIcon /> },
   { id: 'language', label: msg`Language`, icon: <LanguageIcon /> },
   { id: 'folders', label: msg`Folders`, icon: <FoldersIcon /> },
+  // Only while the Plugins preview switch is on; English only.
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- Preview copy, exempt from the catalogs
+  ...(previewBuild && paneAllowed('plugins') ? [{ id: 'plugins' as const, label: 'Plugins', icon: <PluginsIcon /> }] : []),
   { id: 'advanced', label: msg`Advanced`, icon: <AdvancedIcon /> },
   { id: 'debug', label: msg`Debug`, icon: <DebugIcon /> },
   // Preview builds only, and English only (src/preview).
@@ -274,6 +288,11 @@ export function SettingsWindow() {
         {active === 'advanced' && <AdvancedPane />}
         {active === 'debug' && <DebugPane />}
         {previewBuild && active === 'preview' && <PreviewPane />}
+        {previewBuild && paneAllowed('plugins') && active === 'plugins' && PluginsPane !== null && (
+          <Suspense fallback={null}>
+            <PluginsPane />
+          </Suspense>
+        )}
       </div>
     </div>
   )

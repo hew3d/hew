@@ -1,0 +1,34 @@
+[package]
+name = "plugin-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The plugin install store (docs/agents/PLUGINS.md "Installing"): reading a
+# `.hewplugin` package or an unpacked folder, the consent payload, and the
+# on-disk store. Host-class: the pure half (package, consent, installed
+# records) is used by `crates/wasm-api` for the web build; the filesystem
+# half (feature `fs`) by the desktop shell and `hew-cli`.
+#
+# Plugins are a Preview feature that loads code, so everything in this crate
+# is compiled only in a preview build (`cfg(hew_preview)`, set by build.rs);
+# a production build gets an empty crate. It depends on `api` so the two
+# builds' flags can be checked against each other at compile time, and so
+# the preview half of the gate (`cargo tree -i api`) builds and tests it.
+[features]
+default = []
+# The filesystem half: `store.rs`.
+fs = []
+
+[dependencies]
+api.workspace = true
+plugin-manifest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+# Store-only reading needs no compression feature; a deflated entry is
+# refused before its bytes are read.
+zip.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -11,9 +11,10 @@ Status: the manifest parser (`crates/plugin-manifest`), grant
 enforcement in the dispatcher (HEW_API.md §10), plugin-provided commands
 with forwarding (below, and HEW_API.md §10.2), and compounds with
 coalescing and compare-and-swap (below, and HEW_API.md §6.1, §6.5) are
-implemented. Nothing installs or runs a plugin yet, so the app answers
-every forwarded command `plugin_unavailable`, aborting the compound it
-opened for a mutating one at once.
+implemented. A person can install, switch off, roll back, and remove a
+plugin from Settings (see "Installing"), but nothing runs one yet, so the
+app answers every forwarded command `plugin_unavailable`, aborting the
+compound it opened for a mutating one at once.
 
 ## Invariants
 
@@ -1056,6 +1057,154 @@ document (the envelope `document` member, attaching elsewhere, and the
 (`path_not_granted`); attribute writes outside the plugin's namespaces
 are refused (`attr_namespace_not_granted`). HEW_API.md §10 and §8 have
 the exact shapes.
+
+## Installing
+
+Installing is a person's job, done in Settings ▸ Plugins. It is a Preview
+feature: it exists only in a preview build and only while the Plugins
+switch in Settings ▸ Preview is on. With the switch off, or in a
+production build, the tab is absent and the stores below are never read,
+written, or listed. Installed plugins do not run yet: turning one on only
+records the choice.
+
+**An agent cannot install or manage plugins.** There is no bus command
+for it, no `hew-cli` subcommand, and no MCP tool. A plugin package is
+never opened by File ▸ Open or by dropping it on the window, and Hew
+registers no `.hewplugin` file type or link handler. The one door is the
+Settings pane (`app/src/plugins/installer.ts`).
+
+### What can be installed
+
+| Tier | Sources |
+|---|---|
+| Desktop | a `.hewplugin` file, or an unpacked folder, each chosen with the native picker |
+| Web | a `.hewplugin` file chosen in the pane's file input |
+
+A package is a zip whose entries are all stored with no compression
+(`zip -0 -r ../tool.hewplugin .` from inside the plugin folder), with
+`hew-plugin.json` at its top level. The reader refuses a compressed
+entry (`package_not_store_only`); a path that is not plain ASCII, is
+absolute, has a `.` or `..` or empty segment, a backslash, a `:`, a
+segment ending in a dot or a space, or a Windows device name
+(`package_path_invalid`); two entries that are equal after case folding,
+a repeated name, or a symbolic link (also `package_path_invalid`); more
+than 4096 entries, 32 MB in one file, or 64 MB in all
+(`package_too_large`, measured on the bytes read); and a manifest that
+names a `main`, `icon`, `agent.notes`, or `locales.catalogs` the package
+does not hold (`manifest_file_missing`). An id that starts `org.hew3d.`
+is kept for plugins Hew publishes and is refused from a file or folder
+(`reserved_id`); a `hew` range the running Hew is outside
+(`hew_version_unsupported`), a `requires` entry that is not installed in
+a matching version (`dependency_missing`), or one that would make a cycle
+(`dependency_cycle`) refuse the install before the sheet appears.
+
+A folder install reads the folder in place, so its files can change
+after the install; the sheet says so.
+
+### Where it is kept
+
+Desktop: `plugins/` in the app's data folder (`com.hew3d.Hew`), which a
+preview build can move with `HEW_PLUGIN_DIR`. Web: the same layout under
+`plugins/` in the browser's origin-private file system.
+
+```text
+plugins/
+  <id>/
+    hew-plugin.json      the manifest the person consented to, as written
+    installed.json       the record
+    files/...            the package's files (none for a folder install)
+    previous/            the version before, with the same layout
+  .staging/<id>-<token>/ an install being written
+```
+
+An install is written whole into `.staging/` and moved into place; a
+failure part way leaves a staging entry, which listing ignores and the
+next install of the same id clears. Every path the store builds comes
+from a validated id and a validated package path, so nothing it reads or
+writes is outside `plugins/<id>/` (or, for a folder install, the folder).
+
+`installed.json`:
+
+| Field | Meaning |
+|---|---|
+| `schema` | record format, first in the file; `1` |
+| `id`, `version` | the plugin and the installed version |
+| `source` | `{"kind":"file","name"}` or `{"kind":"dir","path"}` |
+| `installed_at_ms` | when it was installed |
+| `grant` | the permissions the person accepted (the manifest's `permissions`) |
+| `optional_granted` | optional permissions granted later |
+| `enabled` | on or off; a fresh install is on |
+| `startup_allowed` | false at install; set by the first time the person turns the plugin on by hand, so a package cannot start itself just by being installed |
+| `data_version` | the plugin's data format; an update keeps the installed value |
+| `signer` | null until signing exists |
+
+Fields Hew does not know are kept and written back. A record with a
+higher `schema`, or one that does not read, is listed as unreadable with
+only a removal offered, and is never rewritten.
+
+### Updating, rolling back, turning off, removing
+
+Installing a package over an installed id is an update. The installed
+copy moves to `previous/` (the copy before that is dropped), the new
+record keeps `enabled`, `data_version`, unknown fields, and the optional
+grants the new manifest still declares, and the sheet shows what is new
+since the accepted grant. "Roll back to <version>" appears when
+`previous/` exists and swaps the two, so a second rollback goes forward
+again. Turning a plugin off also turns off every enabled plugin that
+requires it, and the pane names them. Uninstall asks first, is refused
+while an enabled plugin requires the one being removed, and removes the
+folder, any staging entry, and the plugin's `hew.plugin.<id>.` settings
+keys.
+
+### What the consent sheet shows
+
+The sheet appears before anything is written, on every tier, from the
+payload `plugin-host` builds (`consent`); on the desktop the shell then
+shows a native confirmation built from the same payload it holds, so what
+is confirmed is what Rust holds, not what the page sent. The sheet shows,
+in order:
+
+- the plugin's name and version, and where it came from ("From file", or
+  the folder path with a line that its files can change after install);
+- "Unsigned. Hew cannot tell who made this." for every package, until
+  signing exists;
+- for an update, "Replaces <name> v<version>. Hew cannot check it is the
+  same author.";
+- Hew's warnings, in a highlighted box: "Can send what it reads from your
+  model to <hosts>." when `model.read` and any `network:` permission are
+  both declared (required or optional), and "Can send files you choose to
+  <hosts>." for `files` with `network:`;
+- the permission lines, then those the plugin "May ask for later";
+- for an update, "New since <version>" with the added lines highlighted;
+- "The plugin says", a separate block holding the plugin's own
+  `activationReason` as plain text.
+
+The plugin's name, reason, and file name pass through one cleaning
+function before they reach the payload (control, bidirectional, and
+zero-width characters removed, whitespace collapsed, length capped), and
+the app never renders package text as markup. An icon is shown only as an
+`<img>` with a blob URL. Escape cancels, Enter does nothing, and focus
+starts on Cancel.
+
+The permission lines, exactly:
+
+| Permission | Line |
+|---|---|
+| `model.read` | Read the model: every object, component, material, tag, and attribute |
+| `model.write` | Change the model: draw, move, delete, and edit geometry |
+| `attributes.write` | Store its own data on parts, materials, and the document |
+| `attributes.write:<ns>` | Store data under the "<ns>" namespace |
+| `view` | Change the selection, hide and show parts, and move the camera |
+| `documents.save` | Save, export, and import files |
+| `documents.discard` | Close or revert documents |
+| `documents.other` | Act on every open document, not only the current one |
+| `files` | Ask you to pick files, and save files you choose |
+| `clipboard` | Read and write the clipboard |
+| `library` | Add to and change your Library |
+| `network:<host>` | Connect to <host> (checked by Hew) |
+
+The app keeps the same words in `app/src/plugins/permissionCopy.ts`; a
+test fails if the two tables differ.
 
 ## Engine behavior record
 

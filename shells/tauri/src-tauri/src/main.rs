@@ -36,6 +36,9 @@ mod menu_labels;
 // The Preview wall in the native menu: a production build prunes every
 // Preview feature's item (preview-features.json) before attaching it.
 mod preview_menu;
+// Shell code compiled only in a preview build: the plugin install commands.
+#[cfg(hew_preview)]
+mod preview_only;
 mod version;
 
 // The desktop half of `--live` (docs/agents/HEW_API.md §11.2): the local socket
@@ -3663,6 +3666,30 @@ fn main() {
             follow::follow_seen,
             follow::follow_attach,
             follow::follow_forget,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_dir,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_list,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_pick_package,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_pick_dir,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_stage_file,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_stage_dir,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_commit,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_set_enabled,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_set_grant,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_uninstall,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_rollback,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_read_file,
         ])
         // Build and attach the native menu bar; wire menu-item clicks to
         // `menu-action` events emitted to the webview.
@@ -5273,6 +5300,10 @@ fn main() {
             // fonts.rs's top-of-file doc comment for the token registry's
             // security role.
             app.manage(fonts::SystemFontState::default());
+            // The plugin install commands' picks, waiting installs and store
+            // folder (preview builds only, like the commands themselves).
+            #[cfg(hew_preview)]
+            app.manage(preview_only::plugins::PluginState::resolve());
             // "Open on Phone" server setting + HTTP client — loaded once from
             // server.json; only `set_server_setting` ever changes it.
             app.manage(relay_client::RelayState::new(relay_client::load_setting(
@@ -6064,5 +6095,85 @@ mod tests {
         assert!(!library::valid_item_name("Components/"));
         assert!(!library::valid_item_name("chair.txt"));
         assert!(!library::valid_item_name("Components//chair.hew"));
+    }
+
+    // A plugin package installs only through the Plugins pane's own picker.
+    // Nothing the operating system hands the app (a double-click, an "Open
+    // With", a second launch's arguments, a link) may carry one in. These
+    // run in every build, so adding such a route anywhere fails here.
+
+    #[test]
+    fn a_plugin_package_is_not_a_document() {
+        for name in [
+            "x.hewplugin",
+            "X.HEWPLUGIN",
+            "/tmp/a b/x.hewplugin",
+            "x.hewplugin.zip",
+            "x.hew.hewplugin",
+        ] {
+            assert!(!is_document_name(name), "{name}");
+        }
+        assert!(is_document_name("x.hew"));
+    }
+
+    #[test]
+    fn no_file_association_or_link_handler_reaches_the_app_for_a_plugin() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut configs = 0;
+        for entry in std::fs::read_dir(root).expect("the crate folder") {
+            let path = entry.expect("entry").path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if !(name.starts_with("tauri") && name.ends_with(".conf.json")) {
+                continue;
+            }
+            configs += 1;
+            let text = std::fs::read_to_string(&path).expect("config");
+            let config: serde_json::Value = serde_json::from_str(&text).expect("config parses");
+            let associations = config["bundle"]["fileAssociations"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            for association in &associations {
+                for ext in association["ext"].as_array().cloned().unwrap_or_default() {
+                    let ext = ext.as_str().unwrap_or_default().to_ascii_lowercase();
+                    assert!(
+                        ext.trim_start_matches('.') == "hew"
+                            || ext.trim_start_matches('.') == "skp",
+                        "{name} associates .{ext}: only models open from the system"
+                    );
+                }
+            }
+            // No URL scheme: no deep-link plugin configuration and no
+            // scheme list anywhere in the config.
+            let lower = text.to_ascii_lowercase();
+            for needle in [
+                "deep-link",
+                "deeplink",
+                "schemes",
+                "cfbundleurltypes",
+                "hewplugin",
+            ] {
+                assert!(!lower.contains(needle), "{name} mentions {needle}");
+            }
+        }
+        assert!(configs >= 2, "the Tauri configs were not found");
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml");
+        assert!(
+            !manifest.contains("deep-link"),
+            "the shell must not take a deep-link plugin"
+        );
+        // A hand-written Info.plist could declare URL types the config does not.
+        for plist in ["Info.plist", "Info.macos.plist"] {
+            if let Ok(text) = std::fs::read_to_string(root.join(plist)) {
+                assert!(
+                    !text.contains("CFBundleURLTypes"),
+                    "{plist} declares a URL scheme"
+                );
+                assert!(
+                    !text.to_ascii_lowercase().contains("hewplugin"),
+                    "{plist} names packages"
+                );
+            }
+        }
     }
 }
