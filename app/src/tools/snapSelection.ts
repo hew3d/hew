@@ -118,6 +118,17 @@ export interface SelectScene {
     instance: bigint,
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
   ): { sketch(): bigint; edge(): bigint; depth(): number; free(): void } | undefined
+  /** The line / fill drawn inside a component under the ray, through any
+   *  shown placement (or the members of `scope`, an open instance context):
+   *  the outermost placement in scope, the sketch, the depth. */
+  pick_instance_sketch_edge?(
+    ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
+    scope?: bigint,
+  ): { instance(): bigint; sketch(): bigint; depth(): number; free(): void } | undefined
+  pick_instance_sketch_region?(
+    ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
+    scope?: bigint,
+  ): { instance(): bigint; sketch(): bigint; depth(): number; free(): void } | undefined
   pick_face(
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
   ): { object(): bigint; face?(): bigint; instance(): bigint | undefined; depth(): number; free(): void } | undefined
@@ -147,6 +158,12 @@ export interface ResolveDeps {
    * the instance / itself), or null when hidden or out of the context's
    * scope. Wraps `resolvePickToSelectable` plus the hidden-set filter. */
   resolveObject: (objectId: bigint, instanceId: bigint | undefined) => NodeRef | null
+  /** Instance → its selectable node in the active context, by the same rule
+   *  as `resolveObject` (the outermost group above it, or the instance), or
+   *  null when hidden or out of scope. For a click on a line drawn inside a
+   *  component, which has an instance but no object. Omitted means such a
+   *  line selects nothing. */
+  resolveInstance?: (instanceId: bigint) => NodeRef | null
   /** Camera forward UNIT vector (world space) — for the AXIAL depth bound. */
   cameraForward: readonly [number, number, number]
   /** The render far plane (meters, AXIAL). Read live from the camera. */
@@ -410,6 +427,80 @@ function solidUnderRay(ray: Ray, deps: ResolveDeps, snap: Snap | null = null): N
   }
 }
 
+/** Whether `depth` is no farther along the ray than `other` (a relative
+ *  tolerance: a line drawn on a face ties with the face). */
+function noFarther(depth: number, other: number): boolean {
+  return depth <= other + Math.max(Math.abs(other) * 1e-6, 1e-9)
+}
+
+/** The nearest depth of what else is drawn under the ray and would take the
+ *  click instead: the nearest solid face and, at the top level, the nearest
+ *  free drawing (the only drawing `underRay` picks there). */
+function nearestOtherDepth(ray: Ray, topLevel: boolean, deps: ResolveDeps): number {
+  const args = [ray.origin[0], ray.origin[1], ray.origin[2], ray.direction[0], ray.direction[1], ray.direction[2]] as const
+  let nearest = Infinity
+  const take = (p: { depth(): number; free(): void } | undefined): void => {
+    if (p === undefined) return
+    try {
+      nearest = Math.min(nearest, p.depth())
+    } finally {
+      p.free()
+    }
+  }
+  take(deps.scene.pick_face(...args))
+  if (topLevel) {
+    take(deps.scene.pick_sketch_edge(...args))
+    take(deps.scene.pick_sketch_region(...args))
+  }
+  return nearest
+}
+
+/**
+ * A line or fill drawn inside a component, under the ray: the placement it is
+ * seen through (`instance`, the outermost in scope — a top-level instance, or
+ * a member of the open instance context `scope`) and the node a click on it
+ * selects (`ref`, by `deps.resolveInstance`). The line comes before the fill,
+ * as everywhere else. Taken only where it is drawn (`scopedSketchVisible`) and
+ * when nothing else under the ray is nearer — a solid in front, or a free
+ * drawing in front, keeps the click. Null when there is no such drawing, the
+ * host has no instance-sketch picks, or the placement resolves to nothing
+ * selectable here.
+ */
+export function instanceSketchUnderRay(
+  ray: Ray,
+  scope: bigint | undefined,
+  deps: ResolveDeps,
+): { instance: bigint; ref: NodeRef } | null {
+  const scene = deps.scene
+  if (
+    scene.pick_instance_sketch_edge === undefined ||
+    scene.pick_instance_sketch_region === undefined ||
+    deps.resolveInstance === undefined
+  ) {
+    return null
+  }
+  const args = [ray.origin[0], ray.origin[1], ray.origin[2], ray.direction[0], ray.direction[1], ray.direction[2]] as const
+  let others: number | undefined
+  for (const probe of [scene.pick_instance_sketch_edge, scene.pick_instance_sketch_region]) {
+    const hit = probe.call(scene, ...args, scope)
+    if (hit === undefined) continue
+    let instance: bigint
+    let depth: number
+    try {
+      instance = hit.instance()
+      depth = hit.depth()
+    } finally {
+      hit.free()
+    }
+    if (!scopedSketchVisible(depth, ray, deps)) continue
+    others ??= nearestOtherDepth(ray, deps.context.length === 0, deps)
+    if (!noFarther(depth, others)) continue
+    const ref = deps.resolveInstance(instance)
+    if (ref !== null) return { instance, ref }
+  }
+  return null
+}
+
 /**
  * The selectable NodeRef under `ray` for a resolved `snap`, applying — in one
  * place, so click and drag agree by construction:
@@ -475,6 +566,11 @@ export function resolveSelectableRef(
       }
     }
   }
+  // A line or fill drawn inside a closed component selects the component,
+  // as a click on any of its entities does in SketchUp. The inference index
+  // leaves definition drawing out, so no snap names it: ask the kernel.
+  const placed = instanceSketchUnderRay(ray, activeInstance, deps)
+  if (placed !== null) return placed.ref
   const pick = classifySnapPick(snap)
   switch (pick.kind) {
     case 'object': {

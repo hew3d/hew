@@ -2748,7 +2748,7 @@ export default function App() {
   /** The hover tip's second line for the object under the cursor (Select tool
    *  only — the viewport forwards `object` solely then). */
   const hoverDetail = useMemo(() => {
-    if (pathLabels === null || inferenceInfo === null || inferenceInfo.object === undefined) return null
+    if (pathLabels === null || inferenceInfo === null || (inferenceInfo.object === undefined && inferenceInfo.instance === undefined)) return null
     // An open session frame erases its direct members' parent links, so a
     // member under the cursor names the innermost frame as its parent.
     const frame = sessionStack.length > 0 ? sessionStack[sessionStack.length - 1].node : null

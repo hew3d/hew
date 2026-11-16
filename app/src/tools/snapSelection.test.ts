@@ -218,6 +218,12 @@ interface SceneStubs {
   edgeEndpoints?: (edge: bigint) => number[] | undefined
   instanceRegion?: { sketch: bigint; region: bigint; depth?: number }
   instanceEdge?: { sketch: bigint; edge: bigint; depth?: number }
+  /** A line / fill drawn inside a component, through a placement
+   *  (`pick_instance_sketch_edge` / `_region`); the scope each was asked
+   *  with is logged in `placedScopes`. */
+  placedEdge?: { instance: bigint; sketch: bigint; depth: number }
+  placedRegion?: { instance: bigint; sketch: bigint; depth: number }
+  placedScopes?: (bigint | undefined)[]
   /** Omit plane_units_json / pick_plane_unit entirely (a host with no plane
    *  listing: nothing drawn can ever resolve). */
   noPlanes?: boolean
@@ -277,6 +283,24 @@ function fakeScene(s: SceneStubs): SelectScene {
         depth: () => s.instanceEdge!.depth ?? 5,
         free: vi.fn(),
       },
+    pick_instance_sketch_edge: (_ox: number, _oy: number, _oz: number, _dx: number, _dy: number, _dz: number, scope?: bigint) => {
+      s.placedScopes?.push(scope)
+      return s.placedEdge && {
+        instance: () => s.placedEdge!.instance,
+        sketch: () => s.placedEdge!.sketch,
+        depth: () => s.placedEdge!.depth,
+        free: vi.fn(),
+      }
+    },
+    pick_instance_sketch_region: (_ox: number, _oy: number, _oz: number, _dx: number, _dy: number, _dz: number, scope?: bigint) => {
+      s.placedScopes?.push(scope)
+      return s.placedRegion && {
+        instance: () => s.placedRegion!.instance,
+        sketch: () => s.placedRegion!.sketch,
+        depth: () => s.placedRegion!.depth,
+        free: vi.fn(),
+      }
+    },
     pick_face: () =>
       s.face && {
         object: () => s.face!.object,
@@ -301,6 +325,7 @@ function deps(
     // The Viewport's resolveObject is context-scoped; the stub tags the object
     // so tests can tell it apart from a sketch ref.
     resolveObject: (object, instance) => ({ kind: 'object', id: object, instance } as unknown as NodeRef),
+    resolveInstance: (instance) => ({ kind: 'instance', id: instance }),
     cameraForward: FORWARD,
     cameraFar: far,
     worldPerPixelAt: () => worldPerPixel,
@@ -727,6 +752,79 @@ describe('resolveSelectableRef — provenance × context × depth', () => {
     const tiedClick = curveSnapAt(11n, 8n, [0, 0, 0], 'center')
     expect(resolveSelectableRef(tiedClick, DOWN, deps(mk([e40, e41]), []))).toEqual(draft('draft-edge', GROUND, K(40)))
     expect(resolveSelectableRef(tiedClick, DOWN, deps(mk([e41, e40]), []))).toEqual(draft('draft-edge', GROUND, K(40)))
+  })
+})
+
+describe('resolveSelectableRef — a line drawn inside a component selects the component', () => {
+  const LINE = { instance: 7n, sketch: 31n, depth: 4 }
+
+  it('at the top level, a line or fill through a placement → that instance, edge before fill', () => {
+    const scopes: (bigint | undefined)[] = []
+    const scene = fakeScene({ placedEdge: LINE, placedScopes: scopes })
+    // The snap is the ground under the line: no snap names definition drawing.
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(scene, []))).toEqual({ kind: 'instance', id: 7n })
+    expect(scopes).toEqual([undefined])
+    const fill = fakeScene({ placedRegion: { instance: 8n, sketch: 32n, depth: 4 } })
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(fill, []))).toEqual({ kind: 'instance', id: 8n })
+    const both = fakeScene({ placedEdge: LINE, placedRegion: { instance: 8n, sketch: 32n, depth: 4 } })
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(both, []))).toEqual({ kind: 'instance', id: 7n })
+  })
+
+  it('a solid in front keeps the click; a solid behind does not', () => {
+    const front = fakeScene({ placedEdge: LINE, face: { object: 42n, depth: 2 } })
+    expect(resolveSelectableRef(solidSnap(42n), DOWN, deps(front, []))).toMatchObject({ kind: 'object', id: 42n })
+    const behind = fakeScene({ placedEdge: LINE, face: { object: 42n, depth: 6 } })
+    expect(resolveSelectableRef(solidSnap(42n), DOWN, deps(behind, []))).toEqual({ kind: 'instance', id: 7n })
+    // A line lying on a face ties with it and wins.
+    const on = fakeScene({ placedEdge: LINE, face: { object: 42n, depth: 4 } })
+    expect(resolveSelectableRef(solidSnap(42n), DOWN, deps(on, []))).toEqual({ kind: 'instance', id: 7n })
+  })
+
+  it('a free drawing in front keeps the click at the top level', () => {
+    const scene = fakeScene({
+      placedEdge: LINE,
+      drawn: { 0: lineThroughOrigin(4, FREE_21) },
+      edge: { sketch: 11n, edge: 4n, depth: 3 },
+    })
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(scene, []))).toEqual(draft('draft-edge', GROUND, K(4)))
+  })
+
+  it('in a group context the placement resolves through the context (the group above it)', () => {
+    const scene = fakeScene({ placedEdge: LINE })
+    const seen: bigint[] = []
+    const inGroup: ResolveDeps = {
+      ...deps(scene, GROUP_CTX),
+      // The Viewport's resolver: the direct child of the entered group on
+      // the instance's chain — here a nested group wrapping it.
+      resolveInstance: (instance) => {
+        seen.push(instance)
+        return { kind: 'group', id: 3n } as unknown as NodeRef
+      },
+    }
+    expect(resolveSelectableRef(bareSnap(), DOWN, inGroup)).toEqual({ kind: 'group', id: 3n })
+    expect(seen).toEqual([7n])
+  })
+
+  it('inside an instance context the pick is scoped to that instance, and an unselectable placement selects nothing extra', () => {
+    const scopes: (bigint | undefined)[] = []
+    const scene = fakeScene({ placedEdge: LINE, placedScopes: scopes })
+    const ctx = deps(scene, INSTANCE_CTX)
+    expect(resolveSelectableRef(bareSnap(), DOWN, { ...ctx, resolveInstance: () => null })).toBeNull()
+    expect(scopes[0]).toBe(7n)
+  })
+
+  it('a line hidden behind a face (Shaded) or past the far plane is not taken', () => {
+    const scene = fakeScene({ placedEdge: { ...LINE, depth: 6 }, face: { object: 42n, depth: 5 } })
+    // The solid in front resolves as before.
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(scene, []))).toMatchObject({ kind: 'object', id: 42n })
+    const far = fakeScene({ placedEdge: { ...LINE, depth: 200 } })
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(far, []))).toBeNull()
+  })
+
+  it('a host without the picks (or without resolveInstance) resolves as before', () => {
+    const scene = fakeScene({ placedEdge: LINE })
+    const { resolveInstance: _, ...noResolver } = deps(scene, [])
+    expect(resolveSelectableRef(bareSnap(), DOWN, noResolver)).toBeNull()
   })
 })
 

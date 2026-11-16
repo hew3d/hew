@@ -78,7 +78,11 @@ export const HOVER_DETAIL_DWELL_MS = 400
  * restarts the dwell. The first line is never delayed.
  */
 export function InferenceTooltip({ info, detail = null }: { info: InferenceInfo | null; detail?: string | null }) {
-  const subject = info !== null && info.object !== undefined ? `${info.object}/${info.instance ?? ''}` : null
+  // The thing under the cursor: an object (and the instance carrying it), or
+  // an instance alone when a line drawn inside a component is under it.
+  const subject = info !== null && (info.object !== undefined || info.instance !== undefined)
+    ? `${info.object ?? ''}/${info.instance ?? ''}`
+    : null
   const { t } = useLingui()
   const [settled, setSettled] = useState<string | null>(null)
   const showHints = useViewSetting(getShowToolHints, subscribeShowToolHints)

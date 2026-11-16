@@ -253,6 +253,9 @@ describe('hoverLine', () => {
   it('is null when the snap names no object', () => {
     expect(hoverLine({}, parentOf, labelFor, memberName)).toBeNull()
   })
+  it('an instance alone (a line drawn inside it) reads as the instance in its parent', () => {
+    expect(hoverLine({ instance: 20n }, parentOf, labelFor, memberName)).toBe('Shaker Door · in Island')
+  })
 })
 
 describe('frameClickAction', () => {

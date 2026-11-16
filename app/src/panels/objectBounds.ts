@@ -158,9 +158,9 @@ function composeWorldPose(outer: ArrayLike<number>, inner: ArrayLike<number>): n
  * same expansion the renderer draws) definition-local mesh, posed by
  * `instance_pose × placement's local pose` (module doc). For a flat
  * definition every local pose is identity, so this is exactly the instance's
- * own pose, unchanged from before nesting existed. Null if the instance is
- * stale (no pose), its definition has no members, or every member's mesh is
- * stale.
+ * own pose, unchanged from before nesting existed. The lines drawn inside the
+ * definition count as well (`instance_sketch_bounds`). Null if the instance
+ * is stale (no pose), or it has no live member mesh and no drawn line.
  */
 function instanceWorldBounds(scene: WasmScene, instanceId: bigint): Bounds | null {
   const pose = scene.instance_pose(instanceId)
@@ -173,6 +173,13 @@ function instanceWorldBounds(scene: WasmScene, instanceId: bigint): Bounds | nul
   for (let i = 0; i < memberIds.length; i++) {
     const local = localPoses.subarray(i * 12, i * 12 + 12)
     bounds = unionBounds(bounds, objectMeshBounds(scene, memberIds[i], composeWorldPose(pose, local)))
+  }
+  // The lines drawn inside the definition (nested ones too, curves at their
+  // true extent): drawn with the instance, they belong in its box, and an
+  // instance holding only lines has one. Optional for older test doubles.
+  const lines = (scene as Partial<Pick<WasmScene, 'instance_sketch_bounds'>>).instance_sketch_bounds?.(instanceId)
+  if (lines !== undefined && lines.length === 6) {
+    bounds = unionBounds(bounds, { min: [lines[0], lines[1], lines[2]], max: [lines[3], lines[4], lines[5]] })
   }
   return bounds
 }

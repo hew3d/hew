@@ -259,7 +259,8 @@ function belowCrumbs(
  * The hover tip's second line: the hit label, then `· in <direct parent>`.
  * A definition member (the snap names an instance) reads
  * `<member> · in <instance label>`; when that instance is open the part
- * reads by its own label. `null` when the snap names nothing.
+ * reads by its own label. An instance with no object (a line drawn inside
+ * a component) reads as the instance. `null` when the hit names nothing.
  */
 export function hoverLine(
   hit: HitLeaf,
@@ -281,8 +282,12 @@ export function hoverLine(
     const parentLabel = labelFor(inst)
     return t({ comment: 'Hover tip: a thing and the container it sits in', message: `${partLabel} · in ${parentLabel}` })
   }
-  if (hit.object === undefined) return null
-  const leaf: NodeRef = { kind: 'object', id: hit.object }
+  // An instance alone: a line drawn inside a component is under the cursor,
+  // and the component itself is what a click on it selects.
+  const leaf: NodeRef | null = hit.object !== undefined
+    ? { kind: 'object', id: hit.object }
+    : hit.instance !== undefined ? { kind: 'instance', id: hit.instance } : null
+  if (leaf === null) return null
   const parent = parentOf(leaf)
   const name = labelFor(leaf)
   if (parent === undefined) return name

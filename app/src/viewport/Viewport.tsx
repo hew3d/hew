@@ -139,6 +139,7 @@ import { collectLeafIds, isDraftKind, nodeEq, nodeKey, nodeRefFromJs, placementL
 import { selectModeFor, isModifiedSelectPress } from './selectModifiers'
 import { baseBindingFor, desiredDragState, switchDragTo, orbitDragState, setPreciseOrbit, forceBaseAfterPress, type SwitchableDrag } from './orbitDragSwitch'
 import { MarqueeProjector, WINDOW_COVERAGE_MIN, boundsCoverage, emptyScreenBounds, normalizedRect, type MarqueeMode, type MarqueeRect, type ScreenBounds } from './marquee'
+import { applyAffineToPoint, composeAffine, type Affine } from '../tools/transformMath'
 import { dragMoveTargets, exceedsDragThreshold } from './dragMove'
 import { DragCommitGate } from './dragCommit'
 import {
@@ -161,7 +162,7 @@ import {
 import { CleanModifierTap } from './cleanModifierTap'
 import { MultiClickTracker } from './multiClick'
 import { highlightSetsFor, type HighlightDeps } from './highlightSets'
-import { resolveSelectableRef, selectionScopeActive, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
+import { instanceSketchUnderRay, resolveSelectableRef, selectionScopeActive, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
 import { SMOOTH_BOOLEAN_NOTE, operandsHaveSmooth } from '../panels/smoothActions'
 import {
   draftRef,
@@ -3411,6 +3412,18 @@ export default function Viewport({
             wasmScene, objectId, activeContextRef.current, instanceId, sessionScopeFor(activeContextRef.current),
           )
         },
+        // A line drawn inside a component names its placement, not an
+        // object: the same chain walk from the instance. Only the top level
+        // and a group context select a whole instance; inside an instance
+        // context only its own members are selectable.
+        resolveInstance: (instanceId) => {
+          if (hiddenInstanceIdsRef.current.has(instanceId)) return null
+          const ctx = activeContextRef.current
+          if (ctx.length > 0 && ctx[ctx.length - 1].kind !== 'group') return null
+          // With an instance given, the chain starts at it; the object id
+          // is never read.
+          return resolvePickToSelectable(wasmScene, 0n, ctx, instanceId, sessionScopeFor(ctx))
+        },
         cameraForward: [cameraForwardV.x, cameraForwardV.y, cameraForwardV.z],
         cameraFar: camera.far,
         worldPerPixelAt: (p) =>
@@ -3808,6 +3821,33 @@ export default function Viewport({
       return parts
     }
 
+    /** World endpoints (xyz pairs) of the lines drawn inside each of the
+     *  leaf instances: the definition drawing the renderer shows for a
+     *  placement (`component_rendered_sketches`, through `instance_pose ×
+     *  component_sketch_frame`). A lines-only instance has no face part but
+     *  is drawn all the same, so a marquee must be able to reach it. */
+    function instanceDrawnSegments(instances: readonly bigint[]): number[] {
+      const out: number[] = []
+      for (const id of instances) {
+        const comp = wasmScene.instance_def(id)
+        const pose = wasmScene.instance_pose(id)
+        if (comp === undefined || pose === undefined) continue
+        const sketches = wasmScene.component_rendered_sketches(comp)
+        if (sketches.length === 0) continue
+        const toWorld = composeAffine(
+          Array.from(wasmScene.component_sketch_frame(comp)) as unknown as Affine,
+          Array.from(pose) as unknown as Affine,
+        )
+        for (const s of sketches) {
+          const lines = wasmScene.sketch_lines(s)
+          for (let i = 0; i + 2 < lines.length; i += 3) {
+            out.push(...applyAffineToPoint(toWorld, [lines[i], lines[i + 1], lines[i + 2]]))
+          }
+        }
+      }
+      return out
+    }
+
     /**
      * The nodes a completed marquee selects. Window mode (L→R) requires every
      * vertex of every visible leaf mesh inside the rect; crossing mode (R→L)
@@ -3854,9 +3894,13 @@ export default function Viewport({
       const out: NodeRef[] = []
 
       const bb: ScreenBounds = { minX: 0, minY: 0, maxX: 0, maxY: 0 }
+      const identity = new THREE.Matrix4()
       for (const cand of marqueeCandidates()) {
         const parts = candidateParts(cand)
-        if (parts.length === 0) continue
+        // The lines drawn inside the candidate's instances count as drawn
+        // parts of it (a member pick in an instance context has none).
+        const lines = cand.member === undefined ? instanceDrawnSegments(cand.leafInstances) : []
+        if (parts.length === 0 && lines.length === 0) continue
         // Cheap per-part screen bounds from the local bounding box (null when
         // a corner is behind the camera). A large group is thousands of
         // parts; most are nowhere near the rect and must not cost a vertex
@@ -3871,9 +3915,13 @@ export default function Viewport({
           }
           return projector.meshTouchesRect(parts[i].positions, parts[i].index, parts[i].matrixWorld, rect)
         }
+        const linesInside = lines.length === 0 || projector.allVerticesInRect(lines, identity, rect)
         let hit = false
-        if (mode === 'window') {
-          hit = parts.every((pt, i) => {
+        if (parts.length === 0) {
+          // Lines only: enclosed in a window, touched in a crossing.
+          hit = mode === 'window' ? linesInside : projector.segmentsTouchRect(lines, identity, rect)
+        } else if (mode === 'window') {
+          hit = linesInside && parts.every((pt, i) => {
             // Box inside the rect proves every vertex is; a box that pokes out
             // (rotated geometry overshoots its corners) still needs the scan.
             const b = bounds[i]
@@ -3905,12 +3953,12 @@ export default function Viewport({
             }
           }
         } else {
-          hit = parts.some((_, i) => touches(i))
+          hit = parts.some((_, i) => touches(i)) ||
+            (lines.length > 0 && projector.segmentsTouchRect(lines, identity, rect))
         }
         if (hit) out.push(cand.node)
       }
 
-      const identity = new THREE.Matrix4()
       const drawn = marqueeDrawnRefs(
         wasmScene as never,
         activeContextRef.current,
@@ -10628,7 +10676,7 @@ export default function Viewport({
       drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
       scheduleRender()
 
-      publishSnapCues(cueSnap, activeTool, ev.buttons)
+      publishSnapCues(cueSnap, activeTool, ev.buttons, ray)
 
       // Tape loupe (round-3 playtest finding 4): keep the latest probe live
       // for whichever commit outcome eventually applies (armTapeLoupe's own
@@ -10691,8 +10739,10 @@ export default function Viewport({
      * toggle) — those must refresh the readouts too, or the chip goes stale
      * and reports a snap that is no longer the winner. `snap` is expected to
      * already be the tool-preferred one (`toolSnapForCues`, applied by the
-     * caller so it can share the same value with `cueLayer.update`). */
-    function publishSnapCues(snap: Snap | null, activeTool: Tool, buttons = 0): void {
+     * caller so it can share the same value with `cueLayer.update`). `ray`,
+     * when given, lets the hover line name a component whose drawn line is
+     * under the cursor: no snap names such a line. */
+    function publishSnapCues(snap: Snap | null, activeTool: Tool, buttons = 0, ray?: Ray): void {
       tipHiddenForButton = false
       onStatusChangeRef.current?.(toolController.activeToolName, snap !== null ? snap.kind : null)
 
@@ -10728,11 +10778,21 @@ export default function Viewport({
             return hint === null ? {} : { hint }
           })(),
           // Hover identification is a Select-only, idle-only second line.
-          ...(toolController.activeToolName === 'Select' && !readOnlyRef.current &&
-              !toolHasArmedGesture(activeTool) && snap.object !== undefined &&
-              buttons === 0 && dragMove === null && marqueeDrag === null && deferredTapDrag === null
-            ? { object: snap.object, instance: snap.instance }
-            : {}),
+          ...((): { object?: bigint; instance?: bigint } => {
+            if (
+              toolController.activeToolName !== 'Select' || readOnlyRef.current ||
+              toolHasArmedGesture(activeTool) ||
+              buttons !== 0 || dragMove !== null || marqueeDrag !== null || deferredTapDrag !== null
+            ) {
+              return {}
+            }
+            if (snap.object !== undefined) return { object: snap.object, instance: snap.instance }
+            // A line drawn inside a component: the component, as a click
+            // on it selects.
+            if (ray === undefined) return {}
+            const placed = instanceSketchUnderRay(ray, activeInstanceOf(activeContextRef.current) ?? undefined, selectionDeps())
+            return placed === null ? {} : { instance: placed.instance }
+          })(),
         })
       }
     }

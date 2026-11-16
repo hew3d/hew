@@ -561,3 +561,69 @@ test('explode session: a line folded into a component stays drawn when the compo
   await expect.poll(async () => page.evaluate(() => window.__hew_test!.getSketchIds())).toHaveLength(1)
   await expect.poll(lineDrawn).toBe(true)
 })
+
+test('a line folded into a component selects the component: hover names it, a click selects it, a crossing sweep takes it', async ({
+  page,
+}) => {
+  // A line drawn inside a component renders through the instance, but no
+  // snap names it (the inference index leaves definition drawing out), so
+  // hovering it read as bare ground and clicking it selected nothing. As in
+  // SketchUp, a click on any entity of a closed component selects the
+  // component, and the component's box takes the line in.
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  const { component } = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const box = h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    return h.makeComponent([box])
+  })
+  await dblClickWorld(page, ctx, 0.5, 0.5, 1)
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).not.toBeNull()
+  await page.keyboard.press('l')
+  await clickWorld(page, ctx, 2, 0.1, 0)
+  await clickWorld(page, ctx, 2, 0.9, 0)
+  await page.keyboard.press('Escape') // end the line chain
+  await page.keyboard.press('Space')
+  await page.keyboard.press('Escape') // close the session
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBeNull()
+  const [sketch] = await page.evaluate((c) => window.__hew_test!.getComponentMemberSketches(c), component)
+  const seg = await page.evaluate((s) => window.__hew_test!.getSketchLines(s), sketch)
+  const mid: [number, number, number] = [(seg[0] + seg[3]) / 2, (seg[1] + seg[4]) / 2, (seg[2] + seg[5]) / 2]
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+
+  // Hover: the tip's second line names the component, not just the ground.
+  const at = px(ctx, mid[0], mid[1], mid[2])
+  await page.mouse.move(at.x - 4, at.y - 4)
+  await page.mouse.move(at.x, at.y)
+  await expect(page.getByTestId('inference-tip-detail')).toContainText(/Component/, { timeout: 3000 })
+
+  // Click: the instance is selected.
+  await clickWorld(page, ctx, mid[0], mid[1], mid[2])
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getSelection().map((n) => n.kind))).toEqual(['instance'])
+
+  // Its box encloses the line, which lies outside the cube.
+  const b = await page.evaluate(() => window.__hew_test!.getSelectionBounds())
+  expect(b).not.toBeNull()
+  for (const k of [0, 1, 2]) {
+    expect(b![k]).toBeLessThanOrEqual(Math.min(seg[k], seg[k + 3]) + 1e-6)
+    expect(b![k + 3]).toBeGreaterThanOrEqual(Math.max(seg[k], seg[k + 3]) - 1e-6)
+  }
+
+  // A right-to-left crossing sweep over the line alone takes the instance.
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  const right = px(ctx, mid[0] + 0.15, mid[1] + 0.05, mid[2])
+  const left = px(ctx, mid[0] - 0.15, mid[1] - 0.05, mid[2])
+  const sweep = {
+    minX: Math.min(left.x, right.x) - 20, maxX: Math.max(left.x, right.x) + 20,
+    minY: Math.min(left.y, right.y) - 20, maxY: Math.max(left.y, right.y) + 20,
+  }
+  // The sweep stays clear of the cube, so only the line can take it in.
+  for (const c of [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]]) {
+    const q = px(ctx, c[0], c[1], c[2])
+    expect(q.x < sweep.minX || q.x > sweep.maxX || q.y < sweep.minY || q.y > sweep.maxY).toBe(true)
+  }
+  await page.mouse.move(right.x + 20, right.y - 20)
+  await page.mouse.down()
+  await page.mouse.move(left.x - 20, left.y + 20, { steps: 12 })
+  await page.mouse.up()
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getSelection().map((n) => n.kind))).toEqual(['instance'])
+})

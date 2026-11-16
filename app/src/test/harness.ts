@@ -33,6 +33,7 @@ import type { PrintPlan } from '../print/printJob'
 import type { ViewportApi } from '../viewport/Viewport'
 import type { IsolationTarget } from '../viewport/isolation'
 import { nodeKindToNumber, type NodeKind, type NodeRef } from '../panels/treeModel'
+import { worldBoundsForSelection } from '../panels/objectBounds'
 import { curveRunsView, imprintView } from './drawingView'
 import * as kernelModule from '../wasm/pkg/wasm_api.js'
 import { setBusy } from '../api/busyState'
@@ -470,6 +471,10 @@ export interface HewTestHarness {
   getObjectCount(): number
   getObjectIds(): string[]
   getSelection(): { kind: string; id: string; ctx?: string; key?: string }[]
+  /** The selection's world bounding box as `[minX,minY,minZ,maxX,maxY,maxZ]`
+   *  — the Object Info panel's box (`worldBoundsForSelection`) — or null
+   *  when the selection has no geometry. */
+  getSelectionBounds(): [number, number, number, number, number, number] | null
   /** The drawn, unpushed shapes an object carries on its faces, read from the
    *  object's drawing planes (`object_drawing_planes` + the object-scoped
    *  `plane_units_json`): a `sub_face` per region the drawing closes off, a
@@ -2173,6 +2178,11 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         ...(n.ctx !== undefined ? { ctx: n.ctx } : {}),
         ...(n.key !== undefined ? { key: n.key } : {}),
       })),
+    getSelectionBounds: () =>
+      query((s) => {
+        const b = worldBoundsForSelection(s, deps.getSelection())
+        return b === null ? null : [b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]]
+      }),
     getPlaneUnits: (ctx) => query((s) => JSON.parse(s.plane_units_json(ctx))),
     ctxOfFace: (object, face, instance) =>
       query((s) => ctxOfFace(s, BigInt(object), BigInt(face), instance === undefined ? null : BigInt(instance))),
