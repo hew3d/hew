@@ -89,7 +89,7 @@ test('Follow Me: a typed twist during the drag turns the end cap; retype redoes 
   cap = await endCap(page, ids[0])
   expect(cap.maxY).toBeCloseTo(0.1, 3)
 
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 0)
 })
 

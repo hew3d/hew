@@ -64,12 +64,12 @@ test('tray: a section shortcut brings a hidden tray back with that section open'
   await page.getByRole('button', { name: 'Hide tray' }).click()
   await expect(objectInfo).toBeHidden()
 
-  await page.keyboard.press('Control+Shift+O')
+  await page.keyboard.press('ControlOrMeta+Shift+O')
   await expect(objectInfo).toBeVisible()
   await expect(objectInfo).toHaveAttribute('aria-expanded', 'true')
 
   // Tray shown again: the same shortcut goes back to flipping the section.
-  await page.keyboard.press('Control+Shift+O')
+  await page.keyboard.press('ControlOrMeta+Shift+O')
   await expect(objectInfo).toHaveAttribute('aria-expanded', 'false')
 })
 

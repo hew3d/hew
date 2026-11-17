@@ -66,7 +66,7 @@ test('double-click renames a definition in place, undoably', async ({ page }) =>
   expect(await page.evaluate((c) => window.__hew_test!.getComponentName(c), component)).toBe('Leg')
 
   await page.locator('canvas').first().click({ position: { x: 5, y: 5 } })
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await expect
     .poll(() => page.evaluate((c) => window.__hew_test!.getComponentName(c), component))
     .toBe(originalName)

@@ -341,7 +341,7 @@ test('Fillet: Ctrl+A arms only the object under the cursor, not every object', a
   await page.keyboard.press('Shift+F')
   await moveToWorld(page, [4, 1, 1])
   await page.waitForTimeout(150)
-  await page.keyboard.press('Control+a')
+  await page.keyboard.press('ControlOrMeta+a')
   await page.keyboard.type('3')
   await page.keyboard.press('Enter')
   await page.waitForTimeout(200)

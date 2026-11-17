@@ -813,9 +813,9 @@ test('ungrouping a hidden group, and undoing it, keeps the lines inside its comp
   await expect.poll(() => selectionKinds(page)).toEqual([])
   await expect.poll(inStep).toBe(true)
   // Undo brings the group back; the line follows the component again.
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await expect.poll(inStep).toBe(true)
-  await page.keyboard.press('Control+Shift+Z')
+  await page.keyboard.press('ControlOrMeta+Shift+Z')
   await expect.poll(inStep).toBe(true)
 })
 

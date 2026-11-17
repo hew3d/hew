@@ -113,10 +113,10 @@ test('Copy then Paste places a second box at the click point', async ({ page }) 
   await page.evaluate((oid) => window.__hew_test!.selectObjects([oid]), id)
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
 
-  await page.keyboard.press('Control+c')
+  await page.keyboard.press('ControlOrMeta+c')
   await expect(page.getByText('Copied 1 object', { exact: false })).toBeVisible()
 
-  await page.keyboard.press('Control+v')
+  await page.keyboard.press('ControlOrMeta+v')
   // The paste arms asynchronously (the clipboard is read first); wait for
   // the placement hint before clicking, as a hand would wait for the ghost.
   await expect(page.getByText('Click to place', { exact: false })).toBeVisible()
@@ -143,10 +143,10 @@ test('Paste In Place inserts at the original position with no click, no armed ge
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
   const originalBounds = await page.evaluate((oid) => window.__hew_test!.getObjectBounds(oid), id)
 
-  await page.keyboard.press('Control+c')
+  await page.keyboard.press('ControlOrMeta+c')
   await expect(page.getByText('Copied 1 object', { exact: false })).toBeVisible()
 
-  await page.keyboard.press('Control+Shift+v')
+  await page.keyboard.press('ControlOrMeta+Shift+v')
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 2)
 
   const selection = await page.evaluate(() => window.__hew_test!.getSelection())
@@ -166,7 +166,7 @@ test('Cut removes the original and leaves the clipboard pasteable', async ({ pag
   await page.evaluate((oid) => window.__hew_test!.selectObjects([oid]), id)
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
 
-  await page.keyboard.press('Control+x')
+  await page.keyboard.press('ControlOrMeta+x')
   // Cut = Copy (async: hashes the bytes before the clipboard is actually
   // set) + delete — wait for the "Copied" toast (Copy's own completion
   // signal, same as every other test here) before Ctrl+V, or a fast
@@ -175,7 +175,7 @@ test('Cut removes the original and leaves the clipboard pasteable', async ({ pag
   await expect(page.getByText('Copied 1 object', { exact: false })).toBeVisible()
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 0)
 
-  await page.keyboard.press('Control+v')
+  await page.keyboard.press('ControlOrMeta+v')
   await expect(page.getByText('Click to place', { exact: false })).toBeVisible()
   await clickWorld(page, ctx, 2, -2, 0)
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
@@ -201,12 +201,12 @@ test('a sketch-only selection copies as a shape, and Paste In Place over it reco
   const before = await state()
   expect(before.units).toBe(1)
 
-  await page.keyboard.press('Control+c')
+  await page.keyboard.press('ControlOrMeta+c')
   await expect(page.getByText('Copied 1 shape', { exact: false })).toBeVisible()
 
   // The pasted drawing lies exactly over the original, so nothing is drawn
   // and no undo step is recorded.
-  await page.keyboard.press('Control+Shift+v')
+  await page.keyboard.press('ControlOrMeta+Shift+v')
   // Nothing to wait on when nothing changes: give the paste time to run.
   await page.waitForTimeout(750)
   expect(await state()).toEqual(before)
@@ -227,14 +227,14 @@ test('Cut of a multi-node selection is ONE undo step — a single Ctrl+Z restore
   )
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 3)
 
-  await page.keyboard.press('Control+x')
+  await page.keyboard.press('ControlOrMeta+x')
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 0)
 
   // ONE undo restores all three — `Scene.delete_selection` batches the
   // whole cut into a single compound undo entry (adversarial review
   // finding 3), not three separate `delete_node` entries a single Ctrl+Z
   // would only partially unwind.
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 3)
   const restoredIds = new Set(await page.evaluate(() => window.__hew_test!.getObjectIds()))
   expect(restoredIds).toEqual(new Set([ids.a, ids.b, ids.c]))
@@ -264,11 +264,11 @@ test('Paste In Place overlaps the original even when the drawing axes are moved'
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
   const originalBounds = await page.evaluate((oid) => window.__hew_test!.getObjectBounds(oid), id)
 
-  await page.keyboard.press('Control+c')
+  await page.keyboard.press('ControlOrMeta+c')
   await expect(page.getByText('Copied 1 object', { exact: false })).toBeVisible()
 
   const before = await page.evaluate(() => window.__hew_test!.getObjectCount())
-  await page.keyboard.press('Control+Shift+v')
+  await page.keyboard.press('ControlOrMeta+Shift+v')
   await page.waitForFunction(
     (n) => window.__hew_test!.getObjectCount() === n,
     before + 1,
@@ -310,7 +310,7 @@ test('Cut, enter a group, Paste In Place inside the session: the part folds in a
   // ---- 1. Select the part and Cut it (⌘X).
   await page.evaluate((oid) => window.__hew_test!.selectObjects([oid]), part)
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
-  await page.keyboard.press('Control+x')
+  await page.keyboard.press('ControlOrMeta+x')
   await expect(page.getByText('Copied 1 object', { exact: false })).toBeVisible()
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
   const hashAfterCut = await page.evaluate(() => window.__hew_test!.getModelStateHash())
@@ -326,7 +326,7 @@ test('Cut, enter a group, Paste In Place inside the session: the part folds in a
   // is not refused during a group session (only a component session
   // refuses ExplodeSessionScope): the pasted part lands surfaced, inside
   // the session's own scope.
-  await page.keyboard.press('Control+Shift+v')
+  await page.keyboard.press('ControlOrMeta+Shift+v')
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 2)
   const selection = await page.evaluate(() => window.__hew_test!.getSelection())
   expect(selection).toHaveLength(1)
@@ -367,19 +367,19 @@ test('Cut, enter a group, Paste In Place inside the session: the part folds in a
   // → cut, each a single labeled undo entry (DEVELOPMENT.md rule 9: undo
   // is subject to the same replay contract inside a session as outside
   // it).
-  await page.keyboard.press('Control+z') // undoes the close/fold
+  await page.keyboard.press('ControlOrMeta+z') // undoes the close/fold
   await page.waitForFunction(
     (h) => window.__hew_test!.getModelStateHash() === h,
     hashAfterPaste,
   )
-  await page.keyboard.press('Control+z') // undoes the paste
+  await page.keyboard.press('ControlOrMeta+z') // undoes the paste
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
-  await page.keyboard.press('Control+z') // undoes opening the session
+  await page.keyboard.press('ControlOrMeta+z') // undoes opening the session
   await page.waitForFunction(
     (h) => window.__hew_test!.getModelStateHash() === h,
     hashAfterCut,
   )
-  await page.keyboard.press('Control+z') // undoes the cut
+  await page.keyboard.press('ControlOrMeta+z') // undoes the cut
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 2)
   const restoredPartId = (await page.evaluate(() => window.__hew_test!.getObjectIds())).find(
     (id) => id !== setupIds.box,
@@ -407,7 +407,7 @@ test('Paste In Place is refused with a clear toast while a component session is 
   // session — a real double-click, not the harness.
   await page.evaluate((oid) => window.__hew_test!.selectObjects([oid]), setupIds.part)
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
-  await page.keyboard.press('Control+c')
+  await page.keyboard.press('ControlOrMeta+c')
   await expect(page.getByText('Copied 1 object', { exact: false })).toBeVisible()
 
   await dblClickWorld(page, ctx, 0.5, 0.5, 1)
@@ -417,7 +417,7 @@ test('Paste In Place is refused with a clear toast while a component session is 
   // session is open (unlike a group session — see the test above) — a
   // clear toast, and the document untouched.
   const countBefore = await page.evaluate(() => window.__hew_test!.getObjectCount())
-  await page.keyboard.press('Control+Shift+v')
+  await page.keyboard.press('ControlOrMeta+Shift+v')
   await expect(
     page.getByText(/isn't available while a group or component is open for editing/),
   ).toBeVisible()
@@ -478,7 +478,7 @@ async function copyOneInstance(page: Page): Promise<{ instance: string; componen
   })
   await page.evaluate((i) => window.__hew_test!.selectNodes([{ kind: 'instance', id: i }]), made.instance)
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
-  await page.keyboard.press('Control+c')
+  await page.keyboard.press('ControlOrMeta+c')
   await expect(page.getByText('Copied 1 object', { exact: false })).toBeVisible()
   return made
 }
@@ -499,7 +499,7 @@ test('Copy/Paste of a component instance places a LINKED instance: editing the p
   const { instance, component } = await copyOneInstance(page)
 
   // Paste with a real Ctrl+V and a click on open ground at (3, 0, 0).
-  await page.keyboard.press('Control+v')
+  await page.keyboard.press('ControlOrMeta+v')
   await expect(page.getByText('Click to place', { exact: false })).toBeVisible()
   await clickWorld(page, ctx, 3, 0, 0)
   await page.waitForFunction((c) => window.__hew_test!.getInstancesOf(c).length === 2, component)
@@ -560,7 +560,7 @@ test('Paste In Place of a component instance is linked too, and undo of the past
   await setup(page, true)
   const { instance, component } = await copyOneInstance(page)
 
-  await page.keyboard.press('Control+Shift+v')
+  await page.keyboard.press('ControlOrMeta+Shift+v')
   await page.waitForFunction((c) => window.__hew_test!.getInstancesOf(c).length === 2, component)
   const pasted = (await page.evaluate(() => window.__hew_test!.getSelection()))[0].id
   expect(pasted).not.toBe(instance)
@@ -570,7 +570,7 @@ test('Paste In Place of a component instance is linked too, and undo of the past
   // Undo the paste: the pasted instance goes, the shared definition and the
   // original placement stay exactly as they were. Redo brings it back,
   // still linked.
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForFunction((c) => window.__hew_test!.getInstancesOf(c).length === 1, component)
   expect(await page.evaluate((c) => window.__hew_test!.getInstancesOf(c), component)).toEqual([instance])
   expect(await page.evaluate(() => window.__hew_test!.getComponentIds())).toEqual([component])
@@ -594,10 +594,10 @@ test('Copy of several instances of one definition pastes them onto that ONE defi
     [made.instance, made.second],
   )
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 2)
-  await page.keyboard.press('Control+c')
+  await page.keyboard.press('ControlOrMeta+c')
   await expect(page.getByText('Copied 2 objects', { exact: false })).toBeVisible()
 
-  await page.keyboard.press('Control+Shift+v')
+  await page.keyboard.press('ControlOrMeta+Shift+v')
   await page.waitForFunction((c) => window.__hew_test!.getInstancesOf(c).length === 4, made.component)
   expect(await page.evaluate(() => window.__hew_test!.getComponentIds())).toEqual([made.component])
   expect(await page.evaluate((c) => window.__hew_test!.definitionUsage(c), made.component)).toBe(4)
@@ -614,11 +614,11 @@ test('Cut then Paste of a component instance re-places the same definition', asy
   })
   await page.evaluate((i) => window.__hew_test!.selectNodes([{ kind: 'instance', id: i }]), made.instance)
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
-  await page.keyboard.press('Control+x')
+  await page.keyboard.press('ControlOrMeta+x')
   await expect(page.getByText('Copied 1 object', { exact: false })).toBeVisible()
   await page.waitForFunction((c) => window.__hew_test!.getInstancesOf(c).length === 1, made.component)
 
-  await page.keyboard.press('Control+Shift+v')
+  await page.keyboard.press('ControlOrMeta+Shift+v')
   await page.waitForFunction((c) => window.__hew_test!.getInstancesOf(c).length === 2, made.component)
   const pasted = (await page.evaluate(() => window.__hew_test!.getSelection()))[0].id
   expect(await page.evaluate((i) => window.__hew_test!.getInstanceDef(i), pasted)).toBe(made.component)
@@ -654,7 +654,7 @@ test('A copy taken before the document is reloaded pastes as an ordinary copy, n
   await page.waitForFunction((c) => window.__hew_test!.getInstancesOf(c).length === 1, component)
   expect(await page.evaluate(() => window.__hew_test!.getComponentIds())).toEqual([component])
 
-  await page.keyboard.press('Control+Shift+v')
+  await page.keyboard.press('ControlOrMeta+Shift+v')
   await page.waitForFunction(() => window.__hew_test!.getComponentIds().length === 2)
   const pasted = (await page.evaluate(() => window.__hew_test!.getSelection()))[0].id
   expect(pasted).not.toBe(instance)

@@ -374,7 +374,7 @@ test('switching the mode with the pointer parked re-resolves the cue there, both
   expect(await chip(page)).toContain('On Face')
   // Through the command palette, by keyboard only: the mouse never moves.
   const viaPalette = async (): Promise<void> => {
-    await page.keyboard.press('Control+/')
+    await page.keyboard.press('ControlOrMeta+/')
     // Type only once the palette has reset and focused its search field:
     // the reset runs on open and the focus a frame later, so keys sent
     // straight after the shortcut land on the previous run's text.

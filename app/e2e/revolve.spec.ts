@@ -75,7 +75,7 @@ test('Revolve: rectangle, line, Enter makes one smooth tube', async ({ page }) =
   await shot(page, 'revolve-4-tube')
 
   // One Undo takes the whole revolve back and restores the rectangle.
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 0)
 })
 

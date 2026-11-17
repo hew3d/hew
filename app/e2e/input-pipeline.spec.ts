@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { isMac } from './helpers/platform'
 import {
   buildViewProjection,
   worldToPagePixel,
@@ -268,12 +269,12 @@ test('Ctrl+Z undoes and Ctrl+Shift+Z redoes through the live keydown path', asyn
   await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [1, 1, 0], 1))
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
 
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 0)
 
   // Uppercase 'Z': a physical Shift+Z produces `key === 'Z'` — pressing the
   // lowercase variant here would mask case-sensitivity bugs in the handler.
-  await page.keyboard.press('Control+Shift+Z')
+  await page.keyboard.press('ControlOrMeta+Shift+Z')
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
 })
 
@@ -283,7 +284,7 @@ test('Ctrl+Y redoes through the live keydown path, but not inside a text field',
   await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [1, 1, 0], 1))
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
 
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 0)
 
   // Focus a text field: its native Ctrl+Y must not redo the scene.
@@ -293,7 +294,7 @@ test('Ctrl+Y redoes through the live keydown path, but not inside a text field',
     document.body.appendChild(input)
     input.focus()
   })
-  await page.keyboard.press('Control+y')
+  await page.keyboard.press(isMac ? 'Meta+Shift+Z' : 'Control+y')
   await page.waitForTimeout(150)
   expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(0)
 
@@ -301,7 +302,7 @@ test('Ctrl+Y redoes through the live keydown path, but not inside a text field',
     document.getElementById('ctrl-y-probe')?.remove()
     ;(document.activeElement as HTMLElement | null)?.blur()
   })
-  await page.keyboard.press('Control+y')
+  await page.keyboard.press(isMac ? 'Meta+Shift+Z' : 'Control+y')
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
 })
 
@@ -322,7 +323,7 @@ test('Ctrl+G groups the selection and Ctrl+Shift+G ungroups, through the live ke
   })
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 2)
 
-  await page.keyboard.press('Control+g')
+  await page.keyboard.press('ControlOrMeta+g')
   await page.waitForFunction(() => {
     const sel = window.__hew_test!.getSelection()
     return sel.length === 1 && sel[0].kind === 'group'
@@ -330,7 +331,7 @@ test('Ctrl+G groups the selection and Ctrl+Shift+G ungroups, through the live ke
 
   // Uppercase 'G' — a physical Shift+G produces `key === 'G'`; the lowercase
   // variant would mask case-sensitivity bugs (same rationale as redo above).
-  await page.keyboard.press('Control+Shift+G')
+  await page.keyboard.press('ControlOrMeta+Shift+G')
   // Ungroup clears the selection; both objects are top-level again.
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 0)
   expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(2)
@@ -432,11 +433,11 @@ test('Ctrl+G with a single object selected is a no-op — the keyboard path hono
 
   // The Edit menu disables Group for a 1-node selection; the accelerator must
   // agree — before the handler-side gate, this silently made a 1-member group.
-  await page.keyboard.press('Control+g')
+  await page.keyboard.press('ControlOrMeta+g')
 
   // Positive control: Ctrl+Shift+G on the (still object) selection is also
   // a no-op, then verify the document hash and selection never changed.
-  await page.keyboard.press('Control+Shift+G')
+  await page.keyboard.press('ControlOrMeta+Shift+G')
   await expect
     .poll(async () => page.evaluate(() => window.__hew_test!.getModelStateHash()))
     .toBe(hashBefore)

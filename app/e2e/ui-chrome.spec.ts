@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { isMac } from './helpers/platform'
 
 /**
  * UI-chrome behavior spec — the DOM half of the app the semantic-harness
@@ -220,7 +221,7 @@ test('palette: the resting search field at the top of the tool rail opens it', a
 })
 
 test('palette: Ctrl+K opens it; running a tool entry activates the tool', async ({ page }) => {
-  await page.keyboard.press('Control+k')
+  await page.keyboard.press(isMac ? 'Meta+/' : 'Control+k')
   const palette = page.getByRole('dialog', { name: 'Command palette' })
   await expect(palette).toBeVisible()
 
@@ -243,7 +244,7 @@ test('palette: a pointer parked over the list never steals the keyboard selectio
   const selected = palette.locator('[role=option][aria-selected=true]')
 
   // First use: mouse. The pointer is left resting over the list.
-  await page.keyboard.press('Control+/')
+  await page.keyboard.press('ControlOrMeta+/')
   await expect(search).toBeFocused()
   await page.keyboard.type('para')
   await palette.getByRole('option', { name: /Parallel Projection/ }).click()
@@ -252,7 +253,7 @@ test('palette: a pointer parked over the list never steals the keyboard selectio
   // Second use: keyboard only, pointer still parked where it clicked. Chromium
   // re-fires hover on whichever row lands under a still pointer as the list
   // re-ranks; that must not move the selection.
-  await page.keyboard.press('Control+/')
+  await page.keyboard.press('ControlOrMeta+/')
   await expect(search).toBeFocused()
   await expect(selected).toContainText('Select')
   await page.keyboard.type('para')
@@ -285,7 +286,7 @@ test('palette: clicking dead space inside the dialog keeps focus in the search f
 }) => {
   const palette = page.getByRole('dialog', { name: 'Command palette' })
   const search = palette.getByRole('textbox', { name: 'Search' })
-  await page.keyboard.press('Control+/')
+  await page.keyboard.press('ControlOrMeta+/')
   await expect(search).toBeFocused()
   const box = (await palette.boundingBox())!
   await page.mouse.click(box.x + box.width - 10, box.y + 8)

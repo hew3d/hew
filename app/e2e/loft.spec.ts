@@ -60,7 +60,7 @@ test('Loft: click two shapes in order, Enter makes one solid between them', asyn
   expect(r.bounds[3] - r.bounds[0]).toBeCloseTo(1, 4)
   await shot(page, 'loft-2-solid')
 
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
 })
 

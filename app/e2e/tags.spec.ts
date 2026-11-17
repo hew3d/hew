@@ -57,7 +57,7 @@ test('keyboard undo of a tag delete re-hides content hidden by the restored tag'
   // Undo through the LIVE keydown path — the viewport's own Ctrl+Z binding,
   // not App.handleUndo. The tag registry is restored with its hidden flag,
   // so the content must re-hide (and become unpickable) immediately.
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForFunction(
     () => window.__hew_test!.pickFace([0.5, 0.5, 5], [0, 0, -1]) === null,
   )
@@ -66,7 +66,7 @@ test('keyboard undo of a tag delete re-hides content hidden by the restored tag'
   expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(1)
 
   // Redo through the live keydown path re-deletes the tag: visible again.
-  await page.keyboard.press('Control+Shift+Z')
+  await page.keyboard.press('ControlOrMeta+Shift+Z')
   await page.waitForFunction(
     () => window.__hew_test!.pickFace([0.5, 0.5, 5], [0, 0, -1]) !== null,
   )
@@ -157,7 +157,7 @@ test('Tags panel: clicking a tag selects its items; double-click renames it in p
 
   // Undo restores the old name on every carrier.
   await page.locator('canvas').first().click({ position: { x: 5, y: 5 } })
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await expect.poll(async () => page.evaluate((id) => window.__hew_test!.getNodeTags('object', id), ids.b)).toEqual(['Hardware/Screws'])
 })
 

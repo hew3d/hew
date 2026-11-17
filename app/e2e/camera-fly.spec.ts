@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { isMac } from './helpers/platform'
 
 declare global {
   interface Window {
@@ -406,7 +407,7 @@ test.describe('Fly ▸ latched from Camera ▸ Fly, for trackpads (docs/design/f
   test('the Fly palette entry toggles the latched mode', async ({ page }) => {
     await setup(page)
     await stubPointerLock(page, { denyAll: true })
-    await page.keyboard.press('ControlOrMeta+K')
+    await page.keyboard.press(isMac ? 'Meta+/' : 'Control+k')
     const palette = page.getByRole('dialog', { name: /command palette/i })
     await expect(palette).toBeVisible()
     await palette.getByPlaceholder(/search/i).fill('fly')

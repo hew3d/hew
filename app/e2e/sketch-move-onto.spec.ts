@@ -159,13 +159,13 @@ test('Move one ground rectangle half over another: they merge into one island wi
   await shot(page, testInfo, 'after')
 
   // One undo restores the two separate shapes; redo re-applies the merge.
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForFunction(() => {
     const h = window.__hew_test!
     return h.getSketchIds().reduce((n, s) => n + h.getSketchIslands(s).length, 0) === 2
   })
   expect(await sketchState(page)).toEqual({ sketches: 1, islands: 2, regions: 2 })
-  await page.keyboard.press('Control+Shift+Z')
+  await page.keyboard.press('ControlOrMeta+Shift+Z')
   await page.waitForFunction(() => {
     const h = window.__hew_test!
     return h.getSketchIds().reduce((n, s) => n + h.getSketchIslands(s).length, 0) === 1
@@ -198,7 +198,7 @@ test('Edit Vertex: dragging a rectangle corner across the opposite side re-deriv
   await expectNoRefusalToast(page)
   await shot(page, testInfo, 'vertex-after')
 
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForFunction(() => {
     const h = window.__hew_test!
     return h.getSketchIds().reduce((n, s) => n + h.getSketchRegionCount(s), 0) === 1

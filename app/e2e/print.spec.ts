@@ -103,7 +103,7 @@ test('Standard Line art inks the silhouette of a cylinder (curved walls have no 
 })
 
 test('Ctrl+P opens the dialog', async ({ page }) => {
-  await page.keyboard.press('Control+p')
+  await page.keyboard.press('ControlOrMeta+p')
   await expect(page.getByRole('dialog', { name: 'Print Layout' })).toBeVisible()
 })
 

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { isMac } from './helpers/platform'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
@@ -356,7 +357,7 @@ test('import UI: a second import while the units chooser is open is refused (no 
   // modal). The re-entrancy guard must refuse it — still exactly one chooser.
   // (The File menu itself is unreachable behind the modal overlay, a second,
   // UI-level guard; the palette is the reachable re-entry.)
-  await page.keyboard.press('Control+k')
+  await page.keyboard.press(isMac ? 'Meta+/' : 'Control+k')
   const palette = page.getByRole('dialog', { name: 'Command palette' })
   await expect(palette).toBeVisible()
   await palette.getByRole('textbox', { name: 'Search' }).fill('import')

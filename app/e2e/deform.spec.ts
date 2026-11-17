@@ -73,7 +73,7 @@ test('Twist: click the top of the box, sweep the pointer, click; Undo restores t
   expect(await page.evaluate((id) => window.__hew_test!.isObjectSolid(id), id)).toBe(true)
   await shot(page, 'deform-4-twisted')
 
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForTimeout(300)
   const b = await page.evaluate((id) => window.__hew_test!.getObjectBounds(id), id)
   expect(b[0]).toBeCloseTo(-0.05, 5)
