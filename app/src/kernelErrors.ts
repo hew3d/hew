@@ -417,6 +417,11 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   NestedComponentInContext:
     msg`This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts.`,
 
+  // App-side refusal (not a kernel code): the window declined an entry
+  // `hew.view.enter` had the kernel accept, for a reason it has no name of
+  // its own for (the kernel's own code rides in the refusal's detail).
+  EnterRefused: msg`Hew couldn't open that for editing.`,
+
   // ---------------------------------------------------------- history
   NothingToUndo: msg`Nothing to undo.`,
   NothingToRedo: msg`Nothing to redo.`,

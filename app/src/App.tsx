@@ -81,7 +81,14 @@ import { tagPathKey } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { installTestHarness, type PrintRecorder } from './test/harness'
-import { installLiveBridge, type LiveBridgeDeps, type LiveOpOutcome, type LiveOpRunner } from './api/liveBridge'
+import {
+  installLiveBridge,
+  type EnterOutcome,
+  type EnterRefusal,
+  type LiveBridgeDeps,
+  type LiveOpOutcome,
+  type LiveOpRunner,
+} from './api/liveBridge'
 import { uiContextJson, uiIsolationJson, uiSelectionJson } from './api/viewMirror'
 import { pumpEvents } from './api/eventPump'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
@@ -1994,10 +2001,12 @@ export default function App() {
    * non-contiguous breadcrumbs like "Model → Object 1" for a nested object
    * with no Group shown.
    */
-  const enterNode = useCallback((target: NodeRef, opts?: { keepFallback?: boolean }) => {
+  const enterNode = useCallback((target: NodeRef, opts?: { keepFallback?: boolean }): EnterOutcome => {
     const scene = sceneRef.current
     const api = viewportApi.current
-    if (scene === null || api === null) return
+    if (scene === null || api === null) {
+      return { refused: { name: 'enter_refused', detail: { code: 'window_not_ready' } } }
+    }
     // An armed gesture owns this click, same as Escape's own refusal
     // posture (finding 3, adversarial review): re-homing session state out
     // from under a mid-flight Move/Rotate/PushPull/draw gesture would either
@@ -2005,11 +2014,11 @@ export default function App() {
     // silently retarget the gesture's eventual commit via the shallower
     // EditContext this would push. Silently ignore, no toast — exactly what
     // Escape does when `toolHasArmedGesture` is true.
-    if (api.hasArmedGesture()) return
+    if (api.hasArmedGesture()) return { refused: { name: 'gesture_in_progress' } }
     if (isSketchScopedKind(target.kind)) {
       // No kernel NodeId / container chain — select-only, same as today.
       setSelectedIds([target])
-      return
+      return { ok: true }
     }
 
     // Build the root→leaf container chain by walking node_parent upward,
@@ -2066,10 +2075,17 @@ export default function App() {
     for (let i = openStack.length; i > common; i--) {
       api.runCloseInnermostSession()
     }
+    // A frame the window declines does not stop the walk (a person sees the
+    // same toasts and the same selection as ever); the first refusal is
+    // what a bus caller is told.
+    const refusals: EnterRefusal[] = []
+    const note = (outcome: EnterOutcome | undefined): void => {
+      if (outcome !== undefined && 'refused' in outcome) refusals.push(outcome.refused)
+    }
     for (let i = common; i < framesChain.length; i++) {
       const frame = framesChain[i]
       if (frame.kind === 'group') {
-        api.runOpenGroupSession(frame.id)
+        note(api.runOpenGroupSession(frame.id))
       } else if (frame.kind === 'instance') {
         // Fallback-aware: silently pushes the instance as a K1/K2 context
         // via the SAME `onEnterContext` callback wiring the viewport's own
@@ -2077,15 +2093,56 @@ export default function App() {
         // session for this instance" — identical behavior reaching a
         // component frame through the Outliner/dock instead of a direct
         // viewport double-click.
-        api.runOpenExplodeSessionOrFallback(frame.id, frame)
+        note(api.runOpenExplodeSessionOrFallback(frame.id, frame))
       }
     }
     if (objectLeaf !== null) {
       setActiveContext((prev) => [...prev, objectLeaf])
     }
     setSelectedIds([target])
+    return refusals.length === 0 ? { ok: true } : { refused: refusals[0] }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  /** Where the window stands (open session frames, in-context entries,
+   *  selection, history depth), and a function that puts it back: the bus's
+   *  `hew.view.enter` takes one before its steps and calls it when a step is
+   *  declined, so a refused entry leaves nothing behind. Opening or closing
+   *  a session is a history step, so the steps the walk took are taken back
+   *  with the app's own Undo (which also puts the frames back the way an
+   *  ordinary Undo does); whatever that leaves different (frames, context,
+   *  selection) is then set explicitly. */
+  const snapshotEntry = useCallback((): (() => boolean) => {
+    const scene = sceneRef.current
+    const undoBefore = scene?.undo_depth() ?? 0
+    const stack = viewportApi.current?.sessionStack() ?? []
+    const context = [...activeContextRef.current]
+    const selection = [...selectedIdsRef.current]
+    return () => {
+      const api = viewportApi.current
+      if (api === null) return false
+      for (let added = (scene?.undo_depth() ?? 0) - undoBefore; added > 0 && scene?.can_scene_undo() === true; added--) {
+        api.runUndo()
+      }
+      const now = api.sessionStack()
+      let common = 0
+      while (common < now.length && common < stack.length && nodeEq(now[common], stack[common])) common++
+      for (let i = now.length; i > common; i--) api.runCloseInnermostSession()
+      for (let i = common; i < stack.length; i++) {
+        const frame = stack[i]
+        if (frame.kind === 'group') api.runOpenGroupSession(frame.id)
+        else if (frame.kind === 'instance') api.runOpenExplodeSession(frame.id)
+      }
+      setActiveContext(context)
+      setSelectedIds(selection)
+      // Whether the frames are where they were; a later step may still differ.
+      const after = api.sessionStack()
+      return after.length === stack.length && after.every((f, i) => nodeEq(f, stack[i]))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  const snapshotEntryRef = useRef(snapshotEntry)
+  snapshotEntryRef.current = snapshotEntry
 
   /** Breadcrumb crumb click at combined depth `depth` (0 = outermost
    *  session frame … sessionStack.length + activeContext.length - 1 = the
@@ -2398,6 +2455,7 @@ export default function App() {
     // A bus `hew.view.enter`/`exit`/`exit_all` drives the Outliner's own
     // entry convergence and the breadcrumb's own truncation.
     enterNode: (node, opts) => enterNodeRef.current(node, opts),
+    snapshotEntry: () => snapshotEntryRef.current(),
     setPathDepth: (depth) => setPathDepthRef.current(depth),
     contextDepth: () => prevSessionStackRef.current.length + activeContextRef.current.length,
   }

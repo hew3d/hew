@@ -171,7 +171,16 @@ export interface LiveBridgeDeps {
    * An `enter_context` directive calls it for each instance of the path and
    * then for the leaf. Optional; without it the directive is a no-op.
    */
-  enterNode?: (node: NodeRef, opts?: { keepFallback?: boolean }) => void
+  enterNode?: (node: NodeRef, opts?: { keepFallback?: boolean }) => EnterOutcome
+  /**
+   * Captures where the window stands (open session frames, in-context
+   * entries, selection) and hands back a function that returns it there.
+   * An `enter_context` directive takes one before its first step and calls
+   * it when a step is refused, so a refused entry changes nothing. The
+   * function answers `false` when the window is still not where it was.
+   * Optional; without it a refused entry leaves whatever steps ran before it.
+   */
+  snapshotEntry?: () => () => unknown
   /**
    * The breadcrumb's own truncation (`handleSetPathDepth`): everything past
    * combined depth `depth` (session frames, then in-context entries) closes.
@@ -392,6 +401,17 @@ const DEFAULT_CAMERA_UP: [number, number, number] = [0, 0, 1]
 const DEFAULT_CAMERA_PROJECTION = 'perspective' as const
 const DEFAULT_CAMERA_FOV_DEG = 35
 
+/** Why the window declined an entry: a refusal name (the API's snake_case
+ * names) and the detail that rides with it on the wire. */
+export interface EnterRefusal {
+  name: string
+  detail?: Record<string, unknown>
+}
+
+/** What an entry into a node came to: it happened, or the window declined
+ * it, with a name. */
+export type EnterOutcome = { ok: true } | { refused: EnterRefusal }
+
 /** What applying a directive reaches: the viewport and the app's own
  * handlers (a subset of `LiveBridgeDeps`). */
 export type DirectiveTargets = Pick<
@@ -405,6 +425,7 @@ export type DirectiveTargets = Pick<
   | 'selectNone'
   | 'isolate'
   | 'enterNode'
+  | 'snapshotEntry'
   | 'setPathDepth'
   | 'contextDepth'
 > & { viewportApi: ViewportApi | null }
@@ -463,7 +484,7 @@ function isolationTargets(entries: DirectiveIsolationEntry[]): IsolationTarget[]
  * (`deps.reconcile()`) for a stale document. `units` and the selection,
  * unlike the others, never touch the viewport at all.
  */
-function applyViewDirective(directive: ViewDirective, targets: DirectiveTargets): void {
+function applyViewDirective(directive: ViewDirective, targets: DirectiveTargets): EnterRefusal | undefined {
   const viewportApi = targets.viewportApi
   switch (directive.kind) {
     case 'camera':
@@ -536,13 +557,10 @@ function applyViewDirective(directive: ViewDirective, targets: DirectiveTargets)
       // deep leaf opens one level per call exactly as a double click does.
       // Steps after the first keep the fallback entries the earlier ones
       // pushed, so a path through a mirrored instance ends inside the leaf
-      // with that instance still beneath it.
-      ;[...directive.path, directive.leaf].forEach((n, i) => {
-        const node = { kind: n.kind, id: BigInt(n.id) }
-        if (i === 0) targets.enterNode?.(node)
-        else targets.enterNode?.(node, { keepFallback: true })
-      })
-      return
+      // with that instance still beneath it. A step the window declines
+      // ends the walk and puts the window back where it stood before the
+      // first step: a refused entry changes nothing.
+      return applyEnterContext(directive, targets)
     case 'exit_context': {
       const total = targets.contextDepth?.() ?? 0
       if (total > 0) targets.setPathDepth?.(total - 1)
@@ -551,6 +569,73 @@ function applyViewDirective(directive: ViewDirective, targets: DirectiveTargets)
     case 'exit_all_contexts':
       targets.setPathDepth?.(0)
       return
+  }
+}
+
+/** The `enter_context` walk: see its case in `applyViewDirective`. */
+function applyEnterContext(
+  directive: Extract<ViewDirective, { kind: 'enter_context' }>,
+  targets: DirectiveTargets,
+): EnterRefusal | undefined {
+  // No window to enter in: not a success for nothing.
+  if (targets.enterNode === undefined) return WINDOW_NOT_READY
+  let restore: (() => unknown) | undefined
+  try {
+    restore = targets.snapshotEntry?.()
+  } catch (err) {
+    console.error('the window could not note where it stood', err)
+    return WINDOW_ERROR
+  }
+  const nodes = [...directive.path, directive.leaf]
+  // A put-back that throws, or says the window is still elsewhere, is
+  // logged and told to the caller with the refusal.
+  const refuse = (refusal: EnterRefusal): EnterRefusal => {
+    let restored = true
+    try {
+      if (restore?.() === false) restored = false
+    } catch (err) {
+      console.error('a refused entry could not be put back', err)
+      restored = false
+    }
+    return restored ? refusal : { ...refusal, detail: { ...refusal.detail, restored: false } }
+  }
+  for (let i = 0; i < nodes.length; i++) {
+    let outcome: EnterOutcome | undefined
+    try {
+      const node = { kind: nodes[i].kind, id: BigInt(nodes[i].id) }
+      outcome = i === 0 ? targets.enterNode(node) : targets.enterNode(node, { keepFallback: true })
+    } catch (err) {
+      console.error('the window failed to enter a node', err)
+      return refuse(WINDOW_ERROR)
+    }
+    if (outcome !== undefined && 'refused' in outcome) return refuse(outcome.refused)
+  }
+  return undefined
+}
+
+/** The refusal for an entry whose application threw: never the success reply. */
+const WINDOW_ERROR: EnterRefusal = { name: 'enter_refused', detail: { code: 'window_error' } }
+
+/** The refusal when no window is wired to enter in. */
+export const WINDOW_NOT_READY: EnterRefusal = { name: 'enter_refused', detail: { code: 'window_not_ready' } }
+
+/**
+ * `afterDispatch` for a successful `hew.view.enter`, which is answered after
+ * it runs: anything that throws while applying it (the `mutated` read
+ * included) is the call's refusal, so the caller never hears `{}` for an
+ * entry that did not finish.
+ */
+export function afterEnterDispatch(
+  deps: LiveBridgeDeps,
+  scene: Scene,
+  reply: string,
+  mutated: () => boolean,
+): EnterRefusal | undefined {
+  try {
+    return afterDispatch(deps, scene, reply, mutated())
+  } catch (err) {
+    console.error('a hew.view.enter failed to apply', err)
+    return WINDOW_ERROR
   }
 }
 
@@ -573,16 +658,21 @@ function hasSceneActivation(directives: ViewDirective[]): boolean {
 /** Applies every directive in `directivesJson` (from
  * `Scene.take_pending_view_directives`) in order, tolerating malformed
  * input defensively by no-op rather than throwing into the Tauri event
- * handler; one directive's failure does not stop the rest. Exported for
- * direct unit testing alongside `shouldRefreshAfterDispatch`. */
-export function applyPendingViewDirectives(directivesJson: string, targets: DirectiveTargets): void {
+ * handler; one directive's failure does not stop the rest. Returns the
+ * first entry the window declined (only `enter_context` can), else
+ * undefined. Exported for direct unit testing alongside
+ * `shouldRefreshAfterDispatch`. */
+export function applyPendingViewDirectives(directivesJson: string, targets: DirectiveTargets): EnterRefusal | undefined {
+  let refused: EnterRefusal | undefined
   for (const directive of parseViewDirectives(directivesJson)) {
     try {
-      applyViewDirective(directive, targets)
+      const declined = applyViewDirective(directive, targets)
+      if (refused === undefined) refused = declined
     } catch (err) {
       console.error('a live view directive failed to apply', directive.kind, err)
     }
   }
+  return refused
 }
 
 /** The directive targets `deps` reaches. */
@@ -598,6 +688,7 @@ export function directiveTargets(deps: LiveBridgeDeps): DirectiveTargets {
     selectNone: deps.selectNone,
     isolate: deps.isolate,
     enterNode: deps.enterNode,
+    snapshotEntry: deps.snapshotEntry,
     setPathDepth: deps.setPathDepth,
     contextDepth: deps.contextDepth,
   }
@@ -612,13 +703,15 @@ function refreshAfterMutation(deps: LiveBridgeDeps): void {
 }
 
 /**
- * The tail every answered dispatch runs, after its reply is on its way:
- * re-render a mutation, mark Library materials dirty, take and apply the
- * dispatch's view directives in order, and reconcile tag visibility. Shared
- * by the bridge and the test harness's `apiDispatch`, so both apply a
- * dispatch exactly the same way. The caller pumps events afterwards.
+ * The tail every answered dispatch runs, normally after its reply is on its
+ * way: re-render a mutation, mark Library materials dirty, take and apply
+ * the dispatch's view directives in order, and reconcile tag visibility.
+ * Shared by the bridge and the test harness's `apiDispatch`, so both apply
+ * a dispatch exactly the same way. The caller pumps events afterwards.
+ * Hands back the entry the window declined, if any: a successful
+ * `hew.view.enter` is answered only after this, with `enterRefusedReply`.
  */
-export function afterDispatch(deps: LiveBridgeDeps, scene: Scene, reply: string, mutated: boolean): void {
+export function afterDispatch(deps: LiveBridgeDeps, scene: Scene, reply: string, mutated: boolean): EnterRefusal | undefined {
   if (mutated) refreshAfterMutation(deps)
   if (mutated && addedLibraryMaterials(reply)) deps.markLibraryMaterialsDirty?.()
   // Every directive the dispatch left (`take_pending_view_directives`'s own
@@ -630,7 +723,67 @@ export function afterDispatch(deps: LiveBridgeDeps, scene: Scene, reply: string,
   if (mutated && !(deps.activateScene !== undefined && hasSceneActivation(parseViewDirectives(directivesJson)))) {
     deps.reconcileVisibility?.()
   }
-  applyPendingViewDirectives(directivesJson, directiveTargets(deps))
+  return applyPendingViewDirectives(directivesJson, directiveTargets(deps))
+}
+
+/**
+ * The reply to a `hew.view.enter` the window declined after the kernel
+ * accepted it: `-32000` `refused` with the refusal's name, the same shape
+ * every refusal has on the wire. `frame` is the request (or the reply that
+ * answers it): only its id is read. Undefined for a notification.
+ */
+export function enterRefusedReply(frame: string, refusal: EnterRefusal): string | undefined {
+  let explanation = ENTER_REFUSAL_COPY[refusal.name] ?? ENTER_REFUSAL_COPY.enter_refused
+  if (refusal.detail?.restored === false) explanation += NOT_RESTORED_COPY
+  return refusedFrame(frame, 'hew.view.enter', refusal.name, explanation, refusal.detail ?? {})
+}
+
+/* oxlint-disable lingui/no-unlocalized-strings -- refusal text for the developer API, which stays English */
+/**
+ * The English explanation each refusal of an entry carries on the wire. The
+ * same words live in the app's message table (`kernelErrors.ts`) and, for
+ * `gesture_in_progress`, in the kernel's command; a test holds the copies
+ * together.
+ */
+export const ENTER_REFUSAL_COPY: Record<string, string> = {
+  gesture_in_progress: 'A tool gesture is in progress in the Hew window. Wait for it to finish, then try again.',
+  nested_component_in_context:
+    "This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts.",
+  enter_refused: "Hew couldn't open that for editing.",
+}
+const NOT_RESTORED_COPY = ' The window may not be where it was.'
+/* oxlint-enable lingui/no-unlocalized-strings */
+
+/**
+ * The `-32000` `refused` frame, built once for every refusal the page
+ * mints itself (the plugin host's `forward_ended` and the window's declined
+ * entry). `frame` supplies the request id; undefined for a notification.
+ */
+export function refusedFrame(
+  frame: string,
+  method: string,
+  refusal: string,
+  explanation: string,
+  detail: Record<string, unknown>,
+): string | undefined {
+  let id: unknown = null
+  try {
+    const parsed = JSON.parse(frame) as { id?: unknown }
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    if (!('id' in parsed)) return undefined
+    id = parsed.id
+  } catch {
+    id = null
+  }
+  return JSON.stringify({
+    jsonrpc: '2.0',
+    id,
+    error: {
+      code: -32000,
+      message: 'refused',
+      data: { refusal, failed_index: 0, failed_method: method, detail, explanation },
+    },
+  })
 }
 
 /**
@@ -705,10 +858,14 @@ export function dispatchFrameNow(
     result.kind === 'reply'
       ? result.frame
       : completeForward(scene, wasmId, result.token, result.forward.request_id)
-  const mutated = result.kind === 'reply' && result.dryRun !== true && shouldRefreshAfterDispatch(scene, frame, reply)
-  afterDispatch(deps, scene, reply, mutated)
+  const mutatedNow = (): boolean =>
+    result.kind === 'reply' && result.dryRun !== true && shouldRefreshAfterDispatch(scene, frame, reply)
+  const isEnter = result.kind === 'reply' && frameMethod(frame) === 'hew.view.enter' && replySucceeded(reply)
+  const declined = isEnter
+    ? afterEnterDispatch(deps, scene, reply, mutatedNow)
+    : afterDispatch(deps, scene, reply, mutatedNow())
   pumpEvents(scene)
-  return reply
+  return declined === undefined ? reply : (enterRefusedReply(frame, declined) ?? reply)
 }
 
 /** Asks `router` for the plugin's answer; a router that throws or rejects
@@ -1137,14 +1294,24 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
     } else {
       reply = completeForward(scene, wasmId, result.token, result.forward.request_id)
     }
-    emitReply(connId, reply)
     // A forward is judged by the plugin command itself, not the envelope
     // that carried it: a read-only plugin command inside a sole-command
     // transaction changed nothing.
-    const mutated =
+    const mutatedNow = (): boolean =>
       result.kind === 'pending'
         ? result.forward.mutating && replySucceeded(reply)
         : result.dryRun !== true && refreshesAfter(scene, method, reply)
+    if (result.kind === 'reply' && method === 'hew.view.enter' && replySucceeded(reply)) {
+      // The one reply that waits for its directive: the window may decline
+      // the entry, and the caller must hear that, not `{}`. Whatever throws
+      // while applying it is the refusal; the reply goes out exactly once.
+      const declined = afterEnterDispatch(deps, scene, reply, mutatedNow)
+      emitReply(connId, declined === undefined ? reply : (enterRefusedReply(frame, declined) ?? reply))
+      pump(scene)
+      return
+    }
+    emitReply(connId, reply)
+    const mutated = mutatedNow()
     // Re-render, then the view effects the dispatch left (camera, units, a
     // Scene activation, the selection, hide and show, isolation, framing),
     // in the order its commands ran.

@@ -227,6 +227,8 @@ fn a_headless_host_cannot_act_on_a_window() {
     assert_eq!(got["armed"], json!(false));
 }
 
+/// Host-served and solitary: they are never forwarded to a plugin, so the
+/// page answers them itself, after the window has acted.
 #[test]
 fn the_commands_are_solitary_view_commands_that_mutate() {
     for name in ["hew.view.enter", "hew.view.exit", "hew.view.exit_all"] {
@@ -455,4 +457,24 @@ fn context_reports_the_hosts_fallback_entries() {
     );
     assert_eq!(got["stack"], json!([]));
     assert_eq!(got["armed"], json!(false));
+}
+
+/// The refusals the live app mints after the kernel accepts an entry (the
+/// window declines it) are declared on the command, though no kernel path
+/// produces them: the bus caller sees them, so the registry names them.
+#[test]
+fn enter_declares_the_refusals_the_window_answers_with() {
+    let listed = &REGISTRY.get("hew.view.enter").expect("declared").refusals;
+    for name in [
+        "gesture_in_progress",
+        "nested_component_in_context",
+        "enter_refused",
+    ] {
+        assert!(listed.iter().any(|r| r == name), "{name}");
+    }
+    // The two the window mints itself have plain copy to publish in the
+    // reference.
+    for name in ["nested_component_in_context", "enter_refused"] {
+        assert!(api::refusal::explanation_for(name).is_some(), "{name}");
+    }
 }

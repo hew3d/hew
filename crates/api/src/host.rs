@@ -1130,7 +1130,7 @@ pub trait Host {
     /// Whether a tool gesture is armed in the user's window (a Move drag in
     /// flight). `hew.view.enter`/`exit`/`exit_all` refuse
     /// `gesture_in_progress` while it is, because the app's own entry
-    /// silently does nothing then.
+    /// silently does nothing then. (The window checks again when it acts.)
     fn gesture_armed(&self) -> bool {
         false
     }
@@ -1138,7 +1138,8 @@ pub trait Host {
     /// `hew.view.enter`: converges the user's window onto `leaf` reached
     /// through `path` (instances only, outermost first), the way a double
     /// click on the node in the Outliner would. The host queues the effect;
-    /// the outcome is reported by `context_changed`.
+    /// the page answers the call after the window has acted (a refusal when
+    /// the window declines), and the outcome is reported by `context_changed`.
     fn enter_user_context(
         &mut self,
         path: &[kernel::InstanceId],

@@ -206,6 +206,7 @@ import { setPickAperture, setPickRenderMode } from '../tools/pickPolicy'
 import { pushActiveScope } from './pickScope'
 import { followsViewPlane, leftCanvasBounds, replaysWithoutSnap, shouldReplayHeldPointer } from './heldPointerReplay'
 import { getLengthSystem, getLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit } from '../settings/units'
+import type { EnterOutcome } from '../api/liveBridge'
 import { InfiniteGrid } from './InfiniteGrid'
 
 /** The backdrop part of a document's view style (`view_style_json`). */
@@ -773,9 +774,10 @@ export interface ViewportApi {
    * same fallback the ordinary viewport double-click gesture uses,
    * exposed for the entry-convergence helper (`App.tsx`) so the Outliner/
    * dock entry paths get identical fallback behavior. Any other refusal
-   * toasts and enters nothing.
+   * toasts and enters nothing. Returns whether the instance was entered
+   * (a session or the fallback), else the refusal's name.
    */
-  runOpenExplodeSessionOrFallback: (instanceId: bigint, fallback: NodeRef) => void
+  runOpenExplodeSessionOrFallback: (instanceId: bigint, fallback: NodeRef) => EnterOutcome
   /** Close the open explode session, folding edits back into the
    *  definition. A no-op (returns `false`) if none is open. */
   runCloseExplodeSession: () => boolean
@@ -786,11 +788,12 @@ export interface ViewportApi {
    * Open a GROUP session on `groupId` — the ungroup posture
    * (docs/design/group-session.md): direct members surface to the world
    * top level so the ordinary tool set edits them unmodified. Returns
-   * whether it succeeded (a toast already reported a typed refusal, e.g.
+   * whether it succeeded, else the refusal's name (a toast already
+   * reported a typed refusal, e.g.
    * `ExplodeSessionNestedGroup`/`ExplodeSessionOpen`). Unlike an instance
    * entry, a group entry has no silent fallback — every refusal toasts.
    */
-  runOpenGroupSession: (groupId: bigint) => boolean
+  runOpenGroupSession: (groupId: bigint) => EnterOutcome
   /** Close the open GROUP session (the innermost frame must be one),
    *  re-homing survivors and folding in mid-session creations. A no-op
    *  (returns `false`) if the innermost frame isn't a group session. */
@@ -6351,7 +6354,7 @@ export default function Viewport({
      * definition nests, the fallback would be silently wrong — refuse with
      * the toast instead of entering it.
      */
-    function openExplodeSessionOrFallback(instanceId: bigint, fallback: NodeRef): void {
+    function openExplodeSessionOrFallback(instanceId: bigint, fallback: NodeRef): EnterOutcome {
       const componentId = wasmScene.instance_def(instanceId)
       try {
         rememberLinkedSessionLabel(instanceId)
@@ -6362,18 +6365,23 @@ export default function Viewport({
           if (componentId !== undefined && wasmScene.component_has_nested_members(componentId)) {
             // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code, not copy
             handleToast(kernelErrorMessage('NestedComponentInContext', ''), 'NestedComponentInContext')
-            return
+            return { refused: { name: 'nested_component_in_context' } }
           }
-          onEnterContextRef.current?.(fallback)
-          return
+          // No window to take the fallback entry: not a success for nothing.
+          if (onEnterContextRef.current === undefined) {
+            return { refused: { name: 'enter_refused', detail: { code: 'window_not_ready' } } }
+          }
+          onEnterContextRef.current(fallback)
+          return { ok: true }
         }
         const rawMsg = err instanceof Error ? err.message : String(err)
         handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
-        return
+        return { refused: { name: 'enter_refused', detail: { code: code ?? 'Unknown' } } }
       }
       handleSceneRefresh()
       refreshSessionScope()
       sceneRenderer.refreshAllSketches()
+      return { ok: true }
     }
 
     function runCloseExplodeSession(): boolean {
@@ -6409,7 +6417,7 @@ export default function Viewport({
      *  does (scope itself now comes from the kernel's own live
      *  `session_members()` inside `refreshSessionScope`, not an app-side
      *  snapshot — finding 2, group-session.md). */
-    function runOpenGroupSession(groupId: bigint): boolean {
+    function runOpenGroupSession(groupId: bigint): EnterOutcome {
       const label = resolveLabel(wasmScene.group_name(groupId), undefined, 'group', groupTreeIndex(groupId))
       try {
         wasmScene.open_group_session(groupId)
@@ -6417,12 +6425,12 @@ export default function Viewport({
         const code = parseKernelErrorCode(err)
         const rawMsg = err instanceof Error ? err.message : String(err)
         handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
-        return false
+        return { refused: { name: 'enter_refused', detail: { code: code ?? 'Unknown' } } }
       }
       groupSessionInfoRef.current.set(groupId, { label })
       handleSceneRefresh()
       refreshSessionScope()
-      return true
+      return { ok: true }
     }
 
     function runCloseGroupSession(): boolean {

@@ -425,14 +425,17 @@ The recipe for an outliner panel:
 
 1. On a row's double click, call `hew.view.enter` with the row's id, or
    with its occurrence path when the row is a part inside an instance. The
-   answer is `{}`; do not read the result for what opened.
+   answer is `{}`; do not read the result for what opened. If the window
+   declines the entry, the answer is a refusal (`nested_component_in_context`
+   or `enter_refused`) and the window is where it was.
 2. Listen for `context_changed`. Its `stack` lists the open group and
    component frames, outermost first, and `fallback` lists the in-context
    entries (`{kind: "object" | "instance", id}`) inside the innermost frame.
    Draw the breadcrumb from `stack` followed by `fallback`.
 3. Call `hew.query.context` for the same two lists on startup, or after a
-   refusal. A refusal the app shows the person as a message leaves the
-   context unchanged and sends no event.
+   refusal. A refused entry leaves the context as it was. A refused path may
+   still send `context_changed` for the frames it opened and then took back,
+   so draw from the latest event, which shows where the window is.
 4. Handle `gesture_in_progress`: a tool gesture (a Move drag) is under way,
    and the call changes nothing. Try again when it ends. `hew.query.context`
    reports `armed`.
@@ -445,15 +448,17 @@ events. `hew.view.exit` at the top level (no frame and no in-context
 entry open) refuses `nothing_to_exit`; `hew.view.exit_all` there answers
 `{}` and sends no event.
 
-Known gap: the window can decline an entry after the call has answered
-`{}`. A node whose definition nests other groups or components, placed
-unevenly scaled or inside a group, cannot be entered; the person sees a
-message that the nested component can't open for editing there, and no
-`context_changed` follows for that step. Steps of the path before the
-declined one have already been entered and have sent their events, so
-the context can end part of the way down. A plugin that waits for the
-event should time out and call `hew.query.context`, which always answers
-where the person is.
+What a plugin can rely on: the call answers after the window has acted. A
+node whose definition nests other groups or components, placed unevenly
+scaled or inside a group, cannot be entered; the answer is the refusal
+`nested_component_in_context`, and the person sees a message saying so. Any
+other entry the window declines answers `enter_refused`, with the reason in
+`detail.code`. In both cases the window is where it was: steps of a path
+taken before the declined one are taken back. The limit that stays: the
+window's Redo then holds the step that was taken back, and (when the
+window had opened a frame first) any redo history the person had before the
+call is gone. If the window could not be put back,
+`detail.restored` is `false`; call `hew.query.context` to see where it is.
 
 Calls are solitary: a multi-command transaction carrying one is refused
 `-32602`.

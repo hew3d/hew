@@ -104,6 +104,7 @@ function fakeScene() {
         }
         return reply({ result: { format: 'hew' } })
       }
+      if (req.method === 'hew.view.enter') return reply({ result: {} })
       if (req.method === 'hew.event.subscribe') return reply({ result: { subscribed: (req.params as { events: string[] }).events, denied: [] } })
       if (req.method === 'hew.query.scene') return reply({ result: { tree: [{ kind: 'object' }, { kind: 'object' }], generation } })
       if (req.method === 'hew.tag.create') {
@@ -1398,6 +1399,49 @@ describe('the plugin host, at the edges of a command', () => {
       expect((await later).result).toEqual({ greeting: 'Hello, Hew!' })
       expect(h.grantCalls).toEqual([[ID, 'doc_7', '["model.read","model.write"]']])
     })
+  })
+
+  it('answers a window-declined hew.view.enter with the named refusal, after the window acted', async () => {
+    h = harness()
+    const order: string[] = []
+    h.bridge.enterNode = vi.fn(() => {
+      order.push('enter')
+      return { refused: { name: 'nested_component_in_context' } }
+    })
+    h.scene.take_pending_view_directives.mockReturnValueOnce(
+      JSON.stringify([{ kind: 'enter_context', path: [], leaf: { kind: 'instance', id: '9' } }]),
+    )
+    const reply = await call(h, 'hew.view.enter', { id: '9' })
+    expect(order).toEqual(['enter'])
+    expect(reply.result).toBeUndefined()
+    expect(reply.error).toMatchObject({
+      code: -32000,
+      data: { refusal: 'nested_component_in_context', failed_method: 'hew.view.enter' },
+    })
+  })
+
+  it('answers a refusal, not the empty result, when applying a hew.view.enter throws', async () => {
+    h = harness()
+    h.bridge.enterNode = vi.fn(() => {
+      throw new Error('boom')
+    })
+    h.scene.take_pending_view_directives.mockReturnValueOnce(
+      JSON.stringify([{ kind: 'enter_context', path: [], leaf: { kind: 'instance', id: '9' } }]),
+    )
+    const reply = await call(h, 'hew.view.enter', { id: '9' })
+    expect(reply.result).toBeUndefined()
+    expect(reply.error).toMatchObject({ code: -32000, data: { refusal: 'enter_refused' } })
+  })
+
+  it('answers the original reply for a hew.view.enter the window took', async () => {
+    h = harness()
+    h.bridge.enterNode = vi.fn(() => ({ ok: true }) as const)
+    h.scene.take_pending_view_directives.mockReturnValueOnce(
+      JSON.stringify([{ kind: 'enter_context', path: [], leaf: { kind: 'instance', id: '9' } }]),
+    )
+    const reply = await call(h, 'hew.view.enter', { id: '9' })
+    expect(reply).toEqual({ jsonrpc: '2.0', id: 1, result: {} })
+    expect(h.bridge.enterNode).toHaveBeenCalledTimes(1)
   })
 
   it("pushes the viewport's camera before a save, as the live bridge does, but not for a save that is refused or while the document is held", async () => {

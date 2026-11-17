@@ -22,7 +22,9 @@
  * the test fire events directly.
  */
 
-import { describe, expect, it, vi, beforeEach, type Mock } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { afterEach, describe, expect, it, vi, beforeEach, type Mock } from 'vitest'
 
 vi.hoisted(() => {
   Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true })
@@ -51,7 +53,7 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 const emitMock = vi.fn(() => Promise.resolve())
 vi.mock('@tauri-apps/api/event', () => ({ emit: emitMock }))
 
-import { dispatchFrameNow, installLiveBridge, shouldRefreshAfterDispatch, type LiveBridgeDeps } from './liveBridge'
+import { ENTER_REFUSAL_COPY, dispatchFrameNow, installLiveBridge, shouldRefreshAfterDispatch, type LiveBridgeDeps } from './liveBridge'
 import type { Scene } from '../wasm/loader'
 import type { ViewportApi } from '../viewport/Viewport'
 import { getLengthUnit, setLengthUnit, subscribe as subscribeLengthUnit } from '../settings/units'
@@ -1236,6 +1238,251 @@ describe('installLiveBridge', () => {
       ])
     })
 
+    // A successful `hew.view.enter` is answered only after the window has
+    // acted on it, and says so when the window declined.
+    describe('hew.view.enter answers after the window acts', () => {
+      const enterDirective = {
+        kind: 'enter_context',
+        path: [{ kind: 'instance', id: '7' }],
+        leaf: { kind: 'instance', id: '9' },
+      }
+      const replies = (): Record<string, unknown>[] =>
+        emitMock.mock.calls
+          .filter((c) => (c as unknown[])[0] === 'hew://api-reply')
+          .map((c) => JSON.parse(((c as unknown[])[1] as { frame: string }).frame) as Record<string, unknown>)
+      // Dispatches one frame with `directives` left behind, after a first
+      // reply has loaded the event module: the bridge's emits are then
+      // synchronous, so the order they happen in against the app's own
+      // steps is observable through `order`.
+      const dispatchEnter = async (
+        directives: unknown[],
+        method: string,
+        order: string[] = [],
+        armAfterWarmup?: () => void,
+      ): Promise<void> => {
+        installLiveBridge(deps)
+        await flush()
+        fire('hew://api-connection-open', { connId: 3 })
+        scene.api_dispatch.mockReturnValue(tagged('{"jsonrpc":"2.0","id":1,"result":{}}'))
+        scene.take_pending_view_directives.mockReturnValue('[]')
+        fire('hew://api-frame', { connId: 3, frame: '{"jsonrpc":"2.0","id":1,"method":"hew.query.scene"}' })
+        await vi.waitFor(() => expect(emitMock).toHaveBeenCalled())
+        emitMock.mockClear()
+        emitMock.mockImplementation(((event: string) => {
+          if (event === 'hew://api-reply') order.push('reply')
+          return Promise.resolve()
+        }) as never)
+        armAfterWarmup?.()
+        scene.api_dispatch.mockReturnValue(tagged('{"jsonrpc":"2.0","id":2,"result":{}}'))
+        scene.take_pending_view_directives.mockReturnValue(JSON.stringify(directives))
+        fire('hew://api-frame', {
+          connId: 3,
+          frame: `{"jsonrpc":"2.0","id":2,"method":"${method}","params":{}}`,
+        })
+      }
+      afterEach(() => {
+        emitMock.mockImplementation(() => Promise.resolve())
+      })
+
+      it('a declined entry answers the named refusal, sent after the app acted', async () => {
+        const order: string[] = []
+        deps.enterNode = vi.fn(() => {
+          order.push('enter')
+          return { refused: { name: 'nested_component_in_context' } }
+        })
+        await dispatchEnter([enterDirective], 'hew.view.enter', order)
+        expect(order).toEqual(['enter', 'reply'])
+        const [reply] = replies()
+        expect(reply).toMatchObject({
+          id: 2,
+          error: {
+            code: -32000,
+            message: 'refused',
+            data: { refusal: 'nested_component_in_context', failed_index: 0, failed_method: 'hew.view.enter' },
+          },
+        })
+        expect(reply).not.toHaveProperty('result')
+      })
+
+      it('carries the detail of a refusal with a code', async () => {
+        deps.enterNode = vi.fn(() => ({ refused: { name: 'enter_refused', detail: { code: 'ExplodeSessionOpen' } } }))
+        await dispatchEnter([enterDirective], 'hew.view.enter')
+        expect(replies()[0]).toMatchObject({
+          error: { data: { refusal: 'enter_refused', detail: { code: 'ExplodeSessionOpen' } } },
+        })
+      })
+
+      it('puts the window back where it stood, after the step it declined', async () => {
+        const order: string[] = []
+        const restore = vi.fn(() => order.push('restore'))
+        deps.snapshotEntry = vi.fn(() => restore)
+        deps.enterNode = vi
+          .fn()
+          .mockImplementationOnce(() => {
+            order.push('enter 1')
+            return { ok: true }
+          })
+          .mockImplementationOnce(() => {
+            order.push('enter 2')
+            return { refused: { name: 'gesture_in_progress' } }
+          })
+        await dispatchEnter([enterDirective], 'hew.view.enter', order)
+        expect(order).toEqual(['enter 1', 'enter 2', 'restore', 'reply'])
+        expect(replies()[0]).toMatchObject({ error: { data: { refusal: 'gesture_in_progress' } } })
+      })
+
+      it('an entry the window took answers the original empty result, after the app acted', async () => {
+        const order: string[] = []
+        const restore = vi.fn()
+        deps.snapshotEntry = vi.fn(() => restore)
+        deps.enterNode = vi.fn(() => {
+          order.push('enter')
+          return { ok: true } as const
+        })
+        await dispatchEnter([enterDirective], 'hew.view.enter', order)
+        expect(order).toEqual(['enter', 'enter', 'reply'])
+        expect(replies()).toEqual([{ jsonrpc: '2.0', id: 2, result: {} }])
+        expect(restore).not.toHaveBeenCalled()
+      })
+
+      it('the order is unchanged for every other method: its reply goes out before its directives are applied, and is never rewritten', async () => {
+        const order: string[] = []
+        deps.enterNode = vi.fn(() => {
+          order.push('enter')
+          return { refused: { name: 'enter_refused' } }
+        })
+        // The same directive left by a different method: today's order, and
+        // no rewrite of the reply.
+        await dispatchEnter([enterDirective], 'hew.view.exit', order)
+        expect(order[0]).toBe('reply')
+        expect(replies()).toEqual([{ jsonrpc: '2.0', id: 2, result: {} }])
+      })
+
+      it('an entry whose application throws answers a refusal, once, after putting the window back', async () => {
+        const order: string[] = []
+        deps.snapshotEntry = vi.fn(() => () => order.push('restore'))
+        deps.enterNode = vi
+          .fn()
+          .mockImplementationOnce(() => {
+            order.push('enter 1')
+            return { ok: true }
+          })
+          .mockImplementationOnce(() => {
+            order.push('enter 2')
+            throw new Error('boom')
+          })
+        await dispatchEnter([enterDirective], 'hew.view.enter', order)
+        expect(order).toEqual(['enter 1', 'enter 2', 'restore', 'reply'])
+        expect(replies()).toHaveLength(1)
+        expect(replies()[0]).toMatchObject({
+          error: { data: { refusal: 'enter_refused', detail: { code: 'window_error' } } },
+        })
+      })
+
+      it('a throw on the first step is a refusal, not the empty result', async () => {
+        const restore = vi.fn()
+        deps.snapshotEntry = vi.fn(() => restore)
+        deps.enterNode = vi.fn(() => {
+          throw new Error('boom')
+        })
+        await dispatchEnter([enterDirective], 'hew.view.enter')
+        expect(restore).toHaveBeenCalledTimes(1)
+        expect(replies()).toHaveLength(1)
+        expect(replies()[0]).toMatchObject({ error: { data: { detail: { code: 'window_error' } } } })
+      })
+
+      it('a restore that throws is logged and the refusal still goes back, once', async () => {
+        deps.snapshotEntry = vi.fn(() => () => {
+          throw new Error('cannot restore')
+        })
+        deps.enterNode = vi.fn(() => ({ refused: { name: 'nested_component_in_context' } }))
+        await dispatchEnter([enterDirective], 'hew.view.enter')
+        expect(replies()).toHaveLength(1)
+        expect(replies()[0]).toMatchObject({ error: { data: { refusal: 'nested_component_in_context' } } })
+      })
+
+      it('a throw while reading whether the dispatch mutated is a refusal for an enter', async () => {
+        deps.enterNode = vi.fn(() => ({ ok: true }) as const)
+        await dispatchEnter([enterDirective], 'hew.view.enter', [], () =>
+          scene.api_method_mutates.mockImplementation(() => {
+            throw new Error('dead scene')
+          }),
+        )
+        expect(replies()).toHaveLength(1)
+        expect(replies()[0]).toMatchObject({ error: { data: { detail: { code: 'window_error' } } } })
+      })
+
+      it('another method still replies when reading whether it mutated throws', async () => {
+        const order: string[] = []
+        // The read after the reply throws out of the bridge, as it always has;
+        // the point is that the reply had already gone.
+        await expect(
+          dispatchEnter([], 'hew.doc.transact', order, () =>
+            scene.api_method_mutates.mockImplementation(() => {
+              throw new Error('dead scene')
+            }),
+          ),
+        ).rejects.toThrow('dead scene')
+        expect(order).toEqual(['reply'])
+        expect(replies()).toEqual([{ jsonrpc: '2.0', id: 2, result: {} }])
+      })
+
+      it('a restore that throws, or says the window is elsewhere, says so in the refusal', async () => {
+        deps.enterNode = vi.fn(() => ({ refused: { name: 'nested_component_in_context' } }))
+        deps.snapshotEntry = vi.fn(() => () => false)
+        await dispatchEnter([enterDirective], 'hew.view.enter')
+        const reply = replies()[0] as { error: { data: { detail: { restored: boolean }; explanation: string } } }
+        expect(reply.error.data.detail.restored).toBe(false)
+        expect(reply.error.data.explanation).toContain('may not be where it was')
+      })
+
+      it('a refusal with a clean put-back does not claim anything is wrong', async () => {
+        deps.enterNode = vi.fn(() => ({ refused: { name: 'nested_component_in_context' } }))
+        deps.snapshotEntry = vi.fn(() => () => true)
+        await dispatchEnter([enterDirective], 'hew.view.enter')
+        const reply = replies()[0] as { error: { data: { detail: Record<string, unknown>; explanation: string } } }
+        expect(reply.error.data.detail).toEqual({})
+        expect(reply.error.data.explanation).not.toContain('may not be')
+      })
+
+      it('noting where the window stands that throws is a refusal with nothing entered', async () => {
+        const enterNode = vi.fn(() => ({ ok: true }) as const)
+        deps.enterNode = enterNode
+        deps.snapshotEntry = vi.fn(() => {
+          throw new Error('boom')
+        })
+        await dispatchEnter([enterDirective], 'hew.view.enter')
+        expect(enterNode).not.toHaveBeenCalled()
+        expect(replies()).toHaveLength(1)
+        expect(replies()[0]).toMatchObject({ error: { data: { detail: { code: 'window_error' } } } })
+      })
+
+      it('no window to enter in is a refusal, not a success for nothing', async () => {
+        deps.enterNode = undefined
+        await dispatchEnter([enterDirective], 'hew.view.enter')
+        expect(replies()).toHaveLength(1)
+        expect(replies()[0]).toMatchObject({
+          error: { data: { refusal: 'enter_refused', detail: { code: 'window_not_ready' } } },
+        })
+      })
+
+      it('a refused hew.view.enter is not rewritten', async () => {
+        deps.enterNode = vi.fn()
+        installLiveBridge(deps)
+        await flush()
+        fire('hew://api-connection-open', { connId: 3 })
+        scene.api_dispatch.mockReturnValue(
+          tagged('{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"refused","data":{"refusal":"unknown_entity"}}}'),
+        )
+        scene.take_pending_view_directives.mockReturnValue('[]')
+        fire('hew://api-frame', {
+          connId: 3,
+          frame: '{"jsonrpc":"2.0","id":2,"method":"hew.view.enter","params":{}}',
+        })
+        await vi.waitFor(() => expect(replies()[0]).toMatchObject({ error: { data: { refusal: 'unknown_entity' } } }))
+      })
+    })
+
     it('exit_context pops to one crumb fewer, and exit_all_contexts to the top', async () => {
       const setPathDepth = vi.fn()
       deps.setPathDepth = setPathDepth
@@ -1471,6 +1718,97 @@ describe('dispatchFrameNow', () => {
     expect(scene.take_pending_view_directives).toHaveBeenCalledTimes(1)
   })
 
+  it('answers the named refusal when the window declines a hew.view.enter', () => {
+    const order: string[] = []
+    const scene = {
+      set_display_units: vi.fn(),
+      set_ui_gesture_armed: vi.fn(),
+      api_dispatch: vi.fn(() => tagged('{"jsonrpc":"2.0","id":4,"result":{}}')),
+      api_method_mutates: vi.fn(() => true),
+      take_pending_view_directives: vi.fn(() =>
+        JSON.stringify([{ kind: 'enter_context', path: [], leaf: { kind: 'instance', id: '9' } }]),
+      ),
+      drain_events: vi.fn(() => '[]'),
+    }
+    const enterNode = vi.fn(() => {
+      order.push('enter')
+      return { refused: { name: 'nested_component_in_context' } } as const
+    })
+    const reply = dispatchFrameNow(
+      { getScene: () => scene as unknown as Scene, getViewportApi: () => null, reconcile: vi.fn(), enterNode },
+      scene as unknown as Scene,
+      5,
+      '{"jsonrpc":"2.0","id":4,"method":"hew.view.enter","params":{"id":"9"}}',
+    )
+    expect(order).toEqual(['enter'])
+    expect(JSON.parse(reply ?? '')).toMatchObject({
+      id: 4,
+      error: { code: -32000, data: { refusal: 'nested_component_in_context', failed_method: 'hew.view.enter' } },
+    })
+  })
+
+  it('answers a refusal, never the empty result, when the window throws or cannot put itself back', () => {
+    const scene = {
+      set_display_units: vi.fn(),
+      set_ui_gesture_armed: vi.fn(),
+      api_dispatch: vi.fn(() => tagged('{"jsonrpc":"2.0","id":4,"result":{}}')),
+      api_method_mutates: vi.fn(() => true),
+      take_pending_view_directives: vi.fn(() =>
+        JSON.stringify([{ kind: 'enter_context', path: [], leaf: { kind: 'instance', id: '9' } }]),
+      ),
+      drain_events: vi.fn(() => '[]'),
+    }
+    const frame = '{"jsonrpc":"2.0","id":4,"method":"hew.view.enter","params":{"id":"9"}}'
+    const run = (over: object) =>
+      dispatchFrameNow(
+        { getScene: () => scene as unknown as Scene, getViewportApi: () => null, reconcile: vi.fn(), ...over },
+        scene as unknown as Scene,
+        5,
+        frame,
+      )
+    const restore = vi.fn()
+    const thrown = run({
+      enterNode: () => {
+        throw new Error('boom')
+      },
+      snapshotEntry: () => restore,
+    })
+    expect(restore).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(thrown ?? '')).toMatchObject({ id: 4, error: { data: { detail: { code: 'window_error' } } } })
+    const stuck = run({
+      enterNode: () => ({ refused: { name: 'enter_refused' } }) as const,
+      snapshotEntry: () => () => {
+        throw new Error('cannot restore')
+      },
+    })
+    expect(JSON.parse(stuck ?? '')).toMatchObject({ error: { data: { refusal: 'enter_refused' } } })
+  })
+
+  it('answers the original reply when the window takes the entry', () => {
+    const scene = {
+      set_display_units: vi.fn(),
+      set_ui_gesture_armed: vi.fn(),
+      api_dispatch: vi.fn(() => tagged('{"jsonrpc":"2.0","id":4,"result":{}}')),
+      api_method_mutates: vi.fn(() => true),
+      take_pending_view_directives: vi.fn(() =>
+        JSON.stringify([{ kind: 'enter_context', path: [], leaf: { kind: 'instance', id: '9' } }]),
+      ),
+      drain_events: vi.fn(() => '[]'),
+    }
+    const reply = dispatchFrameNow(
+      {
+        getScene: () => scene as unknown as Scene,
+        getViewportApi: () => null,
+        reconcile: vi.fn(),
+        enterNode: vi.fn(() => ({ ok: true }) as const),
+      },
+      scene as unknown as Scene,
+      5,
+      '{"jsonrpc":"2.0","id":4,"method":"hew.view.enter","params":{"id":"9"}}',
+    )
+    expect(reply).toBe('{"jsonrpc":"2.0","id":4,"result":{}}')
+  })
+
   it('does not refresh after a dry run', () => {
     const reconcile = vi.fn()
     const reconcileVisibility = vi.fn()
@@ -1501,5 +1839,15 @@ describe('dispatchFrameNow', () => {
     expect(reply).toContain('"dry_run":true')
     expect(reconcile).not.toHaveBeenCalled()
     expect(reconcileVisibility).not.toHaveBeenCalled()
+  })
+})
+
+describe('the explanations a refused entry carries', () => {
+  it('say the same as the app\'s message table and the kernel command', async () => {
+    const { kernelErrorMessage } = await import('../kernelErrors')
+    expect(ENTER_REFUSAL_COPY.nested_component_in_context).toBe(kernelErrorMessage('NestedComponentInContext', ''))
+    expect(ENTER_REFUSAL_COPY.enter_refused).toBe(kernelErrorMessage('EnterRefused', ''))
+    const rust = readFileSync(resolve(process.cwd(), '../crates/api/src/commands/view.rs'), 'utf8')
+    expect(rust).toContain(`"gesture_in_progress",\n            "${ENTER_REFUSAL_COPY.gesture_in_progress}"`)
   })
 })

@@ -3184,7 +3184,7 @@ describe('App — enterNode entry convergence (adversarial-review finding 1)', (
     await renderAndLoad()
     const { apiRef, onSessionChange } = latestViewportProps()
     const runCloseInnermostSession = vi.fn(() => true)
-    const runOpenGroupSession = vi.fn(() => true)
+    const runOpenGroupSession = vi.fn(() => ({ ok: true }))
     const runOpenExplodeSessionOrFallback = vi.fn()
     act(() => {
       if (apiRef !== undefined) {
@@ -3224,7 +3224,7 @@ describe('App — enterNode entry convergence (adversarial-review finding 1)', (
     await renderAndLoad()
     const { apiRef, onSessionChange } = latestViewportProps()
     const runCloseInnermostSession = vi.fn(() => true)
-    const runOpenGroupSession = vi.fn(() => true)
+    const runOpenGroupSession = vi.fn(() => ({ ok: true }))
     const runOpenExplodeSessionOrFallback = vi.fn()
     act(() => {
       if (apiRef !== undefined) {
@@ -3269,7 +3269,7 @@ describe('App — enterNode entry convergence (adversarial-review finding 1)', (
       await renderAndLoad()
       const { apiRef, onSessionChange } = latestViewportProps()
       const runCloseInnermostSession = vi.fn(() => true)
-      const runOpenGroupSession = vi.fn(() => true)
+      const runOpenGroupSession = vi.fn(() => ({ ok: true }))
       act(() => {
         if (apiRef !== undefined) {
           apiRef.current = {
@@ -3309,7 +3309,7 @@ describe('App — enterNode entry convergence (adversarial-review finding 1)', (
           sessionMembers: () => [{ kind: 'object', id: 1n }],
           hasArmedGesture: () => true,
           runCloseInnermostSession,
-          runOpenGroupSession: vi.fn(() => true),
+          runOpenGroupSession: vi.fn(() => ({ ok: true })),
           runOpenExplodeSessionOrFallback: vi.fn(),
         }
       }
@@ -3509,7 +3509,7 @@ describe('App — handleSessionChange selection ordering (adversarial-review fin
             // trailing `setSelectedIds([target])`.
             runOpenGroupSession: (id: bigint) => {
               latestViewportProps().onSessionChange?.([{ node: { kind: 'group', id }, label: 'Group 1' }])
-              return true
+              return { ok: true }
             },
             runOpenExplodeSessionOrFallback: vi.fn(),
           }
@@ -3554,7 +3554,7 @@ describe('App — armed-gesture guard on breadcrumb close paths (adversarial-rev
           sessionMembers: () => null,
           hasArmedGesture: () => armed,
           runCloseInnermostSession,
-          runOpenGroupSession: vi.fn(() => true),
+          runOpenGroupSession: vi.fn(() => ({ ok: true })),
           runOpenExplodeSessionOrFallback: vi.fn(),
         }
       }
@@ -3586,7 +3586,7 @@ describe('App — armed-gesture guard on breadcrumb close paths (adversarial-rev
           sessionMembers: () => null,
           hasArmedGesture: () => armed,
           runCloseInnermostSession,
-          runOpenGroupSession: vi.fn(() => true),
+          runOpenGroupSession: vi.fn(() => ({ ok: true })),
           runOpenExplodeSessionOrFallback: vi.fn(),
         }
       }
@@ -4841,7 +4841,7 @@ describe('App — the bus enters and leaves the user context (hew.view.enter / e
   /** A viewport API whose sessions are real enough to follow: `open` and
    *  `close` keep a stack the way the kernel's would and report it through
    *  `onSessionChange`, as the real Viewport does. */
-  function sessionViewport(opts: { armed?: boolean } = {}) {
+  function sessionViewport(opts: { armed?: boolean; refuseInstances?: boolean; refuseGroups?: boolean; history?: { depth: number } } = {}) {
     let armed = opts.armed === true
     let stack: { kind: string; id: bigint }[] = []
     const report = () => {
@@ -4850,9 +4850,13 @@ describe('App — the bus enters and leaves the user context (hew.view.enter / e
       )
     }
     const runOpenGroupSession = vi.fn((id: bigint) => {
+      // The kernel declines the group (a toast in the real window).
+      if (opts.refuseGroups === true) return { refused: { name: 'enter_refused', detail: { code: 'ExplodeSessionOpen' } } }
       stack = [...stack, { kind: 'group', id }]
+      // Opening a session is a history step.
+      if (opts.history !== undefined) opts.history.depth++
       report()
-      return true
+      return { ok: true }
     })
     const runCloseInnermostSession = vi.fn(() => {
       stack = stack.slice(0, -1)
@@ -4863,9 +4867,20 @@ describe('App — the bus enters and leaves the user context (hew.view.enter / e
     // group elsewhere): the fallback pushes it as an in-context entry through
     // the viewport's own callback.
     const runOpenExplodeSessionOrFallback = vi.fn((_id: bigint, frame: { kind: string; id: bigint }) => {
+      // A nested definition on an instance no session can take: the window
+      // toasts and enters nothing.
+      if (opts.refuseInstances === true) return { refused: { name: 'nested_component_in_context' } }
       latestViewportProps().onEnterContext?.(frame)
+      return { ok: true }
+    })
+    // The app's own Undo: takes back the last step, which closes the session.
+    const runUndo = vi.fn(() => {
+      if (opts.history !== undefined) opts.history.depth--
+      stack = stack.slice(0, -1)
+      report()
     })
     const api = {
+      runUndo,
       sessionStack: () => [...stack],
       sessionMembers: () => null,
       hasArmedGesture: () => armed,
@@ -4878,6 +4893,7 @@ describe('App — the bus enters and leaves the user context (hew.view.enter / e
       if (ref !== undefined) ref.current = api
     })
     return {
+      runUndo,
       runOpenGroupSession,
       runCloseInnermostSession,
       runOpenExplodeSessionOrFallback,
@@ -4915,6 +4931,74 @@ describe('App — the bus enters and leaves the user context (hew.view.enter / e
       expect(window.__hew_test!.getSelection()).toEqual([{ kind: 'instance', id: '60' }])
       // The Scene hears the fallback entry in the same call stack.
       expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[{"kind":"instance","id":"60"}]')
+    })
+  })
+
+  it('an entry the window declines part way is refused, and the group it opened closes again', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runOpenGroupSession, runCloseInnermostSession } = sessionViewport({ refuseInstances: true })
+      const { applyPendingViewDirectives, directiveTargets } = await import('./api/liveBridge')
+      const deps = liveBridge.deps as Parameters<typeof directiveTargets>[0]
+      let refused: unknown
+      act(() => {
+        refused = applyPendingViewDirectives(enterMirrored, directiveTargets(deps))
+      })
+      expect(runOpenGroupSession).toHaveBeenCalledWith(50n)
+      expect(refused).toEqual({ name: 'nested_component_in_context' })
+      // Back where it began: the group the walk opened is closed, nothing is
+      // selected, and the Scene hears no in-context entry.
+      expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+      expect(window.__hew_test!.getSelection()).toEqual([])
+      expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[]')
+    })
+  })
+
+  it('a refused entry takes its steps back with Undo, not with a closing step of its own', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const history = { depth: 5 }
+      const priorDepth = mockScene.undo_depth
+      const priorCan = mockScene.can_scene_undo
+      mockScene.undo_depth = () => history.depth
+      mockScene.can_scene_undo = () => history.depth > 0
+      try {
+        const { runUndo, runCloseInnermostSession } = sessionViewport({ refuseInstances: true, history })
+        const { applyPendingViewDirectives, directiveTargets } = await import('./api/liveBridge')
+        const deps = liveBridge.deps as Parameters<typeof directiveTargets>[0]
+        act(() => {
+          applyPendingViewDirectives(enterMirrored, directiveTargets(deps))
+        })
+        // One step taken (the group's open), one Undo to take it back: the
+        // history is the depth it was, and nothing was closed on top of it.
+        expect(runUndo).toHaveBeenCalledTimes(1)
+        expect(runCloseInnermostSession).not.toHaveBeenCalled()
+        expect(history.depth).toBe(5)
+        expect(window.__hew_test!.getSelection()).toEqual([])
+      } finally {
+        mockScene.undo_depth = priorDepth
+        mockScene.can_scene_undo = priorCan
+      }
+    })
+  })
+
+  it("the Outliner's entry still walks on past a frame the window declines, as it always did", async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runOpenGroupSession, runOpenExplodeSessionOrFallback } = sessionViewport({ refuseGroups: true })
+      const deps = liveBridge.deps as { enterNode: (n: { kind: 'instance'; id: bigint }) => unknown }
+      let outcome: unknown
+      act(() => {
+        outcome = deps.enterNode({ kind: 'instance', id: 60n })
+      })
+      // The group was declined, and the instance step, the fallback entry and
+      // the selection still happened: nothing was undone for a person.
+      expect(runOpenGroupSession).toHaveBeenCalledWith(50n)
+      expect(runOpenExplodeSessionOrFallback).toHaveBeenCalledWith(60n, { kind: 'instance', id: 60n })
+      expect(window.__hew_test!.getSelection()).toEqual([{ kind: 'instance', id: '60' }])
+      expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[{"kind":"instance","id":"60"}]')
+      // What the bus is told is the first refusal.
+      expect(outcome).toEqual({ refused: { name: 'enter_refused', detail: { code: 'ExplodeSessionOpen' } } })
     })
   })
 

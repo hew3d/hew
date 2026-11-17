@@ -4558,6 +4558,10 @@ msgid "Hew couldn't make this change without damaging the object, so nothing cha
 msgstr "Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug."
 
 #: src/kernelErrors.ts
+msgid "Hew couldn't open that for editing."
+msgstr "Hew couldn't open that for editing."
+
+#: src/kernelErrors.ts
 msgid "Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug."
 msgstr "Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug."
 

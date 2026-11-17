@@ -410,6 +410,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "NestedComponentInContext" => {
             "This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts."
         }
+        "EnterRefused" => "Hew couldn't open that for editing.",
         "NothingToUndo" => "Nothing to undo.",
         "NothingToRedo" => "Nothing to redo.",
         "InverseFailed" => {

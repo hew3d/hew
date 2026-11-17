@@ -789,6 +789,8 @@ export interface HewTestHarness {
 
   /** True if there is a document action to redo. */
   canRedo(): boolean
+  /** The redo stack's depth. */
+  getRedoDepth(): number
 
   /**
    * Set the active display/parse length unit ( VCB). `format` is one
@@ -2547,6 +2549,7 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     canUndo: () => query((s) => s.can_scene_undo()),
     getUndoDepth: () => query((s) => s.undo_depth()),
     canRedo: () => query((s) => s.can_scene_redo()),
+    getRedoDepth: () => query((s) => s.redo_depth()),
 
     setLengthUnit: (format) => setLengthUnit(format as LengthFormat),
     getLengthUnit: () => getLengthUnit(),

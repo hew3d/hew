@@ -845,7 +845,9 @@ The bus can drive the same entry convergence the Outliner uses
 (`hew.view.enter`, `exit`, and `exit_all`, HEW_API.md §6.3): the app opens
 the same session frames level by level, falls back to the in-context entry
 for the same instances, and reports the result as `context_changed` with
-`stack` and `fallback`.
+`stack` and `fallback`. The call answers after the window has acted: `{}`
+when it entered, or a refusal naming why when the window declined, with the
+window put back where it was.
 
 The API's path forms use the same through-the-pose model with no session
 at all: a move, turn, scale, copy, boolean, or slice addressed to a

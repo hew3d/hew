@@ -38,9 +38,12 @@ import {
 import {
   afterAbort,
   afterDispatch,
+  afterEnterDispatch,
   beforeDispatch,
+  enterRefusedReply,
   frameMethod,
   refreshesAfter,
+  refusedFrame,
   completeForwardWith,
   type LiveBridgeDeps,
 } from '../api/liveBridge'
@@ -287,32 +290,14 @@ const refusedBusy = (reply: string): boolean => {
  * `forward_ended`, nothing run. Undefined for a notification.
  */
 export function forwardEndedReply(frame: string): string | undefined {
-  let id: unknown = null
-  let method = ''
-  try {
-    const parsed = JSON.parse(frame) as { id?: unknown; method?: unknown }
-    if (typeof parsed !== 'object' || parsed === null) return undefined
-    if (!('id' in parsed)) return undefined
-    id = parsed.id
-    if (typeof parsed.method === 'string') method = parsed.method.slice(0, 256)
-  } catch {
-    id = null
-  }
-  return JSON.stringify({
-    jsonrpc: '2.0',
-    id,
-    error: {
-      code: -32000,
-      message: 'refused',
-      data: {
-        refusal: FORWARD_ENDED,
-        failed_index: 0,
-        failed_method: method,
-        detail: {},
-        explanation: 'The command this call was made for has already ended, so the call was not run.',
-      },
-    },
-  })
+  const method = frameMethod(frame)?.slice(0, 256) ?? ''
+  return refusedFrame(
+    frame,
+    method,
+    FORWARD_ENDED,
+    'The command this call was made for has already ended, so the call was not run.',
+    {},
+  )
 }
 
 interface OpenForward {
@@ -519,9 +504,14 @@ export function createPluginHost(
     const raw = stamp === undefined ? scene.api_dispatch(conn, frame) : scene.api_dispatch_in_forward(conn, BigInt(stamp), frame)
     const result = parseDispatch(raw)
     if (result.kind === 'reply') {
-      const mutated = result.dryRun !== true && refreshesAfter(scene, method, result.frame)
-      afterDispatch(env.bridge, scene, result.frame, mutated)
+      const mutatedNow = (): boolean => result.dryRun !== true && refreshesAfter(scene, method, result.frame)
+      const declined =
+        method === 'hew.view.enter' && replySucceeded(result.frame)
+          ? afterEnterDispatch(env.bridge, scene, result.frame, mutatedNow)
+          : afterDispatch(env.bridge, scene, result.frame, mutatedNow())
       pumpEvents(scene)
+      // A window that declined an entry the kernel accepted answers the refusal.
+      if (declined !== undefined) return { ...result, frame: enterRefusedReply(frame, declined) ?? result.frame }
     }
     return result
   }
@@ -559,6 +549,7 @@ export function createPluginHost(
       let frame: string
       if ('ok' in answer) {
         frame = completeForwardWith(scene, conn, token, fwd.request_id, answer)
+        // A forward answers a plugin command; `hew.view.enter` is host-served and solitary, so a declined entry never reaches this reply.
         afterDispatch(env.bridge, scene, frame, committed)
       } else if (compound !== null) {
         abortCompound(scene, compound)

@@ -869,25 +869,41 @@ entry for an instance a session cannot take (unevenly scaled, or placed in
 a group elsewhere; a mirrored instance opens a session like any other),
 and selects the target. `hew.view.exit` pops the innermost entry, a
 fallback entry or a session frame; `hew.view.exit_all`
-goes back to the top level. Each answers `{}`: the outcome is the
-`context_changed` event, which carries the new `stack` and the `fallback`
-entries (`{kind: "object" | "instance", id}`, outermost first, inside the
-innermost frame). Entering through N session frames sends N events, and
-`exit_all` one per frame closed; `exit` at the top level refuses
-`nothing_to_exit` while `exit_all` there answers `{}` with no event. A
-refusal the app shows the person as a toast sends no event for that
-step, and the call has already answered `{}` (an entry the window
-declines because the definition nests other groups or components, on an
-unevenly scaled or group-placed instance, is one). Steps of the path
-before the declined one have already been entered and have sent their
-events, so the context can end part of the way down;
-`hew.query.context` afterward reports the truth. While a tool gesture is armed in the window (a Move
-drag in flight) all three refuse `gesture_in_progress`. A call inside a
-multi-command transaction is `-32602`. Each is `mutates_document: true`,
-because opening or closing a session is a history step the window
-resyncs after, but none is a replayable kernel call. Only closing a
-session pushes an undo entry: an exit that pops just a fallback entry
-changes the window's context and nothing in the history.
+goes back to the top level. When the window takes the call each answers
+`{}`, and the outcome is the `context_changed` event, which carries the new
+`stack` and the `fallback` entries (`{kind: "object" | "instance", id}`,
+outermost first, inside the innermost frame). Entering through N session
+frames sends N events, and `exit_all` one per frame closed; `exit` at the
+top level refuses `nothing_to_exit` while `exit_all` there answers `{}`
+with no event.
+
+`hew.view.enter` answers after the window has acted on it, so an entry the
+window declines after the kernel accepted it is the call's own refusal, not
+`{}`:
+
+- `nested_component_in_context`: the definition nests other groups or
+  components and sits on an unevenly scaled or group-placed instance.
+- `gesture_in_progress`: a tool gesture was armed by the time the window
+  acted.
+- `enter_refused`: any other entry the window declines. `detail.code` is
+  the kernel's code when the kernel refused to open a session, and one of
+  the window's own codes otherwise: `window_not_ready` (no window to enter
+  in) or `window_error` (applying the entry failed).
+
+A declined entry leaves the window as it was. Steps of a path taken before
+the declined one are taken back with the window's own Undo, so the undo
+depth is what it was; the frames they opened may each send a
+`context_changed` event, and the last event shows where the window is. A
+Redo would reopen what was taken back, and any redo history the person had
+before is gone. If the window could not be put back, `detail.restored` is
+`false` and the explanation says so; `hew.query.context` reports where it
+is. While a tool gesture is armed in the window (a Move drag in flight)
+all three refuse `gesture_in_progress`. A call inside a multi-command
+transaction is `-32602`. Each is `mutates_document: true`, because opening
+or closing a session is a history step the window resyncs after, but none
+is a replayable kernel call. Opening and closing a session each push an
+undo entry; an exit that pops just a fallback entry changes the window's
+context and nothing in the history.
 
 ### 6.4 What a transaction may contain
 
@@ -2244,7 +2260,7 @@ transaction with another command.
 | `hew.view.isolate` | host | `{ids}`: 1 to 10 000 node ids or `{object, instance}` pairs | `{isolated}` | `unknown_entity`, `host_capability_missing` |
 | `hew.view.clear_isolation` | host | `{}` | `{}` | `host_capability_missing` |
 | `hew.view.zoom_to` | host | `{ids, padding?}`: `padding` from 0 to 2, default 0.1 | `{min, max}`: the framed box before padding | `unknown_entity`, `nothing_to_frame`, `host_capability_missing` |
-| `hew.view.enter` | host, solitary | `{id}` or `{path}`, exactly one: a world object, group, or instance, or an occurrence path of instances whose last element, an instance or a member object, is the node to enter | `{}`; the outcome arrives as `context_changed` | `unknown_entity`, `unknown_occurrence`, `gesture_in_progress`, `host_capability_missing`; `-32602` for a sketch, guide, annotation, material, tag, or component target |
+| `hew.view.enter` | host, solitary | `{id}` or `{path}`, exactly one: a world object, group, or instance, or an occurrence path of instances whose last element, an instance or a member object, is the node to enter | `{}`; the outcome arrives as `context_changed` | `unknown_entity`, `unknown_occurrence`, `gesture_in_progress`, `nested_component_in_context`, `enter_refused`, `host_capability_missing`; `-32602` for a sketch, guide, annotation, material, tag, or component target |
 | `hew.view.exit` | host, solitary | `{}` | `{}` | `gesture_in_progress`, `nothing_to_exit`, `host_capability_missing` |
 | `hew.view.exit_all` | host, solitary | `{}` | `{}` | `gesture_in_progress`, `host_capability_missing` |
 

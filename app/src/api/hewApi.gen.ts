@@ -2835,9 +2835,9 @@ export interface ViewClearIsolationParams {}
 export interface ViewClearIsolationResult {}
 
 /**
- * `hew.view.enter` (v1) — Converge the user's window onto a node, opening group and component sessions level by level and falling back to the in-context entry for an instance a session cannot take (unevenly scaled, or placed in a group elsewhere; a mirrored instance opens a session like any other), then select it. Give exactly one of id (an object, group, or instance in the world) or path (instances outermost first, ending at the leaf). The result is empty; the outcome arrives as context_changed, and hew.query.context reports the stack and fallback afterward. Acts on the user's window, so it is refused inside a transaction; distinct from hew.context.enter, which scopes a plugin's own edits.
+ * `hew.view.enter` (v1) — Converge the user's window onto a node, opening group and component sessions level by level and falling back to the in-context entry for an instance a session cannot take (unevenly scaled, or placed in a group elsewhere; a mirrored instance opens a session like any other), then select it. Give exactly one of id (an object, group, or instance in the world) or path (instances outermost first, ending at the leaf). The call answers after the window has acted on it: an empty result when it entered (the outcome arrives as context_changed, and hew.query.context reports the stack and fallback afterward), or a refusal naming why when the window declined, with the window put back where it was. Acts on the user's window, so it is refused inside a transaction; distinct from hew.context.enter, which scopes a plugin's own edits.
  * Tier: Standard · Class: solitary · Served: host
- * Refusals: unknown_entity, unknown_occurrence, gesture_in_progress, host_capability_missing
+ * Refusals: unknown_entity, unknown_occurrence, gesture_in_progress, nested_component_in_context, enter_refused, host_capability_missing
  */
 export interface ViewEnterParams {
   /** a world object, group, or instance */

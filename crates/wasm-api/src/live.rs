@@ -335,7 +335,9 @@ pub enum ViewDirective {
     /// `hew.view.enter`'s effect: the bridge converges the user's window on
     /// `leaf` the way an Outliner double click does, calling the app's
     /// `enterNode` for each instance of `path` (outermost first) and then
-    /// for `leaf`. The outcome is `context_changed`, not a reply.
+    /// for `leaf`. The kernel's reply is `{}`; the page answers the call
+    /// itself once the window has acted, with a refusal when the window
+    /// declined, and the outcome otherwise arrives as `context_changed`.
     EnterContext { path: Vec<UiNode>, leaf: UiNode },
     /// `hew.view.exit`'s effect: the app pops its innermost entry or
     /// session frame (`setPathDepth(total - 1)`).
