@@ -4022,7 +4022,14 @@ fn apply_doc_op(
                 stops: None,
                 handles: Vec::new(),
             };
-            let _ = doc.blend_edges(oid, &spec);
+            // A typed refusal is fine; `BlendDegenerate` is the engine
+            // building a patch that did not stitch, and is a defect.
+            if let Err(e) = doc.blend_edges(oid, &spec) {
+                assert!(
+                    !matches!(e, DocumentError::Blend(kernel::BlendError::BlendDegenerate)),
+                    "step {step}: the blend built invalid topology: {e:?}"
+                );
+            }
         }
         DocOp::RemoveBlend { obj_sel, pick } => {
             let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
@@ -5631,6 +5638,49 @@ fn merge_of_a_clipped_tangent_disc_unwinds() {
         },
     ];
     run_doc_case(seeds, ops).expect("the clipped-disc merge unwinds and replays");
+}
+
+/// Two imprints, a strip flush between them, and its line deleted (a merge
+/// across two runs), then a blend of any edge at any of several sizes: the
+/// sweep never gets `BlendDegenerate` (the harness's Blend arm fails on it)
+/// and every result is a valid solid. Where a size would carry the blend
+/// past the merged face's holes the engine names the imprint as the limit.
+#[test]
+fn a_blend_after_a_merge_across_two_runs_builds_or_names_its_limit() {
+    for top in [false, true] {
+        for ts in [(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)] {
+            for pick in 0..24usize {
+                for radius_frac in [0.05, 0.4, 0.8, 1.0] {
+                    let seeds: Vec<BoxSeed> = vec![
+                        ((0.0, 0.0), (1.0, 1.0), 0.5),
+                        ((0.0, 0.0), (1.0, 1.0), 0.5),
+                        (
+                            (2.867415909918617, 0.0),
+                            (2.57007613472689, 1.6372791093210675),
+                            0.5,
+                        ),
+                    ];
+                    let ops = vec![
+                        DocOp::MultiRunMerge {
+                            obj_sel: 1681045913922865655,
+                            face_sel: 9004898613229186253,
+                            ts,
+                            top,
+                        },
+                        DocOp::Blend {
+                            obj_sel: 6724422547958988620,
+                            pick,
+                            radius_frac,
+                            logical: pick % 2 == 0,
+                        },
+                    ];
+                    run_doc_case(seeds, ops).unwrap_or_else(|e| {
+                        panic!("top={top} ts={ts:?} pick={pick} frac={radius_frac}: {e:?}")
+                    });
+                }
+            }
+        }
+    }
 }
 
 proptest! {
