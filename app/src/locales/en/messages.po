@@ -1184,6 +1184,10 @@ msgstr "A mirrored copy can't be made while you're editing inside a component. C
 #~ msgid "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
 #~ msgstr "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
 
+#: src/updater/UpdateWindow.tsx
+msgid "A new version of Hew is available!"
+msgstr "A new version of Hew is available!"
+
 #: src/kernelErrors.ts
 msgid "A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis."
 msgstr "A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis."
@@ -1390,6 +1394,10 @@ msgstr "All items"
 msgid "All of them are solid."
 msgstr "All of them are solid."
 
+#: src/updater/UpdateWindow.tsx
+msgid "All release notes ↗"
+msgstr "All release notes ↗"
+
 #: src/io/tauriFileHost.ts
 #: src/io/webFileHost.ts
 msgid "All supported files"
@@ -1574,6 +1582,15 @@ msgstr "Auto"
 #: src/settings/ThemePane.tsx
 msgid "Auto follows your OS's light/dark appearance setting."
 msgstr "Auto follows your OS's light/dark appearance setting."
+
+#: src/settings/AdvancedPane.tsx
+#: src/settings/FluentSettingsPage.tsx
+msgid "Automatically download and install updates"
+msgstr "Automatically download and install updates"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Automatically download and install updates in the future"
+msgstr "Automatically download and install updates in the future"
 
 #: src/io/docFormat.ts
 msgid "Avoid features older SketchUp versions cannot open"
@@ -2307,6 +2324,7 @@ msgstr "clip"
 #: src/panels/ReportBugDialog.tsx
 #: src/panels/SentReportsDialog.tsx
 #: src/TitleBar.tsx
+#: src/updater/UpdateWindow.tsx
 msgid "Close"
 msgstr "Close"
 
@@ -2370,6 +2388,10 @@ msgstr "Closed"
 msgid "Closer than"
 msgstr "Closer than"
 
+#: src/updater/UpdateWindow.tsx
+msgid "Closing your documents…"
+msgstr "Closing your documents…"
+
 #: src/palette/registry.ts
 msgid "cnc"
 msgstr "cnc"
@@ -2419,8 +2441,8 @@ msgid "Combining…"
 msgstr "Combining…"
 
 #: src/i18n/nativeMenu.ts
-msgid "Command copied"
-msgstr "Command copied"
+#~ msgid "Command copied"
+#~ msgstr "Command copied"
 
 #: src/palette/CommandPalette.tsx
 msgid "Command palette"
@@ -2540,6 +2562,7 @@ msgstr "Coordinate system"
 #: src/ErrorBoundary.tsx
 #: src/log/LogPanel.tsx
 #: src/panels/ReportBugDialog.tsx
+#: src/updater/UpdateWindow.tsx
 msgid "Copied"
 msgstr "Copied"
 
@@ -2600,7 +2623,7 @@ msgstr "Copy a face or profile's boundary inward or outward at a set distance."
 msgid "Copy all log entries to the clipboard"
 msgstr "Copy all log entries to the clipboard"
 
-#: src/i18n/nativeMenu.ts
+#: src/updater/UpdateWindow.tsx
 msgid "Copy Command"
 msgstr "Copy Command"
 
@@ -2697,6 +2720,10 @@ msgstr "Couldn’t compress this file."
 #: src/log/reportBundle.ts
 msgid "Couldn’t compress this report. Save it to a file instead."
 msgstr "Couldn’t compress this report. Save it to a file instead."
+
+#: src/updater/UpdateWindow.tsx
+msgid "Couldn’t copy the command. Select it above and copy it, or click Update Help."
+msgstr "Couldn’t copy the command. Select it above and copy it, or click Update Help."
 
 #: src/tools/DimensionTool.ts
 msgid "Couldn't create dimension: {reason}"
@@ -3408,10 +3435,18 @@ msgstr "double-tap zooms to part"
 msgid "Download Diagnostic Log…"
 msgstr "Download Diagnostic Log…"
 
+#: src/updater/UpdateWindow.tsx
+msgid "Download progress"
+msgstr "Download progress"
+
 #: src/panels/library/LibraryDetailPane.tsx
 #: src/panels/library/LibraryMenu.tsx
 msgid "Download…"
 msgstr "Download…"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Downloading Hew {version}…"
+msgstr "Downloading Hew {version}…"
 
 #: src/io/savePanel.ts
 msgid "Draft (24 segments per turn)"
@@ -4534,16 +4569,44 @@ msgid "Hew — kernel load error"
 msgstr "Hew — kernel load error"
 
 #: src/i18n/nativeMenu.ts
-msgid "Hew {version} is available — you have {current}."
-msgstr "Hew {version} is available — you have {current}."
+#~ msgid "Hew {version} is available — you have {current}."
+#~ msgstr "Hew {version} is available — you have {current}."
 
 #: src/i18n/nativeMenu.ts
-msgid "Hew {version} is available — you have {current}.\n"
-"\n"
-"Download and install it now?"
-msgstr "Hew {version} is available — you have {current}.\n"
-"\n"
-"Download and install it now?"
+#~ msgid "Hew {version} is available — you have {current}.\n"
+#~ "\n"
+#~ "Download and install it now?"
+#~ msgstr "Hew {version} is available — you have {current}.\n"
+#~ "\n"
+#~ "Download and install it now?"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Hew {version} is available — you have {currentVersion}."
+msgstr "Hew {version} is available — you have {currentVersion}."
+
+#: src/updater/UpdateWindow.tsx
+msgid "Hew {version} is installed"
+msgstr "Hew {version} is installed"
+
+#: src/updater/UpdateReadyBar.tsx
+msgid "Hew {version} is installed and will open the next time you start Hew."
+msgstr "Hew {version} is installed and will open the next time you start Hew."
+
+#: src/updater/UpdateWindow.tsx
+msgid "Hew {version} is installed. Restart now to use it?"
+msgstr "Hew {version} is installed. Restart now to use it?"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Hew {version} is now available. You have {currentVersion}. Would you like to update now?"
+msgstr "Hew {version} is now available. You have {currentVersion}. Would you like to update now?"
+
+#: src/updater/UpdateReadyBar.tsx
+msgid "Hew {version} is ready to install. Hew will close and reopen."
+msgstr "Hew {version} is ready to install. Hew will close and reopen."
+
+#: src/updater/UpdateWindow.tsx
+msgid "Hew {version} is ready to install. Hew will close to finish installing."
+msgstr "Hew {version} is ready to install. Hew will close to finish installing."
 
 #: src/shop/ShopApp.tsx
 msgid "Hew Beta"
@@ -4698,6 +4761,10 @@ msgstr "Hew tried to turn this dimension or label into a different kind of entit
 #: src/kernelErrors.ts
 msgid "Hew tries to stand the profile up automatically, but couldn't square it to the path here. Move the profile closer to where the sweep should start — on a drawn circle, near the rim, in line with the circle's center."
 msgstr "Hew tries to stand the profile up automatically, but couldn't square it to the path here. Move the profile closer to where the sweep should start — on a drawn circle, near the rim, in line with the circle's center."
+
+#: src/updater/UpdateWindow.tsx
+msgid "Hew will close to finish installing."
+msgstr "Hew will close to finish installing."
 
 #: src/panels/MakeSolidSketches.tsx
 msgid "Hew will turn the closed shapes you selected into solids."
@@ -5093,8 +5160,25 @@ msgid "inspector"
 msgstr "inspector"
 
 #: src/i18n/nativeMenu.ts
-msgid "Install"
-msgstr "Install"
+#~ msgid "Install"
+#~ msgstr "Install"
+
+#: src/updater/UpdateReadyBar.tsx
+#: src/updater/UpdateWindow.tsx
+msgid "Install and Restart"
+msgstr "Install and Restart"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Install cancelled. Hew {version} is downloaded and ready when you are."
+msgstr "Install cancelled. Hew {version} is downloaded and ready when you are."
+
+#: src/updater/UpdateWindow.tsx
+msgid "Install Update"
+msgstr "Install Update"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Installing Hew {version}…"
+msgstr "Installing Hew {version}…"
 
 #: src/palette/registry.ts
 msgid "instance"
@@ -5328,8 +5412,9 @@ msgstr "Last import"
 msgid "Last steps:"
 msgstr "Last steps:"
 
-#: src/i18n/nativeMenu.ts
 #: src/panels/FollowNoticeBar.tsx
+#: src/updater/UpdateReadyBar.tsx
+#: src/updater/UpdateWindow.tsx
 msgid "Later"
 msgstr "Later"
 
@@ -6924,7 +7009,7 @@ msgstr "Open as Document"
 msgid "Open Complete"
 msgstr "Open Complete"
 
-#: src/i18n/nativeMenu.ts
+#: src/updater/UpdateWindow.tsx
 msgid "Open Download Page"
 msgstr "Open Download Page"
 
@@ -7997,6 +8082,18 @@ msgstr "Release blue plane  ↑"
 msgid "Release green plane  ←"
 msgstr "Release green plane  ←"
 
+#: src/updater/UpdateWindow.tsx
+msgid "Release notes"
+msgstr "Release notes"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Release notes are on the Hew releases page."
+msgstr "Release notes are on the Hew releases page."
+
+#: src/updater/UpdateWindow.tsx
+#~ msgid "Release notes are on the website."
+#~ msgstr "Release notes are on the website."
+
 #: src/viewport/ViewDie.tsx
 msgid "Release red plane  →"
 msgstr "Release red plane  →"
@@ -8017,6 +8114,10 @@ msgstr "Reload"
 #: src/panels/SentReportsDialog.tsx
 msgid "Reload Hew"
 msgstr "Reload Hew"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Remind Me Later"
+msgstr "Remind Me Later"
 
 #: src/health/healthCopy.ts
 #: src/palette/registry.ts
@@ -8286,8 +8387,17 @@ msgid "Resize the selection uniformly about its center."
 msgstr "Resize the selection uniformly about its center."
 
 #: src/i18n/nativeMenu.ts
-msgid "Restart"
-msgstr "Restart"
+#~ msgid "Restart"
+#~ msgstr "Restart"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Restart cancelled. Hew {version} will open the next time you start Hew."
+msgstr "Restart cancelled. Hew {version} will open the next time you start Hew."
+
+#: src/updater/UpdateReadyBar.tsx
+#: src/updater/UpdateWindow.tsx
+msgid "Restart Now"
+msgstr "Restart Now"
 
 #: src/TitleBar.tsx
 msgid "Restore"
@@ -9421,6 +9531,10 @@ msgstr "Skin"
 msgid "Skin a solid through two or more shapes (the same as Loft)."
 msgstr "Skin a solid through two or more shapes (the same as Loft)."
 
+#: src/updater/UpdateWindow.tsx
+msgid "Skip This Version"
+msgstr "Skip This Version"
+
 #: src/i18n/historyLabels.ts
 #: src/i18n/nativeMenu.ts
 msgid "Slice"
@@ -9486,6 +9600,10 @@ msgstr "soften"
 #: src/panels/MenuBar.tsx
 msgid "Soften Edges…"
 msgstr "Soften Edges…"
+
+#: src/i18n/nativeMenu.ts
+msgid "Software Update"
+msgstr "Software Update"
 
 #: src/palette/registry.ts
 msgid "solid"
@@ -10526,8 +10644,12 @@ msgid "The undo memory limit has to be a size of zero or more."
 msgstr "The undo memory limit has to be a size of zero or more."
 
 #: src/i18n/nativeMenu.ts
-msgid "The update command is on your clipboard. Paste it into a terminal to update Hew."
-msgstr "The update command is on your clipboard. Paste it into a terminal to update Hew."
+#~ msgid "The update command is on your clipboard. Paste it into a terminal to update Hew."
+#~ msgstr "The update command is on your clipboard. Paste it into a terminal to update Hew."
+
+#: src/updater/UpdateWindow.tsx
+msgid "The update could not be installed."
+msgstr "The update could not be installed."
 
 #: src/i18n/nativeMenu.ts
 #~ msgid "The update could not be installed.\n"
@@ -10538,20 +10660,20 @@ msgstr "The update command is on your clipboard. Paste it into a terminal to upd
 #~ "{error}"
 
 #: src/i18n/nativeMenu.ts
-msgid "The update could not be installed.\n"
-"\n"
-"{error}\n"
-"\n"
-"You can download the new version from the Download page instead."
-msgstr "The update could not be installed.\n"
-"\n"
-"{error}\n"
-"\n"
-"You can download the new version from the Download page instead."
+#~ msgid "The update could not be installed.\n"
+#~ "\n"
+#~ "{error}\n"
+#~ "\n"
+#~ "You can download the new version from the Download page instead."
+#~ msgstr "The update could not be installed.\n"
+#~ "\n"
+#~ "{error}\n"
+#~ "\n"
+#~ "You can download the new version from the Download page instead."
 
 #: src/i18n/nativeMenu.ts
-msgid "The update has been installed. Restart Hew now to use it?"
-msgstr "The update has been installed. Restart Hew now to use it?"
+#~ msgid "The update has been installed. Restart Hew now to use it?"
+#~ msgstr "The update has been installed. Restart Hew now to use it?"
 
 #: src/kernelErrors.ts
 msgid "The view mode must be shaded, xray or wireframe. If this keeps happening, use Report Bug."
@@ -10699,19 +10821,19 @@ msgstr "This copy"
 msgid "This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again."
 msgstr "This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again."
 
-#: src/i18n/nativeMenu.ts
+#: src/updater/UpdateWindow.tsx
 msgid "This copy of Hew can’t update itself. Update it the same way you installed it, or get the new version from the Download page."
 msgstr "This copy of Hew can’t update itself. Update it the same way you installed it, or get the new version from the Download page."
 
-#: src/i18n/nativeMenu.ts
+#: src/updater/UpdateWindow.tsx
 msgid "This copy of Hew was installed with Flatpak, so Flatpak updates it. To update, run this in a terminal:"
 msgstr "This copy of Hew was installed with Flatpak, so Flatpak updates it. To update, run this in a terminal:"
 
-#: src/i18n/nativeMenu.ts
+#: src/updater/UpdateWindow.tsx
 msgid "This copy of Hew was installed with pacman, so pacman updates it. To update, run this in a terminal:"
 msgstr "This copy of Hew was installed with pacman, so pacman updates it. To update, run this in a terminal:"
 
-#: src/i18n/nativeMenu.ts
+#: src/updater/UpdateWindow.tsx
 msgid "This copy of Hew was installed with Portage, so Portage updates it. To update, run this in a terminal:"
 msgstr "This copy of Hew was installed with Portage, so Portage updates it. To update, run this in a terminal:"
 
@@ -11546,10 +11668,10 @@ msgid "Update"
 msgstr "Update"
 
 #: src/i18n/nativeMenu.ts
-msgid "Update available"
-msgstr "Update available"
+#~ msgid "Update available"
+#~ msgstr "Update available"
 
-#: src/i18n/nativeMenu.ts
+#: src/updater/UpdateWindow.tsx
 msgid "Update Help"
 msgstr "Update Help"
 
@@ -11562,8 +11684,8 @@ msgid "Update in progress"
 msgstr "Update in progress"
 
 #: src/i18n/nativeMenu.ts
-msgid "Update installed"
-msgstr "Update installed"
+#~ msgid "Update installed"
+#~ msgstr "Update installed"
 
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
@@ -11582,6 +11704,14 @@ msgstr "Update Scene failed: {reason}"
 #: src/viewport/gpuCapability.ts
 msgid "Update your graphics drivers first — that fixes most cases. Then check that hardware acceleration is turned on in Firefox's Performance settings, and that webgl.disabled hasn't been switched on in about:config."
 msgstr "Update your graphics drivers first — that fixes most cases. Then check that hardware acceleration is turned on in Firefox's Performance settings, and that webgl.disabled hasn't been switched on in about:config."
+
+#: src/settings/FluentSettingsPage.tsx
+msgid "Updates"
+msgstr "Updates"
+
+#: src/settings/AdvancedPane.tsx
+msgid "Updates:"
+msgstr "Updates:"
 
 #: src/settings/FluentSettingsPage.tsx
 msgid "Upload key"
@@ -11785,6 +11915,19 @@ msgstr "What is open for editing could not be shared with a connected program. I
 msgid "What’s included"
 msgstr "What’s included"
 
+#: src/updater/UpdateReadyBar.tsx
+msgid "What’s New"
+msgstr "What’s New"
+
+#: src/updater/UpdateWindow.tsx
+msgid "What’s new in Hew {version}"
+msgstr "What’s new in Hew {version}"
+
+#: src/settings/AdvancedPane.tsx
+#: src/settings/FluentSettingsPage.tsx
+msgid "When a new version is out, Hew downloads it on its own and then asks before restarting. A version you skipped is never installed."
+msgstr "When a new version is out, Hew downloads it on its own and then asks before restarting. A version you skipped is never installed."
+
 #: src/settings/ViewPane.tsx
 msgid "Where the box that shows the number you are typing sits. The fly speed readout moves with it."
 msgstr "Where the box that shows the number you are typing sits. The fly speed readout moves with it."
@@ -11880,6 +12023,10 @@ msgstr "Y-up, meters, for AR Quick Look and USD pipelines"
 msgid "You"
 msgstr "You"
 
+#: src/updater/UpdateWindow.tsx
+msgid "You can download the new version from the Download page instead."
+msgstr "You can download the new version from the Download page instead."
+
 #: src/panels/ReportBugDialog.tsx
 msgid "You’ll find replies and the report’s status under <0>Help ▸ Sent Reports…</0>"
 msgstr "You’ll find replies and the report’s status under <0>Help ▸ Sent Reports…</0>"
@@ -11905,7 +12052,7 @@ msgstr "Your bug report {onlyId} has a reply from Hew’s developer."
 msgid "Your bug report {onlyId} has an update from Hew’s developer."
 msgstr "Your bug report {onlyId} has an update from Hew’s developer."
 
-#: src/i18n/nativeMenu.ts
+#: src/updater/UpdateWindow.tsx
 msgid "Your computer will ask for your password to install it."
 msgstr "Your computer will ask for your password to install it."
 

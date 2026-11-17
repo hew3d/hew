@@ -57,19 +57,25 @@ function trimUrl(raw: string): string {
   return url.length > 0 ? url : raw
 }
 
+/** The address when it is an `http`/`https` URL, else null. The one check
+ *  every clickable link in the app goes through (also the update window's
+ *  release notes). */
+export function httpUrlOrNull(raw: string): string | null {
+  try {
+    const u = new URL(raw)
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : null
+  } catch {
+    return null
+  }
+}
+
 export function linkifySegments(text: string): { text: string; url: string | null }[] {
   const out: { text: string; url: string | null }[] = []
   let last = 0
   for (const m of text.matchAll(URL_RE)) {
     const start = m.index ?? 0
     const raw = trimUrl(m[0])
-    let url: string | null = null
-    try {
-      const u = new URL(raw)
-      if (u.protocol === 'http:' || u.protocol === 'https:') url = u.href
-    } catch {
-      url = null
-    }
+    const url = httpUrlOrNull(raw)
     if (start > last) out.push({ text: text.slice(last, start), url: null })
     out.push({ text: raw, url })
     last = start + raw.length

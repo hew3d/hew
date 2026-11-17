@@ -64,370 +64,13 @@ mod follow;
 mod relay_client;
 mod report_client;
 
-// ---------------------------------------------------------------------------
-// In-app updater (compiled in via the `updater` feature — see Cargo.toml).
-//
-// Talks to the signed `latest.json` published on GitHub Releases: a silent
-// check on launch, plus a manual "Check for Updates" menu item. The whole
-// flow lives shell-side — check, native dialog, download, restart prompt —
-// so the webview is granted no update-related capability.
-//
-// What happens after a check finds a newer version depends on how this copy
-// was installed (install_channel.rs): the macOS app, the Windows installer,
-// and the AppImage replace themselves; a native .deb or .rpm installs the
-// package after the system asks for a password; a Flatpak, pacman, Gentoo, or
-// other package-manager copy only announces the version and shows the
-// command that updates it. Every branch below reads the `UpdatePlan` and
-// nothing else, so no code here inspects the platform.
-// ---------------------------------------------------------------------------
+// The in-app updater and its update window: see the module doc in
+// updater.rs (the IPC contract lives there). `update_state` is the pure part
+// (update.json, the launch decision, the window's payload shapes) and builds
+// everywhere, because the "automatic updates" preference is read by Settings.
+mod update_state;
 #[cfg(hew_updater)]
-mod updater {
-    use crate::install_channel::{self, InstallChannel, UpdateMode, UpdatePlan};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use tauri::{AppHandle, Manager};
-    use tauri_plugin_clipboard_manager::ClipboardExt;
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-    use tauri_plugin_updater::UpdaterExt;
-
-    /// Single-flight guard (managed state). The silent launch check and the
-    /// manual "Check for Updates" run independently; without this, an update
-    /// that appears while the user also clicks the menu item would stack two
-    /// dialogs and — on accept — start two concurrent installs writing the same
-    /// target (the macOS bundle swap is not atomic). One flag serializes them.
-    #[derive(Default)]
-    pub struct UpdateGuard(pub AtomicBool);
-
-    /// Set once an update has been installed and the restart was put off. The
-    /// running process still reports the old version, so another check would
-    /// offer the same update again; it offers the restart instead.
-    static INSTALLED_PENDING_RESTART: AtomicBool = AtomicBool::new(false);
-
-    /// Run an update check against the configured endpoint — at most one at a
-    /// time. A second call while one is in flight backs off: the launch check
-    /// silently, a manual click with a note.
-    ///
-    /// `interactive` splits the two entry points:
-    ///  - the manual menu item (`true`): always give feedback — report "up to
-    ///    date" and surface errors, so a click is never silent.
-    ///  - the launch check (`false`): stay quiet unless an update is actually
-    ///    available — no popup when current, no error dialog on an offline
-    ///    launch.
-    pub async fn run_check(app: AppHandle, interactive: bool) {
-        if app.state::<UpdateGuard>().0.swap(true, Ordering::SeqCst) {
-            if interactive {
-                let labels = crate::current_menu_labels(&app);
-                info_dialog(
-                    &app,
-                    labels.get("updater:in-progress-title"),
-                    labels.get("updater:in-progress-body"),
-                );
-            }
-            return;
-        }
-        check_and_install(app.clone(), interactive).await;
-        app.state::<UpdateGuard>().0.store(false, Ordering::SeqCst);
-    }
-
-    /// The check → prompt → download → restart flow itself; `run_check`
-    /// serializes calls to it.
-    async fn check_and_install(app: AppHandle, interactive: bool) {
-        let labels = crate::current_menu_labels(&app);
-        // Resolved before anything can replace the binary on disk; see
-        // `install_channel::current_channel`.
-        let plan = install_channel::current_plan();
-        if INSTALLED_PENDING_RESTART.load(Ordering::SeqCst) {
-            if interactive {
-                offer_restart(&app).await;
-            }
-            return;
-        }
-        let updater = match app.updater() {
-            Ok(updater) => updater,
-            Err(err) => {
-                if interactive {
-                    error_dialog(
-                        &app,
-                        &labels
-                            .get("updater:start-failed-body")
-                            .replace("{error}", &err.to_string()),
-                    );
-                }
-                return;
-            }
-        };
-        match updater.check().await {
-            Ok(Some(update)) => match plan.mode {
-                UpdateMode::NotifyOnly => notify_only(app, plan, update, interactive).await,
-                UpdateMode::SelfInstall | UpdateMode::SelfInstallElevated => {
-                    prompt_and_install(app, plan, update).await
-                }
-            },
-            Ok(None) => {
-                if interactive {
-                    info_dialog(
-                        &app,
-                        labels.get("updater:up-to-date-title"),
-                        labels.get("updater:up-to-date-body"),
-                    );
-                }
-            }
-            Err(err) => {
-                if interactive {
-                    error_dialog(
-                        &app,
-                        &labels
-                            .get("updater:check-failed-body")
-                            .replace("{error}", &err.to_string()),
-                    );
-                }
-            }
-        }
-    }
-
-    /// Offer the found update; on acceptance, download it and offer a restart.
-    /// Each prompt is a native modal, and the install replaces the running app
-    /// in place (the `.app` bundle on macOS, the NSIS install on Windows, the
-    /// AppImage or the .deb/.rpm package on Linux).
-    async fn prompt_and_install(
-        app: AppHandle,
-        plan: UpdatePlan,
-        update: tauri_plugin_updater::Update,
-    ) {
-        let labels = crate::current_menu_labels(&app);
-        let mut body = labels
-            .get("updater:available-body")
-            .replace("{version}", &update.version)
-            .replace("{current}", &update.current_version);
-        if plan.mode == UpdateMode::SelfInstallElevated {
-            // A native package install runs as root: say so before the
-            // system's own password prompt appears.
-            body.push(' ');
-            body.push_str(labels.get("updater:elevated-note"));
-        }
-        let install = confirm(
-            &app,
-            MessageDialogKind::Info,
-            labels.get("updater:available-title"),
-            &body,
-            labels.get("updater:install"),
-            labels.get("updater:later"),
-        )
-        .await;
-        if !install {
-            return;
-        }
-        // Platform note: on macOS and Linux the install returns here and the
-        // restart below is offered (the user may choose "Later"). On Windows
-        // the plugin launches the NSIS/MSI installer and exits the process
-        // immediately, so the restart prompt is macOS/Linux-only in practice —
-        // the Windows path ends the app here. Autosave/crash-recovery covers a
-        // dirty document if that happens.
-        if let Err(error) = run_install(&app, &plan, &update).await {
-            // `None` is the user dismissing the password prompt: not a failure.
-            let Some(error) = error else {
-                return;
-            };
-            // Keep the error text and point at the Download page, so a failed
-            // install is never a dead end.
-            let open_download = confirm(
-                &app,
-                MessageDialogKind::Error,
-                labels.get("updater:title"),
-                &labels.get("updater:failed-body").replace("{error}", &error),
-                labels.get("updater:open-download"),
-                labels.get("updater:close"),
-            )
-            .await;
-            if open_download {
-                open_url(install_channel::DOWNLOAD_URL);
-            }
-            return;
-        }
-        INSTALLED_PENDING_RESTART.store(true, Ordering::SeqCst);
-        offer_restart(&app).await;
-    }
-
-    /// Download and install `update` the way `plan` says. `Err(None)` means
-    /// the user backed out at the system's password prompt.
-    ///
-    /// A native `.deb`/`.rpm` copy downloads (and signature-checks) through
-    /// the plugin but installs with our own single `pkexec` call; see
-    /// `install_channel::install_package_elevated`. Every other copy uses the
-    /// plugin's installer.
-    async fn run_install(
-        app: &AppHandle,
-        plan: &UpdatePlan,
-        update: &tauri_plugin_updater::Update,
-    ) -> Result<(), Option<String>> {
-        #[cfg(target_os = "linux")]
-        if plan.mode == UpdateMode::SelfInstallElevated {
-            use install_channel::PackageInstall;
-            let bytes = update
-                .download(|_chunk, _total| {}, || {})
-                .await
-                .map_err(|err| Some(err.to_string()))?;
-            let work_dir = app
-                .path()
-                .app_cache_dir()
-                .map_err(|err| Some(err.to_string()))?
-                .join("update");
-            let channel = plan.channel.clone();
-            let outcome = tauri::async_runtime::spawn_blocking(move || {
-                install_channel::install_package_elevated(&channel, &bytes, &work_dir)
-            })
-            .await
-            .map_err(|err| Some(err.to_string()))?;
-            return match outcome {
-                PackageInstall::Installed => Ok(()),
-                PackageInstall::Cancelled => Err(None),
-                PackageInstall::Failed(message) => Err(Some(message)),
-            };
-        }
-        #[cfg(not(target_os = "linux"))]
-        let _ = (app, plan);
-        update
-            .download_and_install(|_chunk, _total| {}, || {})
-            .await
-            .map_err(|err| Some(err.to_string()))
-    }
-
-    /// Say the update is installed and offer to restart into it.
-    async fn offer_restart(app: &AppHandle) {
-        let labels = crate::current_menu_labels(app);
-        let restart = confirm(
-            app,
-            MessageDialogKind::Info,
-            labels.get("updater:installed-title"),
-            labels.get("updater:installed-body"),
-            labels.get("updater:restart"),
-            labels.get("updater:later"),
-        )
-        .await;
-        if restart {
-            app.restart();
-        }
-    }
-
-    /// Announce a new version on a channel whose package manager installs it.
-    /// Never downloads or installs anything. The launch check names each
-    /// version once; the manual menu check always shows the notice.
-    async fn notify_only(
-        app: AppHandle,
-        plan: UpdatePlan,
-        update: tauri_plugin_updater::Update,
-        interactive: bool,
-    ) {
-        let config_dir = app.path().app_config_dir().ok();
-        if !interactive && !install_channel::should_announce(config_dir.as_deref(), &update.version)
-        {
-            return;
-        }
-        if let Some(dir) = &config_dir {
-            install_channel::write_announced(dir, &update.version);
-        }
-        let labels = crate::current_menu_labels(&app);
-        let channel_sentence = match &plan.channel {
-            InstallChannel::Flatpak => labels.get("updater:notify-flatpak"),
-            InstallChannel::Pacman => labels.get("updater:notify-pacman"),
-            InstallChannel::Gentoo => labels.get("updater:notify-gentoo"),
-            _ => labels.get("updater:notify-other"),
-        };
-        let mut body = format!(
-            "{}\n\n{}",
-            labels
-                .get("updater:notify-version")
-                .replace("{version}", &update.version)
-                .replace("{current}", &update.current_version),
-            channel_sentence
-        );
-        if let Some(command) = &plan.command {
-            body.push_str("\n\n");
-            body.push_str(command);
-        }
-        body.push_str("\n\n");
-        body.push_str(&plan.help_url);
-        let primary = if plan.command.is_some() {
-            labels.get("updater:copy-command")
-        } else {
-            labels.get("updater:update-help")
-        };
-        let chosen = confirm(
-            &app,
-            MessageDialogKind::Info,
-            labels.get("updater:available-title"),
-            &body,
-            primary,
-            labels.get("updater:later"),
-        )
-        .await;
-        if !chosen {
-            return;
-        }
-        match &plan.command {
-            Some(command) if app.clipboard().write_text(command.clone()).is_ok() => info_dialog(
-                &app,
-                labels.get("updater:copied-title"),
-                labels.get("updater:copied-body"),
-            ),
-            // No command, or the clipboard is unavailable: the help page has
-            // the same instructions.
-            _ => open_url(&plan.help_url),
-        }
-    }
-
-    /// Open a web page in the default browser. Best effort.
-    fn open_url(url: &str) {
-        let _ = tauri_plugin_opener::open_url(url, None::<&str>);
-    }
-
-    /// A modal two-button dialog, run off the event loop: the dialog plugin
-    /// forbids its blocking API on the main thread (the file pickers take the
-    /// same `spawn_blocking` route). Returns true when the primary button is
-    /// chosen.
-    async fn confirm(
-        app: &AppHandle,
-        kind: MessageDialogKind,
-        title: &str,
-        body: &str,
-        ok: &str,
-        cancel: &str,
-    ) -> bool {
-        let app = app.clone();
-        let title = title.to_string();
-        let body = body.to_string();
-        let ok = ok.to_string();
-        let cancel = cancel.to_string();
-        tauri::async_runtime::spawn_blocking(move || {
-            app.dialog()
-                .message(body)
-                .title(title)
-                .kind(kind)
-                .buttons(MessageDialogButtons::OkCancelCustom(ok, cancel))
-                .blocking_show()
-        })
-        .await
-        .unwrap_or(false)
-    }
-
-    /// A non-blocking informational dialog (no decision to wait on).
-    fn info_dialog(app: &AppHandle, title: &str, body: &str) {
-        app.dialog()
-            .message(body)
-            .title(title)
-            .kind(MessageDialogKind::Info)
-            .show(|_| {});
-    }
-
-    /// A non-blocking error dialog.
-    fn error_dialog(app: &AppHandle, body: &str) {
-        let labels = crate::current_menu_labels(app);
-        app.dialog()
-            .message(body)
-            .title(labels.get("updater:title"))
-            .kind(MessageDialogKind::Error)
-            .show(|_| {});
-    }
-}
+mod updater;
 
 /// Manually trigger an update check — the entry point for the in-app menu
 /// bar's "Check for Updates" item (Windows/Linux, where the webview drives the
@@ -1456,9 +1099,13 @@ fn set_window_title(
 /// "Known issues" note on `WebviewWindowBuilder::build`). The result is a
 /// zombie window: a frame with no content whose close button does nothing.
 /// An async command runs off the main thread, so the build can complete.
+///
+/// `window` is the window to cascade from; `None` (no window is open, as
+/// after an update restart closed every document and the install then
+/// failed) opens one at the configured default size, centered.
 async fn create_document_window(
     app: &tauri::AppHandle,
-    window: &tauri::WebviewWindow,
+    window: Option<&tauri::WebviewWindow>,
     recover_slot: Option<String>,
     focus: bool,
 ) -> Result<String, String> {
@@ -1473,23 +1120,30 @@ async fn create_document_window(
         let mut guard = state.lock().map_err(|e| e.to_string())?;
         guard.0.insert(label.clone(), slot);
     }
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let size = window.inner_size().map_err(|e| e.to_string())?;
-    let pos = window.outer_position().map_err(|e| e.to_string())?;
     // Standard macOS document-window cascade offset.
     const CASCADE: f64 = 28.0;
     let builder =
         tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::App("index.html".into()))
             .title("Hew")
-            .focused(focus)
-            .inner_size(
-                f64::from(size.width) / scale,
-                f64::from(size.height) / scale,
-            )
-            .position(
-                f64::from(pos.x) / scale + CASCADE,
-                f64::from(pos.y) / scale + CASCADE,
-            );
+            .focused(focus);
+    let builder = match window {
+        Some(window) => {
+            let scale = window.scale_factor().unwrap_or(1.0);
+            let size = window.inner_size().map_err(|e| e.to_string())?;
+            let pos = window.outer_position().map_err(|e| e.to_string())?;
+            builder
+                .inner_size(
+                    f64::from(size.width) / scale,
+                    f64::from(size.height) / scale,
+                )
+                .position(
+                    f64::from(pos.x) / scale + CASCADE,
+                    f64::from(pos.y) / scale + CASCADE,
+                )
+        }
+        // tauri.conf.json's `main` window size.
+        None => builder.inner_size(1280.0, 800.0).center(),
+    };
     // Linux/WebKitGTK draws its own chrome (see the setup() note); Windows and
     // macOS keep native decorations.
     #[cfg(target_os = "linux")]
@@ -1508,7 +1162,7 @@ async fn new_window(
     window: tauri::WebviewWindow,
     recover_slot: Option<String>,
 ) -> Result<(), String> {
-    create_document_window(&app, &window, recover_slot, true).await?;
+    create_document_window(&app, Some(&window), recover_slot, true).await?;
     Ok(())
 }
 
@@ -1534,7 +1188,7 @@ async fn open_in_new_window(
             return focus_window_by_label(&app, &label);
         }
     }
-    let label = create_document_window(&app, &window, None, true).await?;
+    let label = create_document_window(&app, Some(&window), None, true).await?;
     // Propagate a lock failure (matches the sibling recover_slot insert in
     // create_document_window) rather than swallowing it: on a poisoned
     // mutex, silently returning Ok would leave the freshly opened window
@@ -1977,6 +1631,9 @@ fn set_menu_locale(app: tauri::AppHandle, locale: String) -> Result<(), String> 
         }
         if let Some(window) = app.get_webview_window("library") {
             let _ = window.set_title(labels.get("win-library"));
+        }
+        if let Some(window) = app.get_webview_window("update") {
+            let _ = window.set_title(labels.get("updater:window-title"));
         }
         if let Some(state) = app.try_state::<Mutex<MenuLabels>>() {
             if let Ok(mut guard) = state.lock() {
@@ -2893,11 +2550,11 @@ fn frontend_ready(app: tauri::AppHandle, window: tauri::WebviewWindow) {
 }
 /// Whether a window label names a DOCUMENT window — the windows that hold a
 /// model and can receive menu actions, file opens, and library actions.
-/// The settings window and the library browser window are auxiliary: they
+/// The settings window, the library browser window and the update window are auxiliary: they
 /// must never be the "active document" target, never appear in the Window
 /// menu's focus list, and never absorb a routed open.
 fn is_document_window_label(label: &str) -> bool {
-    label != "settings" && label != "library"
+    label != "settings" && label != "library" && label != "update"
 }
 
 /// The document window menu/open events should land in: the focused
@@ -3612,6 +3269,30 @@ fn main() {
             fly_cursor::set_fly_cursor_lock,
             open_settings_window,
             open_library_window,
+            #[cfg(hew_updater)]
+            updater::update_info,
+            #[cfg(hew_updater)]
+            updater::update_install,
+            #[cfg(hew_updater)]
+            updater::update_skip,
+            #[cfg(hew_updater)]
+            updater::update_remind,
+            #[cfg(hew_updater)]
+            updater::update_restart,
+            #[cfg(hew_updater)]
+            updater::update_copy_command,
+            #[cfg(hew_updater)]
+            updater::update_show_notes,
+            #[cfg(hew_updater)]
+            updater::update_ready_get,
+            #[cfg(hew_updater)]
+            updater::update_auto_get,
+            #[cfg(hew_updater)]
+            updater::update_auto_set,
+            #[cfg(hew_updater)]
+            updater::close_cancelled,
+            #[cfg(all(hew_updater, debug_assertions))]
+            updater::update_open_fixture,
             library_dispatch,
             library_push_placements,
             library_popup_menu,
@@ -5438,6 +5119,10 @@ fn main() {
             #[cfg(hew_updater)]
             {
                 app.manage(updater::UpdateGuard::default());
+                app.manage(updater::Pending::default());
+                app.manage(updater::RestartPass::default());
+                #[cfg(debug_assertions)]
+                updater::spawn_fixture_from_env(handle);
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move { updater::run_check(handle, false).await });
             }
@@ -5461,6 +5146,15 @@ fn main() {
         // transient and don't overwrite the primary window's saved state).
         .on_window_event(|window, event| {
             let app = window.app_handle();
+            // The person closing the update window on the open offer means
+            // "Remind Me Later" (updater::remind_on_close).
+            #[cfg(hew_updater)]
+            if window.label() == "update" {
+                if let tauri::WindowEvent::Destroyed = event {
+                    updater::on_window_closed(app);
+                }
+                return;
+            }
             match event {
                 tauri::WindowEvent::Focused(true) if is_document_window_label(window.label()) => {
                     if let Ok(mut active) = app.state::<Mutex<ActiveWindow>>().lock() {
@@ -5521,6 +5215,15 @@ fn main() {
                             if let Some(settings) = app.get_webview_window("settings") {
                                 let _ = settings.close();
                             }
+                            // And the update window, except while a restart
+                            // is closing the documents: it shows that
+                            // restart's progress and its outcome. The
+                            // person did not close it, so this is not
+                            // "Remind Me Later".
+                            #[cfg(hew_updater)]
+                            if !updater::restart_pass_active(app) {
+                                updater::close_window_quietly(app);
+                            }
                         }
                     }
                     // A recovery window that dies before claiming leaves its
@@ -5538,6 +5241,12 @@ fn main() {
                         openers.0.remove(window.label());
                     }
                     refresh_window_list(app);
+                    // Last, once the shell no longer counts the window: a
+                    // running update restart moves on to the next one.
+                    #[cfg(hew_updater)]
+                    if is_document_window_label(window.label()) {
+                        updater::on_document_destroyed(app, window.label());
+                    }
                 }
                 _ => {}
             }
@@ -5643,6 +5352,22 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building Hew desktop")
         .run(|app, event| {
+            // An update restart closes the document windows one by one; the
+            // last one closing must not end the app before the restart or
+            // the installer runs (updater.rs, "Restart"). Only the
+            // last-window exit (`code: None`) is held: the restart itself
+            // (RESTART_EXIT_CODE) cannot be prevented, and a fixture's
+            // `exit(0)` carries a code, so both reach the arm below.
+            #[cfg(hew_updater)]
+            if let tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } = &event
+            {
+                if updater::restart_pass_active(app) {
+                    api.prevent_exit();
+                    return;
+                }
+            }
             // A quit that never routes through CloseRequested must still
             // capture the final main-window geometry. macOS Cmd+Q uses the
             // predefined Quit item's `terminate:` selector, which surfaces
@@ -5655,6 +5380,10 @@ fn main() {
                 if let Some(main_window) = app.get_webview_window("main") {
                     save_window_state(app, &main_window.as_ref().window_ref(), true);
                 }
+                // Quitting with the update offer open is not "Remind Me
+                // Later": the next launch shows it again.
+                #[cfg(hew_updater)]
+                updater::mark_quiet_close(app);
                 // "removes it on exit" (docs/agents/HEW_API.md §11.2) — a crash
                 // (no RunEvent at all) is instead cleaned up by the NEXT
                 // launch's live::start sweeping stale discovery files.

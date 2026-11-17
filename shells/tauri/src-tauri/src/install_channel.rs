@@ -463,43 +463,6 @@ pub fn current_plan() -> UpdatePlan {
     plan_for(current_channel())
 }
 
-// --- Launch-notice quieting (notify-only channels) ------------------------
-//
-// A package-manager copy cannot act on the notice, so the launch check names
-// each version once instead of on every start. The last version announced is
-// one line in the app config dir.
-
-const ANNOUNCED_FILE: &str = "last-update-notice";
-
-/// The version last announced, if one was recorded.
-pub fn read_announced(config_dir: &Path) -> Option<String> {
-    let path = config_dir.join(ANNOUNCED_FILE);
-    if std::fs::metadata(&path).ok()?.len() > 64 {
-        return None;
-    }
-    let text = std::fs::read_to_string(path).ok()?;
-    let version = text.trim();
-    (!version.is_empty()).then(|| version.to_string())
-}
-
-/// Remember `version` as announced. Best effort: a failure only means the
-/// next launch announces it once more.
-pub fn write_announced(config_dir: &Path, version: &str) {
-    if std::fs::create_dir_all(config_dir).is_err() {
-        return;
-    }
-    let _ = std::fs::write(config_dir.join(ANNOUNCED_FILE), format!("{version}\n"));
-}
-
-/// Whether a launch check should announce `version`: true unless it is the
-/// version already announced.
-pub fn should_announce(config_dir: Option<&Path>, version: &str) -> bool {
-    match config_dir.and_then(read_announced) {
-        Some(last) => last != version,
-        None => true,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -846,19 +809,6 @@ mod tests {
         assert_eq!(read_marker(&path).as_deref(), Some("flatpak\n"));
         std::fs::write(&path, "x".repeat(10_000)).unwrap();
         assert_eq!(read_marker(&path), None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn launch_notice_is_announced_once_per_version() {
-        let dir = std::env::temp_dir().join(format!("hew-announce-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(should_announce(Some(&dir), "1.5.0"));
-        assert!(should_announce(None, "1.5.0"));
-        write_announced(&dir, "1.5.0");
-        assert_eq!(read_announced(&dir).as_deref(), Some("1.5.0"));
-        assert!(!should_announce(Some(&dir), "1.5.0"));
-        assert!(should_announce(Some(&dir), "1.5.1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

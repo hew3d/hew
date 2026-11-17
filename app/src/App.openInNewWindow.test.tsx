@@ -216,13 +216,19 @@ const dragDropMock = vi.fn(
 vi.mock('@tauri-apps/api/webview', () => ({
   getCurrentWebview: () => ({ onDragDropEvent: dragDropMock }),
 }))
+// Stable so the close-guard tests can grab the registered close handler and
+// see whether the window was destroyed.
+type CloseHandler = (event: { preventDefault: () => void }) => Promise<void>
+const closeRequestedMock = vi.fn(async (_handler: CloseHandler) => () => {})
+const destroyMock = vi.fn(async () => {})
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({
     label: 'main',
     setTitle: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
+    destroy: destroyMock,
     onFocusChanged: vi.fn(async () => () => {}),
-    onCloseRequested: vi.fn(async () => () => {}),
+    onCloseRequested: closeRequestedMock,
   }),
   getAllWindows: vi.fn(async () => []),
 }))
@@ -667,5 +673,93 @@ describe('App — a refused open in a new window (Tauri)', () => {
     await waitFor(() => expect(mockScene.load).toHaveBeenCalled())
     await act(async () => {})
     expect(refusedCall()).toBeUndefined()
+  })
+})
+
+// The close guard drives both a click on the window's close button and the
+// update restart, which closes every document window through it and stops
+// when one answers Cancel (updater.rs, "Restart"). Cancel must tell the shell
+// (`close_cancelled`); nothing else may, and the guard is otherwise as it
+// was: Don't Save and a clean document close the window.
+describe('App — the close guard reports Cancel to the shell (Tauri)', () => {
+  async function closeHandler(): Promise<CloseHandler> {
+    await waitFor(() => expect(closeRequestedMock).toHaveBeenCalled())
+    return closeRequestedMock.mock.calls[0][0]
+  }
+  const closeCancelledCalls = () => invokeMock.mock.calls.filter(([c]) => c === 'close_cancelled').length
+
+  it('Cancel keeps the window open and calls close_cancelled once', async () => {
+    await renderAndLoad()
+    await makeNonPristine()
+    const handler = await closeHandler()
+    const preventDefault = vi.fn()
+    let closing!: Promise<void>
+    act(() => {
+      closing = handler({ preventDefault })
+    })
+    expect(preventDefault).toHaveBeenCalled()
+    const dialog = await screen.findByRole('dialog', { name: 'Unsaved changes' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await act(async () => {
+      await closing
+    })
+    await waitFor(() => expect(closeCancelledCalls()).toBe(1))
+    expect(destroyMock).not.toHaveBeenCalled()
+  })
+
+  it('Don’t Save closes the window and never calls close_cancelled', async () => {
+    await renderAndLoad()
+    await makeNonPristine()
+    const handler = await closeHandler()
+    let closing!: Promise<void>
+    act(() => {
+      closing = handler({ preventDefault: () => {} })
+    })
+    const dialog = await screen.findByRole('dialog', { name: 'Unsaved changes' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Don’t Save' }))
+    await act(async () => {
+      await closing
+    })
+    expect(destroyMock).toHaveBeenCalledTimes(1)
+    expect(closeCancelledCalls()).toBe(0)
+  })
+
+  // An update restart can reach a window whose prompt the person already
+  // opened by hand. Replacing that prompt would answer it Cancel for them
+  // and stop the restart; the second request is dropped instead, and the
+  // person's answer to the prompt that is up settles both.
+  it('a second close request while the prompt is up changes nothing', async () => {
+    await renderAndLoad()
+    await makeNonPristine()
+    const handler = await closeHandler()
+    let first!: Promise<void>
+    act(() => {
+      first = handler({ preventDefault: () => {} })
+    })
+    const dialog = await screen.findByRole('dialog', { name: 'Unsaved changes' })
+    const secondPrevent = vi.fn()
+    await act(async () => {
+      await handler({ preventDefault: secondPrevent })
+    })
+    expect(secondPrevent).toHaveBeenCalled()
+    expect(closeCancelledCalls()).toBe(0)
+    expect(screen.getAllByRole('dialog', { name: 'Unsaved changes' })).toHaveLength(1)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Don’t Save' }))
+    await act(async () => {
+      await first
+    })
+    expect(destroyMock).toHaveBeenCalledTimes(1)
+    expect(closeCancelledCalls()).toBe(0)
+  })
+
+  it('a clean document closes without a prompt and never calls close_cancelled', async () => {
+    await renderAndLoad()
+    const handler = await closeHandler()
+    await act(async () => {
+      await handler({ preventDefault: () => {} })
+    })
+    expect(screen.queryByRole('dialog', { name: 'Unsaved changes' })).toBeNull()
+    expect(destroyMock).toHaveBeenCalledTimes(1)
+    expect(closeCancelledCalls()).toBe(0)
   })
 })

@@ -104,6 +104,13 @@ impl DocState {
         self.dirty.insert(label.to_string(), dirty);
     }
 
+    /// Whether window `label` last reported unsaved changes (false when it
+    /// never reported). The update restart asks these windows first.
+    #[cfg_attr(not(hew_updater), allow(dead_code))]
+    pub(crate) fn is_dirty(&self, label: &str) -> bool {
+        self.dirty.get(label).copied().unwrap_or(false)
+    }
+
     /// Records (or, with `None`, clears) the persistent id of window
     /// `label`'s document.
     pub(crate) fn set_document_id(&mut self, label: &str, id: Option<String>) {
@@ -985,14 +992,18 @@ fn create_window(app: &AppHandle, front: bool) -> Result<String, Refused> {
     #[cfg(not(target_os = "macos"))]
     let was_focused = anchor.is_focused().unwrap_or(false);
     let anchor_label = anchor.label().to_string();
-    let label =
-        tauri::async_runtime::block_on(crate::create_document_window(app, &anchor, None, front))
-            .map_err(|e| {
-                Refused::new(
-                    "window_not_ready",
-                    format!("Could not create a window: {e}"),
-                )
-            })?;
+    let label = tauri::async_runtime::block_on(crate::create_document_window(
+        app,
+        Some(&anchor),
+        None,
+        front,
+    ))
+    .map_err(|e| {
+        Refused::new(
+            "window_not_ready",
+            format!("Could not create a window: {e}"),
+        )
+    })?;
     if front {
         wait_until_focused(app, &label);
     } else {

@@ -49,6 +49,14 @@ The View pane is about how the viewport feels. Everything in it starts out the w
 
 The Advanced pane (desktop only) has one job: choosing where **Open on Phone** sends a model. **Hew cloud** is the default. **Self-hosted** takes the address of a server you run yourself, plus an optional **Upload key** if that server requires one. **Test connection** confirms the address answers as a Hew relay before you rely on it, and the QR code you get from File ▸ Open on Phone… then points at that server, never at app.hew3d.com. What your phone has to do differently, and how to stand up a server, is covered in [Using your own server](/learn/hew-on-your-phone/#using-your-own-server).
 
+## Updating Hew
+
+Hew checks for a new version when it starts, and **Check for Updates…** checks whenever you ask: it's in the **Hew** menu on a Mac, right under About Hew, and in the **Help** menu on Windows and Linux. When there is one, an update window opens with what's new in it. **Install Update** downloads it and shows a progress bar; when it finishes, **Restart Now** opens the new version, or **Later** keeps working in this one. On Windows the installer has to close Hew, so the download ends with **Install and Restart** instead. Either way, Hew first closes your open windows one at a time and asks about any unsaved changes, just as closing them yourself would. **Cancel** keeps that window open, and the update waits until you're ready. **Remind Me Later** asks again tomorrow, and closing the window does the same. **Skip This Version** stays quiet until the next version comes out. **All release notes** opens the full list on the Hew releases page.
+
+Some installs can't update themselves. A Flatpak, Arch, or Gentoo copy shows the command that updates it, with a **Copy Command** button, and **Update Help** explains the steps. A `.deb` or `.rpm` install asks for your password to install the update. [Updating Hew on Linux](/download/update-help/) covers each one.
+
+Where Hew can update itself without a password (the Mac app, the Windows installer, and the AppImage), the window has **Automatically download and install updates in the future**. The same switch is in Settings: on the Advanced pane on a Mac or Linux, and under **Updates** on Windows. Other copies don't show it, since they can't update themselves. With it on, Hew downloads a new version when it starts and then shows a bar at the top of the window: on a Mac or an AppImage, "Hew 1.6.0 is installed and will open the next time you start Hew" with **Restart Now**; on Windows, "Hew 1.6.0 is ready to install. Hew will close and reopen." with **Install and Restart**. **What's New** shows the release notes. Hew never restarts on its own, and never installs a version you skipped.
+
 ## Debug Mode
 
 The Debug pane's **Enable Debug Mode** checkbox turns on deeper diagnostics for chasing a problem or helping report one:

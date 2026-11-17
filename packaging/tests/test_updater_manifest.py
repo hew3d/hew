@@ -47,7 +47,7 @@ CHANGELOG = f'''# Changelog
 
 ### Fixed
 
-- Updates work on Linux.
+- Updates work on Linux. [#48] Already a link: [#7](https://example.com/7). Code: `[#9]`. Label: [see [#9]](https://example.com/9).
 
 ## [1.4.0] (2025-12-01)
 
@@ -110,7 +110,14 @@ class UpdaterManifestTests(unittest.TestCase):
         m = self.manifest()
         self.assertEqual(m['version'], V)
         self.assertEqual(m['pub_date'], '2026-01-02T03:04:05Z')
-        self.assertEqual(m['notes'], '### Fixed\n\n- Updates work on Linux.')
+        # The section's heading leads as a title, and a bare issue reference
+        # becomes a link; one that is already a link, in code, or in a
+        # link's label is left alone.
+        self.assertEqual(m['notes'], (
+            '## 1.5.0 (2026-01-01) - Test\n\n### Fixed\n\n- Updates work on Linux. '
+            '[#48](https://github.com/example/hew/issues/48) '
+            'Already a link: [#7](https://example.com/7). Code: `[#9]`. '
+            'Label: [see [#9]](https://example.com/9).'))
 
     def test_notes_fall_back_with_a_warning_without_a_changelog_section(self):
         # A pre-release tag has no section of its own, and the manifest

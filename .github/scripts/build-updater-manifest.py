@@ -84,30 +84,49 @@ def signature_for(asset, names, sig_dir):
     return signature
 
 
-def changelog_notes(changelog_path, version):
-    """The version's section of CHANGELOG.md as Markdown, heading excluded.
+def changelog_notes(changelog_path, version, repo=None):
+    """The version's section of CHANGELOG.md as Markdown.
 
-    Empty when there is no such section (pre-release tags, for one); the
-    caller substitutes the version name."""
+    It opens with the section's own heading as a `##` title, the version out
+    of its brackets (`## 1.4.0 (2026-11-08) - The "All In" Release`), so the
+    update window names the release and its date. With `repo`, a bare issue
+    reference (`[#48]`) becomes a link to that issue; the changelog carries
+    no link definitions for them, and the window resolves none.
+
+    Empty when there is no such section (pre-release tags, for one) or the
+    section has no text; the caller substitutes the version name."""
     if not changelog_path or not Path(changelog_path).is_file():
         return ''
     heading = f'## [{version}]'
     lines = Path(changelog_path).read_text().splitlines()
-    out, inside = [], False
+    out, inside, title = [], False, ''
     for line in lines:
         if line.startswith('## ['):
             if inside:
                 break
             inside = line.startswith(heading)
+            if inside:
+                title = f'## {version}{line[len(heading):]}'.rstrip()
             continue
         if inside:
             out.append(line)
-    return '\n'.join(out).strip()
+    body = '\n'.join(out).strip()
+    if not body:
+        return ''
+    if repo:
+        # Not inside a code span, and not where it is already part of a link
+        # (its own, a reference, a definition, or another link's label).
+        parts = re.split(r'(`[^`\n]*`)', body)
+        for i in range(0, len(parts), 2):
+            parts[i] = re.sub(r'\[#(\d+)\](?![(\[:\]])',
+                              rf'[#\1](https://github.com/{repo}/issues/\1)', parts[i])
+        body = ''.join(parts)
+    return f'{title}\n\n{body}'
 
 
 def build(repo, tag, names, sig_dir, changelog=None, pub_date=None):
     version = tag[1:] if tag.startswith('v') else tag
-    notes = changelog_notes(changelog, version)
+    notes = changelog_notes(changelog, version, repo)
     if not notes:
         # Never ship blank notes, and never let it pass unnoticed: a release
         # tagged before its CHANGELOG heading exists lands here too.

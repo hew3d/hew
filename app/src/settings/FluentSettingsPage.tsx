@@ -53,6 +53,7 @@ import {
 import { languageOptions } from '../i18n/languageOptions'
 import { libraryStore } from '../io/libraryStore'
 import { describeIdentity, useServerSettingForm } from './serverForm'
+import { useAutoUpdateSetting } from './autoUpdate'
 import { CLOUD_ORIGIN } from './server'
 import { isComposingKey } from '../input/keyboard'
 import { ControlsPane } from './ControlsPane'
@@ -297,6 +298,29 @@ const THEME_OPTIONS: { value: ThemeSetting; label: MessageDescriptor }[] = [
   { value: 'dark', label: msg`Dark` },
   { value: 'auto', label: msg`Use system setting` },
 ]
+
+/** The automatic-updates switch — the Windows mirror of the row in
+ *  AdvancedPane.tsx; absent where the shell says it cannot work. */
+function UpdatesSection() {
+  const { t } = useLingui()
+  const autoUpdate = useAutoUpdateSetting()
+  if (!autoUpdate.visible) return null
+  return (
+    <>
+      <div style={sectionHeaderStyle}>{t`Updates`}</div>
+      <SettingsCard
+        title={t`Automatically download and install updates`}
+        description={t`When a new version is out, Hew downloads it on its own and then asks before restarting. A version you skipped is never installed.`}
+      >
+        <ToggleSwitch
+          checked={autoUpdate.enabled}
+          onChange={autoUpdate.setEnabled}
+          ariaLabel={t`Automatically download and install updates`}
+        />
+      </SettingsCard>
+    </>
+  )
+}
 
 /** The "Server" section — the Windows mirror of AdvancedPane.tsx, on the
  *  same `useServerSettingForm` state machine (see serverForm.ts). */
@@ -627,6 +651,8 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
           </div>
 
           <ServerSection />
+
+          <UpdatesSection />
 
           {previewBuild && paneAllowed('plugins') && PluginsPane !== null && (
             <>

@@ -591,8 +591,10 @@ describe('native menu labels come from the one table (docs/LOCALIZATION.md "Nati
   // `lbl!("…")` during construction; `labels.get("…")` or `current_menu_labels(…).get("…")` where
   // part of the menu is rebuilt at runtime (the Open Recent submenu) or a
   // shell-built window or dialog is titled.
+  // The update message boxes that stay native are built in updater.rs.
+  const labelSource = source + '\n' + readFileSync(resolve(dirname(MAIN_RS), 'updater.rs'), 'utf8')
   const rustKeys = new Set(
-    Array.from(source.matchAll(/(?:\blbl!|\b(?:labels|current_menu_labels\([^)]*\))\s*\.\s*get)\(\s*"([^"]+)"\s*\)/g), (m) => m[1]),
+    Array.from(labelSource.matchAll(/(?:\blbl!|\b(?:labels|current_menu_labels\([^)]*\))\s*\.\s*get)\(\s*"([^"]+)"\s*\)/g), (m) => m[1]),
   )
   const tableKeys = new Set(Object.keys(NATIVE_MENU_LABELS))
 
@@ -601,7 +603,7 @@ describe('native menu labels come from the one table (docs/LOCALIZATION.md "Nati
     expect(missing, 'add these to NATIVE_MENU_LABELS').toEqual([])
   })
 
-  it('every table entry is used by main.rs', () => {
+  it('every table entry is used by main.rs or updater.rs', () => {
     const unused = [...tableKeys].filter((k) => !rustKeys.has(k))
     expect(unused, 'remove these from NATIVE_MENU_LABELS or use them in main.rs').toEqual([])
   })
@@ -658,8 +660,8 @@ describe('native menu labels with line breaks', () => {
     )
     const escaped = Object.entries(labels).filter(([, v]) => /\\[nrt]/.test(v)).map(([k]) => k)
     expect(escaped, 'labels still carrying a literal backslash escape').toEqual([])
-    expect(labels['updater:failed-body']).toContain('\n\n{error}')
-    expect(labels['updater:available-body']).toContain('{current}.\n\nDownload')
+    expect(labels['updater:check-failed-body']).toContain('\n\n{error}')
+    expect(labels['updater:start-failed-body']).toContain('\n\n{error}')
   })
 })
 
@@ -821,6 +823,6 @@ describe('native menu ↔ keymap', () => {
   it('on_menu_event and set_menu_accelerators both go through menu_action_for', () => {
     expect(/let Some\(action\) = menu_action_for\(id\) else/.test(source)).toBe(true)
     expect(/fn set_menu_accelerators\(/.test(source)).toBe(true)
-    expect(/generate_handler!\[[^\]]*\bset_menu_accelerators\b/s.test(source)).toBe(true)
+    expect(/generate_handler!\[[\s\S]*?\bset_menu_accelerators\b/.test(source)).toBe(true)
   })
 })

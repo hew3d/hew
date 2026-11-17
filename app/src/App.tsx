@@ -220,6 +220,7 @@ import * as inputRecorder from './recording/inputRecorder'
 import { ReportBugDialog } from './panels/ReportBugDialog'
 import { SentReportsDialog } from './panels/SentReportsDialog'
 import { FollowNoticeBar, useFollowedReports } from './panels/FollowNoticeBar'
+import { UpdateReadyBar } from './updater/UpdateReadyBar'
 import { getFollowHost, totalUnread } from './io/followHost'
 import { startWebLaunchCheck } from './io/webFollowHost'
 import { actionAllowed, behaviorEnabled, loaderEnabled, previewBuild } from './preview'
@@ -7264,17 +7265,38 @@ export default function App() {
     if (!isTauri) return
     let unlisten: (() => void) | undefined
     let cancelled = false
+    // A close request while this guard's own prompt is already up (a second
+    // click on the close button, or an update restart reaching a window
+    // whose prompt the person opened by hand) is dropped: replacing the
+    // prompt would answer the first one Cancel on the person's behalf, and
+    // that Cancel would stop the restart. The person's answer to the prompt
+    // that is up settles both.
+    let promptUp = false
     import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
       const win = getCurrentWindow()
       return win.onCloseRequested(async (event) => {
         // Always prevent the default close; we decide explicitly below.
         event.preventDefault()
+        if (promptUp) return
         if (docSessionRef.current.dirty) {
           // In-app UnsavedChangesDialog (Lane C) replaces the native `ask`
           // — its Save runs the current save flow and only resolves 'save'
           // on an actual successful write.
-          const decision = await requestUnsavedChangesDecision()
-          if (decision === 'cancel') return // keep the window open
+          promptUp = true
+          let decision: UnsavedChangesDecision
+          try {
+            decision = await requestUnsavedChangesDecision()
+          } finally {
+            promptUp = false
+          }
+          if (decision === 'cancel') {
+            // Keep the window open. An update restart closing every window
+            // (updater.rs, "Restart") waits on this one: Cancel stops it.
+            import('@tauri-apps/api/core')
+              .then(({ invoke }) => invoke('close_cancelled'))
+              .catch(() => { /* no restart running, or no updater */ })
+            return
+          }
           // 'save' means the dialog's Save already wrote the file.
         }
         // Whether the document was already clean (no prompt needed) or
@@ -8465,6 +8487,7 @@ export default function App() {
 
       {/* Reply notice for followed bug reports (follow-a-report §2.3). */}
       <FollowNoticeBar onView={handleSentReports} />
+      {isTauri && <UpdateReadyBar />}
 
       {/* Kernel panic sticky banner */}
       {kernelPanicked && (

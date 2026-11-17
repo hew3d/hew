@@ -16,6 +16,7 @@ import type { CSSProperties, KeyboardEvent } from 'react'
 import { Trans, useLingui } from '@lingui/react/macro'
 import { SettingsForm, SettingsNote, SettingsRow, SettingsSeparator } from './SettingsForm'
 import { describeIdentity, useServerSettingForm } from './serverForm'
+import { useAutoUpdateSetting } from './autoUpdate'
 import { CLOUD_ORIGIN } from './server'
 import { isComposingKey } from '../input/keyboard'
 
@@ -74,6 +75,7 @@ const okStyle: CSSProperties = {
 export function AdvancedPane() {
   const { t } = useLingui()
   const form = useServerSettingForm()
+  const autoUpdate = useAutoUpdateSetting()
 
   if (!form.available) {
     const origin = typeof window !== 'undefined' ? window.location.origin : ''
@@ -213,6 +215,30 @@ export function AdvancedPane() {
           scanner can't open the camera; scan with the camera app instead.
         </Trans>
       </SettingsNote>
+
+      {autoUpdate.visible && (
+        <>
+          <SettingsSeparator />
+          <SettingsRow label={t`Updates:`} alignTop>
+            <label style={radioLabelStyle}>
+              <input
+                type="checkbox"
+                data-testid="settings-auto-update"
+                checked={autoUpdate.enabled}
+                onChange={(e) => autoUpdate.setEnabled(e.target.checked)}
+                style={{ accentColor: 'var(--accent-base, #5b8cff)', margin: 0 }}
+              />
+              <Trans>Automatically download and install updates</Trans>
+            </label>
+          </SettingsRow>
+          <SettingsNote>
+            <Trans>
+              When a new version is out, Hew downloads it on its own and then asks before restarting. A version
+              you skipped is never installed.
+            </Trans>
+          </SettingsNote>
+        </>
+      )}
     </SettingsForm>
   )
 }

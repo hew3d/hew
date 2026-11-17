@@ -12,7 +12,10 @@ import BaseLayout from '../../layouts/BaseLayout.astro';
       <p class="intro">
         Hew checks for a new version when it starts, and whenever you choose
         Check for Updates from the menu. What happens next depends on how you
-        installed it. Find yours below.
+        installed it. Find yours below. An AppImage can also download
+        and install updates on its own if you turn on
+        <strong>Automatically download and install updates</strong> in
+        Settings. It still asks before it restarts.
       </p>
     </header>
 
@@ -34,10 +37,11 @@ import BaseLayout from '../../layouts/BaseLayout.astro';
     <div class="prose">
       <h2 id="appimage">AppImage</h2>
       <p>
-        When a new version is out, Hew asks whether to install it. Choose
-        <strong>Install</strong> and Hew replaces the AppImage file it is
-        running from, then offers to restart. The file has to be somewhere
-        you can write to, such as your home folder.
+        When a new version is out, Hew opens a window with what's new in it.
+        Choose <strong>Install Update</strong> and Hew replaces the AppImage
+        file it is running from, then offers <strong>Restart Now</strong>.
+        The file has to be somewhere you can write to, such as your home
+        folder.
       </p>
       <p>
         If an update fails, download the new AppImage from the
@@ -47,10 +51,11 @@ import BaseLayout from '../../layouts/BaseLayout.astro';
 
       <h2 id="deb-rpm">.deb and .rpm</h2>
       <p>
-        When a new version is out, Hew asks whether to install it. Choose
-        <strong>Install</strong> and your computer asks for your password,
-        because installing a package changes system files. Hew then offers to
-        restart.
+        When a new version is out, Hew opens a window with what's new in it.
+        Choose <strong>Install Update</strong> and your computer asks for
+        your password, because installing a package changes system files. Hew
+        then offers <strong>Restart Now</strong>. These installs can't update
+        automatically, since each update needs your password.
       </p>
       <p>
         <strong>Did the update fail?</strong> Hew 1.4.0 and older could
@@ -71,8 +76,8 @@ sudo dnf install ./Hew-VERSION-1.x86_64.rpm</code></pre>
       <h2 id="flatpak">Flatpak</h2>
       <p>
         Flatpak updates Hew, not Hew itself. When a new version is out, Hew
-        shows the command and a <strong>Copy Command</strong> button. Paste
-        it into a terminal:
+        shows the command in its update window with a
+        <strong>Copy Command</strong> button. Paste it into a terminal:
       </p>
       <pre><code>flatpak update com.hew3d.Hew</code></pre>
       <p>
@@ -98,8 +103,8 @@ flatpak install --user --reinstall hew com.hew3d.Hew</code></pre>
       <h2 id="arch">Arch Linux</h2>
       <p>
         Pacman updates Hew, not Hew itself. When a new version is out, Hew
-        shows the command and a <strong>Copy Command</strong> button. Paste
-        it into a terminal:
+        shows the command in its update window with a
+        <strong>Copy Command</strong> button. Paste it into a terminal:
       </p>
       <pre><code>sudo pacman -Syu</code></pre>
       <p>
@@ -110,8 +115,8 @@ flatpak install --user --reinstall hew com.hew3d.Hew</code></pre>
       <h2 id="gentoo">Gentoo</h2>
       <p>
         Portage updates Hew, not Hew itself. When a new version is out, Hew
-        shows the command and a <strong>Copy Command</strong> button. Paste
-        it into a terminal:
+        shows the command in its update window with a
+        <strong>Copy Command</strong> button. Paste it into a terminal:
       </p>
       <pre><code>sudo emaint sync -r hew3d &amp;&amp; sudo emerge --update media-gfx/hew-bin</code></pre>
 
