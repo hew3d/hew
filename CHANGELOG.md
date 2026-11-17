@@ -12,6 +12,7 @@ is not guaranteed: releases that change the `.hew` format say so under
 
 ### Added
 
+- **Language:** German interface (Deutsch). Pick it under Settings ▸ Language, or leave System default on a German system. Terms follow SketchUp's German edition; see docs/i18n/glossary-de.md. Translated by Moor and more.
 - **Eraser:** A new Eraser tool (`E`, also in the Tools menu and the command palette) erases a drawn line with a click, or every line you drag across as one undo step. The edges of a solid are not erased, and the status bar says so.
 - **Drawing:** Faces from lines on any plane. A loop of lines on one plane becomes a face even when each line was drawn on a different plane, so three Lines to an apex fill a triangle and a cube drawn edge by edge fills as it closes. Lines that do not lie on one plane make no face, and Line says so.
 - **Drawing:** Automatic solids. When flat faces enclose a space with no gap, they become a solid in the same undo step as the line or shape that closed it: a pyramid from a Rectangle and four Lines, a cube from twelve Lines or six Rectangles. A shape closed against an existing solid grows that solid (a roof drawn on a box), keeping its name and tags. A Detached shape becomes a separate Object. Detached lines that share corners close the faces the connected lines enclose (rafters ending on a box's top corners, say); lines that only cross never make a face, and a face already drawn stays as it is, so draw a dividing line first or erase the face and redraw. A shape inside a solid does nothing.
