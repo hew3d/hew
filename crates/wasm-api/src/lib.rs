@@ -7055,6 +7055,58 @@ impl Scene {
         Ok(())
     }
 
+    /// [`Scene::delete_selection`] for a selection that may also hold
+    /// construction guides and annotations: every listed node, guide, and
+    /// annotation is removed as ONE undo step —
+    /// [`kernel::Document::delete_selection`]. Each guide and annotation goes
+    /// exactly as [`Scene::delete_guide`] and [`Scene::delete_annotation`]
+    /// remove one. `kinds`/`ids` are parallel, `delete_selection`'s
+    /// convention, and may be empty when guides or annotations are listed.
+    ///
+    /// # Errors
+    /// - `BadNodeList` — `kinds` and `ids` differ in length, or nothing at
+    ///   all is listed (an empty selection refuses, as it does for
+    ///   [`Scene::delete_selection`]).
+    /// - `BadNodeKind` — a `kinds` entry names no node kind.
+    /// - `UnknownObject` / `UnknownGroup` / `UnknownInstance` /
+    ///   `UnknownGuide` / `UnknownAnnotation` — a listed handle is stale,
+    ///   deleted, or foreign. The whole batch refuses with the document
+    ///   untouched.
+    pub fn delete_mixed_selection(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        guides: &[u64],
+        annotations: &[u64],
+    ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        // Nodes may be absent when guides or annotations are listed; an
+        // empty selection refuses through `node_ids`, as it does for
+        // `delete_selection`.
+        let nodes =
+            if kinds.is_empty() && ids.is_empty() && !(guides.is_empty() && annotations.is_empty())
+            {
+                Vec::new()
+            } else {
+                node_ids(kinds, ids)?
+            };
+        let guide_ids: Vec<GuideId> = guides.iter().map(|&g| guide_id(g)).collect();
+        let annotation_ids: Vec<AnnotationId> =
+            annotations.iter().map(|&a| annotation_id(a)).collect();
+        let change = self
+            .doc
+            .delete_selection(&nodes, &guide_ids, &annotation_ids)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DeleteMixedSelection {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            guides: guides.to_vec(),
+            annotations: annotations.to_vec(),
+        });
+        Ok(())
+    }
+
     /// Moves a whole selection of live world nodes into `group` (a live
     /// group) or out to the top level (`undefined`/`None`) as ONE undo
     /// step — the Outliner drag-and-drop "Add to Group"/"Move to top
@@ -15282,6 +15334,14 @@ impl Scene {
                 DeleteSelection { kinds, ids } => {
                     self.delete_selection(&kinds, &ids)?;
                 }
+                DeleteMixedSelection {
+                    kinds,
+                    ids,
+                    guides,
+                    annotations,
+                } => {
+                    self.delete_mixed_selection(&kinds, &ids, &guides, &annotations)?;
+                }
                 Shell { object, spec } => {
                     self.shell(object, &spec)?;
                 }
@@ -17990,6 +18050,115 @@ mod tests {
             "replaying a group session reproduces the golden state_hash"
         );
         assert_eq!(replayed.save(), scene.save());
+    }
+
+    /// `delete_mixed_selection` removes nodes, guides, and annotations in ONE
+    /// undo step; a stale guide or annotation refuses typed with nothing
+    /// applied, and an empty selection refuses as `delete_selection` does.
+    #[test]
+    fn delete_mixed_selection_is_one_undo_step() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let g = scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        let note = scene
+            .add_leader_text(0, o, &[0.0, 0.0, 0.0], &[0.0, 0.0, 1.0], "n".to_string())
+            .unwrap();
+        let on_guide = |scene: &Scene| {
+            scene
+                .snap(
+                    5.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
+                    None, None, None,
+                )
+                .unwrap()
+                .is_some()
+        };
+        assert!(on_guide(&scene), "the guide snaps before the delete");
+        let hash_before = scene.state_hash();
+
+        scene
+            .delete_mixed_selection(&[0], &[o], &[g], &[note])
+            .unwrap();
+        assert!(scene.object_ids().is_empty());
+        assert!(scene.guide_ids().is_empty());
+        assert!(scene.annotation_ids().is_empty());
+        assert!(!on_guide(&scene), "the deleted guide no longer snaps");
+
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), hash_before, "one undo restores all");
+        assert_eq!(scene.annotation_detached(note), Some(false));
+        assert!(on_guide(&scene), "the restored guide snaps again");
+
+        // Guides and annotations alone, with no nodes listed.
+        scene.delete_mixed_selection(&[], &[], &[g], &[]).unwrap();
+        assert!(scene.guide_ids().is_empty());
+        scene.scene_undo().unwrap();
+
+        let gone = scene.add_guide_point(0.0, 9.0, 0.0).unwrap();
+        scene.delete_guide(gone).unwrap();
+        let hash = scene.state_hash();
+        let err = scene
+            .delete_mixed_selection(&[0], &[o], &[g, gone], &[])
+            .unwrap_err();
+        assert!(err.0.starts_with("UnknownGuide"), "got {}", err.0);
+        assert_eq!(scene.state_hash(), hash, "nothing applied");
+        let err = scene
+            .delete_mixed_selection(&[0], &[o], &[], &[note, u64::MAX])
+            .unwrap_err();
+        assert!(err.0.starts_with("UnknownAnnotation"), "got {}", err.0);
+        assert_eq!(scene.state_hash(), hash, "nothing applied");
+        let err = scene
+            .delete_mixed_selection(&[0, 0], &[o], &[g], &[])
+            .unwrap_err();
+        assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
+        assert_eq!(scene.state_hash(), hash, "nothing applied");
+
+        let err = scene
+            .delete_mixed_selection(&[], &[], &[], &[])
+            .unwrap_err();
+        assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
+        assert_eq!(scene.state_hash(), hash, "nothing applied");
+    }
+
+    /// A mixed delete is part of the replay contract under its own method;
+    /// a node-only `delete_selection` still records as it always has.
+    #[test]
+    fn delete_mixed_selection_records_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 2.0, 0.0);
+        let o2 = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let g = scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        let note = scene
+            .add_leader_text(0, o, &[0.0, 0.0, 0.0], &[0.0, 0.0, 1.0], "n".to_string())
+            .unwrap();
+        scene
+            .delete_mixed_selection(&[0], &[o], &[g], &[note])
+            .unwrap();
+        scene.scene_undo().unwrap();
+        scene.scene_redo().unwrap();
+        scene.delete_selection(&[0], &[o2]).unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("\"method\":\"delete_mixed_selection\""));
+        assert!(
+            json.contains("\"method\":\"delete_selection\",\"kinds\":[0],\"ids\":["),
+            "a node-only delete keeps its recorded shape: {json}"
+        );
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replay reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
     }
 
     /// The Move tool's array copy across the FFI: `duplicate_selection_array`

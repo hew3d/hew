@@ -1229,6 +1229,20 @@ pub enum RecordedCall {
     /// replaces going forward) replays on older builds unchanged; one that
     /// does fails to parse there — loudly, never silently divergent.
     DeleteSelection { kinds: Vec<u8>, ids: Vec<u64> },
+    /// `delete_mixed_selection(kinds, ids, guides, annotations)` — the
+    /// Delete-key/Cut batch delete of a selection that also holds
+    /// construction guides and annotations: every listed node, guide, and
+    /// annotation removed as ONE undo step. Additive variant, beside
+    /// [`RecordedCall::DeleteSelection`] rather than a change to its shape:
+    /// a recording that never deletes a guide or annotation with a
+    /// selection replays on older builds unchanged; one that does fails to
+    /// parse there — loudly, never silently divergent.
+    DeleteMixedSelection {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        guides: Vec<u64>,
+        annotations: Vec<u64>,
+    },
     /// `reparent_nodes(kinds, ids, group)` — the Outliner drag-and-drop
     /// "Add to Group"/"Move to top level" (v1.1-cycle.md grouping lane):
     /// every listed node moved as ONE undo step, `DeleteSelection`'s
