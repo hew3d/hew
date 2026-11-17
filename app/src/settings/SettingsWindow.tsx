@@ -56,6 +56,9 @@ const iconProps = {
   strokeLinecap: 'round',
   strokeLinejoin: 'round',
   'aria-hidden': true,
+  // The tab is a column flex box: without this a strip squeezed for height
+  // (a horizontal scrollbar in a narrow window) crushes the icon first.
+  style: { flexShrink: 0 },
 } as const
 
 /** Ruler — Units. */

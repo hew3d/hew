@@ -9783,9 +9783,15 @@ export default function App() {
             onClick={(e) => e.stopPropagation()}
             style={{
               position: 'relative',
-              width: '520px',
-              height: '380px',
-              maxHeight: '80vh',
+              // Wide enough for the whole tab strip; the corner grip
+              // resizes it (`resize` needs the clipped overflow below).
+              width: '760px',
+              height: '520px',
+              minWidth: '360px',
+              minHeight: '300px',
+              maxWidth: '94vw',
+              maxHeight: '90vh',
+              resize: 'both',
               overflow: 'hidden',
               background: 'var(--surface-window, #1a1a1a)',
               color: 'var(--text-secondary, #ddd)',

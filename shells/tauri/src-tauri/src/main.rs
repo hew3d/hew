@@ -2651,8 +2651,9 @@ async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(existing) = app.get_webview_window("settings") {
         return existing.set_focus().map_err(|e| e.to_string());
     }
-    // Fixed-size, per macOS Settings convention (HIG: settings windows
-    // aren't resizable; each pane determines its own compact height).
+    // Sized so the whole tab strip shows without scrolling, and resizable:
+    // translated tab labels and the longer panes need more room than any
+    // one fixed size gives them.
     let title = current_menu_labels(&app).get("window:settings").to_string();
     tauri::WebviewWindowBuilder::new(
         &app,
@@ -2660,8 +2661,9 @@ async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
         tauri::WebviewUrl::App("index.html#settings".into()),
     )
     .title(title)
-    .inner_size(520.0, 360.0)
-    .resizable(false)
+    .inner_size(760.0, 520.0)
+    .min_inner_size(520.0, 360.0)
+    .resizable(true)
     .minimizable(false)
     .maximizable(false)
     .build()
@@ -3164,27 +3166,86 @@ fn cli_flag_output(args: &[String]) -> Option<String> {
     }
 }
 
-/// Prints `text` where the person who ran `hew --flag` can see it. A Windows
+/// Where `hew --flag` output goes, given what standard output is.
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+enum CliSink {
+    /// Standard output is a pipe or file the caller handed us (a launcher or
+    /// package manager capturing the version): write there, never to a console.
+    Stdout,
+    /// No usable standard output (a console launch from a GUI-subsystem
+    /// binary): attach to the parent console and write to it.
+    ParentConsole,
+}
+
+/// The kind of thing standard output is, as far as the sink choice cares.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StdoutKind {
+    /// Null or invalid handle: nothing was inherited.
+    Missing,
+    /// A pipe or a disk file.
+    PipeOrFile,
+    /// A console, character device, or anything else.
+    Other,
+}
+
+/// Pure sink decision. Only a pipe or file is written to directly; writing
+/// to the console (`CONOUT$`) would bypass a redirected stream.
+#[cfg(any(windows, test))]
+fn cli_sink(kind: StdoutKind) -> CliSink {
+    match kind {
+        StdoutKind::PipeOrFile => CliSink::Stdout,
+        StdoutKind::Missing | StdoutKind::Other => CliSink::ParentConsole,
+    }
+}
+
+/// Classifies the process's standard output handle (Windows only).
+#[cfg(windows)]
+fn stdout_kind() -> StdoutKind {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_DISK, FILE_TYPE_PIPE};
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
+    // SAFETY: GetStdHandle and GetFileType only read process/handle state; a
+    // null or invalid handle is checked before use.
+    unsafe {
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if h.is_null() || h == INVALID_HANDLE_VALUE {
+            return StdoutKind::Missing;
+        }
+        match GetFileType(h) {
+            FILE_TYPE_PIPE | FILE_TYPE_DISK => StdoutKind::PipeOrFile,
+            _ => StdoutKind::Other,
+        }
+    }
+}
+
+/// Prints `text` where whoever ran `hew --flag` can see it. If standard
+/// output is a pipe or file, write there. Otherwise, on Windows, a
 /// GUI-subsystem binary has no console of its own, so attach to the parent's
-/// first (best effort; nothing to attach to when launched from Explorer).
+/// (best effort; nothing to attach to when launched from Explorer).
 fn print_cli_output(text: &str) {
     use std::io::Write;
     #[cfg(windows)]
     {
-        // SAFETY: AttachConsole takes a plain process-id constant.
-        let attached = unsafe {
-            windows_sys::Win32::System::Console::AttachConsole(
-                windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
-            )
-        } != 0;
-        if attached {
-            if let Ok(mut con) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
-                let _ = con.write_all(text.as_bytes());
-                return;
+        if cli_sink(stdout_kind()) == CliSink::ParentConsole {
+            // SAFETY: AttachConsole takes a plain process-id constant.
+            let attached = unsafe {
+                windows_sys::Win32::System::Console::AttachConsole(
+                    windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+                )
+            } != 0;
+            if attached {
+                if let Ok(mut con) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+                    let _ = con.write_all(text.as_bytes());
+                    return;
+                }
             }
         }
     }
-    let _ = std::io::stdout().write_all(text.as_bytes());
+    let mut out = std::io::stdout();
+    let _ = out.write_all(text.as_bytes());
+    let _ = out.flush();
 }
 
 fn main() {
@@ -5449,6 +5510,13 @@ mod tests {
         }
         assert_eq!(v(&[]), None);
         assert_eq!(v(&["/tmp/a.hew"]), None);
+    }
+
+    #[test]
+    fn cli_output_goes_to_a_pipe_or_file_never_past_it_to_the_console() {
+        assert_eq!(cli_sink(StdoutKind::PipeOrFile), CliSink::Stdout);
+        assert_eq!(cli_sink(StdoutKind::Missing), CliSink::ParentConsole);
+        assert_eq!(cli_sink(StdoutKind::Other), CliSink::ParentConsole);
     }
 
     #[test]
