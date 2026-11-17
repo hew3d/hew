@@ -146,6 +146,8 @@ workers/share-relay/  the public relay Worker, its unit suite, and the
 workers/bug-intake/   the private Help ▸ Report Bug intake Worker (chunked
                       upload, Access-protected admin page) and its unit suite
 tools/                replay runner and development tooling
+corpus/curves/        the curves scoreboard: test models as API scripts and
+                      the checked-in result table (section 7)
 site/                 the hew3d.com website (Astro)
 docs/                 architecture, file format spec, roadmap, this guide
 scripts/              verify.sh (per-commit gate), verify-changed.sh (quick
@@ -727,6 +729,92 @@ recorded sessions replayable as regression tests: a reported bug's input
 stream, once captured, becomes a permanent, exact reproducer rather than a
 "works on my machine" anecdote. See `docs/dev/DIAGNOSTICS.md` for the full
 determinism, logging, and record/replay architecture.
+
+### The curves scoreboard
+
+The scoreboard says, case by case, what Fillet and Chamfer do on a set of
+test models. Every change to the blend engine is judged against it.
+
+```sh
+scripts/scoreboard.sh
+```
+
+rebuilds every model under `corpus/curves/` through the Hew API, runs every
+case at every size of its sweep, rewrites `corpus/curves/SCOREBOARD.tsv`,
+and prints what changed since the last run, cases that got worse first.
+`scripts/scoreboard.sh --check` runs the same cases and fails if the table
+would change, without writing it. Each run of a case at a size gets one
+class:
+
+| Class | Meaning |
+|---|---|
+| `correct` | A valid, watertight solid that passed the checks below |
+| `limit` | Refused, and the refusal names what is in the way |
+| `generic` | Refused without a cause a user could act on |
+| `wrong` | A result that failed a check, a panic, or an undo that did not restore the model |
+
+A built result is `correct` when the object validates, is watertight, lies
+inside the bounds it had before, and moved some volume, but no more than
+the size squared times the total length of the object's edges. A plain
+round or chamfer must also report the size that was asked for. That
+catches a broken or badly oversized result. It does not measure the
+surface: a round that is valid but slightly off its true shape still reads
+`correct` here. A refusal that says a larger size would fit than the one it
+refused is `wrong`.
+
+Which refusals name a cause is decided in one place, `class_of_refusal` in
+`crates/api/tests/curves_scoreboard.rs`. A refusal it does not list is
+`generic`, so a new one that names its cause is added there, in the same
+change as the refusal.
+
+The table is checked in. The gate runs the same cases in the preview build
+and fails when a fresh run differs from the table, so a change in any case
+shows up as a changed line of `SCOREBOARD.tsv` in the pull request. A case
+that got worse does not merge without the maintainer's decision.
+
+**Adding a row.** A model is one JSON file in `corpus/curves/`, named for
+what it is. `box.json` is the one to copy.
+
+- `title` and `from`: what the model is, and why it is in the set (what it
+  tests, or the tutorial, defect or part it came from).
+- `build`: the API calls that make the model, in order, each
+  `{"method", "params", "as"?}`. `as` labels a call's result, and a later
+  call names a value in it as `{"$ref": "<label>#<JSON pointer>"}`, the
+  form `hew.doc.transact` uses. A build call that is refused fails the
+  run: the model is wrong, not the engine.
+- Lengths. A string made of a number and a unit (`"3mm"`, `"2.5cm"`,
+  `"0.1m"`, `"1/8in"`, `"-2mm"`) is read as that length wherever it
+  appears in `params`. It starts with a digit or a minus sign. A bare
+  number is meters, as in the API.
+- `cases`: each has an `id`, the swept call (`method`, and `params` with
+  the edges named by locator), and `sizes`, a list of lengths with units.
+  The sweep sets `distance` for `hew.solid.chamfer` and `radius` for any
+  other call; `sweep` names another parameter. `note` says what the case
+  is for.
+- `before` lists calls made first, at fixed sizes, for a fillet that meets
+  an earlier one. If one of them is refused, the case reports that refusal
+  at every size, marked `before[n]`.
+- A locator that finds no edge, or more than one, and a name that does not
+  exist (an object, a profile) fail the whole run, in the swept call and
+  in `before`: the row is wrong.
+- Run a sweep from very small to past what fits, so the table shows where
+  the answer changes.
+- State what you know about the shape, and only what you have worked out.
+  All three are optional. `fits_to` is a length: every size up to it
+  should build, and a refusal at or below it is counted as open work in
+  the table's summary (it does not fail the gate). `never_above` is a
+  length past which nothing can exist on the shape: a named limit there
+  counts as the right answer, and a built result there is `wrong`.
+  `volume` is `"less"` or `"more"`, the way the volume has to move; give
+  it only when every edge of the case is an outside corner (less) or an
+  inside corner (more).
+- Better and worse are judged with these statements counted in, so
+  changing a `fits_to` or `never_above` can move a case in the comparison
+  with no change in the engine.
+
+Never shape a row to get a better class. A refusal or a wrong result on a
+real model is what the table is for. Run `scripts/scoreboard.sh`, read the
+comparison, and commit the row and the table together.
 
 ## 8. Dependencies & toolchains
 

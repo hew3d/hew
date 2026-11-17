@@ -64,8 +64,11 @@ const GLOBAL = [
 // Files a crate's tests read from outside its own directory. The kernel
 // loads every .hew fixture in the repository under its strictest validator
 // (crates/kernel/tests/tangent_loop_specs.rs), and crates/wasm-api, which
-// depends on the kernel, reads the app's E2E fixtures.
+// depends on the kernel, reads the app's E2E fixtures. The curves scoreboard
+// (crates/api/tests/curves_scoreboard.rs) reads its models and its table
+// from corpus/curves/.
 const READ_ACROSS = [
+  { re: /^corpus\/curves\//, crate: "api" },
   { re: /^app\/e2e\/fixtures\//, crate: "kernel" },
   { re: /^app\/public\/samples\//, crate: "kernel" },
   { re: /^crates\/[^/]+\/tests\/fixtures\/.*\.hew$/, crate: "kernel" },

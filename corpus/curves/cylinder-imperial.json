@@ -1,0 +1,56 @@
+{
+  "title": "A 2 in diameter, 1 in tall cylinder (32 sides)",
+  "from": "Dimensioned in inches and swept in fractions of an inch.",
+  "build": [
+    {
+      "method": "hew.sketch.draw_circle",
+      "as": "c",
+      "params": {"plane": {"ground": true}, "center": [0, 0, 0], "radius": "1in", "segments": 32}
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "cyl",
+      "params": {"region": {"$ref": "c#/region_id"}, "distance": "1in"}
+    }
+  ],
+  "cases": [
+    {
+      "id": "top-rim-round",
+      "note": "2 in diameter, 1 in tall, 32 sides. Cap inradius 0.995 in, height 1 in: limit just under 1 in; 3/4 in is safely inside, 5/4 in is past.",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, "1in"]}}]},
+      "sizes": ["0.1mm", "1/16in", "1/8in", "1/4in", "3/8in", "1/2in", "3/4in", "5/4in"],
+      "fits_to": "3/4in",
+      "never_above": "1in",
+      "volume": "less"
+    },
+    {
+      "id": "bottom-rim-round",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, 0]}}]},
+      "sizes": ["0.1mm", "1/16in", "1/8in", "1/4in", "3/8in", "1/2in", "3/4in", "5/4in"],
+      "fits_to": "3/4in",
+      "never_above": "1in",
+      "volume": "less"
+    },
+    {
+      "id": "top-rim-chamfer",
+      "note": "2 in diameter, 1 in tall, 32 sides. Cap inradius 0.995 in, height 1 in: limit just under 1 in; 3/4 in is safely inside, 5/4 in is past.",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, "1in"]}}]},
+      "sizes": ["0.1mm", "1/16in", "1/8in", "1/4in", "3/8in", "1/2in", "3/4in", "5/4in"],
+      "fits_to": "3/4in",
+      "never_above": "1in",
+      "volume": "less"
+    },
+    {
+      "id": "bottom-rim-chamfer",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, 0]}}]},
+      "sizes": ["0.1mm", "1/16in", "1/8in", "1/4in", "3/8in", "1/2in", "3/4in", "5/4in"],
+      "fits_to": "3/4in",
+      "never_above": "1in",
+      "volume": "less"
+    }
+  ]
+}

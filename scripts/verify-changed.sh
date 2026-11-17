@@ -18,6 +18,9 @@
 #                                   (so preview-only code still compiles
 #                                   against an edited kernel), and their
 #                                   tests when one of them was itself edited.
+#                                   A kernel edit also checks the curves
+#                                   scoreboard, which only that build has.
+#   corpus/curves/**                the same, as a change to crates/api
 #   shells/tauri/**                 the gate's whole tauri lane
 #   app/**, the JS lock file, or    typecheck, lint, the unit tests related to
 #   the kernel's API surface        the changed files (all of them when the
@@ -106,9 +109,9 @@ echo "verify-changed: $(wc -l <<<"$CHANGED" | tr -d ' ') changed file(s) against
 # ---------------------------------------------------------------------------
 # Rust workspace
 # ---------------------------------------------------------------------------
-# The app-side paths are fixtures that Rust tests read across crate lines
-# (scripts/affected-crates.mjs has the list).
-if has '^(crates/|Cargo\.toml$|Cargo\.lock$|rust-toolchain\.toml$|clippy\.toml$|\.?rustfmt\.toml$|\.cargo/|preview-features\.json$|app/e2e/fixtures/|app/public/samples/)'; then
+# The app-side paths and corpus/ are fixtures that Rust tests read across
+# crate lines (scripts/affected-crates.mjs has the list).
+if has '^(crates/|Cargo\.toml$|Cargo\.lock$|rust-toolchain\.toml$|clippy\.toml$|\.?rustfmt\.toml$|\.cargo/|preview-features\.json$|app/e2e/fixtures/|app/public/samples/|corpus/)'; then
   step "cargo fmt --check"
   cargo fmt --check
 
@@ -141,6 +144,12 @@ if has '^(crates/|Cargo\.toml$|Cargo\.lock$|rust-toolchain\.toml$|clippy\.toml$|
       if [ -n "$PREVIEW_EDITED" ]; then
         step "HEW_PREVIEW=1 cargo test ($(tr '\n' ' ' <<<"$PREVIEW_AFFECTED" | sed 's/ $//'))"
         HEW_PREVIEW=1 CARGO_TARGET_DIR="$PREVIEW_TARGET" cargo test "${PPKGS[@]}"
+      elif has '^crates/kernel/'; then
+        # The one preview-only test a kernel edit can change the answer of:
+        # the curves scoreboard exists in no production build, so the
+        # production tests above do not stand in for it.
+        step "scripts/scoreboard.sh --check"
+        scripts/scoreboard.sh --check
       fi
     fi
   fi

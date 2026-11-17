@@ -15,6 +15,9 @@ cd "$(dirname "$0")/.."
 # `HEW_PREVIEW=1 <command>`. Nothing below skips the production half.
 # ---------------------------------------------------------------------------
 unset HEW_PREVIEW
+# The scoreboard test rewrites its table when this is set
+# (scripts/scoreboard.sh sets it). The gate only ever checks the table.
+unset UPDATE_SCOREBOARD
 # The flag is a cfg, so in one target directory each build overwrites the
 # other's artifacts for those crates, and every gate run would recompile
 # them twice (and the next run twice again). The preview steps build into

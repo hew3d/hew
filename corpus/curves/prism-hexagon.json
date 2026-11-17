@@ -1,0 +1,97 @@
+{
+  "title": "A regular hexagon prism, 30 mm circumradius, 25 mm tall",
+  "from": "Corners of 120 degrees, three-edge corners at the caps: the first non-right-angle prism.",
+  "build": [
+    {
+      "method": "hew.sketch.draw_polygon",
+      "as": "base",
+      "params": {"plane": {"ground": true}, "center": [0, 0, 0], "radius": "30mm", "sides": 6}
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "hex",
+      "params": {"region": {"$ref": "base#/region_id"}, "distance": "25mm"}
+    }
+  ],
+  "cases": [
+    {
+      "id": "top-loop-round",
+      "note": "Top cap loop. The 25 mm wall (and the 25.98 mm cap inradius) bound it; fits_to 24 mm leaves a margin for the corner setbacks (1.155 x size must stay under the 30 mm edge).",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, "25mm"]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "20mm", "24mm", "25mm", "28mm", "40mm"],
+      "fits_to": "24mm",
+      "never_above": "25mm",
+      "volume": "less"
+    },
+    {
+      "id": "top-loop-chamfer",
+      "note": "Top cap loop. The 25 mm wall (and the 25.98 mm cap inradius) bound it; fits_to 24 mm leaves a margin for the corner setbacks (1.155 x size must stay under the 30 mm edge).",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, "25mm"]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "20mm", "24mm", "25mm", "28mm", "40mm"],
+      "fits_to": "24mm",
+      "never_above": "25mm",
+      "volume": "less"
+    },
+    {
+      "id": "bottom-loop-round",
+      "note": "Bottom cap loop, same bounds as the top.",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, 0]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "20mm", "24mm", "25mm", "28mm", "40mm"],
+      "fits_to": "24mm",
+      "never_above": "25mm",
+      "volume": "less"
+    },
+    {
+      "id": "bottom-loop-chamfer",
+      "note": "Bottom cap loop, same bounds as the top.",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, 0]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "20mm", "24mm", "25mm", "28mm", "40mm"],
+      "fits_to": "24mm",
+      "never_above": "25mm",
+      "volume": "less"
+    },
+    {
+      "id": "vertical-edge-round",
+      "note": "One 120-degree vertical edge at (30,0). Tangent line sits size x tan30 = 0.577 x size from the edge on each 30 mm side face, so 30/0.577 = 51.96 mm is the limit.",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"object": {"$ref": "hex#/object_id"}, "at": ["30mm", 0, "12.5mm"]}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "15mm", "30mm", "50mm", "55mm", "60mm"],
+      "fits_to": "50mm",
+      "never_above": "52mm",
+      "volume": "less"
+    },
+    {
+      "id": "vertical-edge-chamfer",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"object": {"$ref": "hex#/object_id"}, "at": ["30mm", 0, "12.5mm"]}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "15mm", "25mm", "29mm", "30mm", "35mm", "40mm"],
+      "fits_to": "29mm",
+      "never_above": "30mm",
+      "volume": "less",
+      "note": "A chamfer's distance is measured along each face from the edge, so the 30 mm side faces limit it to 30 mm."
+    },
+    {
+      "id": "all-edges-round",
+      "note": "All 18 edges. Top and bottom rounds share the 25 mm walls, so 12.5 mm is the limit (they would meet).",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"object": {"$ref": "hex#/object_id"}, "all": true}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "12mm", "12.5mm", "14mm", "20mm"],
+      "fits_to": "12mm",
+      "never_above": "12.5mm",
+      "volume": "less"
+    },
+    {
+      "id": "all-edges-chamfer",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"object": {"$ref": "hex#/object_id"}, "all": true}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "12mm", "12.5mm", "14mm", "20mm"],
+      "fits_to": "12mm",
+      "never_above": "12.5mm",
+      "volume": "less"
+    }
+  ]
+}
