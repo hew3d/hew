@@ -65,12 +65,11 @@ fn parse_mode(mode: Option<&str>) -> Result<SelectMode, CmdError> {
     })
 }
 
-/// Resolves `ids` to selection entries, refusing what the app could never
-/// hold as a selection: an id that names no live selectable entity
-/// (`unknown_entity`), picked nodes mixed with a guide or an annotation, or
-/// more than one guide or annotation (`selection_mixed_kinds`), and a hidden
-/// node or sketch (`selection_target_not_visible`). An id named twice
-/// counts once.
+/// Resolves `ids` to selection entries, in pick order, refusing what the
+/// app could never hold as a selection: an id that names no live selectable
+/// entity (`unknown_entity`), and a hidden node, sketch, guide, or
+/// annotation (`selection_target_not_visible`). Every kind mixes with every
+/// other, in any count. An id named twice counts once.
 pub(crate) fn resolve_selection(
     ctx: &Ctx,
     ids: &[String],
@@ -89,8 +88,6 @@ pub(crate) fn resolve_selection(
             resolved.push((id, entry));
         }
     }
-    let picked: Vec<SelectionEntry> = resolved.iter().map(|(_, e)| *e).collect();
-    check_one_kind(&picked)?;
     for (id, entry) in &resolved {
         let hidden = match *entry {
             SelectionEntry::Object(o) => ctx.doc.node_effectively_hidden(kernel::NodeId::Object(o)),
@@ -99,7 +96,8 @@ pub(crate) fn resolve_selection(
                 ctx.doc.node_effectively_hidden(kernel::NodeId::Instance(i))
             }
             SelectionEntry::Sketch(s) => !ctx.doc.sketch_shown(s),
-            SelectionEntry::Guide(_) | SelectionEntry::Annotation(_) => false,
+            SelectionEntry::Guide(g) => !ctx.doc.guide_shown(g),
+            SelectionEntry::Annotation(a) => !ctx.doc.annotation_shown(a),
         };
         if hidden {
             return Err(CmdError::Refusal(
@@ -114,21 +112,6 @@ pub(crate) fn resolve_selection(
     Ok(resolved.into_iter().map(|(_, e)| e).collect())
 }
 
-/// The one-kind rule: nodes and sketches in any mix, or exactly one guide,
-/// or exactly one annotation.
-fn check_one_kind(entries: &[SelectionEntry]) -> Result<(), CmdError> {
-    let singular = entries
-        .iter()
-        .any(|e| matches!(e, SelectionEntry::Guide(_) | SelectionEntry::Annotation(_)));
-    if singular && entries.len() > 1 {
-        return Err(CmdError::Refusal(Refusal::api(
-            "selection_mixed_kinds",
-            "A selection holds nodes, or one guide, or one annotation, never a mix.",
-        )));
-    }
-    Ok(())
-}
-
 fn set(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let SetParams { ids, mode } = parse(params)?;
     if ids.len() > MAX_SELECTION_IDS {
@@ -139,10 +122,6 @@ fn set(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     }
     let mode = parse_mode(mode.as_deref())?;
     let entries = resolve_selection(ctx, &ids)?;
-    // The rule holds for the result too: adding a guide to nodes, or a
-    // second annotation to one, refuses rather than mixing.
-    let current = ctx.host.selection().map_err(CmdError::Refusal)?;
-    check_one_kind(&crate::selection::merge(&current.entries, &entries, mode))?;
     let state = ctx
         .host
         .set_selection(entries, mode)

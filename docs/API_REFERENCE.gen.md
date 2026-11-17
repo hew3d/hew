@@ -11636,7 +11636,7 @@ The app's selection: public ids in pick order, the primary first. A drafting sel
 - **Served:** host
 - **Permission:** view
 
-Change the app's selection: replace it (the default), or add, subtract, or toggle the named entities. Nodes and sketches mix; a guide or an annotation is selected alone. Hidden entities refuse.
+Change the app's selection: replace it (the default), or add, subtract, or toggle the named entities. Objects, groups, instances, sketches, guides, and annotations mix in any count. Hidden entities refuse.
 
 **Params schema:**
 
@@ -11645,7 +11645,7 @@ Change the app's selection: replace it (the default), or add, subtract, or toggl
   "additionalProperties": false,
   "properties": {
     "ids": {
-      "description": "objects, groups, instances, and sketches; or exactly one guide; or exactly one annotation",
+      "description": "objects, groups, instances, sketches, guides, and annotations, in pick order",
       "items": {
         "type": "string"
       },
@@ -11712,7 +11712,6 @@ Change the app's selection: replace it (the default), or add, subtract, or toggl
 
 - `unknown_entity`
 - `selection_target_not_visible`
-- `selection_mixed_kinds`
 - `host_capability_missing`
 
 ## hew.sketch

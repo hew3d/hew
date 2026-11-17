@@ -618,8 +618,9 @@ impl SaveOutcome {
 // ------------------------------------------------- selection and view state
 
 /// One entry of the app's selection (docs/agents/HEW_API.md §7, "Selection
-/// and view state"): a tree node or sketch, or exactly one guide or one
-/// annotation. Equality is kind plus id.
+/// and view state"): a tree node, a sketch, a guide, or an annotation. A
+/// selection is one ordered list of these, in any mix. Equality is kind
+/// plus id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SelectionEntry {
     Object(kernel::ObjectId),
@@ -1079,8 +1080,7 @@ pub trait Host {
     /// Combines `entries` with the selection by `mode`
     /// ([`crate::selection::merge`]) and answers the result
     /// (`hew.selection.set`/`clear`). `crates/api` has already validated
-    /// every entry: it resolves, the set is one kind family, and nothing in
-    /// it is hidden.
+    /// every entry: it resolves and nothing in it is hidden.
     fn set_selection(
         &mut self,
         entries: Vec<SelectionEntry>,
