@@ -94,16 +94,30 @@ Before **pushing**, run the comprehensive gate:
 scripts/verify-full.sh
 ```
 
-It runs `verify.sh` and then the blocking CI lanes it is able to run (the
-golden state-hash replay gate and the chromium E2E smoke), in CI's order.
+It runs `verify.sh`, the dependency advisories, the golden state-hash
+replay gate, the relay contract, and the chromium E2E **smoke set** in both
+builds: the specs listed in `scripts/e2e-smoke-specs.txt`, the Preview wall
+spec, and every spec file the branch changed.
 
-A green run predicts a green CI run with one documented exception: the
-**visual-goldens lane blocks in CI but cannot run here**, because its PNGs are
-rasterized by the SwiftShader inside CI's pinned Chromium and false-fail on any
-other host. If you touched the render path — or bumped three.js or Playwright —
-CI has the last word. It also skips the non-blocking webkit lane and the
-Desktop E2E workflow (tauri-driver cannot drive the macOS WKWebView). The
-header of `scripts/verify-full.sh` carries the full rationale.
+The whole chromium suite is CI's job. It is serial by design and takes well
+over an hour on one machine; CI spreads it over eight runners and blocks the
+merge on it. Run it locally when a change is wide enough to earn the wait
+(the input pipeline, the tool state machines, the test harness, a Playwright
+bump):
+
+```sh
+scripts/verify-full.sh --full-e2e
+```
+
+A green run predicts a green CI run with two documented exceptions. The
+specs outside the smoke set run only in CI, unless `--full-e2e` is given.
+And the **visual-goldens lane blocks in CI but cannot run here**, because its
+PNGs are rasterized by the SwiftShader inside CI's pinned Chromium and
+false-fail on any other host. If you touched the render path — or bumped
+three.js or Playwright — CI has the last word. The gate also skips the
+non-blocking webkit lane and the Desktop E2E workflow (tauri-driver cannot
+drive the macOS WKWebView). The header of `scripts/verify-full.sh` carries
+the full rationale.
 
 ## 2. Repository layout
 
@@ -713,7 +727,8 @@ e2e:build:probe` then `e2e:probe` runs them in the desktop webview under
 `desktop.probe`.
 
 **Running both builds.** `scripts/verify.sh` and `scripts/verify-full.sh`
-run both on their own; nothing in them skips the production half. By hand:
+run both on their own; nothing in them skips the production half (the
+browser smoke set narrows which specs run, never which builds). By hand:
 
 ```
 cargo test -p api                       # production

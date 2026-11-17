@@ -23,8 +23,8 @@ Start with these documents — they are the source of truth:
 - Quick check while working (only what the change reaches):
   `scripts/verify.sh --changed`
 - Verify (run before every commit): `scripts/verify.sh`
-- Full pre-push gate (verify + replay + chromium E2E, mirrors blocking CI):
-  `scripts/verify-full.sh`
+- Full pre-push gate (verify + replay + chromium E2E smoke set; CI runs
+  the whole E2E suite, `--full-e2e` runs it here): `scripts/verify-full.sh`
 - WASM build: `pnpm --dir app wasm` (the production kernel unless
   `HEW_PREVIEW=1`; the dev server builds the preview kernel it needs on its own)
 - UI dev server: `pnpm --dir app dev`

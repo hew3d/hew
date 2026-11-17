@@ -49,10 +49,16 @@ cd "$(dirname "$0")/.."
 # (see scripts/verify.sh).
 unset HEW_PREVIEW
 
-# The specs every browser-reaching change runs: boot, the draw / push-pull /
-# save / reload lifecycle, the test harness itself, sessions, dirty state.
-SMOKE_SPECS="e2e/smoke.spec.ts e2e/web-smoke.spec.ts e2e/harness.spec.ts e2e/session.spec.ts e2e/dirty-state.spec.ts"
-# Spec files run in parallel here. The gate and CI keep one worker
+# The specs every browser-reaching change runs (scripts/e2e-smoke-specs.txt).
+SMOKE_SPECS="$(grep -vE '^[[:space:]]*(#|$)' scripts/e2e-smoke-specs.txt | tr '\n' ' ')"
+SMOKE_SPECS="${SMOKE_SPECS% }"
+for spec in $SMOKE_SPECS; do
+  if [ ! -f "app/$spec" ]; then
+    echo "verify-changed: scripts/e2e-smoke-specs.txt lists app/$spec, which does not exist" >&2
+    exit 2
+  fi
+done
+# Spec files run in parallel here. The whole suite keeps one worker
 # (app/playwright.config.ts); a handful of files on a developer machine does
 # not contend the way the whole suite on a small runner does.
 E2E_WORKERS="${HEW_E2E_WORKERS:-4}"
