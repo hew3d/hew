@@ -1158,7 +1158,8 @@ fn undo_of_deleting_the_last_placement_restores_definition_and_placement() {
     assert_eq!(doc.state_hash(), post);
     // The selection-delete path takes it as one entry too.
     doc.undo().unwrap();
-    doc.delete_selection(&[NodeId::Instance(first)]).unwrap();
+    doc.delete_selection(&[NodeId::Instance(first)], &[], &[])
+        .unwrap();
     assert!(!doc.component_ids().contains(&def));
     doc.undo().unwrap();
     assert_eq!(doc.state_hash(), hash);
@@ -1349,8 +1350,12 @@ fn undo_and_redo_of_the_nested_delete_restore_and_rehide_both_definitions() {
 fn the_nested_delete_survives_save_and_load() {
     let mut doc = Document::new();
     let n = nested_sets(&mut doc);
-    doc.delete_selection(&[NodeId::Instance(n.gp[0]), NodeId::Instance(n.gp[1])])
-        .unwrap();
+    doc.delete_selection(
+        &[NodeId::Instance(n.gp[0]), NodeId::Instance(n.gp[1])],
+        &[],
+        &[],
+    )
+    .unwrap();
     assert!(!doc.component_ids().contains(&n.sa));
     let re = Document::load(&doc.save()).unwrap();
     assert!(re.component_ids().is_empty(), "neither set is saved");

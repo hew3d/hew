@@ -45,12 +45,20 @@
 //! Solid on a free sketch's faces, drive the cell search (§5): closed faces
 //! become solids or grow the boxes, in the same step.
 //!
+//! Construction guides and annotations join in as well: guide points and
+//! lines through lattice points, leader texts anchored to a live node (or to
+//! nothing), and a mixed Delete that takes nodes, guides, and annotations in
+//! one call. A mixed Delete is one undo step that undo then redo reproduce
+//! exactly; salted with a stale guide handle it refuses with the document
+//! and its history untouched.
+//!
 //! Failures shrink to a short op list. Run deeper than the default 256
 //! cases with `PROPTEST_CASES=20000 cargo test -p kernel --test
 //! session_fuzz`.
 
 use kernel::{
-    Document, InstanceId, LibraryProvenance, NodeId, ObjectId, Plane, Point3, Transform, Vec3,
+    Anchor, Document, GuideId, InstanceId, LibraryProvenance, NodeId, ObjectId, Plane, Point3,
+    Transform, Vec3,
 };
 use proptest::prelude::*;
 
@@ -204,6 +212,30 @@ enum Op {
     OutsideParticipant {
         sel: usize,
     },
+    /// A construction guide through a lattice point: a point, or a line
+    /// along a lattice step.
+    AddGuide {
+        at: usize,
+        line: bool,
+        dir: u8,
+    },
+    /// A leader text at a lattice point, anchored to a live node (`sel`
+    /// past the nodes: to nothing).
+    AddNote {
+        sel: usize,
+        at: usize,
+    },
+    /// One `delete_selection` over up to two nodes, a guide, and an
+    /// annotation (`mask` picks which), salted with a stale guide handle
+    /// when `stale`.
+    DeleteMixed {
+        a: usize,
+        b: usize,
+        guide: usize,
+        note: usize,
+        mask: u8,
+        stale: bool,
+    },
 }
 
 fn arb_op() -> impl Strategy<Value = Op> {
@@ -246,6 +278,19 @@ fn arb_op() -> impl Strategy<Value = Op> {
         1 => sel().prop_map(|sel| Op::CloseCells { sel }),
         3 => (any::<u8>(), any::<bool>()).prop_map(|(at, detached)| Op::FaceBox { at, detached }),
         1 => sel().prop_map(|sel| Op::OutsideParticipant { sel }),
+        3 => (sel(), any::<bool>(), 0u8..6)
+            .prop_map(|(at, line, dir)| Op::AddGuide { at, line, dir }),
+        2 => (sel(), sel()).prop_map(|(sel, at)| Op::AddNote { sel, at }),
+        3 => (sel(), sel(), sel(), sel(), 1u8..16, proptest::bool::weighted(0.15)).prop_map(
+            |(a, b, guide, note, mask, stale)| Op::DeleteMixed {
+                a,
+                b,
+                guide,
+                note,
+                mask,
+                stale,
+            }
+        ),
     ]
 }
 
@@ -503,7 +548,7 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
         }
         Op::DeleteSelection { sel } => {
             if let Some(n) = pick(&nodes, sel) {
-                let _ = doc.delete_selection(&[n]);
+                let _ = doc.delete_selection(&[n], &[], &[]);
             }
         }
         Op::DeleteDefinition { comp } => {
@@ -856,6 +901,79 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
                 before,
                 "a refused draft changes nothing"
             );
+        }
+        Op::AddGuide { at, line, dir } => {
+            let p = lattice()[at % lattice().len()];
+            let _ = if line {
+                doc.add_guide_line(p, step_of(dir))
+            } else {
+                doc.add_guide_point(p)
+            };
+        }
+        Op::AddNote { sel, at } => {
+            // One slot past the nodes anchors to nothing.
+            let node = nodes.get(sel % (nodes.len() + 1)).copied();
+            let point = lattice()[at % lattice().len()];
+            let _ = doc.add_leader_text(Anchor { node, point }, Vec3::ZERO, "n".to_string());
+        }
+        Op::DeleteMixed {
+            a,
+            b,
+            guide,
+            note,
+            mask,
+            stale,
+        } => {
+            let guides = doc.guide_ids();
+            let notes = doc.annotation_ids();
+            let mut sel_nodes = Vec::new();
+            let mut sel_guides = Vec::new();
+            let mut sel_notes = Vec::new();
+            if mask & 1 != 0 {
+                sel_nodes.extend(pick(&nodes, a));
+            }
+            if mask & 2 != 0 {
+                sel_nodes.extend(pick(&nodes, b));
+            }
+            if mask & 4 != 0 {
+                sel_guides.extend(pick(&guides, guide));
+            }
+            if mask & 8 != 0 {
+                sel_notes.extend(pick(&notes, note));
+            }
+            if stale {
+                // The null key: never a live guide.
+                sel_guides.push(GuideId::default());
+            }
+            if sel_nodes.is_empty() && sel_guides.is_empty() && sel_notes.is_empty() {
+                return Ok(());
+            }
+            let before = (doc.state_hash(), doc.history_generation());
+            match doc.delete_selection(&sel_nodes, &sel_guides, &sel_notes) {
+                Ok(_) if stale => {
+                    return Err("a batch with a stale guide was not refused".to_string());
+                }
+                Ok(_) => {
+                    if doc.history_generation() == before.1 {
+                        return Err("a mixed delete recorded no undo step".to_string());
+                    }
+                    for &g in &sel_guides {
+                        if doc.guide(g).is_some() {
+                            return Err(format!("listed guide {g:?} survived the delete"));
+                        }
+                    }
+                    for &n in &sel_notes {
+                        if doc.annotation(n).is_some() {
+                            return Err(format!("listed annotation {n:?} survived the delete"));
+                        }
+                    }
+                    return undo_redo_exact(doc, before.0, "mixed delete");
+                }
+                Err(_) if (doc.state_hash(), doc.history_generation()) != before => {
+                    return Err("a refused mixed delete changed the document".to_string());
+                }
+                Err(_) => {}
+            }
         }
         Op::CopySketch { sel, step } => {
             if let Some(s) = pick(&free_sketches(doc), sel) {
