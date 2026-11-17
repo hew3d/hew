@@ -70,6 +70,24 @@ fast, so it does **not** run the browser- and runner-heavy CI lanes — the
 replay gate and the Playwright E2E suite. A green `verify.sh` is therefore
 necessary but not sufficient for a green CI run.
 
+While a change is still in progress, there is a quicker check that runs
+only what the change can reach:
+
+```sh
+scripts/verify.sh --changed        # or: scripts/verify-changed.sh [base]
+```
+
+It compares the working tree with the merge base on `main` (or the branch
+you name) and runs the checks for what differs: Clippy and tests for the
+changed crates and the crates that depend on them, the app's type-check,
+lint and the unit tests related to the changed files, a handful of smoke
+specs plus any spec you edited (the visual goldens aside), and so on. An edit to one small crate or
+one app file takes a minute or two; a kernel edit still rebuilds and
+tests every crate downstream of it. It skips whatever the change does not
+touch, so it does not replace `verify.sh`: run that before the change is
+done. The header of `scripts/verify-changed.sh` lists what each kind of
+change runs and what is left to the gate.
+
 Before **pushing**, run the comprehensive gate:
 
 ```sh
@@ -130,8 +148,10 @@ workers/bug-intake/   the private Help ▸ Report Bug intake Worker (chunked
 tools/                replay runner and development tooling
 site/                 the hew3d.com website (Astro)
 docs/                 architecture, file format spec, roadmap, this guide
-scripts/              verify.sh (per-commit gate), verify-full.sh (pre-push),
-                      relay-contract.sh (relay conformance, both servers)
+scripts/              verify.sh (per-commit gate), verify-changed.sh (quick
+                      check of a change in progress), verify-full.sh
+                      (pre-push), relay-contract.sh (relay conformance,
+                      both servers)
 brand/                logo, mark, and icon assets
 ```
 

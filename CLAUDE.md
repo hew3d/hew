@@ -20,6 +20,8 @@ Start with these documents — they are the source of truth:
 ## Quick reference
 
 - Build all crates: `cargo build --workspace`
+- Quick check while working (only what the change reaches):
+  `scripts/verify.sh --changed`
 - Verify (run before every commit): `scripts/verify.sh`
 - Full pre-push gate (verify + replay + chromium E2E, mirrors blocking CI):
   `scripts/verify-full.sh`

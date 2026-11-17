@@ -56,10 +56,17 @@ preview_crates() {
 #   wall    the production build's wall tests alone (Rust and Tauri): the
 #           cheap part of the production half, for a caller that skips the
 #           rest (scripts/verify-full.sh SKIP_VERIFY=1)
+#
+# `--changed [base]` is not a lane: it hands over to scripts/verify-changed.sh,
+# the quick check that runs only what the current change can reach.
+if [ "${1:-}" = "--changed" ]; then
+  shift
+  exec scripts/verify-changed.sh "$@"
+fi
 LANE="${1:-all}"
 case "$LANE" in
   all|rust|wasm|web|tauri|wall) ;;
-  *) echo "usage: scripts/verify.sh [rust|wasm|web|tauri|wall]" >&2; exit 2 ;;
+  *) echo "usage: scripts/verify.sh [rust|wasm|web|tauri|wall] | --changed [base]" >&2; exit 2 ;;
 esac
 lane() { [ "$LANE" = "all" ] || [ "$LANE" = "$1" ]; }
 
