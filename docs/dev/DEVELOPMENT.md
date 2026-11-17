@@ -115,9 +115,9 @@ And the **visual-goldens lane blocks in CI but cannot run here**, because its
 PNGs are rasterized by the SwiftShader inside CI's pinned Chromium and
 false-fail on any other host. If you touched the render path — or bumped
 three.js or Playwright — CI has the last word. The gate also skips the
-non-blocking webkit lane and the Desktop E2E workflow (tauri-driver cannot
-drive the macOS WKWebView). The header of `scripts/verify-full.sh` carries
-the full rationale.
+non-blocking webkit run (nightly in CI) and the Desktop E2E workflow
+(tauri-driver cannot drive the macOS WKWebView). The header of
+`scripts/verify-full.sh` carries the full rationale.
 
 ## 2. Repository layout
 

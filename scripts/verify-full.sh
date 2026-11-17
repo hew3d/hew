@@ -47,8 +47,9 @@
 #     here at all — if you touched the render path, or bumped three.js or
 #     Playwright, expect CI to have the last word, and regenerate through
 #     Actions ▸ Regen Visual Goldens rather than locally.
-#   - web E2E webkit: CI marks it continue-on-error (non-blocking), because
-#     its WebKitGTK/llvmpipe/Xvfb stack is not pinned by this repository. Run
+#   - web E2E webkit: non-blocking, and run nightly rather than per push
+#     (.github/workflows/e2e-webkit.yml), because its WebKitGTK/llvmpipe/Xvfb
+#     stack is not pinned by this repository. Run
 #     it yourself when touching the render path:
 #       pnpm --dir app exec playwright test --project=webkit
 #   - Desktop E2E (.github/workflows/desktop-e2e.yml): tauri-driver cannot
