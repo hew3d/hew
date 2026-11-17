@@ -17652,43 +17652,126 @@ impl Document {
         Ok(change)
     }
 
-    /// [`Document::delete_node`] across a whole selection as ONE undo step (a
-    /// labeled compound, like `tag_many`) — the Delete key and Cut alike must
-    /// remove N nodes in a single undo entry, not N separate ones. A per-node
-    /// error (a stale handle anywhere in the batch) aborts the WHOLE batch
-    /// back to the pre-call snapshot, matching `tag_many`'s all-or-nothing
-    /// posture — nothing is silently partially deleted.
+    /// Deletes a whole selection — nodes, construction guides, and
+    /// annotations in any mix — as ONE undo step (a labeled compound, like
+    /// `tag_many`): the Delete key and Cut alike must remove N items in a
+    /// single undo entry, not N separate ones. Each node is removed as
+    /// [`Document::delete_node`] removes it, each guide as
+    /// [`Document::delete_guide`], each annotation as
+    /// [`Document::delete_annotation`]; one undo brings every one of them
+    /// back.
     ///
-    /// `nodes` may be objects, groups, and instances mixed; an empty slice is
-    /// a no-op (`Ok` with a touching `DocChange`, no undo entry). The
-    /// compound's label names the sole node when there's exactly one
-    /// ("Delete 'Roof'", falling back to "Delete 1 item" when it has no
-    /// name), else the count ("Delete 3 items").
-    pub fn delete_selection(&mut self, nodes: &[NodeId]) -> Result<DocChange, DocumentError> {
-        if nodes.is_empty() {
+    /// `nodes` may be objects, groups, and instances mixed. Nodes go first,
+    /// so an annotation anchored to a deleted node detaches before it is
+    /// itself deleted, and undo restores both, attached. A selection can
+    /// list a group AND one of its members, or the same item twice: an
+    /// item its own batch already removed is skipped, not refused.
+    ///
+    /// Every handle is checked before anything mutates: one that is stale,
+    /// already deleted, or from another Document refuses the WHOLE batch —
+    /// nothing is silently partially deleted.
+    ///
+    /// All three slices empty is a no-op (`Ok` with an empty `DocChange`, no
+    /// undo entry). The compound's label names the item when the selection
+    /// is exactly one: a node by its name ("Delete 'Roof'", falling back to
+    /// "Delete 1 item" when it has no name), a guide as "Delete guide", an
+    /// annotation by its kind ("Delete dimension", "Delete text"). Several
+    /// items are labeled by their count across all three kinds ("Delete 3
+    /// items").
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`] /
+    ///   [`DocumentError::UnknownInstance`] — a listed node is stale or
+    ///   hidden.
+    /// - [`DocumentError::UnknownGuide`] — a listed guide is stale, deleted,
+    ///   or foreign.
+    /// - [`DocumentError::UnknownAnnotation`] — a listed annotation is stale,
+    ///   deleted, or foreign.
+    ///
+    /// Nodes are checked first, then guides, then annotations; the first
+    /// refusal is the one returned. On `Err` the document is untouched (the
+    /// strong guarantee).
+    pub fn delete_selection(
+        &mut self,
+        nodes: &[NodeId],
+        guides: &[GuideId],
+        annotations: &[AnnotationId],
+    ) -> Result<DocChange, DocumentError> {
+        info!(
+            target: "kernel::op",
+            op = "delete_selection",
+            nodes = nodes.len(),
+            guides = guides.len(),
+            annotations = annotations.len(),
+        );
+        if nodes.is_empty() && guides.is_empty() && annotations.is_empty() {
             return Ok(DocChange::default());
         }
-        let label = if let [only] = *nodes {
-            match self.node_meta(only) {
+        // Validate the whole batch before the snapshot: a refusal leaves the
+        // document exactly as it was, with no bracket opened and aborted.
+        if let Some(&stale) = nodes.iter().find(|&&n| !self.node_is_live(n)) {
+            return Err(match stale {
+                NodeId::Object(_) => DocumentError::UnknownObject,
+                NodeId::Group(_) => DocumentError::UnknownGroup,
+                NodeId::Instance(_) => DocumentError::UnknownInstance,
+            });
+        }
+        if guides.iter().any(|&g| self.guide(g).is_none()) {
+            return Err(DocumentError::UnknownGuide);
+        }
+        if annotations.iter().any(|&a| self.annotation(a).is_none()) {
+            return Err(DocumentError::UnknownAnnotation);
+        }
+        let label = match (nodes, guides, annotations) {
+            ([only], [], []) => match self.node_meta(*only) {
                 Ok((Some(name), _)) if !name.trim().is_empty() => format!("Delete '{name}'"),
                 _ => "Delete 1 item".to_string(),
-            }
-        } else {
-            format!("Delete {} items", nodes.len())
+            },
+            ([], [_], []) => "Delete guide".to_string(),
+            ([], [], [only]) => format!(
+                "Delete {}",
+                annotation_word(self.annotation_label(*only)).to_lowercase()
+            ),
+            _ => format!(
+                "Delete {} items",
+                nodes.len() + guides.len() + annotations.len()
+            ),
         };
         let txn = self.begin_transaction();
         let mut merged = DocChange::default();
-        let live_at_start: Vec<bool> = nodes.iter().map(|&n| self.node_is_live(n)).collect();
-        for (i, &node) in nodes.iter().enumerate() {
-            // A selection can list a group AND one of its members; once the
-            // group is gone its member is tombstoned with it, and deleting
-            // it again is not an error the user can act on — skip it, as the
-            // per-node loop this replaced did. A handle that was not live
-            // when the batch began still refuses typed through `delete_node`.
-            if live_at_start[i] && !self.node_is_live(node) {
+        // Every handle was live when the batch began (checked above), so one
+        // that is gone now was removed by this batch: a member of a group
+        // deleted before it, or an item listed twice. Skip it, as the
+        // per-node loop this replaced did.
+        for &node in nodes {
+            if !self.node_is_live(node) {
                 continue;
             }
             match self.delete_node(node) {
+                Ok(change) => merge_doc_change(&mut merged, change),
+                Err(e) => {
+                    self.abort_transaction(txn);
+                    return Err(e);
+                }
+            }
+        }
+        for &guide in guides {
+            if self.guide(guide).is_none() {
+                continue;
+            }
+            match self.delete_guide(guide) {
+                Ok(change) => merge_doc_change(&mut merged, change),
+                Err(e) => {
+                    self.abort_transaction(txn);
+                    return Err(e);
+                }
+            }
+        }
+        for &annotation in annotations {
+            if self.annotation(annotation).is_none() {
+                continue;
+            }
+            match self.delete_annotation(annotation) {
                 Ok(change) => merge_doc_change(&mut merged, change),
                 Err(e) => {
                     self.abort_transaction(txn);

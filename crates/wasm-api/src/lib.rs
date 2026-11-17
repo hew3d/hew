@@ -7043,7 +7043,10 @@ impl Scene {
     pub fn delete_selection(&mut self, kinds: &[u8], ids: &[u64]) -> Result<(), ApiError> {
         self.ensure_not_busy()?;
         let nodes = node_ids(kinds, ids)?;
-        let change = self.doc.delete_selection(&nodes).map_err(doc_err)?;
+        let change = self
+            .doc
+            .delete_selection(&nodes, &[], &[])
+            .map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DeleteSelection {
             kinds: kinds.to_vec(),
