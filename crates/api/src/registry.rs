@@ -3715,11 +3715,11 @@ impl Registry {
                 ),
                 (
                     "hew.selection.set",
-                    "Change the app's selection: replace it (the default), or add, subtract, or toggle the named entities. Nodes and sketches mix; a guide or an annotation is selected alone. Hidden entities refuse.",
+                    "Change the app's selection: replace it (the default), or add, subtract, or toggle the named entities. Objects, groups, instances, sketches, guides, and annotations mix in any count. Hidden entities refuse.",
                     serde_json::json!({
                         "type": "object",
                         "properties": {
-                            "ids": { "type": "array", "items": { "type": "string" }, "maxItems": 10000, "description": "objects, groups, instances, and sketches; or exactly one guide; or exactly one annotation" },
+                            "ids": { "type": "array", "items": { "type": "string" }, "maxItems": 10000, "description": "objects, groups, instances, sketches, guides, and annotations, in pick order" },
                             "mode": { "type": "string", "enum": ["replace", "add", "subtract", "toggle"], "description": "defaults to replace" }
                         },
                         "required": ["ids"],
@@ -3729,7 +3729,6 @@ impl Registry {
                     vec![
                         "unknown_entity",
                         "selection_target_not_visible",
-                        "selection_mixed_kinds",
                         "host_capability_missing",
                     ],
                 ),

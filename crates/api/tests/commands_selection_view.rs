@@ -116,7 +116,7 @@ fn public(doc: &Document, entity: EntityRef) -> String {
 }
 
 /// Two boxes (`a` at x 0, `b` at x 3), a free sketch at x 6, a guide point,
-/// and a guide line.
+/// a guide line, and a leader text on `a`.
 struct Fixture {
     doc: Document,
     a: String,
@@ -125,6 +125,8 @@ struct Fixture {
     sketch: String,
     point: String,
     line: String,
+    /// A leader text anchored to `a`.
+    note: String,
 }
 
 fn fixture() -> Fixture {
@@ -138,12 +140,23 @@ fn fixture() -> Fixture {
     let line = doc
         .add_guide_line(Point3::ORIGIN, Vec3::new(1.0, 0.0, 0.0))
         .expect("guide line");
+    let note = doc
+        .add_leader_text(
+            kernel::Anchor {
+                node: Some(NodeId::Object(a_id)),
+                point: Point3::ORIGIN,
+            },
+            Vec3::new(0.0, 0.0, 1.0),
+            "note".to_string(),
+        )
+        .expect("leader text");
     Fixture {
         a: public(&doc, EntityRef::Object(a_id)),
         b: public(&doc, EntityRef::Object(b_id)),
         sketch: public(&doc, EntityRef::Sketch(sk)),
         point: public(&doc, EntityRef::Guide(point)),
         line: public(&doc, EntityRef::Guide(line)),
+        note: public(&doc, EntityRef::Annotation(note)),
         a_id,
         doc,
     }
@@ -362,7 +375,7 @@ fn set_replaces_adds_subtracts_and_toggles() {
 }
 
 #[test]
-fn set_refuses_unknown_mixed_and_hidden_targets_and_changes_nothing() {
+fn set_refuses_unknown_and_hidden_targets_and_changes_nothing() {
     let mut f = fixture();
     let mut host = FakeHost::default();
     let mut conn = connect(&mut f.doc, &mut host);
@@ -408,20 +421,31 @@ fn set_refuses_unknown_mixed_and_hidden_targets_and_changes_nothing() {
     );
     assert_eq!(data["refusal"], "unknown_entity");
 
-    for ids in [json!([f.a, f.point]), json!([f.point, f.line])] {
-        let data = refused(
+    // Nodes, guides, and annotations mix in any count: what once refused
+    // `selection_mixed_kinds` selects, in pick order.
+    for ids in [
+        json!([f.a, f.point]),
+        json!([f.point, f.line]),
+        json!([f.note, f.a, f.line]),
+    ] {
+        let got = ok(
             &mut conn,
             &mut f.doc,
             &mut host,
             "hew.selection.set",
             json!({ "ids": ids }),
         );
-        assert_eq!(data["refusal"], "selection_mixed_kinds");
-        assert_eq!(
-            data["explanation"],
-            "A selection holds nodes, or one guide, or one annotation, never a mix."
-        );
+        assert_eq!(got["ids"], ids);
+        assert_eq!(got["primary"], ids[0]);
     }
+    ok(
+        &mut conn,
+        &mut f.doc,
+        &mut host,
+        "hew.selection.set",
+        json!({ "ids": [f.b] }),
+    );
+    assert_eq!(host.selection, before);
 
     f.doc.set_node_user_hidden(NodeId::Object(f.a_id), true);
     let data = refused(
@@ -542,11 +566,105 @@ fn set_refuses_what_a_tag_or_a_group_hides() {
     );
 }
 
-/// The one-kind rule holds for the merged result, not only the pick: add
-/// or toggle onto a selection of the other family refuses
-/// `selection_mixed_kinds` and leaves the selection as it was.
+/// A guide or an annotation on a hidden tag refuses
+/// `selection_target_not_visible`, as a node or a sketch does: a marquee or
+/// a plugin can select many of them, so none may be selected unseen. Shown
+/// again, each selects.
 #[test]
-fn add_and_toggle_never_mix_kinds() {
+fn set_refuses_a_guide_or_an_annotation_a_tag_hides() {
+    let mut f = fixture();
+    let layer = vec!["Layout".to_string()];
+    let scene = kernel::ImportScene {
+        geo: None,
+        materials: Vec::new(),
+        defs: Vec::new(),
+        roots: Vec::new(),
+        guides: vec![kernel::ImportGuide::Point {
+            position: Point3::new(4.0, 4.0, 0.0),
+            tags: vec![layer.clone()],
+        }],
+        tags: vec![kernel::ImportTag {
+            path: layer.clone(),
+            hidden: false,
+        }],
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
+        view_style: None,
+        extra: kernel::ImportSceneExtra {
+            annotations: vec![kernel::Annotation::LeaderText {
+                anchor: kernel::Anchor {
+                    node: None,
+                    point: Point3::new(4.0, 0.0, 0.0),
+                },
+                offset: Vec3::new(0.0, 0.0, 1.0),
+                text: "tagged".to_string(),
+            }],
+            annotation_tags: vec![vec![layer.clone()]],
+            ..Default::default()
+        },
+    };
+    let guides_before = f.doc.guide_ids();
+    let (report, _) = f
+        .doc
+        .ingest(scene, Vec::new())
+        .expect("ingest a tagged guide and annotation");
+    let guide = *f
+        .doc
+        .guide_ids()
+        .iter()
+        .find(|g| !guides_before.contains(g))
+        .expect("the guide was built");
+    let guide = public(&f.doc, EntityRef::Guide(guide));
+    let note = report.annotations[0].expect("the annotation was built");
+    let note = public(&f.doc, EntityRef::Annotation(note));
+
+    let mut host = FakeHost::default();
+    let mut conn = connect(&mut f.doc, &mut host);
+    ok(
+        &mut conn,
+        &mut f.doc,
+        &mut host,
+        "hew.selection.set",
+        json!({ "ids": [f.a] }),
+    );
+    let before = host.selection.clone();
+    f.doc.set_tag_hidden(layer.clone(), true);
+    for hidden in [&guide, &note] {
+        for params in [
+            json!({ "ids": [hidden] }),
+            json!({ "ids": [f.b, hidden], "mode": "add" }),
+        ] {
+            let data = refused(
+                &mut conn,
+                &mut f.doc,
+                &mut host,
+                "hew.selection.set",
+                params.clone(),
+            );
+            assert_eq!(data["refusal"], "selection_target_not_visible", "{params}");
+            assert_eq!(data["detail"], json!({ "id": hidden }), "{params}");
+            assert_eq!(host.selection, before, "{params} changed nothing");
+        }
+    }
+
+    f.doc.set_tag_hidden(layer, false);
+    let got = ok(
+        &mut conn,
+        &mut f.doc,
+        &mut host,
+        "hew.selection.set",
+        json!({ "ids": [guide, note], "mode": "add" }),
+    );
+    assert_eq!(got["ids"], json!([f.a, guide, note]));
+}
+
+/// The merged result mixes kinds as freely as a pick: add or toggle onto a
+/// selection of another kind merges by the selection algebra, survivors
+/// first, so the primary stays the first pick ("click a guide, then
+/// Shift-click a box" keeps the guide primary).
+#[test]
+fn add_and_toggle_mix_kinds_in_pick_order() {
     let mut f = fixture();
     // A second guide point, for "a second guide".
     let other = f
@@ -556,26 +674,54 @@ fn add_and_toggle_never_mix_kinds() {
     let other = public(&f.doc, EntityRef::Guide(other));
     let mut host = FakeHost::default();
     let mut conn = connect(&mut f.doc, &mut host);
-    let cases: [(Value, Value); 6] = [
-        // Nodes selected: a guide added or toggled in would mix.
+    let cases: [(Value, Value, Value); 8] = [
+        // Nodes selected: a guide added or toggled in joins after them.
         (
             json!([f.a, f.b]),
             json!({ "ids": [f.point], "mode": "add" }),
+            json!([f.a, f.b, f.point]),
         ),
-        (json!([f.a]), json!({ "ids": [f.point], "mode": "toggle" })),
-        // A guide selected: a node or a second guide added would mix.
-        (json!([f.point]), json!({ "ids": [f.a], "mode": "add" })),
-        (json!([f.point]), json!({ "ids": [other], "mode": "add" })),
+        (
+            json!([f.a]),
+            json!({ "ids": [f.point], "mode": "toggle" }),
+            json!([f.a, f.point]),
+        ),
+        // A guide selected: a node or a second guide joins after it, and
+        // the guide stays primary.
+        (
+            json!([f.point]),
+            json!({ "ids": [f.a], "mode": "add" }),
+            json!([f.point, f.a]),
+        ),
+        (
+            json!([f.point]),
+            json!({ "ids": [other], "mode": "add" }),
+            json!([f.point, other]),
+        ),
         (
             json!([f.point]),
             json!({ "ids": [f.sketch], "mode": "toggle" }),
+            json!([f.point, f.sketch]),
         ),
         (
             json!([f.point]),
             json!({ "ids": [other], "mode": "toggle" }),
+            json!([f.point, other]),
+        ),
+        // An annotation mixes the same way.
+        (
+            json!([f.note]),
+            json!({ "ids": [f.a, f.line], "mode": "add" }),
+            json!([f.note, f.a, f.line]),
+        ),
+        // Toggle takes out what was in, whatever its kind.
+        (
+            json!([f.a, f.point, f.note]),
+            json!({ "ids": [f.point, f.line], "mode": "toggle" }),
+            json!([f.a, f.note, f.line]),
         ),
     ];
-    for (start, params) in cases {
+    for (start, params, want) in cases {
         ok(
             &mut conn,
             &mut f.doc,
@@ -583,16 +729,15 @@ fn add_and_toggle_never_mix_kinds() {
             "hew.selection.set",
             json!({ "ids": start }),
         );
-        let before = host.selection.clone();
-        let data = refused(
+        let got = ok(
             &mut conn,
             &mut f.doc,
             &mut host,
             "hew.selection.set",
             params.clone(),
         );
-        assert_eq!(data["refusal"], "selection_mixed_kinds", "{start} {params}");
-        assert_eq!(host.selection, before, "{start} {params} changed nothing");
+        assert_eq!(got["ids"], want, "{start} {params}");
+        assert_eq!(got["primary"], want[0], "{start} {params}");
     }
     // Toggling the lone guide off, adding it again, and subtracting stay legal.
     ok(
@@ -626,7 +771,7 @@ fn add_and_toggle_never_mix_kinds() {
         json!({ "ids": [f.a], "mode": "subtract" }),
     );
     assert_eq!(got["ids"], json!([f.point]));
-    // Replace always may switch families.
+    // Replace swaps the whole selection, whatever its kinds.
     let got = ok(
         &mut conn,
         &mut f.doc,

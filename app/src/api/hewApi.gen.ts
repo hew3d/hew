@@ -1848,12 +1848,12 @@ export interface SelectionGetResult {
 }
 
 /**
- * `hew.selection.set` (v1) — Change the app's selection: replace it (the default), or add, subtract, or toggle the named entities. Nodes and sketches mix; a guide or an annotation is selected alone. Hidden entities refuse.
+ * `hew.selection.set` (v1) — Change the app's selection: replace it (the default), or add, subtract, or toggle the named entities. Objects, groups, instances, sketches, guides, and annotations mix in any count. Hidden entities refuse.
  * Tier: Standard · Class: read-only · Served: host
- * Refusals: unknown_entity, selection_target_not_visible, selection_mixed_kinds, host_capability_missing
+ * Refusals: unknown_entity, selection_target_not_visible, host_capability_missing
  */
 export interface SelectionSetParams {
-  /** objects, groups, instances, and sketches; or exactly one guide; or exactly one annotation */
+  /** objects, groups, instances, sketches, guides, and annotations, in pick order */
   ids: string[]
   /** defaults to replace */
   mode?: "replace" | "add" | "subtract" | "toggle"

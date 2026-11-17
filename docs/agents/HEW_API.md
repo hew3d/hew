@@ -2251,7 +2251,7 @@ transaction with another command.
 | Command | Served | Params | Result | Refusals |
 |---|---|---|---|---|
 | `hew.selection.get` | host | `{}` | `{ids, primary, generation, epoch}` | `host_capability_missing` |
-| `hew.selection.set` | host | `{ids, mode?}`: up to 10 000 public ids; `mode` is `replace` (the default), `add`, `subtract`, or `toggle` | the merged selection, as `get` | `unknown_entity`, `selection_target_not_visible`, `selection_mixed_kinds`, `host_capability_missing` |
+| `hew.selection.set` | host | `{ids, mode?}`: up to 10 000 public ids; `mode` is `replace` (the default), `add`, `subtract`, or `toggle` | the merged selection, as `get` | `unknown_entity`, `selection_target_not_visible`, `host_capability_missing` |
 | `hew.selection.clear` | host | `{}` | `{ids: [], primary: null, generation, epoch}` | `host_capability_missing` |
 | `hew.view.hide` | kernel | `{ids}`: objects, groups, component instances | `{hidden}`: every hidden object, group, and instance | `unknown_entity`, `not_a_node` |
 | `hew.view.show` | kernel | `{ids}` | `{hidden}` | `unknown_entity`, `not_a_node` |
@@ -2265,17 +2265,17 @@ transaction with another command.
 | `hew.view.exit_all` | host, solitary | `{}` | `{}` | `gesture_in_progress`, `host_capability_missing` |
 
 **The selection.** `ids` are public ids in pick order; `primary` is the
-first, or `null` for an empty selection. A selection holds objects,
-groups, instances, and sketches in any mix, or exactly one guide, or
-exactly one annotation; anything else refuses `selection_mixed_kinds`,
-whether the picked ids mix or the merged result would (adding a guide to
-nodes, or a second annotation to one).
+first, or `null` for an empty selection. A selection is one ordered list
+that holds objects, groups, instances, sketches, guides, and annotations
+in any mix and any count, so the primary is the first pick whatever its
+kind: a guide picked before a box stays primary.
 An id that names no live entity of those six kinds refuses
 `unknown_entity` with `detail.id`. A target that is hidden refuses
 `selection_target_not_visible` with `detail.id`: a node is hidden when
 it, a group above it, or a tag on it or on a group above it (or any
 parent path of such a tag) is hidden; a sketch is hidden the way the
-viewport hides it. Every id is checked before anything changes, so a
+viewport hides it; a guide or an annotation is hidden when a tag on it
+(or any parent path of such a tag) is hidden. Every id is checked before anything changes, so a
 refused `set` leaves the selection as it was. The app's drafting
 selections (units of a drawing on a plane) have no public id: while one
 is selected, the selection reads as empty.
