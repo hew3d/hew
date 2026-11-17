@@ -46,7 +46,7 @@ use kernel::{
 };
 use proptest::prelude::*;
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::{draw_loop, face_plane, group_faces, no_pinch};
 
 /// Abstract document op; selectors resolve against live ids at apply time.

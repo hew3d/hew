@@ -1,7 +1,7 @@
 //! Executable specs for Revolve and for Follow Me stamping the surfaces of
 //! revolution it sweeps (true-curves.md §5.1; WP12).
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};

@@ -45,7 +45,7 @@ use kernel::topo::WatertightState;
 use kernel::{CurveGeom, Document, Object, Point3, Vec3, tol};
 use proptest::prelude::*;
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::*;
 
 const FACETS: usize = 24;

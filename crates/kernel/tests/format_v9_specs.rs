@@ -5,7 +5,7 @@
 //! decode rule refuses tampered input typed; and sketches persist the E1
 //! smooth-chain marker.
 
-mod common;
+use crate::common;
 
 use std::io::{Cursor, Read as _};
 

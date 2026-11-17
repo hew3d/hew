@@ -53,8 +53,8 @@
 //! and its history untouched.
 //!
 //! Failures shrink to a short op list. Run deeper than the default 256
-//! cases with `PROPTEST_CASES=20000 cargo test -p kernel --test
-//! session_fuzz`.
+//! cases with `PROPTEST_CASES=20000 cargo test -p kernel --test all
+//! session_fuzz::`.
 
 use kernel::{
     Anchor, Document, GuideId, InstanceId, LibraryProvenance, NodeId, ObjectId, Plane, Point3,

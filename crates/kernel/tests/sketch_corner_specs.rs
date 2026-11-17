@@ -11,7 +11,7 @@ use kernel::{
     SketchCurveKind, SketchError, SketchVertexId, Vec3,
 };
 
-mod common;
+use crate::common;
 use common::curves::{add_arc, assert_valid_solid, claim_census, ground, p3};
 
 /// Slack for comparing computed circle points; the kernel's own tolerances

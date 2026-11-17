@@ -4,7 +4,7 @@
 //! through save/load, transforms and booleans; a record that no longer
 //! fits refuses; a blend without one restores by derivation.
 
-mod common;
+use crate::common;
 
 use std::io::{Cursor, Read as _};
 

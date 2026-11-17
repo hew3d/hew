@@ -1,6 +1,6 @@
 //! WP19: Catmull–Clark subdivision with sharp creases.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 

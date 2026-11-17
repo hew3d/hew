@@ -2,7 +2,7 @@
 //! `Object::apply_patch`, `to_patch`, `planarize`, and the
 //! self-intersection guard, driven through their `…_for_test` hooks.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 

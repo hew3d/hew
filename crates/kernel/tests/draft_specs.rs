@@ -28,7 +28,7 @@ use kernel::{
 };
 use proptest::prelude::*;
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::{
     MM, Rings, Wall, face_rings, ground_regions, ground_with, group_faces, imprint_mm,
     multiset_match, no_pinch, rings_match, signed_area, straightened, top_of_box,

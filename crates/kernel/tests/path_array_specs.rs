@@ -10,7 +10,7 @@ use kernel::{
     Point3, ShapeError, SketchEdgeId, SketchId, SurfaceRef, Transform, Vec3,
 };
 
-mod common;
+use crate::common;
 use common::curves::{add_arc, add_circle, assert_valid_solid, claim_census, ground, p3};
 
 fn spec(count: u32, from: f64, to: f64, align: bool) -> PathArraySpec {

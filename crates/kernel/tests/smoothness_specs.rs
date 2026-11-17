@@ -4,7 +4,7 @@
 //! (E1) on solids and in world sketches; and one kernel predicate,
 //! `Object::edge_smoothness`, classifies every edge.
 
-mod common;
+use crate::common;
 
 use std::f64::consts::{PI, TAU};
 

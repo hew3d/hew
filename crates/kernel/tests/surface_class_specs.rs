@@ -3,7 +3,7 @@
 //! `same_surface`, the per-class normal and distance math, map-or-drop
 //! under transforms, Push/Pull routing, and center derivation.
 
-mod common;
+use crate::common;
 
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
 

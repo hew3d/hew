@@ -2,7 +2,7 @@
 //! hemispheres and cones around circles, line–arc–line chains, and seam
 //! crossing on a faceted cylinder.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeSet;
 

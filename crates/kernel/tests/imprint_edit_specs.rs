@@ -12,7 +12,7 @@ use kernel::{
 };
 use proptest::prelude::*;
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::{
     delete_unit_at, draft_on_face, draw_loop, face_plane, group_faces, move_unit_at,
 };

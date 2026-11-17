@@ -1,6 +1,6 @@
 //! WP19: the Smooth level, creases and Bake through the Document.
 
-mod common;
+use crate::common;
 
 use common::curves::p3;
 use kernel::{

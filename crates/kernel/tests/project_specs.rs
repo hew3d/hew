@@ -1,7 +1,7 @@
 //! WP17: Project onto (curved) faces — imprint, then straight or follow
 //! depth.
 
-mod common;
+use crate::common;
 
 use common::curves::*;
 use kernel::project::{DepthMode, DepthSpec, ImprintSpec, ProjectedRegion};

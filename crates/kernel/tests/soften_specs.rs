@@ -1,6 +1,6 @@
 //! WP20 Part 3: Soften by angle.
 
-mod common;
+use crate::common;
 
 use common::curves::*;
 use kernel::{Document, DocumentError, Object, Plane, Point3, ShapeError, Vec3};

@@ -3,7 +3,7 @@
 //! the bug was reported against (rounded through f32 as STL import does,
 //! built at the import planarity tolerance).
 
-mod common;
+use crate::common;
 
 use common::curves::*;
 use kernel::{BooleanOp, Object, Transform, Vec3};

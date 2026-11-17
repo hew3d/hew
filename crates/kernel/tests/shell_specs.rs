@@ -1,6 +1,6 @@
 //! WP16: the offset engine and Shell.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 use std::f64::consts::{FRAC_PI_2, PI};

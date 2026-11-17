@@ -1,7 +1,7 @@
 //! Executable specs for the extended blends (WP07 §1–3, §5): coves,
 //! bullnoses, router profiles, stopped and variable-radius fillets.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeSet;
 use std::f64::consts::{FRAC_PI_2, PI};

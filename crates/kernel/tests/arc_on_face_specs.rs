@@ -11,7 +11,7 @@ use kernel::{
     Transform, Vec3, tol,
 };
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::{delete_unit_at, draw_loop_curves, move_unit_at, units_on};
 
 // ---------------------------------------------------------------- helpers

@@ -3,7 +3,7 @@
 //! against the side surfaces where the facet walk refuses, and the size a
 //! refusal names.
 
-mod common;
+use crate::common;
 
 use common::curves::*;
 use kernel::{

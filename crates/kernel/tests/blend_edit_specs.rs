@@ -1,7 +1,7 @@
 //! Executable specs for editing blends (WP08): features, removal by
 //! verified restoration, resize, corner re-solve, Push/Pull and Paint.
 
-mod common;
+use crate::common;
 
 use common::curves::*;
 use kernel::{

@@ -2,7 +2,7 @@
 //! commit through the snapshot undo, the clamping preview, and the
 //! in-instance form.
 
-mod common;
+use crate::common;
 
 use common::curves::*;
 use kernel::{

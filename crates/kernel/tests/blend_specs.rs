@@ -2,7 +2,7 @@
 //! and chamfers, prismatic miters, the convex clip, pass-through chains,
 //! the size limit and every refusal.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeSet;
 use std::f64::consts::{FRAC_PI_2, PI};

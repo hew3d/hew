@@ -26,7 +26,7 @@ use std::f64::consts::PI;
 
 use kernel::{CurveGeom, DraftReport, EdgeId, FaceId, KernelOp, Object, Point3, StickyError, tol};
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::*;
 
 // --------------------------------------------------------------- helpers

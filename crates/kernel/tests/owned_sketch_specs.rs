@@ -11,7 +11,7 @@ use kernel::{
     Point3, SketchId, Transform, Vec3, tol,
 };
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::{draw_loop, draw_path};
 
 // ----------------------------------------------------------------- helpers

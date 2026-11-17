@@ -1,7 +1,7 @@
 //! Executable specs for blend corners (WP06 §5–7, §8): rolled sphere
 //! corners, the mitered and flat options, and two-pass mixed corners.
 
-mod common;
+use crate::common;
 
 use std::f64::consts::PI;
 

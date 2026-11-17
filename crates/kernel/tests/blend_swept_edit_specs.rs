@@ -6,7 +6,7 @@
 //! record rides through save and load. A record that no longer fits
 //! refuses with a typed error and leaves the object as it was.
 
-mod common;
+use crate::common;
 
 use std::f64::consts::FRAC_PI_2;
 use std::io::{Cursor, Read as _};

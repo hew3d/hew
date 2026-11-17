@@ -1,6 +1,6 @@
 //! Property tests for the blend engine core (WP05 §11).
 
-mod common;
+use crate::common;
 
 use common::curves::*;
 use kernel::{

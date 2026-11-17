@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-mod common;
+use crate::common;
 
 use kernel::{DecodeError, Document, Object, Plane, Point3, TopologyError, Transform, Vec3};
 use proptest::prelude::*;
