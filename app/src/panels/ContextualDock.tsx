@@ -187,7 +187,7 @@ export function ContextualDock({
         pointerEvents: hidden ? 'none' : undefined,
         position: 'absolute',
         bottom: '18px',
-        left: '50%',
+        left: 'calc(50% + var(--tool-card-inset, 0px) / 2)',
         transform: 'translateX(-50%)',
         display: 'flex',
         alignItems: 'stretch',

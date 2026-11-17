@@ -1950,6 +1950,31 @@ describe('FilletTool through the real kernel', () => {
     expect(JSON.parse(h.scene.blend_features_json(box)).length).toBeGreaterThanOrEqual(1)
   })
 
+  it.each(['INPUT', 'TEXTAREA', 'contenteditable'])('a focused %s owns keys while armed, including Escape', (tag) => {
+    const h = setup()
+    makeBox(h.scene, 1, 1, 0.5)
+    click(h, down(0.5, 0.5), [100, 100])
+    expect(h.tool.hasArmedGesture()).toBe(true)
+    const hint = h.tool.statusHint()
+    h.hooks.onMeasurement.mockClear()
+    vi.stubGlobal('document', { activeElement: { tagName: tag, isContentEditable: tag === 'contenteditable' } })
+    try {
+      for (const k of ['5', 'Enter', 'Escape', 'Delete', 'Tab']) {
+        expect(h.tool.capturesKey(k)).toBe(false)
+        h.tool.onKey(key(k))
+      }
+      expect(h.tool.hasArmedGesture()).toBe(true)
+      expect(h.tool.statusHint()).toBe(hint)
+      expect(h.hooks.onMeasurement).not.toHaveBeenCalled()
+      expect(h.hooks.onCommit).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+    expect(h.tool.capturesKey('5')).toBe(true)
+    h.tool.onKey(key('Escape'))
+    expect(h.tool.hasArmedGesture()).toBe(false)
+  })
+
   it('while armed, Space and tool letters go to the app; digits and a size in progress stay here', () => {
     const h = setup()
     makeBox(h.scene, 1, 1, 0.5)

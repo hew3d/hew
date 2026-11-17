@@ -1,31 +1,32 @@
 /* oxlint-disable lingui/no-unlocalized-strings -- True Curves strings are not yet wrapped for translation: this file is English-only until they are */
-/**
- * ProfileChip — the Fillet tool's profile picker, floating at the top of the
- * viewport to the left of the measurement box while the tool is active.
- *
- * Two one-click pills, Round and Chamfer, sit left of the menu button, the
- * active one highlighted. The chip names the current profile; its menu lists Round, Chamfer, Cove and
- * Bullnose, then any further profile entries the caller passes in (the
- * built-in and Library profiles, and Save profile…). Picking one sets the
- * tool's session-sticky profile (`filletSettings`); Alt still swaps Round and
- * Chamfer only. Over a drawn corner, which takes only Round and Chamfer, the
- * other profiles are disabled.
- */
-
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useLingui } from '@lingui/react/macro'
 import {
   getFilletCornerOnly,
   getFilletSettings,
-  profileSizeLabel,
+  getFilletThreeWayCorners,
+  setFilletCorners,
   setFilletProfile,
+  setFilletSegmentsOverride,
   subscribeFilletCornerOnly,
   subscribeFilletSettings,
+  subscribeFilletThreeWayCorners,
+  type FilletCorners,
   type FilletProfile,
 } from '../tools/filletSettings'
+import {
+  clampBlendSegments,
+  clampCornerSegments,
+  MIN_BLEND_SEGMENTS,
+  MAX_BLEND_SEGMENTS,
+  MIN_CORNER_SEGMENTS,
+  MAX_CORNER_SEGMENTS,
+} from '../tools/filletMath'
+import { isComposingKey } from '../input/keyboard'
+import { ToolOptionsInfo } from './ToolOptionsCard'
 
 /** One row of the menu beyond the four basic kinds. */
-export interface ProfileChipItem {
+export interface ProfileOptionItem {
   /** Stable key. */
   id: string
   label: string
@@ -42,18 +43,18 @@ export interface ProfileChipItem {
   badge?: string
 }
 
-export interface ProfileChipSection {
+export interface ProfileOptionSection {
   id: string
   heading?: string
-  items: ProfileChipItem[]
+  items: ProfileOptionItem[]
   /** Shown in place of the rows when there are none ("No saved profiles
    *  yet."); a section without one is hidden while empty. */
   emptyHint?: string
 }
 
-export interface ProfileChipProps {
+export interface FilletOptionsProps {
   /** Further sections below the four basics, each set off by a separator. */
-  sections?: ProfileChipSection[]
+  sections?: ProfileOptionSection[]
 }
 
 const BASICS: Array<{ label: string; profile: FilletProfile }> = [
@@ -63,24 +64,20 @@ const BASICS: Array<{ label: string; profile: FilletProfile }> = [
   { label: 'Bullnose', profile: { kind: 'bullnose' } },
 ]
 
-/** The two one-click pills left of the menu. They stay enabled over a drawn
- *  corner, which takes exactly these two. */
-const QUICK_PILLS = BASICS.slice(0, 2)
-
 const pillStyle = (active: boolean): React.CSSProperties => ({
-  padding: '6px 10px',
-  background: active ? 'var(--accent-soft, rgba(77,144,255,0.18))' : 'var(--surface-overlay)',
+  padding: '5px 6px',
+  background: active ? 'var(--accent-base)' : 'transparent',
   border: `1px solid ${active ? 'var(--accent-base)' : 'var(--border-strong)'}`,
   borderRadius: 'var(--radius-control, 7px)',
   boxShadow: 'var(--shadow-chip, none)',
-  color: 'var(--text-primary)',
+  color: active ? 'var(--text-on-accent, #fff)' : 'var(--text-primary)',
   fontFamily: 'var(--font-family-ui)',
   fontSize: 12.5,
   fontWeight: active ? 600 : 400,
   cursor: 'pointer',
 })
 
-/** The chip's name for a profile. */
+/** The name shown beside More shapes. */
 export function profileLabel(p: FilletProfile): string {
   switch (p.kind) {
     case 'round':
@@ -95,9 +92,6 @@ export function profileLabel(p: FilletProfile): string {
       return p.name
   }
 }
-
-export { profileSizeLabel }
-
 /** The tooltip on a profile a drawn corner can't take. */
 const CORNER_ONLY_TITLE = 'Drawn corners can be rounded or chamfered.'
 
@@ -112,15 +106,15 @@ const itemStyle = (active: boolean, disabled: boolean): React.CSSProperties => (
   width: '100%',
   padding: '6px 12px',
   border: 'none',
-  background: active ? 'var(--accent-soft, rgba(77,144,255,0.18))' : 'transparent',
-  color: disabled ? 'var(--text-faint)' : 'var(--text-primary)',
+  background: active ? 'var(--accent-base)' : 'transparent',
+  color: disabled ? 'var(--text-faint)' : active ? 'var(--text-on-accent, #fff)' : 'var(--text-primary)',
   fontFamily: 'var(--font-family-ui)',
   fontSize: 12.5,
   textAlign: 'left',
   cursor: disabled ? 'default' : 'pointer',
 })
 
-export function ProfileChip({ sections = [] }: ProfileChipProps) {
+function ShapeOptions({ sections = [] }: FilletOptionsProps) {
   const { t } = useLingui()
   const settings = useSyncExternalStore(subscribeFilletSettings, getFilletSettings, getFilletSettings)
   const cornerOnly = useSyncExternalStore(subscribeFilletCornerOnly, getFilletCornerOnly, getFilletCornerOnly)
@@ -133,7 +127,11 @@ export function ProfileChip({ sections = [] }: ProfileChipProps) {
       if (rootRef.current !== null && !rootRef.current.contains(ev.target as Node)) setOpen(false)
     }
     const onKey = (ev: KeyboardEvent): void => {
-      if (ev.key === 'Escape') setOpen(false)
+      if (ev.key === 'Escape' && !isComposingKey(ev)) {
+        setOpen(false)
+        ev.preventDefault()
+        ev.stopPropagation()
+      }
     }
     window.addEventListener('pointerdown', onDown, true)
     window.addEventListener('keydown', onKey, true)
@@ -154,20 +152,21 @@ export function ProfileChip({ sections = [] }: ProfileChipProps) {
   return (
     <div
       ref={rootRef}
-      style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 6 }}
-      data-testid="fillet-profile-chip"
+      style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 6 }}
+      data-testid="fillet-shape-options"
     >
-      <div role="group" aria-label="Quick edge shape" style={{ display: 'flex', gap: 4 }}>
-        {QUICK_PILLS.map((b) => {
+      <div role="group" aria-label="Quick edge shape" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+        {BASICS.map((b) => {
           const active = current.kind === b.profile.kind
           return (
             <button
               key={b.label}
               type="button"
               aria-pressed={active}
-              data-testid={`fillet-pill-${b.profile.kind}`}
+              disabled={cornerOnly && !cornerTakes(b.profile)}
+              title={cornerOnly && !cornerTakes(b.profile) ? CORNER_ONLY_TITLE : undefined}
               onClick={() => pick(b.profile)}
-              style={pillStyle(active)}
+              style={{ ...pillStyle(active), color: cornerOnly && !cornerTakes(b.profile) ? 'var(--text-faint)' : pillStyle(active).color }}
             >
               {b.label}
             </button>
@@ -195,7 +194,7 @@ export function ProfileChip({ sections = [] }: ProfileChipProps) {
           cursor: 'pointer',
         }}
       >
-        <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>Edge</span>
+        <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>More shapes</span>
         <span style={{ fontWeight: 600 }}>{profileLabel(current)}</span>
         <span aria-hidden="true" style={{ fontSize: 9, color: 'var(--text-faint)' }}>
           ▾
@@ -206,7 +205,8 @@ export function ProfileChip({ sections = [] }: ProfileChipProps) {
           role="menu"
           style={{
             position: 'absolute',
-            top: 'calc(100% + 4px)',
+            bottom: 'calc(100% + 4px)',
+            left: 0,
             right: 0,
             minWidth: 200,
             maxHeight: '60vh',
@@ -287,4 +287,94 @@ export function ProfileChip({ sections = [] }: ProfileChipProps) {
       )}
     </div>
   )
+}
+
+
+function OptionHeading({ label, info }: { label: string; info: string }) {
+  return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 5, fontSize: 12 }}>
+    <span>{label}</span><ToolOptionsInfo label={label}>{info}</ToolOptionsInfo>
+  </div>
+}
+
+/** Facets owns a draft while focused; every accepted value still uses the tool's store. */
+function FacetsField({ cornerOnly, value }: { cornerOnly: boolean; value: number | null }) {
+  const [draft, setDraft] = useState<string | null>(null)
+  const before = useRef<number | null>(value)
+  const cancelled = useRef(false)
+  const clamp = cornerOnly ? clampCornerSegments : clampBlendSegments
+  const min = cornerOnly ? MIN_CORNER_SEGMENTS : MIN_BLEND_SEGMENTS
+  const max = cornerOnly ? MAX_CORNER_SEGMENTS : MAX_BLEND_SEGMENTS
+  const parse = (text: string): number | null | undefined => {
+    if (text.trim() === '') return null
+    if (!/^[+-]?\d+$/.test(text.trim())) return undefined
+    const n = Number(text)
+    return Number.isFinite(n) ? n : undefined
+  }
+  const finish = (): void => {
+    if (!cancelled.current && draft !== null) {
+      const n = parse(draft)
+      setFilletSegmentsOverride(n === undefined ? before.current : n === null ? null : clamp(n))
+    }
+    cancelled.current = false
+    setDraft(null)
+  }
+  return <input aria-label="Facets" type="text" inputMode="numeric" placeholder="Auto"
+    value={draft ?? (value === null ? '' : String(value))}
+    onFocus={() => { before.current = value; cancelled.current = false; setDraft(value === null ? '' : String(value)) }}
+    onChange={(ev) => {
+      const text = ev.target.value
+      setDraft(text)
+      const n = parse(text)
+      // Intermediate digits can be outside the range (1 on the way to 12).
+      // Keep the preview steady until a valid count exists or the edit ends.
+      if (n === null || (n !== undefined && n >= min && n <= max)) setFilletSegmentsOverride(n)
+    }}
+    onBlur={finish}
+    onKeyDown={(ev) => {
+      ev.stopPropagation()
+      if (isComposingKey(ev)) return
+      if (ev.key === 'Escape') {
+        ev.preventDefault()
+        cancelled.current = true
+        setFilletSegmentsOverride(before.current)
+        ev.currentTarget.blur()
+      } else if (ev.key === 'Enter') {
+        ev.preventDefault()
+        ev.currentTarget.blur()
+      }
+    }}
+    style={{ width: '100%', boxSizing: 'border-box', padding: '5px 8px',
+      background: 'var(--surface-input)', border: '1px solid var(--border-strong)',
+      borderRadius: 'var(--radius-control, 7px)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12.5 }} />
+}
+
+export function cornerChoices(chamferFamily: boolean): Array<{ label: string; value: FilletCorners }> {
+  return chamferFamily
+    ? [{ label: 'Mitered', value: 'default' }, { label: 'Flat', value: 'flat' }]
+    : [{ label: 'Rolled', value: 'default' }, { label: 'Mitered', value: 'mitered' }]
+}
+
+export function FilletOptions({ sections = [] }: FilletOptionsProps) {
+  const settings = useSyncExternalStore(subscribeFilletSettings, getFilletSettings, getFilletSettings)
+  const cornerOnly = useSyncExternalStore(subscribeFilletCornerOnly, getFilletCornerOnly, getFilletCornerOnly)
+  const corners = useSyncExternalStore(subscribeFilletThreeWayCorners, getFilletThreeWayCorners, getFilletThreeWayCorners)
+  const chamfer = settings.profile.kind === 'chamfer'
+  return <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div>
+      <OptionHeading label="Shape" info="Choose the shape of the edge." />
+      <ShapeOptions sections={sections} />
+    </div>
+    {!chamfer && <div>
+      <OptionHeading label="Facets" info="Choose how many flat faces make the curve, or leave it on Auto and Hew picks." />
+      <FacetsField cornerOnly={cornerOnly} value={settings.segmentsOverride} />
+    </div>}
+    {corners > 0 && <div>
+      <OptionHeading label="Corners" info="Choose how three rounded or chamfered edges meet." />
+      <div role="radiogroup" aria-label="Corners" style={{ display: 'flex', gap: 4 }}>
+        {cornerChoices(chamfer).map((c) => <button key={c.value} type="button" role="radio"
+          aria-checked={settings.corners === c.value} onClick={() => setFilletCorners(c.value)}
+          style={{ ...pillStyle(settings.corners === c.value), flex: 1 }}>{c.label}</button>)}
+      </div>
+    </div>}
+  </div>
 }

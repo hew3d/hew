@@ -7,14 +7,14 @@
 
 import type { ReactNode } from 'react'
 import { toolAllowed } from '../preview'
-import { CornersChip } from '../viewport/CornersChip'
-import { ProfileChip, type ProfileChipSection } from '../viewport/ProfileChip'
+import { ToolOptionsCard } from '../viewport/ToolOptionsCard'
+import { FilletOptions, type ProfileOptionSection } from '../viewport/FilletOptions'
 import type { ToolName } from './toolIcons'
 
 /** What App.tsx hands every panel: app-level data a panel renders. */
 export interface ToolPanelProps {
   /** The Fillet profile picker's sections (Library and built-in profiles). */
-  profileSections: ProfileChipSection[]
+  profileSections: ProfileOptionSection[]
 }
 
 export interface ToolPanel {
@@ -24,23 +24,11 @@ export interface ToolPanel {
 
 const ALL_TOOL_PANELS: readonly ToolPanel[] = [
   {
-    // The Fillet tool's chips sit to the left of the measurement box.
     tool: 'Fillet',
     render: ({ profileSections }) => (
-      <div
-        style={{
-          position: 'absolute',
-          top: '16px',
-          right: '236px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          zIndex: 20,
-        }}
-      >
-        <CornersChip />
-        <ProfileChip sections={profileSections} />
-      </div>
+      <ToolOptionsCard tool="Fillet" info="Round or chamfer an edge, or give it another shape.">
+        <FilletOptions sections={profileSections} />
+      </ToolOptionsCard>
     ),
   },
 ]
