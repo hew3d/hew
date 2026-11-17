@@ -7,15 +7,23 @@
  *
  * It fills the forward router (so the live bridge, where the registry turns
  * that on, asks this host for a plugin's answer), and, when the test
- * harness exists, adds `__hew_test.plugins`.
+ * harness exists, adds `__hew_test.plugins`. On the desktop it also shows
+ * the live API's request to load a plugin from a folder
+ * (`DevRequestNotice`) in a corner of this window, and tells the shell
+ * that this window runs a host (`plugin_host_present`) from start to stop,
+ * so the live API refuses `plugins_off` while no window does.
  */
 
+import { createElement } from 'react'
+import { createRoot } from 'react-dom/client'
 import { setForwardRouter } from '../api/forwardRouter'
 import type { LiveBridgeDeps } from '../api/liveBridge'
 import { isTauri } from '../io/fileHost'
 import * as LogStore from '../log/LogStore'
 import * as kernelModule from '../wasm/pkg/wasm_api.js'
-import { createPluginHost, type PluginHost, type RealmChannel, type RealmState } from './hostCore'
+import { DevRequestNotice } from './DevRequestNotice'
+import { createPluginHost, type BlockReason, type PluginHost, type RealmChannel, type RealmState } from './hostCore'
+import { pluginInstaller } from './installer'
 import { createRealmFrame } from './realm/frame'
 import { desktopStorage, webStorage } from './storageBackend'
 import { invokeShell, storeAccessForWindow } from './storeAccess'
@@ -31,6 +39,8 @@ export interface PluginTestHooks {
    *  socket client would, with forwards served by the host. */
   call(frame: string): Promise<string>
   states(): Record<string, RealmState>
+  /** Why each `blocked` plugin is (`states()` says `blocked`). */
+  reasons(): Record<string, BlockReason>
 }
 
 function grantJson(id: string, document: string, namesJson: string): string {
@@ -95,11 +105,27 @@ export function startPluginHost(opts: PluginHostOptions): () => void {
         return reply
       },
       states: () => host.states(),
+      reasons: () => host.reasons(),
     }
     harness.plugins = hooks
   }
 
+  let stopNotice: (() => void) | null = null
+  if (isTauri) {
+    void invokeShell('plugin_host_present', { present: true }).catch(() => undefined)
+    const box = document.createElement('div')
+    document.body.appendChild(box)
+    const root = createRoot(box)
+    root.render(createElement(DevRequestNotice, { installer: pluginInstaller(), placement: 'window' }))
+    stopNotice = () => {
+      root.unmount()
+      box.remove()
+      void invokeShell('plugin_host_present', { present: false }).catch(() => undefined)
+    }
+  }
+
   return () => {
+    stopNotice?.()
     host.dispose()
     setForwardRouter(null)
     if (typeof harness === 'object' && harness !== null) delete harness.plugins

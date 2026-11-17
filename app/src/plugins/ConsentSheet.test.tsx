@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { requiresPreview } from '../test/requiresPreview'
-import { ConsentSheet, UNSIGNED_LINE } from './ConsentSheet'
+import { ConsentSheet, REVIEW_LINE, UNSIGNED_LINE } from './ConsentSheet'
 import type { ConsentPayload } from './types'
 
 beforeEach((ctx) => requiresPreview(ctx, 'plugins'))
@@ -56,8 +56,107 @@ describe('ConsentSheet', () => {
 
   it('says a folder install can change after install, and shows the folder path', () => {
     open({ source: { kind: 'dir', path: '/home/me/plugin' } })
-    expect(screen.getByText('Unpacked folder: /home/me/plugin')).toBeInTheDocument()
+    expect(screen.getByText('Developer folder')).toBeInTheDocument()
+    // The path in full, set apart as data, not inside a sentence.
+    expect(document.querySelector('[data-path-text] code')!.textContent).toBe('/home/me/plugin')
     expect(screen.getByText('The files in this folder can change after you install.')).toBeInTheDocument()
+  })
+
+  it('in review mode lists what changed, then what it keeps, never a new permission twice', () => {
+    const { dialog } = open({
+      review: true,
+      source: { kind: 'dir', path: '/home/me/plugin' },
+      replaces: { name: 'Parts Lister', version: '1.0.0' },
+      permissions: [
+        { name: 'model.read', text: 'Read your model' },
+        { name: 'clipboard', text: 'Read and write the clipboard' },
+      ],
+      update: {
+        from_version: '1.0.0',
+        added: [{ name: 'clipboard', text: 'Read and write the clipboard' }],
+        new_optional: [],
+        removed: [],
+        removed_optional: [],
+        startup_newly: false,
+      },
+    })
+    expect(within(dialog).getAllByText('Read and write the clipboard')).toHaveLength(1)
+    expect(within(dialog).getByText('Now asks for')).toBeInTheDocument()
+    expect(within(dialog).getByText('It keeps')).toBeInTheDocument()
+    expect(within(dialog).queryByText('It can')).toBeNull()
+    expect(within(dialog).getByText('Read the model: every object, component, material, tag, and attribute')).toBeInTheDocument()
+    expect(within(dialog).getByText('Now asks for').compareDocumentPosition(within(dialog).getByText('It keeps'))).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+  })
+
+  it('in review mode shows the line the host chose for the reason, and the old name when it changed', () => {
+    const { dialog } = open({
+      review: true,
+      review_line: 'This plugin now starts with Hew.',
+      source: { kind: 'dir', path: '/home/me/plugin' },
+      replaces: { name: 'Old Name', version: '1.0.0' },
+    })
+    expect(within(dialog).getByText('This plugin now starts with Hew.')).toBeInTheDocument()
+    expect(within(dialog).queryByText(REVIEW_LINE)).toBeNull()
+    const was = dialog.querySelector('[data-consent="was-named"]') as HTMLElement
+    expect(within(was).getByText('It was named')).toBeInTheDocument()
+    expect(was.querySelector('code')!.textContent).toBe('Old Name')
+  })
+
+  it('in review mode asks to allow the changes, says why in place of the replaces line, lists both sides, and accepts with Allow', () => {
+    const { dialog, onInstall } = open({
+      review: true,
+      version: '1.0.0',
+      source: { kind: 'dir', path: '/home/me/plugin' },
+      replaces: { name: 'Parts Lister', version: '1.0.0' },
+      update: {
+        from_version: '1.0.0',
+        added: [{ name: 'clipboard', text: '' }],
+        new_optional: [],
+        removed: [{ name: 'files', text: '' }],
+        removed_optional: [{ name: 'network:api.example.com', text: 'Connect to api.example.com (checked by Hew)' }],
+        startup_newly: false,
+      },
+    })
+    expect(within(dialog).getByRole('heading', { name: "Allow this plugin's changes?" })).toBeInTheDocument()
+    expect(within(dialog).getByText(REVIEW_LINE)).toBeInTheDocument()
+    expect(dialog.querySelector('[data-consent="replaces"]')).toBeNull()
+    expect(within(dialog).queryByText(/Install .* again\?/)).toBeNull()
+    expect(within(dialog).getByText('Now asks for')).toBeInTheDocument()
+    expect(within(dialog).getByText('Read and write the clipboard')).toBeInTheDocument()
+    const removed = dialog.querySelector('[data-consent="removed"]') as HTMLElement
+    expect(within(dialog).getByText('No longer asks for')).toBeInTheDocument()
+    expect(within(removed).getByText('Ask you to pick files, and save files you choose')).toBeInTheDocument()
+    expect(within(removed).getByText('No longer may ask for later:')).toBeInTheDocument()
+    expect(within(removed).getByText('Connect to api.example.com (checked by Hew)')).toBeInTheDocument()
+    expect(within(dialog).getByText('The files in this folder can change after you install.')).toBeInTheDocument()
+    expect(within(dialog).queryByRole('button', { name: 'Install' })).toBeNull()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Allow' }))
+    expect(onInstall).toHaveBeenCalledOnce()
+  })
+
+  it('in review mode with only removals says it asks for nothing new, and still lists what it no longer asks for', () => {
+    const { dialog } = open({
+      review: true,
+      source: { kind: 'dir', path: '/home/me/plugin' },
+      update: { from_version: '1.2.0', added: [], new_optional: [], removed: [{ name: 'files', text: '' }], removed_optional: [], startup_newly: false },
+    })
+    expect(within(dialog).getByText('It asks for nothing new.')).toBeInTheDocument()
+    const removed = dialog.querySelector('[data-consent="removed"]') as HTMLElement
+    expect(within(removed).getByText('Ask you to pick files, and save files you choose')).toBeInTheDocument()
+  })
+
+  it('shows a folder path and a file name cleaned', () => {
+    open({ source: { kind: 'dir', path: '/home/\u202Eme\u0000/plugin' } })
+    expect(document.querySelector('[data-path-text] code')!.textContent).toBe('/home/me/plugin')
+  })
+
+  it('says a folder copied in on the web was copied from a folder, with its name as data', () => {
+    open({ source: { kind: 'file', name: 'my-plugin', origin: 'folder' } })
+    expect(screen.getByText('Copied from a folder')).toBeInTheDocument()
+    expect(screen.queryByText('From file')).toBeNull()
+    expect(document.querySelector('[data-path-text] code')!.textContent).toBe('my-plugin')
   })
 
   it('shows the replaces line and the update diff, with the new lines highlighted', () => {

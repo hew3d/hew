@@ -8,21 +8,32 @@
  * desktop shell's commands or the browser store; the pane never touches
  * either. Installing always shows the consent sheet first. Anything a plugin
  * wrote (its name, its path) is cleaned before it is shown.
+ *
+ * On the desktop the pane also holds the Developer mode switch (the shell's
+ * own state, which it asks natively before turning on; the pane's copy is
+ * for display), offers "Developer folder…" only while it is on, shows each
+ * folder plugin's state (needs developer mode, a change waiting for review,
+ * a folder that cannot be found) with Review where there is one, and shows
+ * a waiting live API request to load a folder. On the web, where the
+ * browser has a folder picker, "From folder…" installs a copy of a folder.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { ConsentSheet } from './ConsentSheet'
+import { DevRequestNotice } from './DevRequestNotice'
+import { devProblems, pruneDevProblems, seedDevProblems, watchDevProblems } from './devProblems'
+import { PathText } from './pathText'
 import { pluginInstaller } from './installer'
 import { errorText, toPluginError } from './pluginError'
 import { permissionText } from './permissionCopy'
 import { cleanText, displayName } from './pluginText'
 import { buttonStyle } from './styles'
-import type { Installed, InstallSource, Listed, PendingView, PluginInstaller } from './types'
+import { needsConsent, type Installed, type InstallSource, type Listed, type PendingView, type PluginInstaller } from './types'
 import { recordFingerprint, rollbackFingerprint } from './webPluginStore'
 
 /** The desktop shell's refusals for a "no" in its own confirmation. */
-const DECLINED: ReadonlySet<string> = new Set(['rollback_declined', 'enable_declined', 'uninstall_declined'])
+const DECLINED: ReadonlySet<string> = new Set(['rollback_declined', 'enable_declined', 'uninstall_declined', 'developer_mode_declined'])
 
 /** Refusals that are advice, not failures: shown as a plain notice. */
 const NOTICES: Readonly<Record<string, string>> = {
@@ -62,17 +73,108 @@ function GenericGlyph() {
   )
 }
 
-function sourceLine(source: InstallSource): string {
-  if (source.kind === 'file') return 'From file'
-  if (source.kind === 'dir') return `Unpacked: ${cleanText(source.path, 512)}`
+/** What a plugin's row depends on, as one string: a notice raised for the
+ *  plugin lasts while this stays the same. */
+function pluginSig(items: Listed[] | null, problems: Record<string, string>, id: string): string {
+  const l = items?.find((x) => (x.kind === 'installed' ? x.installed.id : x.id) === id)
+  if (l === undefined) return 'gone'
+  if (l.kind !== 'installed') return `unreadable:${l.reason}`
+  const i = l.installed
+  return JSON.stringify([i.version, i.enabled, needsConsent(i), i.needs_consent_reason ?? null, problems[id] ?? null, l.dev_problem ?? null])
+}
+
+function sourceLine(source: InstallSource): ReactNode {
+  if (source.kind === 'file') {
+    // A folder copied on the web is stored as a file with an `origin` the
+    // kernel does not read.
+    if ((source as { origin?: unknown }).origin !== 'folder') return 'From file'
+    return (
+      <>
+        <div>Copied from a folder</div>
+        <PathText label="Folder name" value={source.name} />
+      </>
+    )
+  }
+  if (source.kind === 'dir') {
+    return (
+      <>
+        <div>Developer folder</div>
+        <PathText label="Folder" value={source.path} />
+      </>
+    )
+  }
   return `From ${source.kind}`
+}
+
+/** Why a folder plugin waits for a review, in plain words, beyond the line
+ *  that says it does. */
+const REVIEW_REASONS: Readonly<Record<string, string>> = {
+  startup_added: 'It now asks to start whenever Hew starts.',
+  id_changed: 'Its hew-plugin.json now names a different plugin.',
+  requirements_unmet: "It now needs a Hew version or other plugins that aren't here.",
+  consent_text_changed: 'Its name, or the reason it gives for starting with Hew, changed.',
+  authority_changed: 'What its commands may do, or what it adds to Hew, changed.',
+  command_name_taken: "One of its commands now has the same name as another plugin's command. Rename it in hew-plugin.json.",
+}
+
+/** Why a folder cannot be watched, from `plugins-dev-changed`. */
+const FOLDER_PROBLEMS: Readonly<Record<string, string>> = {
+  folder_missing: "Hew can't find this plugin's folder.",
+  package_path_invalid: "Hew can't read this plugin's folder: a name in it isn't allowed, or it holds a link.",
+  package_too_large: "This plugin's folder holds too many files, or too much data, for a plugin.",
+  main_missing: "Hew can't find this plugin's main file.",
+  folder_not_checked: "Hew is still checking this plugin's folder. It starts once the check is done. If this stays, the folder may be on a drive that isn't answering.",
+}
+
+/** What a folder plugin's row says about it, if anything. */
+function folderState(
+  l: Extract<Listed, { kind: 'installed' }>,
+  devMode: boolean | null,
+  problem: string | undefined,
+): { lines: string[]; review: boolean; data?: { label: string; value: string } } | null {
+  if (l.installed.source.kind !== 'dir') return null
+  if (devMode === false) return { lines: ['Needs developer mode'], review: false }
+  if (needsConsent(l.installed)) {
+    // Nothing to review while the file cannot be read: fixing it is enough.
+    if (l.installed.needs_consent_reason === 'manifest_unreadable') {
+      return { lines: ["Hew can't read this plugin's hew-plugin.json. Fix the file and it starts again."], review: false }
+    }
+    const why = typeof l.installed.needs_consent_reason === 'string' ? REVIEW_REASONS[l.installed.needs_consent_reason] : undefined
+    const reason = l.installed.needs_consent_reason
+    const first =
+      reason === 'permissions_changed' || why === undefined
+        ? "This plugin's folder now asks for different permissions."
+        : "This plugin's folder changed in a way you need to review."
+    return { lines: [first, ...(why === undefined ? [] : [why])], review: true }
+  }
+  if (problem === 'main_missing' && typeof l.manifest.main === 'string') {
+    return { lines: [FOLDER_PROBLEMS.main_missing], review: false, data: { label: 'Main file', value: l.manifest.main } }
+  }
+  if (problem !== undefined) {
+    return { lines: [FOLDER_PROBLEMS[problem] ?? "Hew can't watch this plugin's folder right now."], review: false }
+  }
+  return null
+}
+
+/** Whether this browser can hand the page a folder. */
+function hasFolderPicker(): boolean {
+  return typeof window !== 'undefined' && typeof (window as { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function'
 }
 
 export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
   const inst = useMemo(() => installer ?? pluginInstaller(), [installer])
   const [items, setItems] = useState<Listed[] | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
+  const [notice, setNoticeText] = useState<string | null>(null)
+  // A notice about one plugin's review or folder is tied to that plugin and
+  // the state it was raised in; a change of either ends it.
+  const [noticeScope, setNoticeScope] = useState<{ id: string; sig: string } | null>(null)
+  const setNotice = useCallback((text: string | null, scope?: { id: string; sig: string }): void => {
+    setNoticeText(text)
+    setNoticeScope(text === null ? null : (scope ?? null))
+  }, [])
+  const itemsRef = useRef<Listed[] | null>(null)
+  const problemsRef = useRef<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [pending, setPending] = useState<PendingView | null>(null)
@@ -82,6 +184,12 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
   const [turningOn, setTurningOn] = useState<{ id: string; name: string; lines: string[]; shown: string } | null>(null)
   const [rollingBack, setRollingBack] = useState<{ id: string; version: string; lines: string[]; shown: string } | null>(null)
   const [icons, setIcons] = useState<Record<string, string>>({})
+  // Developer mode as the shell last said; display only. Null until known,
+  // and on the web.
+  const [devMode, setDevMode] = useState<boolean | null>(null)
+  // What the watcher last said about each folder plugin; kept outside the
+  // pane so closing and reopening it does not lose it.
+  const [problems, setProblems] = useState<Record<string, string>>(() => devProblems(inst))
   const iconsRef = useRef<Record<string, string>>({})
   const fileInput = useRef<HTMLInputElement>(null)
 
@@ -92,7 +200,11 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
     const mine = ++latest.current
     try {
       const listed = await inst.list()
-      if (mine === latest.current) setItems(listed)
+      if (mine === latest.current) {
+        pruneDevProblems(inst, listed.map((l) => (l.kind === 'installed' ? l.installed.id : l.id)))
+        seedDevProblems(inst, listed)
+        setItems(listed)
+      }
     } catch (e) {
       if (mine !== latest.current) return
       setError(errorText(e))
@@ -100,10 +212,49 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
     }
   }, [inst])
 
+  const latestMode = useRef(0)
+  const readDevMode = useCallback(async (): Promise<void> => {
+    if (inst.devMode === undefined) return
+    const mine = ++latestMode.current
+    try {
+      const on = await inst.devMode()
+      if (mine === latestMode.current) setDevMode(on)
+    } catch {
+      /* the switch stays as it was shown */
+    }
+  }, [inst])
+
   useEffect(() => {
     void refresh()
-    return inst.onChanged(() => void refresh())
-  }, [inst, refresh])
+    void readDevMode()
+    return inst.onChanged(() => {
+      void refresh()
+      void readDevMode()
+    })
+  }, [inst, refresh, readDevMode])
+
+  // A folder that cannot be watched is said once; a later notice for the
+  // same plugin without a problem clears it.
+  useEffect(() => {
+    setProblems(devProblems(inst))
+    return watchDevProblems(inst, () => setProblems(devProblems(inst)))
+  }, [inst])
+
+  useEffect(() => {
+    itemsRef.current = items
+    problemsRef.current = problems
+    if (noticeScope !== null && pluginSig(items, problems, noticeScope.id) !== noticeScope.sig) setNotice(null)
+  }, [items, problems, noticeScope, setNotice])
+
+  // A folder notice for the plugin also ends on any change the watcher
+  // reports for it.
+  const scopedId = noticeScope?.id
+  useEffect(() => {
+    if (scopedId === undefined) return
+    return inst.onDevChanged?.((change) => {
+      if (change.id === scopedId) setNotice(null)
+    })
+  }, [inst, scopedId, setNotice])
 
   // Icons are blob URLs the pane makes and revokes; they go only into <img>.
   useEffect(() => {
@@ -164,9 +315,10 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
     setSheetError(null)
     try {
       const record = await inst.commit(pending.token, true)
+      const review = pending.consent.review === true
       setPending(null)
       // The desktop asks once more in a native dialog; a "no" there installs nothing.
-      if (record === null) setNotice('Nothing was installed.')
+      if (record === null) setNotice(review ? 'Nothing was changed.' : 'Nothing was installed.')
       await refresh()
     } catch (e) {
       setSheetError(errorText(e))
@@ -183,6 +335,45 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
     setPending(null)
     setSheetError(null)
     if (token !== undefined) inst.commit(token, false).catch(() => undefined)
+  }
+
+  // A review's refusals (nothing waiting, the folder names another plugin,
+  // a manifest that does not read) are told as notices: the person can fix
+  // the folder and try again.
+  const askReview = async (id: string): Promise<void> => {
+    if (inst.review === undefined) return
+    setError(null)
+    setNotice(null)
+    setBusy(true)
+    try {
+      const view = await inst.review(id)
+      setSheetError(null)
+      setPending(view)
+    } catch (e) {
+      setNotice(NOTICES[toPluginError(e).refusal] ?? errorText(e), { id, sig: pluginSig(itemsRef.current, problemsRef.current, id) })
+      await refresh()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const switchDevMode = (on: boolean): Promise<void> =>
+    run(async () => {
+      if (inst.setDevMode === undefined) return
+      setDevMode(await inst.setDevMode(on))
+    }).then(readDevMode)
+
+  const pickFolder = async (): Promise<void> => {
+    if (inst.stageFolder === undefined) return
+    let dir: FileSystemDirectoryHandle
+    try {
+      dir = await (window as unknown as { showDirectoryPicker(o: { mode: 'read' }): Promise<FileSystemDirectoryHandle> }).showDirectoryPicker({ mode: 'read' })
+    } catch {
+      // Cancelled, or the browser refused: nothing to install.
+      return
+    }
+    const stageFolder = inst.stageFolder.bind(inst)
+    await stage(() => stageFolder(dir))
   }
 
   const run = async (work: () => Promise<void>): Promise<void> => {
@@ -263,12 +454,36 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
         you allowed when you installed it.
       </div>
 
+      {inst.tier === 'desktop' && inst.devMode !== undefined && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              role="switch"
+              aria-label="Developer mode"
+              checked={devMode === true}
+              disabled={devMode === null}
+              onChange={(e) => void switchDevMode(e.target.checked)}
+            />
+            <span>Developer mode</span>
+          </label>
+          <div style={noteStyle}>Run a plugin you are writing straight from its folder. Turn this on only if you write plugins.</div>
+        </div>
+      )}
+
+      {inst.tier === 'desktop' && inst.devRequest !== undefined && <DevRequestNotice installer={inst} placement="pane" />}
+
       <div style={{ display: 'flex', gap: '8px', alignItems: 'center', position: 'relative' }}>
         {inst.tier === 'web' ? (
           <>
             <button type="button" disabled={busy} style={buttonStyle(busy)} onClick={() => fileInput.current?.click()}>
               Install…
             </button>
+            {inst.stageFolder !== undefined && hasFolderPicker() && (
+              <button type="button" disabled={busy} style={buttonStyle(busy)} onClick={() => void pickFolder()}>
+                From folder…
+              </button>
+            )}
             <input
               ref={fileInput}
               type="file"
@@ -299,9 +514,11 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
                 <button type="button" style={buttonStyle()} onClick={() => void stage(() => inst.pickAndStage('file'))}>
                   From file…
                 </button>
-                <button type="button" style={buttonStyle()} onClick={() => void stage(() => inst.pickAndStage('dir'))}>
-                  Unpacked folder…
-                </button>
+                {devMode === true && (
+                  <button type="button" style={buttonStyle()} onClick={() => void stage(() => inst.pickAndStage('dir'))}>
+                    Developer folder…
+                  </button>
+                )}
               </>
             )}
           </>
@@ -354,7 +571,33 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
                     </span>
                     <span style={noteStyle}>{l.installed.version}</span>
                   </div>
-                  <div style={noteStyle}>{sourceLine(l.installed.source)}</div>
+                  <div style={{ ...noteStyle, overflowWrap: 'anywhere' }}>{sourceLine(l.installed.source)}</div>
+                  {(() => {
+                    const state = folderState(l, devMode, problems[l.installed.id])
+                    if (state === null) return null
+                    return (
+                      <div data-plugin-folder-state="" style={{ marginTop: '4px' }}>
+                        {state.lines.map((line) => (
+                          <div key={line} style={{ color: 'var(--text-primary, #eee)' }}>
+                            {line}
+                          </div>
+                        ))}
+                        {state.data !== undefined && <PathText label={state.data.label} value={state.data.value} />}
+                        {state.review && (
+                          <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
+                            <button type="button" disabled={busy} style={buttonStyle(busy, true)} onClick={() => void askReview(l.installed.id)}>
+                              Review
+                            </button>
+                            {l.installed.enabled && (
+                              <button type="button" style={buttonStyle()} onClick={() => void toggle(l.installed.id, false)}>
+                                Turn Off
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })()}
                   <details style={{ marginTop: '6px' }}>
                     <summary style={{ cursor: 'pointer' }}>What it can do</summary>
                     <ul style={{ margin: '4px 0 0', paddingLeft: '18px', lineHeight: 1.5 }}>

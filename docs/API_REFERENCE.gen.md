@@ -8467,6 +8467,179 @@ Set an object's Smooth level (0 = Off, 1–3): its faces become the cage of a su
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
 
+## hew.plugin
+
+### `hew.plugin.dev`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** first_party
+
+Ask the app to show the person a request to load a plugin from a folder. Nothing is loaded, staged or read: the person picks the folder in the app's own folder picker, which opens at `path`, and reads what the plugin asks for before anything runs. The answer only says the request is waiting. Refused while developer mode is off, while another request waits, and for a while after the person dismisses one.
+
+> **Preview.** Part of the preview feature Plugins (`plugins`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "path": {
+      "description": "the plugin's folder; shown to the person and used as a starting point for the picker, never read",
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "path"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "status": {
+      "enum": [
+        "awaiting_user"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `plugins_disabled`
+- `no_plugin_dir`
+- `plugins_off`
+- `developer_mode_off`
+- `confirmation_open`
+- `request_waiting`
+- `request_dismissed`
+- `dry_run_host_command`
+- `io`
+
+### `hew.plugin.list`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** first_party
+
+List the plugins installed in the app: id, display name, version, where each came from (file, dir, index, git or url), whether it is turned on, and its state. A folder plugin is needs_developer_mode while developer mode is off, needs_review while the person has not yet read a change to what it asks for, checking until its folder has been compared since it started being watched (nothing of it is read before), plugins_off for the same while no window runs a plugin host (nothing will compare it), and unreadable when its record cannot be read. The list says whether a request to load a folder (hew.plugin.dev) is still waiting for the person, including while they are reading what the plugin asks for, and carries no folder path and does not say whether a plugin is running. Reads only.
+
+> **Preview.** Part of the preview feature Plugins (`plugins`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "developer_mode": {
+      "type": "boolean"
+    },
+    "plugins": {
+      "items": {
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "source": {
+            "description": "null when the record is unreadable",
+            "enum": [
+              "file",
+              "dir",
+              "index",
+              "git",
+              "url",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "enum": [
+              "installed",
+              "needs_developer_mode",
+              "needs_review",
+              "checking",
+              "plugins_off",
+              "unreadable"
+            ],
+            "type": "string"
+          },
+          "version": {
+            "description": "null when the record is unreadable",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "version",
+          "source",
+          "enabled",
+          "state"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "request_waiting": {
+      "description": "true while a request to load a plugin is waiting for the person, including while they are reading what the plugin asks for; no path, no id",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "plugins",
+    "developer_mode",
+    "request_waiting"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `plugins_disabled`
+- `no_plugin_dir`
+
 ## hew.print
 
 ### `hew.print.pdf`

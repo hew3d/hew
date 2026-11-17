@@ -46,6 +46,12 @@ pub struct UpdateDiff {
     pub added: Vec<PermissionLine>,
     /// Optional permissions the installed version did not declare.
     pub new_optional: Vec<PermissionLine>,
+    /// Permissions the installed version declared (or, without its
+    /// manifest, held) that this one no longer asks for.
+    pub removed: Vec<PermissionLine>,
+    /// Optional permissions the installed version declared that this one
+    /// no longer declares.
+    pub removed_optional: Vec<PermissionLine>,
     /// `on_startup` is declared now and was not before.
     pub startup_newly: bool,
     pub from_version: String,
@@ -80,6 +86,15 @@ pub struct ConsentPayload {
     pub replaces: Option<Replaces>,
     /// Present on an update: what changed since the accepted grant.
     pub update: Option<UpdateDiff>,
+    /// True when this is the review of a folder plugin whose manifest
+    /// changed: the sheet asks to allow the changes ([`REVIEW_LINE`],
+    /// [`review_confirmation`]) instead of to install. Set only by the
+    /// host that staged the review, never from anything the page sends.
+    pub review: bool,
+    /// For a review: the one sentence that says why, in Hew's words
+    /// ([`review_line`]). The sheet and [`consent_summary`] both show it,
+    /// so the two never differ. `None` outside a review.
+    pub review_line: Option<String>,
 }
 
 /// Characters [`clean_text`] removes, as inclusive code point ranges:
@@ -185,6 +200,40 @@ pub fn clean_text(text: &str, max_chars: usize) -> String {
         cut.push('…');
         out = cut;
     }
+    out
+}
+
+/// The most characters of a path, or other value from outside Hew, a
+/// native confirmation shows on its line.
+pub const MAX_VALUE_LINE_CHARS: usize = 160;
+
+/// `text` as a value line for a plain-text confirmation: cleaned
+/// ([`clean_text`]: no control, direction-changing or line-breaking
+/// characters, so it stays one line), and when longer than `max_chars`
+/// cut in the middle with `…`, so both ends stay readable. A caller puts
+/// it on a line of its own after a fixed label line, never inside one of
+/// Hew's sentences or quotes.
+pub fn value_line(text: &str, max_chars: usize) -> String {
+    let clean = clean_text(text, usize::MAX);
+    let chars: Vec<char> = clean.chars().collect();
+    if chars.len() <= max_chars || max_chars == 0 {
+        return if max_chars == 0 { String::new() } else { clean };
+    }
+    let keep = max_chars - 1;
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    let mut out: String = chars[..head]
+        .iter()
+        .collect::<String>()
+        .trim_end()
+        .to_string();
+    out.push('…');
+    out.push_str(
+        chars[chars.len() - tail..]
+            .iter()
+            .collect::<String>()
+            .trim_start(),
+    );
     out
 }
 
@@ -321,8 +370,9 @@ pub fn hew_version_ok(manifest: &Manifest, running: &semver::Version) -> bool {
 /// package comes from whoever made the installed one.
 pub fn replaces_line(replaces: &Replaces) -> String {
     format!(
-        "Replaces {} v{}. Hew cannot check it is the same author.",
-        replaces.name, replaces.version
+        "Replaces:\n{} v{}\nHew cannot check it is the same author.",
+        value_line(&replaces.name, MAX_NAME_CHARS),
+        replaces.version
     )
 }
 
@@ -359,8 +409,9 @@ fn cleaned_source(source: &InstallSource) -> InstallSource {
         InstallSource::File { name } => InstallSource::File {
             name: clean_text(name, MAX_SOURCE_CHARS),
         },
+        // A path keeps both ends: the folder's own name is at the end.
         InstallSource::Dir { path } => InstallSource::Dir {
-            path: clean_text(path, MAX_SOURCE_CHARS),
+            path: value_line(path, MAX_SOURCE_CHARS),
         },
         other => other.clone(),
     }
@@ -417,6 +468,29 @@ pub fn consent(
     let update = previous.map(|p| {
         let was_startup =
             previous_manifest.is_some_and(|m| m.activation.contains(&Activation::OnStartup));
+        let removed = match previous_manifest {
+            Some(m) => m
+                .permissions
+                .iter()
+                .filter(|n| !manifest.permissions.contains(n))
+                .map(permission_line)
+                .collect(),
+            None => p
+                .grant
+                .iter()
+                .filter(|n| !manifest.permissions.contains(n))
+                .map(permission_line)
+                .collect(),
+        };
+        let removed_optional = previous_manifest
+            .map(|m| {
+                m.optional_permissions
+                    .iter()
+                    .filter(|n| !manifest.optional_permissions.contains(n))
+                    .map(permission_line)
+                    .collect()
+            })
+            .unwrap_or_default();
         UpdateDiff {
             added: manifest
                 .permissions
@@ -430,6 +504,8 @@ pub fn consent(
                 .filter(|n| previous_manifest.is_none_or(|m| !m.optional_permissions.contains(n)))
                 .map(permission_line)
                 .collect(),
+            removed,
+            removed_optional,
             startup_newly: on_startup && !was_startup,
             from_version: p.version.to_string(),
         }
@@ -452,11 +528,60 @@ pub fn consent(
         source: cleaned_source(source),
         replaces,
         update,
+        review: false,
+        review_line: None,
     }
 }
 
 /// The fixed line for a folder install, whose files are read in place.
 pub const FOLDER_LINE: &str = "The files in this folder can change after you install.";
+
+/// The fixed line an uninstall of a folder plugin adds: only Hew's copy
+/// goes.
+pub const FOLDER_KEPT_LINE: &str = "Your folder and its files are left as they are.";
+
+/// The fixed line for the review of a folder plugin whose manifest
+/// changed, in place of the replacement line.
+pub const REVIEW_LINE: &str = "This plugin's folder now asks for different permissions.";
+
+/// The sentence that says why a folder plugin waits for review, from the
+/// reason its record carries (`needs_consent_reason`; `None` for a record
+/// that carries none, which reads as the permissions line). `clash` is, for
+/// `command_name_taken`, the command's namespaced name and the display
+/// name of the plugin that already has it; each follows the sentence on a
+/// line of its own after a fixed label line ([`value_line`]), never inside
+/// the sentence or in quotes, so plugin text cannot pass for Hew's.
+pub fn review_line(reason: Option<&str>, clash: Option<(&str, &str)>) -> String {
+    match reason {
+        Some("startup_added") => "This plugin now starts with Hew.".to_string(),
+        Some("consent_text_changed") => "This plugin's name or description changed.".to_string(),
+        Some("authority_changed") => {
+            "A command in this plugin now needs different permission.".to_string()
+        }
+        Some("command_name_taken") => match clash {
+            Some((command, other)) => format!(
+                "A command in this plugin has the same name as one in another plugin.\nCommand:\n{}\nOther plugin:\n{}",
+                value_line(command, MAX_NAME_CHARS * 2),
+                value_line(other, MAX_NAME_CHARS)
+            ),
+            None => {
+                "A command in this plugin has the same name as one in another plugin.".to_string()
+            }
+        },
+        Some("id_changed") => "This plugin's folder now names a different plugin.".to_string(),
+        Some("manifest_unreadable") => "This plugin's hew-plugin.json can't be read.".to_string(),
+        Some("requirements_unmet") => {
+            "This plugin now needs a Hew version or other plugins that aren't here.".to_string()
+        }
+        _ => REVIEW_LINE.to_string(),
+    }
+}
+
+/// The title and accept label of the confirmation before a review's
+/// changes are allowed. Hew's own words; nothing from the folder.
+pub fn review_confirmation() -> (&'static str, &'static str) {
+    ("Allow this plugin's changes?", "Allow")
+}
 
 /// Appends `heading` and one bullet per line, at most
 /// [`MAX_SUMMARY_LINES`] then "…and N more"; nothing for no lines.
@@ -492,18 +617,25 @@ fn texts(lines: &[PermissionLine]) -> Vec<&str> {
 /// anything the page sends. It carries what the consent sheet shows, in
 /// this order: name and version; the source line; for a folder,
 /// [`FOLDER_LINE`]; [`UNSIGNED_LINE`]; the replacement line
-/// ([`reinstall_line`] for the installed version again); the warnings;
-/// on an update, "New since vX:" with the added and newly optional
-/// permissions; "Starts with Hew." (or "Now starts with Hew." when the
+/// ([`reinstall_line`] for the installed version again, [`REVIEW_LINE`]
+/// for a review); the warnings; on an update, "New since vX:" with the
+/// added and newly optional permissions, then "No longer asks for:" with
+/// the removed ones; "Starts with Hew." (or "Now starts with Hew." when the
 /// update adds it); "It can:" with the permissions; "May ask for later:"
 /// with the optional ones; and last the plugin's own words under "The
 /// plugin says:". Each list shows at most [`MAX_SUMMARY_LINES`] lines.
 pub fn consent_summary(payload: &ConsentPayload) -> String {
     let mut out = format!("{} {}\n", payload.name, payload.version);
     match &payload.source {
-        InstallSource::File { name } => out.push_str(&format!("From file: {name}\n")),
+        InstallSource::File { name } => out.push_str(&format!(
+            "From file:\n{}\n",
+            value_line(name, MAX_VALUE_LINE_CHARS)
+        )),
         InstallSource::Dir { path } => {
-            out.push_str(&format!("Unpacked: {path}\n"));
+            out.push_str(&format!(
+                "Developer folder:\n{}\n",
+                value_line(path, MAX_VALUE_LINE_CHARS)
+            ));
             out.push_str(FOLDER_LINE);
             out.push('\n');
         }
@@ -513,7 +645,18 @@ pub fn consent_summary(payload: &ConsentPayload) -> String {
         out.push_str(UNSIGNED_LINE);
         out.push('\n');
     }
-    if let Some(r) = &payload.replaces {
+    if payload.review {
+        out.push_str(payload.review_line.as_deref().unwrap_or(REVIEW_LINE));
+        out.push('\n');
+        // A review of a new name says what it was called, so a rename to
+        // look like another plugin is plain.
+        if let Some(r) = payload.replaces.as_ref().filter(|r| r.name != payload.name) {
+            out.push_str(&format!(
+                "It was named:\n{}\n",
+                value_line(&r.name, MAX_NAME_CHARS)
+            ));
+        }
+    } else if let Some(r) = &payload.replaces {
         if is_reinstall(payload) {
             out.push_str(&reinstall_line(&payload.version));
         } else {
@@ -530,6 +673,9 @@ pub fn consent_summary(payload: &ConsentPayload) -> String {
             &format!("New since v{}:", update.from_version),
             &new,
         );
+        let mut gone: Vec<&str> = texts(&update.removed);
+        gone.extend(texts(&update.removed_optional));
+        push_list(&mut out, "No longer asks for:", &gone);
     }
     if payload.on_startup {
         let newly = payload.update.as_ref().is_some_and(|u| u.startup_newly);
@@ -539,8 +685,30 @@ pub fn consent_summary(payload: &ConsentPayload) -> String {
             "\nStarts with Hew.\n"
         });
     }
-    push_list(&mut out, "It can:", &texts(&payload.permissions));
-    push_list(&mut out, "May ask for later:", &texts(&payload.optional));
+    // A review lists what changed above, so the full list would say the
+    // new permissions twice: it lists only what the plugin keeps.
+    let changes = payload.update.as_ref().filter(|_| payload.review);
+    let unchanged = |lines: &[PermissionLine], new: &[PermissionLine]| -> Vec<String> {
+        lines
+            .iter()
+            .filter(|l| !new.iter().any(|n| n.name == l.name))
+            .map(|l| l.text.clone())
+            .collect()
+    };
+    match changes {
+        Some(update) => {
+            let keeps = unchanged(&payload.permissions, &update.added);
+            let keeps: Vec<&str> = keeps.iter().map(String::as_str).collect();
+            push_list(&mut out, "It keeps:", &keeps);
+            let later = unchanged(&payload.optional, &update.new_optional);
+            let later: Vec<&str> = later.iter().map(String::as_str).collect();
+            push_list(&mut out, "May ask for later:", &later);
+        }
+        None => {
+            push_list(&mut out, "It can:", &texts(&payload.permissions));
+            push_list(&mut out, "May ask for later:", &texts(&payload.optional));
+        }
+    }
     if let Some(reason) = &payload.activation_reason {
         out.push_str(&format!("\nThe plugin says:\n{reason}\n"));
     }
@@ -560,8 +728,8 @@ pub fn rollback_summary(
     previous_manifest: &Manifest,
 ) -> String {
     let mut out = format!(
-        "{} v{} goes back to v{}.\n",
-        display_name(previous_manifest),
+        "{}\nGoes back from v{} to v{}.\n",
+        value_line(&display_name(previous_manifest), MAX_NAME_CHARS),
         current.version,
         previous.version
     );
@@ -608,12 +776,18 @@ fn name_version(installed: &Installed, manifest: &Manifest) -> String {
 
 /// What uninstalling removes, as plain text for the host's own
 /// confirmation: the plugin's cleaned name and version, then Hew's line
-/// about what goes with it.
+/// about what goes with it, and for a plugin read from a folder that the
+/// folder itself is not touched.
 pub fn uninstall_summary(installed: &Installed, manifest: &Manifest) -> String {
-    format!(
+    let mut out = format!(
         "{}\nRemoves the plugin, its earlier version, and everything it saved.\n",
         name_version(installed, manifest)
-    )
+    );
+    if matches!(installed.source, InstallSource::Dir { .. }) {
+        out.push_str(FOLDER_KEPT_LINE);
+        out.push('\n');
+    }
+    out
 }
 
 /// What turning a plugin on allows, as plain text for the host's own

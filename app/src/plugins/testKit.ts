@@ -6,7 +6,7 @@
  */
 
 import { FakeDir } from '../test/opfsFake'
-import { storedZip } from '../test/storedZip'
+import { storedZipOf as storedZip } from './storedZip'
 import type { PluginWasm } from './webPluginStore'
 
 export interface ManifestInput {

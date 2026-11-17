@@ -187,7 +187,7 @@ fn the_update_diff_and_the_replacement_line() {
     assert_eq!(replaces.version, "1.0.0");
     assert_eq!(
         replaces_line(&replaces),
-        "Replaces Old Name v1.0.0. Hew cannot check it is the same author."
+        "Replaces:\nOld Name v1.0.0\nHew cannot check it is the same author."
     );
     // Without the previous manifest every optional permission is new and
     // the previous name falls back to the id.
@@ -452,14 +452,14 @@ fn the_rollback_summary() {
     let m = manifest(json!({ "version": "1.0.0", "name": "Cut\u{202E}List" }));
     assert_eq!(
         plugin_host::rollback_summary(&current, &previous, &m),
-        "CutList v2.0.0 goes back to v1.0.0.\n\nIt will be able to:\n\
+        "CutList\nGoes back from v2.0.0 to v1.0.0.\n\nIt will be able to:\n\
          • Read the model: every object, component, material, tag, and attribute\n\
          • Read and write the clipboard\n"
     );
     let bare = installed("com.example.fixture", "1.0.0", &[]);
     assert_eq!(
         plugin_host::rollback_summary(&current, &bare, &m),
-        "CutList v2.0.0 goes back to v1.0.0.\n"
+        "CutList\nGoes back from v2.0.0 to v1.0.0.\n"
     );
 }
 
@@ -504,10 +504,10 @@ fn the_consent_summary_carries_the_sheet_in_order() {
     assert_eq!(
         consent_summary(&c),
         "Fixture 2.0.0\n\
-         Unpacked: /home/me/fixture\n\
+         Developer folder:\n/home/me/fixture\n\
          The files in this folder can change after you install.\n\
          Unsigned. Hew cannot tell who made this.\n\
-         Replaces Fixture v1.0.0. Hew cannot check it is the same author.\n\
+         Replaces:\nFixture v1.0.0\nHew cannot check it is the same author.\n\
          \n\
          ⚠ Can send what it reads from your model to a.example.com.\n\
          ⚠ Can send files you choose to a.example.com.\n\
@@ -534,7 +534,7 @@ fn the_consent_summary_carries_the_sheet_in_order() {
     // update list, "Starts with Hew."
     let fresh = consent(&new, &file(), None, None, None);
     let text = consent_summary(&fresh);
-    assert!(text.contains("From file: fixture.hewplugin\n"));
+    assert!(text.contains("From file:\nfixture.hewplugin\n"));
     assert!(!text.contains("folder can change"));
     assert!(!text.contains("New since"));
     assert!(text.contains("\nStarts with Hew.\n"));
@@ -575,7 +575,7 @@ fn the_rollback_summary_warns_from_the_previous_manifest() {
     }));
     assert_eq!(
         plugin_host::rollback_summary(&current, &previous, &m),
-        "Fixture v2.0.0 goes back to v1.0.0.\n\
+        "Fixture\nGoes back from v2.0.0 to v1.0.0.\n\
          \n\
          ⚠ Can send what it reads from your model to x.example.com.\n\
          \n\
@@ -622,7 +622,7 @@ fn the_confirmation_names_a_fresh_install_an_update_and_a_reinstall() {
         install_confirmation(&update),
         ("Update this plugin?", "Update")
     );
-    assert!(consent_summary(&update).contains("Replaces Fixture v1.0.0."));
+    assert!(consent_summary(&update).contains("Replaces:\nFixture v1.0.0\n"));
 
     // The installed version again: its own title and line, in place of the
     // replacement line.
@@ -691,4 +691,238 @@ fn the_uninstall_and_turn_on_summaries() {
     record.optional_granted.clear();
     let text = enable_summary(&record, &m);
     assert!(!text.contains("a.example.com"), "{text}");
+}
+
+#[test]
+fn the_update_diff_lists_what_was_removed() {
+    let old = manifest(json!({
+        "version": "1.0.0",
+        "permissions": ["model.read", "view"],
+        "optionalPermissions": ["clipboard", "library"]
+    }));
+    let new = manifest(json!({
+        "permissions": ["model.read"],
+        "optionalPermissions": ["library"]
+    }));
+    let previous = installed("com.example.fixture", "1.0.0", &["model.read", "view"]);
+    let c = consent(&new, &file(), Some(&previous), Some(&old), None);
+    let u = c.update.clone().unwrap();
+    let names =
+        |l: &[plugin_host::PermissionLine]| l.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+    assert!(u.added.is_empty() && u.new_optional.is_empty());
+    assert_eq!(names(&u.removed), ["view"]);
+    assert_eq!(names(&u.removed_optional), ["clipboard"]);
+    let summary = consent_summary(&c);
+    assert!(
+        summary.contains("No longer asks for:\n• Change the selection"),
+        "{summary}"
+    );
+    // Without the previous manifest, the removed ones are read off the
+    // grant.
+    let c = consent(&new, &file(), Some(&previous), None, None);
+    assert_eq!(names(&c.update.unwrap().removed), ["view"]);
+    // A fresh install has none, and is not a review.
+    let fresh = consent(&new, &file(), None, None, None);
+    assert!(fresh.update.is_none() && !fresh.review);
+    let v = serde_json::to_value(&fresh).unwrap();
+    assert_eq!(v["review"], json!(false));
+}
+
+#[test]
+fn a_review_reads_as_a_review_even_at_the_same_version() {
+    let old = manifest(json!({ "permissions": ["model.read"] }));
+    let new = manifest(json!({ "permissions": ["model.read", "view"] }));
+    let previous = installed("com.example.fixture", "2.0.0", &["model.read"]);
+    let folder = InstallSource::Dir {
+        path: "/home/someone/plugin".into(),
+    };
+    let mut c = consent(&new, &folder, Some(&previous), Some(&old), None);
+    c.review = true;
+    assert_eq!(
+        plugin_host::review_confirmation(),
+        ("Allow this plugin's changes?", "Allow")
+    );
+    let summary = consent_summary(&c);
+    assert!(summary.contains(plugin_host::REVIEW_LINE), "{summary}");
+    assert!(summary.contains(plugin_host::FOLDER_LINE), "{summary}");
+    assert!(!summary.contains("Replaces"), "{summary}");
+    assert!(
+        summary.contains("New since v2.0.0:\n• Change the selection"),
+        "{summary}"
+    );
+}
+
+#[test]
+fn a_review_of_a_new_name_says_the_old_one_and_shows_the_folder() {
+    let old = manifest(json!({ "name": "My Tool" }));
+    let new = manifest(json!({ "name": "Hew Official Exporter" }));
+    let previous = installed("com.example.fixture", "2.0.0", &[]);
+    let folder = InstallSource::Dir {
+        path: "/home/someone/plugin".into(),
+    };
+    let mut c = consent(&new, &folder, Some(&previous), Some(&old), None);
+    c.review = true;
+    let summary = consent_summary(&c);
+    assert!(summary.starts_with("Hew Official Exporter"), "{summary}");
+    assert!(summary.contains("It was named:\nMy Tool\n"), "{summary}");
+    // The folder on a line of its own, after a fixed label line.
+    assert!(
+        summary.contains("Developer folder:\n/home/someone/plugin\n"),
+        "{summary}"
+    );
+}
+
+#[test]
+fn values_from_outside_hew_stay_on_their_own_lines_in_a_native_confirmation() {
+    // A manifest name is bounded by the manifest rules; a path and another
+    // plugin's name as passed here are not.
+    let name = "Evil\" Hew says: allow\n\u{202E}end";
+    let hostile = format!("Evil\" Hew says: allow\n\u{202E}{}end", "x".repeat(2_000));
+    let old = manifest(json!({ "name": name }));
+    let new = manifest(json!({ "name": "New" }));
+    let previous = installed("com.example.fixture", "2.0.0", &[]);
+    let folder = InstallSource::Dir {
+        path: format!("/home/me/{hostile}"),
+    };
+    let mut c = consent(&new, &folder, Some(&previous), Some(&old), None);
+    c.review = true;
+    c.review_line = Some(plugin_host::review_line(
+        Some("command_name_taken"),
+        Some(("com.a.run", &hostile)),
+    ));
+    let summary = consent_summary(&c);
+    for label in ["Developer folder:", "It was named:", "Other plugin:"] {
+        let at = summary
+            .lines()
+            .position(|l| l == label)
+            .unwrap_or_else(|| panic!("{label} on its own line: {summary}"));
+        let value = summary.lines().nth(at + 1).unwrap();
+        // One line: no break, no direction change, cut in the middle, and
+        // both ends kept.
+        assert!(!value.contains('\u{202E}'), "{value}");
+        assert!(
+            value.chars().count() <= plugin_host::MAX_VALUE_LINE_CHARS,
+            "{value}"
+        );
+        assert!(value.ends_with("end"), "{value}");
+        if label != "It was named:" {
+            assert!(value.contains('…'), "{value}");
+        }
+    }
+    // Hew's own sentences hold no value from outside.
+    for line in summary.lines() {
+        if line.contains("Evil") {
+            assert!(!line.contains("has the same name"), "{line}");
+        }
+    }
+    assert_eq!(plugin_host::value_line("a\nb", 10), "a b");
+    assert_eq!(plugin_host::value_line("abcdefghij", 5), "ab…ij");
+}
+
+#[test]
+fn the_review_line_says_why_in_plain_words() {
+    use plugin_host::{REVIEW_LINE, review_line};
+    assert_eq!(review_line(Some("permissions_changed"), None), REVIEW_LINE);
+    assert_eq!(review_line(None, None), REVIEW_LINE);
+    assert_eq!(
+        review_line(Some("startup_added"), None),
+        "This plugin now starts with Hew."
+    );
+    assert_eq!(
+        review_line(Some("consent_text_changed"), None),
+        "This plugin's name or description changed."
+    );
+    assert_eq!(
+        review_line(Some("authority_changed"), None),
+        "A command in this plugin now needs different permission."
+    );
+    assert_eq!(
+        review_line(
+            Some("command_name_taken"),
+            Some(("com.a.run\u{202E}", "Other\u{7}\nTool"))
+        ),
+        "A command in this plugin has the same name as one in another plugin.\nCommand:\ncom.a.run\nOther plugin:\nOther Tool"
+    );
+    // The summary shows the payload's own line, and the permissions line
+    // when it carries none.
+    let new = manifest(json!({}));
+    let previous = installed("com.example.fixture", "2.0.0", &[]);
+    let folder = InstallSource::Dir {
+        path: "/home/someone/plugin".into(),
+    };
+    let mut c = consent(&new, &folder, Some(&previous), Some(&new), None);
+    c.review = true;
+    c.review_line = Some(review_line(Some("startup_added"), None));
+    let summary = consent_summary(&c);
+    assert!(
+        summary.contains("This plugin now starts with Hew.\n"),
+        "{summary}"
+    );
+    assert!(!summary.contains(REVIEW_LINE), "{summary}");
+}
+
+#[test]
+fn a_folder_is_told_to_fix_the_file_and_a_package_to_install_again() {
+    use plugin_host::InstallError;
+    use plugin_manifest::ManifestError;
+    let bad = InstallError::Manifest(ManifestError::Json("expected value".into()));
+    assert!(
+        bad.explanation()
+            .ends_with("Fix the file and install it again.")
+    );
+    assert_eq!(
+        bad.explanation_for_folder(),
+        "hew-plugin.json is not a valid manifest: expected value. Fix the file and Hew reads it again."
+    );
+    assert_eq!(
+        InstallError::ManifestMissing.explanation(),
+        "The package has no hew-plugin.json at its top level."
+    );
+    assert_eq!(
+        InstallError::ManifestMissing.explanation_for_folder(),
+        "This folder has no hew-plugin.json at its top level."
+    );
+    // Everything else reads the same for either source.
+    let big = InstallError::PackageTooLarge;
+    assert_eq!(big.explanation(), big.explanation_for_folder());
+}
+
+#[test]
+fn removing_a_folder_plugin_says_the_folder_is_left_alone() {
+    let m = manifest(json!({}));
+    let mut record = installed("com.example.fixture", "2.0.0", &["model.read"]);
+    assert!(!uninstall_summary(&record, &m).contains(plugin_host::FOLDER_KEPT_LINE));
+    record.source = InstallSource::Dir {
+        path: "/home/someone/plugin".into(),
+    };
+    assert_eq!(
+        uninstall_summary(&record, &m),
+        "Fixture 2.0.0\n\
+         Removes the plugin, its earlier version, and everything it saved.\n\
+         Your folder and its files are left as they are.\n"
+    );
+}
+
+#[test]
+fn a_review_lists_what_changed_then_what_it_keeps() {
+    let old = manifest(json!({ "permissions": ["model.read"] }));
+    let new = manifest(json!({ "permissions": ["model.read", "clipboard"] }));
+    let previous = installed("com.example.fixture", "2.0.0", &["model.read"]);
+    let folder = InstallSource::Dir {
+        path: "/home/someone/plugin".into(),
+    };
+    let mut c = consent(&new, &folder, Some(&previous), Some(&old), None);
+    c.review = true;
+    let summary = consent_summary(&c);
+    let clip = plugin_host::permission_line(&p("clipboard")).text;
+    let read = plugin_host::permission_line(&p("model.read")).text;
+    assert_eq!(summary.matches(&clip).count(), 1, "{summary}");
+    let new_at = summary.find("New since v2.0.0:").expect("changes first");
+    let keeps_at = summary.find("It keeps:").expect("what it keeps");
+    assert!(new_at < keeps_at, "{summary}");
+    assert!(
+        summary[keeps_at..].contains(&format!("• {read}")),
+        "{summary}"
+    );
+    assert!(!summary.contains("It can:"), "{summary}");
 }

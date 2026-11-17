@@ -14,6 +14,8 @@ pub mod host;
 pub mod live;
 mod live_library;
 pub mod mcp;
+#[cfg(hew_preview)]
+pub mod plugin;
 pub mod print;
 pub mod run;
 

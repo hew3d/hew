@@ -1086,18 +1086,52 @@ production build, the tab is absent and the stores below are never read,
 written, or listed. A plugin that is turned on runs in a sandbox in each
 document window ("How a plugin runs" below).
 
-**An agent cannot install or manage plugins.** There is no bus command
-for it, no `hew-cli` subcommand, and no MCP tool. A plugin package is
-never opened by File ▸ Open or by dropping it on the window, and Hew
-registers no `.hewplugin` file type or link handler. The one door is the
-Settings pane (`app/src/plugins/installer.ts`).
+**An agent cannot install or manage plugins.** No bus command, `hew-cli`
+subcommand or MCP tool installs, changes or removes one. In a preview
+desktop build the shell answers two bus commands itself, and neither
+completes anything: `hew.plugin.list` reads, and `hew.plugin.dev` only
+asks the app to show a request ("Developer mode and folder plugins"
+below). A plugin package is never opened by File ▸ Open or by dropping
+it on the window, and Hew registers no `.hewplugin` file type or link
+handler. The one door is the Settings pane
+(`app/src/plugins/installer.ts`).
 
 ### What can be installed
 
 | Tier | Sources |
 |---|---|
-| Desktop | a `.hewplugin` file, or an unpacked folder, each chosen with the native picker |
-| Web | a `.hewplugin` file chosen in the pane's file input |
+| Desktop | a `.hewplugin` file, or (with developer mode on) a developer folder, each chosen with the native picker |
+| Web | a `.hewplugin` file chosen in the pane's file input, or a copy of a folder chosen with the browser's folder picker where it has one |
+
+**A folder on the web is a copy.** There is no developer mode and no
+live folder on the web. Where the browser has a folder picker
+(`showDirectoryPicker`; Chromium-based browsers), the pane offers "From
+folder…": the page walks the picked folder under the package reader's
+own name rules (printable ASCII; none of `\ : < > " | ? *`; no segment
+ending in a dot or a space; no Windows device name; no two names equal
+ignoring case; paths up to 1,024 bytes) and caps (4,096 files, 32 MB in
+one file, 64 MB in all, the zip's own headers counted), measured on the
+sizes the browser reports before a byte is read, so an oversized folder
+is refused without being read into memory. The walk itself is bounded:
+every entry it visits, directories included, counts against the 4,096
+cap, and nesting deeper than 512 levels (all a 1,024-byte path can hold)
+is refused, both as `package_too_large`, so a tree of empty folders or a
+listing that never ends is cut off. A file whose size changed between
+the measure and the read is refused `package_unreadable` before its
+bytes are read, and the bytes are read through a stream with a running
+count that stops at the measured size, so a file that lies about its
+size is never held beyond that cap. The
+files are written into a stored zip in memory
+(`app/src/plugins/storedZip.ts`) and passed through the same package
+path as a file, so the kernel's reader judges the result as it judges
+any package, then the ordinary consent sheet. It is recorded as a file
+install named after the folder (`{kind: "file", name: "<folder>"}`),
+with an `origin: "folder"` field in the stored record only; the kernel
+reader ignores the field, the app reads it back, and the row says
+"Copied from a folder" with the cleaned name set apart on its own line.
+Nothing is read from the folder again: to take a change, pick it again.
+The browser's picker does not show symbolic links, so the page cannot
+refuse one; it reads what the link points to.
 
 A package is a zip whose entries are all stored with no compression
 (`zip -0 -r ../tool.hewplugin .` from inside the plugin folder), with
@@ -1119,6 +1153,318 @@ a matching version (`dependency_missing`), or one that would make a cycle
 
 A folder install reads the folder in place, so its files can change
 after the install; the sheet says so.
+
+### Developer mode and folder plugins
+
+A folder install is for someone writing a plugin, and runs code straight
+from a folder, so the desktop offers it only in developer mode. Developer
+mode belongs to the shell: it is kept in the file
+`plugin-developer-mode` in the app's config folder, read once at start,
+and anything in that file but `on` (with or without one line break)
+reads as off, so a damaged file turns nothing on. The page's copy is for
+display only. Desktop commands:
+
+| Command | Arguments | Returns |
+|---|---|---|
+| `plugin_dev_mode` | none | `boolean` |
+| `plugin_set_dev_mode` | `on` | `boolean`, the value now |
+| `plugin_dev_review` | `id` | `{token, consent}` |
+| `plugin_dev_request` | none | `{id, path}` (as the request event carries it) or `null` |
+| `plugin_dev_request_dismiss` | `id` | nothing |
+| `plugin_host_present` | `present` | nothing; the window's plugin host started or stopped |
+| `plugin_pick_dir` | `useRequest?: string`, a request's id | the picked folder or `null` |
+
+Turning developer mode on asks in a native dialog: "Turn on developer
+mode?", "Hew will run plugin code straight from a folder, where the files
+can change at any time. Turn this on only if you are writing a plugin.",
+accept "Turn On" (a no is `developer_mode_declined`; `confirmation_open`
+while another dialog shows). It is written to its file before it takes
+effect. Turning it off asks nothing and takes effect at once: every
+folder stops being watched, folder installs waiting for an answer and any
+live API request are dropped. Then it is kept: the file is written as
+off, or removed if that fails (no file reads as off); if that fails too
+it stays off for this run and the answer is `developer_mode_not_saved`,
+"Developer mode is off for now, but Hew could not save that, so it may be
+on again the next time Hew starts.", which the pane shows. Either way
+`plugins-changed` is emitted.
+
+With developer mode off, picking a folder, staging one, reading a folder
+plugin's file, watching it and reviewing it are all refused
+`developer_mode_off`, for a folder installed before as much as a new one.
+Such a plugin stays listed and does not run. Packages are not affected.
+
+**The folder.** The canonical path recorded at the pick is the only
+root. Every read of a folder plugin's file, the icon included, goes
+through one reader (`plugin_host::store::read_jailed`): the root must
+still be a folder (`folder_missing` when it is gone or is no longer a
+folder), must not be a symbolic link, and must canonicalize to exactly
+the recorded path, so no folder above it has become a link either
+(`package_path_invalid`). Under it no segment may be a link, the file is
+opened once, and what was opened must be a regular file whose canonical
+path is inside the root; on Unix it must also be the very file the
+checks saw and the one its canonical path names now (device and inode).
+A review reads the folder through the same reader.
+
+**Saving reloads; asking for more stops.** While developer mode is on
+and the page has listed plugins, the shell polls the folder of every
+enabled folder plugin about twice a second, comparing each entry's
+path, size and modification time, without following links and stopping
+at the package caps (an entry whose name is not valid UTF-8 is
+`package_path_invalid`, as in a package); a burst of saves is one change
+after about 300 ms of quiet. Then it reads the folder's
+`hew-plugin.json` through the reader and compares it with the stored
+copy. A field is reviewed when it carries authority or the consent sheet
+showed it; every other change refreshes the stored copy:
+
+| What changed | What happens |
+|---|---|
+| code or other files only | nothing stored changes; `plugins-dev-changed` with `manifest_changed: false` |
+| fields that need no review: `version`, `main`, `icon`, `locales`, `description`, `author`, `license`, `homepage`, `source`, `api`, `data`, `agent`; activation events other than a new `on_startup`; commands added (with their class's default permission) or removed; a command's `summary`, `label`, `timeout_ms`, `concurrency`, `params`, `result`, `refusals`; `hew` or `requires` that are met | the stored copy and the record's `version` follow the folder; the grant is kept; `plugins-changed`, then `plugins-dev-changed` with `manifest_changed: false` |
+| `permissions` or `optionalPermissions` differ as sets, either way | the record is marked `needs_consent` (`permissions_changed`) |
+| `on_startup` newly asked | marked (`startup_added`) |
+| `name` or `activationReason` | marked (`consent_text_changed`) |
+| a kept command's `class` or `permission`; an added command whose `permission` is not its class's default; `presave` or any other `contributes` kind | marked (`authority_changed`) |
+| a command whose name (`<plugin-id>.<command-id>`) another installed plugin declares | marked (`command_name_taken`) |
+| the manifest no longer reads | marked (`manifest_unreadable`) |
+| it names another id | marked (`id_changed`) |
+| its `hew` range or `requires` changed and are not met | marked (`requirements_unmet`) |
+
+When it is marked, `plugins-changed` and then `plugins-dev-changed` with
+`manifest_changed: true` and the reason are emitted, and every read of
+the folder is refused `dev_consent_pending` until the change is reviewed.
+The stored manifest and the grant are not touched, so what the plugin
+may do never widens before the person says so. The folder stays
+watched: a mark describes a difference, so when the folder's manifest no
+longer differs from the stored one in anything reviewed (the typo is
+fixed, the permission taken out again) the mark is cleared by itself,
+with `plugins-changed` and `plugins-dev-changed` with `manifest_changed:
+false`, and the host starts the plugin as before. Nothing else clears a
+mark but an accepted review or a fresh install. On `manifest_changed:
+false` the host reloads the plugin, and starts it again if it was
+running or starts with Hew. `plugins-dev-changed` with a `problem`
+(`folder_missing`, `package_path_invalid`, `package_too_large`) says the
+folder cannot be watched right now; it is sent once until the folder
+lists again, and `plugin_list` carries the same name as `dev_problem` on
+the folder plugin's row (`null` when there is none), so a window that
+opens later shows it too; the row says `folder_not_checked` while the
+plugin is not ready (below).
+
+**Compared when watching starts.** A folder edited while nobody watched
+it (Hew closed, developer mode off, the plugin turned off) is compared
+the same way when the plugin starts being watched: the first
+`plugin_list` after Hew starts (before it answers), developer mode
+turned on, the plugin turned on, installed, reinstalled, reviewed or
+rolled back. For turning on, installing, a review and a rollback, the
+folder's manifest is read before the command writes and compared under
+the same hold of the store lock as the write, so the record a host can
+read is already marked; otherwise the comparison runs before
+`plugins-changed` is sent. The watcher compares again on its first
+listing of the folder.
+
+**Nothing is read before a comparison completes.** From the moment a
+folder plugin would start being watched until one comparison of its
+folder has completed, it is unchecked: every read of its folder is
+refused `folder_missing` ("Hew is still checking this plugin's
+folder."), so the host holds it as not startable rather than crashed;
+`plugin_list` gives it `dev_problem: "folder_not_checked"` (or the
+watcher's own problem, if it has one) and `hew.plugin.list` gives it
+`state: "checking"`. The set of checked plugins lives in the shell's
+memory: it starts empty with Hew, is emptied when developer mode goes
+off, loses a plugin that stops being watched, and loses a plugin whose
+record a command rewrites (turning it on, an install, a review, a
+rollback) until that command's own comparison completes. A comparison
+whose read stalls or fails leaves it unchecked, and the watcher tries
+again every pass, whether the listing changed or not, until one
+completes; then the host is told to try the plugin again. A second
+window that lists plugins while the first window's comparison runs, or a
+host that reads just after developer mode turns on, gets the refusal,
+not the folder. A
+rollback of a marked folder plugin brings back the older record and
+compares the folder with the older manifest, so it is marked again when
+the folder asks for more than that version did.
+
+**Bounded.** Each folder's walk runs on its own short-lived thread and
+is waited for about a second; a folder that takes longer (a network
+mount that stopped answering) is reported once as `folder_missing` and
+not walked again until that walk returns, so it holds up the others for
+one interval at most. Walks stop between entries when the watcher is
+stopped, and stopping waits for the watcher at most two seconds before
+letting it go, so turning developer mode off and quitting are never held
+by a folder. A command's own reads of folder manifests are bounded the
+same way. Bytes read from a folder while developer mode went off are
+dropped (`developer_mode_off`), and a folder stage that read its folder
+while it went off is refused and holds no slot.
+
+Event payload: `{id, manifest_changed, reason, problem}`, the last two a
+string or `null`.
+
+**Review.** `plugin_dev_review(id)` reads the recorded folder again
+(no new pick) and stages it, for a folder plugin with the marker only
+(`no_review_pending` otherwise, `folder_id_changed` when the folder now
+names another plugin, and any refusal a folder install gets). The
+consent payload has `review: true` and lists what was added and what was
+removed, and is shown whatever the version. `plugin_commit` then asks
+natively, "Allow this plugin's changes?" with accept "Allow"; a yes
+replaces the stored manifest and the grant in place (no `previous/`, and
+`installed_at_ms`, `enabled`, `data_version` and saved data kept; the
+optional grants it still declares kept; starting with Hew allowed again
+only by turning it on, if it newly asks to), clears the marker, and emits
+`plugins-changed` and `plugins-dev-changed` with `manifest_changed:
+false`. A no, a dropped review and one left past ten minutes all leave
+the marker; Review can be asked again. A fresh install of the folder
+through the ordinary sheet also clears it.
+
+**The live API asks; the person picks.** `hew.plugin.list` (read-only)
+answers `{plugins: [{id, name, version, source, enabled, state}],
+developer_mode, request_waiting}`: `name` is the cleaned display name, `source` the
+source kind, and `state` one of `needs_developer_mode` (a folder plugin
+while developer mode is off), `needs_review`, `checking` (an enabled
+folder plugin whose folder has not been compared yet), `plugins_off`
+(the same while no window runs a plugin host), `unreadable` or
+`installed`; `request_waiting` is whether a live API request still waits. Whether a plugin is running is the page's to know and is
+not in it, nor is any path. `hew.plugin.dev {path}` keeps at most one
+request, with a random id, for ten minutes. It is refused, recording
+nothing:
+
+| Refusal | When |
+|---|---|
+| `invalid_params` (`-32602`) | no string path, empty, over 4096 bytes, or nothing left once cleaned |
+| `plugins_off` | no open window runs a plugin host now (the page reports it with `plugin_host_present` as its Plugins switch turns the host on and off) |
+| `developer_mode_off` | developer mode is off |
+| `confirmation_open` | a native dialog (a confirmation or a picker) is showing |
+| `request_dismissed` | the person dismissed a request less than 60 seconds ago |
+| `request_waiting` | a request for another path is waiting |
+| `dry_run_host_command` | sent inside a `hew.doc.transact` with `dry_run: true` |
+
+The same path while its request waits answers `awaiting_user` again and
+shows nothing new, so a client that asks in a loop cannot bring a
+notice back. Otherwise it emits `plugins-dev-request {id, path}` (the
+path cleaned and cut to 512 characters) to every window and answers
+`{status: "awaiting_user"}`. It never picks, stages, or reads the
+folder, and the path is not recorded as picked. `plugins-dev-request`
+with `null` tells every window the request is gone: its folder staged,
+dismissed, expired, developer mode turned off, or the last host gone (a page
+saying its host stopped, or its window closing: the shell drops a closed
+window's label itself, and a label whose window is gone never counts).
+
+`plugin_dev_request` answers the waiting `{id, path}` (or `null`) without
+taking it. `plugin_pick_dir({useRequest: id})` opens the native folder
+picker for request `id` only while it is the one waiting, and only looks
+at it; otherwise it is refused `request_gone` and shows nothing. The
+request is used up by the folder it led to staging (`plugin_stage_dir`
+for a pick made from that request), a Dismiss, expiry, or developer mode
+going off. A cancel, or a folder that is refused, leaves it waiting with
+the same id and expiry, so the card stays and the person can choose again.
+The picker opens at the requested folder itself (the person asked for it
+from their own terminal in the ordinary case; the consent sheet and the
+native confirmation that follow show the picked folder on its own line),
+and only when the path came through cleaning
+unchanged, is written plainly (absolute, no `.`, `..` or empty segment),
+is not a network place as far as the text tells (on Unix `//`, `/net`,
+`/Network`, `/afs`, `/run/user/<n>/gvfs` and `/run/user/<n>/doc`; on
+Windows anything but a drive letter on a fixed disk), and is not inside
+the plugin store or the app's data or config folders; otherwise it
+opens with no start folder. A share mounted elsewhere (`/Volumes/<name>`,
+`/mnt/<name>`) cannot be told from the text. What gets staged is what
+the person picks. The consent sheet shows that folder's path as data (up
+to 512 characters, cut in the middle when longer), the pane row up to
+120, and the native confirmation the cleaned path on its own line under
+"Developer folder:" (up to 160, cut in the middle). The picker opens at
+the hinted folder only after it is resolved to where it really is (a link into the plugin store or the app's folders is
+refused by its target), and with no start folder when it cannot be
+resolved. A folder whose path holds a control character, a line break
+or a character that changes text direction is refused at the pick
+(`folder_path_invalid`). Every value from outside Hew in a native
+confirmation (a folder path, a file name, an earlier name, another
+plugin's name) is on a line of its own after a fixed label line,
+cleaned and cut in the middle, never inside a sentence or quotes. `plugin_dev_request_dismiss({id})`
+forgets the request in every window and starts the 60-second quiet. The
+pickers (`plugin_pick_dir`, `plugin_pick_package`) count as native
+dialogs: while one is open every other dialog command is refused
+`confirmation_open`, and they are refused while another is showing. A
+folder whose path is not valid UTF-8 is refused at the pick
+(`folder_path_invalid`), since its record keeps the path as text. In a
+production build neither bus command exists in the shell. A plugin's
+realm cannot reach either: its calls go to the kernel of its page over a
+connection opened with its grant, which refuses them, and the shell's
+router serves only the live API socket.
+
+**The command line asks the same way.** `hew-cli plugin dev <folder>
+--live` (a preview build of `hew-cli` only; a production binary does not
+list it and answers `plugin` as an unknown word) resolves the
+folder to its canonical absolute path (it must exist and be a folder; no
+`.` or `..` segments, no trailing slash), sends `hew.plugin.dev` with
+that path, and prints the path it sent and "Waiting for you in Hew: choose
+the folder and read what the plugin asks for." Every string that came from
+the app (names, ids, versions, states, refusal text) is printed with
+control and direction-changing characters removed and cut to a bounded
+length, so a plugin's name cannot drive the terminal. It then looks at `hew.plugin.list` about once a second and
+prints a line when a folder plugin appears or changes after the request:
+"<name> <version> is installed from a developer folder and turned on." (installed, turned on, nothing waiting), "Waiting
+for you to review a change in Hew (<name> <version>).", "Turn on developer
+mode in Hew: Settings > Plugins." or a note that the app cannot read a
+plugin's record. A refusal is said in plain words and exits 1 (developer
+mode off, a dialog open, another request already waiting, a request the
+person dismissed a moment ago, Plugins turned off, plugins not
+available, or a production app that answers `preview_only`); a refusal
+name the CLI does not know is printed as "Hew answered: <name>". The app
+closing before it answered the request also exits 1; closing during the
+later watching ends the command with 0. `--once`
+sends the request, prints the waiting line and exits 0, for scripts.
+Ctrl-C ends it. `hew-cli plugin list --live` prints developer mode and one
+line per installed plugin.
+
+What it does not do. Nothing completes from the
+command line: there is no flag that picks the folder, allows what it asks
+for, or turns developer mode on, and the folder it names is only where the
+person's picker starts. The list has no folder path and no running state,
+so the command cannot know which listed plugin came from the folder it
+was given, cannot tell that a plugin is running, and cannot see a reload
+that leaves the version unchanged; it reports every folder plugin that is
+new or different since it began, and says once that the list does not
+show whether a plugin is running. Settings > Plugins in Hew shows that.
+A `hew-cli` in `--live` mode that is a production build refuses
+`hew.plugin.*` itself and never sends it, and the MCP server refuses
+`hew.plugin.dev` to an agent in every build; neither is a boundary, since
+a program that can reach the socket can send the frames itself. The
+boundary is that the request completes nothing without the person.
+
+**What the person sees.** In each document window, while the Plugins
+switch is on, the plugin host shows the request as a small notice in the
+bottom right corner, over the model and under any sheet: the line "A
+program on this computer asked to load a plugin from this folder:", then
+the path on its own in a fixed-width block (cleaned again in the page,
+cut in the middle when long, never inside the sentence), with "Choose
+Folder…" and "Dismiss". The sentence is ordinary text; the path under it
+is labeled "Folder" and cut in the middle past 120 characters. Settings ▸
+Plugins shows the same, including a request that comes while it is open;
+where Settings is a page inside the document window (Windows) the corner
+notice stands aside while the pane shows it, so it is shown once. It is shown when the event comes,
+and also when the window starts (asked with `plugin_dev_request`).
+"Choose Folder…" calls `plugin_pick_dir({useRequest: id})`, then the
+ordinary staging, consent sheet and native confirmation; whatever the
+person does in the picker uses the request up, and every window's notice
+goes. A request that came while a pick or sheet was open is shown when
+it ends. "Dismiss" calls `plugin_dev_request_dismiss`: the request goes
+in every window, and the socket is turned away for a minute. If Hew
+could not dismiss it, the card stays and says so.
+
+**The pane.** On the desktop Settings ▸ Plugins has a "Developer mode"
+switch, read with `plugin_dev_mode` whenever the pane lists plugins and
+changed with `plugin_set_dev_mode` (a no in the native dialog is quiet;
+`confirmation_open` is a plain notice); what the switch shows is what the
+shell last said. "Developer folder…" is under Install… only while it is
+on. A folder plugin's row reads "Developer folder: <path>" and, below
+it, its state: "Needs developer mode" while it is off; "This plugin's
+folder now asks for different permissions." with Review and Turn Off
+while the record is marked (with a line for `startup_added`,
+`manifest_unreadable`, `id_changed` and `requirements_unmet`); and a
+`plugins-dev-changed` problem in plain words ("Hew can't find this
+plugin's folder." for `folder_missing`), until a later notice for it
+carries none. Review stages the review and shows the consent sheet in
+review mode; a refusal of the review (`no_review_pending`,
+`folder_id_changed`, a manifest refusal) is a plain notice; Cancel
+leaves the marker.
 
 ### Where it is kept
 
@@ -1169,7 +1515,10 @@ event `plugins-storage-changed` (`{id, keys}`).
 | `startup_allowed` | false at install; set by the first time the person turns the plugin on by hand, so a package cannot start itself just by being installed |
 | `data_version` | the plugin's data format; an update keeps the installed value |
 | `signer` | null until signing exists |
+| `needs_consent` | present and `true` while a folder plugin's manifest change waits for review; anything there but `false` counts as set |
+| `needs_consent_reason` | why: `permissions_changed`, `startup_added`, `manifest_unreadable`, `id_changed`, `requirements_unmet`, `consent_text_changed`, `authority_changed` or `command_name_taken` |
 
+The last two ride as unknown fields, so they need no new record format.
 Fields Hew does not know are kept and written back. A record with a
 higher `schema`, or one that does not read, is listed as unreadable with
 only a removal offered, and is never rewritten.
@@ -1182,7 +1531,11 @@ record keeps `enabled`, `data_version`, unknown fields, and the optional
 grants the new manifest still declares, and the sheet shows what is new
 since the accepted grant. "Roll back to <version>" appears when
 `previous/` exists and swaps the two, so a second rollback goes forward
-again. Turning a plugin off also turns off every enabled plugin that
+again. The version coming back follows the install rules, checked
+against what is installed now before anything moves (on the desktop
+before the person is asked): its `hew` range (`hew_version_unsupported`),
+what it requires (`dependency_missing`, `dependency_cycle`), and no
+command name another installed plugin has (`command_name_taken`). Turning a plugin off also turns off every enabled plugin that
 requires it, and the pane names them. Uninstall asks first, is refused
 while an enabled plugin requires the one being removed, and removes the
 folder (its saved data included), any staging entry, and the plugin's
@@ -1232,7 +1585,12 @@ in order:
   both declared (required or optional), and "Can send files you choose to
   <hosts>." for `files` with `network:`;
 - the permission lines, then those the plugin "May ask for later";
-- for an update, "New since <version>" with the added lines highlighted;
+- for an update, "New since <version>" with the added lines highlighted,
+  and "No longer asks for" with the removed ones (`update.removed`,
+  `update.removed_optional`);
+- for a review of a folder plugin's change (`review: true`), "This
+  plugin's folder now asks for different permissions." in place of the
+  replacement line;
 - "The plugin says", a separate block holding the plugin's own
   `activationReason` as plain text.
 
@@ -1399,7 +1757,44 @@ Stopping a plugin (a crash) removes the frame, which ends
 the Worker, closes its connection, unregisters its commands, answers
 every open call `failed: crashed`, reports `plugin_state` `crashed`,
 logs an error line, and shows a notice. It stays stopped in that window
-until it is turned off and on again.
+until it is turned off and on again (or, for a folder plugin, its folder
+changes: see "Reloading" below).
+
+**Not startable.** A plugin that the store says may not run now is
+`blocked`, never stopped: no crash record, no notice, no `crashed`
+state. Its commands stay registered, so a caller is answered
+`unavailable` (`plugin_unavailable`) rather than told the command does
+not exist; a realm it had is stopped as when it is turned off (`unload`
+`disable`, its open calls answered `unavailable`). The reasons, which
+`__hew_test.plugins.reasons()` reports beside `states()`:
+
+| Reason | When | Lifted by |
+|---|---|---|
+| `needs_developer_mode` | a folder plugin while developer mode is off (the host asks the shell, `plugin_dev_mode`, at every sync; off when it cannot say), or a read refused `developer_mode_off` | the store saying otherwise at the next sync (developer mode turned on) |
+| `needs_review` | a record whose `needs_consent` is anything but absent or `false`, or a read refused `dev_consent_pending` | the next sync after the marker is cleared (a review accepted) |
+| `folder_missing` | a folder plugin's start whose read of `main` is refused `folder_missing` | the next start: a call to one of its commands, or a reload |
+| `main_missing` | a folder plugin's start whose read of `main` is refused `package_path_invalid`, or whose manifest names no `main` | the same |
+
+Lifted by the store, it starts again with Hew if it starts with Hew;
+otherwise its next command starts it. Nobody turns it off and on. Only
+the shell's refusal names count: text a plugin wrote never blocks it,
+and a packaged plugin whose code cannot be read is stopped as before.
+
+**Reloading.** `plugins-dev-changed` is a hint; the host reads the store
+again whatever it says. With `manifest_changed: false` and no `problem`
+it reloads that plugin: the realm is stopped (`unload` `reload`, open
+calls answered `unavailable` as in any reload, compounds closed), the
+commands of the stored manifest (refreshed by the shell) are registered
+again, and the plugin starts again if it was running, starting, or
+blocked by its last start, or if it starts with Hew. Storage writes on
+their way are kept and land, and the reloaded plugin reads them. Two
+notices before the host gets to them are one reload; a notice for a
+plugin that is off or not installed starts nothing. A reload also
+brings back a folder plugin that crashed, since the person saved its
+folder. A marked change (`manifest_changed: true`) blocks it
+(`needs_review`) through the store; a `problem` changes nothing in the
+host (a running realm has its code already; the next start reads the
+folder again).
 
 **Who owns a call.** A call from a socket client is the live bridge's: it
 opens the compound for a mutating command, shows the busy notice,

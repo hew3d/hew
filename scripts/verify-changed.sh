@@ -163,6 +163,11 @@ fi
 SURFACE=0
 if has '^(crates/(api|wasm-api)/|preview-features\.json$)'; then SURFACE=1; fi
 
+if has '^(crates/api/|sdk/plugin/)'; then
+  step "pnpm --dir sdk/plugin check (boot script current; fix: pnpm --dir sdk/plugin build)"
+  pnpm --dir sdk/plugin check
+fi
+
 if has '^app/' || [ "$SURFACE" = 1 ] || [ "$JS_DEPS" = 1 ]; then
   # The preview module, rebuilt only when it is missing or older than the
   # kernel sources (app/scripts/build-wasm.mjs, as `pnpm --dir app dev` does).

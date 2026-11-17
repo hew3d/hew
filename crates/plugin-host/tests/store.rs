@@ -8,7 +8,7 @@
 mod common;
 
 use common::*;
-use plugin_host::store::{self, Listed, PLUGIN_DIR_ENV, PluginDir};
+use plugin_host::store::{self, DevMode, Listed, PLUGIN_DIR_ENV, PluginDir};
 use plugin_host::{InstallError, InstallSource, Installed, Package, read_package_zip};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -266,20 +266,20 @@ fn rollback_swaps_and_swaps_back() {
     let dir = scratch.store();
     install(&dir, package(ID, "1.0.0", json!({}), &[]));
     assert_eq!(
-        store::rollback(&dir, ID),
+        store::rollback(&dir, ID, &running()),
         Err(InstallError::NoPreviousVersion(ID.into()))
     );
     install(&dir, package(ID, "2.0.0", json!({}), &[]));
-    let back = store::rollback(&dir, ID).unwrap();
+    let back = store::rollback(&dir, ID, &running()).unwrap();
     assert_eq!(back.version.to_string(), "1.0.0");
     assert_eq!(
-        store::read_file(&dir, ID, "dist/background.js").unwrap(),
+        store::read_file(&dir, ID, "dist/background.js", DevMode::Off).unwrap(),
         b"// 1.0.0"
     );
-    let forward = store::rollback(&dir, ID).unwrap();
+    let forward = store::rollback(&dir, ID, &running()).unwrap();
     assert_eq!(forward.version.to_string(), "2.0.0");
     assert_eq!(
-        store::read_file(&dir, ID, "dist/background.js").unwrap(),
+        store::read_file(&dir, ID, "dist/background.js", DevMode::Off).unwrap(),
         b"// 2.0.0"
     );
     assert_eq!(ids(&dir), [ID]);
@@ -311,7 +311,10 @@ fn read_file_is_jailed() {
     );
     // A file outside the plugin's folder, to be sure nothing reaches it.
     std::fs::write(dir.root().join("secret.txt"), b"secret").unwrap();
-    assert_eq!(store::read_file(&dir, ID, "icon.svg").unwrap(), b"<svg/>");
+    assert_eq!(
+        store::read_file(&dir, ID, "icon.svg", DevMode::Off).unwrap(),
+        b"<svg/>"
+    );
     for bad in [
         "../x",
         "files/../installed.json",
@@ -328,18 +331,18 @@ fn read_file_is_jailed() {
     ] {
         assert!(
             matches!(
-                store::read_file(&dir, ID, bad),
+                store::read_file(&dir, ID, bad, DevMode::Off),
                 Err(InstallError::PackagePathInvalid(_))
             ),
             "{bad:?}"
         );
     }
     // installed.json and the stored manifest sit beside files/, not in it.
-    assert!(store::read_file(&dir, ID, "installed.json").is_err());
+    assert!(store::read_file(&dir, ID, "installed.json", DevMode::Off).is_err());
     // An id that is not one never becomes a path.
     for bad_id in ["..", "../plugins", "com.example.fixture/..", "a"] {
         assert!(
-            store::read_file(&dir, bad_id, "icon.svg").is_err(),
+            store::read_file(&dir, bad_id, "icon.svg", DevMode::Off).is_err(),
             "{bad_id}"
         );
     }
@@ -355,8 +358,8 @@ fn read_file_refuses_a_link_planted_in_the_store() {
     let files = dir.root().join(ID).join("files");
     std::os::unix::fs::symlink(scratch.0.join("outside.txt"), files.join("link.txt")).unwrap();
     std::os::unix::fs::symlink(&scratch.0, files.join("up")).unwrap();
-    assert!(store::read_file(&dir, ID, "link.txt").is_err());
-    assert!(store::read_file(&dir, ID, "up/outside.txt").is_err());
+    assert!(store::read_file(&dir, ID, "link.txt", DevMode::Off).is_err());
+    assert!(store::read_file(&dir, ID, "up/outside.txt", DevMode::Off).is_err());
 }
 
 #[test]
@@ -582,6 +585,8 @@ fn a_folder_install_reads_in_place() {
     .unwrap();
     std::fs::write(src.join("dist/background.js"), b"// folder").unwrap();
     let package = store::read_package_dir(&src).unwrap();
+    // The host records the canonical path the person picked.
+    let src = std::fs::canonicalize(&src).unwrap();
     let source = InstallSource::Dir {
         path: src.to_string_lossy().into_owned(),
     };
@@ -593,16 +598,16 @@ fn a_folder_install_reads_in_place() {
         "no copy is kept"
     );
     assert_eq!(
-        store::read_file(&dir, ID, "dist/background.js").unwrap(),
+        store::read_file(&dir, ID, "dist/background.js", DevMode::On).unwrap(),
         b"// folder"
     );
     std::fs::write(src.join("dist/background.js"), b"// edited").unwrap();
     assert_eq!(
-        store::read_file(&dir, ID, "dist/background.js").unwrap(),
+        store::read_file(&dir, ID, "dist/background.js", DevMode::On).unwrap(),
         b"// edited",
         "read from the folder"
     );
-    assert!(store::read_file(&dir, ID, "../src/hew-plugin.json").is_err());
+    assert!(store::read_file(&dir, ID, "../src/hew-plugin.json", DevMode::On).is_err());
 }
 
 #[test]
@@ -821,7 +826,7 @@ fn previous_answers_what_a_rollback_brings_back() {
         "installed_unreadable"
     );
     assert_eq!(
-        store::rollback(&dir, ID).unwrap_err().name(),
+        store::rollback(&dir, ID, &running()).unwrap_err().name(),
         "installed_unreadable"
     );
     assert_eq!(
@@ -1079,20 +1084,24 @@ fn unreadable_storage_is_refused_and_left_as_it_is() {
         );
         assert_eq!(std::fs::read(&path).unwrap(), bad);
     }
-    // A link in its place is not followed.
-    std::fs::remove_file(&path).unwrap();
-    let outside = scratch.0.join("outside.json");
-    std::fs::write(&outside, b"{\"a\":\"secret\"}").unwrap();
-    std::os::unix::fs::symlink(&outside, &path).unwrap();
-    assert_eq!(
-        store::storage_get(&dir, ID, "a"),
-        Err(InstallError::StorageUnreadable)
-    );
-    assert_eq!(
-        store::storage_set(&dir, ID, "a", "1"),
-        Err(InstallError::StorageUnreadable)
-    );
-    assert_eq!(std::fs::read(&outside).unwrap(), b"{\"a\":\"secret\"}");
+    // A link in its place is not followed (links are made this way on
+    // Unix only).
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(&path).unwrap();
+        let outside = scratch.0.join("outside.json");
+        std::fs::write(&outside, b"{\"a\":\"secret\"}").unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert_eq!(
+            store::storage_get(&dir, ID, "a"),
+            Err(InstallError::StorageUnreadable)
+        );
+        assert_eq!(
+            store::storage_set(&dir, ID, "a", "1"),
+            Err(InstallError::StorageUnreadable)
+        );
+        assert_eq!(std::fs::read(&outside).unwrap(), b"{\"a\":\"secret\"}");
+    }
 }
 
 #[test]
@@ -1108,7 +1117,7 @@ fn storage_follows_the_plugin_through_updates_and_rollbacks() {
         "an update keeps the saved data"
     );
     store::storage_set(&dir, ID, "count", "2").unwrap();
-    store::rollback(&dir, ID).unwrap();
+    store::rollback(&dir, ID, &running()).unwrap();
     assert_eq!(
         store::installed(&dir, ID).unwrap().0.version.to_string(),
         "1.0.0"
@@ -1119,14 +1128,14 @@ fn storage_follows_the_plugin_through_updates_and_rollbacks() {
         "a rollback keeps the latest saved data"
     );
     store::storage_set(&dir, ID, "count", "3").unwrap();
-    store::rollback(&dir, ID).unwrap();
+    store::rollback(&dir, ID, &running()).unwrap();
     assert_eq!(
         store::storage_get(&dir, ID, "count").unwrap().as_deref(),
         Some("3")
     );
     // Data deleted before an update does not come back on a rollback.
     assert!(store::storage_delete(&dir, ID, "count").unwrap());
-    store::rollback(&dir, ID).unwrap();
+    store::rollback(&dir, ID, &running()).unwrap();
     assert_eq!(store::storage_list(&dir, ID).unwrap(), Vec::<String>::new());
     // A reinstall of the same version keeps it too.
     store::storage_set(&dir, ID, "kept", "yes").unwrap();
@@ -1161,4 +1170,73 @@ fn uninstalling_removes_the_saved_data() {
     store::storage_set(&dir, ID, "a", "1").unwrap();
     store::purge(&dir, ID).unwrap();
     assert!(!dir.root().join(ID).exists());
+}
+
+#[test]
+fn a_rollback_follows_the_install_rules_and_moves_nothing_when_refused() {
+    let command = |id: &str| {
+        json!({ "commands": [{
+            "id": id, "class": "read_only", "summary": "Runs.",
+            "params": { "type": "object", "additionalProperties": false },
+            "result": { "type": "object", "additionalProperties": false }
+        }] })
+    };
+    // 1.0 has `tool.run`; 2.0 does not, so another plugin may take the name.
+    let scratch = Scratch::new("rollback-names");
+    let dir = scratch.store();
+    install(
+        &dir,
+        package(
+            ID,
+            "1.0.0",
+            json!({ "contributes": command("tool.run") }),
+            &[],
+        ),
+    );
+    install(&dir, package(ID, "2.0.0", json!({}), &[]));
+    let other = "com.example.fixture.tool";
+    install(
+        &dir,
+        package(
+            other,
+            "1.0.0",
+            json!({ "contributes": command("run") }),
+            &[],
+        ),
+    );
+    let before = tree(dir.root());
+    for refused in [
+        store::check_rollback(&dir, ID, &running()).unwrap_err(),
+        store::rollback(&dir, ID, &running()).unwrap_err(),
+    ] {
+        assert_eq!(refused.name(), "command_name_taken");
+    }
+    assert_eq!(tree(dir.root()), before, "nothing moved");
+    assert_eq!(
+        store::installed(&dir, ID).unwrap().0.version.to_string(),
+        "2.0.0"
+    );
+
+    // 1.0 required a plugin that is gone since.
+    let scratch = Scratch::new("rollback-requires");
+    let dir = scratch.store();
+    let dep = "com.example.dep";
+    install(&dir, package(dep, "1.0.0", json!({}), &[]));
+    install(
+        &dir,
+        package(
+            ID,
+            "1.0.0",
+            json!({ "requires": [{ "id": dep, "range": "^1" }] }),
+            &[],
+        ),
+    );
+    install(&dir, package(ID, "2.0.0", json!({}), &[]));
+    store::uninstall(&dir, dep).unwrap();
+    let before = tree(dir.root());
+    assert_eq!(
+        store::rollback(&dir, ID, &running()).unwrap_err().name(),
+        "dependency_missing"
+    );
+    assert_eq!(tree(dir.root()), before, "nothing moved");
 }

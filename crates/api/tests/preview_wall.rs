@@ -458,11 +458,24 @@ fn no_handler_string_names_a_preview_feature() {
 
 /// No permission exists only for preview commands, so a production build
 /// has nothing preview-specific a plugin could ask for or be granted.
+/// `FirstParty` is the one permission a preview command may hold alone: it
+/// is declaration-only, with no name a manifest or a grant can write
+/// (`Permission::parse` refuses its wire form) and no profile that holds
+/// it, so it is not something a plugin could ask for or be granted; it only
+/// keeps a command to first-party connections. The test checks that, then
+/// holds every other permission to the rule.
 #[test]
 fn no_permission_belongs_to_preview_commands_alone() {
     let reference = Registry::reference();
     let gated: BTreeSet<String> = gated_commands().into_iter().map(|(c, _)| c).collect();
     for c in reference.commands().filter(|c| gated.contains(&c.name)) {
+        if c.permission == api::Permission::FirstParty {
+            assert!(
+                api::Permission::parse(&c.permission.to_wire()).is_err(),
+                "FirstParty has a wire form, so a plugin could ask for it"
+            );
+            continue;
+        }
         assert!(
             reference
                 .commands()

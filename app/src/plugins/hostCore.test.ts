@@ -21,7 +21,7 @@ import type { Scene } from '../wasm/loader'
 import { createPluginHost, MAX_FORWARD_TIMEOUT_MS, MAX_PENDING_BUS, type HostScheduler, forwardTimeoutMs, packagePath, readForwardReply, type HostEnv, type PluginHost, type PortLike, type RealmChannel } from './hostCore'
 import type { PluginStorageBackend } from './storageBackend'
 import type { PluginStoreAccess } from './storeAccess'
-import type { Installed, Listed, PluginManifest } from './types'
+import type { DevChange, Installed, Listed, PluginManifest } from './types'
 import { PluginError } from './pluginError'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
@@ -228,6 +228,8 @@ interface Harness {
   list: Listed[]
   changed(): void
   storageChanged(id: string, keys: string[]): void
+  /** Sends `plugins-dev-changed`, as the store access passes it on. */
+  devChanged(change: DevChange): void
   stored: Map<string, string>
   storage: PluginStorageBackend
   toasts: string[]
@@ -253,6 +255,8 @@ interface HarnessOpts {
   readFile?: (id: string, path: string) => Promise<ArrayBuffer>
   /** Runs before a realm frame answers. */
   beforeOpen?: () => Promise<void>
+  /** The shell's developer mode; none (as on the web) when absent. */
+  devMode?: () => Promise<boolean>
 }
 
 function harness(opts: HarnessOpts = {}): Harness {
@@ -260,6 +264,7 @@ function harness(opts: HarnessOpts = {}): Harness {
   let main: Main = opts.main ?? ((hew) => hew.commands.handle('greet', (p) => ({ greeting: `Hello, ${(p as { name?: string }).name ?? 'Hew'}!` })))
   let onChanged: (() => void) | null = null
   let onStorage: ((id: string, keys: string[]) => void) | null = null
+  let onDev: ((change: DevChange) => void) | null = null
   const stored = new Map<string, string>()
   const toasts: string[] = []
   const logs: string[] = []
@@ -277,6 +282,11 @@ function harness(opts: HarnessOpts = {}): Harness {
     onStorageChanged: (fn) => {
       onStorage = fn
       return () => (onStorage = null)
+    },
+    ...(opts.devMode === undefined ? {} : { devMode: opts.devMode }),
+    onDevChanged: (fn) => {
+      onDev = fn
+      return () => (onDev = null)
     },
   }
   const storage: PluginStorageBackend = {
@@ -351,6 +361,7 @@ function harness(opts: HarnessOpts = {}): Harness {
     list: opts.list ?? [{ kind: 'installed', installed: installed(), manifest: manifest(), previous_version: null }],
     changed: () => onChanged?.(),
     storageChanged: (id: string, keys: string[]) => onStorage?.(id, keys),
+    devChanged: (change: DevChange) => onDev?.(change),
     stored,
     storage,
     toasts,
@@ -1657,3 +1668,504 @@ describe('the plugin host, at the edges of a command', () => {
     })
   })
 })
+
+// ---------------------------------------------------------- folder plugins
+
+describe('the plugin host, a folder plugin', () => {
+  let h: Harness
+  beforeEach((ctx) => {
+    requiresPreview(ctx, 'plugins')
+    setBusy(null)
+  })
+  afterEach(() => {
+    h?.host.dispose()
+    vi.useRealTimers()
+  })
+
+  const FOLDER = { kind: 'dir', path: '/home/me/hello' } as const
+  const folder = (over: Partial<Installed> = {}, m: PluginManifest = manifest()): Listed[] => [
+    { kind: 'installed', installed: installed({ source: FOLDER, ...over }), manifest: m, previous_version: null },
+  ]
+  const startup = (): PluginManifest => manifest({ activation: ['on_startup', 'on_command'] })
+  const unchanged: DevChange = { id: ID, manifest_changed: false, reason: null, problem: null }
+  const sentTo = (h: Harness, realm: number, t: HostToRealm['t']): HostToRealm[] => h.realms[realm].toRealm.filter((m) => m.t === t)
+  /** Not stopped as a crash: no crash record, no toast, no error. */
+  const notCrashed = (h: Harness): void => {
+    expect(h.scene.states.filter(([, s]) => s === 'crashed')).toEqual([])
+    expect(h.toasts).toEqual([])
+    expect(h.logs.filter((l) => l.startsWith('error:'))).toEqual([])
+  }
+
+  describe('not startable', () => {
+    it('while developer mode is off: blocked, its commands kept and answering unavailable, nothing started', async () => {
+      h = harness({ list: folder(), devMode: async () => false })
+      await h.host.sync()
+      expect(h.host.states()).toEqual({ [ID]: 'blocked' })
+      expect(h.host.reasons()).toEqual({ [ID]: 'needs_developer_mode' })
+      expect(h.scene.registered.get(ID)!.map((d) => d.id)).toEqual(['greet', 'tag'])
+      expect((await call(h, `${ID}.greet`)).error?.data?.refusal).toBe('plugin_unavailable')
+      expect((await call(h, `${ID}.tag`)).error?.data?.refusal).toBe('plugin_unavailable')
+      expect(h.scene.compounds).toEqual([])
+      expect(getBusy()).toBeNull()
+      expect(h.realms).toHaveLength(0)
+      notCrashed(h)
+    })
+
+    it('while developer mode cannot be read, a folder plugin is held as if it were off; a package is not', async () => {
+      h = harness({
+        list: [
+          ...folder(),
+          { kind: 'installed', installed: installed({ id: OTHER_ID }), manifest: manifest({ id: OTHER_ID }), previous_version: null },
+        ],
+        devMode: async () => {
+          throw new Error('no shell')
+        },
+      })
+      await h.host.sync()
+      expect(h.host.states()).toEqual({ [ID]: 'blocked', [OTHER_ID]: 'enabled' })
+    })
+
+    it('runs again as soon as developer mode is on, without being turned off and on', async () => {
+      let on = false
+      h = harness({ list: folder({ startup_allowed: true }, startup()), devMode: async () => on })
+      await h.host.sync()
+      await flush(60)
+      expect(h.realms).toHaveLength(0)
+      on = true
+      h.changed()
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+      expect(h.host.reasons()).toEqual({})
+      expect((await call(h, `${ID}.greet`)).result).toEqual({ greeting: 'Hello, Hew!' })
+    })
+
+    it('stops a running plugin when developer mode goes off, its open forward answered unavailable', async () => {
+      let on = true
+      h = harness({ list: folder(), devMode: async () => on, main: (hew) => hew.commands.handle('greet', () => new Promise(() => {})) })
+      await h.host.sync()
+      const reply = call(h, `${ID}.greet`)
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+      await flush(20)
+      on = false
+      h.changed()
+      expect((await reply).error?.data?.refusal).toBe('plugin_unavailable')
+      expect(h.host.states()).toEqual({ [ID]: 'blocked' })
+      expect(h.host.reasons()).toEqual({ [ID]: 'needs_developer_mode' })
+      expect(h.realms[0].toRealm.at(-1)).toEqual({ t: 'unload', reason: 'disable' })
+      expect(h.realms[0].channel.remove).toHaveBeenCalled()
+      expect(h.scene.registered.has(ID)).toBe(true)
+      notCrashed(h)
+    })
+
+    it('holds a record waiting for review, whatever its marker holds but false, and runs it once the store clears it', async () => {
+      for (const marker of [true, 'permissions_changed', null, 0, {}]) {
+        h = harness({ list: folder({ needs_consent: marker }), devMode: async () => true })
+        await h.host.sync()
+        expect(h.host.reasons(), String(marker)).toEqual({ [ID]: 'needs_review' })
+        expect((await call(h, `${ID}.greet`)).error?.data?.refusal).toBe('plugin_unavailable')
+        h.host.dispose()
+      }
+      h = harness({ list: folder({ needs_consent: false }), devMode: async () => true })
+      await h.host.sync()
+      expect(h.host.states()).toEqual({ [ID]: 'enabled' })
+      h.host.dispose()
+
+      // A packaged plugin's record with the marker is held too.
+      h = harness({ list: [{ kind: 'installed', installed: installed({ needs_consent: true }), manifest: manifest(), previous_version: null }] })
+      await h.host.sync()
+      expect(h.host.reasons()).toEqual({ [ID]: 'needs_review' })
+      h.list = [{ kind: 'installed', installed: installed(), manifest: manifest(), previous_version: null }]
+      h.changed()
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('enabled'))
+      expect((await call(h, `${ID}.greet`)).result).toEqual({ greeting: 'Hello, Hew!' })
+      notCrashed(h)
+    })
+
+    it("marked while running: stopped at once, and a review's acceptance starts it with Hew again", async () => {
+      h = harness({ list: folder({ startup_allowed: true }, startup()), devMode: async () => true })
+      await h.host.sync()
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+      h.list = folder({ startup_allowed: true, needs_consent: true, needs_consent_reason: 'permissions_changed' }, startup())
+      h.changed()
+      h.devChanged({ id: ID, manifest_changed: true, reason: 'permissions_changed', problem: null })
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('blocked'))
+      expect(h.host.reasons()).toEqual({ [ID]: 'needs_review' })
+      expect(h.realms[0].toRealm.at(-1)).toEqual({ t: 'unload', reason: 'disable' })
+      await flush(60)
+      expect(h.realms).toHaveLength(1)
+      // Accepted: the shell clears the marker and says nothing changed.
+      h.list = folder({ startup_allowed: true }, startup())
+      h.changed()
+      h.devChanged(unchanged)
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+      notCrashed(h)
+    })
+
+    it('a start whose read is refused is blocked by name, not stopped, and the next call tries again', async () => {
+      const refusals: [string, string][] = [
+        ['folder_missing: Hew cannot open the plugin\'s folder "/home/me/hello".', 'folder_missing'],
+        ['package_path_invalid: dist/background.js', 'main_missing'],
+        ['developer_mode_off: Turn on developer mode.', 'needs_developer_mode'],
+        ['dev_consent_pending: Review the change.', 'needs_review'],
+      ]
+      for (const [refusal, reason] of refusals) {
+        let failing = true
+        h = harness({
+          list: folder(),
+          devMode: async () => true,
+          readFile: async (id) => {
+            if (failing) throw refusal
+            return new TextEncoder().encode(id).buffer as ArrayBuffer
+          },
+        })
+        await h.host.sync()
+        expect((await call(h, `${ID}.greet`)).error?.data?.refusal, reason).toBe('plugin_unavailable')
+        expect(h.host.states()).toEqual({ [ID]: 'blocked' })
+        expect(h.host.reasons()).toEqual({ [ID]: reason })
+        expect(h.realms).toHaveLength(0)
+        expect(h.scene.registered.has(ID)).toBe(true)
+        notCrashed(h)
+        failing = false
+        if (reason === 'folder_missing' || reason === 'main_missing') {
+          // The folder is back: the next call starts it.
+          expect((await call(h, `${ID}.greet`)).result).toEqual({ greeting: 'Hello, Hew!' })
+        } else {
+          // Held by what the store says until the store says otherwise.
+          expect((await call(h, `${ID}.greet`)).error?.data?.refusal).toBe('plugin_unavailable')
+          h.changed()
+          await flush(60)
+          expect((await call(h, `${ID}.greet`)).result).toEqual({ greeting: 'Hello, Hew!' })
+        }
+        h.host.dispose()
+      }
+    })
+
+    it('a packaged plugin whose code cannot be read is still stopped as before', async () => {
+      h = harness({
+        readFile: async () => {
+          throw 'package_path_invalid: dist/background.js'
+        },
+      })
+      await h.host.sync()
+      expect((await call(h, `${ID}.greet`)).error?.data?.reason).toBe('crashed')
+      expect(h.host.states()[ID]).toBe('crashed')
+    })
+
+    it('a refusal name in text the plugin could have written does not count', async () => {
+      h = harness({
+        list: folder(),
+        devMode: async () => true,
+        readFile: async () => {
+          throw new Error('the frame said: folder_missing: x')
+        },
+      })
+      await h.host.sync()
+      await call(h, `${ID}.greet`)
+      expect(h.host.states()[ID]).toBe('crashed')
+    })
+
+    it("a folder's manifest whose main went missing after a refresh is blocked, not stopped, and runs again once saved with one", async () => {
+      h = harness({ list: folder(), devMode: async () => true })
+      await h.host.sync()
+      await call(h, `${ID}.greet`)
+      const { main: _gone, ...rest } = manifest() as PluginManifest & { main?: unknown }
+      h.list = folder({}, rest as PluginManifest)
+      h.devChanged(unchanged)
+      await vi.waitFor(() => expect(h.realms[0].toRealm.at(-1)).toEqual({ t: 'unload', reason: 'reload' }))
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('blocked'))
+      expect(h.host.reasons()).toEqual({ [ID]: 'main_missing' })
+      notCrashed(h)
+      // Saved again with a main: reloaded and running.
+      h.list = folder()
+      h.devChanged(unchanged)
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+    })
+  })
+
+  describe('a reload', () => {
+    it('starts a plugin again when a review mark that stopped it while it ran clears', async () => {
+      h = harness({ list: folder(), devMode: async () => true })
+      await h.host.sync()
+      await call(h, `${ID}.greet`)
+      expect(h.host.states()[ID]).toBe('activated')
+      h.list = folder({ needs_consent: true, needs_consent_reason: 'permissions_changed' })
+      h.changed()
+      await vi.waitFor(() => expect(h.host.reasons()[ID]).toBe('needs_review'))
+      // The person undid the change in the folder: the mark is gone.
+      h.list = folder()
+      h.changed()
+      await flush(60)
+      h.devChanged(unchanged)
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+      notCrashed(h)
+    })
+
+    it('does not start again after a stop that was not a folder refresh: a grant change, or developer mode off', async () => {
+      h = harness({ list: folder(), devMode: async () => true })
+      await h.host.sync()
+      await call(h, `${ID}.greet`)
+      // The person narrowed the grant: the plugin is rebuilt, not running.
+      h.list = folder({ grant: [] })
+      h.changed()
+      await flush(60)
+      expect(h.host.states()[ID]).toBe('enabled')
+      // A later save in its folder reloads it, but it was not running.
+      h.devChanged(unchanged)
+      await flush(60)
+      expect(h.host.states()[ID]).toBe('enabled')
+      expect(h.realms).toHaveLength(1)
+      h.host.dispose()
+
+      let on = true
+      h = harness({ list: folder(), devMode: async () => on })
+      await h.host.sync()
+      await call(h, `${ID}.greet`)
+      on = false
+      h.changed()
+      await vi.waitFor(() => expect(h.host.reasons()[ID]).toBe('needs_developer_mode'))
+      on = true
+      h.changed()
+      await flush(60)
+      h.devChanged(unchanged)
+      await flush(60)
+      expect(h.host.states()[ID]).toBe('enabled')
+      expect(h.realms).toHaveLength(1)
+    })
+
+    it('starts a running plugin again when the refresh changed its version: the store change comes first, the reload after', async () => {
+      h = harness({ list: folder(), devMode: async () => true })
+      await h.host.sync()
+      await call(h, `${ID}.greet`)
+      expect(h.host.states()[ID]).toBe('activated')
+      // The shell refreshed the stored copy (a new version): it says the
+      // store changed, then asks for the reload.
+      h.list = folder({ version: '1.1.0' }, manifest({ version: '1.1.0' }))
+      h.changed()
+      // The store change is read before the reload is asked for.
+      await flush(60)
+      expect(h.host.states()[ID]).toBe('enabled')
+      h.devChanged(unchanged)
+      await vi.waitFor(() => expect(h.realms).toHaveLength(2))
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+      notCrashed(h)
+    })
+
+    it('keeps a reload asked for when the store cannot be listed once, and does it on a later try', async () => {
+      h = harness({ list: folder(), devMode: async () => true })
+      await h.host.sync()
+      await call(h, `${ID}.greet`)
+      const list = h.env.store.list.bind(h.env.store)
+      let fail = 1
+      h.env.store.list = async () => {
+        if (fail > 0) {
+          fail--
+          throw new Error('busy')
+        }
+        return list()
+      }
+      h.devChanged(unchanged)
+      await vi.waitFor(() => expect(h.realms).toHaveLength(2), { timeout: 3_000 })
+      expect(h.realms[0].toRealm.at(-1)).toEqual({ t: 'unload', reason: 'reload' })
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+      expect(h.logs.some((l) => l.startsWith('warn: The plugin list could not be read'))).toBe(true)
+    })
+
+    it('stops trying again after a few failed lists', async () => {
+      h = harness({ list: folder(), devMode: async () => true })
+      await h.host.sync()
+      const list = vi.fn(async (): Promise<Listed[]> => {
+        throw new Error('busy')
+      })
+      h.env.store.list = list
+      h.devChanged(unchanged)
+      await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(4), { timeout: 3_000 })
+      await new Promise((r) => setTimeout(r, 1_000))
+      expect(list).toHaveBeenCalledTimes(4)
+    })
+
+    it("on a folder change stops the realm with reload, registers the stored manifest's commands again, and starts it again because it was running", async () => {
+      h = harness({ list: folder(), devMode: async () => true })
+      await h.host.sync()
+      await call(h, `${ID}.greet`)
+      const m = manifest({ contributes: { commands: [{ id: 'greet', class: 'read_only', summary: 'Greets.' }, { id: 'wave', class: 'read_only', summary: 'Waves.' }] } })
+      h.list = folder({}, m)
+      h.devChanged(unchanged)
+      await vi.waitFor(() => expect(h.realms).toHaveLength(2))
+      expect(h.realms[0].toRealm.at(-1)).toEqual({ t: 'unload', reason: 'reload' })
+      expect(h.realms[0].channel.remove).toHaveBeenCalled()
+      expect(h.scene.registered.get(ID)!.map((d) => d.id)).toEqual(['greet', 'wave'])
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+      expect(h.scene.states.filter(([, s]) => s === 'unloaded')).toEqual([[ID, 'unloaded', 'reload']])
+      expect((await call(h, `${ID}.greet`)).result).toEqual({ greeting: 'Hello, Hew!' })
+      expect(h.realms).toHaveLength(2)
+      notCrashed(h)
+    })
+
+    it('does not start a plugin that was not running and does not start with Hew, and starts one that does', async () => {
+      h = harness({ list: folder(), devMode: async () => true })
+      await h.host.sync()
+      h.devChanged(unchanged)
+      await flush(60)
+      expect(h.realms).toHaveLength(0)
+      expect(h.host.states()).toEqual({ [ID]: 'enabled' })
+      h.host.dispose()
+      h = harness({ list: folder({ startup_allowed: true }, startup()), devMode: async () => true })
+      await h.host.sync()
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+      h.devChanged(unchanged)
+      await vi.waitFor(() => expect(h.realms).toHaveLength(2))
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+      expect((sentTo(h, 1, 'hello')[0] as { activation: string }).activation).toBe('startup')
+    })
+
+    it('keeps the storage written behind: a write on its way lands, and the reloaded plugin reads it', async () => {
+      let hew!: Hew
+      h = harness({ list: folder(), devMode: async () => true, timings: { storageDebounceMs: 1_000 }, main: (api) => ((hew = api), api.commands.handle('greet', () => 'x')) })
+      await h.host.sync()
+      await call(h, `${ID}.greet`)
+      const first = hew
+      const write = first.storage.set('k', 'before')
+      await flush(20)
+      expect(h.storage.set).not.toHaveBeenCalled()
+      h.devChanged(unchanged)
+      await vi.waitFor(() => expect(h.realms).toHaveLength(2))
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+      expect(hew).not.toBe(first)
+      await expect(hew.storage.get('k')).resolves.toBe('before')
+      expect(h.stored.get('k')).toBe('"before"')
+      // The old realm is gone; its own promise is nobody's to settle.
+      void write.catch(() => undefined)
+    })
+
+    it('during an open forward settles it unavailable as any reload does, and leaves no compound open', async () => {
+      h = harness({
+        list: folder({}, withSlowManifest()),
+        devMode: async () => true,
+        main: (hew) => {
+          hew.commands.handle('greet', () => 'hi')
+          hew.commands.handle('slow', () => new Promise(() => {}))
+        },
+      })
+      await h.host.sync()
+      const reply = call(h, `${ID}.slow`)
+      await vi.waitFor(() => expect(h.scene.compounds).toHaveLength(1))
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+      h.devChanged(unchanged)
+      expect((await reply).error?.data?.refusal).toBe('plugin_unavailable')
+      expect(h.scene.compounds).toEqual([])
+      expect(getBusy()).toBeNull()
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+      expect(h.realms).toHaveLength(2)
+      // A late answer from the stopped realm reaches nobody.
+      h.realms[0].send({ t: 'forward_reply', id: 1, reply: '{"ok":"late"}' })
+      await flush(60)
+      expect(h.host.states()[ID]).toBe('activated')
+      expect((await call(h, `${ID}.greet`)).result).toBe('hi')
+      notCrashed(h)
+    })
+
+    it('during activation starts it once, answers the waiting forward unavailable, and leaves no compound open', async () => {
+      const read = gate<ArrayBuffer>()
+      h = harness({
+        list: folder({}, withSlowManifest()),
+        devMode: async () => true,
+        readFile: () => read.promise,
+        main: (hew) => {
+          hew.commands.handle('greet', () => 'hi')
+          hew.commands.handle('tag', () => ({ done: true }))
+        },
+      })
+      await h.host.sync()
+      const reply = call(h, `${ID}.tag`)
+      await vi.waitFor(() => expect(h.scene.compounds).toHaveLength(1))
+      expect(h.host.states()[ID]).toBe('activating')
+      h.devChanged(unchanged)
+      await flush(60)
+      read.open(new TextEncoder().encode(ID).buffer as ArrayBuffer)
+      expect((await reply).error?.data?.refusal).toBe('plugin_unavailable')
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+      await flush(60)
+      expect(h.realms).toHaveLength(1)
+      expect(h.scene.compounds).toEqual([])
+      expect(getBusy()).toBeNull()
+      expect(h.scene.states.filter(([, s]) => s === 'loaded')).toHaveLength(1)
+      expect((await call(h, `${ID}.greet`)).result).toBe('hi')
+    })
+
+    it('two change events in a row reload it once', async () => {
+      h = harness({ list: folder(), devMode: async () => true })
+      await h.host.sync()
+      await call(h, `${ID}.greet`)
+      h.devChanged(unchanged)
+      h.devChanged(unchanged)
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+      await flush(100)
+      expect(h.realms).toHaveLength(2)
+      expect(h.host.states()[ID]).toBe('activated')
+      expect(sentTo(h, 1, 'unload')).toEqual([])
+    })
+
+    it('a change event for a plugin that is off, or not installed, starts nothing', async () => {
+      h = harness({ list: folder({ enabled: false }), devMode: async () => true })
+      await h.host.sync()
+      h.devChanged(unchanged)
+      h.devChanged({ ...unchanged, id: 'com.example.nobody' })
+      await flush(100)
+      expect(h.realms).toHaveLength(0)
+      expect(h.host.states()).toEqual({})
+      expect(h.scene.registered.size).toBe(0)
+    })
+
+    it('a change event racing a disable leaves nothing running and nothing registered', async () => {
+      h = harness({ list: folder(), devMode: async () => true })
+      await h.host.sync()
+      await call(h, `${ID}.greet`)
+      h.devChanged(unchanged)
+      h.list = folder({ enabled: false })
+      h.changed()
+      await flush(100)
+      await h.host.sync()
+      expect(h.host.states()).toEqual({})
+      expect(h.scene.registered.has(ID)).toBe(false)
+      for (const r of h.realms) expect(r.channel.remove).toHaveBeenCalled()
+      expect(h.scene.conns.size === 0 || [...h.scene.conns.values()].every((c) => c.plugin !== ID)).toBe(true)
+    })
+
+    it('a folder problem or a marked change does not reload', async () => {
+      h = harness({ list: folder(), devMode: async () => true })
+      await h.host.sync()
+      await call(h, `${ID}.greet`)
+      h.devChanged({ ...unchanged, problem: 'folder_missing' })
+      await flush(100)
+      expect(h.realms).toHaveLength(1)
+      expect(h.host.states()[ID]).toBe('activated')
+    })
+
+    it('brings back a folder plugin that was stopped, since the person saved its folder', async () => {
+      h = harness({ list: folder(), devMode: async () => true })
+      await h.host.sync()
+      await call(h, `${ID}.greet`)
+      h.realms[0].send({ t: 'error', message: 'boom' })
+      await flush(20)
+      expect(h.host.states()[ID]).toBe('crashed')
+      h.devChanged(unchanged)
+      await vi.waitFor(() => expect(h.host.states()[ID]).toBe('enabled'))
+      expect(h.scene.registered.has(ID)).toBe(true)
+      expect((await call(h, `${ID}.greet`)).result).toEqual({ greeting: 'Hello, Hew!' })
+    })
+  })
+})
+
+const OTHER_ID = 'com.example.other'
+
+/** The hello plugin's manifest with `slow` (mutating) beside its commands. */
+function withSlowManifest(): PluginManifest {
+  return manifest({
+    contributes: {
+      commands: [
+        { id: 'greet', class: 'read_only', summary: 'Greets.' },
+        { id: 'tag', class: 'mutating', summary: 'Adds a tag.' },
+        { id: 'slow', class: 'mutating', summary: 'Takes its time.' },
+      ],
+    },
+  })
+}

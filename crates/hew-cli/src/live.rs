@@ -1134,6 +1134,11 @@ impl LiveSession {
         if request.id.is_none() {
             return Ok(DispatchOutcome::Dropped);
         }
+        // The one place every live request passes: a production build does
+        // not carry a Preview command to the app, so it never reaches one.
+        if let Some(refused) = refuse_preview_command(&request) {
+            return Ok(DispatchOutcome::Reply(refused));
+        }
         absolutize_open_path(&mut request);
         // Headless, `hew.library.save` records the opened file as the item's
         // source document; the app's host cannot know its document's file,
@@ -1251,6 +1256,41 @@ impl LiveSession {
             DispatchOutcome::Dropped | DispatchOutcome::Forward(_) => None,
         }
     }
+}
+
+/// The refusal a production build gives, before sending anything, for a
+/// request that names a Preview command (one the registry in
+/// `preview-features.json` marks), as the request's own `method` or as a
+/// command of a `hew.doc.transact`: `preview_only`, the answer the
+/// headless path gives. A name the registry does not know is not refused
+/// here: a newer app may serve it. A preview build refuses nothing here.
+fn refuse_preview_command(request: &Request) -> Option<Response> {
+    let refused = |index: usize, method: &str, refusal: api::Refusal| {
+        Response::err_with(
+            request.id.clone(),
+            api::codes::REFUSED,
+            "refused",
+            refusal.into_data(index, method),
+        )
+    };
+    if let Err(refusal) = api::preview::command_allowed(&request.method) {
+        return Some(refused(0, &request.method, refusal));
+    }
+    if request.method == "hew.doc.transact"
+        && let Some(commands) = request
+            .params
+            .as_ref()
+            .and_then(|p| p.get("commands"))
+            .and_then(Value::as_array)
+    {
+        for (index, command) in commands.iter().enumerate() {
+            let method = command.get("method").and_then(Value::as_str).unwrap_or("");
+            if let Err(refusal) = api::preview::command_allowed(method) {
+                return Some(refused(index, method, refusal));
+            }
+        }
+    }
+    None
 }
 
 /// `hew.doc.import {path}` against a live app: the app has no filesystem, so

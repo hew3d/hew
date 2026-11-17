@@ -154,6 +154,32 @@ describe('the hello plugin, through the real kernel', () => {
     expect(reply.error?.code).toBe(-32001)
   })
 
+  it('refuses the shell-answered plugin commands to a plugin: the kernel answers, and nothing goes further', async () => {
+    // A plugin's realm talks only to the kernel of the page it runs in,
+    // over a connection opened with its grant; the shell's router serves
+    // only frames from the live API socket. So `hew.plugin.*` from a plugin
+    // meets the kernel's permission check and stops there.
+    const scene = new kernel.Scene() as unknown as Scene
+    const grant = (kernel as unknown as { plugin_grant_json(a: string, b: string, c: string): string }).plugin_grant_json(
+      'com.example.hello',
+      'doc_1',
+      '["model.read","model.write"]',
+    )
+    const conn = scene.api_plugin_connection_open(grant)
+    scene.api_dispatch(conn, '{"jsonrpc":"2.0","id":1,"method":"hew.meta.hello","params":{"protocol":1}}')
+    scene.api_dispatch(conn, '{"jsonrpc":"2.0","id":2,"method":"hew.doc.attach","params":{}}')
+    for (const [id, method, params] of [
+      [3, 'hew.plugin.dev', { path: '/home/me/plugin' }],
+      [4, 'hew.plugin.list', {}],
+    ] as const) {
+      const out = JSON.parse(scene.api_dispatch(conn, JSON.stringify({ jsonrpc: '2.0', id, method, params }))!) as Record<string, unknown>
+      // A reply from the kernel itself: no forward, no host request.
+      expect(Object.keys(out)).toEqual(['reply'])
+      const reply = JSON.parse(out.reply as string) as { error?: { code: number; data?: { refusal?: string } } }
+      expect(reply.error?.code, method).toBe(-32001)
+    }
+  })
+
   describe('what the caller of a command that does not finish is told', () => {
     let host: PluginHost | null = null
     afterEach(() => {

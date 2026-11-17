@@ -1347,6 +1347,36 @@ export interface ObjectSmoothParams {
 export type ObjectSmoothResult = UnspecifiedShape
 
 /**
+ * `hew.plugin.dev` (v1) — Ask the app to show the person a request to load a plugin from a folder. Nothing is loaded, staged or read: the person picks the folder in the app's own folder picker, which opens at `path`, and reads what the plugin asks for before anything runs. The answer only says the request is waiting. Refused while developer mode is off, while another request waits, and for a while after the person dismisses one.
+ * Tier: Standard · Class: solitary · Served: host
+ * Refusals: host_capability_missing, plugins_disabled, no_plugin_dir, plugins_off, developer_mode_off, confirmation_open, request_waiting, request_dismissed, dry_run_host_command, io
+ * Preview: Plugins (`plugins`). A production build leaves this command out and refuses it `preview_only`.
+ */
+export interface PluginDevParams {
+  /** the plugin's folder; shown to the person and used as a starting point for the picker, never read */
+  path: string
+}
+
+export interface PluginDevResult {
+  status: "awaiting_user"
+}
+
+/**
+ * `hew.plugin.list` (v1) — List the plugins installed in the app: id, display name, version, where each came from (file, dir, index, git or url), whether it is turned on, and its state. A folder plugin is needs_developer_mode while developer mode is off, needs_review while the person has not yet read a change to what it asks for, checking until its folder has been compared since it started being watched (nothing of it is read before), plugins_off for the same while no window runs a plugin host (nothing will compare it), and unreadable when its record cannot be read. The list says whether a request to load a folder (hew.plugin.dev) is still waiting for the person, including while they are reading what the plugin asks for, and carries no folder path and does not say whether a plugin is running. Reads only.
+ * Tier: Standard · Class: solitary · Served: host
+ * Refusals: host_capability_missing, plugins_disabled, no_plugin_dir
+ * Preview: Plugins (`plugins`). A production build leaves this command out and refuses it `preview_only`.
+ */
+export interface PluginListParams {}
+
+export interface PluginListResult {
+  developer_mode: boolean
+  plugins: ({ enabled: boolean; id: string; name: string; source: "file" | "dir" | "index" | "git" | "url" | null; state: "installed" | "needs_developer_mode" | "needs_review" | "checking" | "plugins_off" | "unreadable"; version: string | null })[]
+  /** true while a request to load a plugin is waiting for the person, including while they are reading what the plugin asks for; no path, no id */
+  request_waiting: boolean
+}
+
+/**
  * `hew.print.pdf` (v1) — Print the document to a PDF the way File ▸ Print… does: standard (one page, the view as-is) or scaled (parallel projection at an exact drawing scale, tiled across pages with overlap bands, crop/trim marks, a scale bar, and a title block). Line art is vector (hidden lines removed); shaded is a software-rasterized bitmap per page. Bytes base64 inline, or written to path.
  * Tier: Standard · Class: solitary · Served: host
  * Refusals: host_capability_missing, nothing_to_render, too_complex, save_failed, unknown_scene
@@ -3226,6 +3256,11 @@ export class HewApiClient {
   readonly object = {
     crease: (params: ObjectCreaseParams): Promise<ObjectCreaseResult> => this.mutate('hew.object.crease', params),
     smooth: (params: ObjectSmoothParams): Promise<ObjectSmoothResult> => this.mutate('hew.object.smooth', params),
+  }
+
+  readonly plugin = {
+    dev: (params: PluginDevParams): Promise<PluginDevResult> => this.call('hew.plugin.dev', params),
+    list: (params: PluginListParams): Promise<PluginListResult> => this.call('hew.plugin.list', params),
   }
 
   readonly print = {

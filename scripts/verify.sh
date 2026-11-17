@@ -167,6 +167,12 @@ if lane web; then
   # differ (a preview kernel has gated `Scene` methods and exports a
   # production one lacks), so the app is type-checked against both: code
   # that names a gated member without a shim fails the production pass.
+  # The plugin boot script embeds the generated API, so a change there shifts
+  # its hash. This fails at once, naming the command that rewrites it, instead
+  # of surfacing later as a failing unit test.
+  echo "=== pnpm --dir sdk/plugin check (boot script current; fix: pnpm --dir sdk/plugin build) ==="
+  pnpm --dir sdk/plugin check
+
   echo "=== kernel types (production flavor into app/src/wasm/pkg) ==="
   scripts/wasm-flavors.sh use production
 

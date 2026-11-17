@@ -2812,6 +2812,54 @@ older ones behind the pointer.
 | `invalid_frame` | `-32000` | `{}` |
 | `dry_run` with `coalesce` | `-32602` | none |
 
+### 7.7 Plugin commands (a Preview feature)
+
+Two commands tell a program what the app's plugins are doing. They belong
+to the Plugins preview feature (`preview-features.json`): a production
+build leaves them out of the registry and refuses them `preview_only`, and
+a production `hew-cli --live` refuses them before sending anything. The
+desktop app answers them itself. Both are first-party only: the `all`
+profile may call them, a plugin may not, and neither installs, enables,
+loads or changes a plugin. Nothing that manages a plugin completes over
+the socket; the person does that in the app.
+
+| Command | Served | Params | Result | Refusals |
+|---|---|---|---|---|
+| `hew.plugin.list` | host, solitary | `{}` | `{plugins: [{id, name, version, source, enabled, state}], developer_mode, request_waiting}` | `plugins_disabled`, `no_plugin_dir`, `host_capability_missing` |
+| `hew.plugin.dev` | host, solitary | `{path}`: the plugin's folder | `{status: "awaiting_user"}` | `developer_mode_off`, `confirmation_open`, `plugins_off`, `request_waiting`, `request_dismissed`, `dry_run_host_command`, `plugins_disabled`, `no_plugin_dir`, `io`, `host_capability_missing`; `-32602` for a missing or empty `path` |
+
+`source` is `file`, `dir`, `index`, `git` or `url`. `state` is
+`installed`, `needs_developer_mode` (a folder plugin while developer mode
+is off), `needs_review` (a folder plugin whose changed manifest waits
+for the person), `checking` (an enabled folder plugin whose folder has
+not been compared since it started being watched; nothing of it is read
+until it has), `plugins_off` (the same, while no window runs a plugin host, so nothing will compare it) or `unreadable` (the record cannot be read; `version` and
+`source` are then `null`). `request_waiting` is true while a request to load
+a plugin is waiting for the person, including while they are reading what
+the plugin asks for (no path, no id), so a client can tell a dismissed,
+declined or expired request from one still open. The
+list carries no folder path and does not say whether a plugin is running.
+
+`hew.plugin.dev` only asks. The app shows the person "a program on this
+computer asked to load a plugin from this folder:" and `path`, with a
+button that opens its own folder picker near that folder; the person's
+pick, and the permissions the plugin asks for, are read in the app before
+anything runs. `path` is a hint: it is shown and at most used for where
+the picker starts, never read. One request waits at a time, for ten
+minutes: the same `path` again answers `awaiting_user` and shows nothing
+new, another `path` is refused `request_waiting`, and after the person
+dismisses one every request is refused `request_dismissed` for a minute.
+`plugins_off` means no Hew window has its Plugins switch on now. Inside a
+`dry_run` transaction it is refused `dry_run_host_command`. A caller learns the outcome by calling `hew.plugin.list`
+again; there is no event for it. `hew-cli plugin dev <folder>` does
+exactly that (docs/agents/PLUGINS.md, "Developer mode").
+
+The MCP server of `hew-cli` refuses every `hew.plugin.*` command but
+`hew.plugin.list` to an agent, directly and inside `hew.doc.transact`,
+in every build. That is a courtesy and not a boundary, because anything
+that can reach the socket can send the frames itself; the boundary is
+that neither command completes anything.
+
 ## 8. Attribute dictionaries
 
 Every Object, Group, Component definition, Instance, Sketch, Guide,

@@ -45,18 +45,28 @@ const AGENT_PLUGIN_COMMANDS: [&str; 1] = ["hew.plugin.list"];
 /// [`AGENT_PLUGIN_COMMANDS`], as `method` itself or anywhere in a
 /// transaction's `commands` (dry runs included), with `invalid_params`
 /// before anything is dispatched, whether or not the command exists yet.
-/// Only a preview build refuses: plugins are a Preview feature, and a
-/// production build answers such a name as it answers any unknown method.
+///
+/// The rule holds in every build. In a production build a name the Preview
+/// registry marks (today `hew.plugin.dev` and `hew.plugin.list`) is left to
+/// the answer every production path gives such a name, `preview_only`,
+/// which the dispatcher and the live forward both produce; every other
+/// `hew.plugin.*` name is refused here with wording that names no feature.
+/// It is a courtesy and not a boundary: anything that can reach the app's
+/// socket can send the frames itself.
 fn refuse_plugin_management(method: &str, params: &Value) -> Result<(), JsonRpcErr> {
     let denied = |m: &str| {
         m.starts_with("hew.plugin.")
             && !AGENT_PLUGIN_COMMANDS.contains(&m)
-            && api::preview::PREVIEW_BUILD
+            && (api::preview::PREVIEW_BUILD || api::preview::command_allowed(m).is_ok())
     };
     if denied(method) {
-        return Err(JsonRpcErr::invalid_params(format!(
-            "{method} is not available to agents: the person using Hew installs and manages plugins in Settings (hew.plugin.list is available)"
-        )));
+        return Err(JsonRpcErr::invalid_params(if api::preview::PREVIEW_BUILD {
+            format!(
+                "{method} is not available to agents: the person using Hew installs and manages plugins in Settings (hew.plugin.list is available)"
+            )
+        } else {
+            format!("{method} is not available to agents")
+        }));
     }
     if method == "hew.doc.transact"
         && let Some(commands) = params.get("commands").and_then(Value::as_array)
@@ -1587,14 +1597,55 @@ mod tests {
     }
 
     /// Agents may read which plugins are installed and nothing more: any
-    /// other `hew.plugin.*` name, declared or not, is refused
-    /// `invalid_params` before dispatch, called directly, inside a
-    /// transaction (first or not), and in a dry run. `hew.plugin.list` is
-    /// not refused by this rule and reaches the dispatcher.
-    #[cfg(hew_preview)]
+    /// other `hew.plugin.*` name, declared or not, is refused before
+    /// dispatch, called directly, inside a transaction (first or not), and
+    /// in a dry run, in every build. In a preview build the refusal is
+    /// `invalid_params` ("not available to agents") for all of them; in a
+    /// production build a name the Preview registry marks gets that
+    /// build's `preview_only` answer instead, and every other name is
+    /// still `invalid_params`. `hew.plugin.list` is not refused by this
+    /// rule.
     #[test]
     fn agents_cannot_manage_plugins() {
-        let denied = [
+        const DENIAL: &str = "not available to agents";
+        let preview = api::preview::PREVIEW_BUILD;
+        let draw = json!({ "method": "hew.sketch.draw_rect", "params": {
+            "plane": { "ground": true }, "corner_a": [0, 0, 0], "corner_b": [1, 1, 0] } });
+        // Nothing ran: the draw ahead of a refused command did not.
+        let nothing_ran = |server: &mut McpServer, method: &str| {
+            let scene = tool_result(&tool_frame(
+                server,
+                3,
+                "hew_query",
+                json!({ "method": "hew.query.scene" }),
+            ));
+            assert_eq!(scene["result"]["tree"], json!([]), "{method}");
+        };
+        // A refused call is `invalid_params` with the denial, or (a
+        // production build, a name the registry marks) the dispatcher's
+        // own `preview_only` answer.
+        let refused = |frame: &Value, marked: bool, path: &str| {
+            if marked && !preview {
+                let inner = tool_result(frame);
+                assert_eq!(
+                    inner["error"]["data"]["refusal"], "preview_only",
+                    "{path}: {frame}"
+                );
+            } else {
+                assert_eq!(frame["error"]["code"], -32602, "{path}: {frame}");
+                let message = frame["error"]["message"].as_str().unwrap_or_default();
+                assert!(message.contains(DENIAL), "{path}: {message}");
+            }
+        };
+        let names_the_feature = |frame: &Value| {
+            !preview
+                && frame["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_lowercase()
+                    .contains("plugin ")
+        };
+        for method in [
             "hew.plugin.install",
             "hew.plugin.confirm",
             "hew.plugin.enable",
@@ -1603,20 +1654,25 @@ mod tests {
             "hew.plugin.rollback",
             "hew.plugin.set_grant",
             "hew.plugin.anything_later",
-        ];
-        const DENIAL: &str = "not available to agents";
-        let refused = |frame: &Value, path: &str| {
-            assert_eq!(frame["error"]["code"], -32602, "{path}: {frame}");
-            let message = frame["error"]["message"].as_str().unwrap_or_default();
-            assert!(message.contains(DENIAL), "{path}: {message}");
-        };
-        let draw = json!({ "method": "hew.sketch.draw_rect", "params": {
-            "plane": { "ground": true }, "corner_a": [0, 0, 0], "corner_b": [1, 1, 0] } });
-        for method in denied {
+            "hew.plugin.dev",
+        ] {
+            let marked = api::preview::command_allowed(method).is_err();
             let mut server = McpServer::new();
-            let one = json!({ "method": method, "params": { "id": "com.example.x" } });
+            let one =
+                json!({ "method": method, "params": { "id": "com.example.x", "path": "/x" } });
             let direct = tool_frame(&mut server, 1, "hew_query", json!({ "method": method }));
-            refused(&direct, &format!("{method} direct"));
+            // `hew_query` only ever answers with the JSON-RPC denial.
+            assert_eq!(direct["error"]["code"], -32602, "{method} direct: {direct}");
+            if preview || !marked {
+                assert!(
+                    direct["error"]["message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains(DENIAL),
+                    "{method} direct: {direct}"
+                );
+            }
+            assert!(!names_the_feature(&direct), "{method}: {direct}");
             for (label, arguments) in [
                 ("transaction", json!({ "commands": [one] })),
                 (
@@ -1626,19 +1682,15 @@ mod tests {
                 ("dry run", json!({ "dry_run": true, "commands": [one] })),
             ] {
                 let frame = tool_frame(&mut server, 2, "hew_transact", arguments);
-                refused(&frame, &format!("{method} {label}"));
+                refused(&frame, marked, &format!("{method} {label}"));
+                assert!(!names_the_feature(&frame), "{method} {label}: {frame}");
             }
-            // Nothing ran: the draw ahead of it in the transaction did not.
-            let scene = tool_result(&tool_frame(
-                &mut server,
-                3,
-                "hew_query",
-                json!({ "method": "hew.query.scene" }),
-            ));
-            assert_eq!(scene["result"]["tree"], json!([]), "{method}");
+            nothing_ran(&mut server, method);
         }
-        // `hew.plugin.list` passes this rule and reaches the dispatcher,
-        // which answers it as it answers any name it does not hold.
+        // `hew.plugin.list` passes this rule. A preview build's dispatcher
+        // then answers as a host with no app does (`host_capability_missing`);
+        // a production build's answers `preview_only`, so the denial
+        // wording appears in neither.
         let mut server = McpServer::new();
         let frame = tool_frame(
             &mut server,
@@ -1648,7 +1700,15 @@ mod tests {
         );
         assert!(frame.get("error").is_none(), "{frame}");
         let inner = tool_result(&frame);
-        assert!(inner["error"].is_object(), "{inner}");
+        assert_eq!(
+            inner["error"]["data"]["refusal"],
+            if preview {
+                "host_capability_missing"
+            } else {
+                "preview_only"
+            },
+            "{inner}"
+        );
         assert!(
             !inner["error"]["message"]
                 .as_str()

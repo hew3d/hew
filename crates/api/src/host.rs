@@ -8,7 +8,7 @@
 use crate::refusal::Refusal;
 
 /// The refusal every unsupported host effect answers.
-fn unsupported(what: &str) -> Refusal {
+pub(crate) fn unsupported(what: &str) -> Refusal {
     Refusal::api(
         "host_capability_missing",
         &format!("This host cannot {what}. Connect through a host that can (hew-cli has file access; the desktop app renders)."),

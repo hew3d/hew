@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { expect, type Page } from '@playwright/test'
 import { isProductionShape } from './preview'
-import { storedZip } from '../../src/test/storedZip'
+import { storedZipOf as storedZip } from '../../src/plugins/storedZip'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const EXAMPLES_DIR = resolve(HERE, '../../../plugins/examples')

@@ -7,4 +7,5 @@
 //! layout against `loader.shellCommands` in preview-features.json).
 
 pub mod confirm;
+pub mod dev_watch;
 pub mod plugins;

@@ -11,17 +11,28 @@
  * (and does nothing while an install is being written, as Cancel does not);
  * Enter does nothing at all, so a stray keypress never installs; focus
  * starts on Cancel. The plugin's cleaned name and version are always shown.
+ *
+ * In review mode (`consent.review`, a folder plugin whose manifest now asks
+ * for something different) it asks "Allow this plugin's changes?", says so
+ * in place of what it replaces, lists what it now asks for and what it no
+ * longer asks for, and accepts with "Allow".
  */
 
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { permissionText } from './permissionCopy'
+import { PathText } from './pathText'
+import { cleanText, MAX_NAME_CHARS } from './pluginText'
 import { buttonStyle } from './styles'
 import type { ConsentPayload, PermissionLine } from './types'
 
 /** The fixed line for a package no one has signed. Kept in step with
  *  `UNSIGNED_LINE` in `crates/plugin-host`. */
 export const UNSIGNED_LINE = 'Unsigned. Hew cannot tell who made this.'
+
+/** The review's line in place of the replaces line. Kept in step with
+ *  `REVIEW_LINE` in `crates/plugin-host`. */
+export const REVIEW_LINE = "This plugin's folder now asks for different permissions."
 
 export interface ConsentSheetProps {
   consent: ConsentPayload
@@ -135,11 +146,48 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
   }, [])
 
   const { source, update } = consent
+  const review = consent.review === true
   const updating = update !== null
   // The same version over itself: a reinstall, not an update.
-  const again = consent.replaces?.version === consent.version
-  const sourceText =
-    source.kind === 'file' ? 'From file' : source.kind === 'dir' ? `Unpacked folder: ${source.path}` : `From ${source.kind}`
+  const again = !review && consent.replaces?.version === consent.version
+  // A review lists what changed, then what the plugin keeps: the full list
+  // would say the new permissions twice.
+  const reviewChanges = review && update !== null
+  const without = (lines: PermissionLine[], added: PermissionLine[]): PermissionLine[] =>
+    reviewChanges ? lines.filter((l) => !added.some((a) => a.name === l.name)) : lines
+  const keptPermissions = without(consent.permissions, update?.added ?? [])
+  const keptOptional = without(consent.optional, update?.new_optional ?? [])
+  const keptSections = (
+    <>
+      {(!reviewChanges || keptPermissions.length > 0) && (
+        <Section heading={reviewChanges ? 'It keeps' : 'It can'}>
+          {keptPermissions.length > 0 ? (
+            <Lines lines={keptPermissions} />
+          ) : (
+            <div style={{ color: 'var(--text-faint, #888)' }}>It asks for no permissions.</div>
+          )}
+        </Section>
+      )}
+      {keptOptional.length > 0 && (
+        <Section heading="May ask for later">
+          <Lines lines={keptOptional} />
+        </Section>
+      )}
+    </>
+  )
+  const removed = update?.removed ?? []
+  const removedOptional = update?.removed_optional ?? []
+  // A folder copied in on the web is a file the store marks as a folder.
+  const copied = source.kind === 'file' && source.origin === 'folder'
+  const sourceText = copied ? 'Copied from a folder' : source.kind === 'file' ? 'From file' : source.kind === 'dir' ? 'Developer folder' : `From ${source.kind}`
+  const title = review
+    ? "Allow this plugin's changes?"
+    : again
+      ? `Install ${consent.name} again?`
+      : updating
+        ? `Update ${consent.name}?`
+        : `Install ${consent.name}?`
+  const accept = review ? 'Allow' : updating && !again ? 'Update' : 'Install'
 
   return createPortal(
     <div
@@ -176,14 +224,18 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
       >
         <div style={{ padding: '16px 18px 4px', overflowY: 'auto', minHeight: 0, flex: 1 }}>
           <h2 id="plugin-consent-title" style={{ margin: 0, fontSize: '15px', color: 'var(--text-primary, #eee)' }}>
-            {again ? `Install ${consent.name} again?` : updating ? `Update ${consent.name}?` : `Install ${consent.name}?`}
+            {title}
           </h2>
-          <div style={{ color: 'var(--text-faint, #888)', marginTop: '2px' }}>Version {consent.version}</div>
+          <div style={{ color: 'var(--text-faint, #888)', marginTop: '2px', overflowWrap: 'anywhere' }}>
+            {review ? `${consent.name}, version ${consent.version}` : `Version ${consent.version}`}
+          </div>
           <div style={{ marginTop: '10px' }}>
             <div data-consent="source">{sourceText}</div>
-            {source.kind === 'file' && source.name !== '' && (
-              <div style={{ color: 'var(--text-faint, #888)', fontSize: '12px' }}>{source.name}</div>
+            {copied && source.name !== '' && <PathText label="Folder name" value={source.name} />}
+            {source.kind === 'file' && !copied && source.name !== '' && (
+              <div style={{ color: 'var(--text-faint, #888)', fontSize: '12px' }}>{cleanText(source.name, 128)}</div>
             )}
+            {source.kind === 'dir' && <PathText label="Folder" value={source.path} max={512} />}
             {source.kind === 'dir' && (
               <div style={{ color: 'var(--text-faint, #888)', fontSize: '12px' }}>
                 The files in this folder can change after you install.
@@ -194,7 +246,18 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
                 {UNSIGNED_LINE}
               </div>
             )}
-            {consent.replaces !== null && (
+            {review && (
+              <div data-consent="review" style={{ marginTop: '4px', color: 'var(--text-primary, #eee)', whiteSpace: 'pre-line', overflowWrap: 'anywhere' }}>
+                {/* Its values (a command, another plugin's name) are on lines of their own. */}
+                {typeof consent.review_line === 'string' && consent.review_line !== '' ? consent.review_line : REVIEW_LINE}
+              </div>
+            )}
+            {review && consent.replaces !== null && consent.replaces.name !== consent.name && (
+              <div data-consent="was-named" style={{ marginTop: '4px' }}>
+                <PathText label="It was named" value={consent.replaces.name} max={MAX_NAME_CHARS} />
+              </div>
+            )}
+            {!review && consent.replaces !== null && (
               <div data-consent="replaces" style={{ marginTop: '4px', color: 'var(--text-primary, #eee)' }}>
                 {again
                   ? `Replaces the installed ${consent.replaces.name} v${consent.replaces.version} with this copy.`
@@ -223,19 +286,7 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
             </div>
           )}
 
-          <Section heading="It can">
-            {consent.permissions.length > 0 ? (
-              <Lines lines={consent.permissions} />
-            ) : (
-              <div style={{ color: 'var(--text-faint, #888)' }}>It asks for no permissions.</div>
-            )}
-          </Section>
-
-          {consent.optional.length > 0 && (
-            <Section heading="May ask for later">
-              <Lines lines={consent.optional} />
-            </Section>
-          )}
+          {!reviewChanges && keptSections}
 
           {consent.on_startup && (
             <div style={{ marginTop: '10px' }}>
@@ -245,7 +296,7 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
           )}
 
           {update !== null && (
-            <Section heading={`New since ${update.from_version}`}>
+            <Section heading={review ? 'Now asks for' : `New since ${update.from_version}`}>
               {update.added.length === 0 && update.new_optional.length === 0 && !update.startup_newly ? (
                 <div style={{ color: 'var(--text-faint, #888)' }}>It asks for nothing new.</div>
               ) : (
@@ -262,6 +313,22 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
               )}
             </Section>
           )}
+
+          {(removed.length > 0 || removedOptional.length > 0) && (
+            <Section heading="No longer asks for">
+              <div data-consent="removed">
+                {removed.length > 0 && <Lines lines={removed} />}
+                {removedOptional.length > 0 && (
+                  <>
+                    <div style={{ marginTop: '4px', color: 'var(--text-faint, #888)' }}>No longer may ask for later:</div>
+                    <Lines lines={removedOptional} />
+                  </>
+                )}
+              </div>
+            </Section>
+          )}
+
+          {reviewChanges && keptSections}
 
           {consent.activation_reason !== null && (
             <section
@@ -295,7 +362,7 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
               Cancel
             </button>
             <button type="button" onClick={onInstall} disabled={busy} style={buttonStyle(busy, true)}>
-              {updating && !again ? 'Update' : 'Install'}
+              {accept}
             </button>
           </div>
         </div>

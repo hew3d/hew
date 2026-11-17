@@ -235,6 +235,7 @@ pub mod history;
 pub mod library;
 pub mod object;
 pub mod parts;
+pub mod plugin;
 pub mod print;
 pub mod query;
 pub mod scenes;
@@ -295,4 +296,5 @@ pub fn handler(name: &str) -> Option<Handler> {
         .or_else(|| shape::handler(name))
         .or_else(|| object::handler(name))
         .or_else(|| array::handler(name))
+        .or_else(|| plugin::handler(name))
 }

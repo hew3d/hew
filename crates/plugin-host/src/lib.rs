@@ -43,12 +43,13 @@ pub use package::{
 pub mod consent;
 #[cfg(hew_preview)]
 pub use consent::{
-    CLEAN_TEXT_COMBINING, CLEAN_TEXT_REMOVED, ConsentPayload, FOLDER_LINE, MAX_COMBINING_RUN,
-    MAX_NAME_CHARS, MAX_REASON_CHARS, MAX_SUMMARY_LINES, MAX_WARNING_HOSTS, PermissionLine,
-    Replaces, UNSIGNED_LINE, UpdateDiff, clean_text, consent, consent_summary, display_name,
-    enable_summary, grant_change_summary, hew_version_ok, install_confirmation, is_reinstall,
-    permission_line, permission_warnings, reinstall_line, replaces_line, rollback_summary,
-    uninstall_summary,
+    CLEAN_TEXT_COMBINING, CLEAN_TEXT_REMOVED, ConsentPayload, FOLDER_KEPT_LINE, FOLDER_LINE,
+    MAX_COMBINING_RUN, MAX_NAME_CHARS, MAX_REASON_CHARS, MAX_SUMMARY_LINES, MAX_VALUE_LINE_CHARS,
+    MAX_WARNING_HOSTS, PermissionLine, REVIEW_LINE, Replaces, UNSIGNED_LINE, UpdateDiff,
+    clean_text, consent, consent_summary, display_name, enable_summary, grant_change_summary,
+    hew_version_ok, install_confirmation, is_reinstall, permission_line, permission_warnings,
+    reinstall_line, replaces_line, review_confirmation, review_line, rollback_summary,
+    uninstall_summary, value_line,
 };
 
 #[cfg(hew_preview)]

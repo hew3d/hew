@@ -130,16 +130,16 @@
       "tools": [],
       "actions": [],
       "dockChips": [],
-      "apiCommands": [],
+      "apiCommands": ["hew.plugin.list", "hew.plugin.dev"],
       "behaviors": ["plugin-forward"],
       "loader": {
         "roots": ["plugin-probe"],
         "panes": ["plugins"],
-        "shellCommands": ["plugin_list", "plugin_pick_package", "plugin_pick_dir", "plugin_stage_file", "plugin_stage_dir", "plugin_commit", "plugin_set_enabled", "plugin_set_grant", "plugin_uninstall", "plugin_rollback", "plugin_read_file", "plugin_storage_get", "plugin_storage_set", "plugin_storage_delete", "plugin_storage_list"],
+        "shellCommands": ["plugin_list", "plugin_pick_package", "plugin_pick_dir", "plugin_stage_file", "plugin_stage_dir", "plugin_commit", "plugin_set_enabled", "plugin_set_grant", "plugin_uninstall", "plugin_rollback", "plugin_read_file", "plugin_storage_get", "plugin_storage_set", "plugin_storage_delete", "plugin_storage_list", "plugin_dev_mode", "plugin_set_dev_mode", "plugin_dev_review", "plugin_dev_request", "plugin_dev_request_dismiss", "plugin_host_present"],
         "kernelExports": ["plugin_package_from_zip", "plugin_consent", "plugin_manifest_parse", "plugin_hew_version_ok", "plugin_install_check", "plugin_grant_json", "note_plugin_state"],
-        "cliCommands": [],
-        "storage": ["app data folder: com.hew3d.Hew/plugins/", "OPFS: plugins/", "localStorage keys: hew.plugin.", "BroadcastChannel: hew-plugins", "environment: HEW_PLUGIN_DIR", "plugins/<id>/storage.json", "desktop event: plugins-storage-changed"],
-        "markers": ["plugin-probe", "ProbeRoot", "hew-realm", "hewProbeReport", "PluginsPane", "ConsentSheet", "webPluginStore", "hew-plugins", "The plugin says", "data-plugins-tab-icon", "UZMzOvZhtJlzChfXW1vCiRIMGxy3nxQNNZaO0qcON3w=", "createRealmFrame", "boot-1.js", "hew-nonce", "forward_cancel", "storage_reply"]
+        "cliCommands": ["plugin"],
+        "storage": ["app data folder: com.hew3d.Hew/plugins/", "OPFS: plugins/", "localStorage keys: hew.plugin.", "BroadcastChannel: hew-plugins", "environment: HEW_PLUGIN_DIR", "plugins/<id>/storage.json", "desktop event: plugins-storage-changed", "app config folder: plugin-developer-mode", "desktop event: plugins-dev-changed", "desktop event: plugins-dev-request", "plugins/<id>/installed.json fields: needs_consent, needs_consent_reason", "OPFS plugins/<id>/installed.json field: source.origin"],
+        "markers": ["plugin-probe", "ProbeRoot", "hew-realm", "hewProbeReport", "PluginsPane", "ConsentSheet", "webPluginStore", "hew-plugins", "The plugin says", "data-plugins-tab-icon", "On//tA2DKEKgmCn9kbZikavBdS7mIYffSU9mxO5Sugc=", "createRealmFrame", "boot-1.js", "hew-nonce", "forward_cancel", "storage_reply", "plugins-dev-changed", "plugins-dev-request", "plugin-developer-mode", "hew-plugin-dev-watch", "Turn on developer mode?", "Allow this plugin's changes?", "A program on this computer asked to load a plugin", "Request to load a plugin", "Hew is still checking this plugin's folder"]
       }
     }
   ]

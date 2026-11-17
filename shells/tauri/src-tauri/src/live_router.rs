@@ -187,6 +187,16 @@ const HOST_METHODS: &[&str] = &[
     "hew.doc.focus",
 ];
 
+/// The plugin commands the shell answers itself, in a preview build only.
+/// Neither completes anything: `hew.plugin.list` reads, and
+/// `hew.plugin.dev` only asks the page to show a request
+/// (`preview_only::plugins::bus_dev`). A production build has no such
+/// entry, so these are forwarded and answered as any unknown method is.
+#[cfg(hew_preview)]
+const PREVIEW_HOST_METHODS: &[&str] = &["hew.plugin.list", "hew.plugin.dev"];
+#[cfg(not(hew_preview))]
+const PREVIEW_HOST_METHODS: &[&str] = &[];
+
 /// What to do with one client frame.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Routed {
@@ -202,6 +212,10 @@ pub(crate) enum Routed {
         method: &'static str,
         params: Value,
         wrapped: bool,
+        /// The envelope asked for a rehearsal (`dry_run: true`, §6.6): a
+        /// command that would show or record something refuses
+        /// `dry_run_host_command`.
+        dry_run: bool,
     },
     /// Everything else: forward to a webview. `line` has the envelope's
     /// `document` member removed; `document` is that member, the target
@@ -226,6 +240,7 @@ pub(crate) fn classify(line: &str) -> Routed {
 fn classify_skipping(line: &str, skip: Option<&str>) -> Routed {
     let host_methods: Vec<&'static str> = HOST_METHODS
         .iter()
+        .chain(PREVIEW_HOST_METHODS)
         .copied()
         .filter(|m| Some(*m) != skip)
         .collect();
@@ -278,6 +293,7 @@ fn classify_skipping(line: &str, skip: Option<&str>) -> Routed {
                     method: host_method,
                     params: with_envelope(host_method, params),
                     wrapped: false,
+                    dry_run: false,
                 },
                 None => Routed::Drop,
             };
@@ -296,6 +312,7 @@ fn classify_skipping(line: &str, skip: Option<&str>) -> Routed {
                                 only.get("params").cloned().unwrap_or_else(|| json!({})),
                             ),
                             wrapped: true,
+                            dry_run: params.get("dry_run") == Some(&Value::Bool(true)),
                         },
                         None => Routed::Drop,
                     };
@@ -1506,8 +1523,49 @@ fn run_host_command(
         "hew.doc.focus" => cmd_focus(app, conn, params),
         "hew.doc.save" => cmd_save(app, conn, params),
         "hew.doc.revert" => cmd_revert(app, conn, params),
+        #[cfg(hew_preview)]
+        "hew.plugin.list" => cmd_plugin_list(app),
+        #[cfg(hew_preview)]
+        "hew.plugin.dev" => cmd_plugin_dev(app, params),
         _ => Err(Refused::new("unimplemented", method.to_string())),
     }
+}
+
+#[cfg(hew_preview)]
+fn plugin_state(
+    app: &AppHandle,
+) -> Result<tauri::State<'_, crate::preview_only::plugins::PluginState>, Refused> {
+    app.try_state::<crate::preview_only::plugins::PluginState>()
+        .ok_or_else(|| Refused::new("plugins_disabled", "Plugins are not available."))
+}
+
+#[cfg(hew_preview)]
+fn bus_refused(r: crate::preview_only::plugins::BusRefusal) -> Refused {
+    Refused::new(r.name, r.explanation)
+}
+
+/// `hew.plugin.list`: read-only.
+#[cfg(hew_preview)]
+fn cmd_plugin_list(app: &AppHandle) -> Result<Value, Refused> {
+    let state = plugin_state(app)?;
+    let open = |label: &str| app.get_webview_window(label).is_some();
+    crate::preview_only::plugins::bus_list(&state, crate::preview_only::plugins::now_ms(), &open)
+        .map_err(bus_refused)
+}
+
+/// `hew.plugin.dev {path}`: records the request and shows it in every
+/// window; the person takes it from there. Nothing is staged, picked or
+/// read here. Only windows still open count as running a plugin host.
+#[cfg(hew_preview)]
+fn cmd_plugin_dev(app: &AppHandle, params: &Value) -> Result<Value, Refused> {
+    use crate::preview_only::plugins::{self, Ui};
+    let state = plugin_state(app)?;
+    let open = |label: &str| app.get_webview_window(label).is_some();
+    let shown = plugins::bus_dev(&state, params, plugins::now_ms(), &open).map_err(bus_refused)?;
+    if let Some(request) = shown {
+        plugins::app_events(app).dev_request(Some(request));
+    }
+    Ok(json!({ "status": "awaiting_user" }))
 }
 
 /// An unsubscribe answered by window `label`'s session applies to the
@@ -1580,12 +1638,24 @@ pub(crate) fn handle_frame(app: &AppHandle, conn: &mut ConnRoute, line: &str) ->
             method,
             params,
             wrapped,
+            dry_run,
         } => {
             if conn.hello.is_none() {
                 return Outcome::Reply(error_reply(&id, NOT_READY, "hew.meta.hello first"));
             }
             // An invalid-params refusal is protocol-level (-32602), not a
             // typed refusal — mirror the dispatcher's own classes.
+            // Asking the person is never rehearsed: a rehearsal changes
+            // nothing and shows nothing.
+            if dry_run && method == "hew.plugin.dev" {
+                return Outcome::Reply(refusal_reply(
+                    &id,
+                    method,
+                    "dry_run_host_command",
+                    "hew.plugin.dev asks the person in Hew, so it cannot be rehearsed.",
+                    json!({ "method": method }),
+                ));
+            }
             match run_host_command(app, conn, method, &params) {
                 Ok(result) => Outcome::Reply(command_reply(&id, method, wrapped, result)),
                 Err(r)
@@ -1831,7 +1901,8 @@ mod tests {
                 id: json!(1),
                 method: "hew.doc.attach",
                 params: json!({"document":"doc_2"}),
-                wrapped: false
+                wrapped: false,
+                dry_run: false
             }
         );
         let wrapped = classify(
@@ -1843,8 +1914,62 @@ mod tests {
                 id: json!("t"),
                 method: "hew.doc.new",
                 params: json!({"focus":"front"}),
-                wrapped: true
+                wrapped: true,
+                dry_run: false
             }
+        );
+    }
+
+    #[test]
+    fn the_plugin_commands_are_the_shells_only_in_a_preview_build() {
+        for method in ["hew.plugin.list", "hew.plugin.dev"] {
+            let bare = classify(&format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":{{"path":"/x"}}}}"#
+            ));
+            let wrapped = classify(&format!(
+                r#"{{"jsonrpc":"2.0","id":2,"method":"hew.doc.transact","params":{{"commands":[{{"method":"{method}","params":{{}}}}]}}}}"#
+            ));
+            if cfg!(hew_preview) {
+                assert!(
+                    matches!(bare, Routed::Host { method: m, wrapped: false, .. } if m == method),
+                    "{method}: {bare:?}"
+                );
+                assert!(
+                    matches!(wrapped, Routed::Host { method: m, wrapped: true, .. } if m == method),
+                    "{method}: {wrapped:?}"
+                );
+            } else {
+                // Forwarded as any method the shell does not answer; the
+                // app's dispatcher answers it as it answers an unknown one.
+                assert!(matches!(bare, Routed::Forward { .. }), "{method}");
+                assert!(matches!(wrapped, Routed::Forward { .. }), "{method}");
+            }
+        }
+        assert!(
+            PREVIEW_HOST_METHODS.is_empty() != cfg!(hew_preview),
+            "the plugin commands exist exactly in a preview build"
+        );
+        // In a preview build a rehearsal reaches the shell's answer marked
+        // `dry_run`, and `handle_frame` refuses `hew.plugin.dev` there
+        // (`dry_run_host_command`) before anything is recorded or shown; in
+        // a production build the method is forwarded as any unknown one.
+        let rehearsal = classify(
+            r#"{"jsonrpc":"2.0","id":3,"method":"hew.doc.transact","params":{"dry_run":true,"commands":[{"method":"hew.plugin.dev","params":{"path":"/x"}}]}}"#,
+        );
+        if cfg!(hew_preview) {
+            assert!(
+                matches!(rehearsal, Routed::Host { dry_run: true, .. }),
+                "{rehearsal:?}"
+            );
+        } else {
+            assert!(matches!(rehearsal, Routed::Forward { .. }), "{rehearsal:?}");
+        }
+        let real = classify(
+            r#"{"jsonrpc":"2.0","id":4,"method":"hew.doc.transact","params":{"commands":[{"method":"hew.doc.new","params":{}}]}}"#,
+        );
+        assert!(
+            matches!(real, Routed::Host { dry_run: false, .. }),
+            "{real:?}"
         );
     }
 
@@ -1862,7 +1987,8 @@ mod tests {
                 id: json!(1),
                 method: "hew.doc.close",
                 params: json!({"discard":true,"document":"doc_2"}),
-                wrapped: false
+                wrapped: false,
+                dry_run: false
             }
         );
         let wrapped = classify(
@@ -1874,7 +2000,8 @@ mod tests {
                 id: json!(2),
                 method: "hew.doc.focus",
                 params: json!({"document":"doc_3"}),
-                wrapped: true
+                wrapped: true,
+                dry_run: false
             }
         );
         // An explicit param wins over the envelope.

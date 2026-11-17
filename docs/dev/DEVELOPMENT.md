@@ -602,7 +602,7 @@ a production build:
 | `panes` | Settings panes | `paneAllowed('<id>')` at the one tab table |
 | `shellCommands` | desktop commands | defined under `src/preview_only/`, a module compiled only with `cfg(hew_preview)`, and absent from the handler list every build registers |
 | `kernelExports` | exports of the WASM module | `#[cfg(hew_preview)]` in `crates/wasm-api` |
-| `cliCommands` | `hew-cli` subcommands | `#[cfg(hew_preview)]` on the match arm and the usage text |
+| `cliCommands` | `hew-cli` subcommands | `#[cfg(hew_preview)]` on the match arm, the usage text, the "did you mean" list and the module behind it, so `hew-cli <word> --help` is answered as for any unknown word |
 | `storage` | folders, databases and settings-key prefixes | touched only by code in the gated modules |
 | `markers` | strings that must not be in a production artifact | scanned for |
 
@@ -615,7 +615,22 @@ commands a `shellCommands` list names answer whether the switch is on or
 off; what the switch decides is whether the app's UI and loader call
 them.
 An event name a loader feature adds is a `GATED_VALUES` row, as for any
-other feature.
+other feature. A bus command the desktop shell answers itself instead of
+forwarding it to the app (`hew.plugin.list`, `hew.plugin.dev`) is named
+in `PREVIEW_HOST_METHODS` in `shells/tauri/src-tauri/src/live_router.rs`,
+which is empty in a production build; there it is forwarded like any
+other method, and the app's dispatcher answers it from the registry.
+A production `hew-cli` does not rely on that: in `--live` mode
+(`dispatch`, `run`, `mcp`) `LiveSession::dispatch`, the one place every
+live request passes, refuses with `preview_only` any method the registry
+marks as a Preview command, bare or inside `hew.doc.transact`, before
+anything is sent. A method the registry does not know is forwarded, since
+a newer app may serve it. The MCP server of `hew-cli` also refuses every
+`hew.plugin.*` method but `hew.plugin.list` to an agent in every build; a
+production build leaves a name the registry marks to that `preview_only`
+answer and refuses any other with wording that names no feature.
+`crates/hew-cli/tests/live_preview_wall.rs` pairs each build of the CLI
+with a fake app socket that records what it is sent.
 
 Both shells' content security policies live in
 `shells/csp/policies.json`: a `production` and a `preview` policy for

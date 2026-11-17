@@ -6,11 +6,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { requiresPreview } from '../test/requiresPreview'
 import { FakeDir, linkedChannels } from '../test/opfsFake'
-import { storedZip } from '../test/storedZip'
+import { storedZipOf as storedZip } from './storedZip'
 import { fakeWasm, indexStoredZip, manifestJson, pluginFile, textAt, treeOf, type ListedFile } from './testKit'
 import {
   compareCodePoints,
+  folderNameOk,
   makeWebPluginStore,
+  packFolder,
   recordFingerprint,
   rollbackFingerprint,
   storageDelete,
@@ -305,6 +307,59 @@ describe('on, off, uninstall', () => {
     expect(plugins.dirs.has('com.example.one')).toBe(false)
     expect([...staging.dirs.keys()]).toEqual([`com.example.one-more-${token}`])
     expect(await refusal(store.uninstall('com.example.one'))).toBe('not_installed')
+  })
+})
+
+describe('command names', () => {
+  const commands = (...ids: string[]) => ({ contributes: { commands: ids.map((id) => ({ id, class: 'read_only', summary: 's' })) } })
+
+  it('refuses at stage a command whose namespaced name another installed plugin has, dots in ids counted', async () => {
+    const { store } = setup()
+    await install(store, { id: 'com.acme', ...commands('tool.run') })
+    expect(await refusal(store.stageFile(pluginFile({ id: 'com.acme.tool', ...commands('run') })))).toBe('command_name_taken')
+    await expect(store.stageFile(pluginFile({ id: 'com.acme.tool', ...commands('go') }))).resolves.toBeTruthy()
+    // The plugin's own earlier version is not another plugin.
+    await expect(store.stageFile(pluginFile({ id: 'com.acme', version: '2.0.0', ...commands('tool.run') }))).resolves.toBeTruthy()
+  })
+
+  it('says which name, cleaned, and refuses again at commit when another plugin took it while the sheet was open', async () => {
+    const { store } = setup()
+    const staged = await store.stageFile(pluginFile({ id: 'com.acme.tool', ...commands('run') }))
+    await install(store, { id: 'com.acme', ...commands('tool.run') })
+    const failure = await store.commit(staged.token, true).then(
+      () => null,
+      (e: PluginError) => e,
+    )
+    expect(failure?.refusal).toBe('command_name_taken')
+    expect(failure?.message).toBe(
+      'Another installed plugin already has a command named "com.acme.tool.run". Rename this plugin\'s command.',
+    )
+    expect(await refusal(store.uninstall('com.acme.tool'))).toBe('not_installed')
+  })
+})
+
+describe('a rollback follows the install rules', () => {
+  const commands = (...ids: string[]) => ({ contributes: { commands: ids.map((id) => ({ id, class: 'read_only', summary: 's' })) } })
+
+  it('refuses a version whose command name another plugin took since, moving nothing', async () => {
+    const { root, store } = setup()
+    await install(store, { id: 'com.acme', ...commands('tool.run') })
+    await install(store, { id: 'com.acme', version: '2.0.0' })
+    await install(store, { id: 'com.acme.tool', ...commands('run') })
+    const before = treeOf(root)
+    expect(await refusal(store.rollback('com.acme'))).toBe('command_name_taken')
+    expect(treeOf(root)).toEqual(before)
+  })
+
+  it('refuses a version whose requirement is gone, moving nothing', async () => {
+    const { root, store } = setup()
+    await install(store, { id: 'com.example.dep' })
+    await install(store, { id: 'com.acme', requires: [{ id: 'com.example.dep', range: '^1' }] })
+    await install(store, { id: 'com.acme', version: '2.0.0' })
+    await store.uninstall('com.example.dep')
+    const before = treeOf(root)
+    expect(await refusal(store.rollback('com.acme'))).toBe('dependency_missing')
+    expect(treeOf(root)).toEqual(before)
   })
 })
 
@@ -1227,5 +1282,255 @@ describe('saved keys sort by code point, as the desktop store sorts them', () =>
     await store.storage.storageSet('com.example.one', wide, '2')
     await store.storage.storageSet('com.example.one', 'a', '3')
     expect(await store.storage.storageList('com.example.one')).toEqual(['a', wide, emoji])
+  })
+})
+
+
+// ----------------------------------------------------- a folder, copied in
+
+/** A picked folder: paths to contents, as the browser's handles. */
+function pickedFolder(name: string, entries: Record<string, string | Uint8Array>): FakeDir {
+  const root = new FakeDir(name)
+  for (const [path, content] of Object.entries(entries)) {
+    const parts = path.split('/')
+    let dir = root
+    for (const p of parts.slice(0, -1)) {
+      let next = dir.dirs.get(p)
+      if (next === undefined) {
+        next = new FakeDir(p)
+        dir.dirs.set(p, next)
+      }
+      dir = next
+    }
+    dir.files.set(parts[parts.length - 1], { bytes: typeof content === 'string' ? new TextEncoder().encode(content) : content, mtime: 0 })
+  }
+  return root
+}
+
+/** A folder whose files report `sizes` and count every byte read. */
+function sizedFolder(sizes: Record<string, number>): { dir: FileSystemDirectoryHandle; reads: string[] } {
+  const reads: string[] = []
+  const handles = Object.entries(sizes).map(([name, size]) => [
+    name,
+    {
+      kind: 'file',
+      name,
+      getFile: async () => ({
+        size,
+        arrayBuffer: async () => {
+          reads.push(name)
+          return new ArrayBuffer(size)
+        },
+      }),
+    },
+  ])
+  const dir = {
+    kind: 'directory',
+    name: 'big',
+    async *entries() {
+      for (const h of handles) yield h
+    },
+  }
+  return { dir: dir as unknown as FileSystemDirectoryHandle, reads }
+}
+
+const asHandle = (d: FakeDir): FileSystemDirectoryHandle => d as unknown as FileSystemDirectoryHandle
+
+describe('installing a copy of a folder (the web)', () => {
+  const plugin = (over = {}, extra: Record<string, string> = {}) =>
+    pickedFolder('my-plugin', { 'hew-plugin.json': manifestJson(over), 'dist/background.js': '// background', ...extra })
+
+  it('packs the folder into a stored package the reader reads, and installs it as a file named after the folder', async () => {
+    const { root, store } = setup()
+    const staged = await store.stageFolder(asHandle(plugin({}, { 'icons/a.png': 'png' })))
+    expect(staged.consent.source).toEqual({ kind: 'file', name: 'my-plugin', origin: 'folder' })
+    expect(treeOf(root)).toEqual([])
+    const record = await store.commit(staged.token, true)
+    expect(record).toMatchObject({ id: 'com.example.one', source: { kind: 'file', name: 'my-plugin' }, enabled: true })
+    expect(treeOf(root)).toEqual([
+      'plugins/com.example.one/files/dist/background.js',
+      'plugins/com.example.one/files/hew-plugin.json',
+      'plugins/com.example.one/files/icons/a.png',
+      'plugins/com.example.one/hew-plugin.json',
+      'plugins/com.example.one/installed.json',
+    ])
+    expect(await textAt(root, 'plugins/com.example.one/files/dist/background.js')).toBe('// background')
+  })
+
+  it('builds what the kernel would read: every file, byte for byte, in a sorted stored zip', async () => {
+    const bytes = await packFolder(asHandle(plugin({}, { 'b.txt': 'bee', 'a/z.txt': 'zed' })))
+    const files = indexStoredZip(bytes)
+    expect(files.map((f) => f.path)).toEqual(['a/z.txt', 'b.txt', 'dist/background.js', 'hew-plugin.json'])
+    const at = (path: string) => {
+      const f = files.find((x) => x.path === path)!
+      return new TextDecoder().decode(bytes.subarray(f.offset, f.offset + f.size))
+    }
+    expect(at('b.txt')).toBe('bee')
+    expect(at('a/z.txt')).toBe('zed')
+  })
+
+  it('refuses a name the package reader refuses, and names that collide ignoring case', async () => {
+    const { store } = setup()
+    for (const bad of ['a:b.js', 'CON.js', 'lpt1', 'trailing.', 'trailing ', 'caf\u00e9.js', 'tab\there', 'q?.js', 'back\\slash']) {
+      expect(await refusal(store.stageFolder(asHandle(plugin({}, { [bad]: 'x' })))), bad).toBe('package_path_invalid')
+    }
+    expect(await refusal(store.stageFolder(asHandle(plugin({}, { 'A.js': 'x', 'a.js': 'y' }))))).toBe('package_path_invalid')
+    expect(await refusal(store.stageFolder(asHandle(plugin({}, { 'Dist/x.js': 'x' }))))).toBe('package_path_invalid')
+    expect(await refusal(store.stageFolder(asHandle(plugin({}, { [`${'a'.repeat(1020)}/b.js`]: 'x' }))))).toBe('package_path_invalid')
+    for (const ok of ['.hidden', 'a-b_c.d.js', 'CONSOLE.js', 'x y.js']) expect(folderNameOk(ok), ok).toBe(true)
+  })
+
+  it('refuses a folder over the caps before reading any of it', async () => {
+    const { store } = setup()
+    for (const sizes of [{ 'one.bin': (32 << 20) + 1 }, { 'a.bin': 30 << 20, 'b.bin': 30 << 20, 'c.bin': 5 << 20 }] as Record<string, number>[]) {
+      const { dir, reads } = sizedFolder(sizes)
+      expect(await refusal(store.stageFolder(dir))).toBe('package_too_large')
+      expect(reads).toEqual([])
+    }
+    const many: Record<string, number> = {}
+    for (let i = 0; i < 4097; i++) many[`f${i}.txt`] = 0
+    const { dir, reads } = sizedFolder(many)
+    expect(await refusal(store.stageFolder(dir))).toBe('package_too_large')
+    expect(reads).toEqual([])
+    // Just under on the data, over once the zip's own headers are counted.
+    const tight = sizedFolder({ 'a.bin': 32 << 20, 'b.bin': (32 << 20) - 10 })
+    expect(await refusal(store.stageFolder(tight.dir))).toBe('package_too_large')
+    expect(tight.reads).toEqual([])
+  })
+
+  it('refuses a file that changed size while it was read', async () => {
+    const { store } = setup()
+    const dir = plugin()
+    const file = dir.files.get('hew-plugin.json')!
+    let calls = 0
+    const real = dir.getFileHandle.bind(dir)
+    dir.getFileHandle = async (name: string, options?: { create?: boolean }) => {
+      const h = await real(name, options)
+      if (name !== 'hew-plugin.json') return h
+      return {
+        ...h,
+        getFile: async () => {
+          calls++
+          const f = await h.getFile()
+          return calls === 1 ? f : { ...f, arrayBuffer: async () => new Uint8Array([...file.bytes, 32]).buffer }
+        },
+      }
+    }
+    expect(await refusal(store.stageFolder(asHandle(dir)))).toBe('package_unreadable')
+  })
+
+  it('cuts off a listing that never ends, and a tree that nests without end, as too large', async () => {
+    const { store } = setup()
+    let yielded = 0
+    const endless = {
+      kind: 'directory',
+      name: 'endless',
+      async *entries() {
+        for (;;) {
+          yielded++
+          yield [`d${yielded}`, { kind: 'directory', name: `d${yielded}`, async *entries() {} }]
+        }
+      },
+    }
+    expect(await refusal(store.stageFolder(endless as unknown as FileSystemDirectoryHandle))).toBe('package_too_large')
+    expect(yielded).toBeLessThanOrEqual(4097)
+    let depth = 0
+    const nest = (): unknown => ({
+      kind: 'directory',
+      name: 'n',
+      async *entries() {
+        depth++
+        yield ['n', nest()]
+      },
+    })
+    expect(await refusal(store.stageFolder(nest() as FileSystemDirectoryHandle))).toBe('package_too_large')
+    expect(depth).toBeLessThanOrEqual(513)
+    let dirsYielded = 0
+    const dirsOnly = {
+      kind: 'directory',
+      name: 'dirs',
+      async *entries() {
+        for (let i = 0; i < 5000; i++) {
+          dirsYielded++
+          yield [`e${i}`, { kind: 'directory', name: `e${i}`, async *entries() {} }]
+        }
+      },
+    }
+    expect(await refusal(store.stageFolder(dirsOnly as unknown as FileSystemDirectoryHandle))).toBe('package_too_large')
+    // Folders count toward the entry cap, and the walk stops there.
+    expect(dirsYielded).toBeLessThan(5000)
+  })
+
+  it('refuses a file that grew between being measured and being read, and stops a stream that outruns its size', async () => {
+    const mk = (measured: number, later: number, chunks: number[]) => {
+      let reads = 0
+      let pulled = 0
+      let calls = 0
+      const dir = {
+        kind: 'directory',
+        name: 'p',
+        async *entries() {
+          yield [
+            'hew-plugin.json',
+            {
+              kind: 'file',
+              name: 'hew-plugin.json',
+              getFile: async () => ({
+                size: ++calls === 1 ? measured : later,
+                arrayBuffer: async () => {
+                  reads++
+                  return new ArrayBuffer(later)
+                },
+                stream: () =>
+                  new ReadableStream<Uint8Array>({
+                    pull(c) {
+                      const n = chunks[pulled++]
+                      if (n === undefined) c.close()
+                      else c.enqueue(new Uint8Array(n))
+                    },
+                  }),
+              }),
+            },
+          ]
+        },
+      }
+      return { dir: dir as unknown as FileSystemDirectoryHandle, reads: () => reads, pulled: () => pulled }
+    }
+    const grew = mk(10, 1 << 20, [])
+    await expect(packFolder(grew.dir)).rejects.toMatchObject({ refusal: 'package_unreadable' })
+    expect(grew.reads()).toBe(0)
+    expect(grew.pulled()).toBe(0)
+    const lies = mk(10, 10, [6, 6, 6, 6, 6])
+    await expect(packFolder(lies.dir)).rejects.toMatchObject({ refusal: 'package_unreadable' })
+    expect(lies.pulled()).toBeLessThan(5)
+    const honest = mk(10, 10, [4, 6])
+    expect((await packFolder(honest.dir)).length).toBeGreaterThan(10)
+  })
+
+  it('records a folder copy as one, and shows the stored record the field the kernel ignores', async () => {
+    const { store } = setup()
+    const staged = await store.stageFolder(asHandle(plugin()))
+    expect(staged.consent.source).toEqual({ kind: 'file', name: 'my-plugin', origin: 'folder' })
+    const record = await store.commit(staged.token, true)
+    expect(record?.source).toEqual({ kind: 'file', name: 'my-plugin', origin: 'folder' })
+    const [l] = await store.list()
+    expect(l.kind === 'installed' && l.installed.source).toEqual({ kind: 'file', name: 'my-plugin', origin: 'folder' })
+  })
+
+  it('says a folder with no manifest has none', async () => {
+    const { store } = setup()
+    const failure = async (p: Promise<unknown>) => (await p.then(() => null, (e: PluginError) => e)) as PluginError
+    const dir = pickedFolder('no-manifest', { 'dist/background.js': '// background' })
+    const folder = await failure(store.stageFolder(asHandle(dir)))
+    expect(folder.refusal).toBe('manifest_missing')
+    expect(folder.message).toBe('This folder has no hew-plugin.json at its top level.')
+  })
+
+  it('cleans the folder name it records', async () => {
+    const { store } = setup()
+    const dir = plugin()
+    Object.defineProperty(dir, 'name', { value: '\u202Emy\u0000 plugin\n' })
+    const staged = await store.stageFolder(asHandle(dir))
+    expect(staged.consent.source).toEqual({ kind: 'file', name: 'my plugin', origin: 'folder' })
   })
 })

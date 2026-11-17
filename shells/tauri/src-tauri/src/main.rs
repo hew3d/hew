@@ -3696,6 +3696,18 @@ fn main() {
             preview_only::plugins::plugin_storage_delete,
             #[cfg(hew_preview)]
             preview_only::plugins::plugin_storage_list,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_dev_mode,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_set_dev_mode,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_dev_review,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_dev_request,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_dev_request_dismiss,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_host_present,
         ])
         // Build and attach the native menu bar; wire menu-item clicks to
         // `menu-action` events emitted to the webview.
@@ -5319,7 +5331,11 @@ fn main() {
                     .map(ToString::to_string)
                     .as_deref(),
                 env!("HEW_PLUGIN_BOOT_HASH"),
+                handle.path().app_config_dir().ok().as_deref(),
             ));
+            // The developer-folder watcher, once the state is there.
+            #[cfg(hew_preview)]
+            preview_only::plugins::start_watching(handle);
             // "Open on Phone" server setting + HTTP client — loaded once from
             // server.json; only `set_server_setting` ever changes it.
             app.manage(relay_client::RelayState::new(relay_client::load_setting(
@@ -5467,6 +5483,9 @@ fn main() {
                 }
                 tauri::WindowEvent::Destroyed => {
                     fly_cursor::unlock_if_locked(app, window);
+                    // The window's plugin host is gone with it.
+                    #[cfg(hew_preview)]
+                    preview_only::plugins::window_gone(app, window.label());
                     if let Ok(mut ready) = app.state::<Mutex<ReadyWindows>>().lock() {
                         ready.0.remove(window.label());
                     }
@@ -5640,6 +5659,10 @@ fn main() {
                 // (no RunEvent at all) is instead cleaned up by the NEXT
                 // launch's live::start sweeping stale discovery files.
                 live::cleanup();
+                // The developer-folder watcher's thread is stopped and
+                // joined, so nothing is left polling.
+                #[cfg(hew_preview)]
+                preview_only::plugins::stop_watching(app);
             }
             // macOS: intercept "open document" Apple events (warm + cold
             // start). deliver_open emits to the active document window once

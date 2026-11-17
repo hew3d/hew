@@ -48,6 +48,8 @@
 import { appVersionString } from '../buildInfo'
 import { readFileIn, subdir, writeFileIn } from '../io/opfs'
 import { PluginError, toPluginError } from './pluginError'
+import { cleanText } from './pluginText'
+import { storedZip, storedZipSize } from './storedZip'
 import type { ConsentPayload, InstallSource, Installed, Listed, PendingView, PluginManifest } from './types'
 
 /** The kernel's plugin exports, as the page calls them. */
@@ -100,6 +102,12 @@ export interface WebPluginStorage {
 export interface WebPluginStore {
   list(): Promise<Listed[]>
   stageFile(file: File): Promise<PendingView>
+  /** Stages a copy of a folder the browser's folder picker gave the page:
+   *  its files are walked under the package rules and caps, packed into a
+   *  stored zip in memory, and read by the same package reader a file is.
+   *  Recorded as a file install named after the folder; nothing is read
+   *  from the folder again. */
+  stageFolder(dir: FileSystemDirectoryHandle): Promise<PendingView>
   commit(token: string, accept: boolean): Promise<Installed | null>
   /** `shown` is `recordFingerprint` of the record the person was shown when
    *  turning a plugin on; the call refuses `plugin_changed` if it differs. */
@@ -137,6 +145,14 @@ const KEY_PREFIX = 'hew.plugin.'
 const SCHEMA = 1
 const PENDING_TTL_MS = 10 * 60 * 1000
 const MAX_PACKAGE_BYTES = 64 << 20
+/** The package reader's other caps (`crates/plugin-host/src/package.rs`),
+ *  applied to a folder before anything in it is read. */
+const MAX_PACKAGE_ENTRIES = 4096
+const MAX_ENTRY_BYTES = 32 << 20
+const MAX_PATH_BYTES = 1024
+/** The deepest a folder may nest: every name is at least one character and a
+ *  slash, so a path of at most `MAX_PATH_BYTES` cannot reach further. */
+const MAX_FOLDER_DEPTH = MAX_PATH_BYTES >> 1
 const RESERVED_FIRST_LABEL = 'hew'
 
 const KNOWN_RECORD_KEYS = new Set([
@@ -468,6 +484,168 @@ interface Pending {
   createdAt: number
 }
 
+/** Names Windows keeps for devices, with any extension; the package
+ *  reader's `DEVICE_NAMES`. */
+const DEVICE_NAMES = new Set([
+  'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$', 'CLOCK$',
+  ...[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, '\u00b9', '\u00b2', '\u00b3'].flatMap((n) => [`COM${n}`, `LPT${n}`]),
+])
+
+/** One name in a folder, under the package reader's rules (`segment_ok`):
+ *  printable ASCII, none of `\ : < > " | ? *`, no trailing dot or space,
+ *  not a device name. */
+export function folderNameOk(name: string): boolean {
+  if (name === '' || name.endsWith('.') || name.endsWith(' ')) return false
+  if (!/^[\x20-\x7e]+$/.test(name) || /[\\:<>"|?*\/]/.test(name)) return false
+  const stem = name.split('.')[0].trimEnd()
+  return !DEVICE_NAMES.has(stem.toUpperCase())
+}
+
+function folderRefused(path: string): PluginError {
+  return new PluginError(
+    'package_path_invalid',
+    `The folder holds "${cleanText(path, 200)}", which is not a file name Hew accepts in a plugin. Use plain letters, digits, dots, dashes and underscores.`,
+  )
+}
+
+function folderTooLarge(): PluginError {
+  return new PluginError('package_too_large', 'This folder is too large to install as a plugin: at most 4,096 files, 32 MB in one file and 64 MB in all.')
+}
+
+/**
+ * The files of a folder the browser's picker gave the page, as a stored zip,
+ * under the package reader's rules: every name checked, names that collide
+ * ignoring case refused, and the entry, file and total caps measured on what
+ * the browser reports before a byte is read, so an oversized folder is
+ * refused without being read into memory. The kernel reads the result as it
+ * reads any package and judges it again.
+ */
+export async function packFolder(dir: FileSystemDirectoryHandle): Promise<Uint8Array> {
+  const files: { path: string; handle: FileSystemFileHandle; size: number }[] = []
+  const folded = new Set<string>()
+  let total = 0
+  // Every entry counts, directories too, so a tree of empty folders (or a
+  // listing that never ends) is cut off at the same cap as a package.
+  let visited = 0
+  const walk = async (at: FileSystemDirectoryHandle, prefix: string, depth: number): Promise<void> => {
+    for await (const [name, handle] of at.entries()) {
+      if (++visited > MAX_PACKAGE_ENTRIES || depth > MAX_FOLDER_DEPTH) throw folderTooLarge()
+      const path = prefix + name
+      if (!folderNameOk(name) || path.length > MAX_PATH_BYTES) throw folderRefused(path)
+      const key = path.toLowerCase()
+      if (folded.has(key)) throw folderRefused(path)
+      folded.add(key)
+      if (handle.kind === 'directory') {
+        await walk(handle as FileSystemDirectoryHandle, `${path}/`, depth + 1)
+        continue
+      }
+      if (handle.kind !== 'file') throw folderRefused(path)
+      if (files.length + 1 > MAX_PACKAGE_ENTRIES) throw folderTooLarge()
+      const fileHandle = handle as FileSystemFileHandle
+      const size = (await fileHandle.getFile()).size
+      total += size
+      if (size > MAX_ENTRY_BYTES || total > MAX_PACKAGE_BYTES) throw folderTooLarge()
+      files.push({ path, handle: fileHandle, size })
+    }
+  }
+  await walk(dir, '', 1)
+  const size = storedZipSize(files.map((f) => ({ nameBytes: f.path.length, size: f.size })))
+  if (size > MAX_PACKAGE_BYTES) throw folderTooLarge()
+  files.sort((a, b) => compareCodePoints(a.path, b.path))
+  const entries: [string, Uint8Array][] = []
+  let read = 0
+  for (const f of files) {
+    const changed = (): PluginError =>
+      new PluginError('package_unreadable', `"${cleanText(f.path, 200)}" changed while Hew was reading the folder. Try again.`)
+    const file = await f.handle.getFile()
+    // The size is checked before any byte is read: a file that grew since it
+    // was measured is refused unread.
+    if (file.size !== f.size || read + file.size > MAX_PACKAGE_BYTES) throw changed()
+    const bytes = await readCapped(file, f.size)
+    if (bytes === null || bytes.length !== f.size) throw changed()
+    read += bytes.length
+    entries.push([f.path, bytes])
+  }
+  return storedZip(entries)
+}
+
+/**
+ * The bytes of `file`, or null when it holds more than `cap`. `File.size` is
+ * a snapshot taken when the file was handed over and the browser refuses to
+ * read a file that changed since, but nothing here relies on that: the bytes
+ * are read through a stream with a running count, and the read stops as soon
+ * as the count passes `cap`, so at most `cap` plus one chunk is ever held.
+ * Without a stream, the size is checked first and `arrayBuffer` is used.
+ */
+async function readCapped(file: File, cap: number): Promise<Uint8Array | null> {
+  if (typeof file.stream !== 'function') {
+    if (file.size > cap) return null
+    const all = new Uint8Array(await file.arrayBuffer())
+    return all.length > cap ? null : all
+  }
+  const reader = file.stream().getReader()
+  const out = new Uint8Array(cap)
+  let n = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (n + value.length > cap) {
+      await reader.cancel().catch(() => undefined)
+      return null
+    }
+    out.set(value, n)
+    n += value.length
+  }
+  return n === cap ? out : out.slice(0, n)
+}
+
+/** The ids of a manifest's commands, as the manifest declares them. */
+function commandIds(manifest: PluginManifest): string[] {
+  const contributes = manifest.contributes as { commands?: unknown } | null | undefined
+  const commands = contributes?.commands
+  if (!Array.isArray(commands)) return []
+  return commands.flatMap((c) => (typeof (c as { id?: unknown } | null)?.id === 'string' ? [(c as { id: string }).id] : []))
+}
+
+/**
+ * The first namespaced command name (`<plugin-id>.<command-id>`) of
+ * `manifest` that another installed plugin already declares, or null.
+ * Command ids may hold dots, so `com.acme` with `tool.run` and
+ * `com.acme.tool` with `run` are one name. Every installed plugin counts,
+ * turned on or not, so turning one on later cannot collide either. The same
+ * rule as `command_name_taken` in `crates/plugin-host`.
+ */
+export function commandNameTaken(
+  manifest: PluginManifest,
+  others: readonly { installed: { id: string }; manifest: PluginManifest }[],
+): string | null {
+  const taken = new Set<string>()
+  for (const o of others) {
+    if (o.installed.id === manifest.id) continue
+    for (const id of commandIds(o.manifest)) taken.add(`${o.installed.id}.${id}`)
+  }
+  for (const id of commandIds(manifest)) {
+    const name = `${manifest.id}.${id}`
+    if (taken.has(name)) return name
+  }
+  return null
+}
+
+function checkCommandNames(manifest: PluginManifest, rows: readonly { installed: Installed; manifest: PluginManifest }[]): void {
+  const name = commandNameTaken(manifest, rows)
+  if (name !== null) {
+    throw new PluginError(
+      'command_name_taken',
+      `Another installed plugin already has a command named "${cleanText(name, 256)}". Rename this plugin's command.`,
+    )
+  }
+}
+
+/** The name a folder install is recorded under: the folder's, cleaned. */
+export function folderSourceName(dir: FileSystemDirectoryHandle): string {
+  return cleanText(dir.name, 128) || 'folder'
+}
+
 export function makeWebPluginStore(deps: WebPluginDeps): WebPluginStore {
   const opfsRoot = deps.opfsRoot ?? (() => navigator.storage.getDirectory())
   const channel =
@@ -734,6 +912,94 @@ export function makeWebPluginStore(deps: WebPluginDeps): WebPluginStore {
     }
   }
 
+  /** Reads a stored zip with the kernel's package reader and stages it
+   *  under the file source `name`. Called inside `serial`. */
+  async function stagePackage(bytes: Uint8Array, name: string, fromFolder = false): Promise<PendingView> {
+    const wasm = await deps.wasm()
+    let parsed: { manifest: PluginManifest; files: { path: string; offset: number; size: number }[] }
+    try {
+      parsed = JSON.parse(wasm.plugin_package_from_zip(bytes))
+    } catch (e) {
+      const err = toPluginError(e)
+      // A folder copy is a zip only inside Hew; the person picked a folder.
+      if (fromFolder && err.refusal === 'manifest_missing') {
+        throw new PluginError('manifest_missing', 'This folder has no hew-plugin.json at its top level.')
+      }
+      throw err
+    }
+
+    // The kernel read the archive and says where each file's bytes are;
+    // this takes exactly those ranges and reads nothing else of the zip.
+    const files = new Map<string, Uint8Array>()
+    for (const f of parsed.files) {
+      const end = f.offset + f.size
+      if (!Number.isSafeInteger(f.offset) || !Number.isSafeInteger(f.size) || f.offset < 0 || f.size < 0 || end > bytes.length) {
+        throw new PluginError('package_unreadable', `This file is not a plugin package Hew can read (${f.path} is out of range).`)
+      }
+      files.set(f.path, bytes.slice(f.offset, end))
+    }
+    // What is stored is the kernel-listed manifest file, and the manifest
+    // the person consents to is read from those same bytes.
+    const manifestBytes = files.get(MANIFEST_FILE)
+    if (manifestBytes === undefined) throw new PluginError('manifest_missing', 'The package has no hew-plugin.json at its top level.')
+    let manifest: PluginManifest
+    try {
+      manifest = JSON.parse(wasm.plugin_manifest_parse(decoder.decode(manifestBytes))) as PluginManifest
+    } catch (e) {
+      throw toPluginError(e)
+    }
+    if (!sameJson(manifest, parsed.manifest)) {
+      throw new PluginError('package_unreadable', 'This file is not a plugin package Hew can read (its manifest is not the one it lists).')
+    }
+    const id = checkedId(manifest.id)
+    const manifestJson = JSON.stringify(manifest)
+    // The kernel is told the source it knows. A folder copy also carries
+    // `origin` in the stored record, a field the kernel reader ignores and
+    // the app reads back, so the row can say it was copied from a folder.
+    const sourceJson = JSON.stringify({ kind: 'file', name })
+    const source = (fromFolder ? { kind: 'file', name, origin: 'folder' } : { kind: 'file', name }) as InstallSource
+
+    const all = await listNow()
+    const rows = all.flatMap((l) => (l.kind === 'installed' ? [{ installed: l.installed, manifest: l.manifest }] : []))
+    wasm.plugin_install_check(manifestJson, sourceJson, hewVersion(), JSON.stringify(rows))
+    checkCommandNames(manifest, rows)
+    const existing = all.find((l) => (l.kind === 'installed' ? l.installed.id : l.id) === id)
+    // A record from a newer Hew is refused; a folder with no record at
+    // all is an install that never finished, and is replaced.
+    if (existing?.kind === 'unreadable' && !incomplete.has(id)) throw unreadableError(id, existing.reason)
+    const previous = existing?.kind === 'installed' ? existing : null
+
+    const consent = JSON.parse(
+      wasm.plugin_consent(
+        manifestJson,
+        sourceJson,
+        previous === null ? undefined : JSON.stringify(previous.installed),
+        previous === null ? undefined : JSON.stringify(previous.manifest),
+        undefined,
+      ),
+    ) as ConsentPayload
+    // The sheet says where it came from as the row will: a folder copy is
+    // told apart by `origin`, which the kernel's payload does not carry.
+    if (fromFolder) consent.source = source
+
+    const plugins = await pluginsDir(false)
+    if (plugins !== null) await clearStaging(plugins, id)
+    // One waiting install per plugin: a newer one replaces the older.
+    for (const [t, other] of pendings) if (other.id === id) pendings.delete(t)
+    const token = newToken()
+    pendings.set(token, {
+      id,
+      files,
+      source,
+      consent,
+      manifest,
+      previous: previous === null ? null : previous.installed,
+      previousJson: previous === null ? null : JSON.stringify(previous.installed),
+      createdAt: now(),
+    })
+    return { token, consent }
+  }
+
   return {
     list: () => reading(listNow),
 
@@ -745,76 +1011,13 @@ export function makeWebPluginStore(deps: WebPluginDeps): WebPluginStore {
         if (file.size > MAX_PACKAGE_BYTES) {
           throw new PluginError('package_too_large', 'This package is too large.')
         }
-        const wasm = await deps.wasm()
-        const bytes = new Uint8Array(await file.arrayBuffer())
-        const parsed = JSON.parse(wasm.plugin_package_from_zip(bytes)) as {
-          manifest: PluginManifest
-          files: { path: string; offset: number; size: number }[]
-        }
+        return stagePackage(new Uint8Array(await file.arrayBuffer()), file.name)
+      }),
 
-        // The kernel read the archive and says where each file's bytes are;
-        // this takes exactly those ranges and reads nothing else of the zip.
-        const files = new Map<string, Uint8Array>()
-        for (const f of parsed.files) {
-          const end = f.offset + f.size
-          if (!Number.isSafeInteger(f.offset) || !Number.isSafeInteger(f.size) || f.offset < 0 || f.size < 0 || end > bytes.length) {
-            throw new PluginError('package_unreadable', `This file is not a plugin package Hew can read (${f.path} is out of range).`)
-          }
-          files.set(f.path, bytes.slice(f.offset, end))
-        }
-        // What is stored is the kernel-listed manifest file, and the manifest
-        // the person consents to is read from those same bytes.
-        const manifestBytes = files.get(MANIFEST_FILE)
-        if (manifestBytes === undefined) throw new PluginError('manifest_missing', 'The package has no hew-plugin.json at its top level.')
-        let manifest: PluginManifest
-        try {
-          manifest = JSON.parse(wasm.plugin_manifest_parse(decoder.decode(manifestBytes))) as PluginManifest
-        } catch (e) {
-          throw toPluginError(e)
-        }
-        if (!sameJson(manifest, parsed.manifest)) {
-          throw new PluginError('package_unreadable', 'This file is not a plugin package Hew can read (its manifest is not the one it lists).')
-        }
-        const id = checkedId(manifest.id)
-        const manifestJson = JSON.stringify(manifest)
-        const source: InstallSource = { kind: 'file', name: file.name }
-        const sourceJson = JSON.stringify(source)
-
-        const all = await listNow()
-        const rows = all.flatMap((l) => (l.kind === 'installed' ? [{ installed: l.installed, manifest: l.manifest }] : []))
-        wasm.plugin_install_check(manifestJson, sourceJson, hewVersion(), JSON.stringify(rows))
-        const existing = all.find((l) => (l.kind === 'installed' ? l.installed.id : l.id) === id)
-        // A record from a newer Hew is refused; a folder with no record at
-        // all is an install that never finished, and is replaced.
-        if (existing?.kind === 'unreadable' && !incomplete.has(id)) throw unreadableError(id, existing.reason)
-        const previous = existing?.kind === 'installed' ? existing : null
-
-        const consent = JSON.parse(
-          wasm.plugin_consent(
-            manifestJson,
-            sourceJson,
-            previous === null ? undefined : JSON.stringify(previous.installed),
-            previous === null ? undefined : JSON.stringify(previous.manifest),
-            undefined,
-          ),
-        ) as ConsentPayload
-
-        const plugins = await pluginsDir(false)
-        if (plugins !== null) await clearStaging(plugins, id)
-        // One waiting install per plugin: a newer one replaces the older.
-        for (const [t, other] of pendings) if (other.id === id) pendings.delete(t)
-        const token = newToken()
-        pendings.set(token, {
-          id,
-          files,
-          source,
-          consent,
-          manifest,
-          previous: previous === null ? null : previous.installed,
-          previousJson: previous === null ? null : JSON.stringify(previous.installed),
-          createdAt: now(),
-        })
-        return { token, consent }
+    stageFolder: (dir) =>
+      serial(async () => {
+        const bytes = await packFolder(dir)
+        return stagePackage(bytes, folderSourceName(dir), true)
       }),
 
     commit: (token, accept) =>
@@ -835,6 +1038,7 @@ export function makeWebPluginStore(deps: WebPluginDeps): WebPluginStore {
         const all = await listNow()
         const rows = all.flatMap((l) => (l.kind === 'installed' ? [{ installed: l.installed, manifest: l.manifest }] : []))
         wasm.plugin_install_check(JSON.stringify(p.manifest), JSON.stringify(p.source), hewVersion(), JSON.stringify(rows))
+        checkCommandNames(p.manifest, rows)
         const nowRow = all.find((l) => (l.kind === 'installed' ? l.installed.id : l.id) === p.id)
         if (nowRow?.kind === 'unreadable' && !incomplete.has(p.id)) throw unreadableError(p.id, nowRow.reason)
         const nowJson = nowRow?.kind === 'installed' ? JSON.stringify(nowRow.installed) : null
@@ -944,14 +1148,27 @@ export function makeWebPluginStore(deps: WebPluginDeps): WebPluginStore {
         const previous = await subdir(current, PREVIOUS, false)
         if (previous === null) throw new PluginError('no_previous_version', `"${id}" has no earlier version to go back to.`)
         let before: Installed
+        let beforeManifest: PluginManifest
         try {
-          before = (await readIn(previous, id)).installed
+          const read = await readIn(previous, id)
+          before = read.installed
+          beforeManifest = read.manifest
         } catch (e) {
           if (e instanceof Unreadable) throw unreadableError(id, e.message)
           throw e
         }
         // What was shown is what comes back, or nothing does.
         if (shown !== undefined && rollbackFingerprint(cur.installed, before) !== shown) throw pluginChanged()
+        // The version coming back follows the install rules, checked
+        // against what is installed now, before anything moves: its Hew
+        // version and what it requires, and no command name another plugin
+        // has.
+        {
+          const wasm = await deps.wasm()
+          const rows = (await listNow()).flatMap((l) => (l.kind === 'installed' ? [{ installed: l.installed, manifest: l.manifest }] : []))
+          wasm.plugin_install_check(JSON.stringify(beforeManifest), JSON.stringify(before.source), hewVersion(), JSON.stringify(rows))
+          checkCommandNames(beforeManifest, rows)
+        }
         // The earlier version becomes the plugin; the one being replaced
         // becomes its `previous/`, so a second rollback goes forward again.
         // The new arrangement is built whole in staging first; saved data

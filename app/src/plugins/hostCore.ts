@@ -19,6 +19,15 @@
  * unanswered pings, an uncaught error, or a frame that navigates stops the
  * realm (`crash`). Nothing a realm sends can throw into the host: every
  * handler is wrapped and turns an exception into a crash.
+ *
+ * A plugin the store says may not run now is `blocked`, never crashed: a
+ * folder plugin while developer mode is off, a record waiting for the
+ * person to review a change, or a folder whose code cannot be read when the
+ * plugin starts. A blocked plugin keeps its commands registered, so a
+ * caller hears `unavailable` rather than that the command does not exist;
+ * it gets no crash record and no toast, and it runs again as soon as the
+ * store says it may, without being turned off and on. A folder plugin's
+ * files changing reloads it (`plugins-dev-changed`).
  */
 
 import type { ForwardRequestJson } from '../api/dispatchResult'
@@ -54,10 +63,37 @@ import { cleanText, displayName } from './pluginText'
 import { checkBootMessage, checkRealmMessage, LIMITS, RateMeter } from './realm/validate'
 import type { PluginStorageBackend } from './storageBackend'
 import type { PluginStoreAccess } from './storeAccess'
-import type { Installed, Listed, PluginManifest } from './types'
+import { needsConsent, type Installed, type Listed, type PluginManifest } from './types'
 
 /** Where a plugin stands in this window. */
-export type RealmState = 'enabled' | 'activating' | 'activated' | 'crashed'
+export type RealmState = 'enabled' | 'activating' | 'activated' | 'crashed' | 'blocked'
+
+/** Why a plugin is `blocked`. The first two come from the store and last
+ *  until it says otherwise; the last two come from a start that could not
+ *  read the plugin's code, and the next start tries again. */
+export type BlockReason = 'needs_developer_mode' | 'needs_review' | 'folder_missing' | 'main_missing'
+
+const STORE_BLOCKS: ReadonlySet<BlockReason> = new Set(['needs_developer_mode', 'needs_review'])
+
+/** What the store says keeps a plugin from running now, or null. */
+export function storeBlock(installed: Installed, devMode: boolean): BlockReason | null {
+  if (installed.source.kind === 'dir' && !devMode) return 'needs_developer_mode'
+  if (needsConsent(installed)) return 'needs_review'
+  return null
+}
+
+/** What a refused read of a plugin's main script means, or null when the
+ *  refusal is not one that says the plugin may not run now. Only the
+ *  shell's refusal names count, never text a plugin wrote. */
+function readBlock(installed: Installed, e: unknown): BlockReason | null {
+  const name = toPluginError(e).refusal
+  if (name === 'developer_mode_off') return 'needs_developer_mode'
+  if (name === 'dev_consent_pending') return 'needs_review'
+  if (installed.source.kind !== 'dir') return null
+  if (name === 'folder_missing') return 'folder_missing'
+  if (name === 'package_path_invalid') return 'main_missing'
+  return null
+}
 
 /** Either end of a `MessagePort`, as the host uses it. */
 export interface PortLike {
@@ -216,6 +252,14 @@ class NotStarted extends Error {}
 /** A start overtaken by a teardown. */
 class Stale extends Error {}
 
+/** A start the store does not allow now: the plugin is blocked, not
+ *  stopped. */
+class Blocked extends Error {
+  constructor(readonly reason: BlockReason) {
+    super(reason)
+  }
+}
+
 /** The longest a plugin command may run: the kernel's
  *  `MAX_PLUGIN_TIMEOUT_MS` (crates/api/src/registry.rs), which clamps a
  *  declared `timeout_ms` to it and gives it to a command that declares
@@ -355,7 +399,15 @@ interface Tracked {
   manifest: PluginManifest
   /** Version and grant, to tell a change from a repeat notice. */
   key: string
+  /** It was running when its folder changed under it: when the folder's
+   *  version changed (the store says so first, the reload comes after), or
+   *  when a review mark stopped it (the person may undo the change, which
+   *  clears the mark). The reload, or the mark clearing, starts it again.
+   *  Any other stop forgets it. */
+  resume: boolean
   state: RealmState
+  /** Why it is `blocked`; null in every other state. */
+  blocked: BlockReason | null
   realm: LiveRealm | null
   activation: Promise<LiveRealm | null> | null
   /** The stamps of the forwards waiting for the activation: a compound
@@ -379,7 +431,15 @@ export interface PluginHost extends ForwardRouter {
   /** Re-reads the store: registers new plugins, drops removed ones,
    *  restarts changed ones. */
   sync(): Promise<void>
+  /** Re-reads the store and reloads plugin `id` whatever changed: its realm
+   *  is stopped (`reload`), its commands registered again from the stored
+   *  manifest, and it starts again if it was running or starts with Hew.
+   *  Its storage writes still on their way are kept. What a folder plugin's
+   *  `plugins-dev-changed` does. */
+  reload(id: string): Promise<void>
   states(): Record<string, RealmState>
+  /** Why each `blocked` plugin is. */
+  reasons(): Record<string, BlockReason>
   dispose(): void
 }
 
@@ -586,7 +646,7 @@ export function createPluginHost(
   // ------------------------------------------------------------- serving
   function serve(fwd: ForwardRequestJson, signal: AbortSignal): Promise<ForwardReplyJson> {
     const p = plugins.get(fwd.plugin)
-    if (p === undefined || p.state === 'crashed' || disposed) return Promise.resolve({ failed: 'unavailable' })
+    if (p === undefined || p.state === 'crashed' || disposed || storeBlocked(p)) return Promise.resolve({ failed: 'unavailable' })
     if (signal.aborted) return Promise.resolve({ failed: 'cancelled' })
     const timeoutMs = forwardTimeoutMs(fwd.timeout_ms)
     const gen = p.gen
@@ -680,15 +740,26 @@ export function createPluginHost(
    */
   function activate(p: Tracked, reason: ActivationReason, stamp?: number): Promise<LiveRealm | null> {
     if (p.state === 'activated' && p.realm !== null) return Promise.resolve(p.realm)
-    if (p.state === 'crashed') return Promise.resolve(null)
+    if (p.state === 'crashed' || storeBlocked(p) || plugins.get(p.id) !== p) return Promise.resolve(null)
     if (stamp !== undefined && !p.joiners.has(stamp)) {
       p.joiners.add(stamp)
       nudge()
     }
     if (p.activation !== null) return p.activation
+    // A plugin blocked by its last start (its folder or code could not be
+    // read) tries again: the folder may be back.
     p.state = 'activating'
+    p.blocked = null
     const gen = p.gen
     const started = start(p, gen, reason).catch((e: unknown) => {
+      if (e instanceof Blocked) {
+        if (p.gen === gen && plugins.get(p.id) === p && p.state === 'activating') {
+          p.state = 'blocked'
+          p.blocked = e.reason
+        }
+        log('info', `Plugin ${p.id} ${p.version} cannot start now (${e.reason}).`)
+        return null
+      }
       if (e instanceof NotStarted) {
         if (p.gen === gen && p.state === 'activating') p.state = 'enabled'
         log('warn', `Plugin ${p.id} ${p.version} did not start: ${e.message}. It starts again when one of its commands is called.`)
@@ -755,8 +826,20 @@ export function createPluginHost(
   async function start(p: Tracked, gen: number, reason: ActivationReason): Promise<LiveRealm | null> {
     const manifest = p.manifest as Manifest
     const main = typeof manifest.main === 'string' ? packagePath(manifest.main) : null
-    if (main === null) throw new Error('the manifest names no main script')
-    const code = await env.store.readFile(p.id, main)
+    if (main === null) {
+      // A folder's manifest may lose its `main` while the person edits it.
+      if (p.installed.source.kind === 'dir') throw new Blocked('main_missing')
+      throw new Error('the manifest names no main script')
+    }
+    let code: ArrayBuffer
+    try {
+      code = await env.store.readFile(p.id, main)
+    } catch (e) {
+      if (p.gen !== gen) return null
+      const block = readBlock(p.installed, e)
+      if (block !== null) throw new Blocked(block)
+      throw e
+    }
     if (p.gen !== gen) return null
     if (code.byteLength > 32 << 20) throw new Error('the main script is larger than 32 MiB')
     // Waiting for the document (its id, and the moment it lets the plugin
@@ -1303,21 +1386,88 @@ export function createPluginHost(
   const keyOf = (installed: Installed): string =>
     JSON.stringify([installed.version, [...installed.grant].sort(), [...installed.optional_granted].sort()])
 
+  /** Whether `p` is blocked by what the store says, which only the store
+   *  lifts. */
+  function storeBlocked(p: Tracked): boolean {
+    return p.state === 'blocked' && p.blocked !== null && STORE_BLOCKS.has(p.blocked)
+  }
+
+  /** Whether `p` starts with Hew: it asks to and the person allowed it. */
+  function startsWithHew(p: Tracked): boolean {
+    const activation = (p.manifest as Manifest).activation
+    return p.installed.startup_allowed && Array.isArray(activation) && activation.includes('on_startup')
+  }
+
+  /** Blocks `p` for `reason`, stopping a realm it has or is starting. Its
+   *  commands stay registered and answer `unavailable`. */
+  function block(p: Tracked, reason: BlockReason): void {
+    if (p.state === 'crashed') return
+    const running = p.realm !== null || p.activation !== null || p.state === 'activating' || p.state === 'activated'
+    if (running) teardown(p, { kind: 'unload', reason: 'disable' })
+    // Stopped by a review mark, it starts again if the mark clears; any
+    // other block forgets that it ran.
+    if (reason === 'needs_review') p.resume = p.resume || running
+    else if (STORE_BLOCKS.has(reason)) p.resume = false
+    if (p.state !== 'blocked' || p.blocked !== reason) log('info', `Plugin ${p.id} ${p.version} cannot run now (${reason}).`)
+    p.state = 'blocked'
+    p.blocked = reason
+  }
+
+  /** Developer mode, asked of the shell; off when it cannot say, so a
+   *  folder plugin never runs on a guess. */
+  async function devModeNow(): Promise<boolean> {
+    if (env.store.devMode === undefined) return false
+    try {
+      return (await env.store.devMode()) === true
+    } catch {
+      return false
+    }
+  }
+
   let syncing: Promise<void> = Promise.resolve()
+  /** How often a reload is tried again after the list could not be read,
+   *  and how long the first wait is (each wait is longer). */
+  const MAX_LIST_RETRIES = 3
+  const LIST_RETRY_MS = 200
+  /** Plugins whose next sync reloads them whatever changed. */
+  const forced = new Set<string>()
   function sync(): Promise<void> {
     syncing = syncing.then(syncNow, syncNow)
     return syncing
   }
+  function reload(id: string): Promise<void> {
+    if (!disposed) forced.add(id)
+    return sync()
+  }
 
+  /** Failed list reads in a row while a reload waited. */
+  let listRetries = 0
   async function syncNow(): Promise<void> {
     if (disposed) return
+    // Taken before the store is read, so the list is at least as new as
+    // the change that asked for the reload; one asked for while this runs
+    // waits for the next sync, which it queued.
+    const force = new Set(forced)
+    forced.clear()
     let listed: Listed[]
     try {
       listed = await env.store.list()
+      listRetries = 0
     } catch (e) {
       log('warn', `The plugin list could not be read: ${String(e)}`)
+      // A reload that was asked for is not lost: it waits for the next
+      // sync, and a few more are asked for, each a little later.
+      if (force.size > 0 && !disposed) {
+        for (const id of force) forced.add(id)
+        if (listRetries < MAX_LIST_RETRIES) {
+          listRetries++
+          setTimeout(() => void sync(), LIST_RETRY_MS * listRetries)
+        }
+      }
       return
     }
+    if (disposed) return
+    const devMode = await devModeNow()
     if (disposed) return
     const enabled = new Map<string, { installed: Installed; manifest: PluginManifest }>()
     for (const l of listed) {
@@ -1335,12 +1485,31 @@ export function createPluginHost(
     }
     for (const [id, { installed, manifest }] of enabled) {
       const key = keyOf(installed)
+      const blockedBy = storeBlock(installed, devMode)
       let p = plugins.get(id)
-      if (p !== undefined && p.key === key) {
+      if (p !== undefined && p.key === key && !force.has(id)) {
         p.installed = installed
         p.manifest = manifest
+        if (blockedBy !== null) block(p, blockedBy)
+        else if (storeBlocked(p)) {
+          // The store lets it run again: it starts if it starts with Hew,
+          // or if a review mark stopped it while it ran.
+          const resume = p.resume
+          p.resume = false
+          p.state = 'enabled'
+          p.blocked = null
+          if (startsWithHew(p)) startUp(p)
+          else if (resume) void activate(p, 'command')
+        } else p.resume = false
         continue
       }
+      // Running, starting, or stopped by a start that could not read its
+      // code (which the change may have fixed); or rebuilt from running by
+      // an earlier sync that saw the record change (a folder's refresh
+      // tells the store first and asks for the reload after).
+      const wasRunning =
+        p !== undefined &&
+        (p.state === 'activating' || p.state === 'activated' || (p.state === 'blocked' && !storeBlocked(p)) || (p.resume && p.state === 'enabled'))
       if (p !== undefined) teardown(p, { kind: 'unload', reason: 'reload' })
       p = {
         id,
@@ -1349,7 +1518,11 @@ export function createPluginHost(
         installed,
         manifest,
         key,
+        // Only a folder's new version is followed by the reload that starts
+        // it again; a grant change, or a package's update, is not.
+        resume: wasRunning && !force.has(id) && installed.source.kind === 'dir' && p !== undefined && p.version !== installed.version,
         state: 'enabled',
+        blocked: null,
         realm: null,
         activation: null,
         joiners: new Set(),
@@ -1363,10 +1536,12 @@ export function createPluginHost(
         p.state = 'crashed'
         continue
       }
-      const activation = (manifest as Manifest).activation
-      if (installed.startup_allowed && Array.isArray(activation) && activation.includes('on_startup')) {
-        startUp(p)
+      if (blockedBy !== null) {
+        block(p, blockedBy)
+        continue
       }
+      if (startsWithHew(p)) startUp(p)
+      else if (wasRunning && force.has(id)) void activate(p, 'command')
     }
   }
 
@@ -1376,20 +1551,36 @@ export function createPluginHost(
   }
 
   const unlistenStore = env.store.onChanged(() => void sync())
+  // A folder plugin's folder changed. The notice is a hint: the store is
+  // read again either way. Files changed with the same permissions reload
+  // the plugin; a change the person must review has already marked the
+  // record, which the sync reads.
+  const unlistenDev =
+    env.store.onDevChanged?.((change) => {
+      if (!change.manifest_changed && change.problem === null) void reload(change.id)
+      else void sync()
+    }) ?? (() => {})
 
   return {
     serve,
     dispatch,
     sync,
+    reload,
     states() {
       const out: Record<string, RealmState> = {}
       for (const [id, p] of plugins) out[id] = p.state
+      return out
+    },
+    reasons() {
+      const out: Record<string, BlockReason> = {}
+      for (const [id, p] of plugins) if (p.state === 'blocked' && p.blocked !== null) out[id] = p.blocked
       return out
     },
     dispose() {
       if (disposed) return
       disposed = true
       unlistenStore()
+      unlistenDev()
       unlistenStorage()
       unregisterSink()
       unsubscribeBusy()

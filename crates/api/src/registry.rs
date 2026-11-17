@@ -1501,6 +1501,24 @@ impl Registry {
             Std,
             "Step the user's window all the way out to the top level.",
         );
+        // hew.plugin.* (docs/agents/PLUGINS.md "Developer mode"): the two
+        // commands the desktop app answers about plugins. Both are Preview
+        // commands (`preview-features.json`), First-party only, and the app
+        // answers them itself; neither installs, loads or changes a plugin.
+        add(
+            "hew.plugin.list",
+            S,
+            Host,
+            Std,
+            "The plugins installed in the app, with their state.",
+        );
+        add(
+            "hew.plugin.dev",
+            S,
+            Host,
+            Std,
+            "Ask the app to show a request to load a plugin from a folder.",
+        );
         // Printing (docs/design/printing.md §9b): headless-renderable like
         // hew.view.snapshot (the same core-profile carve-out below).
         add(
@@ -3885,6 +3903,80 @@ impl Registry {
                 cmd.result_schema = result;
                 cmd.refusals = refusals;
             }
+        }
+
+        // hew.plugin.*: what the desktop app answers (`served: Host`). The
+        // refusal names are the ones its router gives; a bad `path` is the
+        // ordinary -32602.
+        {
+            let cmd = commands.get_mut("hew.plugin.list").expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "List the plugins installed in the app: id, display name, version, where each came from (file, dir, index, git or url), whether it is turned on, and its state. A folder plugin is needs_developer_mode while developer mode is off, needs_review while the person has not yet read a change to what it asks for, checking until its folder has been compared since it started being watched (nothing of it is read before), plugins_off for the same while no window runs a plugin host (nothing will compare it), and unreadable when its record cannot be read. The list says whether a request to load a folder (hew.plugin.dev) is still waiting for the person, including while they are reading what the plugin asks for, and carries no folder path and does not say whether a plugin is running. Reads only.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plugins": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "name": { "type": "string" },
+                                "version": { "type": ["string", "null"], "description": "null when the record is unreadable" },
+                                "source": { "type": ["string", "null"], "enum": ["file", "dir", "index", "git", "url", null], "description": "null when the record is unreadable" },
+                                "enabled": { "type": "boolean" },
+                                "state": { "type": "string", "enum": ["installed", "needs_developer_mode", "needs_review", "checking", "plugins_off", "unreadable"] }
+                            },
+                            "required": ["id", "name", "version", "source", "enabled", "state"]
+                        }
+                    },
+                    "developer_mode": { "type": "boolean" },
+                    "request_waiting": { "type": "boolean", "description": "true while a request to load a plugin is waiting for the person, including while they are reading what the plugin asks for; no path, no id" }
+                },
+                "required": ["plugins", "developer_mode", "request_waiting"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "plugins_disabled",
+                "no_plugin_dir",
+            ];
+        }
+        {
+            let cmd = commands.get_mut("hew.plugin.dev").expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Ask the app to show the person a request to load a plugin from a folder. Nothing is loaded, staged or read: the person picks the folder in the app's own folder picker, which opens at `path`, and reads what the plugin asks for before anything runs. The answer only says the request is waiting. Refused while developer mode is off, while another request waits, and for a while after the person dismisses one.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "minLength": 1, "description": "the plugin's folder; shown to the person and used as a starting point for the picker, never read" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string", "enum": ["awaiting_user"] }
+                },
+                "required": ["status"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "plugins_disabled",
+                "no_plugin_dir",
+                "plugins_off",
+                "developer_mode_off",
+                "confirmation_open",
+                "request_waiting",
+                "request_dismissed",
+                "dry_run_host_command",
+                "io",
+            ];
         }
 
         // hew.entity.*, hew.context.*, hew.group.*, hew.component.*,
@@ -7861,7 +7953,7 @@ fn tidied_schema() -> serde_json::Value {
 /// model-mutating, `hew.library.save` read-only).
 pub fn permission_table() -> Vec<(&'static str, Permission)> {
     use Permission::*;
-    let rows: [(Permission, &[&'static str]); 9] = [
+    let rows: [(Permission, &[&'static str]); 10] = [
         (
             Always,
             &[
@@ -8049,6 +8141,10 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.library.update_meta",
             ],
         ),
+        // Declaration-only: held by no profile a plugin or an app grant
+        // can name, so only a first-party (`all`) connection may call
+        // these. They manage plugins, which a plugin may not.
+        (FirstParty, &["hew.plugin.list", "hew.plugin.dev"]),
     ];
     rows.into_iter()
         .flat_map(|(p, names)| names.iter().map(move |n| (*n, p.clone())))

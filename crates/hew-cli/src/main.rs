@@ -15,7 +15,7 @@ use std::path::PathBuf;
 /// what it reads from the environment, and where to go next. Printed to
 /// stdout on request (a help page is output, not an error) and to stderr
 /// only when it accompanies a usage error.
-const USAGE_BODY: &str = r#" — build and edit Hew models from a script, a shell, or an AI client.
+const USAGE_HEAD: &str = r#" — build and edit Hew models from a script, a shell, or an AI client.
 
 USAGE
     hew-cli <command> [options]
@@ -26,7 +26,10 @@ COMMANDS
     documents             List the app's open documents (--live)
     events                Print the app's events as they happen (--live)
     mcp                   Serve MCP on stdio, for an AI client
+"#;
 
+/// The rest of the top-level help page, after the command list.
+const USAGE_TAIL: &str = r#"
 EXAMPLES
     # Draw a square, pull it into a solid, write the file.
     hew-cli run box.jsonl --out box.hew
@@ -80,8 +83,18 @@ LEARN MORE
 /// formatted at print time because [`hew_cli::VERSION`] is chosen at
 /// compile time from an environment variable.
 fn usage() -> String {
-    format!("hew-cli {}{USAGE_BODY}", hew_cli::VERSION)
+    format!(
+        "hew-cli {}{USAGE_HEAD}{PLUGIN_COMMAND_LINE}{USAGE_TAIL}",
+        hew_cli::VERSION
+    )
 }
+
+/// The `plugin` line of the command list: present in a preview build only.
+#[cfg(hew_preview)]
+const PLUGIN_COMMAND_LINE: &str =
+    "    plugin                Load a plugin from a folder while you build it (--live)\n";
+#[cfg(not(hew_preview))]
+const PLUGIN_COMMAND_LINE: &str = "";
 
 /// `hew-cli run --help`.
 const USAGE_RUN: &str = r#"hew-cli run — run a file of JSON-RPC envelopes in order.
@@ -245,6 +258,53 @@ OPTIONS
                         tool also takes a per-call "document".
 "#;
 
+/// `hew-cli plugin --help`: a preview build only.
+#[cfg(hew_preview)]
+const USAGE_PLUGIN: &str = r#"hew-cli plugin — work on a plugin from a folder while you build it.
+
+USAGE
+    hew-cli plugin dev <folder> --live [--launch] [--instance <pid>] [--once]
+    hew-cli plugin list --live [--launch] [--instance <pid>]
+
+`plugin dev` asks the running app to show you a request to load the
+plugin in <folder>. Nothing loads from the command line: in Hew you
+choose the folder in the app's own folder picker and read what the plugin
+asks for, and the plugin is not loaded until you allow it. The folder
+here only tells the picker where to start. Developer mode must be on in
+Hew (Settings > Plugins), and so must the Plugins switch.
+
+It then checks the app's plugin list about once a second and prints what
+it can see: a plugin from a developer folder that appears or changes
+after the request ("<name> <version> is installed from a developer
+folder and turned on."), one that waits for you to review a change
+("Waiting for you to review a change in Hew."), and the other reasons it
+cannot go on, in plain words. It stops when you press Ctrl-C
+or the app closes after it answered. Exit 0 when it ends on its own, 1
+when the app refuses the request, or closes before answering, or the
+connection fails, 2 for a mistake in the command.
+
+What it cannot tell: the app's list gives no folder path and does not say
+whether a plugin is running. So it cannot know which listed plugin came
+from <folder>, and it cannot see a reload that leaves the version alone.
+It reports every folder plugin that changes, and Settings > Plugins in
+Hew is the place to see what is running.
+
+`plugin list` prints developer mode, then one line per installed plugin:
+its id, name, version, where it came from, and its state.
+
+EXAMPLES
+    hew-cli plugin dev ./my-plugin --live
+    hew-cli plugin dev ./my-plugin --live --once
+    hew-cli plugin list --live
+
+OPTIONS
+    --live              Talk to the running app. Required.
+    --launch            Start the app first and wait for it.
+    --instance <pid>    Pick one when several apps are running.
+    --once              dev: send the request, print the first answer and
+                        stop, for scripts. Nothing is watched.
+"#;
+
 fn usage_error(message: &str) -> ! {
     eprintln!("{message}\n");
     eprint!("{}", usage());
@@ -255,6 +315,9 @@ fn usage_error(message: &str) -> ! {
 /// listing all of them: `hew-cil run` should say "did you mean run?".
 /// Distance 2 or less, so a genuinely different word suggests nothing.
 fn unknown_subcommand(typed: &str) -> String {
+    #[cfg(hew_preview)]
+    const COMMANDS: [&str; 6] = ["run", "dispatch", "documents", "events", "mcp", "plugin"];
+    #[cfg(not(hew_preview))]
     const COMMANDS: [&str; 5] = ["run", "dispatch", "documents", "events", "mcp"];
     // An MCP client configured with `"args": ["mcp --live"]` hands over the
     // whole string as one argument; the client then only shows a closed
@@ -399,6 +462,8 @@ fn main() {
         "mcp" => mcp_subcommand(&args[1..]),
         "documents" => documents_subcommand(&args[1..]),
         "events" => events_subcommand(&args[1..]),
+        #[cfg(hew_preview)]
+        "plugin" => plugin_subcommand(&args[1..]),
         // A help page is what the user asked for, so it goes to stdout
         // where it can be piped and paged. Only a usage ERROR prints it
         // to stderr, alongside what went wrong.
@@ -562,6 +627,75 @@ fn events_subcommand(args: &[String]) -> i32 {
     hew_cli::run::events_live(&opts, filter)
 }
 
+/// `hew-cli plugin dev|list`: a preview build only.
+#[cfg(hew_preview)]
+fn plugin_subcommand(args: &[String]) -> i32 {
+    if help_requested(args, USAGE_PLUGIN) {
+        return 0;
+    }
+    let Some(action) = args.first() else {
+        usage_error("hew-cli plugin: missing dev or list");
+    };
+    let mut live_flags = LiveFlags::default();
+    let mut once = false;
+    let mut folder: Option<PathBuf> = None;
+    let mut i = 1;
+    while i < args.len() {
+        if try_parse_live_flag(args, &mut i, &mut live_flags, "hew-cli plugin") {
+            continue;
+        }
+        match args[i].as_str() {
+            "--once" if action == "dev" => {
+                once = true;
+                i += 1;
+            }
+            other if action == "dev" && folder.is_none() && !other.starts_with("--") => {
+                folder = Some(PathBuf::from(other));
+                i += 1;
+            }
+            other => usage_error(&format!(
+                "hew-cli plugin: unrecognized argument \"{other}\""
+            )),
+        }
+    }
+    if live_flags.document.is_some() {
+        usage_error(
+            "hew-cli plugin: --document does not apply: plugins belong to the app, not to a document",
+        );
+    }
+    match action.as_str() {
+        "dev" => {
+            let Some(folder) = folder else {
+                usage_error("hew-cli plugin dev: missing <folder>");
+            };
+            let Some(opts) = live_flags.into_options("hew-cli plugin dev") else {
+                usage_error(
+                    "hew-cli plugin dev: --live is required: the request goes to the running app",
+                );
+            };
+            hew_cli::plugin::dev_live(
+                &folder,
+                &opts,
+                &hew_cli::plugin::DevOptions {
+                    once,
+                    ..Default::default()
+                },
+            )
+        }
+        "list" => {
+            let Some(opts) = live_flags.into_options("hew-cli plugin list") else {
+                usage_error(
+                    "hew-cli plugin list: --live is required: the list is the running app's",
+                );
+            };
+            hew_cli::plugin::list_live(&opts)
+        }
+        other => usage_error(&format!(
+            "hew-cli plugin: unknown action \"{other}\"; use dev or list"
+        )),
+    }
+}
+
 fn mcp_subcommand(args: &[String]) -> i32 {
     if help_requested(args, USAGE_MCP) {
         return 0;
@@ -602,6 +736,19 @@ mod tests {
         let far = unknown_subcommand("frobnicate");
         assert!(far.contains("frobnicate"));
         assert!(!far.contains("Did you mean"));
+    }
+
+    /// The plugin subcommand is a preview build's alone: it is a suggestion
+    /// there, and no build suggests it by accident otherwise.
+    #[test]
+    fn plugin_is_suggested_only_in_a_preview_build() {
+        let hint = unknown_subcommand("plugn");
+        assert_eq!(
+            hint.contains(r#"Did you mean "plugin""#),
+            cfg!(hew_preview),
+            "{hint}"
+        );
+        assert_eq!(usage().contains("plugin"), cfg!(hew_preview));
     }
 
     /// CLI-2: several arguments joined into one string get a hint that shows
@@ -662,13 +809,17 @@ mod tests {
 
     #[test]
     fn every_command_has_its_own_help_with_an_example() {
-        for page in [
+        #[allow(unused_mut)]
+        let mut pages = vec![
             USAGE_RUN,
             USAGE_DISPATCH,
             USAGE_DOCUMENTS,
             USAGE_EVENTS,
             USAGE_MCP,
-        ] {
+        ];
+        #[cfg(hew_preview)]
+        pages.push(super::USAGE_PLUGIN);
+        for page in pages {
             assert!(page.starts_with("hew-cli "));
             assert!(page.contains("USAGE"));
             assert!(

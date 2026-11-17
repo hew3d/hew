@@ -1,10 +1,12 @@
 /* oxlint-disable lingui/no-unlocalized-strings -- command names, storage names and plugin install copy; English only until the feature graduates. */
 /**
  * The Plugins pane's only door to the install store. On the desktop it calls
- * the shell's twelve `plugin_*` commands; in the browser it uses the OPFS
- * store (`webPluginStore.ts`). Both answer with the same shapes (`types.ts`)
- * and the same refusals (`pluginError.ts`), so the pane does not know which
- * it has.
+ * the shell's `plugin_*` commands; in the browser it uses the OPFS store
+ * (`webPluginStore.ts`). Both answer with the same shapes (`types.ts`) and
+ * the same refusals (`pluginError.ts`), so the pane does not know which it
+ * has. Developer mode, the review of a folder plugin's changed manifest and
+ * the live API's request to load a folder are the desktop's alone; copying a
+ * folder in as a package is the web's.
  *
  * Nothing here is on the live command bus: managing plugins is a person's
  * job, done in Settings.
@@ -12,11 +14,12 @@
 
 import { isTauri } from '../io/fileHost'
 import { toPluginError } from './pluginError'
-import type { Installed, Listed, PendingView, PluginInstaller } from './types'
+import { devChangeNotice, devRequestNotice } from './storeAccess'
+import type { DevChange, DevRequest, Installed, Listed, PendingView, PluginInstaller } from './types'
 import { makeWebPluginStore, type WebPluginDeps } from './webPluginStore'
 
 type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>
-type Listen = (event: string, handler: () => void) => Promise<() => void>
+type Listen = (event: string, handler: (event: { payload: unknown }) => void) => Promise<() => void>
 
 export interface DesktopDeps {
   invoke?: Invoke
@@ -63,8 +66,16 @@ export function makeDesktopInstaller(deps: DesktopDeps = {}): PluginInstaller {
   return {
     tier: 'desktop',
     list: () => call<Listed[]>('plugin_list'),
-    async pickAndStage(kind) {
-      const path = await call<string | null>(kind === 'file' ? 'plugin_pick_package' : 'plugin_pick_dir')
+    async pickAndStage(kind, opts) {
+      // The page passes the folder picker only a request's id, never a
+      // path: the shell opens it near that request's folder, and what is
+      // staged is what the person picked there.
+      const path =
+        kind === 'file'
+          ? await call<string | null>('plugin_pick_package')
+          : typeof opts?.useRequest === 'string'
+            ? await call<string | null>('plugin_pick_dir', { useRequest: opts.useRequest })
+            : await call<string | null>('plugin_pick_dir')
       if (path === null) return null
       return call<PendingView>(kind === 'file' ? 'plugin_stage_file' : 'plugin_stage_dir', { path })
     },
@@ -73,6 +84,20 @@ export function makeDesktopInstaller(deps: DesktopDeps = {}): PluginInstaller {
     setEnabled: (id, enabled) => call<string[]>('plugin_set_enabled', { id, enabled }),
     uninstall: (id) => call<void>('plugin_uninstall', { id }),
     rollback: (id) => call<Installed>('plugin_rollback', { id }),
+    devMode: async () => (await call<unknown>('plugin_dev_mode')) === true,
+    setDevMode: async (on) => (await call<unknown>('plugin_set_dev_mode', { on })) === true,
+    review: (id) => call<PendingView>('plugin_dev_review', { id }),
+    devRequest: async () => devRequestNotice(await call<unknown>('plugin_dev_request')),
+    dismissDevRequest: (id) => call<void>('plugin_dev_request_dismiss', { id }),
+    onDevRequest: (fn: (request: DevRequest | null) => void) =>
+      subscribe(listen, 'plugins-dev-request', (e) => {
+        // `null` says the request is gone; anything malformed is dropped.
+        if (e.payload === null) fn(null)
+        else {
+          const request = devRequestNotice(e.payload)
+          if (request !== null) fn(request)
+        }
+      }),
     async iconUrl(id, rel) {
       try {
         const buf = await invoke<ArrayBuffer>('plugin_read_file', { id, rel })
@@ -81,22 +106,30 @@ export function makeDesktopInstaller(deps: DesktopDeps = {}): PluginInstaller {
         return null
       }
     },
-    onChanged(fn) {
-      let stop: (() => void) | null = null
-      let closed = false
-      listen('plugins-changed', fn)
-        .then((off) => {
-          if (closed) off()
-          else stop = off
-        })
-        .catch(() => {
-          /* no event bridge: the pane still refreshes after its own changes */
-        })
-      return () => {
-        closed = true
-        stop?.()
-      }
-    },
+    onChanged: (fn) => subscribe(listen, 'plugins-changed', () => fn()),
+    onDevChanged: (fn: (change: DevChange) => void) =>
+      subscribe(listen, 'plugins-dev-changed', (e) => {
+        const change = devChangeNotice(e.payload)
+        if (change !== null) fn(change)
+      }),
+  }
+}
+
+/** Listens for `event` until the returned function is called. */
+function subscribe(listen: Listen, event: string, fn: (event: { payload: unknown }) => void): () => void {
+  let stop: (() => void) | null = null
+  let closed = false
+  listen(event, fn)
+    .then((off) => {
+      if (closed) off()
+      else stop = off
+    })
+    .catch(() => {
+      /* no event bridge: the pane still refreshes after its own changes */
+    })
+  return () => {
+    closed = true
+    stop?.()
   }
 }
 
@@ -108,6 +141,9 @@ export function makeWebInstaller(deps: WebPluginDeps): PluginInstaller {
     list: () => store.list(),
     pickAndStage: () => Promise.reject(new Error('In the browser, choose the package with the file input.')),
     stageFile: (file) => store.stageFile(file),
+    ...(typeof window !== 'undefined' && typeof (window as { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function'
+      ? { stageFolder: (dir: FileSystemDirectoryHandle) => store.stageFolder(dir) }
+      : {}),
     commit: (token, accept) => store.commit(token, accept),
     setEnabled: (id, enabled, shown) => store.setEnabled(id, enabled, shown),
     uninstall: (id) => store.uninstall(id),

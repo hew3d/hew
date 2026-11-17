@@ -67,6 +67,23 @@ pub enum InstallError {
     /// The plugin's `storage.json` is not a JSON object of strings, is not
     /// a regular file, or is over the cap. It is left as it is.
     StorageUnreadable,
+    /// A folder plugin's folder is gone, is no longer a folder, or cannot
+    /// be opened. Carries the recorded path.
+    FolderMissing(String),
+    /// Developer mode is off, so nothing is read from a plugin folder.
+    DeveloperModeOff,
+    /// A folder plugin's manifest changed in a way the person must review
+    /// before anything is read from the folder again. Carries the id.
+    DevConsentPending(String),
+    /// A review was asked for a plugin with nothing waiting to be reviewed.
+    NoReviewPending(String),
+    /// The folder's manifest now names another plugin; carries the id it
+    /// names, cleaned.
+    FolderIdChanged(String),
+    /// One of the plugin's commands has the namespaced name
+    /// (`<plugin-id>.<command-id>`) of another installed plugin's command;
+    /// carries the name.
+    CommandNameTaken(String),
     Io(String),
 }
 
@@ -95,7 +112,30 @@ impl InstallError {
             InstallError::StorageQuota => "storage_quota",
             InstallError::StorageKeyInvalid => "storage_key_invalid",
             InstallError::StorageUnreadable => "storage_unreadable",
+            InstallError::FolderMissing(_) => "folder_missing",
+            InstallError::DeveloperModeOff => "developer_mode_off",
+            InstallError::DevConsentPending(_) => "dev_consent_pending",
+            InstallError::NoReviewPending(_) => "no_review_pending",
+            InstallError::FolderIdChanged(_) => "folder_id_changed",
+            InstallError::CommandNameTaken(_) => "command_name_taken",
             InstallError::Io(_) => "io",
+        }
+    }
+
+    /// [`InstallError::explanation`] for a failure while reading a folder
+    /// Hew watches. Where the plain text tells the person to install again
+    /// or says "package", this says what is true of a folder: fixing the
+    /// file is enough, because the folder is read again by itself. Every
+    /// other refusal reads the same for either source.
+    pub fn explanation_for_folder(&self) -> String {
+        match self {
+            InstallError::Manifest(ManifestError::Json(text)) => format!(
+                "hew-plugin.json is not a valid manifest: {text}. Fix the file and Hew reads it again."
+            ),
+            InstallError::ManifestMissing => {
+                "This folder has no hew-plugin.json at its top level.".to_string()
+            }
+            other => other.explanation(),
         }
     }
 
@@ -171,6 +211,28 @@ impl InstallError {
             InstallError::StorageUnreadable => {
                 "Hew cannot read this plugin's saved data; it is left as it is.".to_string()
             }
+            InstallError::FolderMissing(path) => format!(
+                "Hew cannot open the plugin's folder \"{}\". It may have been moved or deleted.",
+                crate::clean_text(path, 512)
+            ),
+            InstallError::DeveloperModeOff => {
+                "Turn on developer mode in Settings > Plugins to run a plugin from a folder."
+                    .to_string()
+            }
+            InstallError::DevConsentPending(_) => {
+                "This plugin's folder changed in a way you need to review. Review the change in Settings > Plugins."
+                    .to_string()
+            }
+            InstallError::NoReviewPending(id) => {
+                format!("\"{id}\" has no change waiting for review.")
+            }
+            InstallError::FolderIdChanged(found) => format!(
+                "The folder's hew-plugin.json now names \"{found}\", another plugin. Change it back, or remove this plugin and install the folder again."
+            ),
+            InstallError::CommandNameTaken(name) => format!(
+                "Another installed plugin already has a command named \"{}\". Rename this plugin's command.",
+                crate::clean_text(name, 256)
+            ),
             InstallError::Io(why) => format!("The plugin folder could not be changed: {why}."),
         }
     }
