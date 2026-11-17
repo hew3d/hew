@@ -47,7 +47,7 @@ env:
   # DELETE this, and restore `node-version-file: .node-version` below, once
   # WebdriverIO stops mixing its own undici with Node's.
   # renovate: datasource=node-version depName=node
-  NODE_VERSION: '24.19.0'
+  NODE_VERSION: '24.22.3'
 
 jobs:
   desktop-e2e:
@@ -77,7 +77,7 @@ jobs:
 
       # rustup honors rust-toolchain.toml — a PINNED version.
       - name: Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: |
             .
@@ -102,13 +102,13 @@ jobs:
 
       # NOT .node-version — see the NODE_VERSION comment at the top of this file.
       - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
       # pnpm's version comes from `packageManager` in the root package.json.
       - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       # Ask pnpm where its store is rather than assuming — see ci.yml.
       - name: Locate pnpm store
@@ -150,7 +150,7 @@ jobs:
 
       - name: Upload plugin realm probe results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: plugin-realm-probe
           path: shells/tauri/e2e/probe/results/*.json

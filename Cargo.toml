@@ -84,7 +84,7 @@ zip = { version = "9.0.5", default-features = false }
 # hosts) and `crates/wasm-api` (`LiveHost::library_write`, which computes the
 # hash itself since it has no filesystem to defer the write to) both need
 # the identical SHA-256, so it's pinned once here.
-sha2 = "0.10"
+sha2 = "0.11"
 # Structured diagnostic logging (docs/dev/DEVELOPMENT.md, M14). kernel/inference use only
 # the `tracing` facade (events, no I/O); wasm-api owns the Subscriber + the
 # wasm→shell drain seam. default-features=false drops the `#[instrument]` proc

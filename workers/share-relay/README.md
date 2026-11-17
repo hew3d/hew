@@ -260,7 +260,7 @@ npm test   # node --test src/*.test.ts
 
 No install step needed to run the tests: they use Node's built-in test
 runner and native TypeScript support (Node ≥23.6; this repo's
-`.node-version` pins 26.7.0), and `src/testSupport/fakeDurableObject.ts`
+`.node-version` pins 26.13.1), and `src/testSupport/fakeDurableObject.ts`
 stands in for the real Durable Object binding — no `miniflare`, no
 network, no Cloudflare account required. It's backed by `node:sqlite`
 (Node's built-in SQLite engine, also dependency-free), so `shareDrop.ts`'s

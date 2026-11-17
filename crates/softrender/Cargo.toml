@@ -10,8 +10,8 @@ license.workspace = true
 [dependencies]
 kernel.workspace = true
 tessellate.workspace = true
-# Deflate for the PNG writer. Pinned to the version the `png` crate already
-# resolves to in the lock; softrender is not one of the three kernel crates.
-miniz_oxide = "0.8.9"
+# Deflate for the PNG writer; kept on the same line as pdfwrite and hew-cli.
+# softrender is not one of the three kernel crates.
+miniz_oxide = "0.9.0"
 png = { workspace = true }
 jpeg-decoder = { workspace = true }

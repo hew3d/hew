@@ -584,7 +584,7 @@ npm test   # node --test src/*.test.ts
 ```
 
 No install step needed to run the tests themselves (Node's built-in test
-runner and native TypeScript stripping, `.node-version` pins 26.7.0);
+runner and native TypeScript stripping, `.node-version` pins 26.13.1);
 `npm install` is only needed for `wrangler dev`/`deploy`. Mirrors
 `share-relay`'s approach throughout:
 

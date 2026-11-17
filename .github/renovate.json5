@@ -210,6 +210,18 @@
       automerge: false,
       labels: ['needs-desktop-check'],
     },
+    // The platform bindings tauri and wry themselves link against. A second
+    // copy of any of them splits the tree: `windows`/`windows-core`/
+    // `webview2-com` would give src/print.rs types from a different
+    // generation than tauri's, and `gtk` 0.19 cannot coexist with the pinned
+    // `webkit2gtk` (two crates claiming `links = "gdk-3"`). Hold them until
+    // tauri itself moves; the 'tauri' group above carries that bump.
+    {
+      matchPackageNames: ['windows', 'windows-core', 'webview2-com', 'gtk', 'webkit2gtk'],
+      matchManagers: ['cargo'],
+      matchFileNames: ['shells/tauri/src-tauri/Cargo.toml'],
+      enabled: false,
+    },
     // The Desktop E2E lane's own Node pin (NODE_VERSION in
     // desktop-e2e.yml — read that comment for why it exists at all).
     //

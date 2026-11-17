@@ -8,14 +8,14 @@ runs:
   using: composite
   steps:
     - name: Setup Node
-      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version-file: .node-version
 
     # pnpm's version comes from `packageManager` in the root package.json —
     # one source of truth that pnpm itself also honors locally.
     - name: Setup pnpm
-      uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
     # Ask pnpm where its store is rather than assuming: the path depends on
     # the OS and on how pnpm was installed, and a wrong guess yields a cache
