@@ -124,22 +124,22 @@
     {
       "id": "plugins",
       "name": "Plugins",
-      "state": "Installs add-ons made by other people. They do not run yet.",
+      "state": "Installs add-ons made by other people and runs them in a sandbox.",
       "owner": "plugins",
       "defaultOn": false,
       "tools": [],
       "actions": [],
       "dockChips": [],
       "apiCommands": [],
-      "behaviors": [],
+      "behaviors": ["plugin-forward"],
       "loader": {
         "roots": ["plugin-probe"],
         "panes": ["plugins"],
-        "shellCommands": ["plugin_dir", "plugin_list", "plugin_pick_package", "plugin_pick_dir", "plugin_stage_file", "plugin_stage_dir", "plugin_commit", "plugin_set_enabled", "plugin_set_grant", "plugin_uninstall", "plugin_rollback", "plugin_read_file"],
-        "kernelExports": ["plugin_package_from_zip", "plugin_consent", "plugin_manifest_parse", "plugin_hew_version_ok", "plugin_install_check"],
+        "shellCommands": ["plugin_list", "plugin_pick_package", "plugin_pick_dir", "plugin_stage_file", "plugin_stage_dir", "plugin_commit", "plugin_set_enabled", "plugin_set_grant", "plugin_uninstall", "plugin_rollback", "plugin_read_file", "plugin_storage_get", "plugin_storage_set", "plugin_storage_delete", "plugin_storage_list"],
+        "kernelExports": ["plugin_package_from_zip", "plugin_consent", "plugin_manifest_parse", "plugin_hew_version_ok", "plugin_install_check", "plugin_grant_json", "note_plugin_state"],
         "cliCommands": [],
-        "storage": ["app data folder: com.hew3d.Hew/plugins/", "OPFS: plugins/", "localStorage keys: hew.plugin.", "BroadcastChannel: hew-plugins", "environment: HEW_PLUGIN_DIR"],
-        "markers": ["plugin-probe", "ProbeRoot", "hew-realm", "hewProbeReport", "PluginsPane", "ConsentSheet", "webPluginStore", "hew-plugins", "The plugin says", "data-plugins-tab-icon"]
+        "storage": ["app data folder: com.hew3d.Hew/plugins/", "OPFS: plugins/", "localStorage keys: hew.plugin.", "BroadcastChannel: hew-plugins", "environment: HEW_PLUGIN_DIR", "plugins/<id>/storage.json", "desktop event: plugins-storage-changed"],
+        "markers": ["plugin-probe", "ProbeRoot", "hew-realm", "hewProbeReport", "PluginsPane", "ConsentSheet", "webPluginStore", "hew-plugins", "The plugin says", "data-plugins-tab-icon", "UZMzOvZhtJlzChfXW1vCiRIMGxy3nxQNNZaO0qcON3w=", "createRealmFrame", "boot-1.js", "hew-nonce", "forward_cancel", "storage_reply"]
       }
     }
   ]

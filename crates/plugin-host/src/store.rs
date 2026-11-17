@@ -6,6 +6,7 @@
 //!   <id>/
 //!     hew-plugin.json      the manifest the user consented to
 //!     installed.json       the record (`Installed`)
+//!     storage.json         the plugin's saved data (`storage_*`)
 //!     files/…              the package's files (not for a folder install)
 //!     previous/            the version before, with the same layout
 //!   .staging/<id>-<token>/ an install being written; ignored by `list`
@@ -17,6 +18,11 @@
 //! install, outside that folder). An install is written whole into
 //! `.staging/` and renamed into place; a failure part way leaves a staging
 //! entry that `list` ignores and the next `stage` of the same id clears.
+//!
+//! A plugin's saved data belongs to the plugin, not to one version of it:
+//! an update and a rollback carry the installed version's `storage.json`
+//! to the version that takes its place, and uninstalling removes it with
+//! the rest of the folder.
 
 use crate::installed::{INSTALLED_SCHEMA, InstallSource, Installed};
 use crate::package::{MANIFEST_FILE, MAX_ENTRY_BYTES, Package};
@@ -33,6 +39,8 @@ const STORE_FOLDER: &str = "plugins";
 /// Where installs are written before they are renamed into place.
 const STAGING: &str = ".staging";
 const INSTALLED_FILE: &str = "installed.json";
+/// The plugin's saved data, a JSON object of string keys to string values.
+const STORAGE_FILE: &str = "storage.json";
 const FILES: &str = "files";
 const PREVIOUS: &str = "previous";
 /// How long a pending install waits for an answer.
@@ -478,6 +486,7 @@ fn commit_with(
 
     let record = record_for(&pending, now_ms);
     let written = write_install(&fresh, &pending, &record)
+        .and_then(|()| carry_storage(&current, &fresh))
         .and_then(|()| commit_moves(&current, &fresh, &aside, rename));
     match written {
         Ok(discard) => {
@@ -800,6 +809,9 @@ fn rollback_with(dir: &PluginDir, id: &str, rename: Rename<'_>) -> Result<Instal
     installed(dir, id)?;
     self::previous(dir, id)?;
     let previous = current.join(PREVIOUS);
+    // The saved data stays the plugin's: the version coming back gets the
+    // current copy, not the one it had when it was replaced.
+    carry_storage(&current, &previous)?;
     let staging = dir.staging();
     std::fs::create_dir_all(&staging).map_err(io)?;
     // Named `.old` while it holds the version before, so an interrupted
@@ -816,6 +828,111 @@ fn rollback_with(dir: &PluginDir, id: &str, rename: Rename<'_>) -> Result<Instal
         return Err(io(e));
     }
     installed(dir, id).map(|(i, _)| i)
+}
+
+/// Makes `to`'s `storage.json` a copy of `from`'s, through a temporary
+/// file and a rename, or removes it when `from` has none. Only a regular
+/// file is copied; anything else in its place counts as none.
+fn carry_storage(from: &Path, to: &Path) -> Result<(), InstallError> {
+    let source = from.join(STORAGE_FILE);
+    let target = to.join(STORAGE_FILE);
+    let is_file = std::fs::symlink_metadata(&source).is_ok_and(|m| m.file_type().is_file());
+    if !is_file {
+        return remove_any(&target);
+    }
+    let tmp = target.with_extension("json.tmp");
+    std::fs::copy(&source, &tmp).map_err(io)?;
+    std::fs::rename(&tmp, &target).map_err(io)
+}
+
+/// A plugin's saved data, by key.
+type Storage = BTreeMap<String, String>;
+
+fn checked_key(key: &str) -> Result<(), InstallError> {
+    if key.is_empty() || key.len() > crate::MAX_STORAGE_KEY_BYTES {
+        return Err(InstallError::StorageKeyInvalid);
+    }
+    Ok(())
+}
+
+/// `plugins/<id>/storage.json` of an installed plugin: `not_installed`
+/// unless `plugins/<id>/` is a folder holding a record, so no call ever
+/// creates a plugin's folder.
+fn storage_path(dir: &PluginDir, id: &str) -> Result<PathBuf, InstallError> {
+    let folder = dir.plugin(id)?;
+    let installed = std::fs::symlink_metadata(&folder).is_ok_and(|m| m.is_dir())
+        && std::fs::symlink_metadata(folder.join(INSTALLED_FILE))
+            .is_ok_and(|m| m.file_type().is_file());
+    if !installed {
+        return Err(InstallError::NotInstalled(id.to_string()));
+    }
+    Ok(folder.join(STORAGE_FILE))
+}
+
+/// Reads a `storage.json`: empty when there is none; `storage_unreadable`
+/// when it is not a regular file, is over the cap, or is not an object of
+/// strings.
+fn read_storage(path: &Path) -> Result<Storage, InstallError> {
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Storage::new()),
+        Err(e) => return Err(io(e)),
+        Ok(m) if !m.file_type().is_file() => return Err(InstallError::StorageUnreadable),
+        Ok(_) => {}
+    }
+    let bytes = read_capped(path, crate::MAX_STORAGE_BYTES).map_err(|e| match e {
+        InstallError::Io(_) => e,
+        _ => InstallError::StorageUnreadable,
+    })?;
+    serde_json::from_slice(&bytes).map_err(|_| InstallError::StorageUnreadable)
+}
+
+/// The value saved under `key`, if any.
+pub fn storage_get(dir: &PluginDir, id: &str, key: &str) -> Result<Option<String>, InstallError> {
+    checked_key(key)?;
+    let mut storage = read_storage(&storage_path(dir, id)?)?;
+    Ok(storage.remove(key))
+}
+
+/// Every saved key, sorted.
+pub fn storage_list(dir: &PluginDir, id: &str) -> Result<Vec<String>, InstallError> {
+    Ok(read_storage(&storage_path(dir, id)?)?.into_keys().collect())
+}
+
+/// Saves `value` under `key`, writing the whole file through a temporary
+/// file and a rename. Refused `storage_quota`, with nothing written, when
+/// the file would pass [`crate::MAX_STORAGE_BYTES`].
+pub fn storage_set(dir: &PluginDir, id: &str, key: &str, value: &str) -> Result<(), InstallError> {
+    checked_key(key)?;
+    // Too large on its own: refused before the file is read.
+    if key.len().saturating_add(value.len()) > crate::MAX_STORAGE_BYTES {
+        return Err(InstallError::StorageQuota);
+    }
+    let path = storage_path(dir, id)?;
+    let mut storage = read_storage(&path)?;
+    storage.insert(key.to_string(), value.to_string());
+    let bytes = serde_json::to_vec(&storage).map_err(|e| InstallError::Io(e.to_string()))?;
+    if bytes.len() > crate::MAX_STORAGE_BYTES {
+        return Err(InstallError::StorageQuota);
+    }
+    write_atomic(&path, &bytes)
+}
+
+/// Removes `key`; answers whether it was there. The file goes when its
+/// last key does.
+pub fn storage_delete(dir: &PluginDir, id: &str, key: &str) -> Result<bool, InstallError> {
+    checked_key(key)?;
+    let path = storage_path(dir, id)?;
+    let mut storage = read_storage(&path)?;
+    if storage.remove(key).is_none() {
+        return Ok(false);
+    }
+    if storage.is_empty() {
+        remove_any(&path)?;
+    } else {
+        let bytes = serde_json::to_vec(&storage).map_err(|e| InstallError::Io(e.to_string()))?;
+        write_atomic(&path, &bytes)?;
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

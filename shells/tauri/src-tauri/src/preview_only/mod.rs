@@ -6,4 +6,5 @@
 //! `a_loader_shell_command_is_in_no_production_handler_list` checks the
 //! layout against `loader.shellCommands` in preview-features.json).
 
+pub mod confirm;
 pub mod plugins;

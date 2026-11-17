@@ -67,7 +67,10 @@ import type { IsolationTarget } from '../viewport/isolation'
 import { getLengthUnit, setLengthUnit, type LengthFormat } from '../settings/units'
 import { parseDispatch } from './dispatchResult'
 import { getBusy, setBusy, subscribeBusy } from './busyState'
-import { pumpEvents, registerBroadcastSink, registerEventSink, setPumpDocumentId } from './eventPump'
+import { pumpDocumentId, pumpEvents, registerBroadcastSink, registerEventSink, setPumpDocumentId } from './eventPump'
+import { forwardRouter, type ForwardReplyJson, type ForwardRouter } from './forwardRouter'
+import { abortCompound, beginCompound, endCompound, type OpenCompound } from './hostCompounds'
+import { behaviorEnabled } from '../preview'
 
 /** What a webview-side live operation answers (`hew://api-op-reply`'s body
  * beside its `opId`). `refusal` names a typed API refusal the shell turns
@@ -224,8 +227,20 @@ export function completeForward(
   requestId: number | string,
   failed: 'unavailable' | 'cancelled' | 'timeout' = 'unavailable',
 ): string {
+  return completeForwardWith(scene, wasmId, token, requestId, { failed })
+}
+
+/** Completes a forward with `reply` and returns the final frame, as
+ * `completeForward` does for a failure. */
+export function completeForwardWith(
+  scene: Scene,
+  wasmId: number,
+  token: number,
+  requestId: number | string,
+  reply: ForwardReplyJson,
+): string {
   try {
-    return scene.api_complete_forward(wasmId, BigInt(token), JSON.stringify({ failed }))
+    return scene.api_complete_forward(wasmId, BigInt(token), JSON.stringify(reply))
   } catch (err) {
     console.error('Scene.api_complete_forward refused a forward this bridge was handed', err)
     return JSON.stringify({
@@ -290,14 +305,25 @@ function replySucceeded(reply: string): boolean {
  * conservatively answers false rather than guess.
  */
 export function shouldRefreshAfterDispatch(scene: Scene, frame: string, reply: string): boolean {
-  let method: unknown
-  try {
-    method = (JSON.parse(frame) as { method?: unknown }).method
-  } catch {
-    return false
-  }
-  if (typeof method !== 'string' || !methodMutates(scene, method)) return false
+  return refreshesAfter(scene, frameMethod(frame), reply)
+}
+
+/** `shouldRefreshAfterDispatch` for a frame already read by `frameMethod`. */
+export function refreshesAfter(scene: Scene, method: string | undefined, reply: string): boolean {
+  if (method === undefined || !methodMutates(scene, method)) return false
   return replySucceeded(reply)
+}
+
+/** The method a request frame names, or undefined (malformed, a batch, or
+ *  no method). The one read of a frame the page makes before dispatching
+ *  it; its result serves before and after the dispatch. */
+export function frameMethod(frame: string): string | undefined {
+  try {
+    const method = (JSON.parse(frame) as { method?: unknown } | null)?.method
+    return typeof method === 'string' ? method : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** A selection entry as a `selection` directive carries it: the kernel
@@ -608,6 +634,45 @@ export function afterDispatch(deps: LiveBridgeDeps, scene: Scene, reply: string,
 }
 
 /**
+ * The tail every aborted compound runs once the compound is gone: the
+ * document came back whole, view state included, so the app's mirrors are
+ * re-read from it and the viewport redrawn (a document-wide change), and
+ * the selection and isolation the command's frames changed come back (the
+ * camera does not). Shared by the bridge and the plugin host.
+ */
+export function afterAbort(deps: LiveBridgeDeps, scene: Scene): void {
+  deps.reseedViewState?.()
+  deps.reconcileVisibility?.()
+  refreshAfterMutation(deps)
+  applyPendingViewDirectives(scene.take_pending_view_directives(), directiveTargets(deps))
+}
+
+/**
+ * What the Scene is told right before a frame is dispatched, by the bridge
+ * and the plugin host alike: a save that hands bytes to a caller sees the
+ * user's current camera (`mayPushCamera` false for a caller whose grant
+ * cannot save, so its refused save leaves the document as it was); a `.skp` the API exports opens in the app's
+ * display units, as File > Export writes it; whether a tool gesture is
+ * armed; and the id the shell gave this document.
+ */
+export function beforeDispatch(deps: LiveBridgeDeps, scene: Scene, method: string | undefined, mayPushCamera = true): void {
+  // Not while a command holds the document: the Scene refuses to set the
+  // camera then. A save the command itself makes (stamped) still runs, and
+  // its bytes carry the camera last pushed.
+  if (mayPushCamera && method === 'hew.doc.save' && !scene.busy()) {
+    try {
+      deps.pushCameraState?.(scene)
+    } catch {
+      /* a camera the Scene refuses leaves the one it has */
+    }
+  }
+  scene.set_display_units(getLengthUnit())
+  pushGestureArmed(deps, scene)
+  const documentId = pumpDocumentId()
+  if (documentId !== null) scene.set_host_document_id(documentId)
+}
+
+/**
  * Tells the Scene whether a tool gesture is armed in the window, right
  * before a dispatch: `hew.view.enter`/`exit`/`exit_all` refuse
  * `gesture_in_progress` while it is. Read at dispatch time rather than
@@ -644,6 +709,24 @@ export function dispatchFrameNow(
   afterDispatch(deps, scene, reply, mutated)
   pumpEvents(scene)
   return reply
+}
+
+/** Asks `router` for the plugin's answer; a router that throws or rejects
+ * answers `crashed`, so the caller is never left waiting. */
+function serveSafely(
+  router: ForwardRouter,
+  forward: Parameters<ForwardRouter['serve']>[0],
+  signal: AbortSignal,
+): Promise<ForwardReplyJson> {
+  try {
+    return router.serve(forward, signal).catch((err: unknown): ForwardReplyJson => {
+      console.error('the plugin host failed to serve a forward', err)
+      return { failed: 'crashed' }
+    })
+  } catch (err) {
+    console.error('the plugin host failed to serve a forward', err)
+    return Promise.resolve({ failed: 'crashed' })
+  }
 }
 
 /**
@@ -693,13 +776,24 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
   // abort. `done` makes the abort and the forward's completion happen
   // exactly once whichever comes first.
   interface InFlight {
-    kernelToken: bigint
+    compound: OpenCompound
     wasmId: number
     token: number
     requestId: number | string
     done: boolean
+    /** Set while a plugin host serves the forward: told when the forward
+     * ends without its answer. */
+    abort: AbortController | null
   }
   const inFlight = new Map<number, InFlight>()
+
+  // Read-only forwards a plugin host is serving, by shell connId: their
+  // callers are told nothing more once the connection is gone or timed out.
+  const serving = new Map<number, Set<AbortController>>()
+  const stopServing = (connId: number): void => {
+    for (const controller of serving.get(connId) ?? []) controller.abort()
+    serving.delete(connId)
+  }
 
   // The event module, imported once: every emit before it resolves waits on
   // the same import, so emits reach the shell in the order they were made
@@ -797,21 +891,11 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
       })
   }
 
-  // The tail every aborted compound runs: the document came back whole,
-  // view state included, so the app's mirrors are re-read from it and the
-  // viewport redrawn — a document-wide change.
-  const abortTail = (scene: Scene, kernelToken: bigint): void => {
-    try {
-      scene.compound_abort(kernelToken)
-    } catch (err) {
-      console.error('Scene.compound_abort refused a compound this bridge opened', err)
-    }
-    deps.reseedViewState?.()
-    deps.reconcileVisibility?.()
-    refreshAfterMutation(deps)
-    // The selection and isolation the command's frames changed come back
-    // (the camera does not).
-    applyPendingViewDirectives(scene.take_pending_view_directives(), directiveTargets(deps))
+  // Aborts the compound (and any a plugin opened inside it), then runs the
+  // abort tail.
+  const abortTail = (scene: Scene, compound: OpenCompound): void => {
+    abortCompound(scene, compound)
+    afterAbort(deps, scene)
   }
 
   // Opens the compound for `connId`'s mutating forward and marks the
@@ -823,14 +907,14 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
     token: number,
     forward: { plugin: string; label: string | null; request_id: number | string },
   ): boolean => {
-    let kernelToken: bigint
+    let compound: OpenCompound
     try {
-      kernelToken = scene.compound_begin(wasmId, BigInt(token))
+      compound = beginCompound(scene, wasmId, token, () => settleInFlight(connId, 'cancelled'))
     } catch (err) {
       console.error('Scene.compound_begin refused a forward this bridge was handed', err)
       return false
     }
-    inFlight.set(connId, { kernelToken, wasmId, token, requestId: forward.request_id, done: false })
+    inFlight.set(connId, { compound, wasmId, token, requestId: forward.request_id, done: false, abort: null })
     setBusy({
       plugin: forward.plugin,
       label: forward.label ?? null,
@@ -850,13 +934,85 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
     if (held === undefined || held.done || scene === null) return
     held.done = true
     inFlight.delete(connId)
-    abortTail(scene, held.kernelToken)
+    held.abort?.abort()
+    abortTail(scene, held.compound)
     emitReply(connId, completeForward(scene, held.wasmId, held.token, held.requestId, failed))
     // The abort's `document_changed` follows the reply.
     pump(scene)
     // Cleared after the reply is on its way, so what waited behind this
     // command is dispatched after it, never before.
     if (!scene.busy()) setBusy(null)
+  }
+
+  // Ends `connId`'s in-flight forward with what the plugin answered: an
+  // `ok` ends the compound (one undo entry) and runs the dispatch tail;
+  // anything else aborts it, as `settleInFlight` does. Once, like it.
+  const finishInFlight = (connId: number, answer: ForwardReplyJson): void => {
+    const held = inFlight.get(connId)
+    const scene = deps.getScene()
+    if (held === undefined || held.done || scene === null) return
+    held.done = true
+    inFlight.delete(connId)
+    let reply = answer
+    // Whether the compound committed: the document changed whatever the
+    // caller's reply says (its connection may have closed meanwhile).
+    let committed = false
+    if ('ok' in reply) {
+      try {
+        endCompound(scene, held.compound)
+        committed = true
+      } catch (err) {
+        // A refused end left the document as it was before the command.
+        console.error('Scene.compound_end refused a compound this bridge opened', err)
+        reply = { failed: 'crashed' }
+      }
+    }
+    if ('ok' in reply) {
+      const frame = completeForwardWith(scene, held.wasmId, held.token, held.requestId, reply)
+      emitReply(connId, frame)
+      afterDispatch(deps, scene, frame, committed)
+    } else {
+      abortTail(scene, held.compound)
+      emitReply(connId, completeForwardWith(scene, held.wasmId, held.token, held.requestId, reply))
+    }
+    pump(scene)
+    if (!scene.busy()) setBusy(null)
+  }
+
+  // Hands `connId`'s in-flight mutating forward to the plugin host.
+  const serveInFlight = (router: ForwardRouter, connId: number, forward: Parameters<ForwardRouter['serve']>[0]): void => {
+    const held = inFlight.get(connId)
+    if (held === undefined) return
+    const controller = new AbortController()
+    held.abort = controller
+    serveSafely(router, forward, controller.signal).then((answer) => finishInFlight(connId, answer))
+  }
+
+  // Hands a read-only forward to the plugin host and answers it when the
+  // plugin does; nothing is held meanwhile.
+  const serveReadOnly = (
+    router: ForwardRouter,
+    connId: number,
+    wasmId: number,
+    token: number,
+    forward: Parameters<ForwardRouter['serve']>[0],
+  ): void => {
+    const controller = new AbortController()
+    let set = serving.get(connId)
+    if (set === undefined) {
+      set = new Set()
+      serving.set(connId, set)
+    }
+    set.add(controller)
+    serveSafely(router, forward, controller.signal).then((answer) => {
+      serving.get(connId)?.delete(controller)
+      const scene = deps.getScene()
+      if (controller.signal.aborted || scene === null || wasmConnOf.get(connId) !== wasmId) return
+      const frame = completeForwardWith(scene, wasmId, token, forward.request_id, answer)
+      emitReply(connId, frame)
+      afterDispatch(deps, scene, frame, false)
+      pump(scene)
+    })
   }
 
   // Dispatches what waited behind a plugin command, in arrival order,
@@ -909,6 +1065,7 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
 
   const handleClose = (connId: number): void => {
     openConnIds.delete(connId)
+    stopServing(connId)
     // What it left waiting dies with it: its socket can take no reply.
     for (let i = queued.length - 1; i >= 0; i--) {
       if (queued[i].connId === connId) queued.splice(i, 1)
@@ -954,34 +1111,28 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
       if (!scene.busy()) flushQueue()
       return
     }
-    // A save that hands bytes to a client (the render fallback's way of
-    // reading this document) should see the user's current camera.
-    try {
-      if ((JSON.parse(frame) as { method?: unknown }).method === 'hew.doc.save') {
-        deps.pushCameraState?.(scene)
-      }
-    } catch {
-      /* an unparseable frame is answered by the dispatcher below */
-    }
-    // A `.skp` the API exports opens in the app's display units, as File
-    // > Export writes it, so the dispatch sees the current preference.
-    scene.set_display_units(getLengthUnit())
-    pushGestureArmed(deps, scene)
-    if (hostDocumentId !== null) scene.set_host_document_id(hostDocumentId)
+    const method = frameMethod(frame)
+    beforeDispatch(deps, scene, method)
     const result = parseDispatch(scene.api_dispatch(wasmId, frame))
     if (result.kind === 'none') return // a notification: no reply, per §4.1
     let reply: string
+    // Where a plugin command goes: a plugin host's router, when the
+    // registry turns that coupling on and a host filled the slot; else
+    // nowhere, and the forward is answered `unavailable`.
+    const router = result.kind === 'pending' && behaviorEnabled('plugin-forward') ? forwardRouter() : null
     if (result.kind === 'reply') {
       reply = result.frame
     } else if (result.forward.mutating && beginInFlight(scene, connId, wasmId, result.token, result.forward)) {
       // A mutating plugin command runs inside a compound: one undo entry,
       // nothing else lands meanwhile, and an abort puts the document back.
-      // No plugin host runs yet, so the forward is answered `unavailable`
-      // (and the compound aborted) as soon as this frame's task is done;
-      // the plugin realm routes it to the plugin's background instead once
-      // that lands. Until then it is in flight: frames queue behind it,
-      // and Cancel or the shell's timeout can end it.
-      queueMicrotask(() => settleInFlight(connId, 'unavailable'))
+      // It is in flight until the plugin answers (or, with no host, as
+      // soon as this frame's task is done, `unavailable`): frames queue
+      // behind it, and Cancel or the shell's timeout can end it.
+      if (router !== null) serveInFlight(router, connId, result.forward)
+      else queueMicrotask(() => settleInFlight(connId, 'unavailable'))
+      return
+    } else if (router !== null && !result.forward.mutating) {
+      serveReadOnly(router, connId, wasmId, result.token, result.forward)
       return
     } else {
       reply = completeForward(scene, wasmId, result.token, result.forward.request_id)
@@ -993,7 +1144,7 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
     const mutated =
       result.kind === 'pending'
         ? result.forward.mutating && replySucceeded(reply)
-        : result.dryRun !== true && shouldRefreshAfterDispatch(scene, frame, reply)
+        : result.dryRun !== true && refreshesAfter(scene, method, reply)
     // Re-render, then the view effects the dispatch left (camera, units, a
     // Scene activation, the selection, hide and show, isolation, framing),
     // in the order its commands ran.
@@ -1025,6 +1176,7 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
         // compound held for its forward, if any.
         win.listen<{ connId: number }>('hew://api-abort', (event) => {
           settleInFlight(event.payload.connId, 'timeout')
+          stopServing(event.payload.connId)
         }),
         win.listen<{ id: string }>('hew://document-id', (event) => {
           handleDocumentId(event.payload.id)

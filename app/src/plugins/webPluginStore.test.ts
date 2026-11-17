@@ -8,13 +8,58 @@ import { requiresPreview } from '../test/requiresPreview'
 import { FakeDir, linkedChannels } from '../test/opfsFake'
 import { storedZip } from '../test/storedZip'
 import { fakeWasm, indexStoredZip, manifestJson, pluginFile, textAt, treeOf, type ListedFile } from './testKit'
-import { makeWebPluginStore, type PluginWasm, type WebPluginStore } from './webPluginStore'
+import {
+  compareCodePoints,
+  makeWebPluginStore,
+  recordFingerprint,
+  rollbackFingerprint,
+  storageDelete,
+  storageGet,
+  storageList,
+  storageSet,
+  type LockProvider,
+  type PluginWasm,
+  type WebPluginStore,
+} from './webPluginStore'
 import { PluginError } from './pluginError'
 import type { Installed } from './types'
 
 beforeEach((ctx) => requiresPreview(ctx, 'plugins'))
 
-function setup(over: { now?: () => number; channel?: BroadcastChannel | null; wasm?: PluginWasm; root?: FakeDir } = {}) {
+/** An in-memory Web Lock: one holder at a time, in request order. */
+function memoryLocks(): LockProvider & { held: boolean; log: string[] } {
+  let tail: Promise<unknown> = Promise.resolve()
+  const locks = {
+    held: false,
+    log: [] as string[],
+    request<T>(name: string, callback: () => Promise<T>): Promise<T> {
+      const run = tail.then(async () => {
+        locks.held = true
+        locks.log.push(`take ${name}`)
+        try {
+          return await callback()
+        } finally {
+          locks.log.push(`release ${name}`)
+          locks.held = false
+        }
+      })
+      tail = run.catch(() => undefined)
+      return run
+    },
+  }
+  return locks
+}
+
+function setup(
+  over: {
+    now?: () => number
+    channel?: BroadcastChannel | null
+    wasm?: PluginWasm
+    root?: FakeDir
+    locks?: LockProvider | null
+  } = {},
+) {
+  const locks = over.locks === undefined ? memoryLocks() : over.locks
   const root = over.root ?? new FakeDir('opfs-root')
   const keys = new Map<string, string>()
   const storage = {
@@ -33,8 +78,9 @@ function setup(over: { now?: () => number; channel?: BroadcastChannel | null; wa
     now: over.now ?? (() => 1_000),
     token: () => String(++tokens).padStart(32, '0'),
     hewVersion: () => '1.5.0',
+    locks,
   })
-  return { root, keys, store }
+  return { root, keys, store, locks }
 }
 
 async function install(store: WebPluginStore, over = {}, extra = {}): Promise<Installed> {
@@ -503,5 +549,683 @@ describe('a changed plugin while an install waits', () => {
     const x = await store.stageFile(pluginFile({ id: 'com.example.x' }))
     await store.stageFile(pluginFile({ id: 'com.example.y' }))
     expect((await store.commit(x.token, true))?.id).toBe('com.example.x')
+  })
+})
+
+describe('the plugin lock', () => {
+  it('refuses every change, with a typed error, when the browser has no Web Locks, and still lists', async () => {
+    const { root, store } = setup({ locks: null })
+    expect(await store.list()).toEqual([])
+    const id = 'com.example.one'
+    expect(await refusal(store.stageFile(pluginFile()))).toBe('locks_unavailable')
+    expect(await refusal(store.commit('x', true))).toBe('locks_unavailable')
+    expect(await refusal(store.setEnabled(id, true))).toBe('locks_unavailable')
+    expect(await refusal(store.uninstall(id))).toBe('locks_unavailable')
+    expect(await refusal(store.rollback(id))).toBe('locks_unavailable')
+    expect(await refusal(store.storage.storageSet(id, 'k', 'v'))).toBe('locks_unavailable')
+    expect(await refusal(store.storage.storageDelete(id, 'k'))).toBe('locks_unavailable')
+    expect(treeOf(root)).toEqual([])
+  })
+
+  it('writes only while holding the lock, and two overlapping changes never interleave', async () => {
+    const locks = memoryLocks()
+    const root = new FakeDir('opfs-root')
+    const make = () =>
+      makeWebPluginStore({
+        wasm: async () => fakeWasm(),
+        opfsRoot: async () => root as unknown as FileSystemDirectoryHandle,
+        channel: null,
+        storage: null,
+        locks,
+        hewVersion: () => '1.5.0',
+      })
+    // Two tabs: two stores over one file system and one lock.
+    const tabA = make()
+    const tabB = make()
+    const writes: boolean[] = []
+    const realRemove = FakeDir.prototype.removeEntry
+    const realFile = FakeDir.prototype.getFileHandle
+    const spies = [
+      vi.spyOn(FakeDir.prototype, 'removeEntry').mockImplementation(async function (this: FakeDir, ...a) {
+        writes.push(locks.held)
+        await new Promise((r) => setTimeout(r, 0))
+        return realRemove.apply(this, a)
+      }),
+      vi.spyOn(FakeDir.prototype, 'getFileHandle').mockImplementation(async function (this: FakeDir, name, opts) {
+        if (opts?.create) {
+          writes.push(locks.held)
+          await new Promise((r) => setTimeout(r, 0))
+        }
+        return realFile.call(this, name, opts)
+      }),
+    ]
+    try {
+      const sa = await tabA.stageFile(pluginFile())
+      const sb = await tabB.stageFile(pluginFile({ id: 'com.example.two' }))
+      locks.log.length = 0
+      writes.length = 0
+      await Promise.all([tabA.commit(sa.token, true), tabB.commit(sb.token, true), tabA.setEnabled('com.example.one', false)])
+    } finally {
+      for (const s of spies) s.mockRestore()
+    }
+    expect(writes.length).toBeGreaterThan(10)
+    expect(writes.every(Boolean)).toBe(true)
+    // take, release, take, release...: never two takes in a row.
+    expect(locks.log).toEqual(['take hew-plugins', 'release hew-plugins', 'take hew-plugins', 'release hew-plugins', 'take hew-plugins', 'release hew-plugins'])
+  })
+})
+
+/** Fails one mutating file system step, or every step from there on. */
+function injector() {
+  let count = 0
+  let failAt = Infinity
+  let sticky = false
+  const tick = (): void => {
+    count++
+    if (count === failAt || (sticky && count > failAt)) throw new Error('InjectedFailure: the disk said no')
+  }
+  const realRemove = FakeDir.prototype.removeEntry
+  const realDir = FakeDir.prototype.getDirectoryHandle
+  const realFile = FakeDir.prototype.getFileHandle
+  const spies = [
+    vi.spyOn(FakeDir.prototype, 'removeEntry').mockImplementation(async function (this: FakeDir, ...a) {
+      tick()
+      return realRemove.apply(this, a)
+    }),
+    vi.spyOn(FakeDir.prototype, 'getDirectoryHandle').mockImplementation(async function (this: FakeDir, name, opts) {
+      if (opts?.create && !this.dirs.has(name)) tick()
+      return realDir.call(this, name, opts)
+    }),
+    vi.spyOn(FakeDir.prototype, 'getFileHandle').mockImplementation(async function (this: FakeDir, name, opts) {
+      if (opts?.create) tick()
+      const handle = await realFile.call(this, name, opts)
+      if (!opts?.create) return handle
+      const real = handle.createWritable.bind(handle)
+      handle.createWritable = async () => {
+        const w = await real()
+        const close = w.close.bind(w)
+        w.close = async () => {
+          tick()
+          return close()
+        }
+        return w
+      }
+      return handle
+    }),
+  ]
+  return {
+    arm(at: number, stick = false) {
+      count = 0
+      failAt = at
+      sticky = stick
+    },
+    disarm() {
+      failAt = Infinity
+      sticky = false
+    },
+    get count() {
+      return count
+    },
+    restore() {
+      for (const s of spies) s.mockRestore()
+    },
+  }
+}
+
+describe('swapping versions survives a failure at every step', () => {
+  const ID = 'com.example.one'
+
+  /** 1.0.0 installed, then 2.0.0 over it; saved data written between. */
+  async function twoVersions() {
+    const env = setup()
+    await install(env.store, { version: '1.0.0' })
+    await env.store.storage.storageSet(ID, 'k', 'one')
+    await install(env.store, { version: '2.0.0' })
+    await env.store.storage.storageSet(ID, 'k2', 'two')
+    return env
+  }
+
+  async function versionsOf(env: ReturnType<typeof setup>): Promise<{ current: string; previous: string | null }> {
+    const listed = await env.store.list()
+    expect(listed).toHaveLength(1)
+    const [l] = listed
+    if (l.kind !== 'installed') throw new Error(`unreadable: ${JSON.stringify(l)}`)
+    return { current: l.installed.version, previous: l.previous_version }
+  }
+
+  async function bothIntact(env: ReturnType<typeof setup>, arrangement: { current: string; previous: string }): Promise<void> {
+    expect(await versionsOf(env)).toEqual(arrangement)
+    const prev = await env.store.previous(ID)
+    expect(prev.installed.version).toBe(arrangement.previous)
+    expect(await textAt(env.root, `plugins/${ID}/hew-plugin.json`)).toContain(`"${arrangement.current}"`)
+    expect(await textAt(env.root, `plugins/${ID}/previous/hew-plugin.json`)).toContain(`"${arrangement.previous}"`)
+    expect(await textAt(env.root, `plugins/${ID}/files/dist/background.js`)).not.toBeNull()
+    expect(await textAt(env.root, `plugins/${ID}/previous/files/dist/background.js`)).not.toBeNull()
+    // The saved data is the plugin's, never lost.
+    expect(await env.store.storage.storageList(ID)).toEqual(['k', 'k2'])
+  }
+
+  async function sweep(
+    op: (env: ReturnType<typeof setup>, prepared: unknown) => Promise<unknown>,
+    prepare: (env: ReturnType<typeof setup>) => Promise<unknown>,
+    before: { current: string; previous: string },
+    after: { current: string; previous: string },
+  ): Promise<void> {
+    // How many steps does a clean run take?
+    const probe = injector()
+    let total: number
+    try {
+      const env = await twoVersions()
+      const prepared = await prepare(env)
+      probe.arm(Infinity)
+      await op(env, prepared)
+      total = probe.count
+    } finally {
+      probe.restore()
+    }
+    expect(total).toBeGreaterThan(8)
+    let rejected = 0
+    for (const sticky of [false, true]) {
+      for (let at = 1; at <= total; at++) {
+        const inj = injector()
+        try {
+          const env = await twoVersions()
+          const prepared = await prepare(env)
+          inj.arm(at, sticky)
+          let failed = false
+          try {
+            await op(env, prepared)
+          } catch {
+            failed = true
+          }
+          // The disk is healthy again (a reload, after a sticky failure).
+          inj.disarm()
+          const label = `${sticky ? 'every step from' : 'only'} step ${at}`
+          if (failed) {
+            rejected++
+            await bothIntact(env, before).catch((e) => {
+              throw new Error(`${label}: ${e instanceof Error ? e.message : e}`)
+            })
+          } else {
+            await bothIntact(env, after).catch((e) => {
+              throw new Error(`${label} (succeeded): ${e instanceof Error ? e.message : e}`)
+            })
+          }
+        } finally {
+          inj.restore()
+        }
+      }
+    }
+    // Most steps are before the swap completes: they must reject.
+    expect(rejected).toBeGreaterThan(total)
+  }
+
+  it('rollback leaves the installed and the previous version whole at any single failure and at a crash', async () => {
+    await sweep(
+      (env) => env.store.rollback(ID),
+      async () => undefined,
+      { current: '2.0.0', previous: '1.0.0' },
+      { current: '1.0.0', previous: '2.0.0' },
+    )
+  })
+
+  it('an update leaves the installed and the previous version whole at any single failure and at a crash', async () => {
+    // Before: 2.0.0 over 1.0.0. After a good update: 3.0.0 over 2.0.0.
+    await sweep(
+      async (env, staged) => env.store.commit((staged as { token: string }).token, true),
+      (env) => env.store.stageFile(pluginFile({ version: '3.0.0' })),
+      { current: '2.0.0', previous: '1.0.0' },
+      { current: '3.0.0', previous: '2.0.0' },
+    )
+  })
+
+  /** A `.old` copy a finished swap could not remove: whole, marked, and now a
+   *  leftover beside a healthy folder. */
+  async function leftover(env: ReturnType<typeof setup>): Promise<void> {
+    const plugins = env.root.dirs.get('plugins') as FakeDir
+    const folder = plugins.dirs.get(ID) as FakeDir
+    const staging = await plugins.getDirectoryHandle('.staging', { create: true })
+    const old = await staging.getDirectoryHandle(`${ID}-${'d'.repeat(32)}.old`, { create: true })
+    for (const [n, f] of folder.files) old.files.set(n, f)
+    for (const [n, d] of folder.dirs) old.dirs.set(n, d)
+    old.files.set('.swap-intent', { bytes: new Uint8Array([49, 10]), mtime: 0 })
+  }
+
+  it('an uninstall cut short at any step leaves the plugin installed or gone, and never brings it back from a `.old` copy', async () => {
+    const probe = injector()
+    let total: number
+    try {
+      const env = await twoVersions()
+      await leftover(env)
+      probe.arm(Infinity)
+      await env.store.uninstall(ID)
+      total = probe.count
+    } finally {
+      probe.restore()
+    }
+    expect(total).toBeGreaterThan(1)
+    let gone = 0
+    let kept = 0
+    for (const sticky of [false, true]) {
+      // One past the last step: nothing fails, the uninstall completes.
+      for (let at = 1; at <= total + 1; at++) {
+        const inj = injector()
+        const label = `${sticky ? 'every step from' : 'only'} step ${at}`
+        try {
+          const env = await twoVersions()
+          await leftover(env)
+          inj.arm(at, sticky)
+          let failed = false
+          try {
+            await env.store.uninstall(ID)
+          } catch {
+            failed = true
+          }
+          inj.disarm()
+          // Whether the plugin's folder was already removed when it stopped:
+          // from then on it is uninstalled, whatever else is left behind.
+          const removed = (await textAt(env.root, `plugins/${ID}/installed.json`)) === null
+          // Two later calls: the first may recover, the second must agree.
+          for (let again = 0; again < 2; again++) {
+            const listed = await env.store.list()
+            expect(listed.length === 0 || !removed, `${label}: the removed plugin came back`).toBe(true)
+            if (listed.length === 0) {
+              expect(await textAt(env.root, `plugins/${ID}/installed.json`), label).toBeNull()
+              if (again === 0) gone++
+            } else {
+              // Never resurrected: still installed means the uninstall did not get past its first step.
+              expect(failed, `${label}: the plugin is back after a completed uninstall`).toBe(true)
+              await bothIntact(env, { current: '2.0.0', previous: '1.0.0' }).catch((e) => {
+                throw new Error(`${label}: ${e instanceof Error ? e.message : e}`)
+              })
+              if (again === 0) kept++
+            }
+          }
+          if (!failed) expect(await env.store.list(), label).toEqual([])
+        } finally {
+          inj.restore()
+        }
+      }
+    }
+    expect(gone).toBeGreaterThan(0)
+    expect(kept).toBeGreaterThan(0)
+  })
+
+  it('a rollback carries the current saved data to the version coming back', async () => {
+    const env = await twoVersions()
+    await env.store.rollback(ID)
+    expect(await env.store.storage.storageGet(ID, 'k2')).toBe('two')
+    expect(await textAt(env.root, `plugins/${ID}/previous/storage.json`)).toBe('{"k":"one","k2":"two"}')
+    expect(treeOf(env.root).some((p) => p.includes('.staging/'))).toBe(false)
+  })
+
+  it('restores a swap a crash cut short, on the next call', async () => {
+    const env = await twoVersions()
+    // The crash state: the folder emptied half way, the `.old` copy whole.
+    const plugins = env.root.dirs.get('plugins') as FakeDir
+    const folder = plugins.dirs.get(ID) as FakeDir
+    const staging = await plugins.getDirectoryHandle('.staging', { create: true })
+    const old = await staging.getDirectoryHandle(`${ID}-${'a'.repeat(32)}.old`, { create: true })
+    for (const [n, f] of folder.files) old.files.set(n, f)
+    for (const [n, d] of folder.dirs) old.dirs.set(n, d)
+    // The swap wrote its intent once the copy was whole.
+    old.files.set('.swap-intent', { bytes: new Uint8Array([49, 10]), mtime: 0 })
+    plugins.dirs.set(ID, new FakeDir(ID))
+    plugins.dirs.get(ID)!.files.set('hew-plugin.json', folder.files.get('hew-plugin.json')!)
+    await bothIntact(env, { current: '2.0.0', previous: '1.0.0' })
+    expect(treeOf(env.root).some((p) => p.includes('.old'))).toBe(false)
+    // The marker is the swap's, not the plugin's: it does not come back.
+    expect(treeOf(env.root).some((p) => p.includes('.swap-intent'))).toBe(false)
+  })
+
+  /** The crash state: the installed folder emptied of its record, its copy
+   *  whole in `.staging`, with or without the swap's intent marker. */
+  async function crashed(env: ReturnType<typeof setup>, marked: boolean): Promise<string> {
+    const plugins = env.root.dirs.get('plugins') as FakeDir
+    const folder = plugins.dirs.get(ID) as FakeDir
+    const staging = await plugins.getDirectoryHandle('.staging', { create: true })
+    const name = `${ID}-${'a'.repeat(32)}.old`
+    const old = await staging.getDirectoryHandle(name, { create: true })
+    for (const [n, f] of folder.files) old.files.set(n, f)
+    for (const [n, d] of folder.dirs) old.dirs.set(n, d)
+    if (marked) old.files.set('.swap-intent', { bytes: new Uint8Array([49, 10]), mtime: 0 })
+    plugins.dirs.set(ID, new FakeDir(ID))
+    plugins.dirs.get(ID)!.files.set('hew-plugin.json', folder.files.get('hew-plugin.json')!)
+    return name
+  }
+
+  it('does not restore from a `.old` copy that carries no intent marker', async () => {
+    const env = await twoVersions()
+    const name = await crashed(env, false)
+    const listed = await env.store.list()
+    expect(listed).toMatchObject([{ kind: 'unreadable', id: ID }])
+    // Nothing deletes it either.
+    expect(treeOf(env.root).some((p) => p.includes(name))).toBe(true)
+  })
+
+  it('staging a package after a failed recovery keeps the `.old` copy, so the next call still restores it', async () => {
+    // Total steps a clean stage takes after a crash, then every failure point.
+    const probe = injector()
+    let total: number
+    try {
+      const env = await twoVersions()
+      await crashed(env, true)
+      probe.arm(Infinity)
+      await env.store.stageFile(pluginFile({ version: '3.0.0' }))
+      total = probe.count
+    } finally {
+      probe.restore()
+    }
+    expect(total).toBeGreaterThan(0)
+    for (const sticky of [false, true]) {
+      for (let at = 1; at <= total; at++) {
+        const inj = injector()
+        try {
+          const env = await twoVersions()
+          await crashed(env, true)
+          inj.arm(at, sticky)
+          // A failing disk fails the recovery inside the call, or the call.
+          let staged: { token: string } | null = null
+          try {
+            staged = await env.store.stageFile(pluginFile({ version: '3.0.0' }))
+          } catch {
+            staged = null
+          }
+          // The person cancels, or the call failed; either way nothing is accepted.
+          if (staged !== null) await env.store.commit(staged.token, false)
+          inj.disarm()
+          await bothIntact(env, { current: '2.0.0', previous: '1.0.0' }).catch((e) => {
+            throw new Error(`${sticky ? 'every step from' : 'only'} step ${at}: ${e instanceof Error ? e.message : e}`)
+          })
+          // A copy left because its removal failed after the restore is a
+          // leftover, harmless beside a folder with a record: the next swap
+          // or uninstall of the id removes it.
+        } finally {
+          inj.restore()
+        }
+      }
+    }
+  })
+
+  it('an update removes the `.old` leftovers of its id once the folder is healthy, and no other plugin\'s', async () => {
+    const env = await twoVersions()
+    const plugins = env.root.dirs.get('plugins') as FakeDir
+    const staging = await plugins.getDirectoryHandle('.staging', { create: true })
+    const mine = await staging.getDirectoryHandle(`${ID}-${'b'.repeat(32)}.old`, { create: true })
+    mine.files.set('installed.json', { bytes: new Uint8Array([123, 125]), mtime: 0 })
+    const other = await staging.getDirectoryHandle(`com.example.two-${'c'.repeat(32)}.old`, { create: true })
+    other.files.set('installed.json', { bytes: new Uint8Array([123, 125]), mtime: 0 })
+    await install(env.store, { version: '3.0.0' })
+    const left = treeOf(env.root).filter((p) => p.includes('.old'))
+    expect(left.some((p) => p.includes(`${ID}-`))).toBe(false)
+    expect(left.some((p) => p.includes('com.example.two-'))).toBe(true)
+  })
+})
+
+describe('plugin storage', () => {
+  const ID = 'com.example.one'
+
+  it('keeps strings by key in plugins/<id>/storage.json, lists them sorted, and says what changed', async () => {
+    const posts: unknown[] = []
+    const channel = { addEventListener: () => {}, postMessage: (m: unknown) => void posts.push(m) } as unknown as BroadcastChannel
+    const { root, store } = setup({ channel })
+    await install(store)
+    const s = store.storage
+    expect(await s.storageGet(ID, 'a')).toBeNull()
+    expect(await s.storageList(ID)).toEqual([])
+    await s.storageSet(ID, 'b', 'two')
+    await s.storageSet(ID, 'a', '1')
+    await s.storageSet(ID, '__proto__', 'x')
+    expect(await s.storageGet(ID, 'b')).toBe('two')
+    expect(await s.storageGet(ID, '__proto__')).toBe('x')
+    expect(await s.storageGet(ID, 'toString')).toBeNull()
+    expect(await s.storageList(ID)).toEqual(['__proto__', 'a', 'b'])
+    expect(JSON.parse((await textAt(root, `plugins/${ID}/storage.json`)) as string)).toEqual({ a: '1', b: 'two', ['__proto__']: 'x' })
+    expect(posts.filter((m) => (m as { kind: string }).kind === 'storage')).toEqual([
+      { kind: 'storage', id: ID, keys: ['b'] },
+      { kind: 'storage', id: ID, keys: ['a'] },
+      { kind: 'storage', id: ID, keys: ['__proto__'] },
+    ])
+    posts.length = 0
+    await s.storageDelete(ID, 'nothing')
+    expect(posts).toEqual([])
+    await s.storageDelete(ID, 'a')
+    expect(posts).toEqual([{ kind: 'storage', id: ID, keys: ['a'] }])
+    await s.storageDelete(ID, 'b')
+    await s.storageDelete(ID, '__proto__')
+    // The file goes with the last key.
+    expect(treeOf(root).some((p) => p.endsWith('storage.json'))).toBe(false)
+  })
+
+  it('does not wake another tab\'s pane for a storage notice', async () => {
+    const [tabA, tabB] = linkedChannels()
+    const a = setup({ channel: tabA })
+    let other = 0
+    const b = makeWebPluginStore({
+      wasm: async () => fakeWasm(),
+      opfsRoot: async () => a.root as unknown as FileSystemDirectoryHandle,
+      channel: tabB,
+      storage: null,
+    })
+    b.onChanged(() => other++)
+    await install(a.store)
+    expect(other).toBe(1)
+    // The linked fake delivers without data; a real storage message carries it.
+    const seen: Array<(ev: unknown) => void> = []
+    const fake = { addEventListener: (_t: string, fn: (ev: unknown) => void) => seen.push(fn), postMessage: () => {} } as unknown as BroadcastChannel
+    const c = makeWebPluginStore({ wasm: async () => fakeWasm(), opfsRoot: async () => a.root as unknown as FileSystemDirectoryHandle, channel: fake, storage: null })
+    let hits = 0
+    c.onChanged(() => hits++)
+    seen.forEach((f) => f({ data: { kind: 'storage', id: ID, keys: ['k'] } }))
+    expect(hits).toBe(0)
+    seen.forEach((f) => f({ data: { kind: 'changed' } }))
+    expect(hits).toBe(1)
+  })
+
+  it('refuses a plugin that is not installed, an id that is not an id, and never makes a folder', async () => {
+    const { root, store } = setup()
+    const s = store.storage
+    for (const call of [
+      () => s.storageGet(ID, 'k'),
+      () => s.storageSet(ID, 'k', 'v'),
+      () => s.storageDelete(ID, 'k'),
+      () => s.storageList(ID),
+    ]) {
+      expect(await refusal(call())).toBe('not_installed')
+    }
+    expect(treeOf(root)).toEqual([])
+    expect(root.dirs.size).toBe(0)
+    for (const bad of ['..', 'a/../b.c', 'x', 'hew.x']) {
+      expect(await refusal(s.storageSet(bad, 'k', 'v')), bad).toBe('invalid_id')
+      expect(await refusal(s.storageGet(bad, 'k')), bad).toBe('invalid_id')
+    }
+    // A folder with no record is not an installed plugin.
+    const plugins = await root.getDirectoryHandle('plugins', { create: true })
+    await plugins.getDirectoryHandle(ID, { create: true })
+    expect(await refusal(s.storageSet(ID, 'k', 'v'))).toBe('not_installed')
+    expect(treeOf(root)).toEqual([])
+  })
+
+  it('refuses an empty key and one over 256 bytes (counted in UTF-8), and reports with the store convention', async () => {
+    const { store } = setup()
+    await install(store)
+    const s = store.storage
+    expect(await refusal(s.storageSet(ID, '', 'v'))).toBe('storage_key_invalid')
+    expect(await refusal(s.storageGet(ID, ''))).toBe('storage_key_invalid')
+    await s.storageSet(ID, 'x'.repeat(256), 'v')
+    expect(await refusal(s.storageSet(ID, 'x'.repeat(257), 'v'))).toBe('storage_key_invalid')
+    // 129 two-byte characters are 258 bytes.
+    await expect(s.storageSet(ID, 'é'.repeat(129), 'v')).rejects.toMatchObject({
+      refusal: 'storage_key_invalid',
+      message: 'A storage key must be 1 to 256 bytes long.',
+    })
+    await s.storageSet(ID, 'é'.repeat(128), 'v')
+  })
+
+  it('refuses past 5 MiB as compact JSON and writes nothing', async () => {
+    const { root, store } = setup()
+    await install(store)
+    const s = store.storage
+    const MiB = 1024 * 1024
+    await s.storageSet(ID, 'big', 'x'.repeat(4 * MiB))
+    const before = await textAt(root, `plugins/${ID}/storage.json`)
+    await expect(s.storageSet(ID, 'more', 'y'.repeat(2 * MiB))).rejects.toMatchObject({ refusal: 'storage_quota' })
+    expect(await textAt(root, `plugins/${ID}/storage.json`)).toBe(before)
+    // A single value too large on its own.
+    expect(await refusal(s.storageSet(ID, 'huge', 'z'.repeat(5 * MiB + 1)))).toBe('storage_quota')
+    // Replacing a value with a smaller one is fine; the file only has to fit.
+    await s.storageSet(ID, 'big', 'x')
+    expect(await s.storageGet(ID, 'big')).toBe('x')
+    // The overhead of the JSON counts: exactly 5 MiB of value plus the braces and key does not fit.
+    expect(await refusal(s.storageSet(ID, 'k', 'v'.repeat(5 * MiB - 8)))).toBe('storage_quota')
+    await s.storageSet(ID, 'k', 'v'.repeat(5 * MiB - 100))
+  })
+
+  it('refuses a file that is not an object of strings and never rewrites it', async () => {
+    const { root, store } = setup()
+    await install(store)
+    const folder = root.dirs.get('plugins')!.dirs.get(ID)!
+    for (const bad of ['not json', '[1]', '"s"', 'null', '{"a":1}', '{"a":{"b":"c"}}', '{"a":"b"']) {
+      const bytes = new TextEncoder().encode(bad)
+      folder.files.set('storage.json', { bytes, mtime: 1 })
+      for (const call of [
+        () => store.storage.storageGet(ID, 'a'),
+        () => store.storage.storageList(ID),
+        () => store.storage.storageSet(ID, 'a', 'v'),
+        () => store.storage.storageDelete(ID, 'a'),
+      ]) {
+        expect(await refusal(call()), bad).toBe('storage_unreadable')
+      }
+      expect(folder.files.get('storage.json')!.bytes, bad).toEqual(bytes)
+    }
+    // A file over the cap is unreadable too.
+    folder.files.set('storage.json', { bytes: new Uint8Array(5 * 1024 * 1024 + 1).fill(32), mtime: 1 })
+    expect(await refusal(store.storage.storageList(ID))).toBe('storage_unreadable')
+  })
+
+  it('is carried across an update and a rollback, and removed on uninstall', async () => {
+    const { root, store } = setup()
+    await install(store, { version: '1.0.0' })
+    await store.storage.storageSet(ID, 'k', 'v')
+    await install(store, { version: '2.0.0' })
+    expect(await store.storage.storageGet(ID, 'k')).toBe('v')
+    expect(await textAt(root, `plugins/${ID}/previous/storage.json`)).toBe('{"k":"v"}')
+    await store.storage.storageSet(ID, 'k', 'v2')
+    await store.rollback(ID)
+    expect(await store.storage.storageGet(ID, 'k')).toBe('v2')
+    await store.rollback(ID)
+    expect(await store.storage.storageGet(ID, 'k')).toBe('v2')
+    await store.uninstall(ID)
+    expect(treeOf(root).some((p) => p.includes('storage.json'))).toBe(false)
+    // Installed again, it starts empty.
+    await install(store)
+    expect(await store.storage.storageList(ID)).toEqual([])
+  })
+
+  it('writes under the lock', async () => {
+    const locks = memoryLocks()
+    const { store } = setup({ locks })
+    await install(store)
+    locks.log.length = 0
+    await store.storage.storageSet(ID, 'k', 'v')
+    expect(locks.log).toEqual(['take hew-plugins', 'release hew-plugins'])
+  })
+
+  it('is exported as module functions over navigator.storage and navigator.locks', async () => {
+    const root = new FakeDir('opfs-root')
+    const locks = memoryLocks()
+    const storageDesc = Object.getOwnPropertyDescriptor(navigator, 'storage')
+    const locksDesc = Object.getOwnPropertyDescriptor(navigator, 'locks')
+    Object.defineProperty(navigator, 'storage', { configurable: true, value: { getDirectory: async () => root } })
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: locks })
+    try {
+      // Install through a store over the same file system.
+      const { store } = setup({ root })
+      await install(store)
+      await storageSet(ID, 'b', '2')
+      await storageSet(ID, 'a', '1')
+      expect(await storageGet(ID, 'a')).toBe('1')
+      expect(await storageList(ID)).toEqual(['a', 'b'])
+      await storageDelete(ID, 'a')
+      expect(await storageList(ID)).toEqual(['b'])
+      expect(await refusal(storageGet('com.example.none', 'k'))).toBe('not_installed')
+    } finally {
+      for (const [k, d] of [['storage', storageDesc], ['locks', locksDesc]] as const) {
+        if (d) Object.defineProperty(navigator, k, d)
+        else delete (navigator as unknown as Record<string, unknown>)[k]
+      }
+    }
+  })
+})
+
+describe('what the person was shown is what is applied', () => {
+  const ID = 'com.example.one'
+
+  it('turning on refuses plugin_changed when the record is not the one shown, and applies the one that is', async () => {
+    const { store } = setup()
+    await install(store, { permissions: ['model.read'] })
+    await store.setEnabled(ID, false)
+    const shown = recordFingerprint((await listedOne(store)).installed)
+    // Another tab updates the plugin to a version that asks for more.
+    await install(store, { version: '2.0.0', permissions: ['model.read', 'network:api.example.com'] })
+    expect(await refusal(store.setEnabled(ID, true, shown))).toBe('plugin_changed')
+    expect((await listedOne(store)).installed.enabled).toBe(false)
+    // Shown the current record, it turns on.
+    await store.setEnabled(ID, true, recordFingerprint((await listedOne(store)).installed))
+    expect((await listedOne(store)).installed.enabled).toBe(true)
+    // Turning off asks nothing of what was shown.
+    await store.setEnabled(ID, false, 'anything')
+    expect((await listedOne(store)).installed.enabled).toBe(false)
+  })
+
+  it('a reinstall of the same version is a change to what was shown', async () => {
+    const { store } = setup({ now: (() => { let t = 1000; return () => (t += 10) })() })
+    await install(store)
+    await store.setEnabled(ID, false)
+    const shown = recordFingerprint((await listedOne(store)).installed)
+    await install(store)
+    expect(await refusal(store.setEnabled(ID, true, shown))).toBe('plugin_changed')
+  })
+
+  it('rolling back refuses plugin_changed when previous/ no longer holds the version shown', async () => {
+    const { store } = setup()
+    await install(store, { version: '1.0.0' })
+    await install(store, { version: '2.0.0' })
+    const before = await store.previous(ID)
+    const shown = rollbackFingerprint((await listedOne(store)).installed, before.installed)
+    // Another tab installs 3.0.0: 2.0.0 becomes the previous version.
+    await install(store, { version: '3.0.0', permissions: ['network:api.example.com'] })
+    expect(await refusal(store.rollback(ID, shown))).toBe('plugin_changed')
+    const now = await listedOne(store)
+    expect(now.installed.version).toBe('3.0.0')
+    expect(now.previous_version).toBe('2.0.0')
+    // Shown the pair that is there, it rolls back.
+    const prev = await store.previous(ID)
+    const back = await store.rollback(ID, rollbackFingerprint(now.installed, prev.installed))
+    expect(back.version).toBe('2.0.0')
+  })
+
+  async function listedOne(store: WebPluginStore) {
+    const [l] = await store.list()
+    if (l.kind !== 'installed') throw new Error('expected an installed plugin')
+    return l
+  }
+})
+
+describe('saved keys sort by code point, as the desktop store sorts them', () => {
+  it('puts U+FF21 before a character outside the Basic Multilingual Plane, and lists the same order', async () => {
+    const { store } = setup()
+    await install(store)
+    const wide = '\uFF21'
+    const emoji = '\u{1F600}'
+    expect([emoji, wide].sort()).toEqual([emoji, wide])
+    expect(compareCodePoints(wide, emoji)).toBeLessThan(0)
+    expect(compareCodePoints(emoji, wide)).toBeGreaterThan(0)
+    expect(compareCodePoints('a', 'a')).toBe(0)
+    expect(compareCodePoints('a', 'ab')).toBeLessThan(0)
+    await store.storage.storageSet('com.example.one', emoji, '1')
+    await store.storage.storageSet('com.example.one', wide, '2')
+    await store.storage.storageSet('com.example.one', 'a', '3')
+    expect(await store.storage.storageList('com.example.one')).toEqual(['a', wide, emoji])
   })
 })

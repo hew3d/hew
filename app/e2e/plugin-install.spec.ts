@@ -74,7 +74,7 @@ test('installs from a file with consent, survives a reload, and uninstalls', asy
   await switchOn(page)
   await boot(page)
   await openPlugins(page)
-  await expect(page.getByText(/do not run yet in this build/)).toBeVisible()
+  await expect(page.getByText(/runs in a sandbox/)).toBeVisible()
   await expect(page.getByText('No plugins are installed.')).toBeVisible()
 
   await page.locator('input[type=file][aria-label="Plugin package"]').setInputFiles({
@@ -112,7 +112,14 @@ test('installs from a file with consent, survives a reload, and uninstalls', asy
   await expect(toggle).toBeChecked()
   await toggle.click()
   await expect(toggle).not.toBeChecked()
+  // Turning it on asks first, with Cancel as the default.
   await toggle.click()
+  const turnOn = page.getByRole('dialog', { name: 'Turn on this plugin?' })
+  await expect(turnOn).toBeVisible()
+  await expect(toggle).not.toBeChecked()
+  await page.keyboard.press('Enter')
+  await expect(toggle).not.toBeChecked()
+  await turnOn.getByRole('button', { name: 'Turn On' }).click()
   await expect(toggle).toBeChecked()
 
   // It is still there after a reload.

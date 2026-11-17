@@ -109,9 +109,9 @@ export function makeWebInstaller(deps: WebPluginDeps): PluginInstaller {
     pickAndStage: () => Promise.reject(new Error('In the browser, choose the package with the file input.')),
     stageFile: (file) => store.stageFile(file),
     commit: (token, accept) => store.commit(token, accept),
-    setEnabled: (id, enabled) => store.setEnabled(id, enabled),
+    setEnabled: (id, enabled, shown) => store.setEnabled(id, enabled, shown),
     uninstall: (id) => store.uninstall(id),
-    rollback: (id) => store.rollback(id),
+    rollback: (id, shown) => store.rollback(id, shown),
     previous: (id) => store.previous(id),
     async iconUrl(id, rel) {
       try {

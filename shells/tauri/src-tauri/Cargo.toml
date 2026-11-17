@@ -125,6 +125,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Cryptography",
+    # The plugin commands' native confirmation (src/preview_only/confirm.rs):
+    # `TaskDialogIndirect` with Cancel as the default button.
+    "Win32_UI_Controls",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [features]

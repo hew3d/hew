@@ -518,6 +518,10 @@ pub const BUSY_EXEMPT: &[&str] = &[
     "note_document_event",
     "note_tool_changed",
     "note_scene_activated",
+    // a plugin's state, queued for the next drain like the notes above
+    // (a preview build's method, `plugins_api.rs`; named here in every
+    // build because the guard test reads the sources, not the build);
+    "note_plugin_state",
     // Scene caches only, no document mutator:
     // the inference scope of the instance being edited;
     "set_active_inference_instance",

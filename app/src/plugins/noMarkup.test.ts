@@ -23,9 +23,12 @@ function* sources(dir: string): Generator<string> {
   }
 }
 
+/** The realm frame, which is built from Hew's own constants alone (below). */
+const REALM_FRAME = join(HERE, 'realm', 'frame.ts')
+
 describe('plugin sources', () => {
   it('never build markup, a frame or an embed from a string', () => {
-    const files = [...sources(HERE)]
+    const files = [...sources(HERE)].filter((f) => f !== REALM_FRAME)
     expect(files.length).toBeGreaterThan(5)
     for (const file of files) {
       const text = readFileSync(file, 'utf8')
@@ -42,5 +45,21 @@ describe('plugin sources', () => {
     const mime = /const MIME[^{]*\{([^}]*)\}/.exec(installer)?.[1] ?? ''
     expect([...mime.matchAll(/'([a-z]+\/[^']+)'/g)].every((m) => m[1].startsWith('image/'))).toBe(true)
     expect(mime).not.toMatch(/html|javascript/i)
+  })
+
+  it('builds the one realm frame from constants and a hex nonce, and no plugin text', () => {
+    const frame = readFileSync(REALM_FRAME, 'utf8')
+    for (const word of ['dangerouslySetInnerHTML', 'innerHTML', 'outerHTML', 'insertAdjacentHTML', '<object', '<embed']) {
+      expect(frame.includes(word), word).toBe(false)
+    }
+    // One srcdoc, from `realmSrcdoc`, whose only inputs are the policy, the
+    // committed boot script and a nonce it checks is 32 hex digits.
+    expect(frame.match(/\.srcdoc\s*=/g)).toHaveLength(1)
+    expect(frame).toContain('frame.srcdoc = realmSrcdoc(nonce)')
+    const body = /export function realmSrcdoc\(nonce: string\): string \{([\s\S]*?)\n\}/.exec(frame)?.[1] ?? ''
+    expect(body).toContain("if (!/^[0-9a-f]{32}$/.test(nonce)) throw")
+    const interpolated = [...body.matchAll(/\$\{([^}]+)\}/g)].map((m) => m[1])
+    expect(interpolated.sort()).toEqual(['BOOT_SOURCE', 'REALM_CSP', 'nonce'])
+    expect(frame).toContain("frame.setAttribute('sandbox', 'allow-scripts')")
   })
 })

@@ -58,6 +58,15 @@ pub enum InstallError {
         id: String,
         reason: String,
     },
+    /// A storage write would make the plugin's `storage.json` larger than
+    /// [`MAX_STORAGE_BYTES`].
+    StorageQuota,
+    /// A storage key is empty or longer than
+    /// [`MAX_STORAGE_KEY_BYTES`].
+    StorageKeyInvalid,
+    /// The plugin's `storage.json` is not a JSON object of strings, is not
+    /// a regular file, or is over the cap. It is left as it is.
+    StorageUnreadable,
     Io(String),
 }
 
@@ -83,6 +92,9 @@ impl InstallError {
             InstallError::PendingStale => "pending_stale",
             InstallError::TooManyPermissions(_) => "too_many_permissions",
             InstallError::InstalledUnreadable { .. } => "installed_unreadable",
+            InstallError::StorageQuota => "storage_quota",
+            InstallError::StorageKeyInvalid => "storage_key_invalid",
+            InstallError::StorageUnreadable => "storage_unreadable",
             InstallError::Io(_) => "io",
         }
     }
@@ -148,6 +160,17 @@ impl InstallError {
             InstallError::InstalledUnreadable { id, reason } => format!(
                 "Hew cannot read the record of \"{id}\" ({reason}). A newer Hew may have written it; it is left as it is."
             ),
+            InstallError::StorageQuota => format!(
+                "This plugin's saved data would pass {} MB, the most a plugin may keep.",
+                MAX_STORAGE_BYTES >> 20
+            ),
+            InstallError::StorageKeyInvalid => format!(
+                "A storage key must be 1 to {} bytes long.",
+                MAX_STORAGE_KEY_BYTES
+            ),
+            InstallError::StorageUnreadable => {
+                "Hew cannot read this plugin's saved data; it is left as it is.".to_string()
+            }
             InstallError::Io(why) => format!("The plugin folder could not be changed: {why}."),
         }
     }
@@ -166,3 +189,8 @@ impl std::fmt::Display for InstallError {
 }
 
 impl std::error::Error for InstallError {}
+
+/// The most a plugin's `storage.json` may hold, in bytes, as written.
+pub const MAX_STORAGE_BYTES: usize = 5 * 1024 * 1024;
+/// The longest storage key, in bytes.
+pub const MAX_STORAGE_KEY_BYTES: usize = 256;

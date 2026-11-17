@@ -291,6 +291,18 @@ the plugin answers (HEW_API.md §6.1). What a handler can rely on:
   mutating command (or its own) opens an inner compound; the inner
   command's writes land in it, and it closes into one child of the
   outer. Only the innermost command's envelopes run while it is open.
+  An inner command still running when its outer command ends (the
+  handler answered without waiting for it, or the outer was cancelled,
+  ran out of time, or its plugin stopped) is ended first: its caller is
+  answered `plugin_command_cancelled`, its plugin is sent the cancel, and
+  its compound is aborted. Then the outer one commits or aborts. Await
+  every command a handler calls.
+- **A call made for a command that has ended is refused.** A bus call
+  that names a forward that was answered, cancelled, or ended under its
+  outer command is answered `-32000` `forward_ended` and nothing runs;
+  it never lands as a write of its own. A handler that carries on after
+  its `ctx.signal` aborts gets this refusal, and its failure from then on
+  is not reported (the caller was already answered).
 - **What undo does not reverse.** Undoing the entry reverses every
   undoable change in it. Registry writes that record no undo entry
   anywhere (HEW_API.md §6.4) keep that contract inside a compound:
@@ -298,8 +310,10 @@ the plugin answers (HEW_API.md §6.1). What a handler can rely on:
   `hew.scenes.*`, and a Library material insert stay after the entry is
   undone. An abort, unlike undo, does take them back.
 - **The 50-second ceiling.** A command's `timeout_ms` is clamped to
-  50000. A command that runs out of time is answered `-32003` with
-  `reason: "timeout"` and its compound aborted. Longer work runs as a job
+  1000 .. 50000 (50000 when it declares none), counted from the moment
+  its plugin is handed the call ("Limits" below). A command that runs out
+  of time is answered `-32003` with `reason: "timeout"`, its compound
+  aborted, and its plugin stopped. Longer work runs as a job
   that answers the command at once.
 - **Cancel.** After a quarter second the app shows a notice naming the
   command (by its label, else the plugin) with Cancel. Cancel aborts the
@@ -1064,8 +1078,8 @@ Installing is a person's job, done in Settings ▸ Plugins. It is a Preview
 feature: it exists only in a preview build and only while the Plugins
 switch in Settings ▸ Preview is on. With the switch off, or in a
 production build, the tab is absent and the stores below are never read,
-written, or listed. Installed plugins do not run yet: turning one on only
-records the choice.
+written, or listed. A plugin that is turned on runs in a sandbox in each
+document window ("How a plugin runs" below).
 
 **An agent cannot install or manage plugins.** There is no bus command
 for it, no `hew-cli` subcommand, and no MCP tool. A plugin package is
@@ -1112,6 +1126,7 @@ plugins/
   <id>/
     hew-plugin.json      the manifest the person consented to, as written
     installed.json       the record
+    storage.json         the plugin's saved data
     files/...            the package's files (none for a folder install)
     previous/            the version before, with the same layout
   .staging/<id>-<token>/ an install being written
@@ -1122,6 +1137,18 @@ failure part way leaves a staging entry, which listing ignores and the
 next install of the same id clears. Every path the store builds comes
 from a validated id and a validated package path, so nothing it reads or
 writes is outside `plugins/<id>/` (or, for a folder install, the folder).
+
+`storage.json` is one JSON object of string keys (1 to 256 bytes) to
+string values (the runtime's JSON text), at most 5 MiB as written; a
+write past that is refused `storage_quota` and writes nothing. It belongs
+to the plugin, not one version of it: an update and a rollback carry the
+current copy to the version that takes over, and uninstalling removes
+it. Only an installed plugin has one, and a key is only ever a key in
+that object, never part of a path. On the desktop the four commands
+`plugin_storage_get`, `plugin_storage_set`, `plugin_storage_delete` and
+`plugin_storage_list` read and write it, each write through a temporary
+file and a rename, and a change is announced to every window with the
+event `plugins-storage-changed` (`{id, keys}`).
 
 `installed.json`:
 
@@ -1153,8 +1180,32 @@ since the accepted grant. "Roll back to <version>" appears when
 again. Turning a plugin off also turns off every enabled plugin that
 requires it, and the pane names them. Uninstall asks first, is refused
 while an enabled plugin requires the one being removed, and removes the
-folder, any staging entry, and the plugin's `hew.plugin.<id>.` settings
-keys.
+folder (its saved data included), any staging entry, and the plugin's
+`hew.plugin.<id>.` settings keys.
+
+On the desktop each of these that widens what a plugin may do, or
+removes it, is confirmed in a native dialog the shell builds from what
+it holds: installing, widening a grant, rolling back, turning a plugin
+on, and uninstalling. Turning one off and narrowing a grant ask nothing.
+Only one such dialog shows at a time; another command that needs one is
+refused `confirmation_open` meanwhile. A no is `enable_declined`,
+`uninstall_declined` or `rollback_declined` (an install answers `null`,
+a grant change the record unchanged). Turning a plugin on and rolling
+back are refused `plugin_changed`, on both tiers, when the record (or,
+for a rollback, the previous version) is no longer the one the person
+was shown: someone changed it in another window meanwhile. Nothing
+changes, and the pane shows a plain notice, not an error: "This plugin
+changed while you were deciding. Check it, then try again." A preview
+desktop build whose content security policy lacks the realm boot
+script's hash (the Tauri CLI run directly instead of through
+`shells/tauri`'s scripts) refuses every plugin command
+`plugins_disabled`, since no realm could start; the pane shows "This
+build of Hew was not given the policy plugins need, so plugins are
+turned off." as an error, and the shell logs how to build it properly.
+In that dialog Cancel is the
+default button: Enter on a fresh dialog, Escape, and closing it all
+answer no (Linux and Windows; macOS still shows the dialog plugin's box,
+where Enter accepts).
 
 ### What the consent sheet shows
 
@@ -1169,7 +1220,8 @@ in order:
 - "Unsigned. Hew cannot tell who made this." for every package, until
   signing exists;
 - for an update, "Replaces <name> v<version>. Hew cannot check it is the
-  same author.";
+  same author."; for the installed version again, "Replaces the installed
+  copy of v<version>." under the title "Install this plugin again?";
 - Hew's warnings, in a highlighted box: "Can send what it reads from your
   model to <hosts>." when `model.read` and any `network:` permission are
   both declared (required or optional), and "Can send files you choose to
@@ -1205,6 +1257,174 @@ The permission lines, exactly:
 
 The app keeps the same words in `app/src/plugins/permissionCopy.ts`; a
 test fails if the two tables differ.
+
+## How a plugin runs
+
+A Preview feature, started only in a preview build with the Plugins
+switch on, by `App.tsx` through `app/src/preview/loaderRoots.ts`
+(`loadPluginHost`). Each document window has its own host
+(`app/src/plugins/host.ts`, `hostCore.ts`); Shop Mode has none.
+
+**Registration and start.** For every enabled plugin the host registers
+the commands of the manifest the store holds (never a folder's live
+copy). A plugin starts the first time one of its commands is called, or
+with Hew when its manifest declares `on_startup` and the user turned it
+on by hand at least once (`startup_allowed`). On start the host opens
+the plugin's own bus connection with the grant the kernel builds from
+the stored record (`plugin_grant_json` from `grant` and
+`optional_granted`), sends `hew.meta.hello` and `hew.doc.attach` on it,
+and creates the realm. A realm lives until the plugin is turned off,
+crashes, changes (an update or a new grant), or the window closes.
+
+**The realm.** A sandboxed `srcdoc` frame (`allow-scripts` only, so an
+opaque origin) whose one inline script is the boot script
+`app/src/plugins/boot/boot-1.js`, pinned by hash in both the page's
+preview policy and the frame's own. The boot script answers a nonce
+handshake, takes a control port, and starts one classic Worker from a
+`blob:` whose text is the SDK runtime followed by the plugin's `main`,
+then hands the Worker the realm port. `main` is therefore one classic
+script, run in strict mode after the runtime: bundle to a plain script
+or an IIFE; `import` and `export` at the top level are not allowed. The
+page's policy has no `blob:` in `script-src`, so inside the Worker
+`importScripts` and `import()` of a blob are refused; nested Workers
+from `blob:` work (see "The Worker's scope" below). The realm has no network (`connect-src 'none'`), no
+storage of the page's origin, no DOM of Hew's, and no way to call the
+desktop shell.
+
+**The Worker's scope.** Before `main` runs, the runtime removes from the
+Worker's global scope (from the global, every object on its prototype
+chain, and `navigator` and its chain, each hole filled with a fixed
+`undefined`) every API a plugin has no sanctioned use for that is storage
+of its own, a channel, or ambient authority: `caches` and the
+CacheStorage interfaces, `indexedDB` and the IDB interfaces, the file
+system entry points, `navigator.storage`, `navigator.locks`,
+`navigator.serviceWorker` and the service worker interfaces,
+`BroadcastChannel`, `SharedWorker`, `fetch`, `XMLHttpRequest`,
+`WebSocket`, `EventSource`, `WebTransport`, `importScripts`,
+`navigator.sendBeacon`, `FontFace` and `fonts`, `Notification` and push,
+background sync and fetch, and `cookieStore`. What stays is what a
+plugin needs: `Worker`, `Blob`, blob URLs, `WebAssembly`, message
+channels, `crypto`, timers, text coding, `structuredClone`,
+`performance`, typed arrays, canvases and image bitmaps for computation,
+and the console. `Worker` is replaced: a nested Worker can be started
+only from a `blob:` URL the plugin made in that scope, only as a classic
+Worker (`type: 'module'` is refused), and runs the same lockdown before
+the plugin's own code, at every depth. A Worker from a `data:` or any
+other URL is refused `SecurityError`. This is defense in depth, not a
+boundary Hew relies on: the frame's policy and the host's checks on the
+port are. It matters most on WebKit (the Linux and macOS desktop), where
+a Worker of an opaque-origin frame has a working CacheStorage that
+every plugin shares, kept on disk under the app's data folder, outside
+the plugin's 5 MiB, and kept after an uninstall; in Chromium `caches`
+is absent there anyway. The residual: a plugin that found a way around
+the lockdown could keep data in that shared cache, which Hew cannot see
+or delete, and read what another plugin put there. On WebKit
+`navigator.locks` refused an opaque origin (`SecurityError`) and a
+`BroadcastChannel` reached no other realm even before the lockdown, and
+the realm frame can create a nested `about:blank` frame despite
+`frame-src 'none'`, in which nothing runs.
+
+**The port.** `sdk/plugin/src/protocol.ts` lists every message. Every
+field whose size a plugin chooses is text (params, results and stored
+values cross as JSON text), so the host measures a message by adding
+lengths. The host checks every message (`realm/validate.ts`): a known
+type, exactly its fields, each of the right type and size, at most
+1 MiB of text per message, at most 1,000 messages and 16 Mi characters
+in any rolling second, and forward and request ids that the host itself
+issued and that are still open. Anything else stops the plugin.
+Messages are checked and counted when they arrive, then handled in
+arrival order a slice at a time (about 8 ms of the page's time, then the
+page runs before the next slice), so a burst of costly calls cannot hold
+Hew. A plugin may have at most 1,000 bus calls waiting in the host;
+more stops it.
+
+The SDK keeps a plugin that uses it as documented inside every one of
+these limits: it cuts console arguments (16 of 2,000 characters each,
+50 calls a second; calls past that reach neither the log nor the
+Worker's own console; the host then keeps fewer, below), error messages and stacks, progress labels and
+refusal explanations to size; it refuses a bus request over 1,000,000
+characters (`RangeError`), a storage key over 256 UTF-8 bytes
+(`storage_key_invalid`), a stored value whose JSON is over 1,000,000
+characters (`storage_value_too_large`) and a package path over 1,024
+characters (`file_missing`) without sending them; and it keeps at most
+32 storage requests and 8 file requests open, holding the rest until
+answers come. Bus calls are not held back: a plugin that sends more than
+1,000 in a second is stopped.
+
+**Console.** What a plugin writes to its console reaches Hew's log (the
+level kept, the line prefixed with the plugin's id) within the host's
+own budget, which is tighter than the SDK's 50 a second: at most 20
+lines a second, and at most 200 lines in one run of sustained output.
+Past 200 the log says once that further output is not shown, and
+nothing more from that plugin is logged until it has been quiet for
+10 seconds. Lines over these budgets are dropped, not a reason to stop
+the plugin.
+
+**Limits.** A command must answer within its declared `timeout_ms`,
+clamped to 1 to 50 seconds (50 when it declares none; the same ceiling
+as "Compounds"), counted from the moment its plugin is handed the call. Starting
+a plugin has limits of its own: on the desktop the host waits for the
+window's document id (it never guesses one), and for the document to let
+the plugin's connection say hello, together at most 10 seconds, and a
+plugin that does not start for one of those reasons is not stopped: the
+call is answered `unavailable` and the next one tries again. The frame
+then has 5 seconds to answer, and `main` 10 seconds to finish its
+top-level code. A plugin's Worker must answer the host within a few seconds,
+always, not only while it serves a command: the host pings it every
+2 seconds from the moment it has said hello, and a realm that misses two
+pings in a row (silent for roughly 4 to 6 seconds) is stopped. The
+runtime answers a ping only between tasks, so a handler (or a timer, or
+anything else) that computes without yielding for more than about
+4 seconds is stopped. Yield to the event loop at least every 2 seconds:
+`await new Promise((r) => setTimeout(r, 0))` (awaiting an already
+resolved promise is not enough; it does not let the ping through), or
+move heavy work to a nested Worker, which has its own thread and does
+not block the realm's. Before hello, while `main` itself runs, there are
+no pings: the plugin has 10 seconds to finish its top-level code.
+
+There is no memory cap. The realm shares the browser tab's process, and
+the web platform offers no limit per Worker. A plugin that allocates in
+the JavaScript heap is stopped by the missed pings, and its Worker ends
+about 2 seconds after that; a plugin that allocates very fast can still
+exhaust the memory the page shares and take the browser tab (or the
+desktop window) down first. Memory held in buffers outside the
+JavaScript heap (`ArrayBuffer`s) is not stopped at all: a plugin that
+keeps gigabytes of them while answering its pings keeps running.
+Stopping a plugin (a crash) removes the frame, which ends
+the Worker, closes its connection, unregisters its commands, answers
+every open call `failed: crashed`, reports `plugin_state` `crashed`,
+logs an error line, and shows a notice. It stays stopped in that window
+until it is turned off and on again.
+
+**Who owns a call.** A call from a socket client is the live bridge's: it
+opens the compound for a mutating command, shows the busy notice,
+completes the call, and asks the host only for the plugin's answer (the
+forward router, `app/src/api/forwardRouter.ts`, read only where the
+registry's `plugin-forward` coupling is on). A call from a realm, or from
+the window itself, is the host's, which does the same work itself. A
+plugin's own bus calls made while it serves a mutating command run
+inside that command's compound.
+
+**Storage.** `hew.storage` is one JSON object per plugin,
+`plugins/<id>/storage.json`, 5 MiB in all; a write over that is refused
+`storage_quota`. A key is 1 to 256 UTF-8 bytes (`storage_key_invalid`
+past that; an empty key is a `TypeError`), and one value is at most
+1,000,000 characters of JSON (`storage_value_too_large`), so a key and
+a value always fit one 1 MiB message. A key that is not well-formed
+text (a surrogate without its pair) is refused too: the SDK refuses it
+`storage_key_invalid` before sending, and a raw message carrying one
+stops the plugin, as one with an over-long key does (the host's message
+check refuses both).
+Writes are gathered for a quarter second and then made together, each
+batch after the one before, so writes land in the order the plugin made
+them; a read sees every earlier write, made or not, and a write that
+fails rejects its own `set` or `delete`.
+
+**Package files.** `hew.assets` reads files of the plugin's own package.
+The host serves one file request of a plugin at a time, reads a path
+named twice in one request once, puts at most 64 MiB in one answer, and
+reads at most about 128 MiB a second for one plugin; a file over any of
+these is answered missing.
 
 ## Engine behavior record
 

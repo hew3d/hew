@@ -28,7 +28,7 @@ pub use semver;
 #[cfg(hew_preview)]
 mod error;
 #[cfg(hew_preview)]
-pub use error::InstallError;
+pub use error::{InstallError, MAX_STORAGE_BYTES, MAX_STORAGE_KEY_BYTES};
 
 #[cfg(hew_preview)]
 pub mod package;
@@ -46,8 +46,9 @@ pub use consent::{
     CLEAN_TEXT_COMBINING, CLEAN_TEXT_REMOVED, ConsentPayload, FOLDER_LINE, MAX_COMBINING_RUN,
     MAX_NAME_CHARS, MAX_REASON_CHARS, MAX_SUMMARY_LINES, MAX_WARNING_HOSTS, PermissionLine,
     Replaces, UNSIGNED_LINE, UpdateDiff, clean_text, consent, consent_summary, display_name,
-    grant_change_summary, hew_version_ok, permission_line, permission_warnings, replaces_line,
-    rollback_summary,
+    enable_summary, grant_change_summary, hew_version_ok, install_confirmation, is_reinstall,
+    permission_line, permission_warnings, reinstall_line, replaces_line, rollback_summary,
+    uninstall_summary,
 };
 
 #[cfg(hew_preview)]

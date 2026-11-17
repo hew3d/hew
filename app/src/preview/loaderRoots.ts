@@ -17,6 +17,7 @@
  */
 
 import { lazy, type ComponentType, type LazyExoticComponent } from 'react'
+import type { LiveBridgeDeps } from '../api/liveBridge'
 
 type Root = LazyExoticComponent<ComponentType> | null
 
@@ -26,4 +27,16 @@ export const ProbeRoot: Root = __HEW_PREVIEW__
 
 export const PluginsPane: Root = __HEW_PREVIEW__
   ? lazy(() => import('../plugins/PluginsPane.tsx').then((m) => ({ default: m.PluginsPane })))
+  : null
+
+/** What `App.tsx` gives the plugin host. */
+export interface PluginHostStart {
+  bridge: LiveBridgeDeps
+  toast(message: string): void
+}
+
+/** Loads the plugin host; its export starts one for this window and returns
+ *  the function that stops it. Started only while `loaderEnabled('plugins')`. */
+export const loadPluginHost: (() => Promise<(opts: PluginHostStart) => () => void>) | null = __HEW_PREVIEW__
+  ? () => import('../plugins/host.ts').then((m) => m.startPluginHost)
   : null

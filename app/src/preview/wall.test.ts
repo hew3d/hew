@@ -17,7 +17,8 @@
  * module with a mock and imports the app fresh. There is no run-time switch.
  */
 
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -210,6 +211,27 @@ describe('the registry file', () => {
       const line = roots.slice(roots.lastIndexOf('\nexport const ', m.index), m.index)
       expect(line, m[0]).toMatch(/=\s*__HEW_PREVIEW__\s*\?\s/)
     }
+  })
+  it('every-build code takes only types from the plugin SDK', () => {
+    // The SDK runtime is the realm's code: a value import would put it in
+    // every build. `import type` (and `export type`) is erased.
+    const valueImport = (text: string): string[] =>
+      [
+        ...text.matchAll(/^\s*(import|export)\b(?!\s+type\b)[^;]*?from\s*['"`][^'"`]*sdk\/plugin[^'"`]*['"`]/gm),
+        ...text.matchAll(/^\s*import\s*['"`][^'"`]*sdk\/plugin[^'"`]*['"`]/gm),
+        ...text.matchAll(/import\(\s*['"`][^'"`]*sdk\/plugin[^'"`]*['"`]\s*\)/g),
+      ].map((m) => m[0].trim())
+    // The rule itself, on what it must catch and let through.
+    expect(valueImport("import { createRuntime } from '../../../sdk/plugin/src/core'")).toHaveLength(1)
+    expect(valueImport("import '../../sdk/plugin/src/runtime'")).toHaveLength(1)
+    expect(valueImport("const m = await import('../../sdk/plugin/src/core')")).toHaveLength(1)
+    expect(valueImport("export { RUNTIME_LIMITS } from '../../sdk/plugin/src/protocol'")).toHaveLength(1)
+    expect(valueImport("import type { HostToRealm } from '../../../sdk/plugin/src/protocol'")).toEqual([])
+    expect(valueImport("export type { HostToRealm } from '../../../sdk/plugin/src/protocol'")).toEqual([])
+    const offenders = sourceFiles(SRC)
+      .filter((f) => !f.includes(`${join(SRC, 'plugins')}/`))
+      .flatMap((f) => valueImport(readFileSync(f, 'utf8')).map((m) => `${f.slice(SRC.length + 1)}: ${m}`))
+    expect(offenders).toEqual([])
   })
   it('every loader pane is a Settings pane asked for through the wall', () => {
     const settings = readFileSync(join(SRC, 'settings/SettingsWindow.tsx'), 'utf8')
@@ -604,6 +626,35 @@ describe('the wall at its entry points', () => {
     expect(at).toBeGreaterThan(0)
     expect(viewport.slice(at, at + 700)).toContain('const toolName = usableTool(requestedTool)')
   })
+  it('starts the plugin host only through loaderRoots, in a preview build, while the Plugins switch is on', () => {
+    // App.tsx asks the lazy export (null in a production build) and the
+    // switch before it loads anything; nothing else names the host's entry.
+    expect(app).toContain("loadPluginHost === null || !loaderEnabled('plugins')) return")
+    const starters = sourceFiles(SRC)
+      .filter((f) => !f.includes(`${join(SRC, 'plugins')}/`))
+      .filter((f) => /startPluginHost|plugins\/host/.test(readFileSync(f, 'utf8')))
+      .map((f) => f.slice(SRC.length + 1))
+    expect(starters).toEqual([])
+    const roots = readFileSync(join(HERE, 'loaderRoots.ts'), 'utf8')
+    expect(roots).toMatch(/export const loadPluginHost:[^\n]*= __HEW_PREVIEW__\n\s*\? \(\) => import\('\.\.\/plugins\/host\.ts'\)/)
+    // The test harness reaches the host only through what the host attaches.
+    expect(readFileSync(join(SRC, 'test/harness.ts'), 'utf8')).not.toMatch(/from\s+['"][./]+\/plugins\//)
+  })
+  it('has no plugin host to load in a production build', async () => {
+    const roots = await import('./loaderRoots')
+    expect(roots.loadPluginHost === null).toBe(!(globalThis as { __HEW_PREVIEW__?: boolean }).__HEW_PREVIEW__)
+  })
+  it('lets the live bridge ask the forward router only where the registry turns plugin-forward on', () => {
+    const bridge = readFileSync(join(SRC, 'api/liveBridge.ts'), 'utf8')
+    const reads = [...bridge.matchAll(/forwardRouter\(\)/g)]
+    expect(reads).toHaveLength(1)
+    expect(bridge).toContain("behaviorEnabled('plugin-forward') ? forwardRouter() : null")
+    // Only the plugin host fills the slot.
+    const fillers = sourceFiles(SRC)
+      .filter((f) => /setForwardRouter\(/.test(readFileSync(f, 'utf8')))
+      .map((f) => f.slice(SRC.length + 1))
+    expect(fillers.filter((f) => f !== 'api/forwardRouter.ts')).toEqual(['plugins/host.ts'])
+  })
   it('does not read the build flag anywhere but the one tiny module', () => {
     const offenders = sourceFiles(SRC)
       .filter((f) => !f.endsWith('src/test/previewFlag.ts') && !f.endsWith('src/vite-env.d.ts'))
@@ -664,5 +715,80 @@ describe('native menu chains in a production build (derived from the registry)',
     expect(forwarded.length).toBeGreaterThan(0)
     const all = SUBMENUS.flatMap((id) => chainItems(pruneChain(parseSubmenu(main, id), offered)).map((i) => i.native))
     for (const native of forwarded) expect(all, native).not.toContain(native)
+  })
+})
+
+describe('the desktop wrapper resolves one flavor for the shell, the page and the policy', () => {
+  const wrapper = join(ROOT, 'shells/tauri/scripts/tauri-policy.mjs')
+  const dry = (command: string, hewPreview: string | undefined) => {
+    const env = { ...process.env }
+    delete env.HEW_PREVIEW
+    if (hewPreview !== undefined) env.HEW_PREVIEW = hewPreview
+    return spawnSync(process.execPath, [wrapper, '--print-args', command, '--debug'], { encoding: 'utf8', env })
+  }
+  const table: [string | undefined, 'dev' | 'build', boolean][] = [
+    [undefined, 'dev', true],
+    ['', 'dev', true],
+    ['1', 'dev', true],
+    ['0', 'dev', false],
+    [undefined, 'build', false],
+    ['', 'build', false],
+    ['1', 'build', true],
+    ['0', 'build', false],
+  ]
+  for (const [value, command, preview] of table) {
+    it(`${command} with HEW_PREVIEW=${value === undefined ? '(unset)' : JSON.stringify(value)} is a ${preview ? 'preview' : 'production'} build`, () => {
+      const r = dry(command, value)
+      expect(r.status, r.stderr).toBe(0)
+      const plan = JSON.parse(r.stdout) as { preview: boolean; hewPreview: string; overlay: string | null; tauriArgs: string[] }
+      expect(plan.preview).toBe(preview)
+      // The Rust shell and the page get the same answer the overlay was chosen by.
+      expect(plan.hewPreview).toBe(preview ? '1' : '0')
+      expect(plan.tauriArgs.slice(0, 2)).toEqual([command, '--debug'])
+      const configs = plan.tauriArgs.filter((a) => a === '--config')
+      expect(configs.length).toBe(preview ? 1 : 0)
+      expect(plan.overlay === null).toBe(!preview)
+    })
+  }
+  it('puts the overlay before a `--`, among the CLI\'s own options', () => {
+    const env = { ...process.env, HEW_PREVIEW: '1' }
+    const r = spawnSync(process.execPath, [wrapper, '--print-args', 'build', '--debug', '--', '--features', 'x'], { encoding: 'utf8', env })
+    expect(r.status, r.stderr).toBe(0)
+    const plan = JSON.parse(r.stdout) as { tauriArgs: string[] }
+    expect(plan.tauriArgs.slice(0, 4)).toEqual(['build', '--debug', '--config', plan.tauriArgs[3]])
+    expect(plan.tauriArgs.slice(4)).toEqual(['--', '--features', 'x'])
+  })
+  it('skips links, dangling ones included, when it looks for a desktop binary', () => {
+    const dir = join(ROOT, 'target', `wall-test-binary-${process.pid}`)
+    try {
+      mkdirSync(join(dir, 'release'), { recursive: true })
+      symlinkSync(join(dir, 'nowhere'), join(dir, 'release', 'dangling'))
+      const r = spawnSync(process.execPath, [join(ROOT, 'scripts/check-desktop-binary.mjs'), '--want', 'preview', '--target', dir], { encoding: 'utf8' })
+      // Nothing to check is a failure of its own, not a crash on the link.
+      expect(r.status, r.stderr).toBe(1)
+      expect(r.stderr).toContain('no hew binary')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+  it('refuses a value that is neither 1, 0 nor empty', () => {
+    for (const command of ['dev', 'build']) {
+      const r = dry(command, 'garbage')
+      expect(r.status).toBe(2)
+      expect(r.stderr).toContain('HEW_PREVIEW must be 1')
+    }
+  })
+  it('writes an overlay whose policy allows the realm boot script, and production allows none', () => {
+    const hash = readFileSync(join(ROOT, 'app/src/plugins/boot/boot-1.hash'), 'utf8').trim()
+    const out = join(ROOT, 'target', `wall-test-overlay-${process.pid}.json`)
+    try {
+      execFileSync(process.execPath, [join(ROOT, 'shells/csp/tauri-overlay.mjs'), 'preview', out], { stdio: 'ignore' })
+      const csp = (JSON.parse(readFileSync(out, 'utf8')) as { app: { security: { csp: string } } }).app.security.csp
+      expect(csp).toContain(`'sha256-${hash}'`)
+    } finally {
+      rmSync(out, { force: true })
+    }
+    const conf = readFileSync(join(ROOT, 'shells/tauri/src-tauri/tauri.conf.json'), 'utf8')
+    expect(conf).not.toContain(hash)
   })
 })

@@ -18,11 +18,17 @@
 //
 //   policy        Both shells' production content security policies equal
 //                 their committed baselines; tauri.conf.json carries the
-//                 desktop one and no platform overlay replaces it; the web
+//                 desktop one and no platform overlay replaces it; only a
+//                 preview desktop build is given the desktop.preview
+//                 overlay (the shell's scripts, the release workflow); the web
 //                 injector puts the web one into the built page; no header
 //                 file sets a cross-origin isolation header.
 //   capabilities  The desktop shell's capability files equal their
 //                 committed baselines, file for file.
+//   markers       Every loader marker and shell command of the registry
+//                 occurs in preview-only code (one listed exception keeps
+//                 the older rule: anywhere in the code) — the code it marks (a marker that marks nothing
+//                 would make the bundle scan vacuous). Needs no build.
 //   bundle        No file of the app build holds a `loader.markers` string
 //                 or a Preview feature's state line from
 //                 preview-features.json. The kernel's .wasm is left out: it
@@ -34,8 +40,10 @@
 // A scan that looked at nothing is a failure too: every check has a
 // positive control.
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { dirname, join, relative, resolve } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { cspMetaOf, policy, policyForBuild, withCspMeta } from '../shells/csp/policy.mjs'
 
@@ -94,13 +102,92 @@ const loaders = registry.filter((f) => f.loader)
   if (JSON.stringify(securityKeys) !== JSON.stringify(['csp'])) {
     problem('policy', `tauri.conf.json app.security holds ${securityKeys.join(', ') || 'nothing'}; the pinned shape is csp alone. Extend this check with the new key's baseline before adding one.`)
   }
-  // A preview desktop build is given no overlay yet (the release workflow
-  // and `tauri dev` both read tauri.conf.json), so a wider desktop.preview
-  // would be served by nothing. Wire shells/csp/tauri-overlay.mjs into
-  // every preview desktop build, then replace this check with one of that
-  // wiring.
-  if (policy('desktop', 'preview') !== policy('desktop', 'production')) {
-    problem('policy', 'desktop.preview differs from desktop.production, but no preview desktop build applies it yet (see the comment at this check)')
+  // A preview desktop build serves desktop.preview through a `--config`
+  // overlay that shells/csp/tauri-overlay.mjs writes: the shell's dev,
+  // build and e2e:build scripts run the Tauri CLI only through
+  // scripts/tauri-policy.mjs, which adds the overlay for a preview build,
+  // and the release workflow writes and passes it for a -pre. tag alone.
+  {
+    const scripts = JSON.parse(read(at('shells/tauri/package.json'))).scripts ?? {}
+    for (const [name, command] of [['dev', 'dev'], ['build', 'build'], ['e2e:build', 'build']]) {
+      const line = scripts[name] ?? ''
+      if (!line.includes(`node scripts/tauri-policy.mjs ${command}`)) {
+        problem('policy', `shells/tauri's "${name}" script does not run the Tauri CLI through scripts/tauri-policy.mjs ${command}, so a preview build would serve the production policy`)
+      }
+      if (/(^|&&|\s)tauri (dev|build)\b/.test(line.replaceAll('node scripts/tauri-policy.mjs', ''))) {
+        problem('policy', `shells/tauri's "${name}" script also runs the Tauri CLI directly`)
+      }
+    }
+    // The wrapper is run, not read: its dry run prints the Tauri arguments
+    // and the HEW_PREVIEW value it would hand the CLI. The overlay appears
+    // exactly for a preview build, and only a preview build's overlay,
+    // as the overlay writer produces it, carries the realm's boot hash.
+    const wrapperPath = at('shells/tauri/scripts/tauri-policy.mjs')
+    const dryRun = (command, hewPreview) => {
+      const env = { ...process.env }
+      delete env.HEW_PREVIEW
+      if (hewPreview !== undefined) env.HEW_PREVIEW = hewPreview
+      const r = spawnSync(process.execPath, [wrapperPath, '--print-args', command, '--debug'], { encoding: 'utf8', env })
+      if (r.status !== 0) return { error: (r.stderr || r.error?.message || `exit ${r.status}`).trim() }
+      try {
+        return JSON.parse(r.stdout)
+      } catch {
+        return { error: `unreadable output: ${r.stdout.slice(0, 80)}` }
+      }
+    }
+    // [HEW_PREVIEW, command, preview build?] (undefined is unset).
+    const table = [
+      [undefined, 'dev', true], ['', 'dev', true], ['1', 'dev', true], ['0', 'dev', false],
+      [undefined, 'build', false], ['', 'build', false], ['1', 'build', true], ['0', 'build', false],
+    ]
+    let ran = 0
+    for (const [value, command, expectPreview] of table) {
+      const label = `tauri-policy.mjs ${command} with HEW_PREVIEW=${value === undefined ? '(unset)' : JSON.stringify(value)}`
+      const got = dryRun(command, value)
+      ran++
+      if (got.error) {
+        problem('policy', `${label} failed: ${got.error}`)
+        continue
+      }
+      const configs = got.tauriArgs.flatMap((a, i) => (a === '--config' ? [got.tauriArgs[i + 1]] : []))
+      if (expectPreview) {
+        if (configs.length !== 1 || !String(configs[0]).endsWith('csp-preview.conf.json') || got.hewPreview !== '1') {
+          problem('policy', `${label} must pass the desktop.preview overlay and export HEW_PREVIEW=1; it passed ${JSON.stringify(got.tauriArgs)} with HEW_PREVIEW=${got.hewPreview}`)
+        }
+      } else if (configs.length !== 0 || got.hewPreview !== '0' || got.overlay !== null) {
+        problem('policy', `${label} must pass no overlay and export HEW_PREVIEW=0; it passed ${JSON.stringify(got.tauriArgs)} with HEW_PREVIEW=${got.hewPreview}`)
+      }
+    }
+    for (const command of ['dev', 'build']) {
+      ran++
+      if (!dryRun(command, 'garbage').error) problem('policy', `tauri-policy.mjs ${command} accepts HEW_PREVIEW=garbage`)
+    }
+    if (ran === 0) problem('policy', 'no wrapper run was made')
+    {
+      const bootHash = read(at('app/src/plugins/boot/boot-1.hash')).trim()
+      const dir = mkdtempSync(join(tmpdir(), 'hew-overlay-'))
+      try {
+        const out = join(dir, 'overlay.json')
+        const w = spawnSync(process.execPath, [at('shells/csp/tauri-overlay.mjs'), 'preview', out], { encoding: 'utf8' })
+        const csp = w.status === 0 ? JSON.parse(read(out)).app?.security?.csp ?? '' : ''
+        if (!bootHash) problem('policy', 'app/src/plugins/boot/boot-1.hash is empty')
+        else if (!csp.includes(`'sha256-${bootHash}'`)) problem('policy', `the desktop.preview overlay does not allow the realm boot script (boot-1.hash ${bootHash})`)
+        if (csp !== policy('desktop', 'preview')) problem('policy', 'the overlay for a preview build is not desktop.preview')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+      if (policy('desktop', 'production').includes(bootHash)) problem('policy', 'desktop.production allows the realm boot script')
+      if (JSON.stringify(JSON.parse(read(at('shells/tauri/src-tauri/tauri.conf.json')))).includes(bootHash)) problem('policy', 'tauri.conf.json (what a build with no overlay ships) allows the realm boot script')
+    }
+    const release = read(at('.github/workflows/release.yml'))
+    const overlayStep =
+      /if \[\[ "\$TAG" == \*-pre\.\* \]\]; then\n\s+overlay="[^"\n]+"\n\s+node shells\/csp\/tauri-overlay\.mjs preview "\$overlay"\n\s+echo "PREVIEW_POLICY_CONFIG=--config \$overlay" >> "\$GITHUB_ENV"\n\s+else\n\s+echo "PREVIEW_POLICY_CONFIG=" >> "\$GITHUB_ENV"/
+    if (!overlayStep.test(release) || !release.includes('/release-version.json ${{ env.PREVIEW_POLICY_CONFIG }}')) {
+      problem('policy', '.github/workflows/release.yml no longer gives a -pre. tag, and only one, the desktop.preview overlay')
+    }
+    if (!release.includes('node scripts/check-desktop-binary.mjs --want "$want"') || !release.includes('want=production; [[ "$TAG" == *-pre.* ]] && want=preview')) {
+      problem('policy', '.github/workflows/release.yml no longer checks the built desktop binary for the policy its tag needs (scripts/check-desktop-binary.mjs)')
+    }
   }
   for (const name of readdirSync(at('shells/tauri/src-tauri'))) {
     if (!/^tauri\..+\.conf\.json$/.test(name)) continue
@@ -165,6 +252,58 @@ const loaders = registry.filter((f) => f.loader)
     if (a !== b) problem('capabilities', `capabilities/${name} differs from shells/csp/baseline/capabilities/${name}. A capability change edits both, on purpose.`)
   }
   if (names(pinned).length === 0) problem('capabilities', 'the baseline is empty')
+}
+
+// --------------------------------------------------------------- markers
+// A marker that marks nothing makes the bundle scan below vacuous: rename
+// the string in the code and forget the registry, and the production scan
+// looks for text no build holds. Every loader marker and shell command must
+// occur in the code of the feature it names (not in a test, not in the
+// registry itself, not in the kernel's embedded copy of it), and in
+// preview-only code: the plugin modules the loader roots import
+// (app/src/plugins), the realm's SDK (sdk/plugin, which every-build code
+// takes only types from), the desktop shell's preview_only module, and the
+// kernel's gated plugin exports. A marker found only in every-build code
+// would mark code every build carries, so the bundle scan could never pass
+// honestly. One marker cannot be placed there: the Settings window's tab
+// icon attribute lives in the every-build Settings window, in a branch the
+// build literal removes; it keeps the older rule (anywhere in the code).
+{
+  const PREVIEW_ONLY = [
+    'app/src/plugins/',
+    'sdk/plugin/',
+    'shells/tauri/src-tauri/src/preview_only/',
+    'crates/wasm-api/src/plugins_api.rs',
+  ]
+  const ANYWHERE = new Set(['data-plugins-tab-icon'])
+  const roots = ['app/src', 'app/index.html', 'sdk/plugin', 'shells/csp', 'shells/tauri/src-tauri/src', 'crates']
+  const skipDirs = new Set(['node_modules', 'target', 'dist', 'pkg', 'e2e', 'tests'])
+  const sources = []
+  const collect = (path) => {
+    if (statSync(path).isDirectory()) {
+      for (const name of readdirSync(path)) if (!skipDirs.has(name)) collect(join(path, name))
+    } else if (!/\.test\.[cm]?[jt]sx?$/.test(path) && !/(^|\/)(preview\.rs|preview-features\.json)$/.test(path) && !/\.(png|svg|ico|wasm|woff2?|ttf)$/.test(path)) {
+      sources.push(path)
+    }
+  }
+  for (const root of roots) if (existsSync(at(root))) collect(at(root))
+  const text = sources.map((f) => readFileSync(f, 'utf8')).join('\n')
+  const named = [
+    ...new Set(loaders.flatMap((f) => [...f.loader.markers, ...f.loader.shellCommands])),
+  ]
+  if (sources.length === 0 || !text.includes('hew.settings.')) problem('markers', 'the source scan read nothing (no hew.settings. in the code)')
+  const previewText = sources
+    .filter((f) => PREVIEW_ONLY.some((root) => relative(ROOT, f).split(sep).join('/').startsWith(root)))
+    .map((f) => readFileSync(f, 'utf8'))
+    .join('\n')
+  if (previewText === '') problem('markers', 'the source scan read no preview-only code')
+  for (const needle of named) {
+    if (!text.includes(needle)) problem('markers', `the registry names "${needle}", which occurs in no code of the feature it marks; rename it in preview-features.json too, or the production scan checks for nothing`)
+    else if (!ANYWHERE.has(needle) && !previewText.includes(needle)) {
+      problem('markers', `the registry names "${needle}", which occurs only in code every build carries (not under ${PREVIEW_ONLY.join(', ')}); a marker there marks nothing a production build drops`)
+    }
+  }
+  console.log(`check-production-artifacts: markers: ${named.length} names found in ${sources.length} source files`)
 }
 
 // ---------------------------------------------------------------- bundle

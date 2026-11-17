@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { pumpEvents, registerBroadcastSink, registerEventSink, setPumpDocumentId } from './eventPump'
+import { pumpDocumentId, pumpEvents, registerBroadcastSink, registerEventSink, setPumpDocumentId } from './eventPump'
 import type { Scene } from '../wasm/loader'
 
 function sceneDraining(json: string): { scene: Scene; drain: ReturnType<typeof vi.fn> } {
@@ -99,5 +99,10 @@ describe('eventPump', () => {
     setPumpDocumentId('doc_9')
     pumpEvents(scene)
     expect(order).toEqual(['id doc_9', 'drain'])
+  })
+
+  it('reports the document id it was told, for the plugin host to bind a grant to', () => {
+    setPumpDocumentId('doc_7')
+    expect(pumpDocumentId()).toBe('doc_7')
   })
 })

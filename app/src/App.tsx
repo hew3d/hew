@@ -214,7 +214,8 @@ import { SentReportsDialog } from './panels/SentReportsDialog'
 import { FollowNoticeBar, useFollowedReports } from './panels/FollowNoticeBar'
 import { getFollowHost, totalUnread } from './io/followHost'
 import { startWebLaunchCheck } from './io/webFollowHost'
-import { actionAllowed, behaviorEnabled, previewBuild } from './preview'
+import { actionAllowed, behaviorEnabled, loaderEnabled, previewBuild } from './preview'
+import { loadPluginHost } from './preview/loaderRoots'
 import { PREVIEW_TAG } from './preview/copy'
 import { TOOLS, isToolAction, toolLabel, usableTool, type ToolName } from './tools/toolRegistry'
 
@@ -2452,6 +2453,25 @@ export default function App() {
     if (deps === null) return
     return installLiveBridge(deps)
   }, [])
+
+  // The plugin host of this window (a Preview feature): only while the
+  // Plugins switch is on, and only once the document's Scene exists. A
+  // production build has no host to load (`loadPluginHost` is null).
+  useEffect(() => {
+    const deps = liveBridgeDepsRef.current
+    if (state?.scene === undefined || deps === null || loadPluginHost === null || !loaderEnabled('plugins')) return
+    let stop: (() => void) | null = null
+    let cancelled = false
+    loadPluginHost()
+      .then((start) => {
+        if (!cancelled) stop = start({ bridge: deps, toast: (message) => handleToastRef.current(message) })
+      })
+      .catch((err: unknown) => LogStore.log.error('plugins', `The plugin host did not start: ${String(err)}`))
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [state?.scene])
 
   // The bus reads the selection and the active tool from the Scene
   // (docs/agents/HEW_API.md §7, "Selection and view state"): mirror both

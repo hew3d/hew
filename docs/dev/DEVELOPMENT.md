@@ -548,6 +548,21 @@ build. Any other value, or none, makes a production build. It reaches:
   defaults it to on and `vite build` to off; set `HEW_PREVIEW=0` or `1` to
   choose.
 
+**One rule for the desktop shell and its page.** The flag has one
+resolution, and `shells/tauri/scripts/tauri-policy.mjs` applies it for the
+desktop shell: `1` is a preview build, `0` a production build, anything
+else an error, and unset or empty is a preview build for `dev` and a
+production build for `build`. The wrapper exports the answer (`1` or `0`)
+as `HEW_PREVIEW` to the Tauri CLI, so the Rust shell
+(`cfg(hew_preview)`), the page `vite dev` or `vite build` serves and the
+policy overlay can never disagree, even when the caller's variable was
+unset. `--print-args` prints what the wrapper would run, which
+`scripts/check-production-artifacts.mjs` and the wall tests read. Use the
+shell's package scripts only: the Tauri CLI run directly (`pnpm tauri`,
+`cargo tauri`) applies neither the overlay nor the flag. A preview shell
+started with a policy that does not allow the realm's boot script logs an
+error and refuses every plugin command.
+
 A `vX.Y.Z-pre.N` tag builds every package with the flag on, publishes a
 pre-release with no update feed, and deploys the web app to the `preview`
 Pages branch. A production tag never sets it, and the release workflow
@@ -593,6 +608,10 @@ a production build:
 answer false for an id no entry lists, the reverse of the rule for tools
 and commands: nothing they guard is public in any build. A host that
 loads code asks `loaderEnabled('<feature>')` before it starts anything.
+The switch gates the app's side only. In a preview build the desktop
+commands a `shellCommands` list names answer whether the switch is on or
+off; what the switch decides is whether the app's UI and loader call
+them.
 An event name a loader feature adds is a `GATED_VALUES` row, as for any
 other feature.
 
@@ -602,13 +621,29 @@ each shell, and the `probe` policy the realm probe is measured under,
 which no release serves. `shells/web/inject-csp.mjs` picks the web one by
 the flag; `tauri.conf.json` holds the desktop production policy, and
 `shells/csp/tauri-overlay.mjs` writes a `--config` overlay for any other.
-A Preview feature that needs a wider policy widens the preview one. No
-preview desktop build is given an overlay yet, so the check below holds
-`desktop.preview` equal to `desktop.production` until the release
-workflow and the dev script pass one. The
+A Preview feature that needs a wider policy widens the preview one. The
+desktop shell's `dev`, `build` and `e2e:build` scripts run the Tauri CLI
+through `shells/tauri/scripts/tauri-policy.mjs`, which adds the
+`desktop.preview` overlay (written under `src-tauri/target/`) whenever
+the app it builds is a preview build (the rule above). The release
+workflow passes the same overlay for a `-pre.` tag and no other, and
+after the build `scripts/check-desktop-binary.mjs` checks that the
+shell binary allows the boot script for a `-pre.` tag and does not for
+any other; the check below holds the wiring to that. The
 production policies and the desktop capability files are pinned to copies
 under `shells/csp/baseline/`, so changing one takes an edit in both
 places. Hew sets no cross-origin isolation header on any tier.
+
+The plugin realm's boot script is built from `sdk/plugin` (the
+`@hew3d/plugin` workspace package) and committed as
+`app/src/plugins/boot/boot-1.js` with its hash in `boot-1.hash`. The
+preview policies pin that hash in `script-src`, and the Plugins registry
+entry lists it as a marker. Both files are byte-exact (`.gitattributes`
+sets `-text` on them), so no checkout rewrites their line endings. After a change to `sdk/plugin/src/`, run
+`pnpm --dir sdk/plugin build` and paste the printed hash into
+`shells/csp/policies.json` (`web.preview`, `desktop.preview`) and the
+entry's `markers`; `app/src/plugins/boot/bootArtifacts.test.ts` fails
+until all of them agree with a fresh build.
 
 `scripts/check-production-artifacts.mjs` runs after the production app
 build in `scripts/verify.sh`, and in the release workflow for a production

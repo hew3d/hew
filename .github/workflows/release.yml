@@ -257,12 +257,24 @@ jobs:
       # (shells/tauri/src-tauri/build.rs), and a pre-release that published
       # an update feed could reach production installs if it were ever made
       # the latest release.
+      #
+      # A preview build also serves the desktop.preview content security
+      # policy (shells/csp/policies.json): a second `--config` overlay,
+      # which the Tauri CLI merges after the first. A production build gets
+      # none and ships tauri.conf.json's policy.
       - name: Stamp release version
         shell: bash
         run: |
           if [[ "$TAG" == *-pre.* ]]; then updater=false; else updater=true; fi
           printf '{"version": "%s", "bundle": {"createUpdaterArtifacts": %s}}\n' \
             "${TAG#v}" "$updater" > release-version.json
+          if [[ "$TAG" == *-pre.* ]]; then
+            overlay="${GITHUB_WORKSPACE}/shells/tauri/src-tauri/target/csp-preview.conf.json"
+            node shells/csp/tauri-overlay.mjs preview "$overlay"
+            echo "PREVIEW_POLICY_CONFIG=--config $overlay" >> "$GITHUB_ENV"
+          else
+            echo "PREVIEW_POLICY_CONFIG=" >> "$GITHUB_ENV"
+          fi
 
       # Apple code signing + notarization (RR9). Exported through GITHUB_ENV
       # only when the secrets exist: `env:` on a step always materializes
@@ -400,7 +412,7 @@ jobs:
           # Without this, tauri-action falls back to `npm run tauri`, which
           # doesn't exist here — the CLI is a pnpm-managed devDependency.
           tauriScript: pnpm tauri
-          args: ${{ matrix.args }} --config ${{ github.workspace }}/release-version.json
+          args: ${{ matrix.args }} --config ${{ github.workspace }}/release-version.json ${{ env.PREVIEW_POLICY_CONFIG }}
 
       # The kernel the bundle carries is the flavor this tag must ship.
       - name: Check the kernel flavor
@@ -412,6 +424,15 @@ jobs:
             echo "::error::The bundled kernel reports preview_build=$have; $TAG needs $want."
             exit 1
           fi
+
+      # The shell the bundle carries was compiled with the policy this tag
+      # needs: a -pre. build allows the plugin realm's boot script, a
+      # production build does not.
+      - name: Check the desktop policy
+        shell: bash
+        run: |
+          want=production; [[ "$TAG" == *-pre.* ]] && want=preview
+          node scripts/check-desktop-binary.mjs --want "$want"
 
       # The app build this bundle was made from carries nothing of a Preview
       # feature that loads code (docs/dev/DEVELOPMENT.md "Preview features").

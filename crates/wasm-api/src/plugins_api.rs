@@ -1,9 +1,10 @@
-//! The web build's plugin install path across the wasm boundary: reading a
-//! `.hewplugin`, validating a manifest, building the consent payload,
-//! checking the Hew version range, and checking an install against what is
-//! already installed. The store itself lives in the page
-//! (OPFS); these are the pure checks it runs, shared with the desktop
-//! through `plugin-host`.
+//! The plugin path across the wasm boundary: reading a `.hewplugin`,
+//! validating a manifest, building the consent payload, checking the Hew
+//! version range, and checking an install against what is already
+//! installed (the web build's store lives in the page, in OPFS; these are
+//! the pure checks it runs, shared with the desktop through
+//! `plugin-host`); building a running plugin's grant from its stored
+//! record; and reporting a plugin's state to the bus.
 //!
 //! Compiled only in a preview build (`lib.rs` declares this module under
 //! `cfg(hew_preview)`); each export is listed in the "plugins" entry's
@@ -14,7 +15,7 @@
 //! `INSTALL_<NAME>` for any other install refusal, and `PLUGIN_BAD_INPUT`
 //! when an argument is not the JSON or version text it should be.
 
-use crate::ApiError;
+use crate::{ApiError, Scene};
 use plugin_host::{InstallError, InstallSource, Installed, semver};
 use wasm_bindgen::prelude::*;
 
@@ -173,6 +174,110 @@ pub fn plugin_install_check(
         }));
     }
     plugin_host::check_requires(&manifest, &installed).map_err(|e| install_error(&e))
+}
+
+/// The most permission names [`plugin_grant_json`] takes: a record's
+/// grant and its optional grants, each capped by the manifest's limit.
+const MAX_GRANT_NAMES: usize = 2 * plugin_host::MAX_PERMISSIONS;
+/// The longest document id [`plugin_grant_json`] binds a grant to.
+const MAX_DOCUMENT_ID_BYTES: usize = 64;
+
+/// A running plugin's grant, as the JSON [`Scene::api_plugin_connection_open`]
+/// takes: `api::Grant::plugin` for plugin `id`, bound to `document` (the
+/// window's document id, `doc_<n>`), holding the permissions `names_json`
+/// names (a JSON array of strings: the stored record's `grant` and
+/// `optional_granted`), at the ceiling those permissions derive. The
+/// ceiling rule is `api`'s and nowhere else.
+///
+/// Nothing is dropped quietly: an id outside the plugin id grammar, or any
+/// name that is not a permission a plugin may hold (`all` included), is
+/// refused `MANIFEST_<NAME>`; a document id that is not 1 to 64 ASCII
+/// letters, digits, `_` or `-`, names that are not an array of strings, or
+/// more than 128 of them, are `PLUGIN_BAD_INPUT`. Repeated names count
+/// once.
+#[wasm_bindgen]
+pub fn plugin_grant_json(id: &str, document: &str, names_json: &str) -> Result<String, ApiError> {
+    plugin_manifest::validate_plugin_id(id)
+        .map_err(|e| install_error(&InstallError::Manifest(e)))?;
+    let document_ok = !document.is_empty()
+        && document.len() <= MAX_DOCUMENT_ID_BYTES
+        && document
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if !document_ok {
+        return Err(bad_input("document", "not a document id"));
+    }
+    let raw: Vec<String> = serde_json::from_str(names_json).map_err(|e| bad_input("names", e))?;
+    if raw.len() > MAX_GRANT_NAMES {
+        return Err(bad_input("names", format!("more than {MAX_GRANT_NAMES}")));
+    }
+    let mut names: Vec<plugin_manifest::PermissionName> = Vec::with_capacity(raw.len());
+    for name in &raw {
+        let parsed = plugin_manifest::PermissionName::parse(name)
+            .map_err(|e| install_error(&InstallError::Manifest(e)))?;
+        if !names.contains(&parsed) {
+            names.push(parsed);
+        }
+    }
+    let permissions = api::Grant::permissions_from_names(&names);
+    // Every name that passed the plugin grammar must arrive as a
+    // permission; one that `api` would drop is refused by name instead.
+    if let Some(dropped) = names
+        .iter()
+        .find(|n| !permissions.iter().any(|p| p.to_wire() == n.as_str()))
+    {
+        return Err(install_error(&InstallError::Manifest(
+            plugin_manifest::ManifestError::UnknownPermission(dropped.as_str().to_string()),
+        )));
+    }
+    let grant = api::Grant::plugin(id, Some(document), permissions);
+    Ok(to_json(&grant))
+}
+
+/// The states a plugin reports through `plugin_state`.
+const PLUGIN_STATES: &[&str] = &["loaded", "unloaded", "crashed", "grant_changed"];
+/// The longest `detail` a `plugin_state` event carries, in characters.
+const MAX_STATE_DETAIL_CHARS: usize = 200;
+
+#[wasm_bindgen]
+impl Scene {
+    /// The host reports a plugin's state; the next [`Scene::drain_events`]
+    /// sends `plugin_state` `{plugin, state, detail?}` to every connection
+    /// subscribed to it. `id` must follow the plugin id grammar
+    /// (`MANIFEST_<NAME>` otherwise) and `state` be one of `loaded`,
+    /// `unloaded`, `crashed` or `grant_changed` (`PLUGIN_BAD_INPUT`
+    /// otherwise). `detail` may come from the plugin (a crash message), so
+    /// it is cleaned like any plugin text and cut to 200 characters; one
+    /// that cleans to nothing is left out. Nothing is queued on a refusal.
+    pub fn note_plugin_state(
+        &mut self,
+        id: &str,
+        state: &str,
+        detail: Option<String>,
+    ) -> Result<(), ApiError> {
+        plugin_manifest::validate_plugin_id(id)
+            .map_err(|e| install_error(&InstallError::Manifest(e)))?;
+        if !PLUGIN_STATES.contains(&state) {
+            return Err(bad_input("state", "not a plugin state"));
+        }
+        let mut params = serde_json::json!({ "plugin": id, "state": state });
+        // Cut before cleaning, so a huge message costs no more than a long
+        // one; cleaning only ever shortens it further.
+        if let Some(detail) = detail
+            .map(|d| {
+                d.chars()
+                    .take(16 * MAX_STATE_DETAIL_CHARS)
+                    .collect::<String>()
+            })
+            .map(|d| plugin_host::clean_text(&d, MAX_STATE_DETAIL_CHARS))
+            .filter(|d| !d.is_empty())
+        {
+            params["detail"] = serde_json::Value::String(detail);
+        }
+        self.pending_host_events
+            .push(("plugin_state".to_string(), params));
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -442,5 +547,238 @@ mod tests {
             code(plugin_hew_version_ok(MANIFEST, "one").unwrap_err()),
             "PLUGIN_BAD_INPUT"
         );
+    }
+
+    fn names(list: &[&str]) -> String {
+        serde_json::to_string(list).unwrap()
+    }
+
+    #[test]
+    fn a_grant_from_names_opens_a_connection_holding_exactly_it() {
+        let list = [
+            "model.read",
+            "view",
+            "network:api.example.com",
+            "attributes.write:com.example.web",
+            "model.read",
+        ];
+        let json = plugin_grant_json("com.example.web", "doc_3", &names(&list)).unwrap();
+        let parsed: Vec<plugin_manifest::PermissionName> = list
+            .iter()
+            .map(|n| plugin_manifest::PermissionName::parse(n).unwrap())
+            .collect();
+        let expected = api::Grant::plugin(
+            "com.example.web",
+            Some("doc_3"),
+            api::Grant::permissions_from_names(&parsed),
+        );
+        assert_eq!(serde_json::from_str::<api::Grant>(&json).unwrap(), expected);
+        assert_eq!(expected.permissions.len(), 4, "a repeat counts once");
+        assert_eq!(
+            expected.ceiling,
+            api::Ceiling::App,
+            "view is a live permission"
+        );
+
+        let mut scene = Scene::new();
+        let conn = scene.api_plugin_connection_open(&json).unwrap();
+        assert_eq!(scene.api_connections[&conn].grant(), &expected);
+
+        // Without a live permission the ceiling is Core, decided by `api`.
+        let json = plugin_grant_json("com.example.web", "doc_1", &names(&["model.read"])).unwrap();
+        let grant: api::Grant = serde_json::from_str(&json).unwrap();
+        assert_eq!(grant.ceiling, api::Ceiling::Core);
+        assert_eq!(grant.plugin.as_deref(), Some("com.example.web"));
+        assert_eq!(grant.document.as_deref(), Some("doc_1"));
+        let conn = scene.api_plugin_connection_open(&json).unwrap();
+        assert_eq!(scene.api_connections[&conn].grant(), &grant);
+
+        // No names: a grant that holds nothing, still a plugin's.
+        let json = plugin_grant_json("com.example.web", "doc_1", "[]").unwrap();
+        let grant: api::Grant = serde_json::from_str(&json).unwrap();
+        assert!(grant.permissions.is_empty());
+        scene.api_plugin_connection_open(&json).unwrap();
+    }
+
+    #[test]
+    fn a_grant_refuses_what_a_plugin_may_not_hold_by_name() {
+        let ok = names(&["model.read"]);
+        for (list, expected) in [
+            (vec!["model.read", "all"], "MANIFEST_UNKNOWN_PERMISSION"),
+            (vec!["always"], "MANIFEST_UNKNOWN_PERMISSION"),
+            (vec!["first_party"], "MANIFEST_UNKNOWN_PERMISSION"),
+            (
+                vec!["network:*.example.com"],
+                "MANIFEST_PERMISSION_TOO_BROAD",
+            ),
+            (
+                vec!["attributes.write:hew.core"],
+                "MANIFEST_UNKNOWN_PERMISSION",
+            ),
+            (vec!["Model.Read"], "MANIFEST_UNKNOWN_PERMISSION"),
+            (vec![""], "MANIFEST_UNKNOWN_PERMISSION"),
+        ] {
+            let e = plugin_grant_json("com.example.web", "doc_1", &names(&list)).unwrap_err();
+            assert_eq!(code(e), expected, "{list:?}");
+        }
+        let e = plugin_grant_json("com.example.web", "doc_1", &names(&["all"])).unwrap_err();
+        assert!(e.to_string().contains("\"all\""), "{e}");
+        for (id, expected) in [
+            ("../x", "MANIFEST_INVALID_PLUGIN_ID"),
+            ("A.b", "MANIFEST_INVALID_PLUGIN_ID"),
+            ("", "MANIFEST_INVALID_PLUGIN_ID"),
+            ("hew.core", "MANIFEST_RESERVED_PLUGIN_ID"),
+        ] {
+            assert_eq!(
+                code(plugin_grant_json(id, "doc_1", &ok).unwrap_err()),
+                expected,
+                "{id:?}"
+            );
+        }
+        let long = "d".repeat(MAX_DOCUMENT_ID_BYTES + 1);
+        for document in ["", "doc 1", "doc_1\n", "doc/1", long.as_str()] {
+            assert_eq!(
+                code(plugin_grant_json("com.example.web", document, &ok).unwrap_err()),
+                "PLUGIN_BAD_INPUT",
+                "{document:?}"
+            );
+        }
+        let many: Vec<String> = (0..=MAX_GRANT_NAMES)
+            .map(|i| format!("network:h{i}.example.com"))
+            .collect();
+        let many = serde_json::to_string(&many).unwrap();
+        for bad in ["{}", "[1]", "\"model.read\"", "", many.as_str()] {
+            assert_eq!(
+                code(plugin_grant_json("com.example.web", "doc_1", bad).unwrap_err()),
+                "PLUGIN_BAD_INPUT",
+                "{bad}"
+            );
+        }
+    }
+
+    fn reply(scene: &mut Scene, conn: u32, frame: Value) -> Value {
+        let text = scene.api_dispatch_reply(conn, &frame.to_string()).unwrap();
+        serde_json::from_str(&text).unwrap()
+    }
+
+    /// The `plugin_state` frames each connection was sent by one drain.
+    fn plugin_states(scene: &mut Scene) -> Vec<(u32, Value)> {
+        let out: Value = serde_json::from_str(&scene.drain_events()).unwrap();
+        let mut got = Vec::new();
+        for batch in out.as_array().unwrap() {
+            let Some(conn) = batch["conn"].as_u64() else {
+                continue;
+            };
+            for frame in batch["frames"].as_array().unwrap() {
+                let frame: Value = serde_json::from_str(frame.as_str().unwrap()).unwrap();
+                if frame["method"] == "hew.event.plugin_state" {
+                    got.push((conn as u32, frame["params"].clone()));
+                }
+            }
+        }
+        got
+    }
+
+    #[test]
+    fn a_plugin_state_reaches_every_subscriber_once() {
+        let mut scene = Scene::new();
+        let first = scene.api_connection_open();
+        let grant = plugin_grant_json("com.example.other", "doc_1", "[]").unwrap();
+        let plugin = scene.api_plugin_connection_open(&grant).unwrap();
+        let quiet = scene.api_connection_open();
+        for conn in [first, plugin] {
+            let r = reply(
+                &mut scene,
+                conn,
+                json!({"jsonrpc":"2.0","id":1,"method":"hew.meta.hello","params":{"protocol":1}}),
+            );
+            assert!(r.get("result").is_some(), "{r}");
+            let r = reply(
+                &mut scene,
+                conn,
+                json!({"jsonrpc":"2.0","id":2,"method":"hew.event.subscribe","params":{"events":["plugin_state"]}}),
+            );
+            assert_eq!(r["result"]["subscribed"], json!(["plugin_state"]), "{r}");
+        }
+        scene.drain_events();
+
+        scene
+            .note_plugin_state("com.example.web", "crashed", Some("boom".into()))
+            .unwrap();
+        let got = plugin_states(&mut scene);
+        let expected = json!({ "plugin": "com.example.web", "state": "crashed", "detail": "boom" });
+        assert_eq!(got, vec![(first, expected.clone()), (plugin, expected)]);
+        assert!(got.iter().all(|(c, _)| *c != quiet));
+        assert!(plugin_states(&mut scene).is_empty(), "sent once");
+
+        // No detail, or one that cleans to nothing, is left out.
+        scene
+            .note_plugin_state("com.example.web", "loaded", None)
+            .unwrap();
+        scene
+            .note_plugin_state(
+                "com.example.web",
+                "unloaded",
+                Some("\u{202e}\u{200b}".into()),
+            )
+            .unwrap();
+        let got = plugin_states(&mut scene);
+        assert_eq!(got.len(), 4);
+        assert_eq!(
+            got[0].1,
+            json!({ "plugin": "com.example.web", "state": "loaded" })
+        );
+        // Each connection's frames in the order they were noted.
+        assert_eq!(
+            got[1].1,
+            json!({ "plugin": "com.example.web", "state": "unloaded" })
+        );
+        assert_eq!(got[2].1, got[0].1);
+
+        // A plugin's message is cleaned and cut.
+        let hostile = format!("\u{202e}evil\n{}", "x".repeat(10_000));
+        scene
+            .note_plugin_state("com.example.web", "grant_changed", Some(hostile))
+            .unwrap();
+        let got = plugin_states(&mut scene);
+        let detail = got[0].1["detail"].as_str().unwrap();
+        assert!(detail.starts_with("evil"), "{detail:?}");
+        assert!(!detail.contains('\u{202e}'));
+        assert!(detail.chars().count() <= MAX_STATE_DETAIL_CHARS);
+        assert!(detail.ends_with('…'));
+    }
+
+    #[test]
+    fn a_plugin_state_refuses_a_bad_id_or_state_and_queues_nothing() {
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        reply(
+            &mut scene,
+            conn,
+            json!({"jsonrpc":"2.0","id":1,"method":"hew.meta.hello","params":{"protocol":1}}),
+        );
+        reply(
+            &mut scene,
+            conn,
+            json!({"jsonrpc":"2.0","id":2,"method":"hew.event.subscribe","params":{"events":["plugin_state"]}}),
+        );
+        scene.drain_events();
+        for (id, state, expected) in [
+            ("../x", "loaded", "MANIFEST_INVALID_PLUGIN_ID"),
+            ("hew.x", "loaded", "MANIFEST_RESERVED_PLUGIN_ID"),
+            ("com.example.web", "", "PLUGIN_BAD_INPUT"),
+            ("com.example.web", "Loaded", "PLUGIN_BAD_INPUT"),
+            ("com.example.web", "deleted_everything", "PLUGIN_BAD_INPUT"),
+        ] {
+            let e = scene.note_plugin_state(id, state, None).unwrap_err();
+            assert_eq!(code(e), expected, "{id} {state}");
+        }
+        assert!(plugin_states(&mut scene).is_empty());
+        for state in PLUGIN_STATES {
+            scene
+                .note_plugin_state("com.example.web", state, None)
+                .unwrap();
+        }
+        assert_eq!(plugin_states(&mut scene).len(), PLUGIN_STATES.len());
     }
 }

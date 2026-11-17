@@ -57,6 +57,7 @@ import type { ViewportApi } from '../viewport/Viewport'
 import { getLengthUnit, setLengthUnit, subscribe as subscribeLengthUnit } from '../settings/units'
 import { tagged } from '../test/taggedDispatch'
 import { getBusy, setBusy } from './busyState'
+import { setForwardRouter } from './forwardRouter'
 
 function fire(event: string, payload: unknown): void {
   listeners.get(event)?.({ payload })
@@ -376,6 +377,47 @@ describe('installLiveBridge', () => {
     expect(reseedViewState).toHaveBeenCalledTimes(1)
     expect(refreshScene).toHaveBeenCalledTimes(1)
     expect(getBusy()).toBeNull()
+  })
+
+  it('answers a plugin forward unavailable even with a router in the slot, while the registry leaves the coupling off', async () => {
+    // A production build never turns the coupling on, and a preview build
+    // has it off until the Plugins switch is on: the bridge does not even
+    // ask the router.
+    const serve = vi.fn()
+    setForwardRouter({ serve })
+    try {
+      installLiveBridge(deps)
+      await flush()
+      fire('hew://api-connection-open', { connId: 3 })
+      for (const mutating of [true, false]) {
+        scene.api_dispatch.mockReturnValue(
+          JSON.stringify({
+            pending: {
+              token: 4,
+              forward: {
+                token: 4,
+                plugin: 'com.example.lib',
+                local: 'cmd',
+                method: 'com.example.lib.cmd',
+                request_id: 9,
+                params: {},
+                mutating,
+                label: null,
+                timeout_ms: 50000,
+                concurrency: 'parallel',
+                caller: { identity: 'live:7', plugin: null, app: null, forward: null },
+              },
+            },
+          }),
+        )
+        scene.api_complete_forward.mockClear()
+        fire('hew://api-frame', { connId: 3, frame: '{"jsonrpc":"2.0","id":9,"method":"com.example.lib.cmd","params":{}}' })
+        await vi.waitFor(() => expect(scene.api_complete_forward).toHaveBeenCalledWith(7, 4n, '{"failed":"unavailable"}'))
+      }
+      expect(serve).not.toHaveBeenCalled()
+    } finally {
+      setForwardRouter(null)
+    }
   })
 
   it('an aborted compound puts back the selection and isolation, unframed', async () => {

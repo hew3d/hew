@@ -11,6 +11,14 @@ fn main() {
     let preview = std::env::var_os("HEW_PREVIEW").is_some_and(|v| v == "1");
     if preview {
         println!("cargo::rustc-cfg=hew_preview");
+        // The base64 SHA-256 of the plugin realm's boot script, which the
+        // preview content security policy must allow (shells/csp). The
+        // shell compares it with the policy it was configured with.
+        let hash = std::path::Path::new("../../../app/src/plugins/boot/boot-1.hash");
+        println!("cargo::rerun-if-changed={}", hash.display());
+        let text = std::fs::read_to_string(hash)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", hash.display()));
+        println!("cargo::rustc-env=HEW_PLUGIN_BOOT_HASH={}", text.trim());
     }
     // The in-app updater runs in a production build with the `updater`
     // feature, and never in a preview build: the one update feed is the

@@ -160,8 +160,19 @@ if lane web; then
   # leave errexit nothing to misjudge, and each step gets its own header.
   # Typecheck and lint read the kernel's generated types from
   # app/src/wasm/pkg, which is untracked: a clean checkout (CI's web job)
-  # has nothing there until a flavor is copied in. Both flavors have the same
-  # types; the preview module is the dev default.
+  # has nothing there until a flavor is copied in. The flavors' types
+  # differ (a preview kernel has gated `Scene` methods and exports a
+  # production one lacks), so the app is type-checked against both: code
+  # that names a gated member without a shim fails the production pass.
+  echo "=== kernel types (production flavor into app/src/wasm/pkg) ==="
+  scripts/wasm-flavors.sh use production
+
+  echo "=== pnpm --dir app typecheck (production kernel types) ==="
+  pnpm --dir app typecheck
+
+  echo "=== pnpm --dir app typecheck:test (production kernel types) ==="
+  pnpm --dir app typecheck:test
+
   echo "=== kernel types (preview flavor into app/src/wasm/pkg) ==="
   scripts/wasm-flavors.sh use preview
 

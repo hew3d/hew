@@ -7,9 +7,10 @@
  * Hew's lines and the plugin's words are kept apart. Everything above "The
  * plugin says" is Hew's: the permission lines, the warnings, the unsigned
  * line. The plugin's own explanation sits in its own block below, as plain
- * text, never markup, so it cannot pass for Hew speaking. Escape cancels;
+ * text, never markup, so it cannot pass for Hew speaking. Escape cancels
+ * (and does nothing while an install is being written, as Cancel does not);
  * Enter does nothing at all, so a stray keypress never installs; focus
- * starts on Cancel.
+ * starts on Cancel. The plugin's cleaned name and version are always shown.
  */
 
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
@@ -84,6 +85,8 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
   const cancel = useRef<HTMLButtonElement>(null)
   const onCancelRef = useRef(onCancel)
   onCancelRef.current = onCancel
+  const busyRef = useRef(busy)
+  busyRef.current = busy
 
   // Focus starts on Cancel and returns to what had it when the sheet closes.
   useEffect(() => {
@@ -103,7 +106,8 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
-        onCancelRef.current()
+        // While the install is being written there is nothing to cancel.
+        if (!busyRef.current) onCancelRef.current()
       } else if (e.key === 'Enter') {
         // No accidental accept: Enter activates nothing here.
         e.preventDefault()
@@ -132,6 +136,8 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
 
   const { source, update } = consent
   const updating = update !== null
+  // The same version over itself: a reinstall, not an update.
+  const again = consent.replaces?.version === consent.version
   const sourceText =
     source.kind === 'file' ? 'From file' : source.kind === 'dir' ? `Unpacked folder: ${source.path}` : `From ${source.kind}`
 
@@ -170,7 +176,7 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
       >
         <div style={{ padding: '16px 18px 4px', overflowY: 'auto', minHeight: 0, flex: 1 }}>
           <h2 id="plugin-consent-title" style={{ margin: 0, fontSize: '15px', color: 'var(--text-primary, #eee)' }}>
-            {updating ? `Update ${consent.name}?` : `Install ${consent.name}?`}
+            {again ? `Install ${consent.name} again?` : updating ? `Update ${consent.name}?` : `Install ${consent.name}?`}
           </h2>
           <div style={{ color: 'var(--text-faint, #888)', marginTop: '2px' }}>Version {consent.version}</div>
           <div style={{ marginTop: '10px' }}>
@@ -190,7 +196,9 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
             )}
             {consent.replaces !== null && (
               <div data-consent="replaces" style={{ marginTop: '4px', color: 'var(--text-primary, #eee)' }}>
-                Replaces {consent.replaces.name} v{consent.replaces.version}. Hew cannot check it is the same author.
+                {again
+                  ? `Replaces the installed ${consent.replaces.name} v${consent.replaces.version} with this copy.`
+                  : `Replaces ${consent.replaces.name} v${consent.replaces.version}. Hew cannot check it is the same author.`}
               </div>
             )}
           </div>
@@ -287,7 +295,7 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
               Cancel
             </button>
             <button type="button" onClick={onInstall} disabled={busy} style={buttonStyle(busy, true)}>
-              {updating ? 'Update' : 'Install'}
+              {updating && !again ? 'Update' : 'Install'}
             </button>
           </div>
         </div>

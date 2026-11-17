@@ -1,7 +1,7 @@
 //! The on-disk store, in a temporary folder: the layout an install writes,
 //! declining, reinstalling, rolling back, uninstalling, the `read_file`
 //! jail, the dependents cascade, the `installed.json` rules, folder
-//! installs, and `HEW_PLUGIN_DIR`.
+//! installs, `HEW_PLUGIN_DIR`, and each plugin's saved data.
 
 #![cfg(all(hew_preview, feature = "fs"))]
 
@@ -919,4 +919,246 @@ fn too_many_permissions_are_refused_in_a_folder() {
         store::read_package_dir(&src).unwrap_err().name(),
         "too_many_permissions"
     );
+}
+
+#[test]
+fn storage_saves_reads_lists_and_deletes() {
+    let scratch = Scratch::new("storage");
+    let dir = scratch.store();
+    install(&dir, package(ID, "1.0.0", json!({}), &[]));
+    assert_eq!(store::storage_list(&dir, ID).unwrap(), Vec::<String>::new());
+    assert_eq!(store::storage_get(&dir, ID, "a").unwrap(), None);
+    assert!(!dir.root().join(ID).join("storage.json").exists());
+
+    store::storage_set(&dir, ID, "b", "2").unwrap();
+    store::storage_set(&dir, ID, "a", "\"one\"").unwrap();
+    store::storage_set(&dir, ID, "a", "{\"x\":1}").unwrap();
+    assert_eq!(
+        store::storage_get(&dir, ID, "a").unwrap().as_deref(),
+        Some("{\"x\":1}")
+    );
+    assert_eq!(store::storage_list(&dir, ID).unwrap(), ["a", "b"]);
+    // One JSON object of strings, in the plugin's folder.
+    let file: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.root().join(ID).join("storage.json")).unwrap())
+            .unwrap();
+    assert_eq!(file, json!({ "a": "{\"x\":1}", "b": "2" }));
+
+    assert!(store::storage_delete(&dir, ID, "a").unwrap());
+    assert!(!store::storage_delete(&dir, ID, "a").unwrap());
+    assert_eq!(store::storage_list(&dir, ID).unwrap(), ["b"]);
+    // The file goes with its last key.
+    assert!(store::storage_delete(&dir, ID, "b").unwrap());
+    assert!(!dir.root().join(ID).join("storage.json").exists());
+    // No temporary file is left behind.
+    store::storage_set(&dir, ID, "c", "3").unwrap();
+    let names: Vec<String> = std::fs::read_dir(dir.root().join(ID))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("storage"))
+        .collect();
+    assert_eq!(names, ["storage.json"]);
+}
+
+#[test]
+fn storage_keys_are_bounded() {
+    let scratch = Scratch::new("storage-keys");
+    let dir = scratch.store();
+    install(&dir, package(ID, "1.0.0", json!({}), &[]));
+    let long = "k".repeat(plugin_host::MAX_STORAGE_KEY_BYTES + 1);
+    for key in ["", long.as_str()] {
+        assert_eq!(
+            store::storage_set(&dir, ID, key, "v"),
+            Err(InstallError::StorageKeyInvalid)
+        );
+        assert_eq!(
+            store::storage_get(&dir, ID, key),
+            Err(InstallError::StorageKeyInvalid)
+        );
+        assert_eq!(
+            store::storage_delete(&dir, ID, key),
+            Err(InstallError::StorageKeyInvalid)
+        );
+    }
+    let longest = "k".repeat(plugin_host::MAX_STORAGE_KEY_BYTES);
+    store::storage_set(&dir, ID, &longest, "v").unwrap();
+    // Keys are only ever map keys: path-like text is just text.
+    store::storage_set(&dir, ID, "../../installed.json", "v").unwrap();
+    assert_eq!(
+        store::storage_list(&dir, ID).unwrap(),
+        ["../../installed.json", longest.as_str()]
+    );
+    assert!(dir.root().join(ID).join("installed.json").is_file());
+}
+
+#[test]
+fn storage_is_refused_past_the_quota_and_writes_nothing() {
+    let scratch = Scratch::new("storage-quota");
+    let dir = scratch.store();
+    install(&dir, package(ID, "1.0.0", json!({}), &[]));
+    let cap = plugin_host::MAX_STORAGE_BYTES;
+    assert_eq!(cap, 5 * 1024 * 1024);
+    // Too large on its own.
+    assert_eq!(
+        store::storage_set(&dir, ID, "a", &"x".repeat(cap)),
+        Err(InstallError::StorageQuota)
+    );
+    assert!(!dir.root().join(ID).join("storage.json").exists());
+    // Two values that fit alone but not together.
+    let half = "x".repeat(cap / 2);
+    store::storage_set(&dir, ID, "a", &half).unwrap();
+    let before = std::fs::read(dir.root().join(ID).join("storage.json")).unwrap();
+    assert_eq!(
+        store::storage_set(&dir, ID, "b", &half),
+        Err(InstallError::StorageQuota)
+    );
+    assert_eq!(
+        std::fs::read(dir.root().join(ID).join("storage.json")).unwrap(),
+        before
+    );
+    assert_eq!(store::storage_list(&dir, ID).unwrap(), ["a"]);
+    // Replacing a value is measured on the result.
+    store::storage_set(&dir, ID, "a", &half).unwrap();
+    assert_eq!(
+        InstallError::StorageQuota.name(),
+        "storage_quota",
+        "the refusal the app branches on"
+    );
+}
+
+#[test]
+fn storage_needs_an_installed_plugin_and_never_creates_its_folder() {
+    let scratch = Scratch::new("storage-missing");
+    let dir = scratch.store();
+    let other = "com.example.missing";
+    assert_eq!(
+        store::storage_set(&dir, other, "a", "1"),
+        Err(InstallError::NotInstalled(other.into()))
+    );
+    assert_eq!(
+        store::storage_get(&dir, other, "a"),
+        Err(InstallError::NotInstalled(other.into()))
+    );
+    assert_eq!(
+        store::storage_list(&dir, other),
+        Err(InstallError::NotInstalled(other.into()))
+    );
+    assert!(!dir.root().join(other).exists());
+    // A bad id is refused by the grammar before any path is built.
+    for bad in ["../x", "a", "hew.x", "a.b/../c", ""] {
+        assert!(matches!(
+            store::storage_set(&dir, bad, "a", "1"),
+            Err(InstallError::Manifest(_))
+        ));
+    }
+    assert!(!dir.root().exists());
+    // A folder with no record is not a plugin either.
+    std::fs::create_dir_all(dir.root().join(other)).unwrap();
+    assert_eq!(
+        store::storage_set(&dir, other, "a", "1"),
+        Err(InstallError::NotInstalled(other.into()))
+    );
+    assert!(!dir.root().join(other).join("storage.json").exists());
+}
+
+#[test]
+fn unreadable_storage_is_refused_and_left_as_it_is() {
+    let scratch = Scratch::new("storage-bad");
+    let dir = scratch.store();
+    install(&dir, package(ID, "1.0.0", json!({}), &[]));
+    let path = dir.root().join(ID).join("storage.json");
+    for bad in [&b"[1,2]"[..], b"{\"a\":1}", b"not json"] {
+        std::fs::write(&path, bad).unwrap();
+        assert_eq!(
+            store::storage_set(&dir, ID, "a", "1"),
+            Err(InstallError::StorageUnreadable)
+        );
+        assert_eq!(
+            store::storage_get(&dir, ID, "a"),
+            Err(InstallError::StorageUnreadable)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bad);
+    }
+    // A link in its place is not followed.
+    std::fs::remove_file(&path).unwrap();
+    let outside = scratch.0.join("outside.json");
+    std::fs::write(&outside, b"{\"a\":\"secret\"}").unwrap();
+    std::os::unix::fs::symlink(&outside, &path).unwrap();
+    assert_eq!(
+        store::storage_get(&dir, ID, "a"),
+        Err(InstallError::StorageUnreadable)
+    );
+    assert_eq!(
+        store::storage_set(&dir, ID, "a", "1"),
+        Err(InstallError::StorageUnreadable)
+    );
+    assert_eq!(std::fs::read(&outside).unwrap(), b"{\"a\":\"secret\"}");
+}
+
+#[test]
+fn storage_follows_the_plugin_through_updates_and_rollbacks() {
+    let scratch = Scratch::new("storage-versions");
+    let dir = scratch.store();
+    install(&dir, package(ID, "1.0.0", json!({}), &[]));
+    store::storage_set(&dir, ID, "count", "1").unwrap();
+    install(&dir, package(ID, "2.0.0", json!({}), &[]));
+    assert_eq!(
+        store::storage_get(&dir, ID, "count").unwrap().as_deref(),
+        Some("1"),
+        "an update keeps the saved data"
+    );
+    store::storage_set(&dir, ID, "count", "2").unwrap();
+    store::rollback(&dir, ID).unwrap();
+    assert_eq!(
+        store::installed(&dir, ID).unwrap().0.version.to_string(),
+        "1.0.0"
+    );
+    assert_eq!(
+        store::storage_get(&dir, ID, "count").unwrap().as_deref(),
+        Some("2"),
+        "a rollback keeps the latest saved data"
+    );
+    store::storage_set(&dir, ID, "count", "3").unwrap();
+    store::rollback(&dir, ID).unwrap();
+    assert_eq!(
+        store::storage_get(&dir, ID, "count").unwrap().as_deref(),
+        Some("3")
+    );
+    // Data deleted before an update does not come back on a rollback.
+    assert!(store::storage_delete(&dir, ID, "count").unwrap());
+    store::rollback(&dir, ID).unwrap();
+    assert_eq!(store::storage_list(&dir, ID).unwrap(), Vec::<String>::new());
+    // A reinstall of the same version keeps it too.
+    store::storage_set(&dir, ID, "kept", "yes").unwrap();
+    install(&dir, package(ID, "1.0.0", json!({}), &[]));
+    assert_eq!(
+        store::storage_get(&dir, ID, "kept").unwrap().as_deref(),
+        Some("yes")
+    );
+}
+
+#[test]
+fn uninstalling_removes_the_saved_data() {
+    let scratch = Scratch::new("storage-uninstall");
+    let dir = scratch.store();
+    install(&dir, package(ID, "1.0.0", json!({}), &[]));
+    store::storage_set(&dir, ID, "a", "1").unwrap();
+    install(&dir, package(ID, "2.0.0", json!({}), &[]));
+    // Both the current version and the one kept for a rollback hold a copy.
+    assert!(dir.root().join(ID).join("storage.json").exists());
+    assert!(
+        dir.root()
+            .join(ID)
+            .join("previous")
+            .join("storage.json")
+            .exists()
+    );
+    store::uninstall(&dir, ID).unwrap();
+    assert!(!dir.root().join(ID).exists());
+    // A different package installed under the same id starts empty.
+    install(&dir, package(ID, "1.0.0", json!({}), &[]));
+    assert_eq!(store::storage_list(&dir, ID).unwrap(), Vec::<String>::new());
+    store::storage_set(&dir, ID, "a", "1").unwrap();
+    store::purge(&dir, ID).unwrap();
+    assert!(!dir.root().join(ID).exists());
 }

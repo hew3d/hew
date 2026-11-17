@@ -1,8 +1,9 @@
-//! The desktop's plugin install commands (docs/agents/PLUGINS.md
-//! "Installing"): the twelve Tauri commands Settings ▸ Plugins calls to
-//! pick, stage, confirm, list, change and remove installed plugins. The
-//! store itself is `plugin_host::store`; this file decides who may call it
-//! and with what.
+//! The desktop's plugin commands (docs/agents/PLUGINS.md "Installing"):
+//! the Tauri commands Settings ▸ Plugins calls to pick, stage, confirm,
+//! list, change and remove installed plugins, and the four a running
+//! plugin's host calls to keep the plugin's saved data
+//! (`plugins/<id>/storage.json`). The store itself is `plugin_host::store`;
+//! this file decides who may call it and with what.
 //!
 //! These commands are the only thing between a web page and installing
 //! other people's code, so every argument from the page is treated as
@@ -20,9 +21,13 @@
 //! - The page only ever sees `{token, consent}`; the package stays here.
 //!   Accepting shows a native confirmation whose text is built from the
 //!   consent payload this side holds, so a page cannot install anything the
-//!   user was not shown by Hew itself. Widening a grant and rolling back
-//!   ask the same way, one dialog at a time, and re-read the store after
-//!   the answer so what is written is what was shown.
+//!   user was not shown by Hew itself. Widening a grant, rolling back,
+//!   turning a plugin on and uninstalling ask the same way, one dialog at a
+//!   time ([`super::confirm`]: only the accept button says yes), and re-read
+//!   the store after the answer so what is written is what was shown.
+//!   Turning a plugin off and narrowing a grant ask nothing.
+//! - Saved data is only ever a value in one JSON object: a key is never a
+//!   path, and the file is found from the checked id alone.
 //! - A picked path is matched by exact string against what the picker
 //!   returned; the page's string is never resolved on the filesystem.
 //!
@@ -42,6 +47,9 @@ use tauri::{Emitter, Manager};
 
 /// The global event every command that changes the store emits.
 pub const CHANGED_EVENT: &str = "plugins-changed";
+/// The global event a change to a plugin's saved data emits, with
+/// [`StorageChanged`], so every window's host can tell that plugin.
+pub const STORAGE_CHANGED_EVENT: &str = "plugins-storage-changed";
 /// The package file extension, compared without regard to case.
 pub const PACKAGE_EXTENSION: &str = "hewplugin";
 /// How many staged installs may wait for an answer at once. Each holds a
@@ -72,6 +80,9 @@ pub struct PluginState {
     /// Held around every change to the store, so two commands never
     /// rearrange the same folders at once. Never held while a dialog shows.
     store: Mutex<()>,
+    /// Why every command is refused, when the build is not one that can
+    /// run plugins; `None` when it can.
+    disabled: Option<&'static str>,
 }
 
 impl PluginState {
@@ -82,16 +93,35 @@ impl PluginState {
             asking: AtomicBool::new(false),
             pending: Mutex::new(HashMap::new()),
             store: Mutex::new(()),
+            disabled: None,
         }
     }
 
     /// The state for the running app: the store under the app's data
-    /// folder.
-    pub fn resolve() -> PluginState {
-        PluginState::new(PluginDir::resolve())
+    /// folder, unless the content security policy this shell was started
+    /// with does not allow the realm's boot script (`boot_hash`, the
+    /// base64 SHA-256 the realm frame is pinned to). A shell built without
+    /// the preview policy (the Tauri CLI run directly instead of through
+    /// `scripts/tauri-policy.mjs`) would otherwise offer plugins whose
+    /// realm can never start; it refuses every command and says why.
+    pub fn resolve(csp: Option<&str>, boot_hash: &str) -> PluginState {
+        if policy_allows_boot(csp, boot_hash) {
+            return PluginState::new(PluginDir::resolve());
+        }
+        eprintln!(
+            "hew: ERROR: the content security policy does not allow the plugin realm's boot script; plugins are disabled. Build a preview shell with `pnpm --dir shells/tauri build` (or dev), not the Tauri CLI directly."
+        );
+        let mut state = PluginState::new(None);
+        state.disabled = Some(
+            "This build of Hew was not given the policy plugins need, so plugins are turned off.",
+        );
+        state
     }
 
     fn dir(&self) -> Result<&PluginDir, String> {
+        if let Some(why) = self.disabled {
+            return Err(refusal("plugins_disabled", why));
+        }
         self.dir.as_ref().ok_or_else(|| {
             refusal(
                 "no_plugin_dir",
@@ -103,6 +133,19 @@ impl PluginState {
     fn store_lock(&self) -> MutexGuard<'_, ()> {
         lock(&self.store)
     }
+}
+
+/// Whether `csp`'s `script-src` allows the script whose base64 SHA-256 is
+/// `boot_hash`.
+pub fn policy_allows_boot(csp: Option<&str>, boot_hash: &str) -> bool {
+    let source = format!("'sha256-{boot_hash}'");
+    !boot_hash.is_empty()
+        && csp.is_some_and(|csp| {
+            csp.split(';')
+                .map(str::trim)
+                .filter(|d| d.starts_with("script-src "))
+                .any(|d| d.split_whitespace().any(|s| s == source))
+        })
 }
 
 /// A lock that a panic elsewhere does not turn into a refusal forever. The
@@ -119,15 +162,25 @@ pub struct PendingView {
     pub consent: ConsentPayload,
 }
 
+/// [`STORAGE_CHANGED_EVENT`]'s payload: the plugin and the keys that
+/// changed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct StorageChanged {
+    pub id: String,
+    pub keys: Vec<String>,
+}
+
 /// The native side of a command: the confirmation dialog and the change
-/// event. The app implements it with the dialog plugin and a global event;
-/// tests stub it.
+/// events. The app implements it with [`super::confirm::confirm_native`]
+/// and global events; tests stub it.
 pub trait Ui {
     /// Shows a native confirmation and blocks until it is answered. True
-    /// only when the user pressed the button labeled `accept`.
+    /// only when the user activated the button labeled `accept`.
     fn confirm(&self, title: &str, body: &str, accept: &str) -> bool;
     /// Tells every window the store changed.
     fn changed(&self);
+    /// Tells every window a plugin's saved data changed.
+    fn storage_changed(&self, change: StorageChanged);
 }
 
 fn refusal(name: &str, text: &str) -> String {
@@ -336,15 +389,13 @@ fn hold(
     Ok(view)
 }
 
-/// `plugin_dir`: the store's root folder.
-pub fn dir(label: &str, state: &PluginState) -> Result<String, String> {
-    check_window(label)?;
-    Ok(state.dir()?.root().to_string_lossy().into_owned())
-}
-
 /// `plugin_list`: every plugin in the store.
 pub fn list(label: &str, state: &PluginState) -> Result<Vec<Listed>, String> {
     check_window(label)?;
+    // Under the store lock, so a change in another window is seen whole or
+    // not at all, never half way through its renames. No command holds the
+    // lock while a dialog is open, so this waits only for a rearrangement.
+    let _store = state.store_lock();
     Ok(store::list(state.dir()?))
 }
 
@@ -426,11 +477,7 @@ pub fn commit(
         return Err(install_error(InstallError::PendingExpired));
     }
     let dir = state.dir()?;
-    let (title, accept_label) = if taken.consent.replaces.is_some() {
-        ("Update this plugin?", "Update")
-    } else {
-        ("Install this plugin?", "Install")
-    };
+    let (title, accept_label) = plugin_host::install_confirmation(&taken.consent);
     let body = plugin_host::consent_summary(&taken.consent);
     let yes = ui.confirm(title, &body, accept_label);
     drop(asking);
@@ -556,6 +603,13 @@ fn grant_added(
 
 /// `plugin_set_enabled`: turns a plugin on or off; returns the plugins that
 /// were turned off with it.
+///
+/// Turning one off asks nothing. Turning one on lets it run, and start
+/// with Hew if it asks to, so the user is asked natively with what it
+/// holds; a no is `enable_declined` and changes nothing. A plugin already
+/// on and allowed to start is left as it is without asking. The record is
+/// read again after the answer and the change refused `plugin_changed` if
+/// it moved meanwhile.
 pub fn set_enabled(
     label: &str,
     state: &PluginState,
@@ -566,20 +620,90 @@ pub fn set_enabled(
     check_window(label)?;
     check_id(id)?;
     let dir = state.dir()?;
-    let (_, also) = {
+    if !enabled {
+        let (_, also) = {
+            let _store = state.store_lock();
+            store::set_enabled(dir, id, false).map_err(install_error)?
+        };
+        ui.changed();
+        return Ok(also);
+    }
+    let (current, manifest) = {
         let _store = state.store_lock();
-        store::set_enabled(dir, id, enabled).map_err(install_error)?
+        store::installed(dir, id).map_err(install_error)?
+    };
+    if current.enabled && current.startup_allowed {
+        return Ok(Vec::new());
+    }
+    let body = plugin_host::enable_summary(&current, &manifest);
+    let yes = {
+        let _asking = begin_asking(state)?;
+        ui.confirm("Turn on this plugin?", &body, "Turn On")
+    };
+    if !yes {
+        return Err(refusal("enable_declined", "The plugin was left off."));
+    }
+    let also = {
+        let _store = state.store_lock();
+        let now = store::installed(dir, id).map_err(install_error)?;
+        if now != (current, manifest) {
+            return Err(plugin_changed());
+        }
+        store::set_enabled(dir, id, true).map_err(install_error)?.1
     };
     ui.changed();
     Ok(also)
 }
 
+fn plugin_changed() -> String {
+    refusal(
+        "plugin_changed",
+        "The plugin changed while Hew was asking. Try again.",
+    )
+}
+
 /// `plugin_uninstall`: removes a plugin and everything the store holds
-/// for it.
+/// for it, its saved data included, after asking natively. A no is
+/// `uninstall_declined` and removes nothing. Refusals the store would make
+/// (not installed, still required by enabled plugins) come before the
+/// question. A plugin whose record cannot be read is named by its id.
 pub fn uninstall(label: &str, state: &PluginState, id: &str, ui: &dyn Ui) -> Result<(), String> {
     check_window(label)?;
     check_id(id)?;
     let dir = state.dir()?;
+    let shown = {
+        let _store = state.store_lock();
+        let shown = match store::installed(dir, id) {
+            Ok(found) => Some(found),
+            Err(InstallError::NotInstalled(_)) => {
+                return Err(install_error(InstallError::NotInstalled(id.to_string())));
+            }
+            // Unreadable records can still be removed.
+            Err(_) => None,
+        };
+        let dependents = store::dependents_of(dir, id);
+        if !dependents.is_empty() {
+            return Err(install_error(InstallError::DependencyMissing(dependents)));
+        }
+        shown
+    };
+    let body = match &shown {
+        Some((installed, manifest)) => plugin_host::uninstall_summary(installed, manifest),
+        // The id passed the plugin id grammar, so it is plain text.
+        None => format!(
+            "{id}\nHew cannot read this plugin's record. Removes the plugin and everything it saved.\n"
+        ),
+    };
+    let yes = {
+        let _asking = begin_asking(state)?;
+        ui.confirm("Uninstall this plugin?", &body, "Uninstall")
+    };
+    if !yes {
+        return Err(refusal(
+            "uninstall_declined",
+            "The plugin was left installed.",
+        ));
+    }
     {
         let _store = state.store_lock();
         store::uninstall(dir, id).map_err(install_error)?;
@@ -593,8 +717,8 @@ pub fn uninstall(label: &str, state: &PluginState, id: &str, ui: &dyn Ui) -> Res
 /// than the one the user has since narrowed to, so the user is asked
 /// natively with what it will be able to do. A no leaves everything as it
 /// is. The records are read again after the answer, and the rollback is
-/// refused if either changed while the dialog was open, so what runs is
-/// what was shown.
+/// refused `plugin_changed` if either changed while the dialog was open, so
+/// what runs is what was shown.
 pub fn rollback(
     label: &str,
     state: &PluginState,
@@ -625,7 +749,7 @@ pub fn rollback(
         let now_previous = store::previous(dir, id).map_err(install_error)?;
         if &now_current != current || now_previous != (previous.clone(), previous_manifest.clone())
         {
-            return Err(rollback_declined());
+            return Err(plugin_changed());
         }
         store::rollback(dir, id).map_err(install_error)?
     };
@@ -642,7 +766,83 @@ fn rollback_declined() -> String {
 pub fn read_file(label: &str, state: &PluginState, id: &str, rel: &str) -> Result<Vec<u8>, String> {
     check_window(label)?;
     check_id(id)?;
-    store::read_file(state.dir()?, id, rel).map_err(install_error)
+    let dir = state.dir()?;
+    let _store = state.store_lock();
+    store::read_file(dir, id, rel).map_err(install_error)
+}
+
+/// `plugin_storage_get`: the value plugin `id` saved under `key`, if any.
+pub fn storage_get(
+    label: &str,
+    state: &PluginState,
+    id: &str,
+    key: &str,
+) -> Result<Option<String>, String> {
+    check_window(label)?;
+    check_id(id)?;
+    let dir = state.dir()?;
+    let _store = state.store_lock();
+    store::storage_get(dir, id, key).map_err(install_error)
+}
+
+/// `plugin_storage_list`: every key plugin `id` has saved, sorted.
+pub fn storage_list(label: &str, state: &PluginState, id: &str) -> Result<Vec<String>, String> {
+    check_window(label)?;
+    check_id(id)?;
+    let dir = state.dir()?;
+    let _store = state.store_lock();
+    store::storage_list(dir, id).map_err(install_error)
+}
+
+/// `plugin_storage_set`: saves `value` under `key` for plugin `id`, then
+/// tells every window. Refused `storage_quota` past the plugin's quota and
+/// `storage_key_invalid` for an empty or overlong key, with nothing
+/// written.
+pub fn storage_set(
+    label: &str,
+    state: &PluginState,
+    id: &str,
+    key: &str,
+    value: &str,
+    ui: &dyn Ui,
+) -> Result<(), String> {
+    check_window(label)?;
+    check_id(id)?;
+    let dir = state.dir()?;
+    {
+        let _store = state.store_lock();
+        store::storage_set(dir, id, key, value).map_err(install_error)?;
+    }
+    ui.storage_changed(StorageChanged {
+        id: id.to_string(),
+        keys: vec![key.to_string()],
+    });
+    Ok(())
+}
+
+/// `plugin_storage_delete`: removes `key` from plugin `id`'s saved data;
+/// tells every window only when it was there.
+pub fn storage_delete(
+    label: &str,
+    state: &PluginState,
+    id: &str,
+    key: &str,
+    ui: &dyn Ui,
+) -> Result<(), String> {
+    check_window(label)?;
+    check_id(id)?;
+    let dir = state.dir()?;
+    let removed = {
+        let _store = state.store_lock();
+        store::storage_delete(dir, id, key).map_err(install_error)?
+    };
+    if removed {
+        ui.storage_changed(StorageChanged {
+            id: id.to_string(),
+            keys: vec![key.to_string()],
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -650,34 +850,23 @@ pub fn read_file(label: &str, state: &PluginState, id: &str, rel: &str) -> Resul
 // (packages are read whole, and the confirmations block until answered).
 // ---------------------------------------------------------------------------
 
-/// The app's [`Ui`]: the dialog plugin's message box and a global event.
+/// The app's [`Ui`]: Hew's native confirmation over the calling window,
+/// and global events.
 struct WindowUi {
     window: tauri::WebviewWindow,
 }
 
 impl Ui for WindowUi {
     fn confirm(&self, title: &str, body: &str, accept: &str) -> bool {
-        use tauri_plugin_dialog::{
-            DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
-        };
-        let answer = self
-            .window
-            .dialog()
-            .message(body)
-            .title(title)
-            .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                accept.to_string(),
-                "Cancel".to_string(),
-            ))
-            .blocking_show_with_result();
-        // Only the accept button itself counts; closing the dialog, Escape
-        // and Cancel all come back as something else.
-        answer == MessageDialogResult::Custom(accept.to_string())
+        super::confirm::confirm_native(&self.window, title, body, accept)
     }
 
     fn changed(&self) {
         let _ = self.window.app_handle().emit(CHANGED_EVENT, ());
+    }
+
+    fn storage_changed(&self, change: StorageChanged) {
+        let _ = self.window.app_handle().emit(STORAGE_CHANGED_EVENT, change);
     }
 }
 
@@ -697,11 +886,6 @@ where
     })
     .await
     .map_err(|e| install_error(InstallError::Io(e.to_string())))?
-}
-
-#[tauri::command]
-pub async fn plugin_dir(window: tauri::WebviewWindow) -> Result<String, String> {
-    off_main(window, |label, state, _| dir(label, state)).await
 }
 
 #[tauri::command]
@@ -854,16 +1038,84 @@ pub async fn plugin_read_file(
     .map(tauri::ipc::Response::new)
 }
 
+#[tauri::command]
+pub async fn plugin_storage_get(
+    window: tauri::WebviewWindow,
+    id: String,
+    key: String,
+) -> Result<Option<String>, String> {
+    off_main(window, move |label, state, _| {
+        storage_get(label, state, &id, &key)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn plugin_storage_set(
+    window: tauri::WebviewWindow,
+    id: String,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    off_main(window, move |label, state, ui| {
+        storage_set(label, state, &id, &key, &value, ui)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn plugin_storage_delete(
+    window: tauri::WebviewWindow,
+    id: String,
+    key: String,
+) -> Result<(), String> {
+    off_main(window, move |label, state, ui| {
+        storage_delete(label, state, &id, &key, ui)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn plugin_storage_list(
+    window: tauri::WebviewWindow,
+    id: String,
+) -> Result<Vec<String>, String> {
+    off_main(window, move |label, state, _| {
+        storage_list(label, state, &id)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn the_boot_script_needs_its_hash_in_script_src() {
+        let with = "default-src 'self'; script-src 'self' 'sha256-abc='; style-src 'self'";
+        assert!(policy_allows_boot(Some(with), "abc="));
+        assert!(!policy_allows_boot(Some(with), "abd="));
+        assert!(!policy_allows_boot(Some("script-src 'self'"), "abc="));
+        // A hash in another directive allows no script.
+        assert!(!policy_allows_boot(Some("style-src 'sha256-abc='"), "abc="));
+        assert!(!policy_allows_boot(None, "abc="));
+        assert!(!policy_allows_boot(Some(with), ""));
+    }
+
+    #[test]
+    fn a_shell_without_the_preview_policy_refuses_every_command() {
+        let state = PluginState::resolve(Some("script-src 'self'"), "abc=");
+        let e = state.dir().expect_err("refused");
+        assert_eq!(refusal_name(&e), "plugins_disabled");
+    }
 
     /// A [`Ui`] with a fixed answer that records what it was asked.
     struct Stub {
         answer: bool,
         asked: RefCell<Vec<(String, String, String)>>,
         changed: Cell<usize>,
+        stored: RefCell<Vec<StorageChanged>>,
     }
 
     impl Stub {
@@ -872,6 +1124,7 @@ mod tests {
                 answer,
                 asked: RefCell::new(Vec::new()),
                 changed: Cell::new(0),
+                stored: RefCell::new(Vec::new()),
             }
         }
         fn asked(&self) -> usize {
@@ -888,6 +1141,9 @@ mod tests {
         }
         fn changed(&self) {
             self.changed.set(self.changed.get() + 1);
+        }
+        fn storage_changed(&self, change: StorageChanged) {
+            self.stored.borrow_mut().push(change);
         }
     }
 
@@ -1113,7 +1369,6 @@ mod tests {
         let id = "com.example.a";
         for label in ["library", "plugin-x", ""] {
             let results: Vec<Result<(), String>> = vec![
-                dir(label, &state).map(drop),
                 list(label, &state).map(drop),
                 stage_file(label, &state, &file, NOW).map(drop),
                 stage_dir(label, &state, &dir_pick, NOW).map(drop),
@@ -1123,6 +1378,10 @@ mod tests {
                 uninstall(label, &state, id, &ui),
                 rollback(label, &state, id, &ui).map(drop),
                 read_file(label, &state, id, "main.js").map(drop),
+                storage_get(label, &state, id, "k").map(drop),
+                storage_set(label, &state, id, "k", "v", &ui),
+                storage_delete(label, &state, id, "k", &ui),
+                storage_list(label, &state, id).map(drop),
             ];
             for r in results {
                 assert_eq!(refusal_name(&r.unwrap_err()), "window_not_allowed");
@@ -1130,6 +1389,7 @@ mod tests {
         }
         assert_eq!(ui.asked(), 0);
         assert_eq!(ui.changed.get(), 0);
+        assert!(ui.stored.borrow().is_empty());
         // A refused window does not use up the user's picks.
         stage_file("settings", &state, &file, NOW).expect("the pick is still there");
         stage_dir("main-2", &state, &dir_pick, NOW).expect("the pick is still there");
@@ -1151,6 +1411,10 @@ mod tests {
                 uninstall("main", &state, bad, &ui),
                 rollback("main", &state, bad, &ui).map(drop),
                 read_file("main", &state, bad, "main.js").map(drop),
+                storage_get("main", &state, bad, "k").map(drop),
+                storage_set("main", &state, bad, "k", "v", &ui),
+                storage_delete("main", &state, bad, "k", &ui),
+                storage_list("main", &state, bad).map(drop),
             ];
             for r in results {
                 let e = r.unwrap_err();
@@ -1169,6 +1433,7 @@ mod tests {
             assert!(uninstall("main", &state, bad, &ui).is_err());
             assert!(set_enabled("main", &state, bad, false, &ui).is_err());
             assert!(rollback("main", &state, bad, &ui).is_err());
+            assert!(storage_set("main", &state, bad, "k", "v", &ui).is_err());
         }
         assert!(!temp.0.join("store").exists());
     }
@@ -1602,8 +1867,8 @@ mod tests {
         assert_eq!(ui.changed.get(), 2);
         uninstall("settings", &state, id, &ui).unwrap();
         assert_eq!(ui.changed.get(), 3);
-        // Only the rollback asked.
-        assert_eq!(ui.asked(), 1);
+        // The rollback and the uninstall asked; turning it off did not.
+        assert_eq!(ui.asked(), 2);
         assert!(installed_ids(&state).is_empty());
 
         // A refused change tells no one.
@@ -1611,6 +1876,7 @@ mod tests {
         assert!(rollback("settings", &state, id, &ui).is_err());
         assert!(set_enabled("settings", &state, id, true, &ui).is_err());
         assert_eq!(ui.changed.get(), 3);
+        assert_eq!(ui.asked(), 2, "refused before asking");
     }
 
     /// Installs `id` 1.0.0 with `model.read` and `view`, updates it to
@@ -1705,6 +1971,9 @@ mod tests {
         fn changed(&self) {
             panic!("a refused rollback must not emit");
         }
+        fn storage_changed(&self, _: StorageChanged) {
+            panic!("a rollback changes no saved data");
+        }
     }
 
     #[test]
@@ -1715,7 +1984,7 @@ mod tests {
         let ui = Meddler { state: &state, id };
         assert_eq!(
             refusal_name(&rollback("main", &state, id, &ui).unwrap_err()),
-            "rollback_declined"
+            "plugin_changed"
         );
         // Only the meddler's own rollback happened.
         let (current, _) = store::installed(state.dir().unwrap(), id).unwrap();
@@ -1830,6 +2099,7 @@ mod tests {
         fn changed(&self) {
             self.changed.set(self.changed.get() + 1);
         }
+        fn storage_changed(&self, _: StorageChanged) {}
     }
 
     #[test]
@@ -1848,6 +2118,11 @@ mod tests {
         .unwrap();
         let r = "com.example.r";
         two_versions(&state, &temp.0, r);
+        let off = "com.example.off";
+        install(&state, &temp.0, off, "1.0.0", &[], &[]);
+        set_enabled("main", &state, off, false, &Stub::answering(true)).unwrap();
+        let gone = "com.example.gone";
+        install(&state, &temp.0, gone, "1.0.0", &[], &[]);
         let src = folder(
             &temp.0,
             "waiting",
@@ -1869,12 +2144,16 @@ mod tests {
                 commit("main", &state, &waiting.token, true, &yes, NOW).map(drop),
                 set_grant("main", &state, g, &wide, &[], &yes).map(drop),
                 rollback("main", &state, r, &yes).map(drop),
+                set_enabled("main", &state, off, true, &yes).map(drop),
+                uninstall("main", &state, gone, &yes),
             ];
+            // Turning off asks nothing, so it is not held up.
+            set_enabled("main", &state, gone, false, &yes).expect("no question");
             for result in results {
                 inner.borrow_mut().push(result.unwrap_err());
             }
             assert_eq!(yes.asked(), 0);
-            assert_eq!(yes.changed.get(), 0);
+            assert_eq!(yes.changed.get(), 1, "only the turn-off");
         });
         assert_eq!(
             commit("main", &state, &first.token, true, &ui, NOW),
@@ -1882,7 +2161,7 @@ mod tests {
         );
         drop(ui);
         let inner = inner.into_inner();
-        assert_eq!(inner.len(), 3);
+        assert_eq!(inner.len(), 5);
         for e in &inner {
             assert_eq!(
                 e,
@@ -1896,6 +2175,9 @@ mod tests {
             .unwrap()
             .expect("installed");
         assert_eq!(yes.asked(), 1);
+        uninstall("main", &state, gone, &yes).expect("asked and removed");
+        set_enabled("main", &state, off, true, &yes).expect("asked and on");
+        assert_eq!(yes.asked(), 3);
     }
 
     /// A [`Ui`] whose dialog panics.
@@ -1906,6 +2188,7 @@ mod tests {
             panic!("the dialog failed");
         }
         fn changed(&self) {}
+        fn storage_changed(&self, _: StorageChanged) {}
     }
 
     #[test]
@@ -2024,26 +2307,301 @@ mod tests {
     }
 
     #[test]
-    fn the_store_folder_and_list_need_an_allowed_window_and_a_folder() {
-        let (temp, state) = setup("dir");
-        assert_eq!(
-            dir("settings", &state).unwrap(),
-            temp.0.join("store").to_string_lossy()
-        );
+    fn listing_needs_an_allowed_window_and_a_folder() {
+        let (_temp, state) = setup("dir");
         assert!(list("main", &state).unwrap().is_empty());
         let none = PluginState::new(None);
-        assert_eq!(
-            refusal_name(&dir("main", &none).unwrap_err()),
-            "no_plugin_dir"
-        );
         assert_eq!(
             refusal_name(&list("main", &none).unwrap_err()),
             "no_plugin_dir"
         );
+        let ui = Stub::answering(true);
+        for r in [
+            storage_list("main", &none, "com.example.a").map(drop),
+            storage_set("main", &none, "com.example.a", "k", "v", &ui),
+        ] {
+            assert_eq!(refusal_name(&r.unwrap_err()), "no_plugin_dir");
+        }
+    }
+
+    #[test]
+    fn the_store_folder_is_not_a_command() {
+        // The page has no use for where the store is, so no command says.
+        let source = include_str!("plugins.rs");
+        let gone = ["plugin", "_dir("].concat();
+        assert!(!source.contains(&format!("fn {gone}")));
     }
 
     #[test]
     fn the_running_version_is_this_builds() {
         assert_eq!(running_version().to_string(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn reinstalling_the_installed_version_asks_as_a_reinstall() {
+        let (temp, state) = setup("again");
+        let id = "com.example.again";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let src = folder(&temp.0, "again", &manifest(id, "1.0.0", &[], &[]));
+        let view = stage_folder(&state, &src, NOW).unwrap();
+        let ui = Stub::answering(true);
+        commit("main", &state, &view.token, true, &ui, NOW)
+            .unwrap()
+            .expect("installed");
+        let asked = ui.asked.borrow();
+        assert_eq!(asked[0].0, "Install this plugin again?");
+        assert_eq!(asked[0].2, "Install");
+        assert!(
+            asked[0]
+                .1
+                .contains("Replaces the installed copy of v1.0.0."),
+            "{}",
+            asked[0].1
+        );
+    }
+
+    #[test]
+    fn uninstalling_asks_and_a_no_removes_nothing() {
+        let (temp, state) = setup("uninstall");
+        let id = "com.example.u";
+        install(&state, &temp.0, id, "1.0.0", &["model.read"], &[]);
+        storage_set("main", &state, id, "k", "v", &Stub::answering(true)).unwrap();
+
+        let no = Stub::answering(false);
+        assert_eq!(
+            uninstall("main", &state, id, &no).unwrap_err(),
+            "uninstall_declined: The plugin was left installed."
+        );
+        assert_eq!(no.asked(), 1);
+        assert_eq!(no.changed.get(), 0);
+        {
+            let asked = no.asked.borrow();
+            let (title, body, accept) = &asked[0];
+            assert_eq!(title, "Uninstall this plugin?");
+            assert_eq!(accept, "Uninstall");
+            let (record, manifest) = store::installed(state.dir().unwrap(), id).unwrap();
+            assert_eq!(body, &plugin_host::uninstall_summary(&record, &manifest));
+        }
+        assert_eq!(installed_ids(&state), [id]);
+        assert_eq!(
+            storage_get("main", &state, id, "k").unwrap().as_deref(),
+            Some("v")
+        );
+
+        let yes = Stub::answering(true);
+        uninstall("main", &state, id, &yes).unwrap();
+        assert_eq!(yes.changed.get(), 1);
+        assert!(installed_ids(&state).is_empty());
+        // Its saved data went with it.
+        assert!(!temp.0.join("store").join(id).exists());
+        assert_eq!(
+            refusal_name(&storage_get("main", &state, id, "k").unwrap_err()),
+            "not_installed"
+        );
+    }
+
+    #[test]
+    fn an_uninstall_the_store_would_refuse_is_refused_before_asking() {
+        let (temp, state) = setup("uninstall-refused");
+        let ui = Stub::answering(true);
+        assert_eq!(
+            refusal_name(&uninstall("main", &state, "com.example.none", &ui).unwrap_err()),
+            "not_installed"
+        );
+        let base = "com.example.base";
+        install(&state, &temp.0, base, "1.0.0", &[], &[]);
+        let needs = serde_json::json!({
+            "manifest": 1, "id": "com.example.needs", "name": "Needs", "version": "1.0.0",
+            "api": 1, "main": "main.js", "requires": [{ "id": base, "range": "^1" }]
+        })
+        .to_string();
+        let src = folder(&temp.0, "needs", &needs);
+        let view = stage_folder(&state, &src, NOW).unwrap();
+        commit(
+            "main",
+            &state,
+            &view.token,
+            true,
+            &Stub::answering(true),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            refusal_name(&uninstall("main", &state, base, &ui).unwrap_err()),
+            "dependency_missing"
+        );
+        assert_eq!(ui.asked(), 0);
+        assert_eq!(installed_ids(&state).len(), 2);
+    }
+
+    #[test]
+    fn a_plugin_whose_record_is_unreadable_can_be_uninstalled_by_its_id() {
+        let (temp, state) = setup("uninstall-unreadable");
+        let id = "com.example.newer";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        std::fs::write(
+            temp.0.join("store").join(id).join("installed.json"),
+            br#"{"schema": 99, "id": "com.example.newer"}"#,
+        )
+        .unwrap();
+        let ui = Stub::answering(true);
+        uninstall("main", &state, id, &ui).unwrap();
+        assert!(ui.asked.borrow()[0].1.starts_with("com.example.newer\n"));
+        assert!(installed_ids(&state).is_empty());
+    }
+
+    #[test]
+    fn turning_a_plugin_on_asks_and_turning_it_off_does_not() {
+        let (temp, state) = setup("enable");
+        let id = "com.example.on";
+        install(&state, &temp.0, id, "1.0.0", &["model.read"], &[]);
+
+        // Freshly installed: on, but not yet allowed to start with Hew, so
+        // turning it on still asks.
+        let off = Stub::answering(false);
+        assert_eq!(set_enabled("main", &state, id, false, &off), Ok(vec![]));
+        assert_eq!(off.asked(), 0, "turning off asks nothing");
+        assert_eq!(off.changed.get(), 1);
+
+        let no = Stub::answering(false);
+        assert_eq!(
+            set_enabled("main", &state, id, true, &no).unwrap_err(),
+            "enable_declined: The plugin was left off."
+        );
+        assert_eq!(no.changed.get(), 0);
+        let (record, manifest) = store::installed(state.dir().unwrap(), id).unwrap();
+        assert!(!record.enabled);
+        {
+            let asked = no.asked.borrow();
+            let (title, body, accept) = &asked[0];
+            assert_eq!(title, "Turn on this plugin?");
+            assert_eq!(accept, "Turn On");
+            assert_eq!(body, &plugin_host::enable_summary(&record, &manifest));
+            assert!(body.contains("Read the model"), "{body}");
+        }
+
+        let yes = Stub::answering(true);
+        assert_eq!(set_enabled("main", &state, id, true, &yes), Ok(vec![]));
+        assert_eq!(yes.asked(), 1);
+        assert_eq!(yes.changed.get(), 1);
+        let (record, _) = store::installed(state.dir().unwrap(), id).unwrap();
+        assert!(record.enabled && record.startup_allowed);
+
+        // Already on and allowed to start: nothing to ask, nothing changes.
+        let again = Stub::answering(false);
+        assert_eq!(set_enabled("main", &state, id, true, &again), Ok(vec![]));
+        assert_eq!(again.asked(), 0);
+        assert_eq!(again.changed.get(), 0);
+
+        // Not installed: refused before asking.
+        let e = set_enabled("main", &state, "com.example.none", true, &again).unwrap_err();
+        assert_eq!(refusal_name(&e), "not_installed");
+        assert_eq!(again.asked(), 0);
+    }
+
+    #[test]
+    fn turning_on_a_plugin_that_changes_while_asking_is_refused() {
+        let (temp, state) = setup("enable-race");
+        let id = "com.example.on";
+        install(&state, &temp.0, id, "1.0.0", &["model.read", "view"], &[]);
+        set_enabled("main", &state, id, false, &Stub::answering(true)).unwrap();
+        let ui = During::new(true, || {
+            // Another window narrows its grant while the dialog is up.
+            store::set_grant(
+                state.dir().unwrap(),
+                id,
+                vec![PermissionName::parse("model.read").unwrap()],
+                vec![],
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            refusal_name(&set_enabled("main", &state, id, true, &ui).unwrap_err()),
+            "plugin_changed"
+        );
+        assert_eq!(ui.changed.get(), 0);
+        let (record, _) = store::installed(state.dir().unwrap(), id).unwrap();
+        assert!(!record.enabled);
+    }
+
+    #[test]
+    fn saved_data_round_trips_and_tells_every_window() {
+        let (temp, state) = setup("storage");
+        let id = "com.example.s";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(false);
+        assert_eq!(storage_get("main", &state, id, "a"), Ok(None));
+        assert_eq!(storage_list("main-2", &state, id), Ok(vec![]));
+        storage_set("main", &state, id, "a", "{\"n\":1}", &ui).unwrap();
+        storage_set("settings", &state, id, "b", "\"x\"", &ui).unwrap();
+        assert_eq!(
+            storage_get("main-2", &state, id, "a").unwrap().as_deref(),
+            Some("{\"n\":1}")
+        );
+        assert_eq!(
+            storage_list("main", &state, id).unwrap(),
+            ["a".to_string(), "b".to_string()]
+        );
+        storage_delete("main", &state, id, "a", &ui).unwrap();
+        // Deleting what is not there changes nothing and tells no one.
+        storage_delete("main", &state, id, "a", &ui).unwrap();
+        assert_eq!(
+            *ui.stored.borrow(),
+            [
+                StorageChanged {
+                    id: id.into(),
+                    keys: vec!["a".into()]
+                },
+                StorageChanged {
+                    id: id.into(),
+                    keys: vec!["b".into()]
+                },
+                StorageChanged {
+                    id: id.into(),
+                    keys: vec!["a".into()]
+                },
+            ]
+        );
+        // Saved data is not a change to the store, and asks nothing.
+        assert_eq!(ui.changed.get(), 0);
+        assert_eq!(ui.asked(), 0);
+        assert_eq!(
+            serde_json::to_value(&ui.stored.borrow()[0]).unwrap(),
+            serde_json::json!({ "id": id, "keys": ["a"] })
+        );
+    }
+
+    #[test]
+    fn saved_data_refusals_carry_their_names_and_write_nothing() {
+        let (temp, state) = setup("storage-refused");
+        let id = "com.example.s";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        let big = "x".repeat(plugin_host::MAX_STORAGE_BYTES);
+        assert_eq!(
+            refusal_name(&storage_set("main", &state, id, "a", &big, &ui).unwrap_err()),
+            "storage_quota"
+        );
+        let long = "k".repeat(plugin_host::MAX_STORAGE_KEY_BYTES + 1);
+        for key in ["", long.as_str()] {
+            assert_eq!(
+                refusal_name(&storage_set("main", &state, id, key, "v", &ui).unwrap_err()),
+                "storage_key_invalid"
+            );
+            assert_eq!(
+                refusal_name(&storage_get("main", &state, id, key).unwrap_err()),
+                "storage_key_invalid"
+            );
+        }
+        // A plugin that is not installed has no saved data, and asking for
+        // it creates nothing.
+        let none = "com.example.none";
+        assert_eq!(
+            refusal_name(&storage_set("main", &state, none, "a", "v", &ui).unwrap_err()),
+            "not_installed"
+        );
+        assert!(!temp.0.join("store").join(none).exists());
+        assert!(ui.stored.borrow().is_empty());
+        assert!(!temp.0.join("store").join(id).join("storage.json").exists());
     }
 }

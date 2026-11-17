@@ -326,6 +326,34 @@ pub fn replaces_line(replaces: &Replaces) -> String {
     )
 }
 
+/// Whether the install replaces the same version that is installed: a
+/// reinstall, not an update.
+pub fn is_reinstall(payload: &ConsentPayload) -> bool {
+    payload
+        .replaces
+        .as_ref()
+        .is_some_and(|r| r.version == payload.version)
+}
+
+/// The fixed line for a reinstall of the installed version, in place of
+/// [`replaces_line`].
+pub fn reinstall_line(version: &str) -> String {
+    format!("Replaces the installed copy of v{version}.")
+}
+
+/// The title and accept label of the confirmation before an install: a
+/// fresh install, an update, or a reinstall of the installed version
+/// ([`is_reinstall`]). Hew's own words; nothing from the package.
+pub fn install_confirmation(payload: &ConsentPayload) -> (&'static str, &'static str) {
+    if is_reinstall(payload) {
+        ("Install this plugin again?", "Install")
+    } else if payload.replaces.is_some() {
+        ("Update this plugin?", "Update")
+    } else {
+        ("Install this plugin?", "Install")
+    }
+}
+
 fn cleaned_source(source: &InstallSource) -> InstallSource {
     match source {
         InstallSource::File { name } => InstallSource::File {
@@ -463,7 +491,8 @@ fn texts(lines: &[PermissionLine]) -> Vec<&str> {
 /// desktop's native dialog) from the payload it holds rather than from
 /// anything the page sends. It carries what the consent sheet shows, in
 /// this order: name and version; the source line; for a folder,
-/// [`FOLDER_LINE`]; [`UNSIGNED_LINE`]; the replacement line; the warnings;
+/// [`FOLDER_LINE`]; [`UNSIGNED_LINE`]; the replacement line
+/// ([`reinstall_line`] for the installed version again); the warnings;
 /// on an update, "New since vX:" with the added and newly optional
 /// permissions; "Starts with Hew." (or "Now starts with Hew." when the
 /// update adds it); "It can:" with the permissions; "May ask for later:"
@@ -485,7 +514,11 @@ pub fn consent_summary(payload: &ConsentPayload) -> String {
         out.push('\n');
     }
     if let Some(r) = &payload.replaces {
-        out.push_str(&replaces_line(r));
+        if is_reinstall(payload) {
+            out.push_str(&reinstall_line(&payload.version));
+        } else {
+            out.push_str(&replaces_line(r));
+        }
         out.push('\n');
     }
     push_warnings(&mut out, &payload.warnings);
@@ -565,5 +598,48 @@ pub fn grant_change_summary(
     let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
     push_list(&mut out, "It will also be able to:", &lines);
     push_warnings(&mut out, &permission_warnings(resulting));
+    out
+}
+
+/// The installed plugin as one line: its cleaned name and version.
+fn name_version(installed: &Installed, manifest: &Manifest) -> String {
+    format!("{} {}", display_name(manifest), installed.version)
+}
+
+/// What uninstalling removes, as plain text for the host's own
+/// confirmation: the plugin's cleaned name and version, then Hew's line
+/// about what goes with it.
+pub fn uninstall_summary(installed: &Installed, manifest: &Manifest) -> String {
+    format!(
+        "{}\nRemoves the plugin, its earlier version, and everything it saved.\n",
+        name_version(installed, manifest)
+    )
+}
+
+/// What turning a plugin on allows, as plain text for the host's own
+/// confirmation: the cleaned name and version; [`UNSIGNED_LINE`] when no
+/// signer is recorded; the warnings of what it holds; "Starts with Hew."
+/// when its manifest asks to; then "It can:" with a line per permission
+/// the record holds (its grant, then its optional grants), at most
+/// [`MAX_SUMMARY_LINES`].
+pub fn enable_summary(installed: &Installed, manifest: &Manifest) -> String {
+    let mut out = format!("{}\n", name_version(installed, manifest));
+    if installed.signer.is_none() {
+        out.push_str(UNSIGNED_LINE);
+        out.push('\n');
+    }
+    let held: Vec<PermissionName> = installed
+        .grant
+        .iter()
+        .chain(&installed.optional_granted)
+        .cloned()
+        .collect();
+    push_warnings(&mut out, &permission_warnings(&held));
+    if manifest.activation.contains(&Activation::OnStartup) {
+        out.push_str("\nStarts with Hew.\n");
+    }
+    let lines: Vec<String> = held.iter().map(|p| permission_line(p).text).collect();
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    push_list(&mut out, "It can:", &lines);
     out
 }

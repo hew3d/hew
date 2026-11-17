@@ -3667,8 +3667,6 @@ fn main() {
             follow::follow_attach,
             follow::follow_forget,
             #[cfg(hew_preview)]
-            preview_only::plugins::plugin_dir,
-            #[cfg(hew_preview)]
             preview_only::plugins::plugin_list,
             #[cfg(hew_preview)]
             preview_only::plugins::plugin_pick_package,
@@ -3690,6 +3688,14 @@ fn main() {
             preview_only::plugins::plugin_rollback,
             #[cfg(hew_preview)]
             preview_only::plugins::plugin_read_file,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_storage_get,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_storage_set,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_storage_delete,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_storage_list,
         ])
         // Build and attach the native menu bar; wire menu-item clicks to
         // `menu-action` events emitted to the webview.
@@ -5303,7 +5309,17 @@ fn main() {
             // The plugin install commands' picks, waiting installs and store
             // folder (preview builds only, like the commands themselves).
             #[cfg(hew_preview)]
-            app.manage(preview_only::plugins::PluginState::resolve());
+            app.manage(preview_only::plugins::PluginState::resolve(
+                handle
+                    .config()
+                    .app
+                    .security
+                    .csp
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .as_deref(),
+                env!("HEW_PLUGIN_BOOT_HASH"),
+            ));
             // "Open on Phone" server setting + HTTP client — loaded once from
             // server.json; only `set_server_setting` ever changes it.
             app.manage(relay_client::RelayState::new(relay_client::load_setting(

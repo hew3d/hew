@@ -99,10 +99,15 @@ export interface PluginInstaller {
   /** Web: stage a package the person chose in a file input. */
   stageFile(file: File): Promise<PendingView>
   commit(token: string, accept: boolean): Promise<Installed | null>
-  /** Returns the ids of the other plugins that were also turned off. */
-  setEnabled(id: string, enabled: boolean): Promise<string[]>
+  /** Returns the ids of the other plugins that were also turned off. On the
+   *  web, `shown` fingerprints the record the person was shown when turning
+   *  a plugin on (`recordFingerprint`), and a different one is refused
+   *  `plugin_changed`; the desktop shell compares what it showed itself. */
+  setEnabled(id: string, enabled: boolean, shown?: string): Promise<string[]>
   uninstall(id: string): Promise<void>
-  rollback(id: string): Promise<Installed>
+  /** `shown`, on the web, fingerprints the two records the person was shown
+   *  (`rollbackFingerprint`); a different pair is refused `plugin_changed`. */
+  rollback(id: string, shown?: string): Promise<Installed>
   /** The version `rollback` would restore, to show before going back. Web
    *  only: the desktop shell confirms natively instead. */
   previous?(id: string): Promise<{ installed: Installed; manifest: PluginManifest }>

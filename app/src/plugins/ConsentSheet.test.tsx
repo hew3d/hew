@@ -79,6 +79,32 @@ describe('ConsentSheet', () => {
     expect(document.querySelectorAll('[data-permission="clipboard"]')).toHaveLength(1)
   })
 
+  it('reads as a reinstall when the same version replaces itself', () => {
+    const { dialog } = open({
+      version: '1.0.0',
+      replaces: { name: 'Parts Lister', version: '1.0.0' },
+      update: { from_version: '1.0.0', added: [], new_optional: [], startup_newly: false },
+    })
+    expect(within(dialog).getByText('Install Parts Lister again?')).toBeInTheDocument()
+    expect(within(dialog).getByText('Version 1.0.0')).toBeInTheDocument()
+    expect(within(dialog).getByText('Replaces the installed Parts Lister v1.0.0 with this copy.')).toBeInTheDocument()
+    expect(within(dialog).queryByText(/Hew cannot check it is the same author/)).toBeNull()
+    expect(within(dialog).getByRole('button', { name: 'Install' })).toBeInTheDocument()
+    expect(within(dialog).queryByRole('button', { name: 'Update' })).toBeNull()
+  })
+
+  it('names the incoming plugin and the installed one, with versions, when the same version replaces itself under another name', () => {
+    const { dialog } = open({
+      name: 'Parts Lister Pro',
+      version: '1.0.0',
+      replaces: { name: 'Parts Lister', version: '1.0.0' },
+      update: { from_version: '1.0.0', added: [], new_optional: [], startup_newly: false },
+    })
+    expect(within(dialog).getByRole('heading', { name: 'Install Parts Lister Pro again?' })).toBeInTheDocument()
+    expect(within(dialog).getByText('Version 1.0.0')).toBeInTheDocument()
+    expect(within(dialog).getByText('Replaces the installed Parts Lister v1.0.0 with this copy.')).toBeInTheDocument()
+  })
+
   it('shows the plugin own words apart, as text and never as markup', () => {
     const { dialog } = open({ activation_reason: '<img src=x onerror=alert(1)> and <b>bold</b>' })
     const says = dialog.querySelector('[data-consent="plugin-says"]') as HTMLElement
@@ -148,6 +174,18 @@ describe('ConsentSheet', () => {
     const { dialog } = open({}, { busy: true })
     expect(within(dialog).getByRole('button', { name: 'Install' })).toBeDisabled()
     expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeDisabled()
+  })
+
+  it('ignores Escape while an install is being written, and still keeps the window behind from seeing it', () => {
+    const behind = vi.fn()
+    document.addEventListener('keydown', behind)
+    const { onCancel } = open({}, { busy: true })
+    const ev = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    document.body.dispatchEvent(ev)
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(ev.defaultPrevented).toBe(true)
+    expect(behind).not.toHaveBeenCalled()
+    document.removeEventListener('keydown', behind)
   })
 
   it('says when a plugin starts with Hew', () => {

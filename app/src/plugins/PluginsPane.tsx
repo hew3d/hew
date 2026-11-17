@@ -11,13 +11,24 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { createPortal } from 'react-dom'
 import { ConsentSheet } from './ConsentSheet'
 import { pluginInstaller } from './installer'
 import { errorText, toPluginError } from './pluginError'
 import { permissionText } from './permissionCopy'
 import { cleanText, displayName } from './pluginText'
 import { buttonStyle } from './styles'
-import type { InstallSource, Listed, PendingView, PluginInstaller } from './types'
+import type { Installed, InstallSource, Listed, PendingView, PluginInstaller } from './types'
+import { recordFingerprint, rollbackFingerprint } from './webPluginStore'
+
+/** The desktop shell's refusals for a "no" in its own confirmation. */
+const DECLINED: ReadonlySet<string> = new Set(['rollback_declined', 'enable_declined', 'uninstall_declined'])
+
+/** Refusals that are advice, not failures: shown as a plain notice. */
+const NOTICES: Readonly<Record<string, string>> = {
+  confirmation_open: 'Another confirmation is already open. Answer it first, then try again.',
+  plugin_changed: 'This plugin changed while you were deciding. Check it, then try again.',
+}
 
 const noteStyle: CSSProperties = { fontSize: '11px', lineHeight: 1.5, color: 'var(--text-faint, #888)', maxWidth: '36em' }
 
@@ -68,15 +79,22 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
   const [sheetBusy, setSheetBusy] = useState(false)
   const [sheetError, setSheetError] = useState<string | null>(null)
   const [confirming, setConfirming] = useState<string | null>(null)
-  const [rollingBack, setRollingBack] = useState<{ id: string; version: string; lines: string[] } | null>(null)
+  const [turningOn, setTurningOn] = useState<{ id: string; name: string; lines: string[]; shown: string } | null>(null)
+  const [rollingBack, setRollingBack] = useState<{ id: string; version: string; lines: string[]; shown: string } | null>(null)
   const [icons, setIcons] = useState<Record<string, string>>({})
   const iconsRef = useRef<Record<string, string>>({})
   const fileInput = useRef<HTMLInputElement>(null)
 
+  // Lists can finish out of order; only the answer to the latest request is
+  // applied, so an earlier, slower one never lands over a newer one.
+  const latest = useRef(0)
   const refresh = useCallback(async (): Promise<void> => {
+    const mine = ++latest.current
     try {
-      setItems(await inst.list())
+      const listed = await inst.list()
+      if (mine === latest.current) setItems(listed)
     } catch (e) {
+      if (mine !== latest.current) return
       setError(errorText(e))
       setItems((cur) => cur ?? [])
     }
@@ -158,6 +176,9 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
   }
 
   const cancel = (): void => {
+    // Once the install has started it cannot be taken back from here: the
+    // answer is the install's own.
+    if (sheetBusy) return
     const token = pending?.token
     setPending(null)
     setSheetError(null)
@@ -171,14 +192,33 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
       await work()
     } catch (e) {
       // A "no" in the shell's own confirmation is an answer, not a failure.
-      if (toPluginError(e).refusal !== 'rollback_declined') setError(errorText(e))
+      const refusal = toPluginError(e).refusal
+      if (NOTICES[refusal] !== undefined) setNotice(NOTICES[refusal])
+      else if (!DECLINED.has(refusal)) setError(errorText(e))
     }
     await refresh()
   }
 
-  const toggle = (id: string, enabled: boolean): Promise<void> =>
+  // On the web the pane asks before turning a plugin on, as the desktop shell
+  // does in its own dialog; turning one off asks nothing.
+  const askToggle = (l: Extract<Listed, { kind: 'installed' }>, enabled: boolean): Promise<void> => {
+    if (enabled && inst.tier === 'web') {
+      setConfirming(null)
+      setRollingBack(null)
+      setTurningOn({
+        id: l.installed.id,
+        name: displayName(l.manifest),
+        lines: (l.manifest.permissions ?? []).map((p) => permissionText(p)),
+        shown: recordFingerprint(l.installed),
+      })
+      return Promise.resolve()
+    }
+    return toggle(l.installed.id, enabled)
+  }
+
+  const toggle = (id: string, enabled: boolean, shown?: string): Promise<void> =>
     run(async () => {
-      const also = await inst.setEnabled(id, enabled)
+      const also = shown === undefined ? await inst.setEnabled(id, enabled) : await inst.setEnabled(id, enabled, shown)
       if (also.length > 0) {
         setNotice(`Turning off ${nameOf(id)} also turned off ${also.map(nameOf).join(', ')}, because they need it.`)
       }
@@ -186,19 +226,29 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
 
   // On the web the pane asks first and lists what the earlier version can do;
   // on the desktop the shell asks in its own dialog.
-  const askRollback = (id: string): Promise<void> =>
+  const askRollback = (current: Installed): Promise<void> =>
     run(async () => {
+      const id = current.id
       if (inst.previous === undefined) {
         await inst.rollback(id)
         return
       }
       const prev = await inst.previous(id)
+      setConfirming(null)
+      setTurningOn(null)
       setRollingBack({
         id,
         version: prev.installed.version,
         lines: (prev.manifest.permissions ?? []).map((p) => permissionText(p)),
+        shown: rollbackFingerprint(current, prev.installed),
       })
     })
+
+  const askRemove = (id: string): void => {
+    setTurningOn(null)
+    setRollingBack(null)
+    setConfirming(id)
+  }
 
   const remove = (id: string): Promise<void> =>
     run(async () => {
@@ -209,8 +259,8 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxWidth: '44em' }}>
       <div style={noteStyle}>
-        Plugins are add-ons made by other people. You can install and manage them here, but they do not run yet in
-        this build.
+        Plugins are add-ons made by other people. A plugin that is turned on runs in a sandbox, and can do only what
+        you allowed when you installed it.
       </div>
 
       <div style={{ display: 'flex', gap: '8px', alignItems: 'center', position: 'relative' }}>
@@ -285,7 +335,7 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
                   id={l.id}
                   label={l.id}
                   confirming={confirming === l.id}
-                  onAsk={() => setConfirming(l.id)}
+                  onAsk={() => (inst.tier === 'web' ? askRemove(l.id) : void remove(l.id))}
                   onKeep={() => setConfirming(null)}
                   onRemove={() => void remove(l.id)}
                 />
@@ -325,35 +375,23 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
                     )}
                   </details>
                   {rollingBack !== null && rollingBack.id === l.installed.id && (
-                    <div role="group" aria-label={`Go back to ${rollingBack.version}?`} style={{ marginTop: '8px' }}>
-                      <div>Go back to {rollingBack.version}? It will be able to:</div>
-                      <ul style={{ margin: '4px 0', paddingLeft: '18px', lineHeight: 1.5 }}>
-                        {rollingBack.lines.length === 0 ? <li>Nothing. It asks for no permissions.</li> : rollingBack.lines.map((t) => <li key={t}>{t}</li>)}
-                      </ul>
-                      <div style={{ display: 'flex', gap: '6px' }}>
-                        <button type="button" style={buttonStyle()} onClick={() => setRollingBack(null)}>
-                          Keep this version
-                        </button>
-                        <button
-                          type="button"
-                          style={buttonStyle(false, true)}
-                          onClick={() => {
-                            const id = rollingBack.id
-                            setRollingBack(null)
-                            void run(async () => void (await inst.rollback(id)))
-                          }}
-                        >
-                          Roll back
-                        </button>
-                      </div>
-                    </div>
+                    <RollbackConfirm
+                      version={rollingBack.version}
+                      lines={rollingBack.lines}
+                      onKeep={() => setRollingBack(null)}
+                      onRollBack={() => {
+                        const { id, shown } = rollingBack
+                        setRollingBack(null)
+                        void run(async () => void (await inst.rollback(id, shown)))
+                      }}
+                    />
                   )}
                   <div style={{ display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' }}>
                     {l.previous_version !== null && (
                       <button
                         type="button"
                         style={buttonStyle()}
-                        onClick={() => void askRollback(l.installed.id)}
+                        onClick={() => void askRollback(l.installed)}
                       >
                         Roll back to {l.previous_version}
                       </button>
@@ -367,7 +405,7 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
                       role="switch"
                       aria-label={`Turn ${displayName(l.manifest)} on or off`}
                       checked={l.installed.enabled}
-                      onChange={(e) => void toggle(l.installed.id, e.target.checked)}
+                      onChange={(e) => void askToggle(l, e.target.checked)}
                     />
                     <span>{l.installed.enabled ? 'On' : 'Off'}</span>
                   </label>
@@ -375,7 +413,7 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
                     id={l.installed.id}
                     label={displayName(l.manifest)}
                     confirming={confirming === l.installed.id}
-                    onAsk={() => setConfirming(l.installed.id)}
+                    onAsk={() => (inst.tier === 'web' ? askRemove(l.installed.id) : void remove(l.installed.id))}
                     onKeep={() => setConfirming(null)}
                     onRemove={() => void remove(l.installed.id)}
                   />
@@ -386,10 +424,176 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
         </ul>
       )}
 
+      {turningOn !== null && (
+        <TurnOnSheet
+          name={turningOn.name}
+          lines={turningOn.lines}
+          onCancel={() => setTurningOn(null)}
+          onAccept={() => {
+            const { id, shown } = turningOn
+            setTurningOn(null)
+            void toggle(id, true, shown)
+          }}
+        />
+      )}
+
       {pending !== null && (
         <ConsentSheet consent={pending.consent} onInstall={() => void install()} onCancel={cancel} busy={sheetBusy} error={sheetError} />
       )}
     </div>
+  )
+}
+
+/** The keys of a confirmation: focus starts on its safe button (Cancel),
+ *  Escape cancels, Enter does nothing so a stray key never accepts, Tab stays
+ *  inside the confirmation, and focus goes back to what had it (or to
+ *  `restore`'s element, when that one has since been replaced). */
+function useConfirmKeys(
+  box: React.RefObject<HTMLElement | null>,
+  safe: React.RefObject<HTMLElement | null>,
+  onCancel: () => void,
+  restore?: () => HTMLElement | null,
+): void {
+  const onCancelRef = useRef(onCancel)
+  onCancelRef.current = onCancel
+  const restoreRef = useRef(restore)
+  restoreRef.current = restore
+  useEffect(() => {
+    const before = document.activeElement
+    safe.current?.focus()
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        onCancelRef.current()
+      } else if (e.key === 'Enter') {
+        e.preventDefault()
+        e.stopPropagation()
+      } else if (e.key === 'Tab' && box.current !== null) {
+        const items = Array.from(box.current.querySelectorAll<HTMLElement>('button:not([disabled])'))
+        if (items.length === 0) return
+        const first = items[0]
+        const last = items[items.length - 1]
+        const at = document.activeElement
+        if (!box.current.contains(at) || (e.shiftKey && at === first)) {
+          e.preventDefault()
+          ;(e.shiftKey ? last : first).focus()
+        } else if (!e.shiftKey && at === last) {
+          e.preventDefault()
+          first.focus()
+        }
+      }
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('keydown', onKey, true)
+      const kept = before instanceof HTMLElement && before.isConnected && before !== document.body ? before : null
+      const back = kept ?? restoreRef.current?.() ?? null
+      back?.focus()
+    }
+  }, [box, safe])
+}
+
+/** The web's in-pane "Go back to ...?": the same keys as the turn-on sheet. */
+function RollbackConfirm({
+  version,
+  lines,
+  onKeep,
+  onRollBack,
+}: {
+  version: string
+  lines: string[]
+  onKeep: () => void
+  onRollBack: () => void
+}) {
+  const box = useRef<HTMLDivElement>(null)
+  const keep = useRef<HTMLButtonElement>(null)
+  useConfirmKeys(box, keep, onKeep)
+  return (
+    <div ref={box} role="group" aria-label={`Go back to ${version}?`} style={{ marginTop: '8px' }}>
+      <div>Go back to {version}? It will be able to:</div>
+      <ul style={{ margin: '4px 0', paddingLeft: '18px', lineHeight: 1.5 }}>
+        {lines.length === 0 ? <li>Nothing. It asks for no permissions.</li> : lines.map((t) => <li key={t}>{t}</li>)}
+      </ul>
+      <div style={{ display: 'flex', gap: '6px' }}>
+        <button ref={keep} type="button" style={buttonStyle()} onClick={onKeep}>
+          Keep this version
+        </button>
+        <button type="button" style={buttonStyle(false, true)} onClick={onRollBack}>
+          Roll back
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** The web's "Turn on this plugin?": Cancel has focus, Escape cancels and
+ *  Enter does nothing, so a stray key never turns a plugin on. */
+function TurnOnSheet({
+  name,
+  lines,
+  onAccept,
+  onCancel,
+}: {
+  name: string
+  lines: string[]
+  onAccept: () => void
+  onCancel: () => void
+}) {
+  const box = useRef<HTMLDivElement>(null)
+  const cancelButton = useRef<HTMLButtonElement>(null)
+  useConfirmKeys(box, cancelButton, onCancel)
+
+  return createPortal(
+    <div
+      onClick={(e) => e.stopPropagation()}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 500,
+        background: 'var(--backdrop-dim, rgba(8,10,13,0.45))',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      <div
+        ref={box}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="plugin-turn-on-title"
+        style={{
+          width: 'min(420px, calc(100vw - 32px))',
+          padding: '16px 18px',
+          background: 'var(--surface-window, #1a1a1a)',
+          color: 'var(--text-secondary, #ddd)',
+          border: '1px solid var(--border-hairline, #333)',
+          borderRadius: '10px',
+          boxShadow: 'var(--shadow-palette, 0 8px 32px rgba(0,0,0,0.6))',
+          fontFamily: 'var(--font-family-ui, system-ui, sans-serif)',
+          fontSize: '13px',
+        }}
+      >
+        <h2 id="plugin-turn-on-title" style={{ margin: 0, fontSize: '15px', color: 'var(--text-primary, #eee)' }}>
+          Turn on this plugin?
+        </h2>
+        <div style={{ marginTop: '8px', overflowWrap: 'anywhere' }}>
+          {name} will run in a sandbox. It will be able to:
+        </div>
+        <ul style={{ margin: '4px 0 0', paddingLeft: '18px', lineHeight: 1.5 }}>
+          {lines.length === 0 ? <li>Nothing. It asks for no permissions.</li> : lines.map((t) => <li key={t}>{t}</li>)}
+        </ul>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '14px' }}>
+          <button ref={cancelButton} type="button" onClick={onCancel} style={buttonStyle()}>
+            Cancel
+          </button>
+          <button type="button" onClick={onAccept} style={buttonStyle(false, true)}>
+            Turn On
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -416,11 +620,20 @@ function RemoveControls({
       </button>
     )
   }
+  return <RemoveConfirm id={id} label={label} onKeep={onKeep} onRemove={onRemove} />
+}
+
+/** The web's "Remove ...?": the same keys as the turn-on sheet; focus goes
+ *  back to the Uninstall button, which comes back in this one's place. */
+function RemoveConfirm({ id, label, onKeep, onRemove }: { id: string; label: string; onKeep: () => void; onRemove: () => void }) {
+  const box = useRef<HTMLDivElement>(null)
+  const keep = useRef<HTMLButtonElement>(null)
+  useConfirmKeys(box, keep, onKeep, () => document.querySelector<HTMLElement>(`[data-uninstall="${CSS.escape(id)}"]`))
   return (
-    <div role="group" aria-label={`Uninstall ${label}?`} style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' }}>
+    <div ref={box} role="group" aria-label={`Uninstall ${label}?`} style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' }}>
       <div style={noteStyle}>Remove {label} and its settings?</div>
       <div style={{ display: 'flex', gap: '6px' }}>
-        <button type="button" style={buttonStyle()} onClick={onKeep}>
+        <button ref={keep} type="button" style={buttonStyle()} onClick={onKeep}>
           Keep it
         </button>
         <button type="button" data-uninstall-confirm={id} style={buttonStyle(false, true)} onClick={onRemove}>

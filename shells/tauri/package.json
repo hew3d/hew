@@ -5,9 +5,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node scripts/stage-cli-sidecar.mjs && node ../../app/scripts/build-wasm.mjs --dev && tauri dev",
-    "build": "node scripts/stage-cli-sidecar.mjs && tauri build",
-    "e2e:build": "node scripts/stage-cli-sidecar.mjs && cross-env VITE_HEW_TEST=1 tauri build --debug --no-bundle",
+    "dev": "node scripts/stage-cli-sidecar.mjs && node ../../app/scripts/build-wasm.mjs --dev && node scripts/tauri-policy.mjs dev",
+    "build": "node scripts/stage-cli-sidecar.mjs && node scripts/tauri-policy.mjs build",
+    "e2e:build": "node scripts/stage-cli-sidecar.mjs && cross-env VITE_HEW_TEST=1 node scripts/tauri-policy.mjs build --debug --no-bundle",
     "e2e:build:probe": "cross-env-shell HEW_PREVIEW=1 VITE_HEW_TEST=1 \"node scripts/stage-cli-sidecar.mjs && node ../csp/tauri-overlay.mjs probe src-tauri/target/csp-probe.conf.json && tauri build --debug --no-bundle --config src-tauri/target/csp-probe.conf.json\"",
     "e2e": "wdio run e2e/wdio.conf.ts",
     "e2e:probe": "wdio run e2e/wdio.conf.ts --spec e2e/probe/plugin-realm.e2e.ts",

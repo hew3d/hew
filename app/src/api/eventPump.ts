@@ -52,9 +52,16 @@ let hostDocumentId: string | null = null
  * The id the shell gave this window's document. Told to the Scene before
  * every drain, so an event the app itself owes (a document just opened)
  * names its document even when the id reached the page before the Scene.
+ * `null` forgets it (tests).
  */
-export function setPumpDocumentId(id: string): void {
+export function setPumpDocumentId(id: string | null): void {
   hostDocumentId = id
+}
+
+/** The id the shell gave this window's document, or `null` before it
+ *  arrived (and always on the web, where the kernel's default stands). */
+export function pumpDocumentId(): string | null {
+  return hostDocumentId
 }
 
 interface Batch {

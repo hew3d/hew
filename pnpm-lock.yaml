@@ -111,6 +111,12 @@ importers:
         specifier: ^4.1.10
         version: 4.1.11(@types/node@26.2.0)(jsdom@30.0.1(@noble/hashes@2.4.0))(vite@8.2.4(@types/node@26.2.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.49.2)(tsx@4.23.11)(yaml@2.9.1))
 
+  sdk/plugin:
+    devDependencies:
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
+
   shells/tauri:
     devDependencies:
       '@tauri-apps/cli':

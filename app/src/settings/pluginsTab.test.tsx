@@ -40,6 +40,6 @@ describe('Settings > Plugins', () => {
     await settings(true)
     fireEvent.click(screen.getByRole('tab', { name: 'Plugins' }))
     expect(await screen.findByText('No plugins are installed.')).toBeInTheDocument()
-    expect(screen.getByText(/do not run yet in this build/)).toBeInTheDocument()
+    expect(screen.getByText(/runs in a sandbox/)).toBeInTheDocument()
   })
 })

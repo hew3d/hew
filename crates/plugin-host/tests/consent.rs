@@ -7,7 +7,8 @@
 use plugin_host::{
     ConsentPayload, InstallError, InstallSource, Installed, MAX_NAME_CHARS, MAX_REASON_CHARS,
     UNSIGNED_LINE, check_requires, check_source_id, clean_text, consent, consent_summary,
-    hew_version_ok, permission_line, replaces_line,
+    enable_summary, hew_version_ok, install_confirmation, is_reinstall, permission_line,
+    reinstall_line, replaces_line, uninstall_summary,
 };
 use plugin_manifest::{Manifest, PermissionName};
 use serde_json::json;
@@ -602,4 +603,92 @@ fn the_grant_change_summary_lists_what_is_added_and_warns_on_the_result() {
         plugin_host::grant_change_summary("Fixture 2.0.0", &[p("view")], &[p("view")]),
         "Fixture 2.0.0\n\nIt will also be able to:\n• Change the selection, hide and show parts, and move the camera\n"
     );
+}
+
+#[test]
+fn the_confirmation_names_a_fresh_install_an_update_and_a_reinstall() {
+    let m = manifest(json!({ "permissions": ["model.read"] }));
+    let fresh = consent(&m, &file(), None, None, None);
+    assert!(!is_reinstall(&fresh));
+    assert_eq!(
+        install_confirmation(&fresh),
+        ("Install this plugin?", "Install")
+    );
+
+    let old = installed("com.example.fixture", "1.0.0", &["model.read"]);
+    let update = consent(&m, &file(), Some(&old), Some(&m), None);
+    assert!(!is_reinstall(&update));
+    assert_eq!(
+        install_confirmation(&update),
+        ("Update this plugin?", "Update")
+    );
+    assert!(consent_summary(&update).contains("Replaces Fixture v1.0.0."));
+
+    // The installed version again: its own title and line, in place of the
+    // replacement line.
+    let same = installed("com.example.fixture", "2.0.0", &["model.read"]);
+    let again = consent(&m, &file(), Some(&same), Some(&m), None);
+    assert!(is_reinstall(&again));
+    assert_eq!(
+        install_confirmation(&again),
+        ("Install this plugin again?", "Install")
+    );
+    assert_eq!(
+        reinstall_line("2.0.0"),
+        "Replaces the installed copy of v2.0.0."
+    );
+    let text = consent_summary(&again);
+    assert!(
+        text.contains("\nReplaces the installed copy of v2.0.0.\n"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Hew cannot check it is the same author"),
+        "{text}"
+    );
+    // Still unsigned, so who made it is still in doubt.
+    assert!(text.contains(UNSIGNED_LINE));
+}
+
+#[test]
+fn the_uninstall_and_turn_on_summaries() {
+    let m = manifest(json!({
+        "name": "Fixture\u{202e}gnp.exe",
+        "permissions": ["model.read", "network:a.example.com"],
+        "optionalPermissions": ["clipboard"],
+        "activation": ["on_startup"],
+        "activationReason": "Not shown here."
+    }));
+    let mut record = installed(
+        "com.example.fixture",
+        "2.0.0",
+        &["model.read", "network:a.example.com"],
+    );
+    record.optional_granted = vec![p("clipboard")];
+    assert_eq!(
+        uninstall_summary(&record, &m),
+        "Fixturegnp.exe 2.0.0\n\
+         Removes the plugin, its earlier version, and everything it saved.\n"
+    );
+    assert_eq!(
+        enable_summary(&record, &m),
+        "Fixturegnp.exe 2.0.0\n\
+         Unsigned. Hew cannot tell who made this.\n\
+         \n\
+         ⚠ Can send what it reads from your model to a.example.com.\n\
+         \n\
+         Starts with Hew.\n\
+         \n\
+         It can:\n\
+         • Read the model: every object, component, material, tag, and attribute\n\
+         • Connect to a.example.com (checked by Hew)\n\
+         • Read and write the clipboard\n"
+    );
+    // The plugin's own words never reach either.
+    assert!(!enable_summary(&record, &m).contains("Not shown"));
+    // What it holds, not what it declares.
+    record.grant = vec![p("model.read")];
+    record.optional_granted.clear();
+    let text = enable_summary(&record, &m);
+    assert!(!text.contains("a.example.com"), "{text}");
 }

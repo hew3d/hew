@@ -4,6 +4,7 @@ import { requiresPreview } from '../test/requiresPreview'
 import { PluginsPane } from './PluginsPane'
 import { PluginError } from './pluginError'
 import type { ConsentPayload, Installed, Listed, PendingView, PluginInstaller } from './types'
+import { recordFingerprint, rollbackFingerprint } from './webPluginStore'
 
 beforeEach((ctx) => requiresPreview(ctx, 'plugins'))
 afterEach(() => vi.restoreAllMocks())
@@ -80,10 +81,11 @@ function fake(initial: Listed[], tier: 'desktop' | 'web' = 'web') {
 }
 
 describe('PluginsPane', () => {
-  it('says plugins do not run yet, and lists nothing when nothing is installed', async () => {
+  it('says a plugin runs in a sandbox once turned on, and lists nothing when nothing is installed', async () => {
     const { inst } = fake([])
     render(<PluginsPane installer={inst} />)
-    expect(screen.getByText(/do not run yet in this build/)).toBeInTheDocument()
+    expect(screen.getByText(/runs in a sandbox, and can do only what you allowed/)).toBeInTheDocument()
+    expect(screen.queryByText(/do not run yet/)).toBeNull()
     expect(await screen.findByText('No plugins are installed.')).toBeInTheDocument()
   })
 
@@ -170,6 +172,66 @@ describe('PluginsPane', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Uninstall' }))
     fireEvent.click(within(screen.getByRole('group', { name: 'Uninstall One?' })).getByRole('button', { name: 'Uninstall' }))
     await waitFor(() => expect(inst.uninstall).toHaveBeenCalledWith('com.example.one'))
+  })
+
+  it('the web uninstall question has the sheet keys: Keep it has focus, Enter does nothing, Escape keeps the plugin and focus returns', async () => {
+    const { inst } = fake([row('com.example.one', 'One')])
+    render(<PluginsPane installer={inst} />)
+    const trigger = await screen.findByRole('button', { name: 'Uninstall' })
+    trigger.focus()
+    fireEvent.click(trigger)
+    const group = screen.getByRole('group', { name: 'Uninstall One?' })
+    const keep = within(group).getByRole('button', { name: 'Keep it' })
+    await waitFor(() => expect(keep).toHaveFocus())
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    keep.dispatchEvent(enter)
+    expect(enter.defaultPrevented).toBe(true)
+    const confirm = within(group).getByRole('button', { name: 'Uninstall' })
+    confirm.focus()
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    confirm.dispatchEvent(tab)
+    expect(tab.defaultPrevented).toBe(true)
+    expect(keep).toHaveFocus()
+    fireEvent.keyDown(document.activeElement as Element, { key: 'Escape' })
+    expect(screen.queryByRole('group', { name: 'Uninstall One?' })).toBeNull()
+    expect(inst.uninstall).not.toHaveBeenCalled()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Uninstall' })).toHaveFocus())
+  })
+
+  it('Escape does not cancel an install that is being written', async () => {
+    const { inst } = fake([], 'web')
+    let finish: (r: Installed) => void = () => undefined
+    inst.commit.mockImplementation(() => new Promise<Installed | null>((resolve) => (finish = resolve)))
+    render(<PluginsPane installer={inst} />)
+    await screen.findByText('No plugins are installed.')
+    const file = new File(['x'], 'one.hewplugin')
+    fireEvent.change(screen.getByLabelText('Plugin package'), { target: { files: [file] } })
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Install' }))
+    await waitFor(() => expect(inst.commit).toHaveBeenCalledTimes(1))
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(inst.commit).toHaveBeenCalledTimes(1)
+    finish(installed('com.example.one'))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(inst.commit).toHaveBeenCalledTimes(1)
+  })
+
+  it('applies only the answer to the latest list request, even when an earlier one answers last', async () => {
+    const { inst, set } = fake([row('com.example.one', 'One')])
+    const answers: ((l: Listed[]) => void)[] = []
+    inst.list.mockImplementation(() => new Promise<Listed[]>((resolve) => answers.push(resolve)))
+    render(<PluginsPane installer={inst} />)
+    await waitFor(() => expect(answers).toHaveLength(1))
+    set([])
+    await waitFor(() => expect(answers).toHaveLength(2))
+    // The newer request answers first; the older, wrong one answers after.
+    answers[1]([row('com.example.two', 'Two')])
+    expect(await screen.findByText('Two')).toBeInTheDocument()
+    answers[0]([{ kind: 'unreadable', id: 'com.example.one', reason: 'half way through a change' }])
+    await new Promise((r) => setTimeout(r, 20))
+    expect(screen.getByText('Two')).toBeInTheDocument()
+    expect(screen.queryByText('com.example.one')).toBeNull()
   })
 
   it('shows an unreadable record as such and offers only removal', async () => {
@@ -297,7 +359,50 @@ describe('PluginsPane', () => {
       expect(inst.rollback).not.toHaveBeenCalled()
       fireEvent.click(screen.getByRole('button', { name: 'Roll back to 1.0.0' }))
       fireEvent.click(within(await screen.findByRole('group', { name: 'Go back to 1.0.0?' })).getByRole('button', { name: 'Roll back' }))
-      await waitFor(() => expect(inst.rollback).toHaveBeenCalledWith('com.example.one'))
+      // The call carries what the sheet showed, so a change since is refused.
+      await waitFor(() => expect(inst.rollback).toHaveBeenCalledWith('com.example.one', rollbackFingerprint(installed('com.example.one', { version: '2.0.0' }), installed('com.example.one', { version: '1.0.0' }))))
+    })
+
+    it('a rollback refused as changed is a visible notice, on both tiers', async () => {
+      for (const tier of ['web', 'desktop'] as const) {
+        const f = fake([row('com.example.one', 'One', { version: '2.0.0' }, { previous_version: '1.0.0' })], tier)
+        f.inst.previous = vi.fn(async () => ({
+          installed: installed('com.example.one', { version: '1.0.0' }),
+          manifest: { id: 'com.example.one', name: 'One', version: '1.0.0', permissions: [] },
+        }))
+        f.inst.rollback.mockRejectedValue(new PluginError('plugin_changed', 'raw text'))
+        const { unmount } = render(<PluginsPane installer={tier === 'web' ? f.inst : { ...f.inst, previous: undefined }} />)
+        fireEvent.click(await screen.findByRole('button', { name: 'Roll back to 1.0.0' }))
+        if (tier === 'web') fireEvent.click(within(await screen.findByRole('group', { name: 'Go back to 1.0.0?' })).getByRole('button', { name: 'Roll back' }))
+        await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('This plugin changed while you were deciding.'))
+        expect(screen.queryByRole('alert')).toBeNull()
+        unmount()
+      }
+    })
+
+    it('the web confirmation has the sheet keys: Keep has focus, Enter does nothing, Escape keeps the version, focus stays inside', async () => {
+      const { inst } = withPrevious()
+      render(<PluginsPane installer={inst} />)
+      const trigger = await screen.findByRole('button', { name: 'Roll back to 1.0.0' })
+      trigger.focus()
+      fireEvent.click(trigger)
+      const ask = await screen.findByRole('group', { name: 'Go back to 1.0.0?' })
+      const keep = within(ask).getByRole('button', { name: 'Keep this version' })
+      const roll = within(ask).getByRole('button', { name: 'Roll back' })
+      await waitFor(() => expect(keep).toHaveFocus())
+      const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+      keep.dispatchEvent(enter)
+      expect(enter.defaultPrevented).toBe(true)
+      expect(inst.rollback).not.toHaveBeenCalled()
+      roll.focus()
+      const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+      roll.dispatchEvent(tab)
+      expect(tab.defaultPrevented).toBe(true)
+      expect(keep).toHaveFocus()
+      fireEvent.keyDown(document.activeElement as Element, { key: 'Escape' })
+      expect(screen.queryByRole('group', { name: 'Go back to 1.0.0?' })).toBeNull()
+      expect(inst.rollback).not.toHaveBeenCalled()
+      expect(screen.getByRole('button', { name: 'Roll back to 1.0.0' })).toHaveFocus()
     })
 
     it('on the desktop a declined native confirmation is a quiet no-op', async () => {
@@ -322,5 +427,87 @@ describe('PluginsPane', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('Nothing was installed.')
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
+
+describe('one question per change', () => {
+  const off = (tier: 'desktop' | 'web') => fake([row('com.example.one', 'One', { enabled: false })], tier)
+
+  it('on the desktop, Uninstall goes straight through: the shell asks', async () => {
+    const { inst } = fake([row('com.example.one', 'One'), { kind: 'unreadable', id: 'com.example.bad', reason: 'x' }], 'desktop')
+    render(<PluginsPane installer={inst} />)
+    const one = (await screen.findByText('One')).closest('li') as HTMLElement
+    fireEvent.click(within(one).getByRole('button', { name: 'Uninstall' }))
+    await waitFor(() => expect(inst.uninstall).toHaveBeenCalledWith('com.example.one'))
+    expect(screen.queryByRole('group', { name: /Uninstall/ })).toBeNull()
+    const bad = screen.getByText('com.example.bad').closest('li') as HTMLElement
+    fireEvent.click(within(bad).getByRole('button', { name: 'Uninstall' }))
+    await waitFor(() => expect(inst.uninstall).toHaveBeenCalledWith('com.example.bad'))
+  })
+
+  it('on the desktop, turning a plugin on calls straight through, and declined answers are quiet', async () => {
+    const { inst } = off('desktop')
+    inst.setEnabled.mockRejectedValue(new PluginError('enable_declined', 'It was left off.'))
+    inst.uninstall.mockRejectedValue(new PluginError('uninstall_declined', 'It was kept.'))
+    render(<PluginsPane installer={inst} />)
+    fireEvent.click(await screen.findByRole('switch', { name: 'Turn One on or off' }))
+    await waitFor(() => expect(inst.setEnabled).toHaveBeenCalledWith('com.example.one', true))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Uninstall' }))
+    await waitFor(() => expect(inst.uninstall).toHaveBeenCalled())
+    await waitFor(() => expect(inst.list.mock.calls.length).toBeGreaterThan(2))
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('shows confirmation_open and plugin_changed as plain notices, not errors', async () => {
+    const { inst } = off('desktop')
+    inst.setEnabled.mockRejectedValueOnce(new PluginError('confirmation_open', 'raw text'))
+    render(<PluginsPane installer={inst} />)
+    fireEvent.click(await screen.findByRole('switch', { name: 'Turn One on or off' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Another confirmation is already open. Answer it first, then try again.')
+    expect(screen.queryByRole('alert')).toBeNull()
+    inst.setEnabled.mockRejectedValueOnce(new PluginError('plugin_changed', 'raw text'))
+    fireEvent.click(screen.getByRole('switch', { name: 'Turn One on or off' }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('This plugin changed while you were deciding. Check it, then try again.'))
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('on the web, turning a plugin on asks first; Cancel has focus and Escape cancels', async () => {
+    const { inst } = off('web')
+    render(<PluginsPane installer={inst} />)
+    fireEvent.click(await screen.findByRole('switch', { name: 'Turn One on or off' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('Turn on this plugin?')).toBeInTheDocument()
+    expect(within(dialog).getByText('One will run in a sandbox. It will be able to:')).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus()
+    expect(inst.setEnabled).not.toHaveBeenCalled()
+    // Enter does nothing.
+    fireEvent.keyDown(document.activeElement as Element, { key: 'Enter' })
+    expect(inst.setEnabled).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    fireEvent.keyDown(document.activeElement as Element, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(inst.setEnabled).not.toHaveBeenCalled()
+    // Cancel with the button too.
+    fireEvent.click(screen.getByRole('switch', { name: 'Turn One on or off' }))
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(inst.setEnabled).not.toHaveBeenCalled()
+  })
+
+  it('on the web, Turn On turns the plugin on; turning off asks nothing', async () => {
+    const { inst, set } = off('web')
+    render(<PluginsPane installer={inst} />)
+    fireEvent.click(await screen.findByRole('switch', { name: 'Turn One on or off' }))
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Turn On' }))
+    // The call carries the record the sheet showed.
+    await waitFor(() => expect(inst.setEnabled).toHaveBeenCalledWith('com.example.one', true, recordFingerprint(installed('com.example.one', { enabled: false }))))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    set([row('com.example.one', 'One', { enabled: true })])
+    inst.setEnabled.mockClear()
+    fireEvent.click(await screen.findByRole('switch', { name: 'Turn One on or off' }))
+    await waitFor(() => expect(inst.setEnabled).toHaveBeenCalledWith('com.example.one', false))
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 })
