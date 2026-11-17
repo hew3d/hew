@@ -8405,8 +8405,26 @@ mod face_plane_writer_tests {
         assert!(obj.validate().is_err(), "the state is invalid");
 
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let bytes =
-            tracing::subscriber::with_default(SaveWarnings(seen.clone()), || obj.encode(&|_| 0));
+        let bytes = tracing::subscriber::with_default(SaveWarnings(seen.clone()), || {
+            // A parallel test can register the warning's callsite while no
+            // subscriber is installed on its thread, which caches the callsite
+            // as disabled for everyone. Creating a dispatcher makes tracing
+            // recompute every callsite against all live subscribers, this
+            // thread's included. A registration that lands after that
+            // recompute can still hide the first warning, so write again
+            // (the bytes do not change) until it is heard.
+            let mut bytes = Vec::new();
+            for _ in 0..8 {
+                drop(tracing::Dispatch::new(
+                    tracing::subscriber::NoSubscriber::default(),
+                ));
+                bytes = obj.encode(&|_| 0);
+                if !seen.lock().unwrap().is_empty() {
+                    break;
+                }
+            }
+            bytes
+        });
         assert_eq!(bytes, plain_bytes, "written as the plain block");
         assert_eq!(*seen.lock().unwrap(), vec![2], "two faces, each once");
         let back = Object::decode(&bytes, &|_| None).unwrap();
