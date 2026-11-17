@@ -165,7 +165,7 @@ export class FilletTool implements Tool {
 
   capturesKey(key: string): boolean {
     const idle = this.c.stage.kind === 'idle'
-    if (idle && this.typingElsewhere()) return false
+    if (this.typingElsewhere()) return false
     if (!idle) return this.stageCapturesKey(key)
     if (this.c.collected.length > 0 && (isDigitStart(key) || this.c.retypeTyped !== '')) return true
     if (this.c.hover.kind === 'blend' && (key === 'Delete' || key === 'Backspace')) return true
@@ -445,6 +445,7 @@ export class FilletTool implements Tool {
   }
 
   onKey(ev: KeyboardEvent): void {
+    if (this.typingElsewhere()) return
     const key = ev.key
     if (key === 'Alt' || key === 'Shift' || key === 'Control' || key === 'Meta') return
     this.c.note = null

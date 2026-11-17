@@ -1890,7 +1890,7 @@ msgstr ""
 msgid "Choose Library Folder"
 msgstr ""
 
-#: src/viewport/ProfileChip.tsx
+#: src/viewport/FilletOptions.tsx
 msgid "Choose the shape of the edge"
 msgstr ""
 

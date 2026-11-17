@@ -8,7 +8,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { libraryStore } from '../io/libraryStore'
-import type { ProfileChipItem, ProfileChipSection } from '../viewport/ProfileChip'
+import type { ProfileOptionItem, ProfileOptionSection } from '../viewport/FilletOptions'
 import { readItemSummary } from './itemFiles'
 import { buildLibraryItem } from './libraryModel'
 import {
@@ -60,7 +60,7 @@ export interface ProfileSectionsOptions {
   onSave(): void
 }
 
-export function useProfileSections({ active, canSave, onSave }: ProfileSectionsOptions): ProfileChipSection[] {
+export function useProfileSections({ active, canSave, onSave }: ProfileSectionsOptions): ProfileOptionSection[] {
   const [builtIns, setBuiltIns] = useState<BundledProfile[]>([])
   const [mine, setMine] = useState<LibraryProfileRow[]>([])
   const [thumbs, setThumbs] = useState<Record<string, string>>({})
@@ -115,8 +115,8 @@ export function useProfileSections({ active, canSave, onSave }: ProfileSectionsO
     }
   }, [builtIns, mine, thumbs])
 
-  return useMemo((): ProfileChipSection[] => {
-    const row = (p: { id: string; name: string; shape: ProfileShapeJson }, badge?: string): ProfileChipItem => ({
+  return useMemo((): ProfileOptionSection[] => {
+    const row = (p: { id: string; name: string; shape: ProfileShapeJson }, badge?: string): ProfileOptionItem => ({
       id: p.id,
       label: p.name,
       thumbnail: thumbs[`${p.id}|${JSON.stringify(p.shape)}`],

@@ -82,7 +82,7 @@ test('Fillet rounds a drawn corner, and the extruded wall follows the arc', asyn
   await page.screenshot({ path: dir ? `${dir}/corner-2d-wall.png` : info.outputPath('corner-2d-wall.png') })
 })
 
-test('Over a drawn corner the Edge chip offers only Round and Chamfer', async ({ page }, info) => {
+test('Over a drawn corner the Shape row offers only Round and Chamfer', async ({ page }, info) => {
   await page.goto('/')
   await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, { timeout: 15_000 })
   await page.evaluate((cam) => {
@@ -96,7 +96,7 @@ test('Over a drawn corner the Edge chip offers only Round and Chamfer', async ({
   const shot = (name: string) => page.screenshot({ path: dir ? `${dir}/${name}` : info.outputPath(name) })
 
   await page.keyboard.press('Shift+F')
-  const chip = page.getByTestId('fillet-profile-chip').getByRole('button', { name: /^Edge/ })
+  const chip = page.getByTestId('fillet-shape-options').getByRole('button', { name: /^More shapes/ })
   await chip.click()
   await page.getByRole('menuitemradio', { name: 'Cove', exact: true }).click()
   await expect(chip).toContainText('Cove')
