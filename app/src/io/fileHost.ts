@@ -31,6 +31,22 @@ export class FileReadError extends Error {
 }
 
 /**
+ * A picked or dropped file whose extension Hew does not recognize. Raised by
+ * the hosts' post-pick dispatch before any importer runs (and before any
+ * texture-directory picker is shown), so the caller can say plainly that the
+ * kind of file is unsupported rather than surfacing a parser error.
+ */
+export class UnsupportedFileError extends Error {
+  readonly fileName: string
+  constructor(fileName: string) {
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- log text; the toast wording is chosen by the caller
+    super(`Unsupported file type: ${fileName}`)
+    this.name = 'UnsupportedFileError'
+    this.fileName = fileName
+  }
+}
+
+/**
  * The on-disk format a document is bound to. `hew` is the native format;
  * `skp2026` and the stream releases (`SKP_STREAM_FORMATS`) are the SketchUp
  * formats a `.skp` document is saved back in (the format of the file that

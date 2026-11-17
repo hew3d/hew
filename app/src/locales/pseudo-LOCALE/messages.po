@@ -4513,6 +4513,11 @@ msgstr ""
 msgid "Hew can't show the 3D view"
 msgstr ""
 
+#: src/App.tsx
+#: src/shop/ShopApp.tsx
+msgid "Hew cannot open this kind of file."
+msgstr ""
+
 #: src/settings/AdvancedPane.tsx
 #: src/settings/FluentSettingsPage.tsx
 msgid "Hew cloud ({cloudHost})"

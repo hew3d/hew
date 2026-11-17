@@ -17,7 +17,7 @@
 
 import { t } from '@lingui/core/macro'
 import type { DocFormat, ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
-import { FileReadError } from './fileHost'
+import { FileReadError, UnsupportedFileError } from './fileHost'
 import { extensionFor, formatDescription, nameForFormat } from './docFormat'
 import { collapseDoubledExtension } from './savePanel'
 
@@ -95,6 +95,10 @@ export async function resolveImportPickFromPath(filePath: string, fileBytes: Uin
   if (/\.stl$/i.test(filePath)) {
     return { kind: 'stl', name: basename(filePath), bytes: fileBytes, path: filePath }
   }
+
+  // Only a `.dae` is COLLADA. Anything else is refused before the sibling
+  // scan, so no importer ever sees a file it cannot parse.
+  if (!/\.dae$/i.test(filePath)) throw new UnsupportedFileError(basename(filePath))
 
   // Scan the sibling directory (and a <stem>_textures / textures subfolder
   // if present) for PNG/JPEG images.  Best-effort — failures are silently

@@ -4519,6 +4519,11 @@ msgstr "Hew can't read that picture. Save it as a PNG or JPEG and place it again
 msgid "Hew can't show the 3D view"
 msgstr "Hew can't show the 3D view"
 
+#: src/App.tsx
+#: src/shop/ShopApp.tsx
+msgid "Hew cannot open this kind of file."
+msgstr "Hew cannot open this kind of file."
+
 #: src/settings/AdvancedPane.tsx
 #: src/settings/FluentSettingsPage.tsx
 msgid "Hew cloud ({cloudHost})"

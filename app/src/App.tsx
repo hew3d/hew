@@ -101,7 +101,7 @@ import { outlinerDrawing, resolveDraft, setKernelHidden, type OutlinerDrawing, t
 import { setDeformMode, getDeformMode, subscribeDeformMode } from './tools/deformMode'
 import { runToolAction } from './tools/toolActions'
 import { smoothLevelFor } from './curveActions'
-import { makeFileHost, isTauri, FileReadError, type DocFormat, type ExportFileType, type FileHost, type FileRef, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
+import { makeFileHost, isTauri, FileReadError, UnsupportedFileError, type DocFormat, type ExportFileType, type FileHost, type FileRef, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
 import {
   panelIdFor,
   exportPanelIdFor,
@@ -3785,6 +3785,10 @@ export default function App() {
       try {
         pick = await fileHostRef.current.openAny()
       } catch (err: unknown) {
+        if (err instanceof UnsupportedFileError) {
+          handleToast(t`Hew cannot open this kind of file.`)
+          return
+        }
         handleToast(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`, undefined, { persistent: true })
         return
       }
@@ -3904,6 +3908,10 @@ export default function App() {
       try {
         pick = await fileHostRef.current.openForImport()
       } catch (err: unknown) {
+        if (err instanceof UnsupportedFileError) {
+          handleToast(t`Hew cannot open this kind of file.`)
+          return
+        }
         handleToast(t`Import failed: ${ph({ reason: friendlyErrorText(err) })}`, undefined, { persistent: true })
         return
       }
@@ -4296,10 +4304,19 @@ export default function App() {
     const buf = await invoke<ArrayBuffer>('read_file', { path })
     const bytes = new Uint8Array(buf)
     const { resolveImportPickFromPath } = await import('./io/tauriFileHost')
-    const pick = await resolveImportPickFromPath(path, bytes)
+    let pick: ImportPick
+    try {
+      pick = await resolveImportPickFromPath(path, bytes)
+    } catch (err: unknown) {
+      if (!(err instanceof UnsupportedFileError)) throw err
+      // Through the open-failure path, so a window opened only to show this
+      // file hands the refusal back to its opener and closes.
+      toastOpenFailure(t`Hew cannot open this kind of file.`, true)
+      return false
+    }
     await runImportPick(scene, pick)
     return true
-  }, [applyLoadedBytes, clearRecoverySnapshot, runImportPick, runOpenSkp])
+  }, [applyLoadedBytes, clearRecoverySnapshot, runImportPick, runOpenSkp, toastOpenFailure])
 
   // File ▸ Revert to Saved, after its confirmation (and the live API's
   // `hew.doc.revert`, which asks none): read the saved file again, load it

@@ -41,7 +41,7 @@ import { MeasurementBox } from '../viewport/MeasurementBox'
 import { CAMERA_HANDOFF_TOOL_NAMES } from '../panels/cameraHandoffTools'
 import { nodeKey, type NodeRef, type SelectMode } from '../panels/treeModel'
 import { tagPathKey } from '../panels/tagModel'
-import { makeFileHost, type OpenPick } from '../io/fileHost'
+import { makeFileHost, UnsupportedFileError, type OpenPick } from '../io/fileHost'
 import { anchorDownload, anchorDownloadAs } from '../io/webFileHost'
 import { stripKnownExtension } from '../io/docFormat'
 import { PrintSheet } from './PrintSheet'
@@ -1243,6 +1243,10 @@ export function ShopApp() {
     try {
       pick = await fileHostRef.current.openAny()
     } catch (err: unknown) {
+      if (err instanceof UnsupportedFileError) {
+        showToast(t`Hew cannot open this kind of file.`)
+        return
+      }
       const errorText = friendlyErrorText(err)
       showToast(t`Open failed: ${errorText}`)
       return

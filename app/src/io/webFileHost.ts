@@ -21,7 +21,7 @@
 
 import { ph, t } from '@lingui/core/macro'
 import type { DocFormat, ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
-import { FileReadError } from './fileHost'
+import { FileReadError, UnsupportedFileError } from './fileHost'
 import { extensionFor, formatDescription, nameForFormat } from './docFormat'
 import { isCoarsePointer } from '../platform'
 
@@ -433,7 +433,8 @@ export class WebFileHost implements FileHost {
    * own resources, so they carry the bytes as-is; COLLADA additionally
    * offers a best-effort directory-picker texture scan (skipped if the API
    * is unavailable or the user cancels it — the kernel ImportReport will
-   * list any still-missing textures).
+   * list any still-missing textures). Any other extension throws
+   * `UnsupportedFileError`.
    */
   private async resolveImportPick(bytes: Uint8Array, fileName: string): Promise<ImportPick> {
     // glTF embeds its own buffers/images — no external resolution needed.
@@ -450,6 +451,11 @@ export class WebFileHost implements FileHost {
     if (/\.stl$/i.test(fileName)) {
       return { kind: 'stl', name: fileName, bytes }
     }
+
+    // Only a `.dae` is COLLADA. Anything else is refused here, before the
+    // texture-directory picker below can be offered for a file that will
+    // never be parsed.
+    if (!/\.dae$/i.test(fileName)) throw new UnsupportedFileError(fileName)
 
     // COLLADA: best-effort texture resolution via a directory picker. If the
     // API is unavailable or the user cancels, proceed with no images — the

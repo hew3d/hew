@@ -28,7 +28,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebFileHost, anchorDownload } from './webFileHost'
-import { FileReadError } from './fileHost'
+import { FileReadError, UnsupportedFileError } from './fileHost'
 
 // jsdom doesn't implement the Blob URL APIs — stub them so anchorDownload's
 // tests below can run without a real browser, mirroring LibraryDialog.test.tsx's
@@ -256,4 +256,55 @@ describe('WebFileHost save/saveAs without the File System Access API (format-awa
     expect(captured.map((c) => c.download)).toEqual(['Model.skp'])
     expect(out).toBe(ref)
   })
+})
+
+/** Drive `openForImport()` or `openAny()` through the fallback <input>, picking `name`. */
+async function pickThrough(method: 'openForImport' | 'openAny', name: string): Promise<unknown> {
+  const opened = new WebFileHost()[method]()
+  const input = document.querySelector('input[type=file]') as HTMLInputElement
+  const bytes = new Uint8Array([1, 2, 3])
+  Object.defineProperty(input, 'files', {
+    value: [{ name, arrayBuffer: () => Promise.resolve(bytes.buffer) }],
+  })
+  input.dispatchEvent(new Event('change'))
+  return opened
+}
+
+describe('WebFileHost unrecognized extensions', () => {
+  for (const method of ['openForImport', 'openAny'] as const) {
+    for (const name of ['notes.txt', 'tool.hewplugin', 'README', 'archive.dae.zip']) {
+      it(`${method}(): refuses ${name} as an unsupported kind`, async () => {
+        const err = await pickThrough(method, name).catch((e: unknown) => e)
+        expect(err).toBeInstanceOf(UnsupportedFileError)
+        expect((err as UnsupportedFileError).fileName).toBe(name)
+      })
+    }
+
+    it(`${method}(): offers the texture directory picker for a .dae and never for an unrecognized file`, async () => {
+      // With the File System Access API present the COLLADA branch asks for
+      // a texture folder; the control pick below proves that branch is live.
+      const w = window as unknown as Record<string, unknown>
+      const picker = vi.fn(() => Promise.reject(new DOMException('cancelled', 'AbortError')))
+      const pickFile = (name: string) => () =>
+        Promise.resolve([{ name, getFile: () => Promise.resolve({ name, arrayBuffer: () => Promise.resolve(new Uint8Array([1]).buffer) }) }])
+      w.showSaveFilePicker = vi.fn()
+      w.showDirectoryPicker = picker
+      try {
+        w.showOpenFilePicker = pickFile('notes.txt')
+        await expect(new WebFileHost()[method]()).rejects.toBeInstanceOf(UnsupportedFileError)
+        expect(picker).not.toHaveBeenCalled()
+        w.showOpenFilePicker = pickFile('model.dae')
+        expect(await new WebFileHost()[method]()).toMatchObject({ kind: 'dae' })
+        expect(picker).toHaveBeenCalledTimes(1)
+      } finally {
+        delete w.showSaveFilePicker
+        delete w.showDirectoryPicker
+        delete w.showOpenFilePicker
+      }
+    })
+
+    it(`${method}(): an upper-case .DAE is still COLLADA`, async () => {
+      expect(await pickThrough(method, 'MODEL.DAE')).toMatchObject({ kind: 'dae', name: 'MODEL.DAE' })
+    })
+  }
 })
