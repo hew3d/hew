@@ -485,7 +485,10 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
         FuzzOp::MergeFaces { edge_sel } => {
             let n = object.edges().len();
             let edge = object.edges().keys().nth(edge_sel % n)?;
-            Some(KernelOp::MergeFaces { edge })
+            Some(KernelOp::MergeFaces {
+                edge,
+                keep_vertices: Vec::new(),
+            })
         }
         FuzzOp::SplitFaceInner {
             face_sel,

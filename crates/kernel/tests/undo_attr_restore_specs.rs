@@ -334,8 +334,14 @@ fn undo_of_merge_faces_restores_each_sides_own_paint() {
 
     // Merge them back (the raw primitive has no material gate), then undo.
     let cut_edge = r.new_edges[0];
-    doc.apply_object_op(oid, KernelOp::MergeFaces { edge: cut_edge })
-        .unwrap();
+    doc.apply_object_op(
+        oid,
+        KernelOp::MergeFaces {
+            edge: cut_edge,
+            keep_vertices: Vec::new(),
+        },
+    )
+    .unwrap();
     doc.undo().unwrap();
 
     // Each half must carry ITS OWN paint, on the correct side.
@@ -413,6 +419,7 @@ fn undo_of_merge_faces_round_trips_wall_attribution() {
             &mut obj,
             KernelOp::MergeFaces {
                 edge: r.new_edges[0],
+                keep_vertices: Vec::new(),
             },
         )
         .unwrap();
@@ -469,7 +476,13 @@ fn sliver_faces_merge_with_best_effort_snapshots() {
 
     // Forward behavior preserved: the merge succeeds at 1e-12 width.
     let report = history
-        .apply(&mut obj, KernelOp::MergeFaces { edge: shared_edge })
+        .apply(
+            &mut obj,
+            KernelOp::MergeFaces {
+                edge: shared_edge,
+                keep_vertices: Vec::new(),
+            },
+        )
         .unwrap();
     assert_eq!(obj.faces().len(), 1, "sliver merges exactly as before");
 
@@ -523,7 +536,13 @@ fn healthy_widths_pin_both_snapshot_anchors() {
             .map(|(id, _)| id)
             .unwrap();
         let report = history
-            .apply(&mut obj, KernelOp::MergeFaces { edge: shared_edge })
+            .apply(
+                &mut obj,
+                KernelOp::MergeFaces {
+                    edge: shared_edge,
+                    keep_vertices: Vec::new(),
+                },
+            )
             .unwrap();
         let KernelOpReport::FaceMerge(r) = report else {
             panic!("wrong report kind")

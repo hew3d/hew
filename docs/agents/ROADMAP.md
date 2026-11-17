@@ -99,8 +99,10 @@ below.
   across an imprint, a rectangle flush between two imprints) cuts that
   face with all of its pieces at once through a local re-trace
   (`Object::retrace_face`: several paths inserted or removed in one step,
-  loops rebuilt by rotational order at each vertex, its own inverse with
-  the arguments swapped), so the boundaries it joins become one, as on
+  loops rebuilt by rotational order at each vertex; with the arguments
+  swapped it is its own inverse, except that a plain swapped call heals
+  away an inserted end that met the joint of a straight run already
+  there, which the history's undo keeps), so the boundaries it joins become one, as on
   the ground; bridges exist only inside the re-trace, never in a
   committed face, so the file format is unchanged. A circle crossing
   the face's own edge or corner splits the face the same way: the lens

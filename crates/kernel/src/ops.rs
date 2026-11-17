@@ -145,8 +145,9 @@ pub enum LoopImprintPlan {
     Nothing,
 }
 
-/// What `split_face` changed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What `split_face` changed. (`vertex_ends` carries f64 positions, so
+/// this is `PartialEq` but not `Eq`.)
+#[derive(Debug, Clone, PartialEq)]
 pub struct FaceSplitReport {
     /// The two faces replacing the input face. A cut with both ends on one
     /// hole loop keeps the input face's handle as `new_faces[0]` (its
@@ -160,6 +161,11 @@ pub struct FaceSplitReport {
     /// Pre-existing boundary edges split by the path endpoints: the now-dead
     /// handle and its two fragments.
     pub split_boundary_edges: Vec<(EdgeId, [EdgeId; 2])>,
+    /// The path's ends that met a vertex already there (not a point split
+    /// into a boundary edge), each once. The undo merge keeps them: such a
+    /// vertex may have been the joint of a straight run before the split,
+    /// and healing it away would not give that run back.
+    pub vertex_ends: Vec<Point3>,
 }
 
 /// What `split_face_inner` changed: a closed loop imprinted strictly inside a
@@ -6351,10 +6357,22 @@ impl Object {
 
         // --- all checks passed — clone and mutate ---
         let mut obj = self.clone();
-        let report = match anchor_hole {
+        let mut report = match anchor_hole {
             None => do_split_face(&mut obj, face, path, &ep0, &ep1)?,
             Some(hole) => do_split_face_hole(&mut obj, face, hole, path, &ep0, &ep1)?,
         };
+        for hit in [&ep0, &ep1] {
+            if let EndpointHit::Vertex(_) = hit {
+                let at = endpoint_position(self, hit);
+                if !report
+                    .vertex_ends
+                    .iter()
+                    .any(|&q| crate::retrace::bits(q) == crate::retrace::bits(at))
+                {
+                    report.vertex_ends.push(at);
+                }
+            }
+        }
         if let Some(restore) = restore {
             apply_split_restore(&mut obj, &report.new_faces, &restore);
         }
@@ -6413,7 +6431,20 @@ impl Object {
     /// # Errors
     /// See [`StickyError`]; all leave the object untouched.
     pub fn merge_faces(&mut self, edge: EdgeId) -> Result<FaceMergeReport, StickyError> {
-        self.merge_faces_impl(edge, true)
+        self.merge_faces_impl(edge, true, &[])
+    }
+
+    /// [`Object::merge_faces`] that leaves every run end at one of
+    /// `keep_vertices` (matched within [`tol::POINT_MERGE`]) in place even
+    /// when the merge leaves it a straight two-edge scar: the undo of a
+    /// split passes the split's [`FaceSplitReport::vertex_ends`], so a cut
+    /// that started at the joint of a straight run gives that joint back.
+    pub(crate) fn merge_faces_keeping(
+        &mut self,
+        edge: EdgeId,
+        keep_vertices: &[Point3],
+    ) -> Result<FaceMergeReport, StickyError> {
+        self.merge_faces_impl(edge, true, keep_vertices)
     }
 
     /// [`Object::merge_faces`], with merges along several separate runs
@@ -6424,6 +6455,7 @@ impl Object {
         &mut self,
         edge: EdgeId,
         multi_run: bool,
+        keep_vertices: &[Point3],
     ) -> Result<FaceMergeReport, StickyError> {
         // --- validation ---
         let edge_data = match self.edges.get(edge) {
@@ -6520,7 +6552,7 @@ impl Object {
                     [attrs_snapshot(self, inner), attrs_snapshot(self, owner)]
                 }
             };
-            let r = self.retrace_face_impl(keep, &[], &runs, &[], Some(keep))?;
+            let r = self.retrace_face_impl(keep, &[], &runs, &[], Some(keep), keep_vertices)?;
             debug_assert_eq!(r.faces, vec![keep], "one merged face, the survivor");
             return Ok(FaceMergeReport {
                 merged_face: keep,
@@ -6532,8 +6564,10 @@ impl Object {
         // --- clone and mutate ---
         let mut obj = self.clone();
         let report = match into_hole {
-            None => do_merge_faces(&mut obj, face_a, face_b)?,
-            Some((inner, owner, hole)) => do_merge_into_hole(&mut obj, inner, owner, hole)?,
+            None => do_merge_faces(&mut obj, face_a, face_b, keep_vertices)?,
+            Some((inner, owner, hole)) => {
+                do_merge_into_hole(&mut obj, inner, owner, hole, keep_vertices)?
+            }
         };
         obj.check_invariants();
         // Always-on backstop.
@@ -6765,7 +6799,7 @@ impl Object {
                 if preserved {
                     continue;
                 }
-                if self.merge_faces_impl(eid, false).is_ok() {
+                if self.merge_faces_impl(eid, false, &[]).is_ok() {
                     dissolved += 1;
                     progress = true;
                 }
@@ -11096,6 +11130,7 @@ fn do_split_face(
         new_faces: [face, face_b_id],
         new_edges,
         split_boundary_edges,
+        vertex_ends: Vec::new(),
     })
 }
 
@@ -11250,6 +11285,7 @@ fn do_split_face_hole(
         new_faces: [face, lune],
         new_edges,
         split_boundary_edges,
+        vertex_ends: Vec::new(),
     })
 }
 
@@ -11620,6 +11656,7 @@ fn do_merge_faces(
     obj: &mut Object,
     face_a: FaceId,
     face_b: FaceId,
+    keep_vertices: &[Point3],
 ) -> Result<FaceMergeReport, StickyError> {
     let outer_a = obj.faces[face_a].outer_loop;
     let outer_b = obj.faces[face_b].outer_loop;
@@ -11853,8 +11890,12 @@ fn do_merge_faces(
     // input must heal identically (the determinism invariant; History replay
     // verifies redo results against the recorded state and fails typed on
     // any asymmetry).
-    let healing_removed_edges =
-        heal_run_endpoints(obj, outer_a, [chain_a_start_v, chain_b_start_v]);
+    let healing_removed_edges = heal_run_endpoints(
+        obj,
+        outer_a,
+        [chain_a_start_v, chain_b_start_v],
+        keep_vertices,
+    );
 
     // 10. Fix any remaining broken outgoing pointers (shared-chain endpoints
     //     that are still present but whose outgoing pointed into the dissolved chain).
@@ -11965,6 +12006,7 @@ fn do_merge_into_hole(
     inner: FaceId,
     owner: FaceId,
     hole: LoopId,
+    keep_vertices: &[Point3],
 ) -> Result<FaceMergeReport, StickyError> {
     let outer_in = obj.faces[inner].outer_loop;
     let inner_surface = obj.faces[inner].surface;
@@ -12064,7 +12106,7 @@ fn do_merge_into_hole(
     }
 
     // 5. Heal the run's endpoints if they are now pure collinear scars.
-    let healed = heal_run_endpoints(obj, hole, [v_start, v_end]);
+    let healed = heal_run_endpoints(obj, hole, [v_start, v_end], keep_vertices);
     repair_dangling_outgoing(obj);
 
     // 6. `inner`'s holes move to `owner`; `inner` and its outer loop go.
@@ -12175,16 +12217,27 @@ pub(crate) fn repair_dangling_outgoing(obj: &mut Object) {
 /// left a pure two-edge scar of a `split_boundary_edge` call — exactly two
 /// departing half-edges, one in `merged_loop` and one in a single
 /// neighbor loop, their edges collinear — is healed away (the two edges
-/// merge on both sides). Returns the retired edges.
+/// merge on both sides). An endpoint at one of `keep_vertices` (matched
+/// within [`tol::POINT_MERGE`]) is never healed: the undo of an insert
+/// passes the vertices the insert met already there, which may have been
+/// the joints of straight runs before it. Returns the retired edges.
 pub(crate) fn heal_run_endpoints(
     obj: &mut Object,
     merged_loop: LoopId,
     endpoint_vertices: [VertexId; 2],
+    keep_vertices: &[Point3],
 ) -> Vec<EdgeId> {
     let mut healing_removed_edges: Vec<EdgeId> = Vec::new();
     for vertex_to_heal in endpoint_vertices {
         if !obj.vertices.contains_key(vertex_to_heal) {
             continue; // healed away together with the other endpoint
+        }
+        let at = obj.vertices[vertex_to_heal].position;
+        if keep_vertices
+            .iter()
+            .any(|q| q.approx_eq(at, tol::POINT_MERGE))
+        {
+            continue; // a joint that was there before the insert
         }
 
         // Heal only true scars: V must have exactly two departing

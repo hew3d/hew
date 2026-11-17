@@ -19,7 +19,10 @@
 //!
 //! Its inverse is itself with the arguments swapped: the report carries the
 //! inserted paths as resolved and the removed chains with their circle
-//! claims, and the history records exactly that.
+//! claims, and the history records exactly that. One exception: an inserted
+//! end that met a vertex already there, where that vertex was the joint of
+//! a straight run, is healed away by a plain swapped call. The history's
+//! undo keeps such vertices (the report's `vertex_ends`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -75,6 +78,12 @@ pub struct FaceRetraceReport {
     /// canonical order (each oriented from its lexicographically smaller
     /// end, sorted by that end). Inserting these is the inverse.
     pub removed: Vec<RetracePath>,
+    /// The inserted paths' ends that met a vertex already there (not a
+    /// point split into an edge, nor a fresh junction), each once. The
+    /// inverse removal keeps them: such a vertex may have been the joint
+    /// of a straight run before the insert, and healing it away would not
+    /// give that run back.
+    pub vertex_ends: Vec<Point3>,
 }
 
 /// Where an inserted path's end meets the region's boundary.
@@ -122,9 +131,14 @@ impl Object {
     /// (map-or-drop). Removed chains' ends left a straight two-edge scar
     /// are healed away, as `merge_faces` does.
     ///
-    /// The inverse is the same call with the arguments swapped:
+    /// The same call with the arguments swapped —
     /// [`FaceRetraceReport::inserted`] removed and
-    /// [`FaceRetraceReport::removed`] inserted.
+    /// [`FaceRetraceReport::removed`] inserted — is the inverse, except for
+    /// an inserted end that met the joint of a straight run already there:
+    /// the swapped call heals that joint away, as it heals any removed
+    /// chain's end left a straight two-edge scar. The history's undo keeps
+    /// those vertices ([`FaceRetraceReport::vertex_ends`]), so it restores
+    /// the face exactly.
     ///
     /// # Errors
     /// All leave the object untouched.
@@ -154,13 +168,16 @@ impl Object {
         insert: &[RetracePath],
         remove: &[Vec<Point3>],
     ) -> Result<FaceRetraceReport, StickyError> {
-        self.retrace_face_impl(face, insert, remove, &[], None)
+        self.retrace_face_impl(face, insert, remove, &[], None, &[])
     }
 
     /// [`Object::retrace_face`] with undo's attribute restoration (each
-    /// snapshot lands on the result face holding its point) and the face
+    /// snapshot lands on the result face holding its point), the face
     /// whose handle and attributes a merge keeps (`keep`; `face` when
-    /// `None`).
+    /// `None`), and the vertices a removed chain's end must keep even when
+    /// left a straight two-edge scar (`keep_vertices`, matched within
+    /// [`tol::POINT_MERGE`]; the undo of an insert passes the insert's
+    /// [`FaceRetraceReport::vertex_ends`]).
     pub(crate) fn retrace_face_impl(
         &mut self,
         face: FaceId,
@@ -168,6 +185,7 @@ impl Object {
         remove: &[Vec<Point3>],
         restore: &[FaceAttrsAt],
         keep: Option<FaceId>,
+        keep_vertices: &[Point3],
     ) -> Result<FaceRetraceReport, StickyError> {
         // ---- input shape ----
         let seed = self.faces.get(face).ok_or(StickyError::UnknownFace)?;
@@ -520,6 +538,17 @@ impl Object {
             End::Vertex(v) => v,
             End::Edge(_, at) | End::Junction(at) => end_vertex[&bits(at)],
         };
+        let mut vertex_ends: Vec<Point3> = Vec::new();
+        for pair in &ends {
+            for &end in pair {
+                if let End::Vertex(v) = end {
+                    let at = obj.vertices[v].position;
+                    if !vertex_ends.iter().any(|&q| bits(q) == bits(at)) {
+                        vertex_ends.push(at);
+                    }
+                }
+            }
+        }
 
         // 2. Each region half-edge's destination and old face, before the
         //    removal leaves `next` pointers dangling.
@@ -867,7 +896,7 @@ impl Object {
             else {
                 continue;
             };
-            healed.extend(heal_run_endpoints(&mut obj, l, [x, x]));
+            healed.extend(heal_run_endpoints(&mut obj, l, [x, x], keep_vertices));
         }
         repair_dangling_outgoing(&mut obj);
 
@@ -897,6 +926,7 @@ impl Object {
             prior_attrs,
             inserted,
             removed: removed_paths,
+            vertex_ends,
         })
     }
 
@@ -980,7 +1010,7 @@ fn meet_only_at(a: Point3, b: Point3, c: Point3, d: Point3, allowed: Option<Poin
 }
 
 /// A point's exact bits, for "the very same point" comparisons.
-fn bits(p: Point3) -> [u64; 3] {
+pub(crate) fn bits(p: Point3) -> [u64; 3] {
     [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]
 }
 

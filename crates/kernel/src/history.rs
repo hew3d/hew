@@ -13,11 +13,13 @@
 //! report**, because the inverse must reference handles that exist in the
 //! *post-apply* state (generational ids are reallocated by mutations):
 //!
-//! - `PushPull { face, d }`        → `PushPull { report.face, -d }`
-//! - `SplitFace { face, path }`    → `MergeFaces { report.new_edges[0] }`
-//! - `MergeFaces { edge }`         → `SplitFace { report.merged_face, path }`
-//!   (the path is reconstructed from the dissolved edges' geometry before
-//!   they die)
+//! - `PushPull { face, d }` → `PushPull { report.face, -d }`
+//! - `SplitFace { face, path }` →
+//!   `MergeFaces { report.new_edges[0], keep_vertices: report.vertex_ends }`
+//!   (the merge keeps the path's ends that met a vertex already there)
+//! - `MergeFaces { edge, keep_vertices }` →
+//!   `SplitFace { report.merged_face, path }` (the path is reconstructed
+//!   from the dissolved edges' geometry before they die)
 //!
 //! The guaranteed property (see `tests/op_specs.rs`): undo restores the
 //! object to *topological and geometric* equality — same polygon soup up to
@@ -106,6 +108,13 @@ pub enum KernelOp {
     MergeFaces {
         /// Edge whose two coplanar faces merge.
         edge: EdgeId,
+        /// Vertices, by position, that a run end must keep even when the
+        /// merge leaves them a straight two-edge scar: the ends a forward
+        /// split met at a vertex already there
+        /// ([`crate::FaceSplitReport::vertex_ends`]), so its undo gives back
+        /// a straight run split at that vertex exactly as it was. Empty for
+        /// a caller's own merge.
+        keep_vertices: Vec<Point3>,
     },
     /// `Object::split_face_inner(face, loop_path)` — imprint a closed loop.
     /// With `restore` set this is the undo of a `MergeInnerFace`: the
@@ -185,6 +194,13 @@ pub enum KernelOp {
         remove: Vec<Vec<Point3>>,
         /// Attribute snapshots to restore onto the result faces (undo path).
         restore: Vec<FaceAttrsAt>,
+        /// Vertices, by position, that a removed chain's end must keep even
+        /// when the removal leaves them a straight two-edge scar: the ends
+        /// a forward insert met at a vertex already there
+        /// ([`crate::FaceRetraceReport::vertex_ends`]), so its undo gives
+        /// back a straight run split at that vertex exactly as it was.
+        /// Empty for a user's own removal.
+        keep_vertices: Vec<Point3>,
     },
 }
 
@@ -406,7 +422,7 @@ impl History {
     ) -> Result<KernelOpReport, KernelOpError> {
         // For MergeFaces, capture the cut-path geometry BEFORE the op runs,
         // because the edge chain's vertices may be healed away during the merge.
-        let pre_merge_path: Option<Vec<MergeRun>> = if let KernelOp::MergeFaces { edge } = &op {
+        let pre_merge_path: Option<Vec<MergeRun>> = if let KernelOp::MergeFaces { edge, .. } = &op {
             Some(reconstruct_merge_runs(object, *edge))
         } else {
             None
@@ -453,12 +469,12 @@ impl History {
             .map_err(HistoryError::InverseFailed)?;
 
         // For MergeFaces in the inverse, capture path before dispatch.
-        let pre_merge_path: Option<Vec<MergeRun>> = if let KernelOp::MergeFaces { edge } = &inverse
-        {
-            Some(reconstruct_merge_runs(object, *edge))
-        } else {
-            None
-        };
+        let pre_merge_path: Option<Vec<MergeRun>> =
+            if let KernelOp::MergeFaces { edge, .. } = &inverse {
+                Some(reconstruct_merge_runs(object, *edge))
+            } else {
+                None
+            };
 
         // Run the inverse on a clone, guard-exempt. A dispatch error is a
         // kernel bug surfaced as InverseFailed; a result that fails the
@@ -512,12 +528,12 @@ impl History {
             re_anchor(object, &rec.op, &rec.anchor).map_err(HistoryError::InverseFailed)?;
 
         // For MergeFaces, capture path before dispatch.
-        let pre_merge_path: Option<Vec<MergeRun>> = if let KernelOp::MergeFaces { edge } = &redo_op
-        {
-            Some(reconstruct_merge_runs(object, *edge))
-        } else {
-            None
-        };
+        let pre_merge_path: Option<Vec<MergeRun>> =
+            if let KernelOp::MergeFaces { edge, .. } = &redo_op {
+                Some(reconstruct_merge_runs(object, *edge))
+            } else {
+                None
+            };
 
         // Run the redo on a clone, guard-exempt, and hold it to the recorded
         // proof exactly as `undo` does; pop only after both succeed so a
@@ -1042,7 +1058,7 @@ fn anchor_of(object: &Object, op: &KernelOp) -> Anchor {
         | KernelOp::CollapseSubFace { sub_face: face }
         | KernelOp::TransformSubFace { sub_face: face, .. }
         | KernelOp::RetraceFace { face, .. } => Anchor::Face(FaceAnchor::of(object, *face)),
-        KernelOp::MergeFaces { edge } => {
+        KernelOp::MergeFaces { edge, .. } => {
             let (a, b) = object
                 .edge_endpoints(*edge)
                 .expect("anchored op holds a fresh handle from its report");
@@ -1154,16 +1170,21 @@ fn re_anchor(object: &Object, op: &KernelOp, anchor: &Anchor) -> Result<KernelOp
             insert,
             remove,
             restore,
+            keep_vertices,
             ..
         } => Ok(KernelOp::RetraceFace {
             face: face(unknown_face_sticky)?,
             insert: insert.clone(),
             remove: remove.clone(),
             restore: restore.clone(),
+            keep_vertices: keep_vertices.clone(),
         }),
-        KernelOp::MergeFaces { .. } => match anchor {
+        KernelOp::MergeFaces { keep_vertices, .. } => match anchor {
             Anchor::Edge { a, b } => resolve_edge(object, *a, *b)
-                .map(|edge| KernelOp::MergeFaces { edge })
+                .map(|edge| KernelOp::MergeFaces {
+                    edge,
+                    keep_vertices: keep_vertices.clone(),
+                })
                 .ok_or(KernelOpError::Sticky(StickyError::UnknownEdge)),
             Anchor::Face(_) => Err(KernelOpError::Sticky(StickyError::UnknownEdge)),
         },
@@ -1221,8 +1242,11 @@ fn dispatch(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport, Kernel
             .split_face_impl(*face, path, restore.as_deref().copied(), curves)
             .map(KernelOpReport::FaceSplit)
             .map_err(KernelOpError::Sticky),
-        KernelOp::MergeFaces { edge } => object
-            .merge_faces(*edge)
+        KernelOp::MergeFaces {
+            edge,
+            keep_vertices,
+        } => object
+            .merge_faces_keeping(*edge, keep_vertices)
             .map(KernelOpReport::FaceMerge)
             .map_err(KernelOpError::Sticky),
         KernelOp::SplitFaceInner {
@@ -1260,8 +1284,9 @@ fn dispatch(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport, Kernel
             insert,
             remove,
             restore,
+            keep_vertices,
         } => object
-            .retrace_face_impl(*face, insert, remove, restore, None)
+            .retrace_face_impl(*face, insert, remove, restore, None, keep_vertices)
             .map(KernelOpReport::FaceRetrace)
             .map_err(KernelOpError::Sticky),
     }
@@ -1307,6 +1332,9 @@ fn derive_inverse(
         }
         (KernelOp::SplitFace { .. }, KernelOpReport::FaceSplit(r)) => KernelOp::MergeFaces {
             edge: r.new_edges[0],
+            // An end the split met at a vertex already there stays: only
+            // the points it split into the boundary heal.
+            keep_vertices: r.vertex_ends.clone(),
         },
         (KernelOp::MergeFaces { .. }, KernelOpReport::FaceMerge(r)) => {
             let mut runs = pre_merge_path
@@ -1328,6 +1356,7 @@ fn derive_inverse(
                         .collect(),
                     remove: Vec::new(),
                     restore: r.prior_attrs.iter().flatten().copied().collect(),
+                    keep_vertices: Vec::new(),
                 };
             }
             let (path, curves) = runs.pop().unwrap_or_default();
@@ -1390,6 +1419,9 @@ fn derive_inverse(
                 insert: r.removed.clone(),
                 remove: r.inserted.iter().map(|p| p.path.clone()).collect(),
                 restore: r.prior_attrs.clone(),
+                // An end the forward insert met at a vertex already there
+                // stays: only the points it split into the boundary heal.
+                keep_vertices: r.vertex_ends.clone(),
             }
         }
         _ => panic!("derive_inverse: op and report type mismatch — kernel bug"),
@@ -1917,6 +1949,7 @@ mod tests {
                 &mut cube,
                 KernelOp::MergeFaces {
                     edge: split_report.new_edges[0],
+                    keep_vertices: Vec::new(),
                 },
             )
             .unwrap();

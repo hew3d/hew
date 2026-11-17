@@ -455,6 +455,7 @@ fn heal_keeps_the_incoming_edges_dictionary() {
         id,
         KernelOp::MergeFaces {
             edge: r.new_edges[0],
+            keep_vertices: Vec::new(),
         },
     )
     .unwrap();
@@ -646,6 +647,7 @@ fn retrace_splits_inherit_and_a_retrace_merge_keeps_the_survivors() {
                 }],
                 remove: Vec::new(),
                 restore: Vec::new(),
+                keep_vertices: Vec::new(),
             },
         )
         .unwrap();
@@ -669,6 +671,7 @@ fn retrace_splits_inherit_and_a_retrace_merge_keeps_the_survivors() {
                 insert: Vec::new(),
                 remove: vec![path],
                 restore: Vec::new(),
+                keep_vertices: Vec::new(),
             },
         )
         .unwrap();
@@ -712,6 +715,7 @@ fn a_merge_keeps_face_as_and_undo_restores_the_other_side() {
             id,
             KernelOp::MergeFaces {
                 edge: r.new_edges[0],
+                keep_vertices: Vec::new(),
             },
         )
         .unwrap();
@@ -1487,7 +1491,13 @@ fn a_merge_into_a_hole_keeps_the_owners_and_undo_restores_the_inner() {
         .unwrap();
     let side = edge_between(obj(&doc, id), ring[3], ring[0]);
     let (report, _) = doc
-        .apply_object_op(id, KernelOp::MergeFaces { edge: side })
+        .apply_object_op(
+            id,
+            KernelOp::MergeFaces {
+                edge: side,
+                keep_vertices: Vec::new(),
+            },
+        )
         .unwrap();
     let KernelOpReport::FaceMerge(m) = report else {
         panic!("merge report")

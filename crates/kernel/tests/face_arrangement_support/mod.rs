@@ -1049,7 +1049,13 @@ pub fn split_and_check(w: &mut Wall, face: FaceId, path: Vec<Point3>) -> FaceSpl
 pub fn merge_and_check(w: &mut Wall, edge: EdgeId) -> kernel::FaceMergeReport {
     let before = w.obj().clone();
     let run = run_segments(&before, edge);
-    let report = apply_and_check(w, KernelOp::MergeFaces { edge });
+    let report = apply_and_check(
+        w,
+        KernelOp::MergeFaces {
+            edge,
+            keep_vertices: Vec::new(),
+        },
+    );
     assert_group_matches_ground(w, &ground_edit(w.plane, &before, &[], &run));
     match report {
         KernelOpReport::FaceMerge(r) => r,

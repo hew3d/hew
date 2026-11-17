@@ -651,7 +651,13 @@ fn merging_a_clipped_tangent_disc_across_its_arc_undoes_and_redoes() {
     let id = w.id;
     let edge = arc_edge(w.obj(), disc, parent);
     w.doc
-        .apply_object_op(id, KernelOp::MergeFaces { edge })
+        .apply_object_op(
+            id,
+            KernelOp::MergeFaces {
+                edge,
+                keep_vertices: Vec::new(),
+            },
+        )
         .expect("the disc merges into the parent");
     let obj = w.obj();
     obj.validate().expect("valid after the merge");

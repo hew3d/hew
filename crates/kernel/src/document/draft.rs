@@ -4568,6 +4568,7 @@ fn plan_topology(
             insert,
             remove,
             restore: Vec::new(),
+            keep_vertices: Vec::new(),
         });
     }
     Ok(ops)

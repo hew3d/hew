@@ -3481,6 +3481,7 @@ fn apply_doc_op(
                     oid,
                     KernelOp::MergeFaces {
                         edge: r.new_edges[0],
+                        keep_vertices: Vec::new(),
                     },
                 );
                 assert!(
@@ -3630,7 +3631,13 @@ fn apply_doc_op(
                     })
                 })
                 .expect("the strip's line");
-            let merged = doc.apply_object_op(oid, KernelOp::MergeFaces { edge });
+            let merged = doc.apply_object_op(
+                oid,
+                KernelOp::MergeFaces {
+                    edge,
+                    keep_vertices: Vec::new(),
+                },
+            );
             assert!(
                 merged.is_ok(),
                 "step {step}: deleting the strip's line (two runs) was refused: {:?}",
@@ -3864,7 +3871,13 @@ fn apply_doc_op(
             let Some(edge) = nth(&candidates, *edge_sel) else {
                 return Ok(true);
             };
-            let result = doc.apply_object_op(oid, KernelOp::MergeFaces { edge });
+            let result = doc.apply_object_op(
+                oid,
+                KernelOp::MergeFaces {
+                    edge,
+                    keep_vertices: Vec::new(),
+                },
+            );
             // Refusals (an imprint's whole outline, faces that would pinch)
             // are typed answers. A committed merge never pinches its face.
             if let Ok((kernel::KernelOpReport::FaceMerge(r), _)) = &result {

@@ -1225,3 +1225,41 @@ fn nested_copy_inside_a_surfaced_group_renders_the_outer_frame() {
     check_reopens(&doc, 0, &Op::CloseSession).unwrap();
     check_sibling_render(&doc, 0, &Op::CloseSession).unwrap();
 }
+
+/// A diagonal drawn across a box's side passes a corner of a face box
+/// drawn against that side, so it lands as two collinear edges meeting at
+/// that corner; a rectangle drawn later on the same side runs one edge from
+/// that joint up to the box's top. One undo of the rectangle gives the
+/// diagonal back as the two edges it was (the joint is not healed away),
+/// and one redo draws the rectangle again. (The group session opens on
+/// nothing, and the explode only adds an object; both are kept as found.)
+#[test]
+fn a_rectangle_from_the_joint_of_a_split_diagonal_undoes_exactly() {
+    let ops = vec![
+        Op::MakeComponent {
+            sel: 78530323837611835,
+        },
+        Op::OpenGroupSession { sel: 0 },
+        Op::FaceBox {
+            at: 180,
+            detached: true,
+        },
+        Op::Line3D {
+            a: 17466740122684460622,
+            b: 326555661605004685,
+            tilt: 2,
+            detached: false,
+        },
+        Op::Explode { sel: 195343 },
+        Op::FaceBox {
+            at: 108,
+            detached: true,
+        },
+        Op::Rect3D {
+            a: 7346897907336210354,
+            b: 16510158797029363534,
+            flip: true,
+        },
+    ];
+    run_case(3, ops).unwrap();
+}
