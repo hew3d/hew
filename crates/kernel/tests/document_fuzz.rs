@@ -2791,12 +2791,19 @@ fn apply_edit_detached(
                     return Ok(());
                 }
                 let unit = &units.units[sel % units.units.len()];
+                // A listed edge that another detached sketch's line from
+                // another plane crosses in the lift is there as the pieces
+                // that cover it end to end (`Document::draft_edges_for_keys`,
+                // how a draft names it): the listing gathers no such line,
+                // the draft's lift does.
                 let es: Vec<_> = unit
                     .edges
                     .iter()
-                    .map(|e| {
-                        w.edge_at_positions(e.a, e.b)
-                            .expect("a listed edge is in the lift")
+                    .flat_map(|e| {
+                        w.edge_at_positions(e.a, e.b).map_or_else(
+                            || pieces_covering(w, e.a, e.b).expect("a listed edge is in the lift"),
+                            |id| vec![id],
+                        )
                     })
                     .collect();
                 for e in &unit.edges {
