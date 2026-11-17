@@ -52,11 +52,11 @@ jobs:
     if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: packaging/scripts/render-templates.sh "$TAG"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rendered-packaging
           path: packaging/
@@ -70,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: rendered-packaging
           path: packaging/
@@ -88,7 +88,7 @@ jobs:
           keyid="$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1=="sec"{print $5; exit}')"
           cd pacman-out
           repo-add -s -k "$keyid" hew.db.tar.gz ./*.pkg.tar.zst
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pacman-x86_64
           path: pacman-out/
@@ -98,7 +98,7 @@ jobs:
     needs: render
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: rendered-packaging
           path: packaging/
@@ -122,7 +122,7 @@ jobs:
           packaging/scripts/build-flatpak-repo.sh \
             flatpak-out/repo flatpak-out/hew.flatpak \
             https://hew3d.github.io/hew-packages
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: flatpak-repo
           path: flatpak-out/
@@ -133,7 +133,7 @@ jobs:
     runs-on: ubuntu-latest
     container: gentoo/stage3:latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: rendered-packaging
           path: packaging/
@@ -146,15 +146,15 @@ jobs:
     needs: [pacman, flatpak]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: pacman-x86_64
           path: layout/pacman/x86_64
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: flatpak-repo
           path: layout/flatpak-staged
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           sparse-checkout: packaging/pages
           path: source
@@ -197,7 +197,7 @@ jobs:
     continue-on-error: true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           sparse-checkout: packaging/scripts
       - name: Install Flatpak
@@ -214,7 +214,7 @@ jobs:
     needs: [render, gentoo-validate]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: rendered-packaging
           path: packaging/
@@ -241,7 +241,7 @@ jobs:
     needs: render
     runs-on: macos-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: rendered-packaging
           path: packaging/
@@ -258,7 +258,7 @@ jobs:
     needs: [render, homebrew-validate]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: rendered-packaging
           path: packaging/
