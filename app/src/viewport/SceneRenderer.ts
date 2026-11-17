@@ -42,6 +42,7 @@ import {
 import { invalidatePlaneUnits, readPlaneUnits } from '../tools/planeUnits'
 import { readPreviewTint } from '../tools/previewTint'
 import { DEPTH_BIAS } from './depthPolicy'
+import { mapThroughPose, trianglesInVertexRange, triangulatePlanarLoop } from './faceCueGeometry'
 import { drawKindFor, type DrawKind } from './drawKind'
 import type { HealthOverlay } from '../health/healthReport'
 import type { IsolationFade } from './isolation'
@@ -3195,47 +3196,16 @@ export class SceneRenderer {
     const n = Math.floor(boundary.length / 3)
     if (n < 3) return null
 
-    const verts3: THREE.Vector3[] = []
-    for (let i = 0; i < n; i++) {
-      verts3.push(new THREE.Vector3(boundary[i * 3], boundary[i * 3 + 1], boundary[i * 3 + 2]))
-    }
-
-    // Robust planar triangulation. The old code fanned from vertex 0, which is
-    // only correct for CONVEX polygons — a non-convex region (an L-shaped or
-    // freehand polyline sketch) produced overlapping/absent triangles, so its
-    // fill "only sometimes" appeared (Refinement pass). Newell's method gives
-    // the polygon normal (works on the ground OR on a face), we project into
-    // that plane, ear-clip via THREE.ShapeUtils, then emit triangles at the
-    // original 3D verts — exactly in the region's plane. (A former +1mm lift
-    // along the normal, there to dodge z-fighting, made ground fills visibly
-    // float at cm scale; the REGION_FILL depth bias below replaces it.)
-    const normal = new THREE.Vector3()
-    for (let i = 0; i < n; i++) {
-      const cur = verts3[i]
-      const nxt = verts3[(i + 1) % n]
-      normal.x += (cur.y - nxt.y) * (cur.z + nxt.z)
-      normal.y += (cur.z - nxt.z) * (cur.x + nxt.x)
-      normal.z += (cur.x - nxt.x) * (cur.y + nxt.y)
-    }
-    if (normal.lengthSq() < 1e-12) return null
-    normal.normalize()
-
-    const u = new THREE.Vector3()
-    if (Math.abs(normal.z) < 0.9) u.set(0, 0, 1).cross(normal).normalize()
-    else u.set(1, 0, 0).cross(normal).normalize()
-    const v = new THREE.Vector3().crossVectors(normal, u).normalize()
-
-    const pts2 = verts3.map((p) => new THREE.Vector2(p.dot(u), p.dot(v)))
-    const tris = THREE.ShapeUtils.triangulateShape(pts2, [])
-
-    const positions: number[] = []
-    for (const tri of tris) {
-      for (const idx of tri) {
-        const p = verts3[idx]
-        positions.push(p.x, p.y, p.z)
-      }
-    }
-    if (positions.length === 0) return null
+    // Robust planar triangulation (`triangulatePlanarLoop`): the old code
+    // fanned from vertex 0, which is only correct for CONVEX polygons — a
+    // non-convex region (an L-shaped or freehand polyline sketch) produced
+    // overlapping/absent triangles, so its fill "only sometimes" appeared
+    // (Refinement pass). Triangles land at the original 3D verts — exactly
+    // in the region's plane. (A former +1mm lift along the normal, there to
+    // dodge z-fighting, made ground fills visibly float at cm scale; the
+    // REGION_FILL depth bias below replaces it.)
+    const positions = triangulatePlanarLoop(boundary)
+    if (positions === null) return null
 
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
@@ -6327,6 +6297,92 @@ export class SceneRenderer {
     geo.clearGroups()
     for (const g of groups) geo.addGroup(g.start, g.count, g.materialIndex)
     return true
+  }
+
+  /**
+   * Where a leaf member is drawn under `instanceId`: the outer instance pose
+   * times the placement's definition-local pose (identity for a flat
+   * definition), as a row-major 3x4. `undefined` when the instance has no
+   * placement of that member (the caller falls back to the instance pose);
+   * `null` when the member is placed more than once at different poses, since
+   * the pick names only the instance and a cue must not guess which copy
+   * (a missing cue beats a misplaced one).
+   */
+  memberPlacementPose(memberId: bigint, instanceId: bigint): number[] | null | undefined {
+    const rec = this.instanceRecords.get(instanceId)
+    if (rec === undefined) return undefined
+    let local: THREE.Matrix4 | null = null
+    for (const placement of rec.placements) {
+      if (placement.memberId !== memberId || !placement.shown) continue
+      if (local === null) local = placement.localMatrix
+      else if (!local.equals(placement.localMatrix)) return null
+    }
+    if (local === null) return undefined
+    const e = new THREE.Matrix4().multiplyMatrices(rec.matrix, local).elements
+    // Column-major 4x4 to the row-major 3x4 `mapThroughPose` takes.
+    return [e[0], e[4], e[8], e[12], e[1], e[5], e[9], e[13], e[2], e[6], e[10], e[14]]
+  }
+
+  /**
+   * The triangles of one object face as drawn right now, flat `x,y,z`
+   * triples in WORLD space, for the face cue (`FaceCueLayer`). The
+   * `[base, count]` vertex range comes from `face_mesh_range`; the positions
+   * are copied out of the buffers the renderer already holds: the object's
+   * own geometry for a world object, or the shared member cache for a
+   * component member (definition-local, mapped through `instanceId`'s pose).
+   * `null` for anything it cannot answer (a stale handle, a hidden or
+   * un-drawn object, a range over the cue's vertex cap): the cue then draws
+   * the outline alone, or nothing.
+   */
+  faceTrianglePositions(objectId: bigint, faceId: bigint, instanceId: bigint | null): Float32Array | null {
+    const range = this.wasmScene.face_mesh_range(objectId, faceId)
+    if (range === undefined) return null
+    const base = range[0]
+    const count = range[1]
+    if (instanceId === null || !this.memberGeometryCache.has(objectId)) {
+      const wg = this.objectGroups.get(objectId)
+      if (wg === undefined) return null
+      const geo = wg.facesMesh.geometry
+      const pos = geo.getAttribute('position') as THREE.BufferAttribute | undefined
+      const index = geo.getIndex()
+      if (pos === undefined || index === null) return null
+      const tris = trianglesInVertexRange(pos.array as ArrayLike<number>, index.array as ArrayLike<number>, base, count)
+      if (tris === null) return null
+      wg.facesMesh.updateWorldMatrix(true, false)
+      const m = wg.facesMesh.matrixWorld
+      if (m.equals(new THREE.Matrix4())) return tris
+      // Column-major 4x4 to the row-major 3x4 `mapThroughPose` takes.
+      const e = m.elements
+      return mapThroughPose(tris, [e[0], e[4], e[8], e[12], e[1], e[5], e[9], e[13], e[2], e[6], e[10], e[14]])
+    }
+    // The member is drawn at its PLACEMENT's pose, not the outer instance's.
+    const placed = this.memberPlacementPose(objectId, instanceId)
+    if (placed === null) return null
+    const pose = placed ?? this.wasmScene.instance_pose(instanceId)
+    const cached = this.memberGeometryCache.get(objectId)?.values().next().value
+    if (pose === undefined || cached === undefined) return null
+    const tris = trianglesInVertexRange(cached.positions, cached.indices, base, count)
+    return tris === null ? null : mapThroughPose(tris, pose)
+  }
+
+  /**
+   * The triangles of one sketch region, flat `x,y,z` triples in WORLD space,
+   * for the face cue: the region's own fill mesh when it has one (a world
+   * sketch), otherwise a triangulation of `region_boundary` (a definition-
+   * owned sketch's is definition-local, mapped through `instanceId`'s pose).
+   * `null` for a stale region or a degenerate loop.
+   */
+  regionTrianglePositions(sketchId: bigint, regionId: bigint, instanceId: bigint | null): Float32Array | null {
+    if (instanceId === null) {
+      const mesh = this.sketchRegionMeshes.get(`${sketchId}:${regionId}`)
+      const pos = mesh?.geometry.getAttribute('position') as THREE.BufferAttribute | undefined
+      if (pos !== undefined) return new Float32Array(pos.array as ArrayLike<number>)
+    }
+    const tris = triangulatePlanarLoop(this.wasmScene.region_boundary(sketchId, regionId))
+    if (tris === null) return null
+    if (instanceId === null) return new Float32Array(tris)
+    const pose = this.wasmScene.instance_pose(instanceId)
+    return pose === undefined ? null : mapThroughPose(tris, pose)
   }
 
   /** Undoes `setFaceMask`: the object draws its full index buffer again. */

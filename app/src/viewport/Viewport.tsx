@@ -49,6 +49,8 @@ import type { HealthOverlay } from '../health/healthReport'
 import { CueLayer } from './CueLayer'
 import { SiblingPreviewMirror } from './siblingPreview'
 import { DrawPlaneCueLayer, planeCueFor, type PlaneCueSpec } from './DrawPlaneCueLayer'
+import { FaceCueLayer, type FaceCueShown, type FaceCueSource } from './FaceCueLayer'
+import { mapThroughPose } from './faceCueGeometry'
 import { pipArrowKey, type DrawPlaneState, type PlanePip } from '../tools/drawPlane'
 import { soleGuideTarget } from '../tools/guideTarget'
 import { viewTurnEye, viewTurnRotation } from './viewTurn'
@@ -207,7 +209,7 @@ import { buildShopGradientTextureFromToken } from './shopGradientBackground'
 import { readAppliedTheme } from '../theme/applyTheme'
 import { setPickAperture, setPickRenderMode } from '../tools/pickPolicy'
 import { pushActiveScope } from './pickScope'
-import { followsViewPlane, leftCanvasBounds, replaysWithoutSnap, shouldReplayHeldPointer } from './heldPointerReplay'
+import { followsViewPlane, hoversFace, leftCanvasBounds, replaysWithoutSnap, shouldReplayHeldPointer } from './heldPointerReplay'
 import { getLengthSystem, getLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit } from '../settings/units'
 import type { EnterOutcome } from '../api/liveBridge'
 import { InfiniteGrid } from './InfiniteGrid'
@@ -1130,6 +1132,8 @@ export interface ViewportApi {
    *  (`DrawPlaneCueLayer.current`: a face outline or the small patch), or
    *  null when none shows. */
   getDrawPlaneCue: () => { kind: 'outline' | 'patch'; normal: [number, number, number]; through: [number, number, number]; held: boolean } | null
+  /** The face cue drawn right now (`FaceCueLayer.current`), or null. */
+  getFaceCue: () => FaceCueShown | null
 
   /**
    * The active tool's drawing-plane state (`Tool.drawPlaneState`, the
@@ -2890,6 +2894,8 @@ export default function Viewport({
   // effect below reach it too, to clear a stale cue on context change
   // (Blocker 3, the sketch-planes design §6 bullet 1).
   const drawPlaneCueLayerRef = useRef<DrawPlaneCueLayer | null>(null)
+  const faceCueLayerRef = useRef<FaceCueLayer | null>(null)
+  const updateFaceCueRef = useRef<((tool: Tool) => void) | null>(null)
 
   // Tool instances are created inside the effect, but we need to be able to
   // switch them from outside (via activeToolProp). Use a ref for the switch fn.
@@ -3217,6 +3223,10 @@ export default function Viewport({
       // parity.md Finding 2) — re-apply it so a context already active when
       // the toggle fires reads correctly right away.
       sceneRendererRef.current?.refreshThemeDependentIsolation()
+      // A face cue resting under the pointer re-reads its theme-tuned tint
+      // (its rebuild key carries the theme).
+      const themedTool = toolControllerRef.current?.activeTool
+      if (themedTool !== undefined) updateFaceCueRef.current?.(themedTool)
       scheduleRenderRef.current()
     })
 
@@ -3260,6 +3270,32 @@ export default function Viewport({
     const drawPlaneCueLayer = new DrawPlaneCueLayer()
     threeScene.add(drawPlaneCueLayer.group)
     drawPlaneCueLayerRef.current = drawPlaneCueLayer
+    // The face a click would act on, lit while a tool is idle over it
+    // (`Tool.hoverFace`, OW-14). Purely visual — see FaceCueLayer.ts.
+    const faceCueLayer = new FaceCueLayer()
+    threeScene.add(faceCueLayer.group)
+    faceCueLayerRef.current = faceCueLayer
+    const outlineThroughPose = (loop: ArrayLike<number>, instance: bigint | null, member: bigint | null = null): Float32Array | null => {
+      if (instance === null) return new Float32Array(loop)
+      // A leaf member is drawn at its placement's pose (outer instance pose
+      // times its definition-local pose); `null` there means the placement
+      // is ambiguous, so no outline rather than a misplaced one.
+      const placed = member === null ? undefined : sceneRenderer.memberPlacementPose(member, instance)
+      if (placed === null) return null
+      const pose = placed ?? wasmScene.instance_pose(instance)
+      return pose === undefined ? null : mapThroughPose(loop, pose)
+    }
+    const faceCueSource: FaceCueSource = {
+      faceTriangles: (o, f, i) => sceneRenderer.faceTrianglePositions(o, f, i),
+      regionTriangles: (sk, r, i) => sceneRenderer.regionTrianglePositions(sk, r, i),
+      faceOutline: (o, f, i) => outlineThroughPose(wasmScene.face_boundary(o, f), i, i === null ? null : o),
+      regionOutline: (sk, r, i) => outlineThroughPose(wasmScene.region_boundary(sk, r), i),
+    }
+    /** Re-light (or clear) the face cue from the tool's own answer. */
+    function updateFaceCue(tool: Tool): void {
+      faceCueLayer.update(tool.hoverFace?.() ?? null, faceCueSource)
+    }
+    updateFaceCueRef.current = updateFaceCue
     // The held-pointer replay after a document mutation (`queueMutationReplay`):
     // one queued at a time, none after teardown (`queueHoverRepick` shares
     // the teardown flag).
@@ -3272,6 +3308,12 @@ export default function Viewport({
     // just-changed lock, pin or hover is reflected.
     function queryDrawPlaneCue(tool: Tool): PlaneCueSpec | null {
       return planeCueFor(tool.drawPlaneState?.() ?? null)
+    }
+    /** Refresh both pointer-following cues from the tool's state: the
+     *  drawing-plane cue and the face cue (`Tool.hoverFace`). */
+    function updatePointerCues(tool: Tool): void {
+      drawPlaneCueLayer.update(queryDrawPlaneCue(tool))
+      updateFaceCue(tool)
     }
 
     // ---- The view die's pips (view-die design §3): state, clicks, changes.
@@ -3327,7 +3369,7 @@ export default function Viewport({
       // held-pointer replay declines, and a gesture's preview follows on the
       // pointer's return.
       if (!capturing && followsViewPlane(tool)) reResolveAtHeldPointer()
-      drawPlaneCueLayer.update(queryDrawPlaneCue(tool))
+      updatePointerCues(tool)
       reportToolHint()
       scheduleRender()
       notifyDrawPlaneState()
@@ -5620,6 +5662,10 @@ export default function Viewport({
       // closed): a mirrored gesture still in flight re-reads its sibling
       // frames on the next sync rather than drawing at stale poses.
       siblingPreview.invalidate()
+      // The lit face's triangles are about to be rebuilt: the cue drawn from
+      // the old ones goes, and the replay below re-lights what is under the
+      // pointer now.
+      faceCueLayer.clear()
       const wtMap = touched !== undefined
         ? sceneRenderer.refreshTouched(touched)
         : sceneRenderer.refresh()
@@ -5676,7 +5722,7 @@ export default function Viewport({
         mutationReplayQueued = false
         if (mutationReplayDisposed) return
         const tool = toolController.activeTool
-        if (!followsViewPlane(tool) || toolHasArmedGesture(tool)) return
+        if (!(followsViewPlane(tool) || hoversFace(tool)) || toolHasArmedGesture(tool)) return
         reResolveAtHeldPointer()
       })
     }
@@ -6675,6 +6721,7 @@ export default function Viewport({
       // plane lock) — the drawing-plane cue, if any was showing, no longer
       // applies (design §6 bullet 1).
       drawPlaneCueLayer.clear()
+      faceCueLayer.clear()
       // The reset silently rewound the tool to idle — without a re-poll the
       // status bar would keep the mid-gesture hint until the next mouse move.
       reportToolHint()
@@ -7249,7 +7296,7 @@ export default function Viewport({
           dirLight,
           lightRig: MODEL_LIGHT_RIG.light,
           gridAxes: [infiniteGrid.mesh, originAxes],
-          hideAlways: [partAxesRoot, cueLayer.group, drawPlaneCueLayer.group, previewGroup, siblingPreviewGroup, sceneRenderer.sectionGroup],
+          hideAlways: [partAxesRoot, cueLayer.group, drawPlaneCueLayer.group, faceCueLayer.group, previewGroup, siblingPreviewGroup, sceneRenderer.sectionGroup],
           viewportCssSize: () => ({ width: el.clientWidth, height: el.clientHeight }),
           liveTheme: () => readAppliedTheme(),
           liveSection: () => getSectionState(),
@@ -7345,12 +7392,16 @@ export default function Viewport({
       siblingPreview.sync()
       // The transform tools' hover highlight is pre-click feedback, not the
       // model: a Scene thumbnail or an API capture leaves it out.
+      // The face cue (OW-14) is the same kind of feedback.
       const hoverWasVisible = sceneRenderer.hoverGroup.visible
+      const faceCueWasVisible = faceCueLayer.group.visible
       sceneRenderer.hoverGroup.visible = false
+      faceCueLayer.group.visible = false
       try {
         renderer.render(threeScene, camera)
       } finally {
         sceneRenderer.hoverGroup.visible = hoverWasVisible
+        faceCueLayer.group.visible = faceCueWasVisible
       }
       const gl = renderer.getContext()
       const width = gl.drawingBufferWidth
@@ -7684,6 +7735,7 @@ export default function Viewport({
       const viewRay = heldButtons === 0 ? heldPointerRay() : undefined
       const viewTool = toolControllerRef.current?.activeTool
       if (viewTool?.onViewChanged !== undefined) viewTool.onViewChanged(viewRay)
+      if (viewTool?.hoverFace !== undefined) updateFaceCue(viewTool)
       refreshAcquireHover(viewRay)
       if (cameraSettledTimer !== null) clearTimeout(cameraSettledTimer)
       cameraSettledTimer = setTimeout(() => {
@@ -7691,7 +7743,10 @@ export default function Viewport({
         // The view stopped under a still cursor: a draw tool's idle plane
         // follows the camera (view-plane inference), so its hover is
         // replayed at the held pointer for the camera as it now stands.
-        if (followsViewPlane(toolController.activeTool)) reResolveAtHeldPointer()
+        const settled = toolController.activeTool
+        // A face-lighting tool is replayed only while idle: mid-pull its
+        // ghost and typed distance are the gesture's, not a hover's.
+        if (followsViewPlane(settled) || (hoversFace(settled) && !toolHasArmedGesture(settled))) reResolveAtHeldPointer()
         onCameraSettledRef.current?.()
       }, 250)
     }
@@ -7876,6 +7931,8 @@ export default function Viewport({
       }
       // A hovered target hidden (or one shown) under a parked cursor: re-pick.
       queueHoverRepick()
+      // A face cue resting on what just went away re-resolves at the held pointer.
+      queueMutationReplay()
       // A part hidden, shown, or isolated away loses or regains its triad.
       rebuildPartAxes()
       scheduleRender()
@@ -8374,7 +8431,7 @@ export default function Viewport({
       apiRefRef.current.current = { runBoolean, operandTriangles, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runFlipAlong, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setViewDirection, orbitDrag, endOrbitDrag, subscribeCameraOrientation, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => {
         const isolation = isolationCtl.state()
         return isolation === null ? null : [...isolation.targets]
-      }, collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, getHoverHighlight: () => sceneRenderer.getHoverHighlight(), rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setPartAxesVisible, getPartAxesInfo, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, setTangentEdgesVisible, getTangentEdgeInfo: () => sceneRenderer.getTangentEdgeInfo(), deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getInstanceRenderedInherited: (id: bigint) => sceneRenderer.debugInstanceInherited(id), getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
+      }, collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getFaceCue: () => faceCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, getHoverHighlight: () => sceneRenderer.getHoverHighlight(), rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setPartAxesVisible, getPartAxesInfo, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, setTangentEdgesVisible, getTangentEdgeInfo: () => sceneRenderer.getTangentEdgeInfo(), deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getInstanceRenderedInherited: (id: bigint) => sceneRenderer.debugInstanceInherited(id), getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
       apiRefRef.current.current.getCageOverlayInfo = () => sceneRenderer.getCageOverlayInfo()
     }
 
@@ -9373,6 +9430,7 @@ export default function Viewport({
       // The outgoing tool's drawing-plane cue (if any) no longer applies —
       // don't wait for the next pointer move to hide it (design §6 bullet 1).
       drawPlaneCueLayer.clear()
+      faceCueLayer.clear()
       scheduleRender()
     }
 
@@ -9828,7 +9886,7 @@ export default function Viewport({
           reResolveAtHeldPointer()
         } else {
           reportToolHint()
-          drawPlaneCueLayer.update(queryDrawPlaneCue(at))
+          updatePointerCues(at)
           scheduleRender()
         }
       }
@@ -10045,13 +10103,15 @@ export default function Viewport({
       if ('toggleExtrudeAsNew' in armedTool) {
         (armedTool as { toggleExtrudeAsNew(): void }).toggleExtrudeAsNew()
         reportToolHint()
+        // The face cue recolors at once: orange pushes the face, blue makes a new object.
+        updateFaceCue(armedTool)
         scheduleRender()
       } else if ('toggleDetached' in armedTool) {
         // Alt held while Ctrl/Cmd releases is the precision-snap chord, not a tap.
         if (ev.altKey) return
         (armedTool as { toggleDetached(): void }).toggleDetached()
         reportToolHint()
-        drawPlaneCueLayer.update(queryDrawPlaneCue(armedTool))
+        updatePointerCues(armedTool)
         scheduleRender()
       }
     }
@@ -10301,7 +10361,7 @@ export default function Viewport({
       activeTool.onPointerMove(snap, ray)
       const cueSnap = toolSnapForCues(snap, activeTool)
       cueLayer.update(cueSnap, readOnlyRef.current, getDrawingAxes(wasmScene))
-      drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
+      updatePointerCues(activeTool)
       publishSnapCues(cueSnap, activeTool)
     }
     function onPrecisionKey(ev: KeyboardEvent): void {
@@ -10924,7 +10984,7 @@ export default function Viewport({
       // leaving the snap — and therefore its SnapDot/tooltip — intact).
       const cueSnap = toolSnapForCues(snap, activeTool)
       cueLayer.update(cueSnap, readOnlyRef.current, getDrawingAxes(wasmScene))
-      drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
+      updatePointerCues(activeTool)
       scheduleRender()
 
       publishSnapCues(cueSnap, activeTool, ev.buttons, ray)
@@ -11465,6 +11525,9 @@ export default function Viewport({
       const armedDrag = readOnlyRef.current
         ? (activeTool.onPointerDown(snap, ray), false)
         : dragCommitGate.press(activeTool, ev.pointerId, pressX, pressY, () => activeTool.onPointerDown(snap, ray))
+      // The press began (or refused) a gesture: the face cue follows the
+      // tool's answer at once (null once a pull is under way).
+      updateFaceCue(activeTool)
       if (armedDrag) {
         // Track the drag even when it leaves the canvas, so its release
         // still reaches onPointerUp (the dragMove precedent).
@@ -11783,7 +11846,7 @@ export default function Viewport({
           // its hover so the cue, the snap dot's ring and the chip's plane
           // word follow at once, as after any idle key.
           if (followsViewPlane(activeTool)) reResolveAtHeldPointer()
-          drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
+          updatePointerCues(activeTool)
           scheduleRender()
           return
         }
@@ -11804,7 +11867,7 @@ export default function Viewport({
           // its hover so the cue, the snap dot's ring and the chip's plane
           // word follow at once, as after any idle key.
           if (followsViewPlane(activeTool)) reResolveAtHeldPointer()
-          drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
+          updatePointerCues(activeTool)
           scheduleRender()
           return
         }
@@ -11847,7 +11910,10 @@ export default function Viewport({
             // the pointer-move path.
             const cueSnap = toolSnapForCues(snap, activeTool)
             cueLayer.update(cueSnap, readOnlyRef.current, getDrawingAxes(wasmScene))
-            drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
+            // Off the canvas nothing is hovered: the replay above must not
+            // leave a face-lighting tool with a hover the pointer is not on.
+            if (!pointerInsideCanvas && hoversFace(activeTool)) activeTool.onPointerLeave?.()
+            updatePointerCues(activeTool)
             // The snap dot's ring and the chip's plane word follow a re-lock
             // at once — while the pointer is still over the canvas (off it,
             // the chip is gone and a stale ray must not bring it back).
@@ -11909,7 +11975,7 @@ export default function Viewport({
         if (followsViewPlane(activeTool)) {
           reResolveAtHeldPointer()
         } else {
-          drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
+          updatePointerCues(activeTool)
         }
         // A tool may have restyled its gizmo in response (e.g. Rotate /
         // Protractor / Slice locking the axis with Shift or an arrow during
@@ -12067,7 +12133,7 @@ export default function Viewport({
           // A delivered drag is never half of a double-click, whatever the
           // multi-click tracker's own (wider, for touch) slop made of it.
           multiClick.reset()
-          drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
+          updatePointerCues(activeTool)
           scheduleRender()
         }
         return
@@ -12228,7 +12294,7 @@ export default function Viewport({
       const leftTool = toolController.activeTool
       leftTool.onPointerLeave?.()
       reportToolHint()
-      drawPlaneCueLayer.update(queryDrawPlaneCue(leftTool))
+      updatePointerCues(leftTool)
       scheduleRender()
       onInferenceChangeRef.current?.(null)
       refreshAcquireHover()
@@ -12965,12 +13031,15 @@ export default function Viewport({
       mutationReplayDisposed = true
       cueLayer.clear()
       drawPlaneCueLayer.clear()
+      faceCueLayer.clear()
       siblingPreview.end()
       sceneRenderer.dispose()
       toolControllerRef.current = null
       switchToolRef.current = null
       sceneRendererRef.current = null
       drawPlaneCueLayerRef.current = null
+      faceCueLayerRef.current = null
+      updateFaceCueRef.current = null
       if (customPipExpiryTimer !== null) clearTimeout(customPipExpiryTimer)
       if (apiRefRef.current !== undefined) {
         apiRefRef.current.current = null
@@ -13085,6 +13154,7 @@ export default function Viewport({
     // exiting an object) — don't wait for the next pointer move to hide it
     // (Blocker 3, mirrors the tool-switch clear above).
     drawPlaneCueLayerRef.current?.clear()
+    faceCueLayerRef.current?.clear()
     scheduleRenderRef.current()
   }, [activeContext, activeLitSet])
 

@@ -186,6 +186,17 @@ export interface ClickAcquire {
   nodes: boolean
 }
 
+/** A face or sketch region a tool is about to act on, plus what the click
+ *  does (`colorToken`, a preview theme token: orange for a push/pull of the
+ *  face's own solid, blue for a new object). Instances are the one the
+ *  target was picked THROUGH (null for a plain world object or sketch). */
+export interface HoverFace {
+  target:
+    | { kind: 'face'; object: bigint; face: bigint; instance: bigint | null }
+    | { kind: 'region'; sketch: bigint; region: bigint; instance: bigint | null }
+  colorToken: '--preview-pushpull' | '--preview-extrude-new'
+}
+
 /**
  * One active tool at a time. ToolController owns the routing; each method
  * is called with the resolved snap result (or null when snap is unavailable
@@ -326,6 +337,17 @@ export interface Tool {
    * refused. `null` (or absent) means nothing to explain right now.
    */
   hoverHint?(): string | null
+
+  /**
+   * (optional) The face or sketch region a click right now would act on,
+   * for the viewport's face cue (`FaceCueLayer`): tinted and outlined in the
+   * color that says what the click does. Push/Pull answers it while idle
+   * from the same resolver its click uses, so the cue cannot light one thing
+   * while the click takes another. `null` (or absent) lights nothing:
+   * nothing under the cursor, a face the tool refuses (`hoverHint` says
+   * why), or a gesture in progress.
+   */
+  hoverFace?(): HoverFace | null
 
   /**
    * (optional) The camera moved (a wheel zoom, a Scene tween, Fly) while the

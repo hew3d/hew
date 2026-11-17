@@ -3612,3 +3612,40 @@ describe('SceneRenderer — hover highlight (setHoverHighlight)', () => {
     expect(children[0]).toBeInstanceOf(LineSegments2)
   })
 })
+
+describe('SceneRenderer — the face cue of a component member (OW-14)', () => {
+  const OUTER = [1, 0, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0] // outer instance: +10 in x
+  const NESTED = [1, 0, 0, 0, 0, 1, 0, 5, 0, 0, 1, 0] // def-local placement: +5 in y
+
+  function cueRenderer(placements: { memberId: bigint; localPose: number[] }[]): SceneRenderer {
+    const scene = makeScene({
+      instances: { '10': { def: 100n, pose: OUTER, memberIds: [1n], memberWatertight: { '1': true }, placements } },
+    })
+    ;(scene as unknown as Record<string, unknown>).face_mesh_range = () => [0, 3]
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    return renderer
+  }
+
+  it('draws a flat definition\'s member at the instance pose', () => {
+    const r = cueRenderer([{ memberId: 1n, localPose: IDENTITY_LOCAL_POSE }])
+    const tris = r.faceTrianglePositions(1n, 7n, 10n)
+    expect(Array.from(tris ?? [])).toEqual([10, 0, 0, 11, 0, 0, 10, 1, 0])
+  })
+
+  it('draws a nested member at the instance pose times its definition-local pose', () => {
+    const r = cueRenderer([{ memberId: 1n, localPose: NESTED }])
+    const tris = r.faceTrianglePositions(1n, 7n, 10n)
+    expect(Array.from(tris ?? [])).toEqual([10, 5, 0, 11, 5, 0, 10, 6, 0])
+    expect(r.memberPlacementPose(1n, 10n)?.[7]).toBe(5)
+  })
+
+  it('draws nothing when the member is placed twice at different poses (the pick cannot say which)', () => {
+    const r = cueRenderer([
+      { memberId: 1n, localPose: IDENTITY_LOCAL_POSE },
+      { memberId: 1n, localPose: NESTED },
+    ])
+    expect(r.memberPlacementPose(1n, 10n)).toBeNull()
+    expect(r.faceTrianglePositions(1n, 7n, 10n)).toBeNull()
+  })
+})

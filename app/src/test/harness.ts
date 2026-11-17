@@ -1293,6 +1293,14 @@ export interface HewTestHarness {
    *  held weight; null when none shows. */
   getDrawPlaneCue(): { kind: 'outline' | 'patch'; normal: Vec3; through: Vec3; held: boolean } | null
 
+  /** The face cue the viewport lights right now (a tool's `hoverFace`: the
+   *  face or sketch region a click would act on), ids as decimal strings;
+   *  `owner` is the object (face) or sketch (region), `id` its face or
+   *  region, `instance` the one it was picked through, `color` the preview
+   *  theme token ('--preview-pushpull' orange, '--preview-extrude-new' blue);
+   *  null when none shows. */
+  getFaceCue(): { kind: 'face' | 'region'; owner: string; id: string; instance: string | null; color: string; tinted: boolean; outlined: boolean } | null
+
   /** The active draw tool's drawing-plane state (view die): its pip
    *  ('red' | 'green' | 'blue' | 'custom'), its hold ('inferred' | 'locked'
    *  | 'pinned' | 'anchored'), the plane's normal, and the hover kind (null
@@ -2998,6 +3006,22 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       return api.getDrawPlaneCue()
+    },
+
+    getFaceCue: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      const c = api.getFaceCue()
+      if (c === null) return null
+      return {
+        kind: c.kind,
+        owner: String(c.owner),
+        id: String(c.id),
+        instance: c.instance === null ? null : String(c.instance),
+        color: c.colorToken,
+        tinted: c.tinted,
+        outlined: c.outlined,
+      }
     },
 
     getDrawPlaneState: () => {

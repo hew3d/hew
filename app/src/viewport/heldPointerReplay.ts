@@ -52,6 +52,13 @@ export function followsViewPlane(tool: object): boolean {
   return (tool as { followsViewPlane?: unknown }).followsViewPlane === true
 }
 
+/** Whether `tool` lights what a click would act on (`Tool.hoverFace`): its
+ *  hover is re-resolved at the held pointer after a mutation or the camera
+ *  settling, so the face cue never shows a face the click would not take. */
+export function hoversFace(tool: object): boolean {
+  return typeof (tool as { hoverFace?: unknown }).hoverFace === 'function'
+}
+
 /** A screen-space drag tool (Look Around, Walk) has no world pick of its
  *  own: the replay hands it a null snap instead of resolving one, as the
  *  pointer-move path does. */
