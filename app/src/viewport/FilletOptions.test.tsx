@@ -23,10 +23,10 @@ afterEach(() => {
 describe('FilletOptions', () => {
   it('names the current profile and lists the four basic kinds', () => {
     render(<FilletOptions />)
-    expect(screen.getByRole('button', { name: /^More shapes/ })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
+    expect(screen.getByRole('button', { name: /^More tools/ })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
     for (const name of ['Round', 'Chamfer', 'Cove', 'Bullnose']) {
-      expect(screen.getByRole('menuitemradio', { name })).toBeTruthy()
+      expect(screen.getByRole('button', { name })).toBeTruthy()
     }
   })
 
@@ -43,8 +43,8 @@ describe('FilletOptions', () => {
     fireEvent.click(round)
     expect(getFilletSettings().profile.kind).toBe('round')
     // The menu keeps every entry.
-    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
-    expect(screen.getAllByRole('menuitemradio')).toHaveLength(4)
+    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
+    expect(screen.getByRole('group', { name: 'Quick edge shape' }).querySelectorAll('button')).toHaveLength(4)
   })
 
   it('the pills stay enabled over a drawn corner, and neither is pressed for Cove', () => {
@@ -72,29 +72,30 @@ describe('FilletOptions', () => {
       />,
     )
     act(() => setFilletCornerOnly(true))
-    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
     for (const name of ['Cove', 'Bullnose', 'Ogee']) {
-      const row = screen.getByRole('menuitemradio', { name }) as HTMLButtonElement
+      const row = screen.getByRole('button', { name }) as HTMLButtonElement
       expect(row.disabled).toBe(true)
       expect(row.title).toBe('Drawn corners can be rounded or chamfered.')
     }
-    expect((screen.getByRole('menuitem', { name: 'Save profile…' }) as HTMLButtonElement).disabled).toBe(false)
-    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Cove' }))
+    expect((screen.getByRole('button', { name: 'Save profile…' }) as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Cove' }))
     expect(getFilletSettings().profile.kind).toBe('round')
-    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Chamfer' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Chamfer' }))
     expect(getFilletSettings().profile.kind).toBe('chamfer')
     act(() => setFilletCornerOnly(false))
-    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
-    expect((screen.getByRole('menuitemradio', { name: 'Cove' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: 'Cove' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('picking a kind sets the session profile and closes the menu', () => {
+  it('picking a kind preserves inline expansion and collapsing preserves selection', () => {
     render(<FilletOptions />)
-    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
-    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Cove' }))
+    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cove' }))
     expect(getFilletSettings().profile.kind).toBe('cove')
-    expect(screen.queryByRole('menu')).toBeNull()
-    expect(screen.getByRole('button', { name: /^More shapes/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /^Less tools/ })).toHaveAttribute('aria-expanded', 'true')
+    fireEvent.click(screen.getByRole('button', { name: /^Less tools/ }))
+    expect(getFilletSettings().profile.kind).toBe('cove')
+    expect(screen.getByRole('button', { name: /^More tools/ })).toHaveAttribute('aria-expanded', 'false')
   })
 
   it('shows extra sections with badges, action rows and disabled rows', () => {
@@ -118,14 +119,12 @@ describe('FilletOptions', () => {
         ]}
       />,
     )
-    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
-    fireEvent.click(screen.getByRole('menuitemradio', { name: /Ogee/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Ogee/ }))
     expect(getFilletSettings().profile).toMatchObject({ kind: 'shape', id: 'builtin:ogee' })
-    fireEvent.click(screen.getByRole('button', { name: /Ogee/ }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Save profile…' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save profile…' }))
     expect(onSave).toHaveBeenCalledTimes(1)
-    fireEvent.click(screen.getByRole('button', { name: /Ogee/ }))
-    expect((screen.getByRole('menuitem', { name: 'Nope' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Nope' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('a disabled row carries its reason, and an empty section shows its hint', () => {
@@ -141,10 +140,10 @@ describe('FilletOptions', () => {
         ]}
       />,
     )
-    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
     expect(screen.getByText('No saved profiles yet.')).toBeTruthy()
     expect(screen.queryByText('Nothing')).toBeNull()
-    const save = screen.getByRole('menuitem', { name: 'Save profile…' }) as HTMLButtonElement
+    const save = screen.getByRole('button', { name: 'Save profile…' }) as HTMLButtonElement
     expect(save.disabled).toBe(true)
     expect(save.title).toBe('Select a chain first.')
   })
@@ -335,18 +334,16 @@ describe('FilletOptions rows and field editing', () => {
     expect(document.activeElement).toBe(field)
   })
 
-  it('offers all four quick shapes and restores menu dismissal on outside press and Escape', () => {
+  it('keeps inline shapes open after selection and outside presses', () => {
     render(<FilletOptions />)
     for (const name of ['Round', 'Chamfer', 'Cove', 'Bullnose']) {
       fireEvent.click(screen.getByRole('button', { name }))
       expect(screen.getByRole('button', { name })).toHaveAttribute('aria-pressed', 'true')
+      expect(screen.getByRole('button', { name }).querySelector('svg path')).toBeTruthy()
     }
-    const more = screen.getByRole('button', { name: /^More shapes/ })
-    fireEvent.click(more)
+    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
     fireEvent.pointerDown(document.body)
-    expect(screen.queryByRole('menu')).toBeNull()
-    fireEvent.click(more)
-    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.getByRole('button', { name: /^Less tools/ })).toHaveAttribute('aria-expanded', 'true')
     expect(screen.queryByRole('menu')).toBeNull()
   })
 
@@ -356,10 +353,15 @@ describe('FilletOptions rows and field editing', () => {
     render(<FilletOptions sections={[{ id: 'library', heading: 'My profiles', items: [
       { id: 'mine', label: 'My curve', profile, thumbnail: 'data:image/png;base64,AA==' },
     ] }]} />)
-    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
-    const row = screen.getByRole('menuitemradio', { name: 'My curve' })
-    expect(row).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
+    const row = screen.getByRole('button', { name: 'My curve' })
+    expect(row).toHaveAttribute('aria-pressed', 'true')
     expect(row.querySelector('img')).toHaveAttribute('width', '32')
+    fireEvent.click(screen.getByRole('button', { name: /^Less tools/ }))
+    expect(screen.getByRole('status')).toHaveTextContent('My curve')
+    expect(getFilletSettings().profile).toEqual(profile)
+    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
+    expect(screen.getByRole('button', { name: 'My curve' })).toHaveAttribute('aria-pressed', 'true')
     fireEvent.click(screen.getByRole('button', { name: 'About Shape' }))
     expect(screen.getByRole('note')).toHaveTextContent('Choose the shape of the edge.')
   })

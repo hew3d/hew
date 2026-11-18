@@ -1,5 +1,6 @@
 /* oxlint-disable lingui/no-unlocalized-strings -- True Curves strings are not yet wrapped for translation: this file is English-only until they are */
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import './ToolOptionsCard.css'
 import { isComposingKey } from '../input/keyboard'
 
 // A card unmounts when its tool ends; only its collapsed state survives.
@@ -55,11 +56,12 @@ export interface ToolOptionsCardProps {
   tool: string
   info: string
   children: ReactNode
+  collapsible?: boolean
 }
 
 /** Shared viewport chrome; it has no knowledge of a tool's settings. */
-export function ToolOptionsCard({ tool, info, children }: ToolOptionsCardProps) {
-  const [collapsed, setCollapsed] = useState(() => collapsedTools.get(tool) ?? false)
+export function ToolOptionsCard({ tool, info, children, collapsible = true }: ToolOptionsCardProps) {
+  const [collapsed, setCollapsed] = useState(() => collapsible && (collapsedTools.get(tool) ?? false))
   const root = useRef<HTMLDivElement>(null)
   const rowsId = useId()
   useLayoutEffect(() => {
@@ -75,7 +77,7 @@ export function ToolOptionsCard({ tool, info, children }: ToolOptionsCardProps) 
     }
   }, [])
   return (
-    <div ref={root} role="region" aria-label={`${tool} options`} data-testid="tool-options-card"
+    <div ref={root} role="region" aria-label={`${tool} options`} data-testid="tool-options-card" className="tool-options-card"
       onPointerDown={(ev) => {
         // A pointer click on a choice must not steal typed-size input.
         if (!(ev.target as HTMLElement).closest('input, textarea, [contenteditable="true"]')) {
@@ -90,20 +92,20 @@ export function ToolOptionsCard({ tool, info, children }: ToolOptionsCardProps) 
         border: '1px solid var(--border-strong)', borderRadius: 'var(--radius-panel-item)',
         boxShadow: 'var(--shadow-dock)', fontFamily: 'var(--font-family-ui)', color: 'var(--text-primary)',
       }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '10px 12px' }}>
+      <div style={{ display: 'flex', flexShrink: 0, alignItems: 'center', gap: 4, padding: '10px 12px' }}>
         <span style={{
           flex: 1, fontFamily: 'var(--font-family-mono)', fontSize: 'var(--font-size-section-header)',
           fontWeight: 600, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text-section)',
         }}>{tool}</span>
         <ToolOptionsInfo label={tool}>{info}</ToolOptionsInfo>
-        <button type="button" aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${tool} options`}
+        {collapsible && <button type="button" aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${tool} options`}
           aria-expanded={!collapsed} aria-controls={rowsId} style={iconStyle}
           onClick={() => {
             collapsedTools.set(tool, !collapsed)
             setCollapsed(!collapsed)
-          }}>{collapsed ? '▸' : '▾'}</button>
+          }}>{collapsed ? '▸' : '▾'}</button>}
       </div>
-      {!collapsed && <div id={rowsId} style={{ padding: '0 12px 12px' }}>{children}</div>}
+      {(!collapsible || !collapsed) && <div id={rowsId} className="tool-options-body" style={{ padding: '0 12px 12px' }}>{children}</div>}
     </div>
   )
 }

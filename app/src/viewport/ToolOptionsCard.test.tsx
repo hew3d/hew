@@ -51,3 +51,13 @@ it('opens text help and dismisses it with Escape or an outside press', () => {
   fireEvent.pointerDown(document.body)
   expect(screen.queryByRole('note')).toBeNull()
 })
+
+
+it('can keep a tool expanded without removing collapse from other tools', () => {
+  render(<ToolOptionsCard tool="Always open" info="Help." collapsible={false}><span>Settings</span></ToolOptionsCard>)
+  expect(screen.queryByRole('button', { name: /(?:Collapse|Expand) Always open options/ })).toBeNull()
+  expect(screen.getByRole('button', { name: 'About Always open' })).toBeVisible()
+  expect(screen.getByText('Settings')).toBeVisible()
+  render(<ToolOptionsCard tool="Other collapsible tool" info="Help.">Other settings</ToolOptionsCard>)
+  expect(screen.getByRole('button', { name: 'Collapse Other collapsible tool options' })).toBeVisible()
+})

@@ -199,6 +199,7 @@ export class CommitStage {
   clearAfterCommit(): void {
     this.c.unsubSettings?.()
     this.c.unsubSettings = null
+    this.c.dimensionEditing = false
     this.c.stage = { kind: 'idle' }
     this.c.preview.clearPreviewDrawing()
     this.c.gripsView.clear()

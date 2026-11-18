@@ -222,6 +222,7 @@ export const filletTool = defineTool({
   // Arm the selected objects' sharp edges: the selection effect does not
   // re-run on a tool switch.
   onActivate(tool, ctx) {
+    tool.activateDimension()
     tool.setSelection(ctx.selection())
   },
   onKeyDown(tool, ev) {

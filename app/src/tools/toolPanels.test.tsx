@@ -12,6 +12,8 @@ it('mounts the Fillet card only for its active tool in Preview', async () => {
   expect(panels).toHaveLength(1)
   render(panels[0].render({ profileSections: [] }))
   expect(screen.getByRole('region', { name: 'Fillet options' })).toBeVisible()
+  expect(screen.queryByRole('button', { name: /(?:Collapse|Expand) Fillet options/ })).toBeNull()
+  expect(screen.getByRole('button', { name: 'About Fillet' })).toBeVisible()
 })
 
 it('exposes no Fillet card in production', async () => {
