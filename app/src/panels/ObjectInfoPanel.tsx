@@ -82,6 +82,7 @@ import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { MIN_SEGMENTS_PER_TURN } from '../tools/arcMath'
 import { isComposingKey } from '../input/keyboard'
 import { SmoothSection } from './SmoothSection'
+import { selectionCountLine } from './selectionCounts'
 import { copiesRow, unlinkLabel, makeComponentLabel, selectAllCopiesLabel } from '../linkedCopyCopy'
 
 /**
@@ -93,6 +94,8 @@ import { copiesRow, unlinkLabel, makeComponentLabel, selectAllCopiesLabel } from
  * before the round trip.
  */
 const MIN_CIRCLE_SEGMENTS = MIN_SEGMENTS_PER_TURN
+/** The default for an id-list prop left unset: one shared empty list. */
+const NO_IDS: readonly bigint[] = []
 
 interface Props {
   scene: WasmScene
@@ -148,17 +151,17 @@ interface Props {
    */
   onShowHealth?: (objectId: bigint) => void
   /**
-   * The selected dimension or leader text, if any. Annotations are not
-   * nodes, so they never appear in `selectedIds`; when nothing else is
-   * selected the panel shows a read-only entry for it.
+   * The selected dimensions and leader texts. Annotations are not nodes, so
+   * they never appear in `selectedIds`; a lone one gets a read-only entry,
+   * and alongside anything else it is counted.
    */
-  selectedAnnotation?: bigint | null
+  selectedAnnotations?: readonly bigint[]
   /**
-   * The selected construction guide (line or point), if any. Guides are not
-   * nodes, so they never appear in `selectedIds`; when nothing else is
-   * selected the panel shows a read-only entry for it.
+   * The selected construction guides (lines or points). Guides are not
+   * nodes, so they never appear in `selectedIds`; a lone one gets a
+   * read-only entry, and alongside anything else it is counted.
    */
-  selectedGuide?: bigint | null
+  selectedGuides?: readonly bigint[]
   /**
    * The open session frames (outermost first, with the labels captured when
    * they opened) and the innermost frame's live direct members. An open frame
@@ -285,16 +288,30 @@ const ADD_TAG_BUTTON_STYLE: React.CSSProperties = {
   flexShrink: 0,
 }
 
-export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onSelectTag, onSelectMaterial, onToast, onShowHealth, selectedAnnotation = null, selectedGuide = null, sessionStack, sessionMembers = null, onUnlink, onMakeComponent }: Props) {
+export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onSelectTag, onSelectMaterial, onToast, onShowHealth, selectedAnnotations = NO_IDS, selectedGuides = NO_IDS, sessionStack, sessionMembers = null, onUnlink, onMakeComponent }: Props) {
   const { t } = useLingui()
   // Re-render the length readouts when the format OR the Precision changes.
   const lengthDisplay = useLengthDisplay()
   const selectedCount = selectedIds.length
+  // Guides and annotations held beside the nodes. Any of them makes a
+  // selection of more than one entry the multi view, counted per kind, whose
+  // sections act on the nodes only.
+  const others = selectedGuides.length + selectedAnnotations.length
+  const selectedAnnotation = selectedIds.length === 0 && selectedGuides.length === 0 && selectedAnnotations.length === 1 ? selectedAnnotations[0] : null
+  const selectedGuide = selectedIds.length === 0 && selectedAnnotations.length === 0 && selectedGuides.length === 1 ? selectedGuides[0] : null
+  const countLine = useMemo(
+    () => (others === 0 ? null : selectionCountLine([
+      ...selectedIds,
+      ...selectedGuides.map((id) => ({ kind: 'guide' as const, id })),
+      ...selectedAnnotations.map((id) => ({ kind: 'annotation' as const, id })),
+    ])),
+    [others, selectedIds, selectedGuides, selectedAnnotations],
+  )
   // --------------------------------------------------------------------------
   // Derive the node info from the scene whenever docRev or selectedIds changes.
   // --------------------------------------------------------------------------
   const nodeInfo = useMemo(() => {
-    if (selectedIds.length !== 1) return null
+    if (selectedIds.length !== 1 || others > 0) return null
     const node = selectedIds[0]
     const kind = node.kind
     const id = node.id
@@ -823,7 +840,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
   // a tag to all (and it appears at once) and × removes it from all
   // (playtest round 2: a union-with-counts view read as noise).
   const multi = useMemo(() => {
-    if (selectedIds.length < 2) return null
+    if (selectedIds.length === 0 || (selectedIds.length < 2 && others === 0)) return null
     const kinds: number[] = []
     const ids: bigint[] = []
     let common: Map<string, string[]> | null = null
@@ -850,7 +867,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     return { kinds, ids, tags }
     // docRev: tags change on every mutation without changing identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedIds, scene, docRev])
+  }, [selectedIds, others, scene, docRev])
 
   // ---- Materials row ---------------------------------------------------
   // The union of every material on the selection (see selectionMaterials).
@@ -986,7 +1003,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
   }
 
   // Nothing selected → an empty panel, no boilerplate.
-  if (nodeInfo === null && selectedIds.length === 0) {
+  if (nodeInfo === null && selectedIds.length === 0 && others === 0) {
     return <div style={PANEL_STYLE} />
   }
 
@@ -999,7 +1016,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     return (
       <div style={PANEL_STYLE}>
         <div style={{ fontSize: '11px', color: 'var(--text-faint, #666)', padding: '4px 8px' }}>
-          {plural(selectedCount, { one: '# selected', other: '# selected' })}
+          {countLine ?? plural(selectedCount, { one: '# selected', other: '# selected' })}
         </div>
         {bounds !== null && <BoundingBoxRow bounds={bounds} />}
         <SmoothSection

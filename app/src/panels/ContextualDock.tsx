@@ -127,7 +127,8 @@ function DockItem({ verb, selected, disabled, onRun }: { verb: DockVerb; selecte
 
 export interface ContextualDockProps {
   selectedIds: NodeRef[]
-  selectedGuide: bigint | null
+  /** How many guides and annotations the selection also holds. */
+  others?: number
   onRun: (id: string) => void
   /** Fade the dock out (opacity 0 + click-through) while the camera is being
    * dragged (spec: "Hidden during pure camera navigation... reappears
@@ -142,7 +143,7 @@ export interface ContextualDockProps {
    * nothing is selected (throttled/edge-detected in Viewport.tsx via
    * `SketchHoverGate`). Only consulted when the derived context is 'empty'
    * — an explicit selection's dock always wins, so this is ignored entirely
-   * the moment `selectedIds`/`selectedGuide` yield anything else. Swaps the
+   * the moment the selection yields anything else. Swaps the
    * empty-selection draw-tool row for the 'sketch' verb set (Push/Pull
    * primary) as a preview of what a click there would do. */
   hoveringSketchRegion?: boolean
@@ -154,16 +155,16 @@ export interface ContextualDockProps {
 
 export function ContextualDock({
   selectedIds,
-  selectedGuide,
+  others = 0,
   onRun,
   hidden = false,
   activeToolId,
   hoveringSketchRegion = false,
   gates,
 }: ContextualDockProps) {
-  const baseContext = deriveDockContext(selectedIds, selectedGuide)
+  const baseContext = deriveDockContext(selectedIds, others)
   // Hover only ever promotes 'empty' -> 'sketch' — any other context (an
-  // actual selection, or null for a selected guide) is left untouched.
+  // actual selection, or null for guides or annotations alone) is left untouched.
   const hoverPreviewOnly = baseContext === 'empty' && hoveringSketchRegion
   const context = hoverPreviewOnly ? 'sketch' : baseContext
   if (context === null) return null

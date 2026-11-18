@@ -1,19 +1,6 @@
 import { plural, t } from '@lingui/core/macro'
-import { isNodeItem, type SelItem } from '../panels/treeModel'
-
-/** The noun a Delete's Undo step counts an entry by. A drawn unit on a
- *  plane counts as a sketch, as the transform labels count it. */
-function deleteNoun(s: SelItem): 'object' | 'group' | 'instance' | 'sketch' | 'guide' | 'annotation' {
-  if (!isNodeItem(s)) return s.kind
-  switch (s.kind) {
-    case 'object':
-    case 'group':
-    case 'instance':
-      return s.kind
-    default:
-      return 'sketch'
-  }
-}
+import { selNoun } from '../panels/selectionCounts'
+import type { SelItem } from '../panels/treeModel'
 
 /**
  * The Undo step's name for a Delete of `items`, in the user's language. One
@@ -26,7 +13,7 @@ function deleteNoun(s: SelItem): 'object' | 'group' | 'instance' | 'sketch' | 'g
 export function deleteStepLabel(items: readonly SelItem[]): string {
   const n = items.length
   if (n === 1) return t`Delete`
-  const nouns = new Set(items.map(deleteNoun))
+  const nouns = new Set(items.map(selNoun))
   const noun = nouns.size === 1 ? [...nouns][0] : 'item'
   switch (noun) {
     case 'object':

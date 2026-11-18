@@ -12,25 +12,26 @@ const instance = (id: bigint): NodeRef => ({ kind: 'instance', id })
 const sketch = (id: bigint): NodeRef => ({ kind: 'sketch', id })
 
 describe('deriveDockContext', () => {
-  it('is "empty" when nothing is selected and no guide is selected', () => {
-    expect(deriveDockContext([], null)).toBe('empty')
+  it('is "empty" when nothing is selected', () => {
+    expect(deriveDockContext([])).toBe('empty')
   })
 
-  it('is null when a guide is selected, regardless of node selection', () => {
-    expect(deriveDockContext([], 5n)).toBeNull()
-    expect(deriveDockContext([obj(1n)], 5n)).toBeNull()
+  it('is null for guides or annotations alone, and follows the nodes beside them', () => {
+    expect(deriveDockContext([], 2)).toBeNull()
+    expect(deriveDockContext([obj(1n)], 2)).toBe('object')
+    expect(deriveDockContext([obj(1n), obj(2n)], 1)).toBe('multi')
   })
 
   it('is "object" for a single selected Object', () => {
-    expect(deriveDockContext([obj(1n)], null)).toBe('object')
+    expect(deriveDockContext([obj(1n)])).toBe('object')
   })
 
   it('is "group" for a single selected Group', () => {
-    expect(deriveDockContext([group(1n)], null)).toBe('group')
+    expect(deriveDockContext([group(1n)])).toBe('group')
   })
 
   it('is "instance" for a single selected Instance', () => {
-    expect(deriveDockContext([instance(1n)], null)).toBe('instance')
+    expect(deriveDockContext([instance(1n)])).toBe('instance')
   })
 
   // Contract change ("sketches are first-class interactable"): a
@@ -38,22 +39,22 @@ describe('deriveDockContext', () => {
   // dedicated 'sketch' context with its own curated verb set, since sketches
   // gained real Push/Pull/Move/Rotate/Scale/Erase behavior.
   it('is "sketch" for a single selected free-standing sketch', () => {
-    expect(deriveDockContext([sketch(1n)], null)).toBe('sketch')
+    expect(deriveDockContext([sketch(1n)])).toBe('sketch')
   })
 
   it('is "sketch" for a single selected sketch LINE too (same verbs, finer selection)', () => {
     expect(
-      deriveDockContext([{ kind: 'draft-edge', id: 4n, ctx: '{"plane":[0,0,0,0,0,1]}', key: '0000000000000004' }], null),
+      deriveDockContext([{ kind: 'draft-edge', id: 4n, ctx: '{"plane":[0,0,0,0,0,1]}', key: '0000000000000004' }]),
     ).toBe('sketch')
   })
 
   it('is "multi" for more than one selected node, regardless of kind mix', () => {
-    expect(deriveDockContext([obj(1n), obj(2n)], null)).toBe('multi')
-    expect(deriveDockContext([obj(1n), group(2n), instance(3n)], null)).toBe('multi')
+    expect(deriveDockContext([obj(1n), obj(2n)])).toBe('multi')
+    expect(deriveDockContext([obj(1n), group(2n), instance(3n)])).toBe('multi')
   })
 
   it('is "multi" for a sketch mixed into a multi-selection (multi rules unchanged)', () => {
-    expect(deriveDockContext([obj(1n), sketch(2n)], null)).toBe('multi')
+    expect(deriveDockContext([obj(1n), sketch(2n)])).toBe('multi')
   })
 })
 

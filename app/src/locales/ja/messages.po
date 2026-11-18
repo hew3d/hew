@@ -420,6 +420,10 @@ msgstr ""
 msgid "{n, plural, one {{verb} # sketch} other {{verb} # sketches}}"
 msgstr ""
 
+#: src/panels/selectionCounts.ts
+msgid "{n, plural, one {# annotation} other {# annotations}}"
+msgstr ""
+
 #: src/panels/ImportingOverlay.tsx
 msgid "{n, plural, one {# byte} other {# bytes}}"
 msgstr ""
@@ -432,12 +436,32 @@ msgstr ""
 msgid "{n, plural, one {# gap will stay open.} other {# gaps will stay open.}}"
 msgstr ""
 
+#: src/panels/selectionCounts.ts
+msgid "{n, plural, one {# group} other {# groups}}"
+msgstr ""
+
+#: src/panels/selectionCounts.ts
+msgid "{n, plural, one {# guide} other {# guides}}"
+msgstr ""
+
+#: src/panels/selectionCounts.ts
+msgid "{n, plural, one {# instance} other {# instances}}"
+msgstr ""
+
 #: src/panels/LibraryDialog.tsx
 msgid "{n, plural, one {# item} other {# items}}"
 msgstr ""
 
+#: src/panels/selectionCounts.ts
+msgid "{n, plural, one {# object} other {# objects}}"
+msgstr ""
+
 #: src/print/layout.ts
 msgid "{n, plural, one {# page} other {# pages ({cols} × {rows})}}"
+msgstr ""
+
+#: src/panels/selectionCounts.ts
+msgid "{n, plural, one {# sketch} other {# sketches}}"
 msgstr ""
 
 #: src/health/healthCopy.ts
