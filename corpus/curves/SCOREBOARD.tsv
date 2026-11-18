@@ -1,6 +1,6 @@
 # The curves scoreboard. Written by scripts/scoreboard.sh; do not edit.
-# 634 cases: 426 correct, 162 limit, 46 generic, 0 wrong.
-# Open: 8 refused or wrong at a size that must build; 121 limits where nothing larger can exist.
+# 644 cases: 426 correct, 162 limit, 56 generic, 0 wrong.
+# Open: 15 refused or wrong at a size that must build; 121 limits where nothing larger can exist.
 model	case	size	expect	class	detail
 box	one-edge-round	0.1mm	fits	correct	
 box	one-edge-round	1mm	fits	correct	
@@ -278,6 +278,16 @@ cylinder-imperial	bottom-rim-chamfer	3/8in	fits	correct
 cylinder-imperial	bottom-rim-chamfer	1/2in	fits	correct	
 cylinder-imperial	bottom-rim-chamfer	3/4in	fits	correct	
 cylinder-imperial	bottom-rim-chamfer	5/4in	over	limit	radius_too_large max=25.4mm by=other_geometry
+faceted-plinth-seam	seam-loop-round	0.1mm	fits	generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
+faceted-plinth-seam	seam-loop-round	0.3mm	fits	generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
+faceted-plinth-seam	seam-loop-round	0.5mm	fits	generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
+faceted-plinth-seam	seam-loop-round	1mm	fits	generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
+faceted-plinth-seam	seam-loop-round	1.2mm	fits	generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
+faceted-plinth-seam	seam-loop-round	1.5mm	fits	generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
+faceted-plinth-seam	seam-loop-round	1.7mm	fits	generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
+faceted-plinth-seam	seam-loop-round	2.5mm		generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
+faceted-plinth-seam	seam-click-round	0.5mm		generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
+faceted-plinth-seam	seam-click-round	1mm		generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
 grooved-knob	one-groove-top-rim-round	0.1mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
 grooved-knob	one-groove-top-rim-round	1mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
 grooved-knob	one-groove-top-rim-round	2mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
