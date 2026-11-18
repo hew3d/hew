@@ -11,8 +11,6 @@ describe('uiSelectionJson', () => {
             { kind: 'object', id: 4n },
             { kind: 'sketch', id: 5n },
           ],
-          null,
-          null,
         ),
       ),
     ).toEqual([
@@ -26,15 +24,27 @@ describe('uiSelectionJson', () => {
     expect(
       uiSelectionJson(
         [{ kind: 'draft-edge', id: 1n, ctx: '{"plane":[0,0,0,0,0,1]}', key: '0000000000000001' }],
-        null,
-        null,
       ),
     ).toBe('[]')
   })
 
-  it('mirrors a guide or an annotation', () => {
-    expect(JSON.parse(uiSelectionJson([], 12n, null))).toEqual([{ kind: 'guide', id: '12' }])
-    expect(JSON.parse(uiSelectionJson([], null, 13n))).toEqual([{ kind: 'annotation', id: '13' }])
+  it('mirrors a mixed selection in pick order, the primary first', () => {
+    // A guide picked first stays the primary ahead of the box picked after it.
+    expect(
+      JSON.parse(
+        uiSelectionJson([
+          { kind: 'guide', id: 12n },
+          { kind: 'object', id: 4n },
+          { kind: 'annotation', id: 13n },
+          { kind: 'guide', id: 14n },
+        ]),
+      ),
+    ).toEqual([
+      { kind: 'guide', id: '12' },
+      { kind: 'object', id: '4' },
+      { kind: 'annotation', id: '13' },
+      { kind: 'guide', id: '14' },
+    ])
   })
 })
 

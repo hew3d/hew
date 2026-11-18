@@ -1139,12 +1139,39 @@ describe('installLiveBridge', () => {
       expect(refreshScene).not.toHaveBeenCalled()
     })
 
-    it('selection: one guide, one annotation, or nothing go to their own handlers', async () => {
-      const selectGuide = vi.fn()
-      const selectAnnotation = vi.fn()
+    it('selection: a mixed selection replaces the app selection in its order', async () => {
       const selectNone = vi.fn()
       const selectMany = vi.fn()
-      Object.assign(deps, { selectGuide, selectAnnotation, selectNone, selectMany })
+      Object.assign(deps, { selectNone, selectMany })
+      await dispatchWith(
+        [
+          {
+            kind: 'selection',
+            mode: 'replace',
+            entries: [
+              { kind: 'guide', id: '12' },
+              { kind: 'object', id: '4' },
+              { kind: 'annotation', id: '13' },
+            ],
+          },
+        ],
+        'hew.selection.set',
+      )
+      expect(selectMany).toHaveBeenCalledWith(
+        [
+          { kind: 'guide', id: 12n },
+          { kind: 'object', id: 4n },
+          { kind: 'annotation', id: 13n },
+        ],
+        'replace',
+      )
+      expect(selectNone).not.toHaveBeenCalled()
+    })
+
+    it('selection: a lone guide or annotation replaces the selection, nothing clears it', async () => {
+      const selectNone = vi.fn()
+      const selectMany = vi.fn()
+      Object.assign(deps, { selectNone, selectMany })
       await dispatchWith(
         [
           { kind: 'selection', mode: 'replace', entries: [{ kind: 'guide', id: '12' }] },
@@ -1153,10 +1180,9 @@ describe('installLiveBridge', () => {
         ],
         'hew.selection.set',
       )
-      expect(selectGuide).toHaveBeenCalledWith(12n)
-      expect(selectAnnotation).toHaveBeenCalledWith(13n)
+      expect(selectMany).toHaveBeenNthCalledWith(1, [{ kind: 'guide', id: 12n }], 'replace')
+      expect(selectMany).toHaveBeenNthCalledWith(2, [{ kind: 'annotation', id: 13n }], 'replace')
       expect(selectNone).toHaveBeenCalledTimes(1)
-      expect(selectMany).not.toHaveBeenCalled()
     })
 
     it('hidden_changed re-reads the hidden state before reconciling tags', async () => {

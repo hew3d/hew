@@ -32,7 +32,7 @@ import type { PrintPageModel } from '../print/PrintDocument'
 import type { PrintPlan } from '../print/printJob'
 import type { ViewportApi } from '../viewport/Viewport'
 import type { IsolationTarget } from '../viewport/isolation'
-import { nodeKindToNumber, type NodeKind, type NodeRef } from '../panels/treeModel'
+import { nodeKindToNumber, type NodeKind, type NodeRef, type SelItem } from '../panels/treeModel'
 import { worldBoundsForSelection } from '../panels/objectBounds'
 import { curveRunsView, imprintView } from './drawingView'
 import * as kernelModule from '../wasm/pkg/wasm_api.js'
@@ -108,14 +108,14 @@ export interface HarnessDeps {
   reconcile: () => void
   /** Current object/group/instance selection. */
   getSelection: () => NodeRef[]
-  /** The selected construction guide id, or null. */
-  getSelectedGuide?: () => bigint | null
-  /** The selected annotation id (dimension / leader text), or null. */
-  getSelectedAnnotation?: () => bigint | null
+  /** The selected construction guides, in pick order. */
+  getSelectedGuides?: () => bigint[]
+  /** The selected annotations (dimensions / leader texts), in pick order. */
+  getSelectedAnnotations?: () => bigint[]
   /** Replace the selection with these object handles. */
   setSelectedObjects: (ids: bigint[]) => void
-  /** Replace the selection with arbitrary nodes (objects/groups/instances). */
-  setSelection: (nodes: NodeRef[]) => void
+  /** Replace the selection with arbitrary entries (nodes, guides, annotations). */
+  setSelection: (items: SelItem[]) => void
   /**
    * Reload `.hew` bytes through the app's real Open path (the same
    * `scene.load` + UI reset + viewport `notifyLoaded` re-tessellation a user's
@@ -316,10 +316,13 @@ export interface HewTestHarness {
   getPartAxesInfo(): { visible: boolean; origins: [number, number, number][] }
   /** Show/hide the ground grid (View ▸ Grid). Same rationale as setAxesVisible. */
   setGridVisible(visible: boolean): void
-  /** The selected guide / annotation id as a decimal string, or null (the
-   *  Select tool's pick of a construction guide, dimension or leader). */
+  /** The first selected guide / annotation id as a decimal string, or null
+   *  (the Select tool's pick of a construction guide, dimension or leader). */
   getSelectedGuide(): string | null
   getSelectedAnnotation(): string | null
+  /** Every selected guide / annotation id as a decimal string, in pick order. */
+  getSelectedGuides(): string[]
+  getSelectedAnnotations(): string[]
   /** Render mode (View ▸ X-ray / Wireframe), through `ViewportApi.setRenderMode`. */
   setRenderMode(mode: 'shaded' | 'xray' | 'wireframe'): void
   /** Place a session section plane (`ViewportApi.setSectionPlane`); normal points at the removed side. */
@@ -1913,14 +1916,10 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       return api.getPartAxesInfo()
     },
 
-    getSelectedGuide: () => {
-      const g = deps.getSelectedGuide?.() ?? null
-      return g === null ? null : g.toString()
-    },
-    getSelectedAnnotation: () => {
-      const a = deps.getSelectedAnnotation?.() ?? null
-      return a === null ? null : a.toString()
-    },
+    getSelectedGuide: () => deps.getSelectedGuides?.()[0]?.toString() ?? null,
+    getSelectedAnnotation: () => deps.getSelectedAnnotations?.()[0]?.toString() ?? null,
+    getSelectedGuides: () => (deps.getSelectedGuides?.() ?? []).map(String),
+    getSelectedAnnotations: () => (deps.getSelectedAnnotations?.() ?? []).map(String),
     setRenderMode: (mode) => {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')

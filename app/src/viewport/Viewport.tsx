@@ -491,15 +491,18 @@ interface Props {
   /** Lift a multi-node selection (marquee, Select All, Invert Selection) up
    * to the parent. `mode` as for `onSelect`, read off the marquee's press. */
   onSelectMany?: (nodes: NodeRef[], mode: SelectMode) => void
-  /** Lift a construction-guide pick to the parent; `null` clears. */
-  onSelectGuide?: (id: bigint | null) => void
-  /** The currently selected guide, reflected into the renderer highlight. */
-  selectedGuide?: bigint | null
-  /** Lift an annotation (dimension/leader-text) pick to the parent; `null`
-   * clears (docs/design/dimensions-text.md). */
-  onSelectAnnotation?: (id: bigint | null) => void
-  /** The currently selected annotation, reflected into the renderer highlight. */
-  selectedAnnotation?: bigint | null
+  /** Lift a construction-guide pick to the parent, combined with the
+   * selection as `mode` says (omitted: replace); `null` deselects every
+   * guide. */
+  onSelectGuide?: (id: bigint | null, mode?: SelectMode) => void
+  /** The selected guides, reflected into the renderer highlight. A lone
+   * guide (no node selected) is also Move's and Rotate's guide target. */
+  selectedGuides?: readonly bigint[]
+  /** Lift an annotation (dimension/leader-text) pick to the parent, as
+   * `onSelectGuide` does (docs/design/dimensions-text.md). */
+  onSelectAnnotation?: (id: bigint | null, mode?: SelectMode) => void
+  /** The selected annotations, reflected into the renderer highlight. */
+  selectedAnnotations?: readonly bigint[]
   /**
    * Requests the parent open the in-viewport text editor (`AnnotationEditor`,
    * the `InferenceTooltip` DOM-positioning pattern): a double-click on an
@@ -665,6 +668,9 @@ export type StandardView = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right
  * can't drift apart.
  */
 const POLE_TILT = 0.001
+/** The default for an id-list prop left unset: one shared empty list, so
+ *  the effects that read it do not run again on every render. */
+const NO_IDS: readonly bigint[] = []
 
 /** The camera tweens' ease: cubic in-out. */
 function easeCameraTween(t: number): number {
@@ -2665,9 +2671,9 @@ export default function Viewport({
   onIsolateRequest,
   onSelectMany,
   onSelectGuide,
-  selectedGuide = null,
+  selectedGuides = NO_IDS,
   onSelectAnnotation,
-  selectedAnnotation = null,
+  selectedAnnotations = NO_IDS,
   onOpenAnnotationEditor,
   onEnterContext,
   onExitContext,
@@ -2838,8 +2844,11 @@ export default function Viewport({
   const lastPushedSessionRef = useRef<{ node: NodeRef; label: string }[]>([])
   // Latest selected ids, readable inside the stable event closures.
   const selectedIdsRef = useRef<NodeRef[]>(selectedIds)
-  // Latest selected construction guide — the Move tool's guide target.
-  const selectedGuideRef = useRef<bigint | null>(selectedGuide)
+  // The Move and Rotate guide target: the selected guide when it is the
+  // only guide and no node is selected. Carrying several guides, or guides
+  // together with nodes, is not wired yet.
+  const guideTarget = selectedGuides.length === 1 && selectedIds.length === 0 ? selectedGuides[0] : null
+  const selectedGuideRef = useRef<bigint | null>(guideTarget)
   // Latest current material id for the Paint tool.
   const currentMaterialIdRef = useRef<bigint>(currentMaterialId)
   // Polygon's last-used side count — session-lived across tool re-selection
@@ -4055,6 +4064,17 @@ export default function Viewport({
     }
 
     function dispatchSelectPick(ndcX: number, ndcY: number, ray: Ray): void {
+      // An annotation under a modified click joins or leaves the selection;
+      // a plain press on one already selected it (and armed its drag) in
+      // onPointerDown. Shop Mode picks no annotations at all.
+      if (!readOnlyRef.current) {
+        const annotationId = pickAnnotation(ndcX, ndcY)
+        if (annotationId !== null) {
+          onSelectAnnotationRef.current?.(annotationId, selectModeRef.current)
+          scheduleRender()
+          return
+        }
+      }
       const { snap: rawSnap } = snapService.resolve(
         ray, el.clientHeight, apertureBasis(),
         undefined, undefined, undefined, undefined, undefined,
@@ -4071,7 +4091,7 @@ export default function Viewport({
       const lineUnder = (under !== null && (under.kind === 'draft-edge' || under.kind === 'draft-curve')) ||
         (g !== null && componentLineUnder(ray))
       if (g !== null && !lineUnder) {
-        onSelectGuideRef.current?.(g)
+        onSelectGuideRef.current?.(g, selectModeRef.current)
         scheduleRender()
         return
       }
@@ -12932,25 +12952,30 @@ export default function Viewport({
     scheduleRenderRef.current()
   }, [selectedIds, activeContext])
 
-  // Reflect the selected construction guide into the renderer highlight,
-  // and into the active tool (Move's guide target, like Tool.setSelection).
+  // Reflect the guide target into the active tool (Move's guide target,
+  // like Tool.setSelection).
   useEffect(() => {
-    selectedGuideRef.current = selectedGuide
+    selectedGuideRef.current = guideTarget
     const activeTool = toolControllerRef.current?.activeTool
     if (activeTool !== undefined && 'setGuideTarget' in activeTool) {
-      (activeTool as { setGuideTarget(guide: bigint | null): void }).setGuideTarget(selectedGuide)
+      (activeTool as { setGuideTarget(guide: bigint | null): void }).setGuideTarget(guideTarget)
     }
-    sceneRendererRef.current?.setSelectedGuides(selectedGuide === null ? [] : [selectedGuide])
     refreshAcquireHoverRef.current?.()
     scheduleRenderRef.current()
-  }, [selectedGuide])
+  }, [guideTarget])
 
-  // Reflect the selected annotation into the renderer highlight
+  // Reflect the selected construction guides into the renderer highlight.
+  useEffect(() => {
+    sceneRendererRef.current?.setSelectedGuides(selectedGuides)
+    scheduleRenderRef.current()
+  }, [selectedGuides])
+
+  // Reflect the selected annotations into the renderer highlight
   // (docs/design/dimensions-text.md).
   useEffect(() => {
-    sceneRendererRef.current?.setSelectedAnnotations(selectedAnnotation === null ? [] : [selectedAnnotation])
+    sceneRendererRef.current?.setSelectedAnnotations(selectedAnnotations)
     scheduleRenderRef.current()
-  }, [selectedAnnotation])
+  }, [selectedAnnotations])
 
   return (
     <div

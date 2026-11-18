@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState, useCallback, useRef, useMemo, useSyncExternalStore } from 'react'
+import { useSelectionViews } from './useSelectionViews'
 import { useClearSelectionOnDrawTool } from './useClearSelectionOnDrawTool'
 import { i18n } from '@lingui/core'
 import { ph, plural, t } from '@lingui/core/macro'
@@ -74,7 +75,7 @@ import { parseHistoryEntries } from './panels/changesModel'
 import { ToolRail } from './panels/ToolRail'
 import { TrayHideRow, TrayShowTab } from './panels/TrayToggle'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, isSketchScopedKind, makeLabelFor, placementLabel, stripTagSuffix, type NodeRef } from './panels/treeModel'
+import { nextSelection, mergeSelection, withNodes, isNodeItem, type SelItem, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, isSketchScopedKind, makeLabelFor, placementLabel, stripTagSuffix, type NodeRef } from './panels/treeModel'
 import { SelectionPathStrip } from './panels/SelectionPathStrip'
 import { buildSelectionPath, frameClickAction, hoverLine, type HitLeaf } from './panels/selectionPath'
 import { tagPathKey } from './panels/tagModel'
@@ -677,20 +678,31 @@ export default function App() {
 
   /** Sticky banner: true once a kernel panic / borrow-lock is detected */
   const [kernelPanicked, setKernelPanicked] = useState(false)
-  /** Selected nodes (ordered; index 0 = primary). */
-  const [selectedIds, setSelectedIds] = useState<NodeRef[]>([])
-  /** Selected construction guide, mutually exclusive with node
-   * selection. Deleted via the same Edit ▸ Delete / Delete-key path as nodes. */
-  const [selectedGuide, setSelectedGuide] = useState<bigint | null>(null)
-  /** Selected dimension/leader-text annotation, mutually exclusive with node
-   * and guide selection (docs/design/dimensions-text.md). Deleted via the
-   * same Edit ▸ Delete / Delete-key path. */
-  const [selectedAnnotation, setSelectedAnnotation] = useState<bigint | null>(null)
+  /** The selection: one ordered list in pick order (index 0 = primary)
+   * mixing nodes, construction guides and annotations in any count
+   * (`SelItem`). Everything else reads the per-kind views below. */
+  const [selection, setSelection] = useState<SelItem[]>([])
+  const {
+    /** Selected nodes, in pick order. */
+    nodes: selectedIds,
+    /** Selected construction guides, in pick order. */
+    guides: selectedGuides,
+    /** Selected dimension/leader-text annotations, in pick order
+     * (docs/design/dimensions-text.md). */
+    annotations: selectedAnnotations,
+  } = useSelectionViews(selection)
+  /** The guide or the annotation when it is the whole selection: what keeps
+   * its own Object Info panel and its own single-entity commands. */
+  const loneGuide = selection.length === 1 && selection[0].kind === 'guide' ? selection[0].id : null
+  const loneAnnotation = selection.length === 1 && selection[0].kind === 'annotation' ? selection[0].id : null
+  // The whole selection, readable inside stable callbacks.
+  const selectionRef = useRef(selection)
+  selectionRef.current = selection
   // Live mirrors for the test harness (read at call time).
-  const selectedGuideLive = useRef<bigint | null>(null)
-  selectedGuideLive.current = selectedGuide
-  const selectedAnnotationLive = useRef<bigint | null>(null)
-  selectedAnnotationLive.current = selectedAnnotation
+  const selectedGuidesLive = useRef<bigint[]>([])
+  selectedGuidesLive.current = selectedGuides
+  const selectedAnnotationsLive = useRef<bigint[]>([])
+  selectedAnnotationsLive.current = selectedAnnotations
   /** Session-only hidden node set (keyed by nodeKey). Cleared on load/new. */
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set())
   /** Whether Paste/Paste In Place have something to work with — gates the
@@ -1642,10 +1654,7 @@ export default function App() {
     // Every route to a selection starts without a hit leaf; the viewport
     // click and the crumb click set it again right after this returns.
     setPathHit(null)
-    // Node, guide, and annotation selection are mutually exclusive.
-    setSelectedGuide(null)
-    setSelectedAnnotation(null)
-    setSelectedIds((cur) => nextSelection(cur, node, mode))
+    setSelection((cur) => nextSelection<SelItem>(cur, node, mode))
   }, [])
 
   /** The viewport's own Select click: the plain selection change, plus the
@@ -1663,14 +1672,12 @@ export default function App() {
       snap !== null && snap.object !== undefined ? { object: snap.object, instance: snap.instance } : null
   }, [])
 
-  /** Lift a multi-node selection (marquee, Select All, Invert Selection)
-   * from the viewport. `mode` is the Select tool's modifier matrix
-   * (`selectModeFor`): replace / toggle / add / subtract — see
-   * `mergeSelection`. */
-  const handleSelectMany = useCallback((nodes: NodeRef[], mode: SelectMode) => {
-    setSelectedGuide(null)
-    setSelectedAnnotation(null)
-    setSelectedIds((cur) => mergeSelection(cur, nodes, mode))
+  /** Lift a multi-entry selection (marquee, Select All, Invert Selection,
+   * a bus `hew.selection.set`) from the viewport. `mode` is the Select
+   * tool's modifier matrix (`selectModeFor`): replace / toggle / add /
+   * subtract — see `mergeSelection`. */
+  const handleSelectMany = useCallback((items: SelItem[], mode: SelectMode) => {
+    setSelection((cur) => mergeSelection(cur, items, mode))
   }, [])
 
   /** The Outliner's row click: its modifier reading is a list's (Shift or
@@ -1682,11 +1689,9 @@ export default function App() {
   )
 
   /** Edit ▸ Select None (⇧⌘A / Ctrl+Shift+A): clear every kind of selection
-   * — nodes, guide, annotation — without touching the editing context. */
+   * — nodes, guides, annotations — without touching the editing context. */
   const handleSelectNone = useCallback(() => {
-    setSelectedGuide(null)
-    setSelectedAnnotation(null)
-    setSelectedIds([])
+    setSelection([])
   }, [])
 
   /** Replace the selection outright (Object Info's "(N instances)" click). */
@@ -1827,27 +1832,30 @@ export default function App() {
     [openModelHealth],
   )
 
-  /** Lift a guide pick from the viewport; clears node/annotation selection. */
-  const handleSelectGuide = useCallback((id: bigint | null) => {
-    setSelectedGuide(id)
-    setSelectedAnnotation(null)
-    if (id !== null) setSelectedIds([])
+  /** Lift a guide pick from the viewport, combined with the selection as
+   * `mode` says (a plain click replaces it). `null` deselects every guide
+   * and keeps the rest. */
+  const handleSelectGuide = useCallback((id: bigint | null, mode: SelectMode = 'replace') => {
+    setSelection((cur) => {
+      if (id !== null) return nextSelection<SelItem>(cur, { kind: 'guide', id }, mode)
+      const kept = cur.filter((s) => s.kind !== 'guide')
+      return kept.length === cur.length ? cur : kept
+    })
   }, [])
 
-  /** Lift an annotation pick from the viewport; clears node/guide selection. */
-  const handleSelectAnnotation = useCallback((id: bigint | null) => {
-    setSelectedAnnotation(id)
-    setSelectedGuide(null)
-    if (id !== null) setSelectedIds([])
+  /** Lift an annotation pick from the viewport, as `handleSelectGuide` does
+   * for a guide (docs/design/dimensions-text.md). */
+  const handleSelectAnnotation = useCallback((id: bigint | null, mode: SelectMode = 'replace') => {
+    setSelection((cur) => {
+      if (id !== null) return nextSelection<SelItem>(cur, { kind: 'annotation', id }, mode)
+      const kept = cur.filter((s) => s.kind !== 'annotation')
+      return kept.length === cur.length ? cur : kept
+    })
   }, [])
   // The live bridge (installed once) reaches the selection handlers through
   // refs, like the Outliner eye's `handleToggleHiddenRef`.
   const handleSelectManyRef = useRef(handleSelectMany)
   handleSelectManyRef.current = handleSelectMany
-  const handleSelectGuideRef = useRef(handleSelectGuide)
-  handleSelectGuideRef.current = handleSelectGuide
-  const handleSelectAnnotationRef = useRef(handleSelectAnnotation)
-  handleSelectAnnotationRef.current = handleSelectAnnotation
   const handleSelectNoneRef = useRef(handleSelectNone)
   handleSelectNoneRef.current = handleSelectNone
 
@@ -1896,7 +1904,7 @@ export default function App() {
    *  buried behind session frames that aren't open yet. */
   const handleEnterContext = useCallback((node: NodeRef) => {
     setActiveContext((prev) => [...prev, node])
-    setSelectedIds([node])
+    setSelection([node])
   }, [])
 
   const handleExitContext = useCallback(() => {
@@ -1905,7 +1913,7 @@ export default function App() {
     // that poses it. Never carry that scoped handle back to the parent level,
     // where Delete/transform commands would otherwise retain a route to
     // geometry that is no longer visibly selected.
-    setSelectedIds([])
+    setSelection([])
   }, [])
 
   /** Clear the whole OBJECT-context path (never the session stack) — the
@@ -1916,7 +1924,7 @@ export default function App() {
    *  wins). */
   const handleExitAllContexts = useCallback(() => {
     setActiveContext([])
-    setSelectedIds([])
+    setSelection([])
   }, [])
 
   /**
@@ -1939,12 +1947,12 @@ export default function App() {
    *  as ordinary call-time state, INSTEAD of diffing inside a
    *  `setSessionStack` updater. An updater runs at React's reconciliation
    *  time, not synchronously when `handleSessionChange` is called — so a
-   *  `setSelectedIds([])` written inside one used to land on a LATER render
-   *  pass, after `enterNode`'s own trailing `setSelectedIds([target])` (a
+   *  `setSelection([])` written inside one used to land on a LATER render
+   *  pass, after `enterNode`'s own trailing `setSelection([target])` (a
    *  plain call-time setState in the same synchronous call stack) had
    *  already resolved, silently clobbering it. Doing the diff and every
    *  clear here at call time, before `setSessionStack` even runs, restores
-   *  ordinary call-order semantics: whichever `setSelectedIds` call happens
+   *  ordinary call-order semantics: whichever `setSelection` call happens
    *  LAST in the synchronous stack wins, so `enterNode`'s final selection
    *  sticks. */
   const prevSessionStackRef = useRef<{ node: NodeRef; label: string }[]>([])
@@ -1956,11 +1964,7 @@ export default function App() {
       const innermostChanged = prevInnermost === null || nextInnermost === null
         ? prevInnermost !== nextInnermost
         : !nodeEq(prevInnermost, nextInnermost)
-      if (innermostChanged) {
-        setSelectedIds([])
-        setSelectedGuide(null)
-        setSelectedAnnotation(null)
-      }
+      if (innermostChanged) setSelection([])
       // Tape Measure scoped-rescale invalidation (finding 5,
       // group-session.md): the confirmation dialog captured a specific
       // innermost frame at arm time. Undo/redo (Ctrl/Cmd+Z and the native
@@ -2017,7 +2021,7 @@ export default function App() {
     if (api.hasArmedGesture()) return { refused: { name: 'gesture_in_progress' } }
     if (isSketchScopedKind(target.kind)) {
       // No kernel NodeId / container chain — select-only, same as today.
-      setSelectedIds([target])
+      setSelection([target])
       return { ok: true }
     }
 
@@ -2099,7 +2103,7 @@ export default function App() {
     if (objectLeaf !== null) {
       setActiveContext((prev) => [...prev, objectLeaf])
     }
-    setSelectedIds([target])
+    setSelection([target])
     return refusals.length === 0 ? { ok: true } : { refused: refusals[0] }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -2117,7 +2121,7 @@ export default function App() {
     const undoBefore = scene?.undo_depth() ?? 0
     const stack = viewportApi.current?.sessionStack() ?? []
     const context = [...activeContextRef.current]
-    const selection = [...selectedIdsRef.current]
+    const selection = [...selectionRef.current]
     return () => {
       const api = viewportApi.current
       if (api === null) return false
@@ -2134,7 +2138,7 @@ export default function App() {
         else if (frame.kind === 'instance') api.runOpenExplodeSession(frame.id)
       }
       setActiveContext(context)
-      setSelectedIds(selection)
+      setSelection(selection)
       // Whether the frames are where they were; a later step may still differ.
       const after = api.sessionStack()
       return after.length === stack.length && after.every((f, i) => nodeEq(f, stack[i]))
@@ -2164,11 +2168,11 @@ export default function App() {
     const stackLen = prevSessionStackRef.current.length
     if (depth < stackLen) {
       setActiveContext([])
-      setSelectedIds([])
+      setSelection([])
       for (let i = stackLen; i > depth; i--) api?.runCloseInnermostSession()
     } else {
       setActiveContext((prev) => prev.slice(0, depth - stackLen))
-      setSelectedIds([])
+      setSelection([])
     }
   }, [])
 
@@ -2187,7 +2191,7 @@ export default function App() {
     // (finding 3) — the Model crumb is a close path too.
     if (api?.hasArmedGesture()) return
     setActiveContext([])
-    setSelectedIds([])
+    setSelection([])
     for (let i = prevSessionStackRef.current.length; i > 0; i--) api?.runCloseInnermostSession()
   }, [])
 
@@ -2297,7 +2301,7 @@ export default function App() {
     // consuming operands, extrusions consuming sketches — so they all
     // reconcile at this one choke point. pruneDeadSelection returns the
     // same array when nothing died, so this setState is a no-op then.
-    setSelectedIds((sel) => {
+    setSelection((sel) => {
       const scene = sceneRef.current
       if (scene === null) return sel
       const deepest = activeContext.length > 0
@@ -2446,8 +2450,6 @@ export default function App() {
     // A bus `hew.selection.set`/`clear`: the merged selection, applied
     // through the app's own selection handlers.
     selectMany: (nodes, mode) => handleSelectManyRef.current(nodes, mode),
-    selectGuide: (id) => handleSelectGuideRef.current(id),
-    selectAnnotation: (id) => handleSelectAnnotationRef.current(id),
     selectNone: () => handleSelectNoneRef.current(),
     // A bus isolation is nobody's panel's: Model Health closing must not
     // end it (`handleIsolate` hands ownership back to the app).
@@ -2474,15 +2476,11 @@ export default function App() {
       clearIsolation: () => handleClearIsolation(),
       reconcile: () => reconcileRef.current(),
       getSelection: () => selectedIdsRef.current,
-      getSelectedGuide: () => selectedGuideLive.current,
-      getSelectedAnnotation: () => selectedAnnotationLive.current,
+      getSelectedGuides: () => selectedGuidesLive.current,
+      getSelectedAnnotations: () => selectedAnnotationsLive.current,
       setSelectedObjects: (ids) =>
-        setSelectedIds(ids.map((id) => ({ kind: 'object' as const, id }))),
-      setSelection: (nodes) => {
-        setSelectedGuide(null)
-        setSelectedAnnotation(null)
-        setSelectedIds(nodes)
-      },
+        setSelection(ids.map((id) => ({ kind: 'object' as const, id }))),
+      setSelection: (items) => setSelection(items),
       loadBytes: (bytes) => applyLoadedBytesRef.current?.(bytes) ?? false,
       toggleTagPath: (path) => toggleTagPathRef.current(path),
       deleteTag: (path) => deleteTagRef.current(path),
@@ -2538,9 +2536,9 @@ export default function App() {
   useEffect(() => {
     const scene = state?.scene
     if (scene === undefined) return
-    scene.set_ui_selection(uiSelectionJson(selectedIds, selectedGuide, selectedAnnotation))
+    scene.set_ui_selection(uiSelectionJson(selection))
     pumpEvents(scene)
-  }, [state?.scene, selectedIds, selectedGuide, selectedAnnotation])
+  }, [state?.scene, selection])
   // The in-context entries: `setActiveContext` already mirrors every change
   // into the Scene; this re-seeds a replaced Scene and pumps, so
   // `context_changed` reaches subscribers when the user's own clicks (not a
@@ -3031,7 +3029,7 @@ export default function App() {
 
   // Choosing a Draw tool at top level clears the selection (see the hook).
   useClearSelectionOnDrawTool(activeTool, DRAW_TOOLS, activeContext.length > 0, () =>
-    setSelectedIds((cur) => (cur.length > 0 ? [] : cur)),
+    setSelection((cur) => (cur.length > 0 ? [] : cur)),
   )
 
   // ---------------------------------------------------------------- palette: dynamic Model entries
@@ -3264,7 +3262,7 @@ export default function App() {
     // it is, so it keeps the person's render mode too.
     if (opts?.keepCamera !== true) setRenderMode('shaded')
     setWelcomeOpen(false)
-    setSelectedIds([])
+    setSelection([])
     setActiveContext([])
     // The wasm handle is reused and mutated in place across New/Open, so
     // the Scenes controller must be told explicitly that this is a new
@@ -6129,23 +6127,22 @@ export default function App() {
   // sees the current `selectedIds` (the ref is reassigned fresh every render;
   // see the Fast-Refresh note above `menuActionRef`).
   const deleteSelection = () => {
-    // A selected guide/annotation deletes via the same path; mutually
-    // exclusive with node selection.
-    if (selectedGuide !== null) {
-      viewportApi.current?.runDeleteGuide(selectedGuide)
-      setSelectedGuide(null)
+    // A lone guide or annotation deletes through its own call.
+    if (loneGuide !== null) {
+      viewportApi.current?.runDeleteGuide(loneGuide)
+      setSelection([])
       setDocRev((r) => r + 1)
       return
     }
-    if (selectedAnnotation !== null) {
-      viewportApi.current?.runDeleteAnnotation(selectedAnnotation)
-      setSelectedAnnotation(null)
+    if (loneAnnotation !== null) {
+      viewportApi.current?.runDeleteAnnotation(loneAnnotation)
+      setSelection([])
       setDocRev((r) => r + 1)
       return
     }
     if (selectedIds.length === 0) return
     viewportApi.current?.runDelete(selectedIds)
-    setSelectedIds([])
+    setSelection((cur) => withNodes(cur, []))
     setDocRev((r) => r + 1)
   }
 
@@ -6298,7 +6295,8 @@ export default function App() {
     const scene = sceneRef.current
     // Delete exactly what the copy carried (a picked edge's whole shape).
     viewportApi.current?.runDelete(scene === null ? copied : cutTargets(scene, copied))
-    setSelectedIds((cur) => cur.filter((n) => !copied.some((c) => nodeEq(c, n))))
+    // Only nodes were copied: guides and annotations stay, still selected.
+    setSelection((cur) => cur.filter((n) => !isNodeItem(n) || !copied.some((c) => nodeEq(c, n))))
     setDocRev((r) => r + 1)
   }
 
@@ -6348,9 +6346,7 @@ export default function App() {
             const { result, sources } = pasteLinked(scene, linkNodes, content.placementAffine, new Float64Array(content.placementAffine ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]))
             repointLinkSource(content, sources)
             viewportApi.current?.refreshScene()
-            setSelectedGuide(null)
-            setSelectedAnnotation(null)
-            setSelectedIds(result.rootIds.map((id) => ({ kind: 'instance' as const, id })))
+            setSelection(result.rootIds.map((id) => ({ kind: 'instance' as const, id })))
           } catch (err) {
             const code = parseKernelErrorCode(err)
             const rawMsg = err instanceof Error ? err.message : String(err)
@@ -6398,9 +6394,7 @@ export default function App() {
         }))
         // The pasted drawing, found again by geometry (v1.5 decisions D3).
         refs.push(...pastedDrawingRefs(scene, result.drawn))
-        setSelectedGuide(null)
-        setSelectedAnnotation(null)
-        setSelectedIds(refs)
+        setSelection(refs)
         return
       }
 
@@ -6483,9 +6477,7 @@ export default function App() {
       const [, kindStr, idStr] = payload.split(':')
       const kind = kindStr as NodeRef['kind']
       if ((kind === 'object' || kind === 'group' || kind === 'instance') && /^\d+$/.test(idStr)) {
-        setSelectedGuide(null)
-        setSelectedAnnotation(null)
-        setSelectedIds([{ kind, id: BigInt(idStr) }])
+        setSelection([{ kind, id: BigInt(idStr) }])
         setShowModelInfo(true)
         setShowObjectInfo(true)
         showTray()
@@ -7487,7 +7479,7 @@ export default function App() {
       checked[`object-smooth-${level === 0 ? 'off' : level}`] = menuGates?.smoothLevel === level
     }
     const enabled: Record<string, boolean> = {
-      'edit-delete': selectedIds.length > 0 || selectedGuide !== null || selectedAnnotation !== null,
+      'edit-delete': selection.length > 0,
       'edit-group': menuGates?.canGroup ?? false,
       'edit-ungroup': menuGates?.canUngroup ?? false,
       'edit-make-component': (menuGates?.canMakeComponent ?? false) || (menuGates?.canPromote ?? false),
@@ -7567,8 +7559,7 @@ export default function App() {
     showDebugLog,
     showLibrary,
     selectedIds,
-    selectedGuide,
-    selectedAnnotation,
+    selection,
     menuGates,
     menuFocusTick,
     menuSyncTick,
@@ -8066,7 +8057,7 @@ export default function App() {
       // status must still be re-derived from the document.
       setDocRev((r) => r + 1)
     } else if (result != null) {
-      setSelectedIds([result])
+      setSelection((cur) => withNodes(cur, [result]))
       setDocRev((r) => r + 1)
     }
   }
@@ -8100,7 +8091,7 @@ export default function App() {
     if (!(menuGates?.canGroup ?? false)) return
     const newGroupId = viewportApi.current?.runGroup(selectedIds)
     if (newGroupId != null) {
-      setSelectedIds([{ kind: 'group', id: newGroupId }])
+      setSelection((cur) => withNodes(cur, [{ kind: 'group', id: newGroupId }]))
       setDocRev((r) => r + 1)
     }
   }
@@ -8117,7 +8108,7 @@ export default function App() {
     if (ok === true) {
       // Moving a node into (or out of) a hidden group hides (or shows) it.
       reconcileVisibility()
-      setSelectedIds(nodes)
+      setSelection(nodes)
       setDocRev((r) => r + 1)
     }
   }
@@ -8125,7 +8116,7 @@ export default function App() {
   const handleUngroup = () => {
     if (selectedIds.length === 1 && selectedIds[0].kind === 'group') {
       viewportApi.current?.runUngroup(selectedIds[0].id)
-      setSelectedIds([])
+      setSelection((cur) => withNodes(cur, []))
       setDocRev((r) => r + 1)
     }
   }
@@ -8145,7 +8136,7 @@ export default function App() {
     if (!(menuGates?.canMakeComponent ?? false)) return
     const instanceId = viewportApi.current?.runMakeComponent(selectedIds)
     if (instanceId != null) {
-      setSelectedIds([{ kind: 'instance', id: instanceId }])
+      setSelection((cur) => withNodes(cur, [{ kind: 'instance', id: instanceId }]))
       setDocRev((r) => r + 1)
     }
   }
@@ -8200,7 +8191,7 @@ export default function App() {
     const scene = sceneRef.current
     const linked = scene !== null ? linkedPlacementOf(scene, node !== undefined ? [node] : selectedIds) : null
     if (scene === null || linked === null) return
-    setSelectedIds(Array.from(scene.instances_of(linked.definition)).map((id) => ({ kind: 'instance' as const, id })))
+    setSelection(Array.from(scene.instances_of(linked.definition)).map((id) => ({ kind: 'instance' as const, id })))
   }
 
   /** Outliner row actions for a linked copy (the row's "Copies" menu). */
@@ -8229,7 +8220,7 @@ export default function App() {
     if (selectedIds.length === 1 && selectedIds[0].kind === 'instance') {
       const newId = viewportApi.current?.runPlaceInstance(selectedIds[0].id)
       if (newId != null) {
-        setSelectedIds([{ kind: 'instance', id: newId }])
+        setSelection((cur) => withNodes(cur, [{ kind: 'instance', id: newId }]))
         setDocRev((r) => r + 1)
       }
     }
@@ -8239,10 +8230,10 @@ export default function App() {
     if (selectedIds.length === 1 && selectedIds[0].kind === 'instance') {
       const objectIds = viewportApi.current?.runExplodeInstance(selectedIds[0].id)
       if (objectIds != null && objectIds.length > 0) {
-        setSelectedIds(objectIds.map((id) => ({ kind: 'object' as const, id })))
+        setSelection((cur) => withNodes(cur, objectIds.map((id) => ({ kind: 'object' as const, id }))))
         setDocRev((r) => r + 1)
       } else if (objectIds != null) {
-        setSelectedIds([])
+        setSelection((cur) => withNodes(cur, []))
         setDocRev((r) => r + 1)
       }
     }
@@ -8580,9 +8571,9 @@ export default function App() {
             onSelectSnap={handleSelectSnap}
             onSelectMany={handleSelectMany}
             onSelectGuide={handleSelectGuide}
-            selectedGuide={selectedGuide}
+            selectedGuides={selectedGuides}
             onSelectAnnotation={handleSelectAnnotation}
-            selectedAnnotation={selectedAnnotation}
+            selectedAnnotations={selectedAnnotations}
             onOpenAnnotationEditor={handleOpenAnnotationEditor}
             onEnterContext={handleEnterContext}
             onExitContext={handleExitContext}
@@ -8829,7 +8820,7 @@ export default function App() {
           <div style={{ display: 'contents' }} onPointerOver={() => setInferenceInfo(null)}>
             <ContextualDock
               selectedIds={selectedIds}
-              selectedGuide={selectedGuide}
+              selectedGuide={selectedIds.length === 0 && selectedGuides.length > 0 ? selectedGuides[0] : null}
               hidden={cameraDragging}
               activeToolId={toolActionId(activeTool)}
               hoveringSketchRegion={hoveringSketchRegion}
@@ -9042,8 +9033,8 @@ export default function App() {
               scene={state.scene}
               docRev={docRev}
               selectedIds={selectedIds}
-              selectedAnnotation={selectedAnnotation}
-              selectedGuide={selectedGuide}
+              selectedAnnotation={loneAnnotation}
+              selectedGuide={loneGuide}
               // Segments rebuilds a circle's chords, so it needs the repaint
               // path like every other tray panel that edits geometry; names
               // change nothing drawn and skip the re-tessellation.
@@ -9715,7 +9706,7 @@ export default function App() {
         onRun={(id) => menuActionRef.current(id)}
         extraEntries={paletteExtraEntries}
         gates={{
-          selection: selectedIds.length > 0 || selectedGuide !== null || selectedAnnotation !== null,
+          selection: selection.length > 0,
           canGroup: menuGates?.canGroup ?? false,
           canUngroup: menuGates?.canUngroup ?? false,
           canMakeComponent: (menuGates?.canMakeComponent ?? false) || (menuGates?.canPromote ?? false),
