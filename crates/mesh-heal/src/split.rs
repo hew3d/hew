@@ -411,12 +411,23 @@ fn has_duplicate_directed_edge(faces: &[Vec<usize>], face_holes: &[Vec<Vec<usize
 /// convention, as [`crate::orient_outward`] judges a whole mesh (whose
 /// closed-shell test could not see the pieces until the split).
 pub fn orient_pieces_outward(pieces: Vec<MeshPiece>) -> Vec<MeshPiece> {
-    let shells: Vec<(bool, f64)> = pieces
+    // Each piece's rings (outer loops, then hole loops wound against them):
+    // the closed test, the volume and the enclosure test all read the whole
+    // surface, so a plate's bore is not solid to a piece sitting in it.
+    let rings: Vec<Vec<Vec<usize>>> = pieces
         .iter()
         .map(|p| {
-            let closed = crate::is_closed(&p.faces);
+            let holes = crate::normalize_hole_winding(&p.faces, &p.face_holes, &p.positions);
+            crate::rings_with_holes(&p.faces, &holes)
+        })
+        .collect();
+    let shells: Vec<(bool, f64)> = pieces
+        .iter()
+        .zip(&rings)
+        .map(|(p, rings)| {
+            let closed = crate::is_closed(rings);
             let volume6 = if closed {
-                crate::signed_volume6(&p.faces, &p.positions)
+                crate::signed_volume6(rings, &p.positions)
             } else {
                 0.0
             };
@@ -443,7 +454,7 @@ pub fn orient_pieces_outward(pieces: Vec<MeshPiece>) -> Vec<MeshPiece> {
                 j != i
                     && shells[j].0
                     && shells[j].1 > 0.0
-                    && crate::winding_number(probe, &other.faces, &other.positions).abs()
+                    && crate::winding_number(probe, &rings[j], &other.positions).abs()
                         > crate::WINDING_ENCLOSED
             });
             !enclosed

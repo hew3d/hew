@@ -263,18 +263,22 @@ fn theater(file: &str) {
     // meshes split into 16 more open pieces (979 -> 995, leaky 139 -> 155,
     // placements 692 -> 700, four more split meshes' groups 29 -> 33);
     // every watertight solid stays one (840).
+    // Faces with holes now count in a shell's closed test, volume and
+    // consistency pass: the 2" PVC wye tee, whose annular ends left two of
+    // its pieces apart, comes in one piece fewer (995 -> 994 objects, leaky
+    // 155 -> 154, placements 700 -> 696); no watertight solid moves.
     // Edges bounding no face are drafting now, held by their group: 12
     // world groups of lines alone arrive that used to be dropped
     // (33 -> 45).
-    assert_eq!(report.objects_created, 995);
+    assert_eq!(report.objects_created, 994);
     assert_eq!(report.watertight, 840);
-    assert_eq!(report.leaky, 155);
+    assert_eq!(report.leaky, 154);
     assert_eq!(report.skipped.len(), 0);
     assert_eq!(doc.instance_ids().len(), 295);
     assert_eq!(doc.group_ids().len(), 45);
     assert_eq!(doc.user_hidden_nodes().len(), 13);
     assert_eq!(doc.component_ids().len(), 151);
-    assert_eq!(doc.expanded_placements().len(), 700);
+    assert_eq!(doc.expanded_placements().len(), 696);
     assert_eq!(
         doc.component_ids()
             .iter()

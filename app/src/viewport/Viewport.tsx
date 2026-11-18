@@ -7460,6 +7460,17 @@ export default function Viewport({
       }
     }
 
+    // The pose a scene camera was last applied at, with the `up` it stored.
+    // The live camera keeps the world's up (`levelledUp`), but a stored
+    // pitched `up` is what the scene holds: while the camera is still at
+    // that pose it reads back as stored, so activating a scene does not
+    // look like a change to it. Moving the camera by any means drops it.
+    let appliedPose: {
+      eye: [number, number, number]
+      target: [number, number, number]
+      up: [number, number, number]
+    } | null = null
+
     /**
      * The camera's full working view, for document-save persistence
      * (docs/design/camera.md §5) — unlike the test-only `getCamera`
@@ -7493,14 +7504,47 @@ export default function Viewport({
       // to encode it (a saved parallel view keeps its real target, and a
       // Scene captured from one compares equal to itself).
       const dist = controls.getDistance()
+      const target: [number, number, number] = [
+        eye[0] + forward[0] * dist,
+        eye[1] + forward[1] * dist,
+        eye[2] + forward[2] * dist,
+      ]
+      const tol = 1e-5 * Math.max(1, dist)
+      const atApplied =
+        appliedPose !== null &&
+        appliedPose.eye.every((v, i) => Math.abs(v - eye[i]) <= tol) &&
+        appliedPose.target.every((v, i) => Math.abs(v - target[i]) <= tol)
       return {
         projection: rig.projection,
         fovDeg: rig.fovDeg,
         parallelHeight: rig.heightAtTarget(dist),
         eye,
-        target: [eye[0] + forward[0] * dist, eye[1] + forward[1] * dist, eye[2] + forward[2] * dist],
-        up: [camera.up.x, camera.up.y, camera.up.z],
+        target,
+        up: atApplied && appliedPose !== null ? appliedPose.up : [camera.up.x, camera.up.y, camera.up.z],
       }
+    }
+
+    /**
+     * The `up` a pose should leave on the camera. A stored camera's `up` is
+     * its pitched screen-up (perpendicular to the view direction); left on
+     * `camera.up` it becomes OrbitControls' turning axis, so orbiting from
+     * a scene's view rolled the horizon instead of turning about the
+     * vertical. A view that is not straight up or down is the same
+     * orientation with the world's up (Hew's cameras do not roll), so that
+     * is what stays; a straight-down view keeps the stored one, which is
+     * all that fixes its heading.
+     */
+    function levelledUp(
+      eye: [number, number, number],
+      target: [number, number, number],
+      up: [number, number, number],
+    ): [number, number, number] {
+      const dx = target[0] - eye[0]
+      const dy = target[1] - eye[1]
+      const dz = target[2] - eye[2]
+      const len = Math.hypot(dx, dy, dz)
+      if (len === 0 || Math.abs(dz) / len > 0.9995) return up
+      return [0, 0, 1]
     }
 
     /**
@@ -7537,6 +7581,11 @@ export default function Viewport({
       rig.perspective.position.set(state.eye[0], state.eye[1], state.eye[2])
       rig.perspective.up.set(state.up[0], state.up[1], state.up[2])
       rig.perspective.lookAt(targetVec)
+      // The orientation is now exact; what stays on `camera.up` is the axis
+      // OrbitControls turns about, so a roll-free pose keeps the world's.
+      const levelled = levelledUp(state.eye, state.target, state.up)
+      rig.perspective.up.set(levelled[0], levelled[1], levelled[2])
+      appliedPose = { eye: state.eye, target: state.target, up: state.up }
       rig.setFov(state.fovDeg)
       // A scene camera holding a frame ratio: hold it (set before the
       // parallel toggle so the frustum is sized through the fit).
@@ -7575,7 +7624,10 @@ export default function Viewport({
       up: [number, number, number]
       aspectRatio?: number
     }): void {
-      framePose = rig.frameAspect === null ? null : { eye: state.eye, target: state.target, up: state.up }
+      framePose =
+        rig.frameAspect === null
+          ? null
+          : { eye: state.eye, target: state.target, up: levelledUp(state.eye, state.target, state.up) }
     }
     function releaseFrameIfMoved(): void {
       if (framePose === null || cameraTween !== null) return
@@ -7603,6 +7655,18 @@ export default function Viewport({
       cancelAnimationFrame(cameraTween.raf)
       const done = cameraTween.onDone
       cameraTween = null
+      // A tween in flight turns the camera on the slerped pitched `up`; the
+      // pose it stopped at keeps the world's, or the next orbit pivots about
+      // the pitched axis.
+      const stopEye = currentEye()
+      const fwd = currentForward()
+      const stopDist = controls.getDistance()
+      const lvl = levelledUp(
+        stopEye,
+        [stopEye[0] + fwd[0] * stopDist, stopEye[1] + fwd[1] * stopDist, stopEye[2] + fwd[2] * stopDist],
+        [camera.up.x, camera.up.y, camera.up.z],
+      )
+      camera.up.set(lvl[0], lvl[1], lvl[2])
       done?.(false)
     }
 

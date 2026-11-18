@@ -258,6 +258,8 @@ impl ConvertJob {
             sketches: Vec::new(),
             run_variants: BTreeMap::new(),
             def_frames: Vec::new(),
+            drawing_group_pids: BTreeSet::new(),
+            drawing_group_aliases: BTreeMap::new(),
             provenance: Provenance::default(),
             claims: None,
         };
@@ -556,8 +558,21 @@ impl ConvertJob {
                 camera: s.camera.as_ref().map(|c| camera_state(c, &cv.hew)),
                 // A hidden set is captured only when the page saved it; a
                 // page that did not leaves visibility alone (`None`).
-                hidden_keys: saves_hidden_geometry(s)
-                    .then(|| s.hidden_entities.iter().map(|&k| k as u64).collect()),
+                hidden_keys: saves_hidden_geometry(s).then(|| {
+                    s.hidden_entities
+                        .iter()
+                        .flat_map(|&k| {
+                            let k = k as u64;
+                            std::iter::once(k).chain(
+                                cv.drawing_group_aliases
+                                    .get(&k)
+                                    .into_iter()
+                                    .flatten()
+                                    .copied(),
+                            )
+                        })
+                        .collect()
+                }),
                 hidden_tags: saves_visible_layers(s).then(|| {
                     s.hidden_layers
                         .iter()
@@ -813,6 +828,13 @@ struct Converter {
     /// definition placement's world pose, innermost last. A group's own
     /// geometry inside one bakes straight into the definition's frame.
     def_frames: Vec<Transform>,
+    /// Placement ids of groups already built holding drawing: a placement
+    /// inside a definition several placed groups share keeps one id for all
+    /// of them, and a sketch finds its group by key.
+    drawing_group_pids: BTreeSet<u32>,
+    /// A drawing group's placement id -> the synthetic keys later copies of
+    /// it were given, so a scene naming the placement hides them too.
+    drawing_group_aliases: BTreeMap<u64, Vec<u64>>,
 }
 
 impl Converter {
@@ -965,7 +987,26 @@ impl Converter {
         // The group's own drawing: edges bounding no face, as sketches the
         // group holds (by its key; a placement without an id leaves them
         // free drawing).
-        let sketches = self.run_drawing(run_idx, &bake, key_of(pid));
+        let mut sketches = self.run_drawing(run_idx, &bake, key_of(pid));
+        // The key this group goes by: its placement id, except for a copy
+        // of a group of drawing already built. The groups of a definition
+        // placed more than once share their placement ids, so by that id
+        // every copy's lines would land in the first copy (and show or hide
+        // with its scene); a later copy takes a key of its own, which the
+        // scenes naming the placement are told of.
+        let mut gkey = key_of(pid);
+        if !sketches.is_empty()
+            && let Some(p) = gkey
+            && !self.drawing_group_pids.insert(pid)
+        {
+            let k = self.synthetic_key();
+            self.drawing_group_aliases.entry(p).or_default().push(k);
+            self.provenance.nodes.push((k, Origin::Group { pid }));
+            for s in &mut sketches {
+                s.group = Some(k);
+            }
+            gkey = Some(k);
+        }
         // Alone, the group's geometry stands for the group and takes its
         // key; beside children it is geometry of its own.
         let own_key = if children.is_empty() {
@@ -1030,7 +1071,7 @@ impl Converter {
             children: all_children,
             tags,
             hidden,
-            key: key_of(pid),
+            key: gkey,
         })
     }
 
@@ -3792,6 +3833,128 @@ mod tests {
             "{:?}",
             report.sketches
         );
+    }
+
+    /// Copies of a group definition share the placement ids of the groups
+    /// inside it. Each copy's lines belong to that copy's own group, so
+    /// they follow its container's tag: one copy on Overview and one on
+    /// Exploded View each hold their own threads, never both on the
+    /// first.
+    #[test]
+    fn lines_in_copies_of_a_shared_group_stay_with_their_own_copy() {
+        let ident = |x: f64| {
+            let inch = x * skpwright::INCH;
+            [
+                1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, inch, 0.0, 0.0, 1.0,
+            ]
+        };
+        let group_def = |name: &str| skpwright::Definition {
+            name: name.into(),
+            guid: String::new(),
+            kind: skpwright::DefinitionKind::Group,
+            description: String::new(),
+            source_path: String::new(),
+            behaviour: Default::default(),
+            timestamp: 0,
+            map_index: None,
+            thumbnail: None,
+            thumbnail_camera: None,
+            point_m: [0.0; 3],
+            flag: false,
+        };
+        let placed = |pid, defref, layer| skpwright::PlacedInstance {
+            pid,
+            defref,
+            transform: ident(0.0),
+            is_group: true,
+            layer,
+            ..Default::default()
+        };
+        let mut model = skpwright::Model::default();
+        for (i, name) in ["Rod", "Thread", "Turn"].into_iter().enumerate() {
+            model.definitions.push(group_def(name));
+            model.definition_links.push((10 + i as u32, i));
+        }
+        for name in ["Layer0", "Overview", "Exploded View"] {
+            model.layers.push(skpwright::Layer {
+                name: name.into(),
+                visible: true,
+                rgba: [0, 0, 0, 255],
+            });
+        }
+        model.layer_links = vec![(0, 0), (1, 1), (2, 2)];
+        // Rod (a group) > Thread (a group) x2 > Turn (edges only).
+        let turn = skpwright::Mesh {
+            vertices: vec![[0.0, 0.0, 0.0], [0.0, 0.1, 0.1]],
+            edges: vec![skpwright::MeshEdge {
+                pid: 5,
+                v0: 0,
+                v1: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let run = |def, mesh, placed| skpwright::GeometryRun {
+            def_index: Some(def),
+            mesh,
+            placed,
+            ..Default::default()
+        };
+        model.geometry = vec![
+            run(
+                10,
+                Default::default(),
+                vec![placed(21, 11, 0), placed(22, 11, 0)],
+            ),
+            run(11, Default::default(), vec![placed(31, 12, 0)]),
+            run(12, turn, Vec::new()),
+        ];
+        // The rod, once on each layer, 5 m apart.
+        let top = |pid, layer, x| skpwright::Instance {
+            pid,
+            definition: Some("Rod".into()),
+            defref: 10,
+            offset: 1,
+            translation_m: [x, 0.0, 0.0],
+            transform: ident(x),
+            material: None,
+            name: None,
+            is_group: Some(true),
+            hidden: Some(false),
+            layer: Some(layer),
+            slot: None,
+            guid: String::new(),
+            casts_shadows: Some(true),
+            receives_shadows: Some(true),
+            locked: Some(false),
+        };
+        model.instances = vec![top(1, 1, 0.0), top(2, 2, 5.0)];
+        let out = convert(Rc::new(model));
+        let mut doc = kernel::Document::new();
+        doc.ingest(out.scene, out.textures_missing).unwrap();
+        let sketches = doc.sketch_ids();
+        assert_eq!(sketches.len(), 4, "two threads in each of two rods");
+        let mut per_tag: BTreeMap<String, usize> = BTreeMap::new();
+        for s in sketches {
+            let g = doc.sketch_owner_group(s).expect("held by its group");
+            let mut tags = Vec::new();
+            let mut at = Some(g);
+            while let Some(p) = at {
+                tags.extend(doc.node_tags(kernel::NodeId::Group(p)).iter().cloned());
+                at = doc.node_parent(kernel::NodeId::Group(p));
+            }
+            let x = doc
+                .sketch(s)
+                .unwrap()
+                .vertices()
+                .values()
+                .map(|v| v.position.x)
+                .fold(f64::MAX, f64::min);
+            let want = if x < 1.0 { "Overview" } else { "Exploded View" };
+            assert_eq!(tags, vec![vec![want.to_string()]], "sketch at x={x}");
+            *per_tag.entry(want.into()).or_default() += 1;
+        }
+        assert_eq!(per_tag.values().copied().collect::<Vec<_>>(), [2, 2]);
     }
 
     /// A loose run read as several pieces (here a visible box and a hidden
