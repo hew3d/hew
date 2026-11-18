@@ -24,6 +24,7 @@ import { chordFromEvent, chordToString } from '../keymap/chord'
 import { commandForChord } from '../keymap/keymap'
 import { isTextFieldFocused } from '../clipboard/textFieldPaste'
 import { shownAnnotationIds } from './shownAnnotations'
+import { guideSpanOf } from './guideWindow'
 import { useEffect, useLayoutEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
@@ -135,7 +136,7 @@ import type { Snap, SnapConstraint, Tool, EditContext } from '../tools/types'
 import { toolHasArmedGesture } from '../tools/types'
 import { rayPlaneIntersect, subV3, addV3, perpComponentV3, type V3 } from './geoHelpers'
 import { readAnnotation, commitAnnotationText, initialEditorText, type AnnotationSnapshot } from './annotationEdit'
-import { collectLeafIds, isDraftKind, nodeEq, nodeKey, nodeRefFromJs, placementLabel, resolveLabel, structuralSelection, treeIndexOf, type NodeRef, type SelectMode } from '../panels/treeModel'
+import { collectLeafIds, isDraftKind, nodeEq, nodeKey, nodeRefFromJs, placementLabel, resolveLabel, selKey, structuralSelection, treeIndexOf, type NodeRef, type SelItem, type SelectMode } from '../panels/treeModel'
 import { selectModeFor, isModifiedSelectPress } from './selectModifiers'
 import { deleteStepLabel } from './deleteLabel'
 import { baseBindingFor, desiredDragState, switchDragTo, orbitDragState, setPreciseOrbit, forceBaseAfterPress, type SwitchableDrag } from './orbitDragSwitch'
@@ -489,9 +490,10 @@ interface Props {
    * (drag-move auto-select, marquee, outliner clicks, …) — those have no
    * single corresponding tap snap to report. */
   onSelectSnap?: (snap: Snap | null) => void
-  /** Lift a multi-node selection (marquee, Select All, Invert Selection) up
-   * to the parent. `mode` as for `onSelect`, read off the marquee's press. */
-  onSelectMany?: (nodes: NodeRef[], mode: SelectMode) => void
+  /** Lift a multi-entry selection (marquee, Select All, Invert Selection)
+   * up to the parent: nodes, and at the model level the shown guides and
+   * annotations too. `mode` as for `onSelect`, read off the marquee's press. */
+  onSelectMany?: (items: SelItem[], mode: SelectMode) => void
   /** Lift a construction-guide pick to the parent, combined with the
    * selection as `mode` says (omitted: replace); `null` deselects every
    * guide. */
@@ -2852,6 +2854,11 @@ export default function Viewport({
   // together with nodes, is not wired yet.
   const guideTarget = selectedGuides.length === 1 && selectedIds.length === 0 ? selectedGuides[0] : null
   const selectedGuideRef = useRef<bigint | null>(guideTarget)
+  // Latest selected guides and annotations, for Invert Selection.
+  const selectedGuidesRef = useRef(selectedGuides)
+  selectedGuidesRef.current = selectedGuides
+  const selectedAnnotationsRef = useRef(selectedAnnotations)
+  selectedAnnotationsRef.current = selectedAnnotations
   // Latest current material id for the Paint tool.
   const currentMaterialIdRef = useRef<bigint>(currentMaterialId)
   // Polygon's last-used side count — session-lived across tool re-selection
@@ -3739,11 +3746,30 @@ export default function Viewport({
         }
         return
       }
-      const refs = dedupeRefs([...visibleTopLevelCandidates().map((c) => c.node), ...visibleSketchRefs(), ...visibleObjectDrawingRefs()])
+      const refs: SelItem[] = dedupeRefs([...visibleTopLevelCandidates().map((c) => c.node), ...visibleSketchRefs(), ...visibleObjectDrawingRefs()])
+      if (atModelLevel()) refs.push(...shownGuidesAndAnnotations())
       if (refs.length > 0) {
         onSelectManyRef.current?.(refs, 'replace')
         scheduleRender()
       }
+    }
+
+    /** Whether no editing context or session is open: the level where the
+     *  document's construction guides and annotations live, so the level
+     *  Select All and Invert Selection take them at. */
+    function atModelLevel(): boolean {
+      return activeContextRef.current.length === 0 && sessionStackRef.current.length === 0
+    }
+
+    /** Every guide and annotation on screen: the guides while View ▸ Guides
+     *  is on, and in either case none on a hidden tag. */
+    function shownGuidesAndAnnotations(): SelItem[] {
+      const out: SelItem[] = []
+      if (sceneRenderer.guidesGroup.visible) {
+        for (const id of wasmScene.guide_ids()) out.push({ kind: 'guide', id })
+      }
+      for (const id of shownAnnotationIds(wasmScene)) out.push({ kind: 'annotation', id })
+      return out
     }
 
     /**
@@ -3784,7 +3810,14 @@ export default function Viewport({
         const sketches = innermost !== undefined && innermost.kind === 'group' ? [] : [...visibleSketchRefs(), ...visibleObjectDrawingRefs()]
         candidates = [...visibleTopLevelCandidates().map((c) => c.node), ...sketches]
       }
-      const refs = invertWithin(wasmScene, candidates, selectedIdsRef.current)
+      const refs: SelItem[] = invertWithin(wasmScene, candidates, selectedIdsRef.current)
+      if (atModelLevel()) {
+        const selected = new Set([
+          ...selectedGuidesRef.current.map((id) => selKey({ kind: 'guide', id })),
+          ...selectedAnnotationsRef.current.map((id) => selKey({ kind: 'annotation', id })),
+        ])
+        refs.push(...shownGuidesAndAnnotations().filter((s) => !selected.has(selKey(s))))
+      }
       onSelectManyRef.current?.(refs, 'replace')
       scheduleRender()
     }
@@ -3908,12 +3941,12 @@ export default function Viewport({
       return (found?.objects ?? []).filter((r): r is { kind: 'object'; id: bigint } => r.kind === 'object')
     }
 
-    function computeMarqueeSelection(rect: MarqueeRect, mode: MarqueeMode): NodeRef[] {
+    function computeMarqueeSelection(rect: MarqueeRect, mode: MarqueeMode): SelItem[] {
       // Matrices are current from the last render; a non-forced update only
       // touches nodes still flagged dirty.
       threeScene.updateMatrixWorld()
       const projector = new MarqueeProjector(camera, el.clientWidth, el.clientHeight)
-      const out: NodeRef[] = []
+      const out: SelItem[] = []
 
       const bb: ScreenBounds = { minX: 0, minY: 0, maxX: 0, maxY: 0 }
       const identity = new THREE.Matrix4()
@@ -4019,6 +4052,56 @@ export default function Viewport({
           ? projector.allVerticesInRect(lines, identity, rect)
           : projector.segmentsTouchRect(lines, identity, rect)
         if (hit) out.push(s)
+      }
+      out.push(...marqueeGuidesAndAnnotations(projector, rect, mode))
+      return out
+    }
+
+    /**
+     * The shown guides and annotations a marquee takes, by the rules a drawn
+     * line follows: under a window when the rect holds the whole of it, under
+     * a crossing when it touches the rect. A point guide is its point, an
+     * annotation the line a click on it picks (`annotationPickSegment`). A
+     * line guide that runs on without end can never sit whole inside a
+     * window, so only a crossing takes it; one bounded at both ends is a
+     * segment like any other.
+     */
+    function marqueeGuidesAndAnnotations(projector: MarqueeProjector, rect: MarqueeRect, mode: MarqueeMode): SelItem[] {
+      const out: SelItem[] = []
+      const identity = new THREE.Matrix4()
+      const takes = (positions: number[]): boolean =>
+        mode === 'window'
+          ? projector.allVerticesInRect(positions, identity, rect)
+          : projector.segmentsTouchRect(positions, identity, rect)
+      if (sceneRenderer.guidesGroup.visible) {
+        const eye = camera.position
+        for (const id of wasmScene.guide_ids()) {
+          const kind = wasmScene.guide_kind(id)
+          const g = wasmScene.guide_geometry(id)
+          if (kind === undefined || g === undefined) continue
+          let hit = false
+          if (kind === 'point') {
+            hit = projector.allVerticesInRect([g[0], g[1], g[2]], identity, rect)
+          } else if (kind === 'line') {
+            const len = Math.hypot(g[3], g[4], g[5])
+            if (len < 1e-9) continue
+            const ux = g[3] / len, uy = g[4] / len, uz = g[5] / len
+            const { lo, hi } = guideSpanOf(g)
+            if (mode === 'window' && !(Number.isFinite(lo) && Number.isFinite(hi))) continue
+            // An open end runs on past anything the camera shows: out to the
+            // far plane either side of the point nearest the eye.
+            const near = (eye.x - g[0]) * ux + (eye.y - g[1]) * uy + (eye.z - g[2]) * uz
+            const t0 = Number.isFinite(lo) ? lo : near - camera.far
+            const t1 = Number.isFinite(hi) ? hi : near + camera.far
+            if (t0 >= t1) continue
+            hit = takes([g[0] + ux * t0, g[1] + uy * t0, g[2] + uz * t0, g[0] + ux * t1, g[1] + uy * t1, g[2] + uz * t1])
+          }
+          if (hit) out.push({ kind: 'guide', id })
+        }
+      }
+      for (const id of shownAnnotationIds(wasmScene)) {
+        const seg = annotationPickSegment(id)
+        if (seg !== null && takes([...seg[0], ...seg[1]])) out.push({ kind: 'annotation', id })
       }
       return out
     }
@@ -10993,6 +11076,40 @@ export default function Viewport({
      * radial dimension or leader text — measured like a guide line in
      * `pickGuide` above (screenPick.ts), just against the annotation's own
      * two key points instead of a stretch of an infinite line. */
+    /** The line a click on annotation `id` picks: the dimension line of a
+     *  linear dimension, the leader of a radial dimension or a leader text.
+     *  Null when the annotation is gone. */
+    function annotationPickSegment(id: bigint): [V3, V3] | null {
+      const kind = wasmScene.annotation_kind(id)
+      if (kind === undefined) return null
+      if (kind === 'linear') {
+        const a = wasmScene.annotation_anchor_point(id, 0)
+        const b = wasmScene.annotation_anchor_point(id, 1)
+        const offset = wasmScene.annotation_offset(id)
+        if (a === undefined || b === undefined || offset === undefined) return null
+        return [
+          [a[0] + offset[0], a[1] + offset[1], a[2] + offset[2]],
+          [b[0] + offset[0], b[1] + offset[1], b[2] + offset[2]],
+        ]
+      }
+      if (kind === 'radial') {
+        const anchor = wasmScene.annotation_anchor_point(id, 0)
+        const leaderDir = wasmScene.annotation_leader_dir(id)
+        if (anchor === undefined || leaderDir === undefined) return null
+        return [
+          [anchor[0], anchor[1], anchor[2]],
+          [anchor[0] + leaderDir[0], anchor[1] + leaderDir[1], anchor[2] + leaderDir[2]],
+        ]
+      }
+      const anchor = wasmScene.annotation_anchor_point(id, 0)
+      const offset = wasmScene.annotation_offset(id)
+      if (anchor === undefined || offset === undefined) return null
+      return [
+        [anchor[0], anchor[1], anchor[2]],
+        [anchor[0] + offset[0], anchor[1] + offset[1], anchor[2] + offset[2]],
+      ]
+    }
+
     function pickAnnotation(ndcX: number, ndcY: number): bigint | null {
       const w = renderer.domElement.clientWidth
       const h = renderer.domElement.clientHeight
@@ -11002,30 +11119,9 @@ export default function Viewport({
       let bestDist = ANNOTATION_PICK_PX
       const visDeps = drawnVisibilityDeps()
       for (const id of shownAnnotationIds(wasmScene)) {
-        const kind = wasmScene.annotation_kind(id)
-        if (kind === undefined) continue
-        let p0: V3 | undefined
-        let p1: V3 | undefined
-        if (kind === 'linear') {
-          const a = wasmScene.annotation_anchor_point(id, 0)
-          const b = wasmScene.annotation_anchor_point(id, 1)
-          const offset = wasmScene.annotation_offset(id)
-          if (a === undefined || b === undefined || offset === undefined) continue
-          p0 = [a[0] + offset[0], a[1] + offset[1], a[2] + offset[2]]
-          p1 = [b[0] + offset[0], b[1] + offset[1], b[2] + offset[2]]
-        } else if (kind === 'radial') {
-          const anchor = wasmScene.annotation_anchor_point(id, 0)
-          const leaderDir = wasmScene.annotation_leader_dir(id)
-          if (anchor === undefined || leaderDir === undefined) continue
-          p0 = [anchor[0], anchor[1], anchor[2]]
-          p1 = [anchor[0] + leaderDir[0], anchor[1] + leaderDir[1], anchor[2] + leaderDir[2]]
-        } else {
-          const anchor = wasmScene.annotation_anchor_point(id, 0)
-          const offset = wasmScene.annotation_offset(id)
-          if (anchor === undefined || offset === undefined) continue
-          p0 = [anchor[0], anchor[1], anchor[2]]
-          p1 = [anchor[0] + offset[0], anchor[1] + offset[1], anchor[2] + offset[2]]
-        }
+        const seg = annotationPickSegment(id)
+        if (seg === null) continue
+        const [p0, p1] = seg
         let d = Infinity
         for (const sm of segmentPickSamples(camera, w, h, p0, p1, clickX, clickY, bestDist)) {
           if (drawnPointVisible(sm.point, visDeps)) {

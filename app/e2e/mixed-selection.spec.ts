@@ -162,3 +162,99 @@ test('a Delete names its undo step by what it took', async ({ page }) => {
   await expect.poll(() => page.evaluate(() => window.__hew_test!.getGuideIds())).toEqual([])
   await expectUndoLabel(page, 'Undo Delete 2 guides')
 })
+
+/** Page pixel of world point `at`. */
+function pagePx(ctx: Ctx, at: [number, number, number]): { x: number; y: number } {
+  const p = worldToPagePixel({ x: at[0], y: at[1], z: at[2] }, ctx.vp, ctx.rect)
+  if (p === null) throw new Error(`world (${at.join(',')}) does not project onto the canvas`)
+  return p
+}
+
+/** A real marquee drag from `from` to `to` (page pixels): left to right is
+ *  a window, right to left a crossing. */
+async function marquee(page: Page, from: { x: number; y: number }, to: { x: number; y: number }): Promise<void> {
+  await page.mouse.move(from.x, from.y)
+  await page.mouse.down()
+  for (let i = 1; i <= 8; i++) {
+    await page.mouse.move(from.x + ((to.x - from.x) * i) / 8, from.y + ((to.y - from.y) * i) / 8)
+  }
+  await page.mouse.up()
+}
+
+async function selectedKinds(page: Page): Promise<{ nodes: string[]; guides: string[]; annotations: string[] }> {
+  return page.evaluate(() => ({
+    nodes: window.__hew_test!.getSelection().map((n) => n.id),
+    guides: window.__hew_test!.getSelectedGuides(),
+    annotations: window.__hew_test!.getSelectedAnnotations(),
+  }))
+}
+
+/** A box, a point guide, an endless vertical guide line between them, and a
+ *  dimension, all on screen. */
+async function guidesScene(page: Page) {
+  return page.evaluate(() => {
+    const h = window.__hew_test!
+    return {
+      box: h.drawBox([0, 0, 0], [1, 1, 0], 1),
+      point: h.addGuidePoint(3, 0, 0),
+      line: h.addGuideLine(2, 0, 0, 0, 0, 1),
+      dim: h.addLinearDimension([0, 3, 0], [2, 3, 0], [0, 1, 0], [0, 0, 0, 0, 0, 1]),
+    }
+  })
+}
+
+test('a window marquee takes the box, the point guide and the dimension, never an endless guide line', async ({ page }) => {
+  const ctx = await setup(page)
+  const ids = await guidesScene(page)
+  const pts = ([
+    [0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1],
+    [3, 0, 0], [0, 4, 0], [2, 4, 0],
+  ] as [number, number, number][]).map((p) => pagePx(ctx, p))
+  const margin = 25
+  const minX = Math.min(...pts.map((p) => p.x)) - margin
+  const maxX = Math.max(...pts.map((p) => p.x)) + margin
+  const minY = Math.min(...pts.map((p) => p.y)) - margin
+  const maxY = Math.max(...pts.map((p) => p.y)) + margin
+
+  await marquee(page, { x: minX, y: minY }, { x: maxX, y: maxY })
+  expect(await selectedKinds(page)).toEqual({ nodes: [ids.box], guides: [ids.point], annotations: [ids.dim] })
+
+  // A crossing across the guide line alone, Shift held, adds it.
+  const onLine = pagePx(ctx, [2, 0, 0.5])
+  await page.keyboard.down('Shift')
+  await marquee(page, { x: onLine.x + 15, y: onLine.y - 15 }, { x: onLine.x - 15, y: onLine.y + 15 })
+  await page.keyboard.up('Shift')
+  const after = await selectedKinds(page)
+  expect(new Set(after.guides)).toEqual(new Set([ids.point, ids.line]))
+  expect(after.nodes).toEqual([ids.box])
+  expect(after.annotations).toEqual([ids.dim])
+})
+
+test('Select All and Invert Selection take the shown guides and annotations at the model level', async ({ page }) => {
+  await setup(page)
+  const ids = await guidesScene(page)
+  await focusViewport(page)
+
+  await page.keyboard.press('Control+a')
+  await expect.poll(async () => (await selectedKinds(page)).guides.length).toBe(2)
+  let sel = await selectedKinds(page)
+  expect(sel.nodes).toEqual([ids.box])
+  expect(new Set(sel.guides)).toEqual(new Set([ids.point, ids.line]))
+  expect(sel.annotations).toEqual([ids.dim])
+
+  // With View ▸ Guides off, the guides stay out.
+  await page.evaluate(() => window.__hew_test!.setGuidesVisible(false))
+  await page.evaluate(() => window.__hew_test!.selectAll())
+  await expect.poll(async () => (await selectedKinds(page)).guides).toEqual([])
+  await page.evaluate(() => window.__hew_test!.setGuidesVisible(true))
+
+  // Invert of one selected guide is everything else.
+  await page.evaluate((g) => window.__hew_test!.selectNodes([{ kind: 'guide', id: g }]), ids.point)
+  await expect.poll(async () => (await selectedKinds(page)).guides).toEqual([ids.point])
+  await page.getByTestId('menu-bar').getByRole('button', { name: 'Edit' }).click()
+  await page.getByText('Invert Selection', { exact: true }).click()
+  await expect.poll(async () => (await selectedKinds(page)).guides).toEqual([ids.line])
+  sel = await selectedKinds(page)
+  expect(sel.nodes).toEqual([ids.box])
+  expect(sel.annotations).toEqual([ids.dim])
+})
