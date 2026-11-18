@@ -3759,6 +3759,10 @@ describe('App — welcome screen', () => {
     ]
     await renderAndLoad()
     await screen.findByRole('dialog', { name: /recover unsaved document/i })
+    // The dialog's Escape listener is attached in a passive effect, which can
+    // flush after the DOM node is already findable. Drain pending effects so
+    // the key press cannot land in that gap.
+    await act(async () => {})
     fireEvent.keyDown(document, { key: 'Escape' })
     await screen.findByRole('dialog', { name: /welcome to hew/i })
   })
