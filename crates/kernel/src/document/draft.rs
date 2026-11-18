@@ -6,7 +6,14 @@
 //! free sketches on the plane — is replayed into ONE working [`Sketch`]. A
 //! solid's own edges on the plane (where its faces meet non-coplanar ones)
 //! are FIXED: drafting splits them where lines meet them, but never moves or
-//! removes them.
+//! removes them. So are the edges between two of its faces on the plane
+//! that are its content rather than drawing: a paint or attribute boundary,
+//! and a soft seam (a terrain's or a deformed face's triangulation) — with
+//! one exception: a soft seam the edit leaves HANGING (a dangling end, or a
+//! bridge, once the drawing it ended on is erased or moved away) is removed
+//! with that drawing, since no face can hold it and the plane carries no
+//! geometry along it. A hanging paint or attribute boundary, or a soft seam
+//! carrying an attribute dictionary, refuses the edit instead.
 //!
 //! **Edit.** Any [`Sketch`] method runs on the working sketch: drawing,
 //! erasing, moving islands, dragging points, offsetting, re-faceting. The
@@ -237,7 +244,10 @@ pub(crate) struct Lifted {
     owned: BTreeMap<ObjectId, Vec<SketchId>>,
     /// The free sketches on the plane, in key order.
     free: Vec<SketchId>,
-    /// The objects' own edges on the plane, then the foreign edges (fixed).
+    /// The objects' own edges on the plane (the soft seams and paint or
+    /// attribute boundaries between their faces there included), then the
+    /// foreign edges: fixed. Only a soft seam an edit leaves hanging is ever
+    /// removed ([`hanging_soft_edges`]).
     fixed: Vec<(Point3, Point3)>,
     /// The foreign edges among `fixed`, with where each comes from.
     foreign: Vec<Foreign>,
@@ -1082,7 +1092,9 @@ impl Document {
                         // split is the solid's content (the paint or
                         // dictionary boundary, a source's smoothed seam — a
                         // terrain's flat triangles), kept like its own edges,
-                        // as boolean seam cleanup keeps it.
+                        // as boolean seam cleanup keeps it. (A soft seam the
+                        // edit leaves hanging is the exception: the lower
+                        // removes it, `hanging_soft_edges`.)
                         if !obj.edges()[he.edge].soft
                             && other.is_some_and(|g| {
                                 on.contains(&g)
@@ -1898,7 +1910,10 @@ impl Document {
     /// - [`DocumentError::DraftNotOpen`] — none is open, or the document
     ///   changed since it opened (its lift no longer describes the plane).
     /// - [`DocumentError::DraftBoundaryEdgeTouched`] — the edit moved or
-    ///   removed a solid's own edge (topology editing).
+    ///   removed a solid's own edge (topology editing), or left one of its
+    ///   paint or attribute boundaries (or a soft seam with an attribute
+    ///   dictionary) hanging. A plain soft seam left hanging is removed
+    ///   with the drawing instead.
     /// - [`DocumentError::Op`] / [`DocumentError::Sketch`] — a store could
     ///   not take its part (a kernel refusal no demotion could avoid).
     pub fn end_draft(&mut self) -> Result<(DraftReport, DocChange), DocumentError> {
@@ -2670,7 +2685,7 @@ impl Document {
                 .collect();
             let obj = &self.objects[o].object;
             let planarity = obj.planarity_tol;
-            let plan_with = |set: &[SketchEdgeId]| -> Result<Vec<KernelOp>, StickyError> {
+            let plan_with = |set: &[SketchEdgeId]| -> Result<Vec<KernelOp>, PlanError> {
                 let wanted: Vec<(Point3, Point3, Claim)> = set
                     .iter()
                     .map(|&e| {
@@ -2705,7 +2720,7 @@ impl Document {
             let greedy = |base: Vec<SketchEdgeId>,
                           candidates: Vec<Vec<SketchEdgeId>>,
                           kept: &mut Vec<(Point3, Point3)>|
-             -> Result<(Vec<SketchEdgeId>, Vec<KernelOp>), StickyError> {
+             -> Result<(Vec<SketchEdgeId>, Vec<KernelOp>), PlanError> {
                 let mut accepted = base;
                 let mut ops = plan_with(&accepted)?;
                 for island in candidates {
@@ -2726,6 +2741,11 @@ impl Document {
             };
             let (accepted, ops) = match plan_with(&topo_after) {
                 Ok(ops) => (topo_after.clone(), ops),
+                // The edit itself leaves the solid's content hanging; no
+                // island kept as sketch puts it back.
+                Err(PlanError::BoundaryHangs) => {
+                    return Err(DocumentError::DraftBoundaryEdgeTouched);
+                }
                 Err(_) => {
                     // The face cannot hold all of it. Keep what it holds now
                     // and add the new islands it can; only when the existing
@@ -2742,7 +2762,7 @@ impl Document {
                             islands_of(&topo_after),
                             &mut report.kept_as_sketch,
                         )
-                        .map_err(|e| DocumentError::Op(KernelOpError::Sticky(e)))?,
+                        .map_err(DocumentError::from)?,
                     }
                 }
             };
@@ -4359,13 +4379,23 @@ fn components(sk: &Sketch, edges: &[SketchEdgeId]) -> BTreeMap<SketchEdgeId, usi
 /// (anchors on the kept drawing or boundary, junctions where three or more
 /// meet); a loop touching nothing is given as two paths. One re-trace per
 /// cluster of faces joined by removed edges, seeded by a point inside it.
+///
+/// Soft edges the delta leaves hanging ([`hanging_soft_edges`]) are removed
+/// with it: a removed drawing edge a terrain's or a deformed face's
+/// triangulation ended on leaves that seam dangling inside the merged face,
+/// where no face can hold it. The face is planar, so the seam carries no
+/// geometry, and removing it changes no point: no repair under
+/// DEVELOPMENT.md rule 4 (the undo gives the seam back, soft). A hanging
+/// edge that is a paint or attribute boundary, or a soft seam with an
+/// attribute dictionary, instead refuses the plan
+/// ([`PlanError::BoundaryHangs`]).
 fn plan_topology(
     obj: &Object,
     plane: &Plane,
     stored: &[(Point3, Point3)],
     wanted: &[(Point3, Point3, Claim)],
-) -> Result<Vec<KernelOp>, StickyError> {
-    let removed: Vec<(Point3, Point3)> = stored
+) -> Result<Vec<KernelOp>, PlanError> {
+    let mut removed: Vec<(Point3, Point3)> = stored
         .iter()
         .copied()
         .filter(|&(a, b)| !covered_by_set(wanted, a, b))
@@ -4399,6 +4429,9 @@ fn plan_topology(
     if removed.is_empty() && inserted.is_empty() {
         return Ok(Vec::new());
     }
+    // (No wanted edge lies along a soft edge — the lift holds those fixed,
+    // so drawing along one is no drawing edge — so `inserted` stands.)
+    removed.extend(hanging_soft_edges(obj, plane, &removed, &inserted)?);
     let anchored = |p: Point3| {
         kept.iter()
             .chain(
@@ -4447,6 +4480,7 @@ fn plan_topology(
             path,
             curves,
             polygons,
+            soft: Vec::new(),
         }
     };
     // A path closing on its own start is a loop touching the rest at that
@@ -4461,11 +4495,13 @@ fn plan_topology(
                 path: p.path[..=mid].to_vec(),
                 curves: p.curves[..mid].to_vec(),
                 polygons: p.polygons[..mid].to_vec(),
+                soft: Vec::new(),
             });
             paths.push(RetracePath {
                 path: p.path[mid..].to_vec(),
                 curves: p.curves[mid..].to_vec(),
                 polygons: p.polygons[mid..].to_vec(),
+                soft: Vec::new(),
             });
         } else {
             paths.push(p);
@@ -4486,18 +4522,20 @@ fn plan_topology(
         let p = walk(start, e0, &mut used);
         let n = p.path.len();
         if n < 4 {
-            return Err(StickyError::PathNotSimple);
+            return Err(StickyError::PathNotSimple.into());
         }
         let mid = n / 2;
         paths.push(RetracePath {
             path: p.path[..=mid].to_vec(),
             curves: p.curves[..mid].to_vec(),
             polygons: p.polygons[..mid].to_vec(),
+            soft: Vec::new(),
         });
         paths.push(RetracePath {
             path: p.path[mid..].to_vec(),
             curves: p.curves[mid..].to_vec(),
             polygons: p.polygons[mid..].to_vec(),
+            soft: Vec::new(),
         });
     }
 
@@ -4572,6 +4610,253 @@ fn plan_topology(
         });
     }
     Ok(ops)
+}
+
+/// Why [`plan_topology`] found no plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanError {
+    /// A re-trace refused.
+    Sticky(StickyError),
+    /// The delta would leave hanging an edge between two faces on the plane
+    /// that is the solid's content (a paint or attribute boundary, or a
+    /// soft seam carrying an attribute dictionary): drafting never removes
+    /// one ([`DocumentError::DraftBoundaryEdgeTouched`]).
+    BoundaryHangs,
+}
+
+impl From<StickyError> for PlanError {
+    fn from(e: StickyError) -> Self {
+        PlanError::Sticky(e)
+    }
+}
+
+impl From<PlanError> for DocumentError {
+    fn from(e: PlanError) -> Self {
+        match e {
+            PlanError::Sticky(e) => DocumentError::Op(KernelOpError::Sticky(e)),
+            PlanError::BoundaryHangs => DocumentError::DraftBoundaryEdgeTouched,
+        }
+    }
+}
+
+/// The soft edges of `obj` between two of its faces on `plane` that a
+/// re-trace removing `removed` and inserting `inserted` would leave
+/// HANGING — an edge with the same face on both sides, which no face loop
+/// can hold: a dangling end, a chain of them, or a bridge between two
+/// boundaries. Each is given by its endpoints, for removal with the rest.
+///
+/// In a planar graph an edge has one face on both sides exactly when it is
+/// a bridge (an isthmus: on no cycle), so the edges after the edit — every
+/// edge of the object's faces on the plane but the removed, plus the
+/// inserted, split where an inserted end lands inside one — are searched
+/// for bridges once. Removing a bridge puts no other edge off a cycle, so
+/// that one search is the fixpoint of pruning dangling ends one at a time
+/// (each removal exposing the next).
+///
+/// Only a soft edge whose two faces agree in paint (both sides) and in
+/// attribute dictionary, and which carries no dictionary of its own, is
+/// pruned. A hanging edge between faces on the plane that the lift holds
+/// fixed for any other reason (a paint or attribute boundary, a soft edge
+/// with a dictionary) refuses with [`PlanError::BoundaryHangs`]. A soft edge
+/// an inserted end splits is left to the re-trace (an end on a removed edge
+/// is refused there anyway). Before any removal a valid object holds no
+/// bridge, so with nothing removed, or no such edge on the plane, the
+/// answer is empty without a search.
+fn hanging_soft_edges(
+    obj: &Object,
+    plane: &Plane,
+    removed: &[(Point3, Point3)],
+    inserted: &[(Point3, Point3, Claim)],
+) -> Result<Vec<(Point3, Point3)>, PlanError> {
+    if removed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let on: BTreeSet<FaceId> = obj
+        .faces()
+        .keys()
+        .filter(|&f| face_on_plane(obj, f, plane))
+        .collect();
+    let removed_ids: BTreeSet<EdgeId> = removed
+        .iter()
+        .filter_map(|&(a, b)| obj.edge_matching(a, b).map(|(e, _, _)| e))
+        .collect();
+    // Every kept edge of the faces on the plane, once, with whether it is
+    // held fixed between two of them (`Some(prunable)`) or not (`None`).
+    let mut kept: Vec<(EdgeId, Option<bool>)> = Vec::new();
+    let mut seen: BTreeSet<EdgeId> = BTreeSet::new();
+    for &f in &on {
+        let face = &obj.faces()[f];
+        for l in std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied()) {
+            for h in obj.loop_half_edges(l) {
+                let e = obj.half_edges()[h].edge;
+                if removed_ids.contains(&e) || !seen.insert(e) {
+                    continue;
+                }
+                let edge = &obj.edges()[e];
+                let other = edge
+                    .twin_half_edge
+                    .map(|t| obj.loops()[obj.half_edges()[t].loop_id].face)
+                    .filter(|g| on.contains(g));
+                // As the lift tells drawing from the solid's content.
+                let fixed = other.map(|g| {
+                    let alike = obj.faces()[g].material == face.material
+                        && obj.faces()[g].back_material == face.back_material
+                        && obj.face_attrs_eq(g, f);
+                    (
+                        edge.soft || !alike,
+                        edge.soft && alike && edge.attrs.is_none(),
+                    )
+                });
+                let class = match fixed {
+                    Some((true, prunable)) => Some(prunable),
+                    _ => None,
+                };
+                kept.push((e, class));
+            }
+        }
+    }
+    if !kept.iter().any(|&(_, c)| c.is_some()) {
+        return Ok(Vec::new());
+    }
+
+    // The graph: object vertices, plus a node per inserted end that lands
+    // on none (a junction, or a point inside a kept edge).
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum Node {
+        V(crate::VertexId),
+        P([u64; 3]),
+    }
+    let ends_of = |e: EdgeId| {
+        let he = &obj.half_edges()[obj.edges()[e].half_edge];
+        (he.origin, obj.half_edges()[he.next].origin)
+    };
+    let mut kept_verts: BTreeMap<crate::VertexId, Point3> = BTreeMap::new();
+    for &(e, _) in &kept {
+        let (u, v) = ends_of(e);
+        kept_verts.insert(u, obj.vertices()[u].position);
+        kept_verts.insert(v, obj.vertices()[v].position);
+    }
+    // Inserted ends inside a kept edge, by edge.
+    let mut splits: BTreeMap<EdgeId, Vec<Point3>> = BTreeMap::new();
+    let node_of = |p: Point3, splits: &mut BTreeMap<EdgeId, Vec<Point3>>| -> Node {
+        if let Some((&v, _)) = kept_verts
+            .iter()
+            .find(|&(_, &q)| q.approx_eq(p, tol::POINT_MERGE))
+        {
+            return Node::V(v);
+        }
+        if let Some(&(e, _)) = kept.iter().find(|&&(e, _)| {
+            let (u, v) = ends_of(e);
+            point_near_segment(p, kept_verts[&u], kept_verts[&v], tol::POINT_MERGE)
+        }) {
+            let at = splits.entry(e).or_default();
+            if !at.iter().any(|&q| bits(q) == bits(p)) {
+                at.push(p);
+            }
+        }
+        Node::P(bits(p))
+    };
+    let mut segs: Vec<(Node, Node)> = Vec::new();
+    for &(a, b, _) in inserted {
+        let na = node_of(a, &mut splits);
+        let nb = node_of(b, &mut splits);
+        segs.push((na, nb));
+    }
+    // Each kept edge as its run of pieces; `owner[i]` names the kept edge
+    // segment `i` is a piece of.
+    let mut owner: Vec<Option<usize>> = vec![None; segs.len()];
+    for (k, &(e, _)) in kept.iter().enumerate() {
+        let (u, v) = ends_of(e);
+        let (a, b) = (kept_verts[&u], kept_verts[&v]);
+        let mut stops: Vec<Point3> = splits.get(&e).cloned().unwrap_or_default();
+        let d = b - a;
+        let t = |q: Point3| (q - a).dot(d);
+        stops.sort_by(|&p, &q| t(p).total_cmp(&t(q)));
+        let mut at = Node::V(u);
+        for p in stops {
+            segs.push((at, Node::P(bits(p))));
+            owner.push(Some(k));
+            at = Node::P(bits(p));
+        }
+        segs.push((at, Node::V(v)));
+        owner.push(Some(k));
+    }
+
+    // Bridges (Tarjan, iterative: a terrain's plane holds thousands).
+    let mut index: BTreeMap<Node, usize> = BTreeMap::new();
+    for &(x, y) in &segs {
+        for n in [x, y] {
+            let next = index.len();
+            index.entry(n).or_insert(next);
+        }
+    }
+    let mut adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); index.len()];
+    for (i, &(x, y)) in segs.iter().enumerate() {
+        let (x, y) = (index[&x], index[&y]);
+        adj[x].push((y, i));
+        adj[y].push((x, i));
+    }
+    let mut disc = vec![usize::MAX; adj.len()];
+    let mut low = vec![0usize; adj.len()];
+    let mut bridge = vec![false; segs.len()];
+    let mut clock = 0usize;
+    for root in 0..adj.len() {
+        if disc[root] != usize::MAX {
+            continue;
+        }
+        disc[root] = clock;
+        low[root] = clock;
+        clock += 1;
+        // (vertex, the segment it was reached by, next neighbor to visit)
+        let mut stack: Vec<(usize, usize, usize)> = vec![(root, usize::MAX, 0)];
+        while let Some(&mut (v, via, ref mut next)) = stack.last_mut() {
+            if let Some(&(w, i)) = adj[v].get(*next) {
+                *next += 1;
+                if i == via {
+                    continue;
+                }
+                if disc[w] == usize::MAX {
+                    disc[w] = clock;
+                    low[w] = clock;
+                    clock += 1;
+                    stack.push((w, i, 0));
+                } else {
+                    low[v] = low[v].min(disc[w]);
+                }
+            } else {
+                stack.pop();
+                if let Some(&(parent, _, _)) = stack.last() {
+                    low[parent] = low[parent].min(low[v]);
+                    if low[v] > disc[parent] {
+                        bridge[via] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // A kept edge hangs when any of its pieces is a bridge.
+    let mut hangs = vec![false; kept.len()];
+    for (i, o) in owner.iter().enumerate() {
+        if let Some(k) = *o {
+            hangs[k] |= bridge[i];
+        }
+    }
+    let mut prune = Vec::new();
+    for (k, &(e, class)) in kept.iter().enumerate() {
+        let Some(prunable) = class else { continue };
+        if !hangs[k] {
+            continue;
+        }
+        if !prunable {
+            return Err(PlanError::BoundaryHangs);
+        }
+        if splits.contains_key(&e) {
+            continue;
+        }
+        prune.push(obj.edge_endpoints(e).expect("a kept edge is live"));
+    }
+    Ok(prune)
 }
 
 /// Whether segment `a–b` is covered end to end by `set`'s segments lying

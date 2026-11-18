@@ -644,6 +644,7 @@ fn retrace_splits_inherit_and_a_retrace_merge_keeps_the_survivors() {
                     path: path.clone(),
                     curves: Vec::new(),
                     polygons: Vec::new(),
+                    soft: Vec::new(),
                 }],
                 remove: Vec::new(),
                 restore: Vec::new(),

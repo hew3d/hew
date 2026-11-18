@@ -3660,8 +3660,11 @@ pub enum DocumentError {
     /// [`Document::end_draft`] with no draft open.
     DraftNotOpen,
     /// A draft moved or removed one of a solid's own edges (where its face
-    /// meets a non-coplanar one): that is topology editing, which drafting
-    /// never does.
+    /// meets a non-coplanar one), or left hanging an edge between two of its
+    /// faces on the plane that is its content (a paint or attribute
+    /// boundary, or a soft seam carrying an attribute dictionary): that is
+    /// topology editing, which drafting never does. (A plain soft seam left
+    /// hanging carries no geometry and is removed with the drawing.)
     DraftBoundaryEdgeTouched,
     /// Guide geometry is degenerate: a zero-length/non-finite direction, or a
     /// non-finite coordinate. Nothing is silently repaired or guessed.
@@ -12623,6 +12626,16 @@ impl Document {
     pub fn set_edge_crease_for_test(&mut self, object: ObjectId, edge: EdgeId, crease: bool) {
         if let Some(rec) = self.objects.get_mut(object) {
             rec.object.set_edge_crease_for_test(edge, crease);
+        }
+    }
+
+    /// Test support only: overwrites one edge's soft flag on a live object
+    /// (see [`Object::set_edge_soft_for_test`]). Never call from product
+    /// code.
+    #[doc(hidden)]
+    pub fn set_edge_soft_for_test(&mut self, object: ObjectId, edge: EdgeId, soft: bool) {
+        if let Some(rec) = self.objects.get_mut(object) {
+            rec.object.set_edge_soft_for_test(edge, soft);
         }
     }
 

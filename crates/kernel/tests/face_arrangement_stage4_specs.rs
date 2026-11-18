@@ -69,11 +69,13 @@ fn strip_bridges(w: &Wall) -> Vec<RetracePath> {
             path: vec![mm(w, 7.0, 4.0), mm(w, 8.0, 4.5), mm(w, 9.0, 4.0)],
             curves: Vec::new(),
             polygons: Vec::new(),
+            soft: Vec::new(),
         },
         RetracePath {
             path: vec![mm(w, 9.0, 3.0), mm(w, 8.0, 2.5), mm(w, 7.0, 3.0)],
             curves: Vec::new(),
             polygons: Vec::new(),
+            soft: Vec::new(),
         },
     ]
 }
@@ -258,6 +260,36 @@ fn retracing_through_the_history_undoes_and_redoes_exactly() {
     assert_eq!(before.save(), w.doc.save());
 }
 
+/// A removed soft edge is reported with its soft mark, and the swapped call
+/// (the undo) gives it back soft: drafting removes a soft seam left
+/// hanging, and its undo restores the smoothing exactly.
+#[test]
+fn a_removed_soft_edge_comes_back_soft() {
+    let mut w = front_wall();
+    let p = w.face;
+    let (a, b) = (mm(&w, 0.0, 0.0), mm(&w, 20.0, 10.0));
+    retrace_and_check(&mut w, p, vec![vec![a, b]], Vec::new());
+    let mut o = w.obj().clone();
+    let e = edge_between(&o, a, b);
+    o.set_edge_soft_for_test(e, true);
+    let face = group_faces(&o, &w.plane)[0];
+    let removal = o
+        .retrace_face(face, &[], &[vec![a, b]])
+        .expect("the soft edge removes");
+    assert_eq!(removal.removed.len(), 1);
+    assert_eq!(removal.removed[0].soft, vec![true]);
+    o.retrace_face(removal.faces[0], &removal.removed, &[])
+        .expect("the undo re-inserts it");
+    assert!(o.edges()[edge_between(&o, a, b)].soft, "back soft");
+    // A hard edge removed records no mark at all.
+    let mut hard = w.obj().clone();
+    let face = group_faces(&hard, &w.plane)[0];
+    let removal = hard
+        .retrace_face(face, &[], &[vec![a, b]])
+        .expect("the hard edge removes");
+    assert!(removal.removed[0].soft.is_empty());
+}
+
 #[test]
 fn a_lone_bridge_refuses_untouched() {
     // One bridge joins the two holes without splitting the wall: the
@@ -295,11 +327,13 @@ fn retrace_refuses_crossing_or_off_boundary_paths_untouched() {
             path: vec![mm(&w, 7.0, 4.0), mm(&w, 9.0, 3.0)],
             curves: Vec::new(),
             polygons: Vec::new(),
+            soft: Vec::new(),
         },
         RetracePath {
             path: vec![mm(&w, 9.0, 4.0), mm(&w, 7.0, 3.0)],
             curves: Vec::new(),
             polygons: Vec::new(),
+            soft: Vec::new(),
         },
     ];
     assert_eq!(
@@ -311,6 +345,7 @@ fn retrace_refuses_crossing_or_off_boundary_paths_untouched() {
         path: vec![mm(&w, 7.0, 4.0), mm(&w, 8.0, 4.5)],
         curves: Vec::new(),
         polygons: Vec::new(),
+        soft: Vec::new(),
     }];
     assert_eq!(
         o.retrace_face(p, &loose, &[]).map(|_| ()),
@@ -355,11 +390,13 @@ proptest! {
                 path: vec![mm(&w, 7.0, at), mm(&w, 8.0, mid_t), mm(&w, 9.0, bt)],
                 curves: Vec::new(),
                 polygons: Vec::new(),
+                soft: Vec::new(),
             },
             RetracePath {
                 path: vec![mm(&w, 9.0, bb), mm(&w, 8.0, mid_b), mm(&w, 7.0, ab)],
                 curves: Vec::new(),
                 polygons: Vec::new(),
+                soft: Vec::new(),
             },
         ];
         let original = w.obj().clone();
@@ -979,6 +1016,7 @@ fn plain(path: Vec<Point3>) -> RetracePath {
         path,
         curves: Vec::new(),
         polygons: Vec::new(),
+        soft: Vec::new(),
     }
 }
 

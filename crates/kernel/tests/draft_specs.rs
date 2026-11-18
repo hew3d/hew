@@ -509,6 +509,229 @@ fn deleting_a_line_merges_faces() {
     undo_redo_exact(&mut doc, &before);
 }
 
+/// A 4..6 x 2..4 rectangle on the box top and two lines tying it to the
+/// top's left and right sides at y = 3, made soft (a triangulated face's
+/// seams): the lines split the ring around the rectangle into two faces.
+fn rectangle_tied_by_soft_seams() -> (Document, ObjectId, Vec<kernel::EdgeId>) {
+    let (mut doc, o) = boxdoc();
+    doc.draft(top(), None, &[o], "Seams", |w| {
+        rect(w, 4., 2., 6., 4.)?;
+        w.add_segment(z3(0., 3.), z3(4., 3.))?;
+        w.add_segment(z3(6., 3.), z3(10., 3.))?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(tops(&doc, o), 3, "the rectangle, and the ring split in two");
+    let obj = doc.object(o).unwrap();
+    let seams: Vec<kernel::EdgeId> = obj
+        .edges()
+        .keys()
+        .filter(|&e| {
+            let (a, b) = obj.edge_endpoints(e).unwrap();
+            [(0., 4.), (6., 10.)].iter().any(|&(x0, x1)| {
+                on_segment(a, z3(x0, 3.), z3(x1, 3.)) && on_segment(b, z3(x0, 3.), z3(x1, 3.))
+            })
+        })
+        .collect();
+    assert_eq!(seams.len(), 2);
+    for &e in &seams {
+        doc.set_edge_soft_for_test(o, e, true);
+    }
+    doc.object(o).unwrap().validate().expect("valid");
+    (doc, o, seams)
+}
+
+/// Erasing the rectangle leaves the soft seams tied to it hanging inside
+/// the merged top: they carry no geometry (the top is planar), so they go
+/// with it, and the top is one face again. Undo gives them back, soft.
+#[test]
+fn erasing_a_shape_takes_the_soft_seams_left_hanging() {
+    let (mut doc, o, _) = rectangle_tied_by_soft_seams();
+    draft_top(&mut doc, o, "Erase", |w| {
+        for e in edges_along(w, &rect_sides(4., 2., 6., 4.)) {
+            w.remove_edge(e)?;
+        }
+        Ok(())
+    });
+    assert_sound(&doc, o);
+    assert_faces(&doc, o, &[rg(rect_ring(0., 0., 10., 6.), Vec::new())]);
+    assert!(doc.object(o).unwrap().edges().values().all(|e| !e.soft));
+    doc.undo().unwrap();
+    let soft = doc
+        .object(o)
+        .unwrap()
+        .edges()
+        .values()
+        .filter(|e| e.soft)
+        .count();
+    assert_eq!(soft, 2, "undo gives the seams back soft");
+}
+
+/// A hanging seam that carries an attribute dictionary is the user's
+/// content: the erase refuses typed and changes nothing.
+#[test]
+fn a_hanging_soft_seam_with_attributes_refuses_the_erase() {
+    let (mut doc, o, seams) = rectangle_tied_by_soft_seams();
+    doc.edge_attr_set(o, seams[0], "spec", "k", kernel::AttrValue::Int(1))
+        .unwrap();
+    let before = doc.save();
+    let depth = doc.undo_depth();
+    let r = doc.draft(top(), None, &[o], "Erase", |w| {
+        for e in edges_along(w, &rect_sides(4., 2., 6., 4.)) {
+            w.remove_edge(e)?;
+        }
+        Ok(())
+    });
+    assert_eq!(r.err(), Some(DocumentError::DraftBoundaryEdgeTouched));
+    assert_eq!(doc.save(), before, "untouched");
+    assert_eq!(doc.undo_depth(), depth);
+}
+
+/// The soft marks of `o`'s edges as sorted (endpoints, soft) rows.
+fn soft_marks(doc: &Document, o: ObjectId) -> Vec<String> {
+    let obj = doc.object(o).unwrap();
+    let mut rows: Vec<String> = obj
+        .edges()
+        .iter()
+        .map(|(e, edge)| {
+            let (a, b) = obj.edge_endpoints(e).unwrap();
+            let mut ends = [
+                format!("({:.3},{:.3},{:.3})", a.x, a.y, a.z),
+                format!("({:.3},{:.3},{:.3})", b.x, b.y, b.z),
+            ];
+            ends.sort();
+            format!("{}-{} soft={}", ends[0], ends[1], edge.soft)
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// A line across the top at y = 3, soft left of x = 5 and hard right of
+/// it, with a stem from (5,3) up to (5,6). Erasing the stem leaves (5,3) a
+/// straight two-edge scar between a soft and a hard edge, which the
+/// re-trace heals into one edge. Undo puts the stem back, splitting that
+/// edge at (5,3), and each half gets back its own mark: the soft half
+/// soft, the hard half hard, byte for byte.
+#[test]
+fn undoing_an_erase_healed_across_mixed_soft_marks_restores_each_mark() {
+    let (mut doc, o) = boxdoc();
+    doc.draft(top(), None, &[o], "Lines", |w| {
+        w.add_segment(z3(0., 3.), z3(10., 3.))?;
+        w.add_segment(z3(5., 3.), z3(5., 6.))?;
+        Ok(())
+    })
+    .unwrap();
+    let obj = doc.object(o).unwrap();
+    let left: Vec<kernel::EdgeId> = obj
+        .edges()
+        .keys()
+        .filter(|&e| {
+            let (a, b) = obj.edge_endpoints(e).unwrap();
+            on_segment(a, z3(0., 3.), z3(5., 3.)) && on_segment(b, z3(0., 3.), z3(5., 3.))
+        })
+        .collect();
+    assert_eq!(left.len(), 1);
+    doc.set_edge_soft_for_test(o, left[0], true);
+    doc.object(o).unwrap().validate().expect("valid");
+    let hash0 = doc.state_hash();
+    let marks0 = soft_marks(&doc, o);
+    draft_top(&mut doc, o, "Erase", |w| {
+        for e in edges_along(w, &[(z3(5., 3.), z3(5., 6.))]) {
+            w.remove_edge(e)?;
+        }
+        Ok(())
+    });
+    assert_sound(&doc, o);
+    doc.undo().unwrap();
+    assert_eq!(soft_marks(&doc, o), marks0, "undo restores every soft mark");
+    assert_eq!(doc.state_hash(), hash0, "undo restores the state hash");
+}
+
+/// A triangle drawn on the top beside a rectangle, its sides soft (a
+/// triangulated face's seams closing on themselves), and soft seams along
+/// y = 3 tying the top's left side to the triangle, the triangle to the
+/// rectangle, and the rectangle to the top's right side.
+/// Erasing the rectangle leaves the seams hanging, so they go with it; the
+/// triangle is a closed cycle with a face on each side of every edge, so
+/// it stays, soft, holding its own sub-face. Prune means bridges only;
+/// islands are valid topology and match the state before the shape was
+/// drawn. Undo gives everything back exactly.
+#[test]
+fn erasing_a_shape_keeps_a_closed_soft_island() {
+    let (mut doc, o) = boxdoc();
+    let tri = vec![z3(1., 3.), z3(2., 1.5), z3(3., 3.)];
+    doc.draft(top(), None, &[o], "Seams", |w| {
+        draw_ring(w, &tri)?;
+        rect(w, 4., 2., 6., 4.)?;
+        w.add_segment(z3(0., 3.), z3(1., 3.))?;
+        w.add_segment(z3(3., 3.), z3(4., 3.))?;
+        w.add_segment(z3(6., 3.), z3(10., 3.))?;
+        Ok(())
+    })
+    .unwrap();
+    let obj = doc.object(o).unwrap();
+    let soft_segs = [
+        (z3(1., 3.), z3(2., 1.5)),
+        (z3(2., 1.5), z3(3., 3.)),
+        (z3(3., 3.), z3(1., 3.)),
+        (z3(0., 3.), z3(1., 3.)),
+        (z3(3., 3.), z3(4., 3.)),
+        (z3(6., 3.), z3(10., 3.)),
+    ];
+    let softs: Vec<kernel::EdgeId> = obj
+        .edges()
+        .keys()
+        .filter(|&e| {
+            let (a, b) = obj.edge_endpoints(e).unwrap();
+            soft_segs
+                .iter()
+                .any(|&(s, t)| on_segment(a, s, t) && on_segment(b, s, t))
+        })
+        .collect();
+    assert_eq!(softs.len(), 6);
+    for &e in &softs {
+        doc.set_edge_soft_for_test(o, e, true);
+    }
+    doc.object(o).unwrap().validate().expect("valid");
+    let hash0 = doc.state_hash();
+    let marks0 = soft_marks(&doc, o);
+    draft_top(&mut doc, o, "Erase", |w| {
+        for e in edges_along(w, &rect_sides(4., 2., 6., 4.)) {
+            w.remove_edge(e)?;
+        }
+        Ok(())
+    });
+    assert_sound(&doc, o);
+    assert_faces(
+        &doc,
+        o,
+        &[
+            rg(tri.clone(), Vec::new()),
+            rg(rect_ring(0., 0., 10., 6.), vec![tri.clone()]),
+        ],
+    );
+    let obj = doc.object(o).unwrap();
+    let soft_left: Vec<(Point3, Point3)> = obj
+        .edges()
+        .iter()
+        .filter(|(_, e)| e.soft)
+        .map(|(e, _)| obj.edge_endpoints(e).unwrap())
+        .collect();
+    assert_eq!(soft_left.len(), 3, "the triangle's sides, still soft");
+    for (a, b) in soft_left {
+        assert!(
+            soft_segs[..3]
+                .iter()
+                .any(|&(s, t)| on_segment(a, s, t) && on_segment(b, s, t)),
+            "only the island stays soft"
+        );
+    }
+    doc.undo().unwrap();
+    assert_eq!(soft_marks(&doc, o), marks0, "undo restores every soft mark");
+    assert_eq!(doc.state_hash(), hash0, "undo restores the state hash");
+}
+
 #[test]
 fn moving_a_shape_across_the_edge() {
     let (mut doc, o) = boxdoc();

@@ -5586,6 +5586,50 @@ fn kb34_redo_split_after_tangent_circle() {
     run_doc_case(seeds, ops).expect("KB-34 replay holds every invariant");
 }
 
+/// A tangent circle on a box, the box made a component, its definition
+/// member deformed (its face triangulated with soft edges, some ending on
+/// the circle's vertices), then the circle moved off the face in a draft.
+/// Moving it away leaves those soft edges hanging, and the face re-trace
+/// refused (`SharedChainDisconnected`). A soft seam left hanging carries
+/// no geometry on the planar face, so the draft removes it with the
+/// drawing and commits.
+#[test]
+fn draft_after_deform_of_a_tangent_circle_component() {
+    let seeds: Vec<BoxSeed> = vec![
+        ((0.0, 0.0), (1.0, 1.0), 0.5),
+        ((0.0, 0.0), (1.0, 4.799387276188647), 0.5),
+    ];
+    let ops = vec![
+        DocOp::TangentCircle {
+            obj_sel: 5051262289570015841,
+            face_sel: 4700139125940671488,
+            side: 1705099914020460835,
+            t: 0.2,
+            frac: 0.2,
+            twin: false,
+        },
+        DocOp::MakeComponent {
+            node_sel: 9706830679354215332,
+        },
+        DocOp::Deform {
+            obj_sel: 0,
+            mode: 1,
+            amount_frac: 0.05,
+        },
+        DocOp::Draft {
+            obj_sel: 0,
+            face_sel: 7364512011690746,
+            ground: false,
+            shape: 4,
+            a: (0, 0),
+            b: (1, 1),
+            sel: 0,
+            segments: 24,
+        },
+    ];
+    run_doc_case(seeds, ops).expect("the draft replay holds every invariant");
+}
+
 /// A tangent circle drawn over two imprints and a loop bridging them,
 /// clipped by them, then merged into the face around it across its arc:
 /// the arc runs through the rim vertex where the hole touches the face's
@@ -5713,4 +5757,39 @@ proptest! {
     ) {
         run_doc_case(seeds, ops)?;
     }
+}
+
+/// The same root cause through an erase: a tangent circle on a box, the
+/// box deformed (its face triangulated with soft edges, some ending on the
+/// circle's vertices), then the circle erased whole as a topology drawing
+/// unit. The erase leaves those soft edges hanging and the face re-trace
+/// refused; the harness requires a topology unit to erase whole, and it
+/// does: the hanging soft seams go with it.
+#[test]
+fn erase_of_a_tangent_circle_on_a_deformed_face() {
+    let seeds: Vec<BoxSeed> = vec![
+        ((0.0, 0.0), (1.0, 1.0), 0.5),
+        ((0.0, 0.0), (1.0, 2.4132880624594963), 0.5),
+    ];
+    let ops = vec![
+        DocOp::TangentCircle {
+            obj_sel: 2059041234277821091,
+            face_sel: 709351749800146806,
+            side: 802807580596839867,
+            t: 0.6010879176008542,
+            frac: 0.2,
+            twin: false,
+        },
+        DocOp::Deform {
+            obj_sel: 2531821312719452809,
+            mode: 0,
+            amount_frac: 0.05,
+        },
+        DocOp::MergeCoplanar {
+            obj_sel: 1021169033968718305,
+            edge_sel: 0,
+            from_features: true,
+        },
+    ];
+    run_doc_case(seeds, ops).expect("the circle erases whole");
 }

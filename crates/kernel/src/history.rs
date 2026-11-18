@@ -1352,6 +1352,7 @@ fn derive_inverse(
                             path,
                             curves,
                             polygons: Vec::new(),
+                            soft: Vec::new(),
                         })
                         .collect(),
                     remove: Vec::new(),

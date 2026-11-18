@@ -192,10 +192,16 @@ events) edits the whole drawing on one plane as one undo step:
   on it, those objects' owned sketches, and the free sketches there. A
   solid's own edges on the plane (where its faces meet non-coplanar ones)
   are FIXED: drafting splits them where lines meet them but never moves or
-  removes them. So are **foreign edges** (`gather_foreign`): straight edges
-  that lie in the plane, both ends within `tol::PLANE_DIST`, but belong to
-  something else. They come from live free sketches of the frame on other
-  planes (a sketch facing the other way on the same plane counts as
+  removes them. So are the edges between two of its faces on the plane that
+  are its content — a paint or attribute boundary, a soft seam — except
+  that a soft seam the edit leaves hanging (a dangling end or a bridge once
+  the drawing it ended on is gone) is removed with that drawing, since a
+  planar face carries no geometry along it; a hanging paint or attribute
+  boundary, or a soft seam with an attribute dictionary, refuses the edit
+  (`DraftBoundaryEdgeTouched`). So are **foreign edges**
+  (`gather_foreign`): straight edges that lie in the plane, both ends
+  within `tol::PLANE_DIST`, but belong to something else. They come from
+  live free sketches of the frame on other planes (a sketch facing the other way on the same plane counts as
   another plane, because `planes_coincide` is same-facing) and from
   visible Objects' edges that bound no face on this plane, either facing
   (for a detached shape the Object rule differs; see §2.6). A part of a

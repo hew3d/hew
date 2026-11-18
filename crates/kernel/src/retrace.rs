@@ -51,6 +51,11 @@ pub struct RetracePath {
     /// One regular-polygon claim per path edge ([`crate::topo::Edge::polygon`]),
     /// or empty.
     pub polygons: Vec<Option<CurveGeom>>,
+    /// One soft mark per path edge ([`crate::topo::Edge::soft`]), or empty
+    /// (none soft). A removed chain records its edges' marks, so the
+    /// swapped call that undoes a removal of soft edges gives them back
+    /// soft.
+    pub soft: Vec<bool>,
 }
 
 /// What [`Object::retrace_face`] changed. (Carries `f64` positions, so
@@ -145,8 +150,9 @@ impl Object {
     /// - [`StickyError::UnknownFace`] — stale `face`.
     /// - [`StickyError::PathTooShort`] — nothing to insert or remove, or a
     ///   path or chain of fewer than two points.
-    /// - [`StickyError::CurveClaimOffLoop`] — `curves` neither empty nor
-    ///   one per path edge, or a claimed edge's ends off its circle.
+    /// - [`StickyError::CurveClaimOffLoop`] — `curves`, `polygons` or
+    ///   `soft` neither empty nor one per path edge, or a claimed edge's
+    ///   ends off its circle.
     /// - [`StickyError::UnknownEdge`] — a chain segment that is no edge.
     /// - [`StickyError::FacesNotCoplanar`] — a removed edge between faces
     ///   not coplanar and same-facing with `face`.
@@ -202,6 +208,9 @@ impl Object {
             if !p.polygons.is_empty() && p.polygons.len() != p.path.len() - 1 {
                 return Err(StickyError::CurveClaimOffLoop);
             }
+            if !p.soft.is_empty() && p.soft.len() != p.path.len() - 1 {
+                return Err(StickyError::CurveClaimOffLoop);
+            }
         }
         if remove.iter().any(|c| c.len() < 2) {
             return Err(StickyError::PathTooShort);
@@ -219,6 +228,7 @@ impl Object {
             let mut path = Vec::with_capacity(chain.len());
             let mut curves = Vec::with_capacity(chain.len() - 1);
             let mut polygons = Vec::with_capacity(chain.len() - 1);
+            let mut soft = Vec::with_capacity(chain.len() - 1);
             for (k, w) in chain.windows(2).enumerate() {
                 let (e, a, b) = self
                     .edge_matching(w[0], w[1])
@@ -245,12 +255,19 @@ impl Object {
                 path.push(b);
                 curves.push(edge.curve);
                 polygons.push(edge.polygon);
+                soft.push(edge.soft);
                 removed_edges.push(e);
+            }
+            // (No mark at all when none is soft, as an inserted path
+            // claiming none gives.)
+            if !soft.contains(&true) {
+                soft.clear();
             }
             removed_paths.push(RetracePath {
                 path,
                 curves,
                 polygons,
+                soft,
             });
         }
         // Canonical: each chain from its lexicographically smaller end,
@@ -260,6 +277,7 @@ impl Object {
                 p.path.reverse();
                 p.curves.reverse();
                 p.polygons.reverse();
+                p.soft.reverse();
             }
         }
         removed_paths.sort_by(|a, b| lex_cmp(a.path[0], b.path[0]));
@@ -593,12 +611,16 @@ impl Object {
                 if let Some(&g) = insert[pi].polygons.get(k) {
                     obj.edges[e].polygon = g;
                 }
+                if let Some(&soft) = insert[pi].soft.get(k) {
+                    obj.edges[e].soft = soft;
+                }
             }
             new_edges.push(edges);
             inserted.push(RetracePath {
                 path: path.clone(),
                 curves: insert[pi].curves.clone(),
                 polygons: insert[pi].polygons.clone(),
+                soft: insert[pi].soft.clone(),
             });
         }
 
