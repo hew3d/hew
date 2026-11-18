@@ -48,6 +48,10 @@ new_sqlite_classes = ["ReportThread"]
 [[send_email]]
 name = "NOTIFY"
 
+# The routes below put the public intake (`/report/*`) on app.hew3d.com and
+# beta.hew3d.com, and the admin pages (`/report/admin/*`, answered only on
+# the third host, see `ADMIN_HOST` in src/constants.ts) on reports.hew3d.com.
+#
 # app.hew3d.com also serves the Pages-hosted web app; a Workers route on the
 # same hostname takes precedence for matching paths (confirmed, not just
 # trusted, on first deploy — see README.md's deploy checklist).
@@ -58,4 +62,11 @@ zone_name = "hew3d.com"
 # The beta host (beta.hew3d.com) posts to the same Worker the same way.
 [[routes]]
 pattern = "beta.hew3d.com/report/*"
+zone_name = "hew3d.com"
+
+# The admin host. It has no origin of its own: DNS is a proxied placeholder
+# record and this route answers every path that matters. Cloudflare Access
+# fronts `reports.hew3d.com/report/admin/*` (README.md's deploy checklist).
+[[routes]]
+pattern = "reports.hew3d.com/report/*"
 zone_name = "hew3d.com"

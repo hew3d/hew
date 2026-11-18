@@ -128,6 +128,10 @@ function makeEnvWithThrowingIndex(
       setThreadCache: throwOn.has('setThreadCache') ? boom : real.setThreadCache.bind(real),
       markAdminViewed: throwOn.has('markAdminViewed') ? boom : real.markAdminViewed.bind(real),
       listChildren: throwOn.has('listChildren') ? boom : real.listChildren.bind(real),
+      getReports: throwOn.has('getReports') ? boom : real.getReports.bind(real),
+      setTriagedMany: throwOn.has('setTriagedMany') ? boom : real.setTriagedMany.bind(real),
+      listChildrenOf: throwOn.has('listChildrenOf') ? boom : real.listChildrenOf.bind(real),
+      deleteReports: throwOn.has('deleteReports') ? boom : real.deleteReports.bind(real),
       countThreadRequest: throwOn.has('countThreadRequest') ? boom : real.countThreadRequest.bind(real),
     }
     return stub
@@ -1109,7 +1113,7 @@ describe('handleRequest: top-level catch-all', () => {
     })
     const { token, authOptions } = await makeAdminAuth()
     const res = await handleRequest(
-      new Request('https://app.hew3d.com/report/admin/', { headers: { 'cf-access-jwt-assertion': token } }),
+      new Request('https://reports.hew3d.com/report/admin/', { headers: { 'cf-access-jwt-assertion': token } }),
       env,
       NOOP_MAILER,
       authOptions,
@@ -1132,14 +1136,14 @@ describe('handleRequest: top-level catch-all', () => {
 describe('/report/admin/*: authorization', () => {
   test('403 with no Cf-Access-Jwt-Assertion header', async () => {
     const env = adminEnv()
-    const res = await handleRequest(new Request('https://app.hew3d.com/report/admin/'), env, NOOP_MAILER)
+    const res = await handleRequest(new Request('https://reports.hew3d.com/report/admin/'), env, NOOP_MAILER)
     assert.equal(res.status, 403)
   })
 
   test('403 with an invalid token', async () => {
     const env = adminEnv()
     const res = await handleRequest(
-      new Request('https://app.hew3d.com/report/admin/', { headers: { 'cf-access-jwt-assertion': 'garbage' } }),
+      new Request('https://reports.hew3d.com/report/admin/', { headers: { 'cf-access-jwt-assertion': 'garbage' } }),
       env,
       NOOP_MAILER,
     )
@@ -1150,7 +1154,7 @@ describe('/report/admin/*: authorization', () => {
     const { token, authOptions } = await makeAdminAuth()
     const env = makeEnv()
     const res = await handleRequest(
-      new Request('https://app.hew3d.com/report/admin/', { headers: { 'cf-access-jwt-assertion': token } }),
+      new Request('https://reports.hew3d.com/report/admin/', { headers: { 'cf-access-jwt-assertion': token } }),
       env,
       NOOP_MAILER,
       authOptions,
@@ -1162,7 +1166,7 @@ describe('/report/admin/*: authorization', () => {
     const { token, authOptions } = await makeAdminAuth()
     const env = adminEnv()
     const res = await handleRequest(
-      new Request('https://app.hew3d.com/report/admin/', { headers: { 'cf-access-jwt-assertion': token } }),
+      new Request('https://reports.hew3d.com/report/admin/', { headers: { 'cf-access-jwt-assertion': token } }),
       env,
       NOOP_MAILER,
       authOptions,
@@ -1181,7 +1185,7 @@ describe('/report/admin/*: list, detail, download', () => {
     const { id } = await uploadAndCommit(env)
     const { token, authOptions } = await makeAdminAuth()
     const res = await handleRequest(
-      new Request('https://app.hew3d.com/report/admin/', { headers: { 'cf-access-jwt-assertion': token } }),
+      new Request('https://reports.hew3d.com/report/admin/', { headers: { 'cf-access-jwt-assertion': token } }),
       env,
       NOOP_MAILER,
       authOptions,
@@ -1201,7 +1205,7 @@ describe('/report/admin/*: list, detail, download', () => {
 
     const { token: adminToken, authOptions } = await makeAdminAuth()
     const listRes = await handleRequest(
-      new Request('https://app.hew3d.com/report/admin/', { headers: { 'cf-access-jwt-assertion': adminToken } }),
+      new Request('https://reports.hew3d.com/report/admin/', { headers: { 'cf-access-jwt-assertion': adminToken } }),
       env,
       NOOP_MAILER,
       authOptions,
@@ -1209,7 +1213,7 @@ describe('/report/admin/*: list, detail, download', () => {
     assert.match(await listRes.text(), /unknown/)
 
     const detailRes = await handleRequest(
-      new Request(`https://app.hew3d.com/report/admin/${id}`, { headers: { 'cf-access-jwt-assertion': adminToken } }),
+      new Request(`https://reports.hew3d.com/report/admin/${id}`, { headers: { 'cf-access-jwt-assertion': adminToken } }),
       env,
       NOOP_MAILER,
       authOptions,
@@ -1227,7 +1231,7 @@ describe('/report/admin/*: list, detail, download', () => {
     })
     const { token, authOptions } = await makeAdminAuth()
     const res = await handleRequest(
-      new Request(`https://app.hew3d.com/report/admin/${id}`, { headers: { 'cf-access-jwt-assertion': token } }),
+      new Request(`https://reports.hew3d.com/report/admin/${id}`, { headers: { 'cf-access-jwt-assertion': token } }),
       env,
       NOOP_MAILER,
       authOptions,
@@ -1242,7 +1246,7 @@ describe('/report/admin/*: list, detail, download', () => {
     const env = adminEnv()
     const { token, authOptions } = await makeAdminAuth()
     const res = await handleRequest(
-      new Request('https://app.hew3d.com/report/admin/HEW-0000-0000', { headers: { 'cf-access-jwt-assertion': token } }),
+      new Request('https://reports.hew3d.com/report/admin/HEW-0000-0000', { headers: { 'cf-access-jwt-assertion': token } }),
       env,
       NOOP_MAILER,
       authOptions,
@@ -1264,7 +1268,7 @@ describe('/report/admin/*: list, detail, download', () => {
 
     const { token: adminToken, authOptions } = await makeAdminAuth()
     const res = await handleRequest(
-      new Request(`https://app.hew3d.com/report/admin/${id}/download`, { headers: { 'cf-access-jwt-assertion': adminToken } }),
+      new Request(`https://reports.hew3d.com/report/admin/${id}/download`, { headers: { 'cf-access-jwt-assertion': adminToken } }),
       env,
       NOOP_MAILER,
       authOptions,
@@ -1309,7 +1313,7 @@ describe('/report/admin/*: list, detail, download', () => {
 
     const { token: adminToken, authOptions } = await makeAdminAuth()
     const res = await handleRequest(
-      new Request(`https://app.hew3d.com/report/admin/${id}`, { headers: { 'cf-access-jwt-assertion': adminToken } }),
+      new Request(`https://reports.hew3d.com/report/admin/${id}`, { headers: { 'cf-access-jwt-assertion': adminToken } }),
       env,
       NOOP_MAILER,
       authOptions,
@@ -1329,7 +1333,7 @@ describe('/report/admin/*: list, detail, download', () => {
     const { id } = await uploadAndCommit(env)
     const { token, authOptions } = await makeAdminAuth()
     const res = await handleRequest(
-      new Request(`https://app.hew3d.com/report/admin/${id}`, { headers: { 'cf-access-jwt-assertion': token } }),
+      new Request(`https://reports.hew3d.com/report/admin/${id}`, { headers: { 'cf-access-jwt-assertion': token } }),
       env,
       NOOP_MAILER,
       authOptions,
@@ -1344,7 +1348,7 @@ describe('/report/admin/*: list, detail, download', () => {
     const { id, compressed } = await uploadAndCommit(env)
     const { token, authOptions } = await makeAdminAuth()
     const res = await handleRequest(
-      new Request(`https://app.hew3d.com/report/admin/${id}/download`, { headers: { 'cf-access-jwt-assertion': token } }),
+      new Request(`https://reports.hew3d.com/report/admin/${id}/download`, { headers: { 'cf-access-jwt-assertion': token } }),
       env,
       NOOP_MAILER,
       authOptions,
@@ -1366,7 +1370,7 @@ describe('/report/admin/*: list, detail, download', () => {
 
     const { token, authOptions } = await makeAdminAuth()
     const detailRes = await handleRequest(
-      new Request(`https://app.hew3d.com/report/admin/${id}`, { headers: { 'cf-access-jwt-assertion': token } }),
+      new Request(`https://reports.hew3d.com/report/admin/${id}`, { headers: { 'cf-access-jwt-assertion': token } }),
       env,
       NOOP_MAILER,
       authOptions,
@@ -1374,7 +1378,7 @@ describe('/report/admin/*: list, detail, download', () => {
     assert.equal(detailRes.status, 404)
 
     const downloadRes = await handleRequest(
-      new Request(`https://app.hew3d.com/report/admin/${id}/download`, { headers: { 'cf-access-jwt-assertion': token } }),
+      new Request(`https://reports.hew3d.com/report/admin/${id}/download`, { headers: { 'cf-access-jwt-assertion': token } }),
       env,
       NOOP_MAILER,
       authOptions,
@@ -1382,7 +1386,7 @@ describe('/report/admin/*: list, detail, download', () => {
     assert.equal(downloadRes.status, 404)
 
     const listRes = await handleRequest(
-      new Request('https://app.hew3d.com/report/admin/', { headers: { 'cf-access-jwt-assertion': token } }),
+      new Request('https://reports.hew3d.com/report/admin/', { headers: { 'cf-access-jwt-assertion': token } }),
       env,
       NOOP_MAILER,
       authOptions,
@@ -1397,7 +1401,7 @@ describe('/report/admin/*: mutations require a matching Origin', () => {
     const { id } = await uploadAndCommit(env)
     const { token, authOptions } = await makeAdminAuth()
     const res = await handleRequest(
-      new Request(`https://app.hew3d.com/report/admin/${id}/delete`, {
+      new Request(`https://reports.hew3d.com/report/admin/${id}/delete`, {
         method: 'POST',
         headers: { 'cf-access-jwt-assertion': token },
       }),
@@ -1413,7 +1417,7 @@ describe('/report/admin/*: mutations require a matching Origin', () => {
     const { id } = await uploadAndCommit(env)
     const { token, authOptions } = await makeAdminAuth()
     const res = await handleRequest(
-      new Request(`https://app.hew3d.com/report/admin/${id}/delete`, {
+      new Request(`https://reports.hew3d.com/report/admin/${id}/delete`, {
         method: 'POST',
         headers: { 'cf-access-jwt-assertion': token, origin: 'https://evil.example' },
       }),
@@ -1429,9 +1433,9 @@ describe('/report/admin/*: mutations require a matching Origin', () => {
     const { id } = await uploadAndCommit(env)
     const { token, authOptions } = await makeAdminAuth()
     const res = await handleRequest(
-      new Request(`https://app.hew3d.com/report/admin/${id}/delete`, {
+      new Request(`https://reports.hew3d.com/report/admin/${id}/delete`, {
         method: 'POST',
-        headers: { 'cf-access-jwt-assertion': token, origin: 'https://app.hew3d.com' },
+        headers: { 'cf-access-jwt-assertion': token, origin: 'https://reports.hew3d.com' },
       }),
       env,
       NOOP_MAILER,
@@ -1451,7 +1455,7 @@ describe('/report/admin/*: mutations require a matching Origin', () => {
     const { token, authOptions } = await makeAdminAuth()
 
     const forbidden = await handleRequest(
-      new Request(`https://app.hew3d.com/report/admin/${id}/triage`, {
+      new Request(`https://reports.hew3d.com/report/admin/${id}/triage`, {
         method: 'POST',
         headers: { 'cf-access-jwt-assertion': token },
       }),
@@ -1462,9 +1466,9 @@ describe('/report/admin/*: mutations require a matching Origin', () => {
     assert.equal(forbidden.status, 403)
 
     const ok = await handleRequest(
-      new Request(`https://app.hew3d.com/report/admin/${id}/triage`, {
+      new Request(`https://reports.hew3d.com/report/admin/${id}/triage`, {
         method: 'POST',
-        headers: { 'cf-access-jwt-assertion': token, origin: 'https://app.hew3d.com' },
+        headers: { 'cf-access-jwt-assertion': token, origin: 'https://reports.hew3d.com' },
       }),
       env,
       NOOP_MAILER,
@@ -1545,9 +1549,9 @@ describe('unknown ids leave no Durable Object storage behind', () => {
 
     const { token: adminToken, authOptions } = await makeAdminAuth()
     const del = await handleRequest(
-      new Request(`https://app.hew3d.com/report/admin/${id}/delete`, {
+      new Request(`https://reports.hew3d.com/report/admin/${id}/delete`, {
         method: 'POST',
-        headers: { 'cf-access-jwt-assertion': adminToken, origin: 'https://app.hew3d.com' },
+        headers: { 'cf-access-jwt-assertion': adminToken, origin: 'https://reports.hew3d.com' },
       }),
       env,
       NOOP_MAILER,

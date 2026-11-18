@@ -159,6 +159,13 @@ export interface ReportIndexStub {
   getReport(id: string): Promise<ReportEntry | null>
   deleteReport(id: string): Promise<void>
   setTriaged(id: string, triaged: boolean): Promise<void>
+  /** The admin list's batch actions: one call for many ids. */
+  getReports(ids: string[]): Promise<ReportEntry[]>
+  setTriagedMany(ids: string[], triaged: boolean): Promise<void>
+  listChildrenOf(parentIds: string[]): Promise<ReportEntry[]>
+  deleteReports(ids: string[]): Promise<void>
+  /** Rows whose thread and bundle were destroyed but that stay listed. */
+  markDestroyed(ids: string[]): Promise<void>
   /** `'thread'` stops short of the cap (`EMAIL_THREAD_RESERVE`). */
   reserveEmail(now: number, purpose?: 'report' | 'thread'): Promise<boolean>
   /** A `ReportDrop` alarm (retention or abandonment) fired for `id`.

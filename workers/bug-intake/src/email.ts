@@ -26,7 +26,7 @@
  * report is already durably stored, and only logs the outcome.
  */
 
-import { INDEX_DO_NAME } from './constants.ts'
+import { INDEX_DO_NAME, ADMIN_ORIGIN } from './constants.ts'
 import type { BugIntakeEnv } from './types.ts'
 
 export interface NotifyReport {
@@ -73,7 +73,7 @@ export function buildNotificationMime(report: NotifyReport, from: string, to: st
   const appVersion = orUnknown(report.appVersion)
   const platform = orUnknown(report.platform)
   const subject = `[Hew bug report] ${report.id} — ${sanitizeHeaderValue(appVersion)} / ${sanitizeHeaderValue(platform)}`
-  const adminLink = `https://app.hew3d.com/report/admin/${report.id}`
+  const adminLink = `${ADMIN_ORIGIN}/report/admin/${report.id}`
   const body = [
     `Report ${report.id}`,
     ``,
@@ -114,7 +114,7 @@ export type ThreadEvent =
   | { kind: 'attachment'; id: string; childId: string; label: string; sizeBytes: number }
 
 export function buildThreadEventMime(event: ThreadEvent, from: string, to: string): string {
-  const adminLink = `https://app.hew3d.com/report/admin/${event.id}`
+  const adminLink = `${ADMIN_ORIGIN}/report/admin/${event.id}`
   if (event.kind === 'reply') {
     const subject = `[Hew bug report] ${event.id} — reply from the reporter`
     const body = [
@@ -137,7 +137,7 @@ export function buildThreadEventMime(event: ThreadEvent, from: string, to: strin
     event.label,
     ``,
     `Admin: ${adminLink}`,
-    `Attachment: https://app.hew3d.com/report/admin/${event.childId}`,
+    `Attachment: ${ADMIN_ORIGIN}/report/admin/${event.childId}`,
     ``,
   ].join('\r\n')
   return assembleMime(from, to, subject, body)

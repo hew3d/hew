@@ -95,6 +95,8 @@ const STYLE = `
   dd { margin: 0; }
   .new { color: #b00020; font-weight: 600; }
   .child { color: #555; }
+  .notice { background: #f2f7ee; border: 1px solid #b9d3a8; padding: 0.5rem 0.75rem; border-radius: 4px; }
+  .toolbar button { margin-right: 0.5rem; }
   .thread { list-style: none; padding: 0; }
   .thread li { border-left: 3px solid #ddd; padding: 0.25rem 0.75rem; margin: 0.5rem 0; }
   .thread li.reporter { border-left-color: #2a6fdb; }
@@ -114,13 +116,85 @@ ${body}
 </html>`
 }
 
+export const SELECT_PRESETS = ['all', 'untriaged', 'triaged', 'expired', 'none'] as const
+export type SelectPreset = (typeof SELECT_PRESETS)[number]
+
+export function isSelectPreset(value: unknown): value is SelectPreset {
+  return typeof value === 'string' && (SELECT_PRESETS as readonly string[]).includes(value)
+}
+
+/** Whether a preset checks `r`'s box. A follow-up attachment never has a
+ *  box (it travels with its parent), so it is never selected. */
+function presetSelects(preset: SelectPreset | undefined, r: ReportRow): boolean {
+  if (r.parentId) return false
+  switch (preset) {
+    case 'all':
+      return true
+    case 'untriaged':
+      return !r.triaged
+    case 'triaged':
+      return r.triaged
+    case 'expired':
+      return r.bundleDeleted
+    default:
+      return false
+  }
+}
+
+/** What a finished batch action reports back on the list. Built by the
+ *  handler from VALIDATED values only (a known action name, a count, report
+ *  ids that matched the id shape); this still escapes every one. */
+export interface BatchNotice {
+  action: 'triaged' | 'untriaged' | 'deleted'
+  ok: number
+  failed: string[]
+  /** A delete destroyed the data but could not remove the list entries. */
+  rowsKept?: boolean
+}
+
+export const NOTICE_ACTIONS: ReadonlyArray<BatchNotice['action']> = ['triaged', 'untriaged', 'deleted']
+
+function renderNotice(n: BatchNotice): string {
+  const verb = n.action === 'deleted' ? 'Deleted' : n.action === 'triaged' ? 'Marked triaged' : 'Marked untriaged'
+  const failed =
+    n.failed.length > 0
+      ? ` <strong>Not done for ${n.failed.length}:</strong> ${n.failed.map((id) => `<code>${escapeHtml(id)}</code>`).join(', ')}.`
+      : ''
+  const kept = n.rowsKept
+    ? ' The data for the reports listed above was removed, but their entries are still in this list; delete them again to clear them.'
+    : ''
+  return `<p class="notice">${verb} ${Math.trunc(n.ok)} report${n.ok === 1 ? '' : 's'}.${failed}${kept}</p>`
+}
+
+const BATCH_BUTTONS = `<p class="toolbar">
+<button type="submit" formmethod="post" formaction="/report/admin/batch/triage" name="value" value="1">Mark triaged</button>
+<button type="submit" formmethod="post" formaction="/report/admin/batch/triage" name="value" value="0">Mark untriaged</button>
+<button type="submit" formmethod="post" formaction="/report/admin/batch/delete">Delete&hellip;</button>
+<button type="submit" formmethod="get" formaction="/report/admin/batch/download">Download</button>
+</p>`
+
+export interface ListOptions {
+  select?: SelectPreset
+  notice?: BatchNotice
+}
+
 /** The reports list — newest first (`listReports` already orders this way).
  *  `report.id` is server-generated (Crockford base32, `id.ts`) and never
- *  needs escaping, but every other displayed field does. */
-export function renderList(reports: ReportRow[]): string {
+ *  needs escaping, but every other displayed field does.
+ *
+ *  The table sits in ONE form so checkboxes and the toolbar need no script:
+ *  each toolbar button carries its own `formaction`/`formmethod`, and the
+ *  "Select" presets are plain links that re-render the page with the boxes
+ *  already checked (`?select=`). */
+export function renderList(reports: ReportRow[], options: ListOptions = {}): string {
   const rows = reports
     .map(
       (r) => `<tr${r.triaged ? ' class="triaged"' : ''}>
+  <td>${
+    r.parentId
+      ? ''
+      : `<input type="checkbox" name="id" value="${r.id}" aria-label="Select ${r.id}"${presetSelects(options.select, r) ? ' checked' : ''}>`
+  }</td>
   <td><a href="/report/admin/${r.id}"><code>${r.id}</code></a>${hasNewActivity(r) ? ' <span class="new">new</span>' : ''}${
     r.parentId ? `<br><span class="child">↳ for <a href="/report/admin/${escapeHtml(r.parentId)}">${escapeHtml(r.parentId)}</a></span>` : ''
   }</td>
@@ -136,17 +210,55 @@ export function renderList(reports: ReportRow[]): string {
     )
     .join('\n')
 
+  const selectLinks = SELECT_PRESETS.map((p) => `<a href="/report/admin/?select=${p}">${p}</a>`).join(' &middot; ')
+
   return page(
     'Bug reports',
     `<h1>Bug reports</h1>
-<p>${reports.length} report${reports.length === 1 ? '' : 's'}.</p>
+${options.notice ? renderNotice(options.notice) : ''}<p>${reports.length} report${reports.length === 1 ? '' : 's'}.</p>
+<p>Select: ${selectLinks}</p>
+<form method="post" action="/report/admin/batch/triage">
+${BATCH_BUTTONS}
 <table>
-<thead><tr><th>ID</th><th>Received</th><th>Version</th><th>Platform</th><th>Description</th><th>Size</th><th>Status</th><th>Following</th><th>Triaged</th></tr></thead>
+<thead><tr><th></th><th>ID</th><th>Received</th><th>Version</th><th>Platform</th><th>Description</th><th>Size</th><th>Status</th><th>Following</th><th>Triaged</th></tr></thead>
 <tbody>
 ${rows}
 </tbody>
-</table>`,
+</table>
+${BATCH_BUTTONS}
+</form>`,
   )
+}
+
+/** The step before a batch delete: nothing has changed yet. `ids` are every
+ *  validated selected id (carried as hidden inputs so the second request is
+ *  self-contained); `found` the reports that exist, `attachments` their
+ *  follow-up attachments, which are deleted with them. */
+export function renderDeleteConfirm(ids: string[], found: ReportRow[], attachments: ReportRow[]): string {
+  const hidden = ids.map((id) => `<input type="hidden" name="id" value="${escapeHtml(id)}">`).join('\n')
+  const n = found.length
+  const m = attachments.length
+  const list = found.map((r) => `<li><code>${escapeHtml(r.id)}</code> &middot; ${escapeHtml(r.descriptionPreview)}</li>`).join('\n')
+  const gone = ids.length - n
+  return page(
+    'Delete reports?',
+    `<h1>Delete ${n} report${n === 1 ? '' : 's'}${m > 0 ? ` and their ${m} attachment${m === 1 ? '' : 's'}` : ''}?</h1>
+<p>This cannot be undone.</p>
+${gone > 0 ? `<p>${gone} selected id${gone === 1 ? ' is' : 's are'} not a report any more and will be skipped.</p>` : ''}<ul>
+${list}
+</ul>
+<form method="post" action="/report/admin/batch/delete">
+${hidden}
+<input type="hidden" name="confirm" value="1">
+<button type="submit">Delete ${n} report${n === 1 ? '' : 's'}</button>
+<a href="/report/admin/">Back</a>
+</form>`,
+  )
+}
+
+/** A refused batch request: a plain page, nothing changed. */
+export function renderBatchError(message: string): string {
+  return page('Not done', `<p>${escapeHtml(message)}</p><p><a href="/report/admin/">&larr; All reports</a></p>`)
 }
 
 function field(label: string, value: string | undefined): string {

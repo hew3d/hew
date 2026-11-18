@@ -27,6 +27,7 @@ import {
 } from './constants.ts'
 
 const BASE = 'https://app.hew3d.com'
+const ADMIN_BASE = 'https://reports.hew3d.com'
 
 async function gzipJson(doc: unknown): Promise<Uint8Array> {
   const cs = new CompressionStream('gzip')
@@ -87,7 +88,7 @@ function thread(t: TestEnv, id: string, secret: string | null, init: { method?: 
 
 function adminForm(t: TestEnv, id: string, action: string, fields: Record<string, string>, extraHeaders: Record<string, string> = {}) {
   return t.handle(
-    new Request(`${BASE}/report/admin/${id}/${action}`, {
+    new Request(`${ADMIN_BASE}/report/admin/${id}/${action}`, {
       method: 'POST',
       headers: t.adminHeaders({ 'content-type': 'application/x-www-form-urlencoded', ...extraHeaders }),
       body: new URLSearchParams(fields).toString(),
@@ -96,7 +97,7 @@ function adminForm(t: TestEnv, id: string, action: string, fields: Record<string
 }
 
 async function adminGet(t: TestEnv, path: string): Promise<Response> {
-  return t.handle(new Request(`${BASE}/report/admin/${path}`, { headers: t.adminHeaders() }))
+  return t.handle(new Request(`${ADMIN_BASE}/report/admin/${path}`, { headers: t.adminHeaders() }))
 }
 
 function tableCount(t: TestEnv, id: string): number {
@@ -479,7 +480,7 @@ describe('follow-up attachments (§5.6)', () => {
     const child = (await res.json()) as { id: string; token: string }
     assert.equal((await commit(t, child.id, child.token)).status, 201)
     assert.equal((await t.index().listChildren(id)).length, 1)
-    const del = await t.handle(new Request(`${BASE}/report/admin/${id}/delete`, { method: 'POST', headers: t.adminHeaders() }))
+    const del = await t.handle(new Request(`${ADMIN_BASE}/report/admin/${id}/delete`, { method: 'POST', headers: t.adminHeaders() }))
     assert.equal(del.status, 303)
     assert.equal(await t.index().getReport(child.id), null)
     assert.equal(await t.drop(child.id).head(), null)
@@ -633,7 +634,7 @@ describe('admin reply and status forms', () => {
     const { id, follow } = await send(t)
     const r1 = await adminForm(t, id, 'reply', { text: 'Thanks — looking into it.' })
     assert.equal(r1.status, 303)
-    assert.equal(r1.headers.get('location'), `https://app.hew3d.com/report/admin/${id}`)
+    assert.equal(r1.headers.get('location'), `https://reports.hew3d.com/report/admin/${id}`)
     assert.equal(r1.headers.get('cache-control'), 'no-store')
     assert.equal((await adminForm(t, id, 'reply', { text: 'ignored', canned: 'ask-file' })).status, 303)
     assert.equal((await adminForm(t, id, 'reply', { canned: 'ask-steps' })).status, 303)
@@ -739,7 +740,7 @@ describe('admin reply and status forms', () => {
   test('admin delete destroys the thread too: the reporter key stops working at once', async () => {
     const t = await buildTestEnv()
     const { id, follow } = await send(t)
-    const del = await t.handle(new Request(`${BASE}/report/admin/${id}/delete`, { method: 'POST', headers: t.adminHeaders() }))
+    const del = await t.handle(new Request(`${ADMIN_BASE}/report/admin/${id}/delete`, { method: 'POST', headers: t.adminHeaders() }))
     assert.equal(del.status, 303)
     assert.equal(tableCount(t, id), 0)
     assert.equal((await thread(t, id, follow!)).status, 403)
@@ -750,9 +751,9 @@ describe('admin reply and status forms', () => {
     const t = await buildTestEnv()
     const { id } = await send(t)
     const res = await t.handle(
-      new Request(`${BASE}/report/admin/${id}/reply`, {
+      new Request(`${ADMIN_BASE}/report/admin/${id}/reply`, {
         method: 'POST',
-        headers: { origin: 'https://app.hew3d.com', 'content-type': 'application/x-www-form-urlencoded' },
+        headers: { origin: 'https://reports.hew3d.com', 'content-type': 'application/x-www-form-urlencoded' },
         body: 'text=hi',
       }),
     )

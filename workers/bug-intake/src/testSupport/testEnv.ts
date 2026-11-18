@@ -26,7 +26,7 @@ import type { VerifyOptions } from '../adminAuth.ts'
 
 export const TEST_TEAM_DOMAIN = 'hew-test.cloudflareaccess.com'
 export const TEST_ACCESS_AUD = 'admin-aud'
-export const TEST_ADMIN_ORIGIN = 'https://app.hew3d.com'
+export const TEST_ADMIN_ORIGIN = 'https://reports.hew3d.com'
 
 function base64Url(bytes: Uint8Array): string {
   let binary = ''

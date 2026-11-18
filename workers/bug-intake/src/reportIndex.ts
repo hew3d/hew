@@ -76,6 +76,26 @@ export class ReportIndex extends DurableObject<BugIntakeEnv> {
     return this.store_.setTriaged(id, triaged)
   }
 
+  getReports(ids: string[]): Promise<ReportRow[]> {
+    return this.store_.getReports(ids)
+  }
+
+  setTriagedMany(ids: string[], triaged: boolean): Promise<void> {
+    return this.store_.setTriagedMany(ids, triaged)
+  }
+
+  listChildrenOf(parentIds: string[]): Promise<ReportRow[]> {
+    return this.store_.listChildrenOf(parentIds)
+  }
+
+  deleteReports(ids: string[]): Promise<void> {
+    return this.store_.deleteReports(ids)
+  }
+
+  markDestroyed(ids: string[]): Promise<void> {
+    return this.store_.markDestroyed(ids)
+  }
+
   reserveEmail(now: number, purpose: 'report' | 'thread' = 'report'): Promise<boolean> {
     return this.store_.reserveEmail(now, purpose)
   }

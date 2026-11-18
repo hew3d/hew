@@ -144,6 +144,16 @@ const REPORT_COLUMNS =
   'id, receivedAt, appVersion, platform, descriptionPreview, sizeBytes, triaged, committed, ' +
   'following, status, statusVersion, reporterActivityAt, adminViewedAt, parentId, bundleDeleted'
 
+/** Durable Object SQLite allows at most 100 bound parameters per statement;
+ *  a multi-id statement binds at most this many ids (plus its extras). */
+const SQL_IN_CHUNK = 90
+
+function chunked<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
+  return out
+}
+
 /** Columns added after the first deploy, with the definition each gets on
  *  a `reports` table that predates it (docs/design/follow-a-report.md
  *  §5.2). Also part of `CREATE TABLE` for a fresh database. */
@@ -430,6 +440,81 @@ export class IndexStore {
   async setTriaged(id: string, triaged: boolean): Promise<void> {
     this.migrate()
     this.storage.sql.exec('UPDATE reports SET triaged = ? WHERE id = ?', triaged ? 1 : 0, id)
+  }
+
+  // -------------------------------------------------------------------
+  // Batch actions (the admin list's checkboxes): one call per request,
+  // however many ids, so a batch costs the Worker a fixed number of
+  // Durable Object subrequests.
+  // -------------------------------------------------------------------
+
+  /** The committed rows among `ids`, newest first. Unknown and uncommitted
+   *  ids are simply absent. Chunked under the Durable Object's bound-
+   *  parameter limit, then merged back into one newest-first list. */
+  async getReports(ids: string[]): Promise<ReportRow[]> {
+    this.migrate()
+    const rows: ReportRow[] = []
+    for (const chunk of chunked(ids, SQL_IN_CHUNK)) {
+      const marks = chunk.map(() => '?').join(', ')
+      rows.push(
+        ...this.storage.sql
+          .exec<RawReportRow>(`SELECT ${REPORT_COLUMNS} FROM reports WHERE committed = 1 AND id IN (${marks})`, ...chunk)
+          .toArray()
+          .map(rowToReportRow),
+      )
+    }
+    return rows.sort((x, y) => y.receivedAt - x.receivedAt)
+  }
+
+  /** Sets (never toggles) the triaged flag on every id that exists. */
+  async setTriagedMany(ids: string[], triaged: boolean): Promise<void> {
+    this.migrate()
+    for (const chunk of chunked(ids, SQL_IN_CHUNK)) {
+      const marks = chunk.map(() => '?').join(', ')
+      this.storage.sql.exec(`UPDATE reports SET triaged = ? WHERE id IN (${marks})`, triaged ? 1 : 0, ...chunk)
+    }
+  }
+
+  /** The committed follow-up attachments of every parent in `parentIds`,
+   *  oldest first. */
+  async listChildrenOf(parentIds: string[]): Promise<ReportRow[]> {
+    this.migrate()
+    const rows: ReportRow[] = []
+    for (const chunk of chunked(parentIds, SQL_IN_CHUNK)) {
+      const marks = chunk.map(() => '?').join(', ')
+      rows.push(
+        ...this.storage.sql
+          .exec<RawReportRow>(`SELECT ${REPORT_COLUMNS} FROM reports WHERE parentId IN (${marks}) AND committed = 1`, ...chunk)
+          .toArray()
+          .map(rowToReportRow),
+      )
+    }
+    return rows.sort((x, y) => x.receivedAt - y.receivedAt)
+  }
+
+  /** Deletes the rows for `ids`, outright and idempotently (`deleteReport`
+   *  for many). */
+  async deleteReports(ids: string[]): Promise<void> {
+    this.migrate()
+    for (const chunk of chunked(ids, SQL_IN_CHUNK)) {
+      const marks = chunk.map(() => '?').join(', ')
+      this.storage.sql.exec(`DELETE FROM reports WHERE id IN (${marks})`, ...chunk)
+    }
+  }
+
+  /** The thread and bundle of each row in `ids` were destroyed but the row
+   *  stays (a batch delete that could not finish the family): show what is
+   *  true: bundle gone, not followed, status back to the default, and the
+   *  stored size freed. Idempotent. */
+  async markDestroyed(ids: string[]): Promise<void> {
+    this.migrate()
+    for (const chunk of chunked(ids, SQL_IN_CHUNK)) {
+      const marks = chunk.map(() => '?').join(', ')
+      this.storage.sql.exec(
+        `UPDATE reports SET bundleDeleted = 1, following = 0, sizeBytes = 0, status = 'open', statusVersion = NULL WHERE id IN (${marks})`,
+        ...chunk,
+      )
+    }
   }
 
   // -------------------------------------------------------------------

@@ -103,7 +103,7 @@ describe('buildNotificationMime', () => {
 
   test('includes the admin link and size', () => {
     const mime = buildNotificationMime(makeReport({ sizeBytes: 2048 }), 'notify@hew3d.com', 'maintainer@hew3d.com')
-    assert.ok(mime.includes('https://app.hew3d.com/report/admin/HEW-AAAA-BBBB'))
+    assert.ok(mime.includes('https://reports.hew3d.com/report/admin/HEW-AAAA-BBBB'))
     assert.ok(mime.includes('2.0 KB'))
   })
 })
@@ -210,7 +210,7 @@ describe('thread event emails (follow-a-report §3.3)', () => {
     assert.match(raw, /^Subject: \[Hew bug report\] HEW-AAAA-BBBB — file attached \(46\.5 MB\)\r$/m)
     const headers = raw.split('\r\n\r\n')[0]
     assert.ok(!headers.includes('Bcc'))
-    assert.ok(raw.includes('https://app.hew3d.com/report/admin/HEW-CCCC-DDDD'))
+    assert.ok(raw.includes('https://reports.hew3d.com/report/admin/HEW-CCCC-DDDD'))
   })
 
   test('sendThreadNotification stops short of the cap, leaving the reserve for new reports, and never throws', async () => {

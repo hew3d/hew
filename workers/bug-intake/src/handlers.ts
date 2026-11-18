@@ -31,6 +31,12 @@ import {
   THREAD_MESSAGE_MAX_CHARS,
   THREAD_BODY_MAX_BYTES,
   STATUS_VERSION_MAX_CHARS,
+  ADMIN_HOST,
+  ADMIN_ORIGIN,
+  BATCH_TRIAGE_MAX,
+  BATCH_DELETE_MAX,
+  BATCH_DOWNLOAD_MAX,
+  BATCH_DOWNLOAD_MAX_BYTES,
 } from './constants.ts'
 import { readBodyCapped, TOO_LARGE } from './bytes.ts'
 import { decompressAndValidateHead, HeadDecompressor, parseHeadForDisplay } from './headScan.ts'
@@ -39,15 +45,21 @@ import { hashClient } from './clientHash.ts'
 import { generateUploadToken, generateFollowSecret, hashToken } from './uploadToken.ts'
 import { sendNotification, sendThreadNotification, formatBytes, type RawMailSender } from './email.ts'
 import { verifyAccessJwt, type VerifyOptions } from './adminAuth.ts'
-import { renderList, renderDetail, renderFormError, escapeHtml, CANNED_REPLIES } from './adminPages.ts'
+import {
+  renderList,
+  renderDetail,
+  renderFormError,
+  renderDeleteConfirm,
+  renderBatchError,
+  isSelectPreset,
+  NOTICE_ACTIONS,
+  escapeHtml,
+  CANNED_REPLIES,
+  type BatchNotice,
+} from './adminPages.ts'
+import { tarStream, type TarSource, type TarSkip } from './tar.ts'
 import { isThreadStatus } from './threadStore.ts'
 import type { BugIntakeEnv } from './types.ts'
-
-/** The only origin admin mutation forms are ever legitimately submitted
- *  from — the admin pages themselves are served under this same origin.
- *  Admin pages are only ever served from app.hew3d.com, never from the beta
- *  host, so beta reports are administered there too. */
-const ADMIN_ORIGIN = 'https://app.hew3d.com'
 
 function jsonResponse(status: number, body: unknown, extraHeaders?: Record<string, string>): Response {
   return new Response(JSON.stringify(body), {
@@ -732,9 +744,30 @@ function originAllowed(request: Request): boolean {
   return request.headers.get('origin') === ADMIN_ORIGIN
 }
 
-async function handleAdminList(env: BugIntakeEnv): Promise<Response> {
+/** The result notice a batch redirect carries (`?notice=&ok=&failed=`),
+ *  rebuilt from validated pieces only: a known action name, a short integer,
+ *  and ids that match the report id shape. Anything else drops the notice,
+ *  so nothing in the URL reaches the page as it was typed. */
+function parseNotice(params: URLSearchParams): BatchNotice | undefined {
+  const action = params.get('notice')
+  const ok = params.get('ok')
+  if (action === null || ok === null) return undefined
+  if (!(NOTICE_ACTIONS as readonly string[]).includes(action)) return undefined
+  if (!/^[0-9]{1,4}$/.test(ok)) return undefined
+  const failedRaw = params.get('failed') ?? ''
+  const failed = failedRaw === '' ? [] : failedRaw.split(',')
+  if (failed.length > BATCH_TRIAGE_MAX || !failed.every((id) => isValidReportId(id))) return undefined
+  return { action: action as BatchNotice['action'], ok: Number(ok), failed: failed.map(normalizeReportId), rowsKept: params.get('rows') === 'kept' }
+}
+
+async function handleAdminList(request: Request, env: BugIntakeEnv): Promise<Response> {
+  const params = new URL(request.url).searchParams
+  const select = params.get('select')
   const reports = await indexStub(env).listReports()
-  return adminHtml(200, renderList(reports))
+  return adminHtml(
+    200,
+    renderList(reports, { select: isSelectPreset(select) ? select : undefined, notice: parseNotice(params) }),
+  )
 }
 
 /** Reads and decompresses just piece 0 of a report's HEAD, for the detail
@@ -908,6 +941,203 @@ async function handleAdminTriage(request: Request, env: BugIntakeEnv, id: string
   return redirectNoStore(`${ADMIN_ORIGIN}/report/admin/${id}`, 303)
 }
 
+// ---------------------------------------------------------------------------
+// Batch actions (the list's checkboxes). Every id is validated before
+// anything is touched; follow-up attachments travel with their parent.
+// ---------------------------------------------------------------------------
+
+type ParsedIds = { ok: true; ids: string[] } | { ok: false; response: Response }
+
+/** Validates and normalizes every `id` value (checkbox or hidden input),
+ *  de-duplicated in first-seen order. One bad id refuses the whole request. */
+function parseBatchIds(raw: string[], cap: number, what: string): ParsedIds {
+  if (raw.length === 0) return { ok: false, response: adminHtml(400, renderBatchError('Select at least one report.')) }
+  const ids: string[] = []
+  const seen = new Set<string>()
+  for (const value of raw) {
+    if (!isValidReportId(value)) return { ok: false, response: adminHtml(400, renderBatchError('That selection has an invalid report id. Nothing was changed.')) }
+    const id = normalizeReportId(value)
+    if (!seen.has(id)) {
+      seen.add(id)
+      ids.push(id)
+    }
+  }
+  if (ids.length > cap) {
+    return { ok: false, response: adminHtml(400, renderBatchError(`You selected ${ids.length} reports; ${what} takes at most ${cap} at a time. Nothing was changed.`)) }
+  }
+  return { ok: true, ids }
+}
+
+function batchRedirect(action: BatchNotice['action'], ok: number, failed: string[], rowsKept = false): Response {
+  const query = new URLSearchParams({ notice: action, ok: String(ok) })
+  if (failed.length > 0) query.set('failed', failed.join(','))
+  if (rowsKept) query.set('rows', 'kept')
+  return redirectNoStore(`${ADMIN_ORIGIN}/report/admin/?${query.toString()}`, 303)
+}
+
+async function handleBatchTriage(request: Request, env: BugIntakeEnv): Promise<Response> {
+  if (!originAllowed(request)) return forbidden()
+  const form = await readForm(request)
+  const value = form.get('value')
+  if (value !== '0' && value !== '1') return adminHtml(400, renderBatchError('Pick Mark triaged or Mark untriaged.'))
+  const parsed = parseBatchIds(form.getAll('id'), BATCH_TRIAGE_MAX, 'Mark triaged')
+  if (!parsed.ok) return parsed.response
+  const index = indexStub(env)
+  // Top-level reports only: an attachment is never selected on its own.
+  const eligible = new Set((await index.getReports(parsed.ids)).filter((r) => r.parentId === null).map((r) => r.id))
+  const targets = parsed.ids.filter((id) => eligible.has(id))
+  await index.setTriagedMany(targets, value === '1')
+  return batchRedirect(value === '1' ? 'triaged' : 'untriaged', targets.length, parsed.ids.filter((id) => !eligible.has(id)))
+}
+
+/** The selected top-level reports that exist, and their attachments, for
+ *  the delete and download steps. */
+async function loadBatch(env: BugIntakeEnv, ids: string[]) {
+  const index = indexStub(env)
+  // In the order selected (the index answers newest first).
+  const rank = new Map(ids.map((id, i) => [id, i]))
+  const reports = (await index.getReports(ids))
+    .filter((r) => r.parentId === null)
+    .sort((x, y) => rank.get(x.id)! - rank.get(y.id)!)
+  const found = new Set(reports.map((r) => r.id))
+  const children = await index.listChildrenOf(reports.map((r) => r.id))
+  return { reports, children, missing: ids.filter((id) => !found.has(id)) }
+}
+
+async function handleBatchDelete(request: Request, env: BugIntakeEnv): Promise<Response> {
+  if (!originAllowed(request)) return forbidden()
+  const form = await readForm(request)
+  const parsed = parseBatchIds(form.getAll('id'), BATCH_DELETE_MAX, 'Delete')
+  if (!parsed.ok) return parsed.response
+  const { reports, children, missing } = await loadBatch(env, parsed.ids)
+  if (reports.length + children.length > BATCH_DELETE_MAX) {
+    return adminHtml(
+      400,
+      renderBatchError(
+        `You selected ${reports.length} reports with ${children.length} attachments; Delete takes at most ${BATCH_DELETE_MAX} reports and attachments together. Nothing was changed.`,
+      ),
+    )
+  }
+  // Step one: nothing changes. The page asks, and carries the ids forward.
+  if (form.get('confirm') !== '1') return adminHtml(200, renderDeleteConfirm(parsed.ids, reports, children))
+
+  const index = indexStub(env)
+  const failed = [...missing]
+  const goneRows: string[] = []
+  const keptDestroyed: string[] = []
+  for (const report of reports) {
+    try {
+      // The single delete's order: the thread first (the reporter's key stops
+      // working at once), then the bundle, then — after the loop, in one
+      // call — the rows; attachments' bundles go before their parent's row.
+      await threadStub(env, report.id).destroy()
+      await dropStub(env, report.id).destroy()
+      const mine = children.filter((c) => c.parentId === report.id)
+      const done: string[] = []
+      let childFailed = false
+      for (const child of mine) {
+        try {
+          await dropStub(env, child.id).destroy()
+          done.push(child.id)
+        } catch (err) {
+          console.error(`bug-intake: batch delete failed for attachment ${child.id}:`, err)
+          failed.push(child.id)
+          childFailed = true
+        }
+      }
+      goneRows.push(...done)
+      // A parent whose attachment would not go keeps its row, so the
+      // attachment stays reachable from it and a retry finishes the job.
+      // Its thread and bundle are already destroyed, so the row says so.
+      if (childFailed) {
+        failed.push(report.id)
+        keptDestroyed.push(report.id)
+      } else goneRows.push(report.id)
+    } catch (err) {
+      console.error(`bug-intake: batch delete failed for ${report.id}:`, err)
+      failed.push(report.id)
+    }
+  }
+  const deletedReports = reports.filter((r) => goneRows.includes(r.id)).length
+  try {
+    await index.markDestroyed(keptDestroyed)
+  } catch (err) {
+    console.error('bug-intake: batch delete could not mark kept rows as destroyed:', err)
+  }
+  try {
+    await index.deleteReports(goneRows)
+  } catch (err) {
+    // The data is gone but the list entries are not: say so, as not done.
+    console.error('bug-intake: batch delete could not remove the index rows:', err)
+    const unlisted = reports.filter((r) => goneRows.includes(r.id)).map((r) => r.id)
+    return batchRedirect('deleted', 0, [...new Set([...failed, ...unlisted])], true)
+  }
+  return batchRedirect('deleted', deletedReports, failed)
+}
+
+function tarTimestamp(now: number): string {
+  return new Date(now).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
+}
+
+async function handleBatchDownload(request: Request, env: BugIntakeEnv): Promise<Response> {
+  const parsed = parseBatchIds(new URL(request.url).searchParams.getAll('id'), BATCH_DOWNLOAD_MAX, 'Download')
+  if (!parsed.ok) return parsed.response
+  const { reports, children, missing } = await loadBatch(env, parsed.ids)
+  const skipped: TarSkip[] = missing.map((id) => ({ label: id, reason: 'not a report' }))
+  const sources: TarSource[] = []
+  const childrenOf = (id: string) => children.filter((c) => c.parentId === id)
+
+  const add = (name: string, row: { id: string; receivedAt: number; bundleDeleted: boolean; sizeBytes: number }) => {
+    if (row.bundleDeleted) {
+      skipped.push({ label: row.id, reason: 'bundle expired' })
+      return
+    }
+    sources.push({
+      name,
+      label: row.id,
+      mtimeSeconds: Math.floor(row.receivedAt / 1000),
+      async open() {
+        const stub = dropStub(env, row.id)
+        const head = await stub.head()
+        if (head === null) return { skipped: 'bundle missing' }
+        return { size: head.totalBytes, body: await stub.readStream() }
+      },
+    })
+  }
+  for (const report of reports) {
+    add(`${report.id}.json.gz`, report)
+    for (const child of childrenOf(report.id)) add(`${report.id}--${child.id}.json.gz`, child)
+  }
+
+  if (sources.length > BATCH_DOWNLOAD_MAX) {
+    return adminHtml(
+      400,
+      renderBatchError(`That is ${sources.length} bundles (attachments included); Download takes at most ${BATCH_DOWNLOAD_MAX} at a time.`),
+    )
+  }
+  const totalBytes = [...reports, ...children].reduce((n, r) => n + (r.bundleDeleted ? 0 : r.sizeBytes), 0)
+  if (totalBytes > BATCH_DOWNLOAD_MAX_BYTES) {
+    return adminHtml(
+      400,
+      renderBatchError(
+        `Those bundles total ${formatBytes(totalBytes)}; Download takes at most ${formatBytes(BATCH_DOWNLOAD_MAX_BYTES)} at a time.`,
+      ),
+    )
+  }
+  const now = Date.now()
+  // One uncompressed tar, streamed: each bundle is already gzip, so it goes
+  // in exactly as stored. No content-length (the skipped list is only known
+  // as entries open).
+  return new Response(tarStream(sources, skipped, Math.floor(now / 1000)), {
+    status: 200,
+    headers: {
+      'content-type': 'application/x-tar',
+      'content-disposition': `attachment; filename="hew-reports-${tarTimestamp(now)}.tar"`,
+      'cache-control': 'no-store',
+    },
+  })
+}
+
 async function routeAdmin(
   request: Request,
   env: BugIntakeEnv,
@@ -918,10 +1148,18 @@ async function routeAdmin(
 
   if (rest === '' || rest === '/') {
     if (request.method !== 'GET') return methodNotAllowed()
-    return handleAdminList(env)
+    return handleAdminList(request, env)
   }
 
   const segments = rest.replace(/^\//, '').split('/')
+  // `batch` is not a valid report id, so it is matched before the id check.
+  if (segments[0] === 'batch' && segments.length === 2) {
+    const action = segments[1]
+    if (action === 'triage' && request.method === 'POST') return handleBatchTriage(request, env)
+    if (action === 'delete' && request.method === 'POST') return handleBatchDelete(request, env)
+    if (action === 'download' && request.method === 'GET') return handleBatchDownload(request, env)
+    return notFound()
+  }
   const rawId = segments[0]
   if (!isValidReportId(rawId)) return notFound()
   const id = normalizeReportId(rawId)
@@ -962,6 +1200,9 @@ async function handleRequestInner(
   }
 
   if (pathname === ADMIN_PREFIX || pathname.startsWith(`${ADMIN_PREFIX}/`)) {
+    // The admin pages exist only on their own host: on any other (the public
+    // intake hosts) it is a plain 404, before auth, as if there were no page.
+    if (new URL(request.url).hostname !== ADMIN_HOST) return notFound()
     const rest = pathname.slice(ADMIN_PREFIX.length)
     return routeAdmin(request, env, rest, authOptions)
   }
