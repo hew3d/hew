@@ -156,6 +156,7 @@ Copy nodes along a sketch curve or face loop, with an optional scale ramp.
 - `ambiguous_locator`
 - `reflection`
 - `unimplemented`
+- `locked_node` — Locked. Unlock it to change it.
 
 ## hew.attr
 
@@ -257,6 +258,7 @@ Delete one attribute key or a whole namespace.
 - `unknown_material` — That material is no longer in the palette. Pick another swatch.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_tag` — That tag doesn't exist in this model. Check the tag name and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.attr.get`
 
@@ -450,6 +452,7 @@ Write one attribute key.
 - `unknown_material` — That material is no longer in the palette. Pick another swatch.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_tag` — That tag doesn't exist in this model. Check the tag name and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ## hew.component
 
@@ -512,6 +515,7 @@ Fold a selection into a definition plus one instance.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.component.explode`
 
@@ -565,6 +569,7 @@ Bake an instance into world geometry.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `cannot_explode_reflected`
 - `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.component.flip_instance`
 
@@ -640,6 +645,7 @@ Mirror one world instance across one of its definition's local axes.
 
 - `unknown_entity`
 - `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.component.import_definition`
 
@@ -835,6 +841,7 @@ Give one placement its own private definition (through an occurrence path at any
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.component.place`
 
@@ -941,6 +948,7 @@ Make a set of linked copies a named component: removes its linked mark and names
 
 - `unknown_entity`
 - `not_linked` — This is already a component, not a set of linked copies, so there's nothing to change.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.component.rebase`
 
@@ -1029,6 +1037,7 @@ Re-express a definition in a new frame; every placement is compensated, so nothi
 - `invalid_frame` — That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions.
 - `rebase_during_session` — Finish editing the component before changing its axes.
 - `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
 
 ## hew.compute
 
@@ -3974,6 +3983,7 @@ Open a group/component editing frame (transaction-balanced only).
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.context.exit`
 
@@ -5306,6 +5316,7 @@ Delete an entity.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `definition_nested_in_definition` — This component is used inside another component's definition. Make that component's instances unique or explode them first, or delete the outer component.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.entity.flip`
 
@@ -5483,6 +5494,70 @@ Mirror a selection across a plane (Flip Along an axis through its center, the or
 - `degenerate_axis` — The rotation axis needs two distinct points. Pick a second point further from the first.
 - `degenerate_texture_frame` — That would stretch a picture or texture on the object so far it couldn't stay on its face, so it was refused. Try a smaller stretch.
 - `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.entity.lock`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Lock objects, groups, and component copies so nothing about them changes until they are unlocked; locking one copy of a component or linked set locks every copy.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "description": "One undo step labeled Lock. Hiding, selecting, measuring, and copying a locked thing still work; edits to it refuse locked_node. Refused explode_session_scope while a component is open for editing, or when the lock would freeze an open group.",
+  "properties": {
+    "targets": {
+      "description": "objects (\"obj_…\"), groups (\"grp_…\"), and component instances (\"ins_…\"); an instance stands for its definition, so every copy of it changes together",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 10000,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "targets"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "changed": {
+      "description": "how many objects, groups, and shapes changed state; 0 when all were already as asked (and no undo entry was made)",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "changed"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `not_a_node`
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ### `hew.entity.move`
 
@@ -5649,6 +5724,7 @@ Translate (with copy/array forms) by vector or from→to points; ids may be path
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
 - `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.entity.rename`
 
@@ -5702,6 +5778,7 @@ Rename an entity.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_material` — That material is no longer in the palette. Pick another swatch.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.entity.rotate`
 
@@ -5844,6 +5921,7 @@ Rotate about a pivot and axis by an angle; ids may be paths to members of one de
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
 - `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.entity.scale`
 
@@ -5931,6 +6009,7 @@ Scale about an anchor with per-axis factors; a negative factor mirrors. ids may 
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.entity.set_frame`
 
@@ -6020,6 +6099,70 @@ Set or clear the part frame override (hew.part / frame) of an object or group.
 - `unknown_entity`
 - `not_a_part`
 - `invalid_frame` — That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions.
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.entity.unlock`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Unlock objects, groups, and component copies (every copy of a shared shape with them), or everything with all: true.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "description": "Give targets, or all: true. One undo step labeled Unlock.",
+  "properties": {
+    "all": {
+      "description": "true unlocks every locked object, group, and shape in the document; give it alone",
+      "type": "boolean"
+    },
+    "targets": {
+      "description": "objects (\"obj_…\"), groups (\"grp_…\"), and component instances (\"ins_…\"); an instance stands for its definition, so every copy of it changes together",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 10000,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "changed": {
+      "description": "how many objects, groups, and shapes changed state; 0 when all were already as asked (and no undo entry was made)",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "changed"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `not_a_node`
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 
 ## hew.event
 
@@ -6450,6 +6593,7 @@ Group sibling nodes non-destructively.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.group.explode`
 
@@ -6492,6 +6636,7 @@ Dissolve a group, re-homing its members.
 
 - `unknown_entity`
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.group.reparent`
 
@@ -6548,6 +6693,7 @@ Move live nodes into a group, or out to the top level, without touching their ge
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ## hew.guide
 
@@ -7717,6 +7863,7 @@ Paint a face (by default its whole logical face: a fillet, a cylinder wall; `log
 - `unknown_occurrence`
 - `not_an_object`
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.material.position_texture`
 
@@ -7805,6 +7952,7 @@ Position a face's texture by three tile-corner pins, or reset it to the default 
 - `face_token_unknown`
 - `face_token_stale`
 - `degenerate_pins`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.material.replace`
 
@@ -7863,6 +8011,7 @@ Replace one material with another everywhere it is painted, or within one object
 
 - `unknown_entity`
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.material.set_default`
 
@@ -7913,6 +8062,7 @@ Set an object's default material.
 - `unknown_entity`
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_material` — That material is no longer in the palette. Pick another swatch.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.material.set_opacity`
 
@@ -8414,6 +8564,7 @@ Set or clear the crease on edges, which keeps them sharp under Smooth.
 - `unknown_entity`
 - `locator_missed`
 - `ambiguous_locator`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.object.smooth`
 
@@ -8466,6 +8617,7 @@ Set an object's Smooth level (0 = Off, 1–3): its faces become the cage of a su
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `locked_node` — Locked. Unlock it to change it.
 
 ## hew.plugin
 
@@ -9094,6 +9246,10 @@ One entity's details.
       "minimum": 0,
       "type": "integer"
     },
+    "frozen": {
+      "description": "objects, groups, and instances: whether a lock keeps it from changing — its own, a locked group above it, or a locked shape it is part of. Edits to a frozen entity refuse locked_node",
+      "type": "boolean"
+    },
     "generation": {
       "minimum": 0,
       "type": "integer"
@@ -9103,6 +9259,10 @@ One entity's details.
     },
     "kind": {
       "type": "string"
+    },
+    "locked": {
+      "description": "objects, groups, instances, and components: locked itself (an instance by its component's lock, shared by every copy)",
+      "type": "boolean"
     }
   },
   "required": [
@@ -9694,6 +9854,10 @@ Every placement in the model with its path and world pose: objects, groups, and 
               "null"
             ]
           },
+          "frozen": {
+            "description": "a lock keeps the node from changing: its own, a locked group above it, or a locked shape it is part of (through any placement). Edits to it refuse locked_node",
+            "type": "boolean"
+          },
           "hidden": {
             "description": "effective: the node's own flag and tags, its groups', and every instance on the path",
             "type": "boolean"
@@ -9711,6 +9875,10 @@ Every placement in the model with its path and world pose: objects, groups, and 
           },
           "linked": {
             "description": "instance rows only: the definition is a set of linked copies (hew / linked)",
+            "type": "boolean"
+          },
+          "locked": {
+            "description": "locked itself: an object's or group's own lock, an instance's component's (shared by every copy)",
             "type": "boolean"
           },
           "material": {
@@ -9821,6 +9989,8 @@ Every placement in the model with its path and world pose: objects, groups, and 
           "name",
           "definition_name",
           "depth",
+          "locked",
+          "frozen",
           "members"
         ],
         "type": "object"
@@ -11854,6 +12024,7 @@ Copy drawing units on a plane by an offset.
 - `ambiguous_locator`
 - `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
 - `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.delete`
 
@@ -11961,6 +12132,7 @@ Delete drawing units from a plane.
 - `ambiguous_locator`
 - `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
 - `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.draw_arc`
 
@@ -12196,6 +12368,7 @@ Draw an arc on a plane spec.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
 - `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
 - `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.draw_circle`
 
@@ -12412,6 +12585,7 @@ Draw a circle on a plane spec.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
 - `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
 - `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.draw_line`
 
@@ -12620,6 +12794,7 @@ Draw a line (chain) on a plane spec.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
 - `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
 - `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.draw_polygon`
 
@@ -12836,6 +13011,7 @@ Draw a regular N-gon on a plane spec.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
 - `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
 - `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.draw_rect`
 
@@ -13056,6 +13232,7 @@ Draw an axis-aligned rectangle on a plane spec.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
 - `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
 - `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.move`
 
@@ -13196,6 +13373,7 @@ Move drawing units (islands, edges, circles, regions) on a plane by an offset.
 - `ambiguous_locator`
 - `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
 - `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.offset`
 
@@ -13336,6 +13514,7 @@ Offset a region boundary within its sketch, or a face or plane region by its uni
 - `unknown_entity`
 - `unknown_unit`
 - `draft_boundary_edge_touched` — A solid's own edges can't be moved or erased by drawing. Push/Pull or a boolean changes the solid itself.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.rotate`
 
@@ -13488,6 +13667,7 @@ Rotate drawing units on a plane about the plane normal through a point.
 - `ambiguous_locator`
 - `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
 - `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.scale`
 
@@ -13648,6 +13828,7 @@ Scale drawing units on a plane about a center, uniformly or per axis.
 - `ambiguous_locator`
 - `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
 - `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.units`
 
@@ -13896,6 +14077,7 @@ Replace a smoothed object's cage with its Smooth surface and clear the level.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.cap`
 
@@ -13977,6 +14159,7 @@ Close an open object's flat openings with faces; an object closed all round beco
 - `cap_would_be_coplanar` — This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid.
 - `non_manifold_rim` — The edges around this opening branch off in more than one direction, so Hew can't tell where a face goes. Fix those edges by hand first.
 - `caps_overlap` — A face here would overlap another part of this object. Close all of the object's openings together, or draw faces across this one by hand.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.chamfer`
 
@@ -14135,6 +14318,7 @@ Chamfer the edges of a solid, or chamfer a 2D corner, as the Fillet tool's Chamf
 - `locator_missed`
 - `ambiguous_locator`
 - `angle_does_not_fit`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.deform`
 
@@ -14265,6 +14449,7 @@ Twist, bend or taper a solid along its bounding box, or bend it along a path, as
 - `ambiguous_locator`
 - `follow_me_in_component_unsupported`
 - `unimplemented`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.delete_faces`
 
@@ -14344,6 +14529,7 @@ Remove faces from an open object; islands cut loose become objects of their own.
 - `ambiguous_locator`
 - `face_token_unknown`
 - `face_token_stale`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.delete_imprint`
 
@@ -14399,6 +14585,7 @@ Kept for compatibility: delete a drawn shape (sub-face or chord island) back int
 - `ambiguous_locator`
 - `face_token_unknown`
 - `face_token_stale`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.extrude`
 
@@ -14466,6 +14653,7 @@ Extrude a region into a new Object, consuming the profile.
 - `unknown_unit`
 - `region_not_pushable` — That shape can't be pushed or pulled: part of it is drawn on the solid's face and part is loose, so the face can't hold it. Move the drawing clear of the edge, or push/pull the neighboring pieces instead.
 - `region_touches_hole` — This shape touches another shape at a point, so it can't be pulled as one piece. Pull the shape inside it instead, or move them a hair apart.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.fillet`
 
@@ -14646,6 +14834,7 @@ Round, cove, bullnose or profile the edges of a solid, or round a 2D corner, as 
 - `unknown_profile` — That profile isn't built in. Pick one from the profile list.
 - `load_failed`
 - `host_capability_missing`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.follow_me`
 
@@ -14787,6 +14976,7 @@ Sweep a profile along an edge-chain path, as the tool does.
 - `locator_missed`
 - `ambiguous_locator`
 - `unimplemented`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.from_faces`
 
@@ -14849,6 +15039,7 @@ Make a solid from drawn faces that enclose a space (Make Solid on sketches), fir
 - `loop_not_planar`
 - `faces_not_solid`
 - `unknown_entity`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.imprints`
 
@@ -15191,6 +15382,7 @@ Boolean intersection of two or more solids: the material in all of them.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 - `would_unlink`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.loft`
 
@@ -15298,6 +15490,7 @@ Skin a new solid through closed shapes in order, optionally to an apex and along
 - `ambiguous_locator`
 - `follow_me_in_component_unsupported`
 - `unimplemented`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.mark_surface`
 
@@ -15355,6 +15548,7 @@ Mark an open object as a surface on purpose (or clear the mark); hew.doc.health 
 
 - `object_is_solid` — This is already solid, so there's nothing to close. Use Push/Pull to change its shape.
 - `unknown_entity`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.mend`
 
@@ -15553,6 +15747,7 @@ Mend an open object: merge nearby points, remove zero-width folds, separate pinc
 - `weld_flattens_object` — Merging points that far apart would press the sides of a thin part together. Try a smaller distance.
 - `non_manifold_rim` — The edges around this opening branch off in more than one direction, so Hew can't tell where a face goes. Fix those edges by hand first.
 - `rim_not_planar` — This opening isn't flat, so one face can't close it. Mend in Model Health can fill small ones; otherwise draw faces across it by hand.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.move_imprint`
 
@@ -15617,6 +15812,7 @@ Kept for compatibility: slide a drawn shape (sub-face or chord island) in its pl
 - `ambiguous_locator`
 - `face_token_unknown`
 - `face_token_stale`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.project`
 
@@ -15709,6 +15905,7 @@ Drape a sketch's shape onto an object's faces, then engrave or emboss it.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.push_pull`
 
@@ -15854,6 +16051,7 @@ Push/pull a face of a solid with the tool's full semantics.
 - `unknown_occurrence`
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `not_an_object`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.rejoin`
 
@@ -15989,6 +16187,7 @@ Rejoin one seam family of split pieces as a single solid (Model Health's Rejoin 
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.remove_blend`
 
@@ -16043,6 +16242,7 @@ Remove a fillet or chamfer, restoring the sharp edges, by naming any face of it.
 - `unknown_entity`
 - `locator_missed`
 - `ambiguous_locator`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.remove_degenerate_faces`
 
@@ -16099,6 +16299,7 @@ Remove an object's zero-width and sub-tolerance faces, keeping it closed.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
 - `nothing_to_remove` — No degenerate faces found.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.resize_blend`
 
@@ -16204,6 +16405,7 @@ Resize a fillet or chamfer (or switch it between round and chamfer) by naming an
 - `unknown_entity`
 - `locator_missed`
 - `ambiguous_locator`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.revolve`
 
@@ -16323,6 +16525,7 @@ Turn a profile about an axis in its plane into a solid, as the Revolve tool does
 - `unknown_entity`
 - `locator_missed`
 - `ambiguous_locator`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.rotate_imprint`
 
@@ -16401,6 +16604,7 @@ Kept for compatibility: turn a drawn shape about its plane's normal through a pi
 - `face_token_unknown`
 - `face_token_stale`
 - `no_such_point`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.scale_imprint`
 
@@ -16479,6 +16683,7 @@ Kept for compatibility: uniformly scale a drawn shape about an anchor in its pla
 - `face_token_unknown`
 - `face_token_stale`
 - `no_such_point`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.shell`
 
@@ -16550,6 +16755,7 @@ Hollow a solid to a wall of one thickness, leaving chosen faces open.
 - `unknown_entity`
 - `locator_missed`
 - `ambiguous_locator`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.slice`
 
@@ -16734,6 +16940,7 @@ Slice a solid by a plane into two solids; the object may be a path to a definiti
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `grouped_operand` — This operation can't target an object inside a group. Ungroup it, or leave the group context, first.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.soften`
 
@@ -16794,6 +17001,7 @@ Soften the edges of an object that bend less than an angle, so faceted walls rea
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.subtract`
 
@@ -17007,6 +17215,7 @@ Boolean subtraction: the first solid minus every other one; a may be a path to a
 - `nothing_removed` — Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting.
 - `mirrored_pose`
 - `compute_too_large`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.thicken`
 
@@ -17079,6 +17288,7 @@ Pull a flat surface into a solid of the given thickness.
 - `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
 - `not_a_flat_sheet` — Only flat panels can get a thickness this way. Close the openings of this shape instead.
 - `thickness_too_small` — That thickness is too small. Enter at least 0.001 mm.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.union`
 
@@ -17275,6 +17485,7 @@ Boolean union of two or more solids: the material in any of them.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 - `would_unlink`
+- `locked_node` — Locked. Unlock it to change it.
 
 ## hew.tag
 
@@ -17332,6 +17543,7 @@ Assign a tag to nodes.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.tag.create`
 
@@ -17429,6 +17641,7 @@ Delete a tag path, unassigning it everywhere.
 **Refusals:**
 
 - `unknown_tag` — That tag doesn't exist in this model. Check the tag name and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.tag.rename`
 
@@ -17484,6 +17697,7 @@ Rename a tag path (and every tag nested under it), keeping its identity.
 - `unknown_tag` — That tag doesn't exist in this model. Check the tag name and try again.
 - `duplicate_tag` — A tag with that name already exists. Choose a different name.
 - `invalid_tag_path` — That isn't a valid tag name — it can't be empty, and a tag can't be moved inside itself.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.tag.set_visible`
 
@@ -17718,6 +17932,7 @@ Converge the user's window onto a node, opening group and component sessions lev
 - `nested_component_in_context` — This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts.
 - `enter_refused` — Hew couldn't open that for editing.
 - `host_capability_missing`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.view.exit`
 

@@ -659,3 +659,47 @@ describe('PaintTool — a click on the selection paints the whole selection', ()
     expect(resolver).not.toHaveBeenCalled()
   })
 })
+
+// ── Lock (OW-1) ──
+describe('PaintTool — a locked thing is not painted', () => {
+  function withLocks(scene: WasmScene, locked: string[]) {
+    return {
+      ...scene,
+      node_frozen: vi.fn((kind: number, id: bigint) => (locked.includes(`${kind}:${id}`) ? { kind: kind === 2 ? 'instance' : 'object', id } : undefined)),
+      node_locked: vi.fn((kind: number, id: bigint) => locked.includes(`${kind}:${id}`)),
+      definition_usage: vi.fn(() => 1),
+    } as unknown as WasmScene
+  }
+
+  it('hover says Locked beside the cursor; the click toasts with the Unlock target and paints nothing', () => {
+    const scene = withLocks(makeWasmScene({ facePick: makeFacePick(3n, 4n) }), ['0:3'])
+    const { tool, onToast, onCommit } = makeTool(scene)
+    tool.setCurrentMaterial(7n)
+    tool.onPointerMove(makeSnap(), RAY)
+    expect(tool.hoverHint()).toBe('Locked. Unlock it to change it.')
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(onToast).toHaveBeenCalledWith('Locked. Unlock it to change it.', 'LockedHint:object:3')
+    expect(scene.paint_logical_face).not.toHaveBeenCalled()
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it('the eyedropper still samples a locked thing (it only reads)', () => {
+    const scene = withLocks(makeWasmScene({ facePick: makeFacePick(3n, 4n), faceMaterial: makeFaceMaterial(4n, 0xffffffffffffffffn) }), ['0:3'])
+    const { tool, onToast, onSample } = makeTool(scene)
+    tool.setEyedropper(true)
+    tool.onPointerMove(makeSnap(), RAY)
+    expect(tool.hoverHint()).toBeNull()
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(onToast).not.toHaveBeenCalled()
+    expect(onSample).toHaveBeenCalled()
+  })
+
+  it('a free thing paints as ever', () => {
+    const scene = withLocks(makeWasmScene({ facePick: makeFacePick(3n, 4n) }), [])
+    const { tool, onCommit } = makeTool(scene)
+    tool.setCurrentMaterial(7n)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(scene.paint_logical_face).toHaveBeenCalledWith(3n, 4n, 7n)
+    expect(onCommit).toHaveBeenCalledWith(3n)
+  })
+})

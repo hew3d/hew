@@ -566,6 +566,8 @@ fn entity(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                 "tags": ctx.doc.node_tags(NodeId::Object(oid)),
                 "material_default": material_default,
                 "smooth_level": ctx.doc.smooth_level(oid),
+                "locked": ctx.doc.node_locked(NodeId::Object(oid)),
+                "frozen": ctx.doc.node_frozen(NodeId::Object(oid)).is_some(),
             }))
         }
         EntityRef::Sketch(sid) => {
@@ -588,6 +590,8 @@ fn entity(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                 "id": p.id,
                 "name": ctx.doc.group_name(gid),
                 "members": member_json,
+                "locked": ctx.doc.node_locked(NodeId::Group(gid)),
+                "frozen": ctx.doc.node_frozen(NodeId::Group(gid)).is_some(),
             }))
         }
         EntityRef::Component(cid) => {
@@ -633,6 +637,7 @@ fn entity(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                 "members": member_nodes,
                 "bounds_local": ctx.doc.definition_bounds(cid).map(bbox_json),
                 "instances": instance_ids,
+                "locked": ctx.doc.component_locked(cid),
             }))
         }
         EntityRef::Instance(iid) => {
@@ -672,6 +677,8 @@ fn entity(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                 // depends on the path it is reached by, which
                 // `hew.query.occurrences` reports per row.
                 "material_effective": material,
+                "locked": ctx.doc.node_locked(NodeId::Instance(iid)),
+                "frozen": ctx.doc.node_frozen(NodeId::Instance(iid)).is_some(),
             }))
         }
         EntityRef::Guide(gid) => {

@@ -244,6 +244,12 @@ export interface MenuBarProps {
     canPromote?: boolean
     /** Something that can be mirrored is selected (Flip Along). */
     canFlip?: boolean
+    /** Something unlocked is selected (Lock). */
+    canLock?: boolean
+    /** Something locked is selected (Unlock ▸ Selected). */
+    canUnlock?: boolean
+    /** Anything in the document is locked (Unlock ▸ All). */
+    canUnlockAll?: boolean
     canBoolean: boolean
     /** One or more solids selected — Object ▸ Smooth ▸ … and Bake Smooth.
      *  Defaults to disabled when omitted. */
@@ -1126,6 +1132,24 @@ export function MenuBar({
               shortcut={sc('edit-invert-selection')}
               onClick={withClose(() => onEditAction?.('edit-invert-selection'))}
             />
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem
+              label={t`Lock`}
+              disabled={!(editGates?.canLock ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-lock'))}
+            />
+            <SubMenu label={t`Unlock`}>
+              <MenuItem
+                label={t`Selected`}
+                disabled={!(editGates?.canUnlock ?? false)}
+                onClick={withClose(() => onEditAction?.('edit-unlock-selected'))}
+              />
+              <MenuItem
+                label={t`All`}
+                disabled={!(editGates?.canUnlockAll ?? false)}
+                onClick={withClose(() => onEditAction?.('edit-unlock-all'))}
+              />
+            </SubMenu>
             <div style={SEPARATOR_STYLE} />
             <MenuItem
               label={t`Delete Guide Lines`}

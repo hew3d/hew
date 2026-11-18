@@ -344,6 +344,7 @@ mod tests {
             vec![DefRecipe {
                 name: Some("Tray".into()),
                 children: vec![ImportNode::Mesh(open_tray(0.0))],
+                locked: false,
             }],
         );
         let member = doc.live_object_ids()[0];
@@ -374,6 +375,7 @@ mod tests {
             vec![DefRecipe {
                 name: Some("Tray".into()),
                 children: vec![ImportNode::Mesh(open_tray(0.0))],
+                locked: false,
             }],
         );
         let member = doc.live_object_ids()[0];
@@ -396,6 +398,7 @@ mod tests {
             vec![DefRecipe {
                 name: Some("Tray".into()),
                 children: vec![ImportNode::Mesh(open_tray(0.0))],
+                locked: false,
             }],
         );
         let ids = doc.live_object_ids();

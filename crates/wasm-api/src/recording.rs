@@ -576,6 +576,13 @@ pub enum RecordedCall {
         ids: Vec<u64>,
         path: Vec<String>,
     },
+    /// `set_nodes_locked(kinds, ids, locked)` — one Lock or Unlock entry
+    /// over several nodes (OW-1). Additive variant.
+    SetNodesLocked {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        locked: bool,
+    },
     /// `set_tag_hidden(path, hidden)` — not undoable, but persisted with
     /// the document (manifest v5), so it must replay for the saved bytes
     /// and state hash to match.

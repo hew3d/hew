@@ -160,6 +160,7 @@ fn health_lists_a_shared_definitions_open_member_once_and_adds_no_undo_entry() {
         vec![DefRecipe {
             name: Some("Bin".into()),
             children: vec![ImportNode::Mesh(open_box("Bin", 0.0))],
+            locked: false,
         }],
     );
     let mut conn = attach(&mut doc);
@@ -552,8 +553,10 @@ fn deleting_a_member_inside_a_group_within_its_definition_works() {
                     tags: Vec::new(),
                     hidden: false,
                     key: None,
+                    locked: false,
                 },
             ],
+            locked: false,
         }],
     );
     let mut conn = attach(&mut doc);

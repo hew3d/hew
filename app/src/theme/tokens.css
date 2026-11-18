@@ -188,6 +188,11 @@
   --draw-attached: #d9591a;
   --draw-attached-fill: #e8a66a;
 
+  /* ---- Locked selection: a selected locked (or frozen) thing draws its
+     edges in this red instead of the amber selection color (SketchUp's cue
+     for a locked entity). Unselected, a locked thing looks like any other. */
+  --selection-locked: #e5392e;
+
   /* ---- Borders / dividers ---------------------------------------------*/
   --border-hairline: rgba(255, 255, 255, 0.06);
   --border-panel: rgba(255, 255, 255, 0.08);
@@ -329,6 +334,7 @@
   --draw-free-fill: #7f9fd6;
   --draw-attached: #b85a0e;
   --draw-attached-fill: #d9975a;
+  --selection-locked: #c4281d;
 
   /* ---- Borders -----------------------------------------------------*/
   --border-hairline: rgba(20, 40, 70, 0.08);

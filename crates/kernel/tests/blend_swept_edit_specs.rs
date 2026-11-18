@@ -444,7 +444,7 @@ fn a_swept_record_rides_through_save_load_and_undo() {
     let id = report.blends[0];
     let bytes = doc.save();
     let m = manifest_of(&bytes);
-    assert_eq!(m["format_version"], 32);
+    assert_eq!(m["format_version"], 33);
     let rec = &m["objects"][0]["blends"][0];
     assert!(
         !rec["pieces"].as_array().unwrap().is_empty(),

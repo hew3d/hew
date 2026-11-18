@@ -33,6 +33,7 @@ import {
   PREVIEW_PUSHPULL_FALLBACK,
   PREVIEW_PUSHPULL_TOKEN,
 } from './previewTint'
+import { lockHintForPick } from '../lock/lockModel'
 import { defaultFaceEligible, ineligibleFaceHint, sessionIsOpen, worldFaceNormal, EDIT_CONTEXT_HINT_CODE, FacePickCache, type FaceEligible, type RawFacePick } from './faceDraw'
 import { ctxOfFace, ctxOfSketch, readPlaneUnits, type PlaneUnitsScene } from './planeUnits'
 import { pickPolicyGeneration, pickRenderMode } from './pickPolicy'
@@ -516,6 +517,11 @@ export class PushPullTool implements Tool {
     const regionWins = regionInFrontOfFace(region, raw, eligible !== null, this._regionInScope(region, activeInstance))
 
     if (raw !== null && !regionWins) {
+      // A locked thing (or a shape also used inside a locked group) refuses
+      // before anything else: the line beside the cursor and the click's
+      // toast both say "Locked", and the toast offers Unlock (OW-1).
+      const locked = lockHintForPick(this.wasmScene, raw.object, raw.instance, { shape: true })
+      if (locked !== null) return { kind: 'refused', hint: locked.message, code: locked.code }
       // Same face-eligibility policy as the draw tools (faceDraw.ts): at the
       // top level only PLAIN objects are directly push/pullable — faces
       // inside a group or component instance keep their explicit editing

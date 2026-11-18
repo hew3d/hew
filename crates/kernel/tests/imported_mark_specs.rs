@@ -231,7 +231,7 @@ fn the_marks_survive_save_and_load() {
     let (doc, _, _) = imported_doc();
     let bytes = doc.save();
     let m = manifest(&bytes);
-    assert_eq!(m["format_version"], 32);
+    assert_eq!(m["format_version"], 33);
     assert_eq!(m["objects"][0]["imported"], true);
     assert_eq!(m["sketches"][0]["imported"], true);
 

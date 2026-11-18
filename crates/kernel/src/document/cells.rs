@@ -602,6 +602,9 @@ impl Document {
             if !self.sketches.contains_key(s) || self.sketch_tombstoned(&s) {
                 return Err(DocumentError::UnknownSketch);
             }
+            // A frozen drawing (a locked Object's, or a frozen shape's) is
+            // not consumed into a solid (OW-1).
+            self.refuse_frozen_sketch(s)?;
             let seed = CellSeed::Sketch(s);
             let list = by_frame
                 .entry(self.def_sketches.get(&s).copied())
@@ -664,7 +667,12 @@ impl Document {
     /// in the frame, and in no group or in the group an open session is
     /// editing.
     fn cell_sketch(&self, s: SketchId, frame: Option<ComponentId>) -> bool {
+        // A frozen drawing (a frozen shape's, in its frame) is never
+        // consumed or trimmed (OW-1).
         self.sketch_takes_part(s, frame)
+            && self
+                .sketch_freeze(s, &mut super::FreezeMemo::new())
+                .is_none()
     }
 
     /// Whether Object `o` can be closed against in `scope`: it takes part
@@ -683,6 +691,8 @@ impl Document {
         self.cell_visible(o, scope)
             && scope.object.is_none_or(|only| only == o)
             && self.explode_scope_object(o).is_ok()
+            // A frozen Object is closed against but never grows (OW-1).
+            && self.node_frozen(NodeId::Object(o)).is_none()
     }
 
     /// The search and its writes, unrecorded ([`Document::close_cells`]).
@@ -1366,6 +1376,7 @@ impl Document {
                         tags,
                         // Drawing closed it: the grown solid is the user's.
                         imported: false,
+                        locked: false,
                     });
                     // The grown solid takes the old one's place: in a group
                     // it replaces it in the member list (never reached while
@@ -1407,6 +1418,7 @@ impl Document {
                         name: None,
                         tags: Vec::new(),
                         imported: false,
+                        locked: false,
                     });
                     self.join_owner(id, owner, out);
                     object_rows.push(DocAction::CreatedObjectFromFaces { id });

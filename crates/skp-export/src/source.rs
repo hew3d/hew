@@ -648,7 +648,7 @@ pub fn node_hash(doc: &Document, node: NodeId) -> u64 {
                 .group_members(id)
                 .unwrap_or_default()
                 .into_iter()
-                .map(|m| node_hash(doc, m))
+                .map(|m| member_hash(doc, m))
                 .collect();
             members.sort_unstable();
             members.iter().for_each(|&m| h.u64(m));
@@ -680,8 +680,25 @@ pub fn node_hash(doc: &Document, node: NodeId) -> u64 {
     h.0
 }
 
-/// A definition: its name, attributes, members (each a whole node) and
-/// drawn sketches.
+/// A member of a group or definition: the whole node, and its lock (its
+/// own, or its definition's for an instance). A member's placement is
+/// written by its container, so a group or definition whose member was
+/// locked or unlocked counts as changed, and a save back rewrites it with
+/// the document's locks instead of keeping the file's (OW-1). The lock is
+/// mixed in only when set, so the hash of anything unlocked is what it
+/// always was.
+fn member_hash(doc: &Document, node: NodeId) -> u64 {
+    let h = node_hash(doc, node);
+    if doc.node_locked(node) {
+        let mut l = Fnv::new();
+        l.u64(h);
+        l.str("locked");
+        l.0
+    } else {
+        h
+    }
+}
+
 /// An annotation's content and tags: any edit reads as a change. 0 for a
 /// stale handle.
 pub fn annotation_hash(doc: &Document, id: AnnotationId) -> u64 {
@@ -700,6 +717,8 @@ pub fn annotation_hash(doc: &Document, id: AnnotationId) -> u64 {
     h.0
 }
 
+/// A definition: its name, attributes, members (each a whole node, with
+/// its lock) and drawn sketches.
 pub fn def_hash(doc: &Document, def: ComponentId) -> u64 {
     let mut h = Fnv::new();
     h.str(doc.component_name(def).unwrap_or(""));
@@ -708,7 +727,7 @@ pub fn def_hash(doc: &Document, def: ComponentId) -> u64 {
         .def_member_nodes(def)
         .unwrap_or_default()
         .into_iter()
-        .map(|m| node_hash(doc, m))
+        .map(|m| member_hash(doc, m))
         .collect();
     members.sort_unstable();
     members.iter().for_each(|&m| h.u64(m));

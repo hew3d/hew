@@ -913,7 +913,8 @@ impl Document {
     /// definition's local space) into one working sketch: the face topology
     /// of every face of `objects` lying on the plane (their own boundary
     /// edges fixed), those objects' owned sketches on the plane, and the free
-    /// sketches on it.
+    /// sketches on it that no lock freezes (OW-1: a locked group's lines
+    /// take no part in a plane's arrangement).
     ///
     /// # Errors
     /// [`DocumentError::UnknownObject`] for a stale, hidden, or other-frame
@@ -961,10 +962,17 @@ impl Document {
         frame: Option<ComponentId>,
         wall: Option<&SessionScope>,
     ) -> Result<Lifted, DocumentError> {
+        // A frozen Object is closed against, never lifted (OW-1); a frozen
+        // drawing is never lifted either.
+        let mut memo = super::FreezeMemo::new();
         let objects: Vec<ObjectId> = self
             .drawable_objects_on_plane(plane, frame)
             .into_iter()
-            .filter(|&o| self.object_takes_part(o, frame) && SessionScope::holds_object(wall, o))
+            .filter(|&o| {
+                self.object_takes_part(o, frame)
+                    && SessionScope::holds_object(wall, o)
+                    && self.node_freeze(NodeId::Object(o), &mut memo).is_none()
+            })
             .collect();
         let free: Vec<SketchId> = self
             .sketches
@@ -974,6 +982,7 @@ impl Document {
                     && SessionScope::holds_sketch(wall, s)
                     && !sk.detached()
                     && planes_coincide(&plane, &sk.plane())
+                    && self.sketch_freeze(s, &mut memo).is_none()
             })
             .map(|(s, _)| s)
             .collect();
@@ -1248,6 +1257,7 @@ impl Document {
                 }
             }
         }
+        let mut memo = super::FreezeMemo::new();
         let free: Vec<SketchId> = match free {
             Some(given) => given,
             None => self
@@ -1263,6 +1273,12 @@ impl Document {
                         && planes_coincide(&plane, &sk.plane())
                         // The lift's side of an open session's wall (D1).
                         && wall.is_none_or(|w| w.sketches.contains(&s) != outside_side)
+                        // A frozen drawing (a locked group's lines, OW-1)
+                        // takes no part in the plane's arrangement: drawing
+                        // beside it is separate, never merged into or split
+                        // against it. An outside listing is read-only
+                        // context and keeps it.
+                        && (outside_side || self.sketch_freeze(s, &mut memo).is_none())
                 })
                 .map(|(s, _)| s)
                 .collect(),
@@ -1737,6 +1753,16 @@ impl Document {
                 return Err(DocumentError::ExplodeSessionScope);
             }
         }
+        // A frozen Object named as a participant would be cut, and a
+        // drawing in a frozen shape's frame edits the shape (OW-1).
+        // A face draw on a frozen Object is opened detached by callers
+        // (`face_draw_detaches`); plane drafts leave it out
+        // (`draft_participants`).
+        let ids: Vec<NodeId> = objects.iter().map(|&o| NodeId::Object(o)).collect();
+        self.refuse_frozen(&ids)?;
+        if let Some(def) = frame {
+            self.refuse_def_frozen(def)?;
+        }
         let lifted = self.lift_plane_for_draft(plane, frame, objects)?;
         self.open_draft(lifted, label);
         Ok(())
@@ -1768,6 +1794,7 @@ impl Document {
         if !self.draft_scope_holds_sketch(sketch) {
             return Err(DocumentError::ExplodeSessionScope);
         }
+        self.refuse_frozen_sketch(sketch)?;
         self.open_draft(lifted, label);
         Ok(())
     }
@@ -1789,6 +1816,9 @@ impl Document {
     ) -> Result<(), DocumentError> {
         if self.current_draft().is_some() {
             return Err(DocumentError::DraftAlreadyOpen);
+        }
+        if let Some(def) = frame {
+            self.refuse_def_frozen(def)?;
         }
         let lifted = self.lift_detached_new(plane, frame)?;
         self.open_draft(lifted, label);
@@ -4983,14 +5013,15 @@ pub enum PlaneListing {
     Plane(Plane),
     /// While an editing session is open: the drawing on a plane OUTSIDE the
     /// session, arranged among itself with the outside objects on the plane
-    /// (v1.5 decisions D1). Context to show dimmed, never opened for
-    /// editing: a draft on the plane is the session's
-    /// ([`PlaneListing::Plane`]).
+    /// (v1.5 decisions D1); and, session or not, the frozen drawing on a
+    /// plane (a locked group's lines, OW-1) with the frozen objects there.
+    /// Context to show dimmed, never opened for editing: a draft on the
+    /// plane is the session's unfrozen drawing ([`PlaneListing::Plane`]).
     Context(Plane),
     /// One detached sketch, in its own context
     /// ([`Document::detached_sketch_units`]); `context` while an editing
     /// session is open and the sketch is outside it (it cannot be drafted
-    /// on until the session closes).
+    /// on until the session closes), or while a lock freezes it (OW-1).
     Detached {
         sketch: SketchId,
         plane: Plane,
@@ -5008,8 +5039,8 @@ impl PlaneListing {
         }
     }
 
-    /// Whether the entry is outside an open editing session: shown, never
-    /// edited (v1.5 decisions D1).
+    /// Whether the entry is outside an open editing session (v1.5
+    /// decisions D1) or frozen by a lock (OW-1): shown, never edited.
     pub fn is_context(&self) -> bool {
         match *self {
             PlaneListing::Plane(_) => false,
@@ -5060,6 +5091,17 @@ impl Document {
     /// itself. Every key of a session entry names an edge of the draft
     /// opened on that plane; a detached sketch outside the session is
     /// marked `context`.
+    ///
+    /// Frozen drawing (OW-1: a locked group's lines, or a sketch otherwise
+    /// frozen with its owner) takes no part in a draft on its plane, so it
+    /// lists apart the same way, session or not: a plane's frozen drawing
+    /// is a [`PlaneListing::Context`] entry with the frozen objects on the
+    /// plane, and the [`PlaneListing::Plane`] entry is the unfrozen drawing
+    /// with the objects a draft takes part with
+    /// ([`Document::draft_participants`]) — listed even when every drawing
+    /// on the plane is frozen, if an object takes part, so the listing is
+    /// what a draft there lifts; a frozen detached sketch is marked
+    /// `context`.
     pub fn free_plane_units(
         &self,
         frame: Option<ComponentId>,
@@ -5115,9 +5157,11 @@ impl Document {
         // session's arrangement and the outside one apart, each lifted
         // among itself, so a session entry's keys are the draft's.
         let wall = self.draft_session_scope(frame);
+        let mut memo = super::FreezeMemo::new();
         // Free sketches by plane, in sketch order (outside the session's
-        // wall, then inside it); detached ones apart.
-        let mut groups: Vec<(Plane, [Vec<SketchId>; 2])> = Vec::new();
+        // wall or frozen, then the draft's), and whether frozen drawing
+        // inside the wall is among them; detached ones apart.
+        let mut groups: Vec<(Plane, [Vec<SketchId>; 2], bool)> = Vec::new();
         let mut group_of: BTreeMap<[i64; 4], Vec<usize>> = BTreeMap::new();
         let mut detached: Vec<SketchId> = Vec::new();
         for (s, sk) in self.sketches.iter() {
@@ -5131,7 +5175,11 @@ impl Document {
                 detached.push(s);
                 continue;
             }
-            let side = usize::from(SessionScope::holds_sketch(wall.as_ref(), s));
+            // A frozen drawing (OW-1) is context too: a draft on the plane
+            // leaves it out.
+            let held = SessionScope::holds_sketch(wall.as_ref(), s);
+            let frozen = held && self.sketch_freeze(s, &mut memo).is_some();
+            let side = usize::from(held && !frozen);
             let plane = sk.plane();
             let key = key_of(&plane);
             let found = around(key).into_iter().find_map(|k| {
@@ -5142,12 +5190,15 @@ impl Document {
                     .find(|&g| planes_coincide(&groups[g].0, &plane))
             });
             match found {
-                Some(g) => groups[g].1[side].push(s),
+                Some(g) => {
+                    groups[g].1[side].push(s);
+                    groups[g].2 |= frozen;
+                }
                 None => {
                     group_of.entry(key).or_default().push(groups.len());
                     let mut sides: [Vec<SketchId>; 2] = [Vec::new(), Vec::new()];
                     sides[side].push(s);
-                    groups.push((plane, sides));
+                    groups.push((plane, sides, frozen));
                 }
             }
         }
@@ -5159,7 +5210,7 @@ impl Document {
         // hundreds of thousands of face planes, none of them wanted.
         let wanted: BTreeSet<[i64; 4]> = groups
             .iter()
-            .flat_map(|(plane, _)| around(key_of(plane)))
+            .flat_map(|(plane, _, _)| around(key_of(plane)))
             .collect();
         let mut objects_by_plane: BTreeMap<[i64; 4], Vec<ObjectId>> = BTreeMap::new();
         for (id, rec) in self.objects.iter() {
@@ -5185,7 +5236,7 @@ impl Document {
             }
         }
         let mut out = Vec::with_capacity(groups.len());
-        for (plane, sides) in groups {
+        for (plane, sides, held_frozen) in groups {
             let mut objects: Vec<ObjectId> = Vec::new();
             for k in around(key_of(&plane)) {
                 for &o in objects_by_plane.get(&k).into_iter().flatten() {
@@ -5207,18 +5258,25 @@ impl Document {
             // The outside entry first, so a reader that keys entries by
             // plane alone keeps the session's (the one a draft opens).
             for (side, sketches) in sides.into_iter().enumerate() {
-                if sketches.is_empty() {
-                    continue;
-                }
                 let inside = side == 1;
+                // The draft's objects are `draft_participants`': inside the
+                // wall and not frozen (OW-1); the rest are context.
                 let objects: Vec<ObjectId> = objects
                     .iter()
                     .copied()
                     .filter(|&o| {
-                        wall.as_ref()
-                            .is_none_or(|w| w.objects.contains(&o) == inside)
+                        let takes_part = wall.as_ref().is_none_or(|w| w.objects.contains(&o))
+                            && self.node_freeze(NodeId::Object(o), &mut memo).is_none();
+                        takes_part == inside
                     })
                     .collect();
+                // A plane whose only drawing inside the wall is frozen still
+                // lists what a draft there lifts: the objects taking part,
+                // with no drawing (the plane listed them before a lock
+                // moved its drawing to context).
+                if sketches.is_empty() && !(inside && held_frozen && !objects.is_empty()) {
+                    continue;
+                }
                 let Ok(lifted) = self.lift_plane_in_wall(
                     at,
                     frame,
@@ -5250,7 +5308,8 @@ impl Document {
                 PlaneListing::Detached {
                     sketch: s,
                     plane: self.sketches[s].plane(),
-                    context: !SessionScope::holds_sketch(wall.as_ref(), s),
+                    context: !SessionScope::holds_sketch(wall.as_ref(), s)
+                        || self.sketch_freeze(s, &mut memo).is_some(),
                 },
                 units,
             ));
@@ -5683,7 +5742,14 @@ impl Document {
     /// object is untouched. A draft addressed to a definition frame
     /// (`Some(def)`) is not narrowed. Read-only.
     pub fn draft_participants(&self, plane: Plane, frame: Option<ComponentId>) -> Vec<ObjectId> {
-        let objects = self.drawable_objects_on_plane(plane, frame);
+        // A frozen Object (OW-1) never takes part: its face gives the plane
+        // and the drawing on it is free drawing that does not cut it.
+        let mut memo = super::FreezeMemo::new();
+        let objects: Vec<ObjectId> = self
+            .drawable_objects_on_plane(plane, frame)
+            .into_iter()
+            .filter(|&o| self.node_freeze(NodeId::Object(o), &mut memo).is_none())
+            .collect();
         match self.draft_session_scope(frame) {
             Some(wall) => objects
                 .into_iter()
@@ -5691,6 +5757,19 @@ impl Document {
                 .collect(),
             None => objects,
         }
+    }
+
+    /// Whether drawing on a face of `object` opens the draft DETACHED
+    /// (OW-1, v1.5 owner's items D1): the Object is frozen
+    /// ([`Document::node_frozen`]), so the drawing cannot cut its face and
+    /// is a separate shape on the face's plane that pulls into a new
+    /// Object. A plane draft does not ask this; it simply leaves frozen
+    /// Objects out ([`Document::draft_participants`]). A face of a member
+    /// of a frozen definition still refuses in its own frame (the
+    /// definition is frozen, so even a detached drawing there edits it).
+    /// `false` for a stale or hidden Object. Read-only.
+    pub fn face_draw_detaches(&self, object: ObjectId) -> bool {
+        self.node_frozen(NodeId::Object(object)).is_some()
     }
 
     /// Whether object `object` may take part in a draft in its own frame:

@@ -620,8 +620,11 @@ impl<'d> Author<'d> {
                 return false;
             };
             // The whole node: a loose Object retagged or hidden in place
-            // rewrites the loose geometry too (its faces carry both).
+            // rewrites the loose geometry too (its faces carry both). A
+            // locked one cannot stay loose: SketchUp keeps a lock only on
+            // a placement, so it is written as a group (`reuse_node`).
             crate::node_hash(doc, NodeId::Object(o)) == n.node
+                && !doc.node_locked(NodeId::Object(o))
         };
         let has_loose = !model.geometry[root].mesh.faces.is_empty();
         // The file's loose edges the document read as drawing stay with
@@ -781,7 +784,15 @@ impl<'d> Author<'d> {
         match (node, src.origin) {
             // Loose geometry still at the top level: kept as the file has
             // it, or written loose again with the rest of it. (Grouped in
-            // Hew since, it is written in its group.)
+            // Hew since, it is written in its group.) Locked in Hew, it is
+            // written as a group, as a new file writes an Object: loose
+            // geometry has no placement to carry the lock (OW-1), and a
+            // locked loose Object never leaves the loose geometry kept.
+            (NodeId::Object(_), Origin::Loose)
+                if self.doc.node_parent(node).is_none() && self.doc.node_locked(node) =>
+            {
+                false
+            }
             (NodeId::Object(o), Origin::Loose) if self.doc.node_parent(node).is_none() => {
                 let r = self.reuse.as_mut().expect("reuse mode");
                 if !r.keep_loose {
@@ -844,6 +855,7 @@ impl<'d> Author<'d> {
                         self.pids.insert(sid, pid);
                         self.origins.insert(sid, Origin::Image { pid });
                     }
+                    self.note_image_lock(node);
                     return true;
                 }
                 false
@@ -893,7 +905,19 @@ impl<'d> Author<'d> {
             self.pids.insert(sid, pid);
             self.origins.insert(sid, Origin::Image { pid });
         }
+        self.note_image_lock(node);
         true
+    }
+
+    /// A placed image has no lock in a `.skp` (SketchUp's image record
+    /// carries none): a locked one is written unlocked, and the notes say
+    /// so (OW-1).
+    fn note_image_lock(&mut self, node: NodeId) {
+        if self.doc.node_locked(node) {
+            self.note(
+                "placed images cannot be locked in SketchUp; locked images are saved unlocked",
+            );
+        }
     }
 
     /// The file's placed images the document read in and has since
@@ -1034,11 +1058,20 @@ impl<'d> Author<'d> {
         );
         run.placed.push(PlacedInstance {
             // Everything of the file's placement the document has no say
-            // over (GUID, shadows, lock) stays.
+            // over (GUID, shadows) stays. The lock is the document's now
+            // (OW-1): `fresh` carries the shape's, which a save back writes
+            // over the file's, as it does on every placement it writes. An
+            // open locks a component when any of its copies was locked, so
+            // its unlocked copies come back locked. (What a save leaves as
+            // the file's own records keeps the file's locks: the members
+            // of a group put back whole, the placements inside a
+            // definition reused unchanged, and placements the document
+            // never read in. A lock changed in Hew on any of those makes
+            // its group or definition count as changed (`source::
+            // member_hash`), so it is rewritten with the document's.)
             guid: placed.guid.clone(),
             casts_shadows: placed.casts_shadows,
             receives_shadows: placed.receives_shadows,
-            locked: placed.locked,
             ..fresh
         });
         true

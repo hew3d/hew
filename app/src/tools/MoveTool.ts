@@ -91,6 +91,7 @@ import { getDrawingAxes } from './drawingAxes'
 import { translationAffine, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { clearPreview } from './transformPreview'
+import { gateCopyOperands, leaveBehind } from '../lock/lockGate'
 import {
   commitSelectionTransform,
   buildSelectionPreview,
@@ -251,6 +252,9 @@ export class MoveTool implements Tool {
   private get copyMode(): boolean {
     return this.copyState !== 'off'
   }
+  /** True from a click refused because the target is locked until the next
+   *  click or Escape: typed digits are swallowed, not sent to hotkeys. */
+  private refusedClick = false
   /** VCB buffer — raw string being typed by the user */
   private typed: string = ''
   /**
@@ -528,6 +532,9 @@ export class MoveTool implements Tool {
    */
   capturesKey(key: string): boolean {
     if (this.stage.kind === 'base') return true
+    // After a refused click (a locked thing) digits belong to nobody: they
+    // are ignored rather than jumping the view.
+    if (this.refusedClick && ((key >= '0' && key <= '9') || key === '-' || key === '.')) return true
     if (this.arrayHot === null && !this.retype.isOpen) return false
     const arrayKey = key === 'x' || key === 'X' || key === '*' || key === '/'
     if ((key >= '0' && key <= '9') || key === '-' || key === '.') return true
@@ -656,6 +663,7 @@ export class MoveTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    this.refusedClick = false
     // Any pointer action ends the retype window — the next move begins —
     // and a half-typed post-commit value must not leak into the next
     // gesture's own length buffer.
@@ -688,6 +696,24 @@ export class MoveTool implements Tool {
       if (nodes.length === 0 && guide === null) {
         this.onToast(t`Click an object to move it`)
         return
+      }
+      // Locked things are left behind (OW-1): the move runs on the rest and
+      // one toast says what it left; if nothing is left, nothing starts and
+      // the toast is the "Locked." line with Unlock.
+      // A COPY of a locked thing is allowed (the original stays put): in
+      // copy mode only a node frozen by what holds it is refused.
+      if (guide === null) {
+        const go = this.copyMode
+          ? gateCopyOperands(this.wasmScene, nodes, this.onToast)
+          : leaveBehind(this.wasmScene, nodes, this.onToast, { descendants: true })
+        if (go === null) {
+          this._releaseAcquiredNodes()
+          // The refusal ended the gesture before it began: a number typed
+          // next is not a distance, and must not reach the view hotkeys.
+          this.refusedClick = true
+          return
+        }
+        nodes = go
       }
 
       // Starting a new gesture ends the ×N / /N refinement window.
@@ -738,6 +764,7 @@ export class MoveTool implements Tool {
 
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
+      this.refusedClick = false
       this.cancel()
       return
     }

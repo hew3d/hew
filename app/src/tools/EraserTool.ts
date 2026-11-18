@@ -35,6 +35,8 @@ import { cueColors, pathHoverColors } from './FollowMeTool'
 import { geometryOf, type PlaneUnitsScene } from './planeUnits'
 import { takeTouched, type TouchedIds } from './offsetShared'
 import { inHistoryBracket } from './transformSelection'
+import { lockHintFor } from '../lock/lockModel'
+import { leaveBehind } from '../lock/lockGate'
 
 export type OnToast = (message: string, code?: string) => void
 
@@ -201,6 +203,17 @@ export class EraserTool implements Tool {
     return []
   }
 
+  /** The line beside the cursor while a locked thing's line or edge is
+   *  hovered (OW-1): a drawing on a locked Object, or one of its edges,
+   *  cannot be erased or creased. */
+  hoverHint(): string | null {
+    const t_ = this.target
+    if (t_ === null || this.pressed) return null
+    const node: NodeRef | null =
+      t_.kind === 'drawn' ? t_.ref : t_.kind === 'solid' || t_.kind === 'seam' ? { kind: 'object', id: t_.object } : null
+    return lockHintFor(this.wasmScene, node)?.message ?? null
+  }
+
   // ---------------------------------------------------------------- pointer
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
@@ -306,8 +319,12 @@ export class EraserTool implements Tool {
   private _apply(mode: 'erase' | 'crease', targets: EraserTarget[]): void {
     this._clearHover()
     if (mode === 'erase') {
-      const refs = targets.flatMap((t) => (t.kind === 'drawn' ? [t.ref] : []))
+      let refs = targets.flatMap((t) => (t.kind === 'drawn' ? [t.ref] : []))
       if (refs.length === 0) return
+      // Locked drawing is left behind, with one toast saying so.
+      const go = leaveBehind(this.wasmScene, refs, this.onToast)
+      if (go === null) return
+      refs = go
       try {
         this._inBracket(t`Erase`, refs.length, () => this.host.runDelete(refs))
       } catch (err) {
@@ -315,7 +332,12 @@ export class EraserTool implements Tool {
       }
       return
     }
-    const edges = targets.flatMap((t) => (t.kind === 'solid' || t.kind === 'seam' ? [t] : []))
+    let edges = targets.flatMap((t) => (t.kind === 'solid' || t.kind === 'seam' ? [t] : []))
+    if (edges.length === 0) return
+    // Creasing an edge of a locked Object is an edit of it: left behind.
+    const goObjects = leaveBehind(this.wasmScene, edges.map((e) => ({ kind: 'object' as const, id: e.object })), this.onToast)
+    if (goObjects === null) return
+    edges = edges.filter((e) => goObjects.some((n) => n.id === e.object))
     if (edges.length === 0) return
     const touched: TouchedIds = { objectIds: [], componentIds: [], instanceIds: [] }
     try {

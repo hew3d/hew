@@ -1108,6 +1108,24 @@ describe('dropTargetFor', () => {
     expect(dropTargetFor([sk], g, view())).toBeNull()
   })
 
+  it('a frozen row cannot be dragged and nothing drops into a frozen group (OW-1)', () => {
+    const frozen = new Set<string>(['object:1', 'group:11'])
+    const isFrozen = (n: NodeRef): boolean => frozen.has(`${n.kind}:${n.id}`)
+    const v = { getGroupMembers, sessionOpen: false, isFrozen }
+    // a locked row does not move, even to the top level
+    expect(dropTargetFor([a], g, v)).toBeNull()
+    expect(dropTargetFor([a], 'root', v)).toBeNull()
+    // a selection holding one locked row does not move at all
+    expect(dropTargetFor([a, b], g, v)).toBeNull()
+    // a free row drops into a free group, but not into a locked one
+    expect(dropTargetFor([b], g, v)).toEqual({ group: 10n })
+    expect(dropTargetFor([b], h, v)).toBeNull()
+    // a locked group row cannot be dragged out
+    expect(dropTargetFor([h], 'root', v)).toBeNull()
+    // without the predicate nothing is frozen
+    expect(dropTargetFor([a], g, view())).toEqual({ group: 10n })
+  })
+
   it('refuses every drop while a group/component session is open', () => {
     expect(dropTargetFor([a], g, view(true))).toBeNull()
     expect(dropTargetFor([a], 'root', view(true))).toBeNull()

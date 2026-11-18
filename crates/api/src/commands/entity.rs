@@ -28,6 +28,8 @@ pub(crate) fn handler(name: &str) -> Option<Handler> {
         "hew.entity.flip" => flip,
         "hew.entity.scale" => scale,
         "hew.entity.set_frame" => set_frame,
+        "hew.entity.lock" => lock,
+        "hew.entity.unlock" => unlock,
         "hew.doc.purge_unused" => purge_unused,
         _ => return None,
     })
@@ -1036,6 +1038,82 @@ fn set_frame(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     ctx.doc
         .attr_set(target, FRAME_NAMESPACE, FRAME_KEY, AttrValue::Map(m))?;
     Ok(serde_json::json!({ "id": p.id, "source": "attribute" }))
+}
+
+// ------------------------------------------------------------ lock / unlock
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LockParams {
+    targets: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnlockParams {
+    #[serde(default)]
+    targets: Option<Vec<String>>,
+    #[serde(default)]
+    all: Option<bool>,
+}
+
+/// Resolves lock targets: objects, groups, and instances (an instance
+/// stands for its definition). Every id is checked before anything moves.
+fn lock_targets(ctx: &Ctx, ids: &[String]) -> Result<Vec<NodeId>, CmdError> {
+    if ids.is_empty() {
+        return Err(CmdError::Params(
+            "targets must name at least one entity".into(),
+        ));
+    }
+    ids.iter()
+        .map(|id| match ctx.resolver().resolve(id) {
+            Some(EntityRef::Object(o)) => Ok(NodeId::Object(o)),
+            Some(EntityRef::Group(g)) => Ok(NodeId::Group(g)),
+            Some(EntityRef::Instance(i)) => Ok(NodeId::Instance(i)),
+            Some(_) => Err(CmdError::Refusal(
+                Refusal::api(
+                    "not_a_node",
+                    "Only objects, groups, and component instances can be locked; an instance locks its component, and every copy of it, with it.",
+                )
+                .with_detail(serde_json::json!({ "id": id })),
+            )),
+            None => Err(unknown_entity(id)),
+        })
+        .collect()
+}
+
+/// How many lock records a change flipped: Objects, groups, and shapes.
+fn lock_count(change: &kernel::DocChange) -> usize {
+    change.objects_touched.len() + change.groups_touched.len() + change.components_touched.len()
+}
+
+/// `hew.entity.lock { targets }` (OW-1): one undo step labeled "Lock".
+fn lock(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let p: LockParams =
+        serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    let nodes = lock_targets(ctx, &p.targets)?;
+    let change = ctx.doc.set_nodes_locked(&nodes, true)?;
+    Ok(serde_json::json!({ "changed": lock_count(&change) }))
+}
+
+/// `hew.entity.unlock { targets } | { all: true }` (OW-1): one undo step
+/// labeled "Unlock".
+fn unlock(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let p: UnlockParams =
+        serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    let change = match (p.targets, p.all) {
+        (None, Some(true)) => ctx.doc.unlock_all()?,
+        (Some(targets), None | Some(false)) => {
+            let nodes = lock_targets(ctx, &targets)?;
+            ctx.doc.set_nodes_locked(&nodes, false)?
+        }
+        _ => {
+            return Err(CmdError::Params(
+                "unlock takes \"targets\", or \"all\": true alone".into(),
+            ));
+        }
+    };
+    Ok(serde_json::json!({ "changed": lock_count(&change) }))
 }
 
 #[cfg(test)]

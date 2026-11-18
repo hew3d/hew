@@ -26,7 +26,7 @@ function makePick(object: bigint, face: bigint) {
   return { object: () => object, face: () => face, instance: () => undefined, depth: () => 1, free: vi.fn() }
 }
 
-function makeScene(opts: { pick?: ReturnType<typeof makePick>; failSegmentAt?: (n: number) => Error | null } = {}) {
+function makeScene(opts: { pick?: ReturnType<typeof makePick>; failSegmentAt?: (n: number) => Error | null; frozen?: boolean } = {}) {
   let gen = 1n
   const dm = draftMock({ failSegmentAt: opts.failSegmentAt })
   const baseEnd = dm.members.draft_end
@@ -40,6 +40,7 @@ function makeScene(opts: { pick?: ReturnType<typeof makePick>; failSegmentAt?: (
     pick_face: vi.fn(() => opts.pick),
     pick_sketch: vi.fn(() => undefined),
     node_parent: vi.fn(() => undefined),
+    node_frozen: vi.fn(() => (opts.frozen === true ? { kind: 'object', id: 7n } : undefined)),
     face_normal: vi.fn(() => new Float64Array([0, 0, 1])),
     face_plane: vi.fn(() => new Float64Array([0, 0, 1, 0, 0, 1])),
     instance_pose: vi.fn(() => new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])),
@@ -379,5 +380,59 @@ describe('LineTool — the rubber band follows the mode latched for the chain', 
     r.tool.toggleDetached()
     r.tool.onPointerMove(face(3, 2), RAY)
     expect(bandColor(r.preview)).toBe(BLUE)
+  })
+})
+
+// A locked Object's face is never imprinted: the kernel opens the draft
+// detached by itself, and the app matches (blue cue, detached target, no
+// face-imprint refresh) without touching the Detached toggle.
+describe.each(TOOLS)('%s — drawing on a locked Object face', (name) => {
+  const BLUE = new THREE.Color(PREVIEW_DETACHED_FALLBACK).getHex()
+  const click = (r: Rig, x: number, y: number) => r.tool.onPointerDown(snap(x, y, 1, 'face'), RAY)
+
+  it('previews blue and commits a detached face target, with the toggle left off', () => {
+    const { scene, raw } = makeScene({ pick: makePick(7n, 3n), frozen: true })
+    const r = rig(name, scene)
+    click(r, 0, 0)
+    r.tool.onPointerMove(snap(name === 'Rectangle' ? 2 : name === 'Arc' ? 4 : 1, name === 'Rectangle' ? 1 : 0, 1, 'face'), RAY)
+    expect(bandColor(r.preview)).toBe(BLUE)
+    if (name === 'Arc') {
+      click(r, 4, 0); r.tool.onPointerMove(snap(2, 1, 1, 'face'), RAY)
+      expect(bandColor(r.preview)).toBe(BLUE)
+      click(r, 2, 1)
+    } else if (name === 'Rectangle') {
+      click(r, 2, 1)
+    } else {
+      click(r, 2, 0)
+    }
+    expect(raw.draft_begin_detached).toHaveBeenCalledWith('{"face":{"object":7,"face":3}}', expect.any(String))
+    expect(raw.draft_begin_face).not.toHaveBeenCalled()
+    expect(r.onFaceImprint).not.toHaveBeenCalled()
+    expect(r.tool.detachedOn).toBe(false)
+    expect(r.onDetachedChange).not.toHaveBeenCalled()
+  })
+
+  it('an unlocked face still previews orange and imprints', () => {
+    const { scene, raw } = makeScene({ pick: makePick(7n, 3n) })
+    const r = rig(name, scene)
+    click(r, 0, 0)
+    r.tool.onPointerMove(snap(name === 'Rectangle' ? 2 : name === 'Arc' ? 4 : 1, name === 'Rectangle' ? 1 : 0, 1, 'face'), RAY)
+    expect(bandColor(r.preview)).toBe(new THREE.Color(PREVIEW_DRAW_JOINED_FALLBACK).getHex())
+    expect(raw.draft_begin_detached).not.toHaveBeenCalled()
+  })
+})
+
+describe('LineTool — a loop on a locked face is one detached sketch', () => {
+  it('four segments open one detached sketch and continue into it', () => {
+    const { scene, raw } = makeScene({ pick: makePick(7n, 3n), frozen: true })
+    const r = rig('Line', scene)
+    const p = (x: number, y: number) => r.tool.onPointerDown(snap(x, y, 1, 'face'), RAY)
+    p(0, 0); p(2, 0); p(2, 2); p(0, 2); p(0, 0)
+    expect(raw.draft_begin_detached).toHaveBeenCalledTimes(1)
+    const ctx = (raw.draft_begin_ctx as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])
+    expect(ctx).toEqual(['{"sketch":901}', '{"sketch":901}', '{"sketch":901}'])
+    expect(raw.draft_begin_face).not.toHaveBeenCalled()
+    expect(r.onFaceImprint).not.toHaveBeenCalled()
+    expect(r.tool.detachedOn).toBe(false)
   })
 })

@@ -59,7 +59,7 @@ import { formatLength, parseDimensionsToMeters, typedReadout } from '../settings
 import { editDimsBuffer, nextIdlePlaneLock, axisLockColorName, arrowToAxis } from './moveInput'
 import type { SketchTarget } from './sketchGesture'
 import { DetachedMode, type OnDetachedChange } from './detachedMode'
-import { runDraft, addDraftLoop, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
+import { runDraft, addDraftLoop, refreshAfterDraft, draftTargetFromSketchTarget, faceDrawsDetached } from './draftCommit'
 import { cameraView } from './viewPlaneInference'
 import { namedPointLeavesPlane, isNamedPointSnap, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, DrawPlaneTracker, pinnedPlaneThrough, faceStageDrawPlane, idleFallbackPlane, customPipPlaneFor, pinCustomPlane, type DrawPlane, type DrawPlaneState, type IdleDrawTarget, type IdleHoverResolution, type CameraView } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
@@ -866,7 +866,7 @@ export class RectangleTool implements Tool {
       const corners = faceRectangleCorners(anchor, cursorOnPlane, normal)
       const extents = this._planeExtents(anchor, cursorOnPlane, normal)
       if (corners !== null && extents !== null) {
-        this._drawRubberBandCorners(corners, true)
+        this._drawRubberBandCorners(corners, !this._faceDetached(this.faceStage.object))
         this._reportMeasurement(extents[0], extents[1])
       } else {
         this._clearPreview()
@@ -1304,7 +1304,7 @@ export class RectangleTool implements Tool {
       this._clearPreview()
       this.onMeasurementCb('')
       if (this._commitFaceCorners(object, face, corners)) {
-        this._armRetype({ mode: 'face', object, face, normal, anchor, far: corners[2], detached: this.sep.on })
+        this._armRetype({ mode: 'face', object, face, normal, anchor, far: corners[2], detached: this._faceDetached(object) })
       }
     }
   }
@@ -1545,7 +1545,7 @@ export class RectangleTool implements Tool {
       this.onMeasurementCb('')
 
       if (this._commitFaceCorners(object, face, corners)) {
-        this._armRetype({ mode: 'face', object, face, normal, anchor, far: corners[2], detached: this.sep.on })
+        this._armRetype({ mode: 'face', object, face, normal, anchor, far: corners[2], detached: this._faceDetached(object) })
       }
     }
   }
@@ -1574,7 +1574,7 @@ export class RectangleTool implements Tool {
   /** Draw a rectangle loop of 4 explicit world-space corners on the given
    *  face (one draft; the engine decides which edges become face topology).
    *  True when the kernel accepted it (false = refused, toasted). */
-  private _commitFaceCorners(object: bigint, face: bigint, corners: [V3, V3, V3, V3], detached = this.sep.on): boolean {
+  private _commitFaceCorners(object: bigint, face: bigint, corners: [V3, V3, V3, V3], detached = this._faceDetached(object)): boolean {
     try {
       const { result: regionsCreated, report } = runDraft(
         this.wasmScene,
@@ -1614,6 +1614,12 @@ export class RectangleTool implements Tool {
       ...c3, ...c0,
     ])
     this.preview.add(makeFatSegments(pts, this.sep.previewStyle(joinsFace)))
+  }
+
+  /** Detached on this face: the toggle, or a locked Object (its face is
+   *  never imprinted; the kernel opens a free sketch there). */
+  private _faceDetached(object: bigint): boolean {
+    return this.sep.on || faceDrawsDetached(this.wasmScene, object)
   }
 
   private _clearPreview(): void {

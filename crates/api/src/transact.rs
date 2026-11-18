@@ -168,7 +168,7 @@ pub fn run(
                 Err(CmdError::Refusal(refusal)) => Err(TxError::Refused {
                     index: 0,
                     method: cmd.method.clone(),
-                    refusal,
+                    refusal: refusal.with_document(ctx.doc),
                 }),
                 Err(CmdError::Params(msg)) => Err(TxError::Invalid(format!("command 0: {msg}"))),
                 Err(CmdError::Internal(msg)) => Err(TxError::Internal(msg)),
@@ -381,7 +381,7 @@ fn execute(
                 return Err(TxError::Refused {
                     index: i,
                     method: cmd.method.clone(),
-                    refusal,
+                    refusal: refusal.with_document(ctx.doc),
                 });
             }
             Err(CmdError::Params(msg)) => {

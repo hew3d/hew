@@ -28,6 +28,12 @@
 //!     needs wrapper groups to isolate geometry; Hew's solids-first model
 //!     doesn't — unless the group itself is hidden (a bare mesh has nowhere
 //!     to carry that).
+//! - locks: SketchUp locks a placement, Hew a shape. A group placement's
+//!   lock lands on its Group (or the Object it collapses to); a component
+//!   placement's lands on the definition recipe it places, so a definition
+//!   is locked when any copy of it was, and the open report says so
+//!   ([`crate::LOCKED_COPIES_NOTE`]) when that locks copies the file left
+//!   unlocked;
 //! - pure containers without geometry runs become [`ImportNode::Group`]s
 //!   with **absolute world poses** exactly like `dae-import`;
 //! - a definition of drawing alone (a wire-frame component, a light rig of
@@ -174,7 +180,8 @@ pub(crate) struct ConvertJob {
     def_indexes: BTreeSet<usize>,
     roots: Vec<ImportNode>,
     tree: Vec<skpwright::Node>,
-    top_level: Vec<(Option<String>, u32)>,
+    /// Each top-level placement's own name, persistent id and lock.
+    top_level: Vec<(Option<String>, u32, bool)>,
     /// Runs of loose world geometry, in file order.
     loose: Vec<usize>,
     next_loose: usize,
@@ -257,6 +264,7 @@ impl ConvertJob {
             next_key: SYNTHETIC_KEYS,
             sketches: Vec::new(),
             run_variants: BTreeMap::new(),
+            copy_locks: BTreeMap::new(),
             def_frames: Vec::new(),
             drawing_group_pids: BTreeSet::new(),
             drawing_group_aliases: BTreeMap::new(),
@@ -267,9 +275,10 @@ impl ConvertJob {
         // ── The composed instance tree ─────────────────────────────────────────
         // `scene()` maps the top-level instances in filter order; zip against the
         // same filter to recover each root placement's own name (nested placements
-        // have no names — they fall back to their def's name) and its persistent
-        // id (the importer key; see the module docs).
-        let top_level: Vec<(Option<String>, u32)> = model
+        // have no names — they fall back to their def's name), its persistent
+        // id (the importer key; see the module docs) and its lock (the composed
+        // tree does not carry it).
+        let top_level: Vec<(Option<String>, u32, bool)> = model
             .instances
             .iter()
             .filter(|i| {
@@ -278,7 +287,13 @@ impl ConvertJob {
                     .iter()
                     .any(|r| r.start <= i.offset && i.offset < r.end)
             })
-            .map(|i| (i.name.clone().filter(|n| !n.is_empty()), i.pid))
+            .map(|i| {
+                (
+                    i.name.clone().filter(|n| !n.is_empty()),
+                    i.pid,
+                    i.locked.unwrap_or(false),
+                )
+            })
             .collect();
         let tree = model.scene();
         debug_assert_eq!(tree.len(), top_level.len());
@@ -379,8 +394,8 @@ impl ConvertJob {
         while done < items && self.next_top < self.top_level.len() {
             let i = self.next_top;
             self.next_top += 1;
-            let (own_name, pid) = self.top_level[i].clone();
-            if let Some(n) = self.cv.convert_node(&self.tree[i], own_name, pid) {
+            let (own_name, pid, locked) = self.top_level[i].clone();
+            if let Some(n) = self.cv.convert_node(&self.tree[i], own_name, pid, locked) {
                 self.roots.push(n);
             }
             done += 1;
@@ -680,6 +695,15 @@ impl ConvertJob {
         if let Some(note) = kept_unshown_note(&model.features) {
             warnings.push(note);
         }
+        // A component some copies of which were locked and some not opens
+        // with all of them locked (a lock is the shape's in Hew).
+        if cv
+            .copy_locks
+            .values()
+            .any(|&[unlocked, locked]| unlocked && locked)
+        {
+            warnings.push(crate::LOCKED_COPIES_NOTE.to_string());
+        }
         // A file Hew wrote holds the user's own work: nothing it builds is
         // marked imported (`ImportSceneExtra::native`).
         let native = cv.hew.written_by_hew;
@@ -820,6 +844,10 @@ struct Converter {
     /// Geometry run -> the definition recipes built from it (one per
     /// inherited-material variant).
     run_variants: BTreeMap<usize, Vec<usize>>,
+    /// Definition recipe -> whether some placement of it was unlocked
+    /// (`[0]`) and whether some was locked (`[1]`) in the file: a recipe
+    /// with both opens with every copy locked, which the open report says.
+    copy_locks: BTreeMap<usize, [bool; 2]>,
     provenance: Provenance,
     /// The claims of the run last read, under its bake, for the pieces
     /// still to come from it (see [`RunClaims`]).
@@ -854,26 +882,49 @@ impl Converter {
         node.children.iter().zip(pids.iter().map(|p| p.pid))
     }
 
-    /// Every child of `node` converted (pruned children drop out).
+    /// Every child of `node` converted (pruned children drop out). Each
+    /// child's lock is its placement's in the run's `placed` list, read in
+    /// step with the pids (the composed tree does not carry it).
     fn convert_children(&mut self, node: &skpwright::Node) -> Vec<ImportNode> {
+        let locks: Vec<bool> = node
+            .run
+            .map(|ri| {
+                self.model.geometry[ri]
+                    .placed
+                    .iter()
+                    .map(|p| p.locked)
+                    .collect()
+            })
+            .unwrap_or_default();
         let pairs: Vec<(&skpwright::Node, u32)> = self.children_with_pids(node).collect();
         pairs
             .into_iter()
-            .filter_map(|(c, pid)| {
+            .enumerate()
+            .filter_map(|(i, (c, pid))| {
                 let name = self.names.get(&pid).cloned();
-                self.convert_node(c, name, pid)
+                let locked = locks.get(i).copied().unwrap_or(false);
+                self.convert_node(c, name, pid, locked)
             })
             .collect()
     }
 
     /// One composed scene node -> an import node, `None` when pruned
     /// (hidden instance, hidden layer, or nothing importable below).
-    /// `pid` is the placing object's persistent id (0 = unknown).
+    /// `pid` is the placing object's persistent id (0 = unknown), `locked`
+    /// the placement's own lock.
+    ///
+    /// Locks (OW-1): SketchUp locks one placement at a time, Hew locks a
+    /// shape. A group placement is a shape of its own, so its lock carries
+    /// over as it is (onto the Group, or the Object a one-solid group
+    /// becomes). A component placement's lock goes onto the definition it
+    /// places, so a definition is locked when ANY of its copies was, and
+    /// every copy then opens locked (`copy_locks` notes it for the report).
     fn convert_node(
         &mut self,
         node: &skpwright::Node,
         own_name: Option<String>,
         pid: u32,
+        locked: bool,
     ) -> Option<ImportNode> {
         // NOTHING visibility-related is dropped: a hidden INSTANCE
         // (per-entity hide) imports as a user-hidden node (persisted view
@@ -903,7 +954,7 @@ impl Converter {
             // are independent containers, not shared definitions — each
             // placement converts on its own (deep copy, no shared def).
             Some(ri) if matches!(node.is_group, Some(true)) => {
-                self.group_node(ri, node, own_name, tags, hidden, pid)
+                self.group_node(ri, node, own_name, tags, hidden, locked, pid)
             }
             // A placement of a definition — with or without in-definition
             // child placements. The whole subtree is ONE nested definition
@@ -915,6 +966,8 @@ impl Converter {
             // apart — kept on this path for backward compatibility).
             Some(ri) => {
                 let def = self.assembly_variant(ri, node.material, node)?;
+                self.defs[def].locked |= locked;
+                self.copy_locks.entry(def).or_default()[usize::from(locked)] = true;
                 self.origin(pid, |pid| Origin::Instance { pid });
                 Some(ImportNode::Instance {
                     def,
@@ -942,6 +995,7 @@ impl Converter {
                     tags,
                     hidden,
                     key: key_of(pid),
+                    locked,
                 })
             }
         }
@@ -959,6 +1013,7 @@ impl Converter {
     /// component definition that pose composed with the definition
     /// placement's inverse, landing the positions in def-local coordinates
     /// in one step.
+    #[allow(clippy::too_many_arguments)]
     fn group_node(
         &mut self,
         run_idx: usize,
@@ -966,6 +1021,7 @@ impl Converter {
         own_name: Option<String>,
         tags: Vec<Vec<String>>,
         hidden: bool,
+        locked: bool,
         pid: u32,
     ) -> Option<ImportNode> {
         let name = own_name
@@ -1042,6 +1098,7 @@ impl Converter {
             let mut mesh = own_meshes.pop().expect("len checked above");
             mesh.tags = tags;
             mesh.extra.hidden = hidden;
+            mesh.extra.locked = locked;
             return Some(ImportNode::Mesh(mesh));
         }
         // Several meshes (a non-manifold split) under one group: the group
@@ -1072,6 +1129,7 @@ impl Converter {
             tags,
             hidden,
             key: gkey,
+            locked,
         })
     }
 
@@ -1431,7 +1489,12 @@ impl Converter {
             // (A definition of drawing alone — a wire-frame component, a
             // light rig of edges — is a definition of its sketches; the
             // kernel keeps it as it keeps a group of lines alone.)
-            self.defs.push(DefRecipe { name, children });
+            // (Locked by its placements, `convert_node`.)
+            self.defs.push(DefRecipe {
+                name,
+                children,
+                locked: false,
+            });
             let di = self.defs.len() - 1;
             if let Some(Owner::Definition(definition)) = def_owner {
                 let name = self.model.definitions[definition].name.clone();
@@ -2128,6 +2191,7 @@ impl Converter {
             self.defs.push(DefRecipe {
                 name,
                 children: meshes.into_iter().map(ImportNode::Mesh).collect(),
+                locked: false,
             });
             Some(self.defs.len() - 1)
         });

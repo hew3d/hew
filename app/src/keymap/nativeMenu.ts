@@ -87,6 +87,7 @@ export const ALL_NATIVE_COMMANDS: readonly string[] = [
   'toggle-tangent-edges', 'tool-chamfer', 'tool-deform-bend', 'tool-deform-bend-path',
   'tool-deform-taper', 'tool-deform-twist', 'tool-eraser', 'tool-fillet', 'tool-loft',
   'tool-path-array', 'tool-project', 'tool-revolve', 'tool-shell',
+  'edit-lock', 'edit-unlock-selected', 'edit-unlock-all',
   'edit-unlink', 'edit-unlink-all', 'toggle-part-axes', 'tool-flip',
   'toggle-axes', 'toggle-changes', 'toggle-compact-rail', 'toggle-components',
   'toggle-debug-log', 'toggle-dock', 'toggle-fly', 'toggle-grid',

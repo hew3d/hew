@@ -1362,6 +1362,9 @@ fn menu_action_for(id: &str) -> Option<&'static str> {
         "edit-paste-independent" => "edit-paste-independent",
         "edit-paste-linked" => "edit-paste-linked",
         "edit-delete" => "edit-delete",
+        "edit-lock" => "edit-lock",
+        "edit-unlock-selected" => "edit-unlock-selected",
+        "edit-unlock-all" => "edit-unlock-all",
         "edit-delete-guides" => "edit-delete-guides",
         "edit-select-all" => "edit-select-all",
         "edit-select-none" => "edit-select-none",
@@ -3884,6 +3887,33 @@ fn main() {
                 None,
                 None,
             )?;
+            // Lock (OW-1): Edit ▸ Lock and Unlock ▸ Selected / All. No
+            // accelerator, by design: locking is a deliberate act, and the
+            // shortcut policy keeps keys for what is used constantly.
+            let edit_lock = gated_item(
+                handle,
+                &mut gated,
+                "edit-lock",
+                lbl!("edit-lock"),
+                None,
+                None,
+            )?;
+            let edit_unlock_selected = gated_item(
+                handle,
+                &mut gated,
+                "edit-unlock-selected",
+                lbl!("edit-unlock-selected"),
+                None,
+                None,
+            )?;
+            let edit_unlock_all = gated_item(
+                handle,
+                &mut gated,
+                "edit-unlock-all",
+                lbl!("edit-unlock-all"),
+                None,
+                None,
+            )?;
             let edit_link_identical_copies = gated_item(
                 handle,
                 &mut gated,
@@ -3960,6 +3990,9 @@ fn main() {
                 &edit_make_unique,
                 &edit_unlink,
                 &edit_unlink_all,
+                &edit_lock,
+                &edit_unlock_selected,
+                &edit_unlock_all,
                 &edit_link_identical_copies,
                 &edit_select_all_copies,
                 &edit_flip_red,
@@ -3977,6 +4010,11 @@ fn main() {
             // Edit stays textbook HIG (undo block, delete/select block, then
             // the specialized guide cleanup); everything object-level lives in
             // the Object menu below.
+            let unlock_menu =
+                SubmenuBuilder::with_id(handle, "submenu:unlock", lbl!("submenu:unlock"))
+                    .item(&edit_unlock_selected)
+                    .item(&edit_unlock_all)
+                    .build()?;
             let edit_menu = SubmenuBuilder::with_id(handle, "submenu:edit", lbl!("submenu:edit"))
                 .item(&edit_undo)
                 .item(&edit_redo)
@@ -3992,6 +4030,9 @@ fn main() {
                 .item(&edit_select_all)
                 .item(&edit_select_none)
                 .item(&edit_invert_selection)
+                .separator()
+                .item(&edit_lock)
+                .item(&unlock_menu)
                 .separator()
                 .item(&edit_delete_guides)
                 .build()?;

@@ -111,6 +111,21 @@ Groups appear as folders you can expand; component instances get their own hexag
 
 Hover a group row for its second eye button — a stacked-eye glyph — to hide or show every one of its members at once, nested groups included; the root Model row above the tree has the same button for the whole document. Typing into the filter field above the tree narrows the list to matching rows and the groups standing between them and the top.
 
+## Lock
+
+Lock a part you do not want to disturb while you work around it: an imported house, a reference part, a wall that is finished. Select it and choose **Edit ▸ Lock**, click **Lock** on the contextual dock, or tick **Locked** in Object Info. To undo it, use **Edit ▸ Unlock ▸ Selected** (or **All** for the whole model), click the padlock on its row in the Outliner, or click **Unlock** on the message Hew shows when something is refused. Lock and Unlock are each one undo step.
+
+A locked thing cannot be changed: not moved, rotated, scaled, pushed or pulled, painted, renamed, tagged, grouped, exploded, or deleted, and it cannot be opened for editing. Hover it with Push/Pull, Offset, Paint, Eraser, or Move and the cursor says "Locked. Unlock it to change it."; click and the same words appear in a message with an **Unlock** button. It still works as something to snap to. You can select it, measure it, dimension it, hide and show it, copy it, and draw on its faces (what you draw is a free drawing and does not cut the face). When it is selected its edges draw red instead of orange.
+
+- **A group's members are locked with the group.** Everything inside a locked group, and everything nested in it, is frozen. Its Outliner rows show a dimmed padlock, the way a row hidden by its parent shows a dimmed eye.
+- **A lock belongs to the shape, not to one copy.** Lock any copy of a component, or of a set of [linked copies](#linked-copies), and every copy is locked; unlock any one and all are unlocked. Hew says so: "Locked, along with its 3 copies." To change just one copy, choose **Make Unique** (or **Unlink** for a linked copy). It works on a locked copy, and the copy that splits off stays locked with a lock of its own, so unlocking it later leaves the others alone. The message offers **Unlock** and **Make Unique** side by side.
+- **A window used inside a locked house is frozen too.** If a component is also placed inside a locked group, editing its shape through any copy changes the locked house on screen, so Hew refuses: "This shape is also used inside a locked group. Make this copy unique to change it." The copy outside the house still moves and deletes freely; only editing its shape is refused. **Make Unique** on that copy is the way out, or unlock the house.
+- **A group holding a locked member cannot be moved.** Unlocked group, locked member: moving or deleting the group would move or delete the member, so Hew leaves the group alone and says which member is locked.
+
+**Selections: locked items are left behind.** When a command works on a selection, Hew does it for everything not locked and says so once: "1 locked item was left alone." This is what lets you Select All and Move around a locked background. If everything selected is locked, nothing happens and the message offers **Unlock**. Move, Rotate, Scale, Flip, Delete, Group, Cut, and tags and paint applied to a selection all work this way. Commands that need every piece (Union, Subtract, Intersect, Make Component, Explode, Ungroup, Link identical copies) are refused whole when any piece is locked.
+
+In the [Outliner](#in-the-outliner), a locked row cannot be dragged and nothing can be dropped into a locked group. Locks are saved in the file.
+
 ## What did I just click?
 
 A click in the viewport selects the outermost group a thing belongs to, so a click on a cabinet door inside a kitchen group selects the kitchen. The selection path, the strip at the top of the viewport, tells you what was under that click: Model › Kitchen › Base Cabinets › Cabinet 2 › Door. The selected level is highlighted; the levels after it run down to the thing you hit.

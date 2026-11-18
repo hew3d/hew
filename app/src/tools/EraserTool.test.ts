@@ -16,6 +16,7 @@ import type { NodeRef } from '../panels/treeModel'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 import { inHistoryBracket } from './transformSelection'
+import { planeUnitsMock, hexKey } from './planeUnitsMock'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
@@ -472,5 +473,43 @@ describe('EraserTool', () => {
     t.tool.onPointerUp(null, RAY)
     expect(t.scene.set_crease).not.toHaveBeenCalled()
     expect(t.host.onCreaseCommit).not.toHaveBeenCalled()
+  })
+})
+
+// ── Lock (OW-1): drawing on a locked Object is frozen with it ──
+describe('EraserTool — a locked Object keeps its drawing', () => {
+  const CTX = '{"plane":[0,0,0,0,0,1]}'
+  const ownedBy = (object: number) => planeUnitsMock({
+    [CTX]: { units: [{ key: 1, edges: [{ key: 5, a: [0, 0, 0], b: [1, 0, 0], store: { kind: 'topology', object } }] }] },
+  })
+  const lineRef = (): NodeRef => ({ kind: 'draft-edge', id: 1n, ctx: CTX, key: hexKey(5) })
+  const freeze = (scene: unknown, object: bigint) => {
+    const s = scene as Record<string, unknown>
+    s.node_frozen = vi.fn((kind: number, id: bigint) => (kind === 0 && id === object ? { kind: 'object', id } : undefined))
+    s.node_locked = vi.fn((kind: number, id: bigint) => kind === 0 && id === object)
+    s.definition_usage = vi.fn(() => 1)
+  }
+
+  it('hover says Locked; the click erases nothing and toasts with the Unlock target', () => {
+    const t = makeTool()
+    Object.assign(t.scene, ownedBy(7))
+    freeze(t.scene, 7n)
+    t.setRef(lineRef())
+    t.tool.onPointerMove(null, RAY)
+    expect(t.tool.hoverHint()).toBe('Locked. Unlock it to change it.')
+    click(t.tool, null)
+    expect(t.host.runDelete).not.toHaveBeenCalled()
+    expect(t.onToast).toHaveBeenCalledWith('Locked. Unlock it to change it.', 'LockedHint:object:7')
+  })
+
+  it('the same line on a free Object is erased', () => {
+    const t = makeTool()
+    Object.assign(t.scene, ownedBy(8))
+    freeze(t.scene, 7n)
+    const ref = lineRef()
+    t.setRef(ref)
+    click(t.tool, null)
+    expect(t.host.runDelete).toHaveBeenCalledWith([ref])
+    expect(t.onToast).not.toHaveBeenCalled()
   })
 })

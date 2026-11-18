@@ -86,6 +86,7 @@ import { nonUniformScaleAboutPivot, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { resolveDraft } from './planeUnits'
 import { clearPreview } from './transformPreview'
+import { leaveBehind } from '../lock/lockGate'
 import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
 import { surfaceSketchTransformReports } from './draftCommit'
 import { editLengthBuffer, isLengthInputKey, parseDistance } from './moveInput'
@@ -553,6 +554,11 @@ export class ScaleTool implements Tool {
 
       const boxExtent = this._boxExtent()
       if (boxExtent === null) return
+
+      // Locked things are left behind (OW-1): the scale runs on the rest.
+      const go = leaveBehind(this.wasmScene, nodes, this.onToast, { descendants: true })
+      if (go === null) return
+      nodes = go
 
       const previewMesh = this._buildPreview(nodes)
       if (previewMesh !== null) this.preview.add(previewMesh)

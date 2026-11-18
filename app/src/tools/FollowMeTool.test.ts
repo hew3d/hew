@@ -1155,6 +1155,25 @@ describe('FollowMeTool — solid-face PROFILES (design §3a)', () => {
     expect(tool.statusHint()).toBe(behaviorEnabled('follow-me-twist') ? `${plain} Type 30deg to twist it or 40% to shrink its end.` : plain)
   })
 
+  it('the hover over a face of a LOCKED solid says Locked and offers no profile', () => {
+    const facePick = makeFacePick(30n, 31n)
+    const scene = makeWasmScene({ facePick })
+    const s = scene as unknown as Record<string, unknown>
+    s.node_frozen = vi.fn((kind: number, id: bigint) => (kind === 0 && id === 40n ? { kind: 'object', id } : undefined))
+    s.node_locked = vi.fn((kind: number, id: bigint) => kind === 0 && id === 40n)
+    s.group_members = vi.fn(() => [])
+    s.definition_usage = vi.fn(() => 1)
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(null, RAY) // path: face loop on object 30n
+    ;(scene.pick_face as ReturnType<typeof vi.fn>).mockReturnValue(makeFacePick(40n, 41n))
+    tool.onPointerMove(null, RAY) // hover the locked solid's face
+    expect(tool.statusHint()).toBe('Locked. Unlock it to change it.')
+    // Back on a free face, the normal cue returns.
+    ;(scene.pick_face as ReturnType<typeof vi.fn>).mockReturnValue(makeFacePick(50n, 51n))
+    tool.onPointerMove(null, RAY)
+    expect(tool.statusHint()).toContain('Click this face')
+  })
+
   it('discloses the group-birth gap while editing a group (no group-birth surface on this route)', () => {
     // `follow_me_face_along_edges`/`follow_me_face_around_face` have no
     // `group` parameter at all (unlike the plain sketch-region routes) — a

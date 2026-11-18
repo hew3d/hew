@@ -51,6 +51,8 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import type { NodeRef } from '../panels/treeModel'
 import { inHistoryBracket } from './transformSelection'
+import { lockHintForPick, type LockHint } from '../lock/lockModel'
+import { leaveBehind } from '../lock/lockGate'
 
 export type OnPaintCommit = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
@@ -266,6 +268,18 @@ export class PaintTool implements Tool {
     this.replaceScope = scope
   }
 
+  /** The hovered thing's lock hint while idle (Tool.hoverHint): a locked
+   *  thing cannot be painted, and the line beside the cursor says so. */
+  private _hoverLock: LockHint | null = null
+
+  hoverHint(): string | null {
+    return this.eyedropper ? null : (this._hoverLock?.message ?? null)
+  }
+
+  onPointerLeave(): void {
+    this._hoverLock = null
+  }
+
   onPointerMove(snap: Snap | null, ray: Ray): void {
     this.lastSnap = snap
 
@@ -279,11 +293,13 @@ export class PaintTool implements Tool {
       try {
         this.hoveredObject = pick.object()
         this.hoveredFace = pick.face()
+        this._hoverLock = lockHintForPick(this.wasmScene, this.hoveredObject, pick.instance())
         this._setHoveredInstance(this._paintableInstance(pick) ?? null)
       } finally {
         pick.free()
       }
     } else {
+      this._hoverLock = null
       this.hoveredObject = null
       this.hoveredFace = null
       this._setHoveredInstance(null)
@@ -308,6 +324,15 @@ export class PaintTool implements Tool {
       const objectHandle = pick.object()
       const faceHandle = pick.face()
       const instance = this._paintableInstance(pick)
+      // A locked thing is not painted: the click says so and offers Unlock.
+      // Sampling (Alt) only reads, so it stays allowed.
+      if (!this.eyedropper) {
+        const locked = lockHintForPick(this.wasmScene, objectHandle, pick.instance())
+        if (locked !== null) {
+          this.onToast(locked.message, locked.code)
+          return
+        }
+      }
       // A plain click on a selected thing (a placement included) paints the
       // whole selection; ⌘/Ctrl-click stays single-target.
       const plan = wholeObject || this.eyedropper || replaceScope !== null ? null : (this.selectionFill?.(objectHandle, pick.instance()) ?? null)
@@ -399,6 +424,20 @@ export class PaintTool implements Tool {
    *  The clears are `replace_material` sweeps over each material the object
    *  carries, so no per-face wasm call is needed. */
   private _fill(objects: bigint[], message: string | null, instances: bigint[] = []): void {
+    // Painting a selection leaves locked items behind (OW-1).
+    const asked = objects.length + instances.length
+    const go = leaveBehind(
+      this.wasmScene,
+      [
+        ...objects.map((id) => ({ kind: 'object' as const, id })),
+        ...instances.map((id) => ({ kind: 'instance' as const, id })),
+      ],
+      this.onToast,
+    )
+    if (go === null) return
+    objects = go.filter((n) => n.kind === 'object').map((n) => n.id)
+    instances = go.filter((n) => n.kind === 'instance').map((n) => n.id)
+    if (go.length < asked) message = null
     try {
       const touchedInstances: bigint[] = []
       const linkedDefs = new Set<bigint>()

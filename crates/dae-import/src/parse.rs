@@ -1032,6 +1032,7 @@ fn convert_node(
                 tags,
                 hidden: false,
                 key: None,
+                locked: false,
             })
         }
     }

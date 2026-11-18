@@ -989,6 +989,7 @@ fn mend_inside_a_definition_reaches_every_instance() {
                 faces,
                 vec![Vec::new(); n],
             ))],
+            locked: false,
         }],
         vec![place(0.0), place(5.0)],
     );
@@ -1214,6 +1215,7 @@ fn the_census_refuses_what_the_mend_refuses() {
                 faces,
                 vec![Vec::new(); n],
             ))],
+            locked: false,
         }],
         Vec::new(),
     );

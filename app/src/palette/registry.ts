@@ -64,6 +64,12 @@ export type PaletteGate =
   | 'canPromote'
   /** Something that can be mirrored is selected (Flip Along). */
   | 'canFlip'
+  /** Something unlocked is selected (Lock). */
+  | 'canLock'
+  /** Something locked is selected (Unlock ▸ Selected). */
+  | 'canUnlock'
+  /** Anything in the document is locked (Unlock ▸ All). */
+  | 'canUnlockAll'
   /** Paste linked is the explicit form only while copies default to independent. */
   | 'canPasteLinked'
   | 'canBoolean'
@@ -242,6 +248,9 @@ function actionEntries(): PaletteEntry[] {
     { id: 'edit-unlink-all', label: t`Unlink all`, description: t`Make every copy of the selected linked copy independent.`, group: 'Actions', synonyms: [t`independent copies`], gate: 'canUnlinkAll' },
     { id: 'edit-link-identical-copies', label: t`Link identical copies`, description: t`Turn objects that are the same shape into linked copies, so editing one changes them all.`, group: 'Actions', synonyms: [t`link similar`, t`same shape`, t`look-alike`], gate: 'canLinkSimilar' },
     { id: 'edit-select-all-copies', label: t`Select all copies`, description: t`Select every copy linked to the selected one.`, group: 'Actions', synonyms: [t`linked copies`], gate: 'canUnlinkAll' },
+    { id: 'edit-lock', label: t`Lock`, description: t`Lock the selection so nothing can change it until it is unlocked. Locking one copy of a shared shape locks every copy.`, group: 'Actions', synonyms: [t`freeze`, t`protect`, t`pin`], gate: 'canLock' },
+    { id: 'edit-unlock-selected', label: t`Unlock Selected`, description: t`Unlock the selected locked objects, groups, and components.`, group: 'Actions', synonyms: [t`unfreeze`], gate: 'canUnlock' },
+    { id: 'edit-unlock-all', label: t`Unlock All`, description: t`Unlock everything in the model.`, group: 'Actions', synonyms: [t`unfreeze all`], gate: 'canUnlockAll' },
     { id: 'edit-flip-red', label: t`Flip Along Red`, description: t`Mirror the selection across the plane through its center, across the red axis.`, group: 'Actions', synonyms: [t`mirror`, t`flip x`], gate: 'canFlip' },
     { id: 'edit-flip-green', label: t`Flip Along Green`, description: t`Mirror the selection across the plane through its center, across the green axis.`, group: 'Actions', synonyms: [t`mirror`, t`flip y`], gate: 'canFlip' },
     { id: 'edit-flip-blue', label: t`Flip Along Blue`, description: t`Mirror the selection across the plane through its center, across the blue axis.`, group: 'Actions', synonyms: [t`mirror`, t`flip z`], gate: 'canFlip' },

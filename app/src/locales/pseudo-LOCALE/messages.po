@@ -80,6 +80,11 @@ msgstr ""
 msgid "{0, plural, one {Linked # copy} other {Linked # copies}}"
 msgstr ""
 
+#. placeholder {0}: block.copies
+#: src/lock/lockModel.ts
+msgid "{0, plural, one {Locked, along with its # copy.} other {Locked, along with its # copies.}}"
+msgstr ""
+
 #. placeholder {0}: d.openEdges
 #: src/panels/MakeSolidSketches.tsx
 msgid "{0, plural, one {Not closed yet. # open edge is marked in red.} other {Not closed yet. # open edges are marked in red.}}"
@@ -138,6 +143,10 @@ msgstr ""
 
 #: src/panels/changesModel.ts
 msgid "{count, plural, one {{count} change undone since last save.} other {{count} changes undone since last save.}}"
+msgstr ""
+
+#: src/lock/lockModel.ts
+msgid "{count, plural, one {# locked item was left alone.} other {# locked items were left alone.}}"
 msgstr ""
 
 #: src/health/healthCopy.ts
@@ -312,6 +321,10 @@ msgstr ""
 
 #: src/panels/TextDialog.tsx
 msgid "{hiddenCount, plural, one {+# more — refine your search} other {+# more — refine your search}}"
+msgstr ""
+
+#: src/lock/lockModel.ts
+msgid "{holding, plural, one {# group that holds something locked was left alone.} other {# groups that hold something locked were left alone.}}"
 msgstr ""
 
 #: src/App.tsx
@@ -1176,6 +1189,14 @@ msgstr ""
 msgid "A line needs a length. Type a length other than 0."
 msgstr ""
 
+#: src/panels/DocumentTree.tsx
+msgid "A locked group can't take new items. Unlock it first."
+msgstr ""
+
+#: src/panels/DocumentTree.tsx
+msgid "A locked item can't be moved. Unlock it first."
+msgstr ""
+
 #: src/tools/FlipTool.ts
 msgid "A mirrored copy can't be made while you're editing inside a component. Close the component first, or flip in place."
 msgstr ""
@@ -1382,7 +1403,9 @@ msgstr ""
 msgid "Aligned"
 msgstr ""
 
+#: src/i18n/nativeMenu.ts
 #: src/panels/LibraryDialog.tsx
+#: src/panels/MenuBar.tsx
 msgid "All"
 msgstr ""
 
@@ -4307,6 +4330,10 @@ msgstr ""
 msgid "free camera"
 msgstr ""
 
+#: src/palette/registry.ts
+msgid "freeze"
+msgstr ""
+
 #: src/panels/library/LibraryDetailPane.tsx
 msgid "from {sourceDoc}"
 msgstr ""
@@ -4469,6 +4496,10 @@ msgstr ""
 #. Command palette entry that jumps to a named group
 #: src/App.tsx
 msgid "Group: {label}"
+msgstr ""
+
+#: src/App.tsx
+msgid "Grouping needs two or more, so nothing was grouped."
 msgstr ""
 
 #: src/palette/registry.ts
@@ -5145,6 +5176,10 @@ msgstr ""
 msgid "inside"
 msgstr ""
 
+#: src/panels/DocumentTree.tsx
+msgid "Inside something that is locked. Click to unlock it."
+msgstr ""
+
 #: src/tools/toolRegistry.ts
 msgid "Inspect"
 msgstr ""
@@ -5654,6 +5689,15 @@ msgstr ""
 msgid "Loading…"
 msgstr ""
 
+#: src/i18n/historyLabels.ts
+#: src/i18n/nativeMenu.ts
+#: src/lock/lockActions.ts
+#: src/palette/registry.ts
+#: src/panels/dockLogic.ts
+#: src/panels/MenuBar.tsx
+msgid "Lock"
+msgstr ""
+
 #: src/viewport/ViewDie.tsx
 msgid "Lock blue plane  ↑"
 msgstr ""
@@ -5664,6 +5708,14 @@ msgstr ""
 
 #: src/viewport/ViewDie.tsx
 msgid "Lock red plane  →"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "Lock the selection so nothing can change it until it is unlocked. Locking one copy of a shared shape locks every copy."
+msgstr ""
+
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Locked"
 msgstr ""
 
 #: src/tools/PlaceImageTool.ts
@@ -5685,6 +5737,15 @@ msgstr ""
 
 #: src/tools/DimensionTool.ts
 msgid "Locked to the {lockedAxis} plane — same arrow or ArrowDown unlocks."
+msgstr ""
+
+#: src/panels/DocumentTree.tsx
+msgid "Locked. Click to unlock."
+msgstr ""
+
+#: src/kernelErrors.ts
+#: src/lock/lockModel.ts
+msgid "Locked. Unlock it to change it."
 msgstr ""
 
 #: src/palette/curveEntries.ts
@@ -5840,6 +5901,7 @@ msgstr ""
 msgid "Make unique"
 msgstr ""
 
+#: src/App.tsx
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
 #: src/panels/dockLogic.ts
@@ -7372,6 +7434,10 @@ msgstr ""
 msgid "Part Axes"
 msgstr ""
 
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Part of something that is locked."
+msgstr ""
+
 #: src/tools/CircleTool.ts
 msgid "Part of the circle is too thin to make a face, so it stays as drawing. Move it a little so it sits clear, or draw it larger."
 msgstr ""
@@ -7511,6 +7577,10 @@ msgstr ""
 
 #: src/palette/curveEntries.ts
 msgid "pillow"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "pin"
 msgstr ""
 
 #: src/viewport/ViewDie.tsx
@@ -7739,6 +7809,10 @@ msgstr ""
 #: src/panels/GeoReferenceInfo.tsx
 #: src/shop/ViewsSheet.tsx
 msgid "Projection"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "protect"
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
@@ -9037,6 +9111,11 @@ msgstr ""
 
 #: src/kernelErrorCopy/blend.ts
 msgid "Select the edges to fillet first."
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+#: src/panels/MenuBar.tsx
+msgid "Selected"
 msgstr ""
 
 #: src/health/healthCopy.ts
@@ -11085,6 +11164,11 @@ msgstr ""
 msgid "This shape has no circle behind it, so there's nothing to re-build. Only a circle drawn with the Circle tool has a segment count."
 msgstr ""
 
+#: src/kernelErrors.ts
+#: src/lock/lockModel.ts
+msgid "This shape is also used inside a locked group. Make this copy unique to change it."
+msgstr ""
+
 #: src/panels/MakeSolidSketches.tsx
 msgid "This shape is inside a solid, so nothing was made. Push or pull its face to cut into the solid."
 msgstr ""
@@ -11557,6 +11641,14 @@ msgstr ""
 msgid "Unfiled"
 msgstr ""
 
+#: src/palette/registry.ts
+msgid "unfreeze"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "unfreeze all"
+msgstr ""
+
 #: src/i18n/historyLabels.ts
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
@@ -11623,6 +11715,36 @@ msgstr ""
 
 #: src/linkedCopyCopy.ts
 msgid "Unlinked this copy and cut it"
+msgstr ""
+
+#: src/App.tsx
+#: src/i18n/historyLabels.ts
+#: src/i18n/nativeMenu.ts
+#: src/lock/lockActions.ts
+#: src/panels/dockLogic.ts
+#: src/panels/DocumentTree.tsx
+#: src/panels/MenuBar.tsx
+msgid "Unlock"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "Unlock All"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "Unlock everything in the model."
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "Unlock Selected"
+msgstr ""
+
+#: src/panels/DocumentTree.tsx
+msgid "Unlock the locked item above"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "Unlock the selected locked objects, groups, and components."
 msgstr ""
 
 #: src/panels/SentReportsDialog.tsx

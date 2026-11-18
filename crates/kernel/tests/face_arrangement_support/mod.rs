@@ -642,7 +642,13 @@ pub fn plane_objects(
     scope: Option<ComponentId>,
     obj: ObjectId,
 ) -> Vec<ObjectId> {
-    let mut objs = doc.drawable_objects_on_plane(plane, scope);
+    // A frozen object takes no part (OW-1, as `draft_participants` has
+    // it): it is only something to draw over.
+    let mut objs: Vec<ObjectId> = doc
+        .drawable_objects_on_plane(plane, scope)
+        .into_iter()
+        .filter(|&o| doc.node_frozen(kernel::NodeId::Object(o)).is_none())
+        .collect();
     if !objs.contains(&obj) {
         objs.push(obj);
     }

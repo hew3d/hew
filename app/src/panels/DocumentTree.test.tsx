@@ -679,3 +679,63 @@ describe('DocumentTree — linked copies', () => {
     expect(a.onRename).not.toHaveBeenCalled()
   })
 })
+
+describe('DocumentTree — padlocks and drag rules for locked rows (OW-1)', () => {
+  // jsdom has no hit testing: nothing is ever under the pointer.
+  beforeEach(() => {
+    document.elementFromPoint = () => null
+    Element.prototype.scrollIntoView = () => {}
+  })
+  const g = (id: number, kind: 'object' | 'group' | 'instance' = 'object') => ({ kind, id: BigInt(id) })
+  // Group 10 is locked and holds object 2; object 1 stands free beside it.
+  function lockScene() {
+    return makeScene({
+      top_level_nodes: () => [g(10, 'group'), g(1)],
+      object_ids: () => [1n, 2n],
+      group_ids: () => [10n],
+      instance_ids: () => [],
+      group_members: (id: bigint) => (id === 10n ? [g(2)] : []),
+      group_name: (id: bigint) => (id === 10n ? 'House' : undefined),
+      object_name: (id: bigint) => (id === 1n ? 'Free' : id === 2n ? 'Wall' : undefined),
+      node_parent: (kind: number, id: bigint) => (kind === 0 && id === 2n ? 10n : undefined),
+      node_locked: (kind: number, id: bigint) => kind === 1 && id === 10n,
+      node_frozen: (kind: number, id: bigint) => (
+        (kind === 1 && id === 10n) || (kind === 0 && id === 2n) ? g(10, 'group') : undefined
+      ),
+    })
+  }
+
+  it('a locked row shows a padlock that unlocks it; a member shows it dimmed and unlocks the group above', () => {
+    const onUnlock = vi.fn()
+    render(
+      <DocumentTree {...baseProps} scene={lockScene()} onSelect={vi.fn()} onUnlock={onUnlock} selectedIds={[g(2)]} />,
+    )
+    const locks = screen.getAllByTestId('outliner-lock')
+    expect(locks.map((l) => l.getAttribute('data-lock-state'))).toEqual(['own', 'inherited'])
+    fireEvent.click(locks[0])
+    expect(onUnlock).toHaveBeenLastCalledWith(g(10, 'group'))
+    fireEvent.click(locks[1])
+    expect(onUnlock).toHaveBeenLastCalledWith(g(10, 'group'))
+  })
+
+  it('a free row has no padlock', () => {
+    render(<DocumentTree {...baseProps} scene={lockScene()} onSelect={vi.fn()} onUnlock={vi.fn()} />)
+    // Only the group is locked; the free object row beside it carries none.
+    expect(screen.getAllByTestId('outliner-lock')).toHaveLength(1)
+  })
+
+  it('a locked row cannot be dragged', () => {
+    render(<DocumentTree {...baseProps} scene={lockScene()} onSelect={vi.fn()} onUnlock={vi.fn()} />)
+    fireEvent.pointerDown(screen.getByText('House'), { button: 0, clientX: 5, clientY: 5 })
+    fireEvent(window, new MouseEvent('pointermove', { clientX: 60, clientY: 60 }))
+    expect(screen.queryByTestId('outliner-drag-ghost')).toBeNull()
+  })
+
+  it('a free row can be dragged (the rule is the lock, not the drag)', () => {
+    render(<DocumentTree {...baseProps} scene={lockScene()} onSelect={vi.fn()} onUnlock={vi.fn()} />)
+    fireEvent.pointerDown(screen.getByText('Free'), { button: 0, clientX: 5, clientY: 5 })
+    fireEvent(window, new MouseEvent('pointermove', { clientX: 60, clientY: 60 }))
+    expect(screen.queryByTestId('outliner-drag-ghost')).not.toBeNull()
+    fireEvent(window, new MouseEvent('pointerup', { clientX: 60, clientY: 60 }))
+  })
+})

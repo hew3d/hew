@@ -79,6 +79,9 @@ import { useLengthDisplay, type LengthDisplay } from '../settings/useLengthDispl
 import { measureSelection, type SelectionMeasure } from './measureInfo'
 import { selectionMaterials } from './selectionMaterials'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
+import { frozenCause, isLockableKind, isLockRefusalCode, isLocked, sharedShapeCause } from '../lock/lockModel'
+import { setNodesLocked } from '../lock/lockActions'
+import { leaveBehind } from '../lock/lockGate'
 import { MIN_SEGMENTS_PER_TURN } from '../tools/arcMath'
 import { isComposingKey } from '../input/keyboard'
 import { SmoothSection } from './SmoothSection'
@@ -177,6 +180,12 @@ interface Props {
    */
   onUnlink?: (node: NodeRef) => void
   onMakeComponent?: (node: NodeRef) => void
+  /**
+   * Called after the Locked checkbox (or a locked tag refusal) changed the
+   * document: the bookkeeping every mutation needs, plus a re-color of the
+   * selection, which draws red while locked.
+   */
+  onLockChanged?: () => void
 }
 
 /** The guide accessor the panel reads. */
@@ -288,7 +297,7 @@ const ADD_TAG_BUTTON_STYLE: React.CSSProperties = {
   flexShrink: 0,
 }
 
-export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onSelectTag, onSelectMaterial, onToast, onShowHealth, selectedAnnotations = NO_IDS, selectedGuides = NO_IDS, sessionStack, sessionMembers = null, onUnlink, onMakeComponent }: Props) {
+export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onSelectTag, onSelectMaterial, onToast, onShowHealth, selectedAnnotations = NO_IDS, selectedGuides = NO_IDS, sessionStack, sessionMembers = null, onUnlink, onMakeComponent, onLockChanged }: Props) {
   const { t } = useLingui()
   // Re-render the length readouts when the format OR the Precision changes.
   const lengthDisplay = useLengthDisplay()
@@ -622,14 +631,32 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
   // --------------------------------------------------------------------------
   // Name commit: called on Enter or blur.
   // --------------------------------------------------------------------------
+  // The kernel's own lock refusal from any edit made here shows the standard
+  // toast (with Unlock / Make Unique) instead of failing silently. True when
+  // it was one; anything else is the caller's to handle.
+  const toastLockRefusal = useCallback((err: unknown): boolean => {
+    const code = parseKernelErrorCode(err)
+    if (!isLockRefusalCode(code)) return false
+    const raw = err instanceof Error ? err.message : String(err)
+    onToast?.(kernelErrorMessage(code ?? 'Unknown', raw), code ?? undefined)
+    return true
+  }, [onToast])
+
   const commitName = useCallback(() => {
     if (nodeInfo === null || nodeInfo.kindNum === null) return
+    // A locked (or frozen) thing cannot be renamed: the field is read-only.
+    if (frozenCause(scene, nodeInfo.node) !== null) return
     const trimmed = localName.trim()
     // Pass undefined to clear; pass the string to set. Clearing makes the
     // field fall back to the placeholder default label (Outliner parity).
-    scene.set_node_name(nodeInfo.kindNum, nodeInfo.id, trimmed === '' ? undefined : trimmed)
+    try {
+      scene.set_node_name(nodeInfo.kindNum, nodeInfo.id, trimmed === '' ? undefined : trimmed)
+    } catch (err) {
+      if (!toastLockRefusal(err)) throw err
+      return
+    }
     onNameChanged()
-  }, [nodeInfo, localName, scene, onNameChanged])
+  }, [nodeInfo, localName, scene, onNameChanged, toastLockRefusal])
 
   // --------------------------------------------------------------------------
   // Definition Name (instances only) — local controlled state + commit,
@@ -658,10 +685,25 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
 
   const commitDefName = useCallback(() => {
     if (nodeInfo === null || nodeInfo.defId === null) return
+    if (frozenCause(scene, nodeInfo.node) !== null) return
+    if (nodeInfo.kind === 'instance' && sharedShapeCause(scene, nodeInfo.id) !== null) {
+      // The shape is also used inside a locked group: the field is read-only
+      // (an in-progress edit snaps back), and the toast says why.
+      setLocalDefName(nodeInfo.defName ?? '')
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- the typed kernel error code, not copy
+      onToast?.(kernelErrorMessage('LockedNodeViaSharedShape', ''), 'LockedNodeViaSharedShape')
+      return
+    }
     const trimmed = localDefName.trim()
-    scene.set_component_name(nodeInfo.defId, trimmed === '' ? undefined : trimmed)
+    try {
+      scene.set_component_name(nodeInfo.defId, trimmed === '' ? undefined : trimmed)
+    } catch (err) {
+      if (!toastLockRefusal(err)) throw err
+      setLocalDefName(nodeInfo.defName ?? '')
+      return
+    }
     onNameChanged()
-  }, [nodeInfo, localDefName, scene, onNameChanged])
+  }, [nodeInfo, localDefName, scene, onNameChanged, onToast, toastLockRefusal])
 
   // --------------------------------------------------------------------------
   // "(N instances)" click: select every instance of the definition. The
@@ -878,16 +920,65 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIds, scene, docRev])
 
+  // ---- Lock (OW-1) -----------------------------------------------------
+  // What the Locked checkbox shows and the fields obey. A node is FROZEN
+  // when it is locked or sits inside something locked; the kernel refuses to
+  // change a frozen node, so its name and tags show read-only.
+  const lockState = useMemo(() => {
+    const nodes = selectedIds.filter((n) => isLockableKind(n.kind))
+    if (nodes.length === 0 || nodes.length !== selectedIds.length) return null
+    const lockedCount = nodes.filter((n) => isLocked(scene, n)).length
+    const frozenCount = nodes.filter((n) => frozenCause(scene, n) !== null).length
+    return { nodes, lockedCount, frozenCount }
+    // docRev: a lock changes without the selection changing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIds, scene, docRev])
+  const frozenSingle = nodeInfo !== null && lockState !== null && lockState.frozenCount > 0
+  // The Definition Name edits the shared shape: also read-only when a copy of
+  // it sits inside a locked group (the indirect case), though this copy is free.
+  const defNameLocked = useMemo(
+    () => frozenSingle || (nodeInfo !== null && nodeInfo.kind === 'instance' && sharedShapeCause(scene, nodeInfo.id) !== null),
+    // docRev: a lock elsewhere changes without the selection changing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [frozenSingle, nodeInfo, scene, docRev],
+  )
+  const lockedBox = useRef<HTMLInputElement | null>(null)
+  const lockIndeterminate = lockState !== null && lockState.lockedCount > 0 && lockState.lockedCount < lockState.nodes.length
+  useEffect(() => {
+    if (lockedBox.current !== null) lockedBox.current.indeterminate = lockIndeterminate
+  })
+  const toggleLocked = useCallback((next: boolean) => {
+    if (lockState === null) return
+    try {
+      setNodesLocked(scene, lockState.nodes, next)
+    } catch (err) {
+      const code = parseKernelErrorCode(err)
+      const raw = err instanceof Error ? err.message : String(err)
+      onToast?.(kernelErrorMessage(code ?? 'Unknown', raw), code ?? undefined)
+      return
+    }
+    onLockChanged?.()
+  }, [lockState, scene, onToast, onLockChanged])
+
   const handleAddTag = useCallback(() => {
     const segments = tagInput.split('/').map((s) => s.trim()).filter((s) => s.length > 0)
     if (segments.length === 0) return
     if (nodeInfo !== null && nodeInfo.kindNum !== null) {
-      scene.add_node_tag(nodeInfo.kindNum, nodeInfo.id, segments)
-    } else if (multi !== null) {
-      // One undo step across the whole selection (kernel compound).
       try {
-        scene.add_node_tag_many(new Uint8Array(multi.kinds), new BigUint64Array(multi.ids), segments)
+        scene.add_node_tag(nodeInfo.kindNum, nodeInfo.id, segments)
       } catch (err) {
+        if (!toastLockRefusal(err)) throw err
+        return
+      }
+    } else if (multi !== null) {
+      // One undo step across the whole selection (kernel compound). Locked
+      // items are left behind (OW-1), with one toast saying so.
+      try {
+        const go = leaveBehindIds(scene, multi, onToast)
+        if (go === null) return
+        scene.add_node_tag_many(new Uint8Array(go.kinds), new BigUint64Array(go.ids), segments)
+      } catch (err) {
+        if (toastLockRefusal(err)) return
         const errorText = err instanceof Error ? err.message : String(err)
         onToast?.(t`Add tag failed: ${errorText}`)
         return
@@ -898,25 +989,33 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     setTagInput('')
     setAddingTag(false)
     onTagsChanged()
-  }, [nodeInfo, multi, tagInput, scene, onTagsChanged, onToast])
+  }, [nodeInfo, multi, tagInput, scene, onTagsChanged, onToast, toastLockRefusal])
 
   const handleRemoveTagFromAll = useCallback((path: string[]) => {
     if (multi === null) return
     try {
-      scene.remove_node_tag_many(new Uint8Array(multi.kinds), new BigUint64Array(multi.ids), path)
+      const go = leaveBehindIds(scene, multi, onToast)
+      if (go === null) return
+      scene.remove_node_tag_many(new Uint8Array(go.kinds), new BigUint64Array(go.ids), path)
     } catch (err) {
+      if (toastLockRefusal(err)) return
       const errorText = err instanceof Error ? err.message : String(err)
       onToast?.(t`Remove tag failed: ${errorText}`)
       return
     }
     onTagsChanged()
-  }, [multi, scene, onTagsChanged, onToast])
+  }, [multi, scene, onTagsChanged, onToast, toastLockRefusal])
 
   const handleRemoveTag = useCallback((path: string[]) => {
     if (nodeInfo === null || nodeInfo.kindNum === null) return
-    scene.remove_node_tag(nodeInfo.kindNum, nodeInfo.id, path)
+    try {
+      scene.remove_node_tag(nodeInfo.kindNum, nodeInfo.id, path)
+    } catch (err) {
+      if (!toastLockRefusal(err)) throw err
+      return
+    }
     onTagsChanged()
-  }, [nodeInfo, scene, onTagsChanged])
+  }, [nodeInfo, scene, onTagsChanged, toastLockRefusal])
 
   // A selected dimension or leader text (read-only). Re-derived on every
   // document change, since the text and tags can change without the id doing so.
@@ -1018,6 +1117,19 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
         <div style={{ fontSize: '11px', color: 'var(--text-faint, #666)', padding: '4px 8px' }}>
           {countLine ?? plural(selectedCount, { one: '# selected', other: '# selected' })}
         </div>
+        {lockState !== null && (
+          <div data-testid="object-info-locked" style={{ padding: '4px 8px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+              <input
+                ref={lockedBox}
+                type="checkbox"
+                checked={lockState.lockedCount === lockState.nodes.length}
+                onChange={(e) => toggleLocked(e.target.checked)}
+              />
+              <span style={{ ...LABEL_STYLE, marginBottom: 0 }}><Trans>Locked</Trans></span>
+            </label>
+          </div>
+        )}
         {bounds !== null && <BoundingBoxRow bounds={bounds} />}
         <SmoothSection
           scene={scene}
@@ -1115,6 +1227,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
               style={INPUT_STYLE}
               aria-label={nodeInfo.linked ? t`Name (all copies)` : t`Definition Name`}
               value={localDefName}
+              readOnly={defNameLocked}
               onChange={(e) => setLocalDefName(e.target.value)}
               onBlur={commitDefName}
               onKeyDown={(e) => {
@@ -1134,6 +1247,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
               style={INPUT_STYLE}
               aria-label={nodeInfo.linked ? t`This copy` : t`Instance Name`}
               value={localName}
+              readOnly={frozenSingle}
               onChange={(e) => setLocalName(e.target.value)}
               onBlur={commitName}
               onKeyDown={(e) => {
@@ -1154,6 +1268,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
           <input
             style={INPUT_STYLE}
             value={localName}
+            readOnly={frozenSingle}
             onChange={(e) => setLocalName(e.target.value)}
             onBlur={commitName}
             onKeyDown={(e) => {
@@ -1165,6 +1280,27 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
             placeholder={nodeInfo.defaultLabel}
             spellCheck={false}
           />
+        </div>
+      )}
+
+      {/* Locked (OW-1): a locked thing cannot change until it is unlocked.
+       * While it is, the name and tags above and below are read-only. */}
+      {lockState !== null && (
+        <div data-testid="object-info-locked">
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+            <input
+              ref={lockedBox}
+              type="checkbox"
+              checked={lockState.lockedCount === lockState.nodes.length}
+              onChange={(e) => toggleLocked(e.target.checked)}
+            />
+            <span style={{ ...LABEL_STYLE, marginBottom: 0 }}><Trans>Locked</Trans></span>
+          </label>
+          {nodeInfo !== null && frozenSingle && lockState.lockedCount === 0 && (
+            <div style={{ ...VALUE_STYLE, color: 'var(--text-faint, #888)' }}>
+              <Trans>Part of something that is locked.</Trans>
+            </div>
+          )}
         </div>
       )}
 
@@ -1431,7 +1567,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       <div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
           <div style={{ ...LABEL_STYLE, marginBottom: 0 }}><Trans>Tags</Trans></div>
-          {!addingTag && (
+          {!addingTag && !frozenSingle && (
             <button
               onClick={() => setAddingTag(true)}
               title={t`Add tag`}
@@ -1449,7 +1585,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
               <TagChip
                 key={path.join('/')}
                 path={path}
-                onRemove={() => handleRemoveTag(path)}
+                onRemove={frozenSingle ? undefined : () => handleRemoveTag(path)}
                 onSelect={onSelectTag}
               />
             ))}
@@ -1686,7 +1822,8 @@ function TagChip({
   onSelect,
 }: {
   path: string[]
-  onRemove: () => void
+  /** Absent while the tagged thing is locked: the chip shows, no ×. */
+  onRemove?: () => void
   removeLabel?: string
   /** Click on the name (not the ×): select this tag in the Tags pane. */
   onSelect?: (path: string[]) => void
@@ -1728,7 +1865,7 @@ function TagChip({
       >
         {display}
       </button>
-      <button
+      {onRemove !== undefined && (<button
         onClick={onRemove}
         aria-label={removeLabel ?? t`Remove tag ${display}`}
         title={removeLabel ?? t`Remove tag`}
@@ -1744,7 +1881,21 @@ function TagChip({
         }}
       >
         ×
-      </button>
+      </button>)}
     </div>
   )
+}
+
+/** A multi-selection's kind/id arrays without its locked items (OW-1): the
+ *  tag edit runs on the rest and says so once. Null when all are locked. */
+function leaveBehindIds(
+  scene: WasmScene,
+  multi: { kinds: number[]; ids: bigint[] },
+  toast: ((message: string, code?: string) => void) | undefined,
+): { kinds: number[]; ids: bigint[] } | null {
+  const names = ['object', 'group', 'instance'] as const
+  const nodes: NodeRef[] = multi.ids.map((id, i) => ({ kind: names[multi.kinds[i]] ?? 'object', id }))
+  const go = leaveBehind(scene, nodes, toast ?? (() => {}))
+  if (go === null) return null
+  return { kinds: go.map((n) => nodeKindToNumber(n.kind)), ids: go.map((n) => n.id) }
 }

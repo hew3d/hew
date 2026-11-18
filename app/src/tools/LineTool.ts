@@ -101,7 +101,7 @@ import { segmentLength, directionBetween, rehomePlaneNormal, dotV3 } from './lin
 import { ReferenceLines, drawingFrame, resolveDrawCursor, resolveIdleReference, type DrawCursor } from './referenceLines'
 import type { SketchTarget } from './sketchGesture'
 import { DetachedMode, type OnDetachedChange } from './detachedMode'
-import { runDraft, addDraftSegment, refreshAfterDraft, draftClosedLoop, draftTargetFromSketchTarget, type DraftTarget } from './draftCommit'
+import { runDraft, addDraftSegment, refreshAfterDraft, draftClosedLoop, draftTargetFromSketchTarget, faceDrawsDetached, type DraftTarget } from './draftCommit'
 import { cameraView } from './viewPlaneInference'
 import { namedPointLeavesPlane, isNamedPointSnap, pointOnPlane, drawPlaneThrough, isGroundPlane, isPointOnDrawPlane, planeKey, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, DrawPlaneTracker, pinnedPlaneThrough, faceStageDrawPlane, idleFallbackPlane, customPipPlaneFor, pinCustomPlane, type DrawPlane, type IdleDrawTarget, type CameraView, type DrawPlaneState, type IdleHoverResolution } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
@@ -314,7 +314,7 @@ export class LineTool implements Tool {
     if (!anchored) return this.sep.hint(base, true)
     // D12: the mode is latched when a chain's first segment commits; a tap
     // after that applies to the next chain.
-    if (this.chainDetached !== null && this.chainDetached !== this.sep.on) {
+    if (this.chainDetached !== null && !this.chainForced && this.chainDetached !== this.sep.on) {
       return this.sep.on
         ? this.sep.hint(base, false, true)
         : `${base} ${t`This line stays detached; the next one will not.`}`
@@ -360,6 +360,9 @@ export class LineTool implements Tool {
    *  (D12), or null before one commits. Every segment of the chain uses it,
    *  whatever a later tap does to `sep`. */
   private chainDetached: boolean | null = null
+  /** The chain's latch was forced Detached (a locked face), not chosen: the
+   *  toggle says nothing about it, so the hint shows no mismatch. */
+  private chainForced = false
   /** The detached sketch the chain's first segment created (the draft
    *  report's `sketches[0]`); later segments continue into it. Null before
    *  the first segment, off a detached chain, and after a re-home onto a new
@@ -1329,7 +1332,7 @@ export class LineTool implements Tool {
     const { points } = this.faceStage
     const last = points[points.length - 1]
     this._clearPreview()
-    this._drawRubberBandSegment(last, cursor, this._previewStyle(snap, true))
+    this._drawRubberBandSegment(last, cursor, this._previewStyle(snap, !faceDrawsDetached(this.wasmScene, this.faceStage.object)))
     this._reportMeasurement(last, cursor)
     this._publishTransient()
   }
@@ -1796,16 +1799,22 @@ export class LineTool implements Tool {
   /** The chain is over: the next chain latches Detached afresh. */
   private _resetChainLatch(): void {
     this.chainDetached = null
+    this.chainForced = false
     this.chainSketch = null
   }
 
   /**
    * Whether the chain being drawn is detached, latching the mode at the
    * chain's first commit (D12). The caller undoes the latch with
-   * `_unlatchIfFirst` when that first commit is refused.
+   * `_unlatchIfFirst` when that first commit is refused. `force` latches a
+   * chain detached regardless of the toggle: a face chain on a locked Object
+   * (its face is never imprinted; the kernel opens a free sketch there).
    */
-  private _latchChain(): boolean {
-    if (this.chainDetached === null) this.chainDetached = this.sep.on
+  private _latchChain(force = false): boolean {
+    if (this.chainDetached === null) {
+      this.chainDetached = this.sep.on || force
+      this.chainForced = force
+    }
     return this.chainDetached
   }
 
@@ -2276,7 +2285,10 @@ export class LineTool implements Tool {
       return true
     } catch (err) {
       // A refused FIRST segment starts no chain: the next click latches anew.
-      if (latchBefore.chainDetachedBefore === null) this.chainDetached = null
+      if (latchBefore.chainDetachedBefore === null) {
+        this.chainDetached = null
+        this.chainForced = false
+      }
       if (rehomedFromSketch !== undefined) this.chainSketch = rehomedFromSketch
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
@@ -2447,7 +2459,7 @@ export class LineTool implements Tool {
       // Detached (D12): the first segment opens a new detached sketch on the
       // face's plane; the rest continue into it. A detached commit changes no
       // object, so `onFaceImprint` is never called for it.
-      const detached = this._latchChain()
+      const detached = this._latchChain(faceDrawsDetached(this.wasmScene, object))
       const liveSketch = detached ? this._liveChainSketch() : null
       let outcome: ReturnType<typeof run>
       try {
@@ -2480,7 +2492,10 @@ export class LineTool implements Tool {
       })
       return true
     } catch (err) {
-      if (wasUnlatched) this.chainDetached = null
+      if (wasUnlatched) {
+        this.chainDetached = null
+        this.chainForced = false
+      }
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)

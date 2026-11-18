@@ -35,6 +35,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { resolveDraft } from './planeUnits'
 import { clearPreview } from './transformPreview'
+import { leaveBehind } from '../lock/lockGate'
 import {
   buildSelectionPreview,
   commitSelectionTransform,
@@ -401,8 +402,15 @@ export class FlipTool implements Tool {
     this.gizmoGroup = null
     this.squares = []
     let committed: NodeRef[]
+    // An in-place flip leaves locked items behind (OW-1); a mirrored copy
+    // only reads them, so it takes everything selected.
+    const flipNodes = copy === 'none' ? leaveBehind(this.wasmScene, this.selection, this.onToast, { descendants: true }) : this.selection
+    if (flipNodes === null) {
+      this._showGizmo()
+      return false
+    }
     try {
-      committed = runFlip(this.wasmScene, this.selection, point, normal, copy, this._activeInstance)
+      committed = runFlip(this.wasmScene, flipNodes, point, normal, copy, this._activeInstance)
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)

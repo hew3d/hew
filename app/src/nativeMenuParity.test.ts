@@ -738,6 +738,60 @@ describe('linked copy menu items parity', () => {
 })
 
 /**
+ * Lock (OW-1): Edit ▸ Lock and Edit ▸ Unlock ▸ Selected / All are gated
+ * native items (the Unlock pair in their own submenu), each dispatching to
+ * the action id the web menu, the palette and the contextual dock use. No
+ * accelerator and nothing in the status bar, by design.
+ */
+describe('Lock menu items parity', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const menuBarSource = readFileSync(MENU_BAR_TSX, 'utf8')
+  const ids = ['edit-lock', 'edit-unlock-selected', 'edit-unlock-all']
+
+  it.each(ids)('%s is a gated native item, attached to a submenu, with a dispatch arm', (id) => {
+    const binding = new RegExp(`let\\s+(\\w+)\\s*=\\s*gated_item\\(\\s*handle,\\s*&mut \\w+,\\s*"${id}"`).exec(source)
+    expect(binding, `no gated_item binding found for ${id}`).not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(source.includes(`.item(&${variable})`), `${id} is built but never attached to a submenu`).toBe(true)
+    expect(new RegExp(`"${id}"\\s*=>\\s*"${id}"`).test(source), `${id} has no dispatch arm`).toBe(true)
+    expect(source.includes(`&${variable},`), `${id} is not in the initial disable list`).toBe(true)
+    // The shortcut policy: locking is deliberate, so no key.
+    expect(new RegExp(`"${id}",\\s*lbl!\\("${id}"\\),\\s*None,\\s*None`).test(source), `${id} carries an accelerator`).toBe(true)
+  })
+
+  it('the Unlock submenu holds Selected and All and sits in the Edit menu', () => {
+    expect(source).toMatch(/let\s+unlock_menu\s*=\s*SubmenuBuilder::with_id\(handle,\s*"submenu:unlock"/)
+    expect(source.includes('.item(&unlock_menu)')).toBe(true)
+    expect(NATIVE_MENU_LABELS['submenu:unlock']).toBeDefined()
+    const edit = source.slice(source.indexOf('let edit_menu = SubmenuBuilder'), source.indexOf('.build()?', source.indexOf('let edit_menu = SubmenuBuilder')))
+    expect(edit).toContain('.item(&edit_lock)')
+    expect(edit).toContain('.item(&unlock_menu)')
+  })
+
+  it('the web menu and the palette offer the same actions', () => {
+    for (const id of ids) {
+      expect(menuBarSource.includes(`'${id}'`), `MenuBar lacks ${id}`).toBe(true)
+      expect(paletteEntries().map((e) => e.id)).toContain(id)
+      expect(NATIVE_MENU_LABELS[id], `no native label for ${id}`).toBeDefined()
+      expect(NATIVE_COMMANDS.has(id), `${id} is not a native command`).toBe(true)
+    }
+  })
+
+  it('the app syncs the enabled state of every Lock item', () => {
+    const appSource = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'App.tsx'), 'utf8')
+    for (const id of ids) expect(appSource.includes(`'${id}':`), `App does not sync ${id}`).toBe(true)
+  })
+
+  it('the contextual dock offers Lock, or Unlock when everything selected is locked', () => {
+    const gates = { canGroup: false, canMakeComponent: false }
+    expect(dockVerbsFor('object', { ...gates, canLock: true }).map((v) => v.id)).toContain('edit-lock')
+    const locked = dockVerbsFor('object', { ...gates, canUnlock: true }).map((v) => v.id)
+    expect(locked[0]).toBe('edit-unlock-selected')
+    expect(locked).not.toContain('tool-pushpull')
+  })
+})
+
+/**
  * Flip: the tool sits in the Tools menu beside Scale (covered by the tool
  * parity checks above through TOOL_MENU_IDS), and Object ▸ Flip Along ▸
  * Red / Green / Blue are gated native items in their own submenu, each

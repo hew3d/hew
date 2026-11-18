@@ -37,6 +37,12 @@
 //!   by fingerprint, not bytes, because baked translations round-trip with
 //!   ulp noise (`fl(fl(x + d) - d) != x` — the DEVELOPMENT.md fp trap), and
 //!   that noise is exactly what tolerance-aware equivalence exists for.
+//! - locks (OW-1): Lock and Unlock any live node (definition members
+//!   included), Unlock All, linked copies and joins over locked operands,
+//!   and face drafts on frozen Objects (opened detached) run among the rest; beside the kernel's own commit audit,
+//!   a node frozen before a forward step is still there after it, still
+//!   frozen unless the step unlocked, and keeps its geometry where it
+//!   stands, its name and its tags (`lock_oracle`).
 
 use kernel::{
     Anchor, Annotation, BooleanOp, CapturedCurve, Document, DocumentError, FaceId, KernelOp,
@@ -47,6 +53,7 @@ use kernel::{
 use proptest::prelude::*;
 
 use crate::face_arrangement_support;
+use crate::lock_oracle;
 use face_arrangement_support::{draw_loop, face_plane, group_faces, no_pinch};
 
 /// Abstract document op; selectors resolve against live ids at apply time.
@@ -584,6 +591,21 @@ enum DocOp {
     },
     /// `purge_unused` — one labeled entry (or nothing when idle).
     PurgeUnused,
+    /// Lock (or unlock) the `node_sel`-th live node, a definition member
+    /// included (OW-1).
+    Lock {
+        node_sel: usize,
+        locked: bool,
+    },
+    /// Edit ▸ Unlock ▸ All.
+    UnlockAll,
+    /// "Link identical copies": the `obj_sel`-th visible object joined to
+    /// the `set_sel`-th linked placement, at the pose that lands the set's
+    /// solid on it when both are the same unrotated box.
+    JoinLinked {
+        set_sel: usize,
+        obj_sel: usize,
+    },
     /// `reparent_nodes`: move the `node_sel`-th top-level node into the
     /// `group_sel`-th live group (or out to the top level when `to_top`),
     /// exercising the tree bookkeeping and its verbatim member-order
@@ -694,6 +716,20 @@ enum DocOp {
         b: (i32, i32),
         segments: usize,
     },
+    /// A face draft on a frozen Object (OW-1, v1.5 owner's items D1): the
+    /// `face_sel`-th face of the `obj_sel`-th visible FROZEN Object, which
+    /// a face draw opens detached (`Document::face_draw_detaches`), drawn
+    /// there as [`DocOp::DrawDetached`] draws; the lock oracle checks the
+    /// Object is untouched. While nothing visible is frozen, the
+    /// `obj_sel`-th visible Object is locked first (its own undo step).
+    FrozenFaceDraft {
+        obj_sel: usize,
+        face_sel: usize,
+        circle: bool,
+        a: (i32, i32),
+        b: (i32, i32),
+        segments: usize,
+    },
     /// Edit the `sk_sel`-th detached sketch in its own context
     /// (`Document::draft_detached`): `mode` 0 moves its `sel`-th unit by
     /// `d` lattice steps in its plane, 1 erases its `sel`-th edge, 2
@@ -781,6 +817,16 @@ fn free_drawing_on(doc: &Document, plane: Plane) -> bool {
     })
 }
 
+/// The visible objects no lock freezes: the ops that assert an edit
+/// succeeds pick from these (OW-1); the rest pick from every visible
+/// object, so locked operands meet their refusals.
+fn editable_objects(doc: &Document) -> Vec<ObjectId> {
+    doc.visible_object_ids()
+        .into_iter()
+        .filter(|&o| doc.node_frozen(NodeId::Object(o)).is_none())
+        .collect()
+}
+
 /// A hole-free rectangular face of the `obj_sel`-th visible object (the
 /// `face_sel`-th face), given two side-by-side imprints at x ∈ [0.15, 0.4]
 /// and [0.6, 0.85], y ∈ [0.25, 0.75] of its frame — returned as
@@ -793,7 +839,7 @@ fn two_imprints(
     face_sel: usize,
     step: usize,
 ) -> Option<(ObjectId, (Point3, Vec3, Vec3))> {
-    let oid = nth(&doc.visible_object_ids(), obj_sel)?;
+    let oid = nth(&editable_objects(doc), obj_sel)?;
     let obj = doc.object(oid).expect("visible id resolves");
     let face = obj.faces().keys().nth(face_sel % obj.faces().len())?;
     if !obj.faces()[face].inner_loops.is_empty() {
@@ -887,6 +933,17 @@ fn arb_sketch_edit() -> impl Strategy<Value = DocOp> {
         )
             .prop_map(|(obj_sel, face_sel, ground, circle, a, b, segments)| {
                 DocOp::DrawDetached { obj_sel, face_sel, ground, circle, a, b, segments }
+            }),
+        1 => (
+            any::<usize>(),
+            any::<usize>(),
+            any::<bool>(),
+            (-2..14i32, -2..14i32),
+            (1..9i32, 1..9i32),
+            24..40usize,
+        )
+            .prop_map(|(obj_sel, face_sel, circle, a, b, segments)| {
+                DocOp::FrozenFaceDraft { obj_sel, face_sel, circle, a, b, segments }
             }),
         2 => (any::<usize>(), 0..3u8, any::<usize>(), (-6..=6i32, -6..=6i32))
             .prop_map(|(sk_sel, mode, sel, d)| DocOp::EditDetached { sk_sel, mode, sel, d }),
@@ -1134,6 +1191,11 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         1 => any::<usize>().prop_map(|mat_sel| DocOp::DeleteMaterial { mat_sel }),
         1 => any::<usize>().prop_map(|comp_sel| DocOp::DeleteDefinition { comp_sel }),
         1 => Just(DocOp::PurgeUnused),
+        3 => (any::<usize>(), proptest::bool::ANY)
+            .prop_map(|(node_sel, locked)| DocOp::Lock { node_sel, locked }),
+        1 => Just(DocOp::UnlockAll),
+        1 => (any::<usize>(), any::<usize>())
+            .prop_map(|(set_sel, obj_sel)| DocOp::JoinLinked { set_sel, obj_sel }),
         1 => (any::<usize>(), any::<usize>(), proptest::bool::ANY).prop_map(
             |(node_sel, group_sel, to_top)| DocOp::Reparent { node_sel, group_sel, to_top }
         ),
@@ -1985,7 +2047,10 @@ fn check_detached_untouched(
         return Ok(());
     }
     if let Some(g) = gesture
-        && matches!(op, DocOp::DrawDetached { .. } | DocOp::EditDetached { .. })
+        && matches!(
+            op,
+            DocOp::DrawDetached { .. } | DocOp::FrozenFaceDraft { .. } | DocOp::EditDetached { .. }
+        )
     {
         return check_detached_take(doc, step, op, before, target, g);
     }
@@ -2566,6 +2631,49 @@ fn nth<T: Copy>(items: &[T], sel: usize) -> Option<T> {
     }
 }
 
+/// Whether a member anywhere in `def`'s own subtree (through member
+/// groups) is frozen: a rebase re-expresses each one (OW-1).
+fn def_subtree_frozen(doc: &Document, def: kernel::ComponentId) -> bool {
+    let mut stack = doc.def_member_nodes(def).unwrap_or_default();
+    while let Some(n) = stack.pop() {
+        if let NodeId::Group(g) = n {
+            stack.extend(doc.group_members(g).unwrap_or_default());
+        } else if doc.node_frozen(n).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a whole-document rescale must refuse for a lock (OW-1): a live
+/// Object or group (definition members included) carries one, or a
+/// definition with something to edit (a placement or a member) does.
+fn anything_locked(doc: &Document) -> bool {
+    if doc
+        .live_object_ids()
+        .into_iter()
+        .any(|o| doc.node_locked(NodeId::Object(o)))
+    {
+        return true;
+    }
+    let mut groups: Vec<NodeId> = doc.group_ids().into_iter().map(NodeId::Group).collect();
+    for c in doc.component_ids() {
+        if doc.component_locked(c) && doc.def_frozen(c).is_some() {
+            return true;
+        }
+        groups.extend(doc.def_member_nodes(c).unwrap_or_default());
+    }
+    while let Some(n) = groups.pop() {
+        if let NodeId::Group(g) = n {
+            if doc.node_locked(n) {
+                return true;
+            }
+            groups.extend(doc.group_members(g).unwrap_or_default());
+        }
+    }
+    false
+}
+
 /// Builds a glyph-like ring+counter sketch (an outer square with a smaller
 /// concentric square hole — `document.rs`'s `glyph_o_sketch` fixture,
 /// re-expressed against the public API since this is an external test) at
@@ -2916,6 +3024,8 @@ fn apply_draft(
     let n = plane.normal();
     let v = n.cross(u);
     let at = |x: i32, y: i32| origin + u * (f64::from(x) * 0.5) + v * (f64::from(y) * 0.5);
+    // A frozen object takes no part (OW-1, as `draft_participants` has
+    // it): drawing on its face is free drawing that does not cut it.
     let objs: Vec<ObjectId> = visible
         .iter()
         .copied()
@@ -2924,6 +3034,7 @@ fn apply_draft(
             obj.faces()
                 .keys()
                 .any(|f| fuzz_face_on_plane(obj, f, &plane))
+                && doc.node_frozen(NodeId::Object(o)).is_none()
         })
         .collect();
     let fixed = fixed_segments(doc, &objs, &plane);
@@ -3189,7 +3300,7 @@ fn apply_doc_op(
             ts,
             pull_in,
         } => {
-            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+            let Some(oid) = nth(&editable_objects(doc), *obj_sel) else {
                 return Ok(true);
             };
             let obj = doc.object(oid).expect("visible id resolves");
@@ -3275,7 +3386,7 @@ fn apply_doc_op(
             frac,
             twin,
         } => {
-            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+            let Some(oid) = nth(&editable_objects(doc), *obj_sel) else {
                 return Ok(true);
             };
             let obj = doc.object(oid).expect("visible id resolves");
@@ -3404,7 +3515,7 @@ fn apply_doc_op(
             frac,
             merge_back,
         } => {
-            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+            let Some(oid) = nth(&editable_objects(doc), *obj_sel) else {
                 return Ok(true);
             };
             let obj = doc.object(oid).expect("visible id resolves");
@@ -3671,7 +3782,7 @@ fn apply_doc_op(
             circle,
             from_inside,
         } => {
-            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+            let Some(oid) = nth(&editable_objects(doc), *obj_sel) else {
                 return Ok(true);
             };
             let obj = doc.object(oid).expect("visible id resolves");
@@ -3805,7 +3916,9 @@ fn apply_doc_op(
             edge_sel,
             from_features,
         } => {
-            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+            // The erase must succeed: an object no lock freezes, with the
+            // frozen ones on its plane left out of the draft (OW-1).
+            let Some(oid) = nth(&editable_objects(doc), *obj_sel) else {
                 return Ok(true);
             };
             if *from_features {
@@ -3815,6 +3928,7 @@ fn apply_doc_op(
                 for plane in doc.object_drawing_planes(oid) {
                     let objs = {
                         let mut v = doc.drawable_objects_on_plane(plane, None);
+                        v.retain(|&o| doc.node_frozen(NodeId::Object(o)).is_none());
                         if !v.contains(&oid) {
                             v.push(oid);
                         }
@@ -4130,6 +4244,65 @@ fn apply_doc_op(
                 return Ok(true);
             };
             let _ = doc.delete_node(node);
+        }
+        DocOp::Lock { node_sel, locked } => {
+            let Some(node) = nth(&lock_oracle::all_live_nodes(doc), *node_sel) else {
+                return Ok(true);
+            };
+            let before = doc.state_hash();
+            if doc.set_nodes_locked(&[node], *locked).is_err() {
+                prop_assert_eq!(
+                    doc.state_hash(),
+                    before,
+                    "a refused lock changed the document"
+                );
+            }
+        }
+        DocOp::UnlockAll => {
+            let _ = doc.unlock_all();
+        }
+        DocOp::JoinLinked { set_sel, obj_sel } => {
+            let sets: Vec<kernel::InstanceId> = doc
+                .instance_ids()
+                .into_iter()
+                .filter(|&i| doc.instance_def(i).is_some_and(|d| doc.is_linked_set(d)))
+                .collect();
+            let (Some(set), Some(joiner)) = (
+                nth(&sets, *set_sel),
+                nth(&doc.visible_object_ids(), *obj_sel),
+            ) else {
+                return Ok(true);
+            };
+            let min = |o: ObjectId| {
+                doc.object(o).map(|obj| {
+                    obj.vertices().values().fold(
+                        Point3::new(f64::MAX, f64::MAX, f64::MAX),
+                        |m, v| {
+                            Point3::new(
+                                m.x.min(v.position.x),
+                                m.y.min(v.position.y),
+                                m.z.min(v.position.z),
+                            )
+                        },
+                    )
+                })
+            };
+            let def = doc.instance_def(set).expect("live");
+            let member = doc.def_members(def).unwrap_or_default().first().copied();
+            let (Some(m), Some(w)) = (member.and_then(min), min(joiner)) else {
+                return Ok(true);
+            };
+            let before = doc.state_hash();
+            if doc
+                .join_linked(set, joiner, Transform::translation(w - m))
+                .is_err()
+            {
+                prop_assert_eq!(
+                    doc.state_hash(),
+                    before,
+                    "a refused join changed the document"
+                );
+            }
         }
         DocOp::Group { count } => {
             let nodes = doc.top_level_nodes();
@@ -4499,9 +4672,24 @@ fn apply_doc_op(
         }
         DocOp::Rescale { factor } => {
             // Always a valid (finite, positive) factor by construction
-            // (`arb_doc_op`'s `0.2..5.0` range), so this cannot refuse.
-            doc.rescale_document(*factor)
-                .expect("rescale never refuses a valid factor");
+            // (`arb_doc_op`'s `0.2..5.0` range), so the only refusal is the
+            // lock's: a whole-document rescale is refused exactly while
+            // something is locked (OW-1, D1 decision 7), with the document
+            // untouched.
+            let before = doc.state_hash();
+            let locked = anything_locked(doc);
+            match doc.rescale_document(*factor) {
+                Ok(_) => prop_assert!(!locked, "a rescale ran while something is locked"),
+                Err(DocumentError::LockedNode { .. }) => {
+                    prop_assert!(locked, "a rescale refused LockedNode with nothing locked");
+                    prop_assert_eq!(
+                        doc.state_hash(),
+                        before,
+                        "a refused rescale changed the document"
+                    );
+                }
+                Err(e) => panic!("rescale refused a valid factor: {e:?}"),
+            }
         }
         DocOp::RebaseDefinition {
             comp_sel,
@@ -4520,10 +4708,24 @@ fn apply_doc_op(
             let x = rot.apply_vector(Vec3::new(1.0, 0.0, 0.0));
             let y = rot.apply_vector(Vec3::new(0.0, 1.0, 0.0));
             let o = Point3::new(origin.0, origin.1, origin.2);
+            let before = doc.state_hash();
+            let frozen = doc.def_frozen(cid).is_some() || def_subtree_frozen(doc, cid);
             match doc.rebase_definition(cid, o, x, y) {
                 Ok(_)
                 | Err(DocumentError::RebaseDuringSession)
                 | Err(DocumentError::UnknownComponent) => {}
+                // A rebase rewrites every member's definition-local
+                // geometry: an edit to the shape, refused while its
+                // contents or any member in them is frozen (OW-1), with
+                // the document untouched.
+                Err(DocumentError::LockedNode { .. }) => {
+                    prop_assert!(frozen, "a rebase refused LockedNode on a free shape");
+                    prop_assert_eq!(
+                        doc.state_hash(),
+                        before,
+                        "a refused rebase changed the document"
+                    );
+                }
                 Err(e) => panic!("a rotated frame refused: {e:?}"),
             }
         }
@@ -4803,8 +5005,11 @@ fn apply_doc_op(
                 (true, 2) => e.map(|x| doc.edge_attr_delete(oid, x, NS, Some(key))),
                 (true, _) => e.map(|x| doc.edge_attr_delete(oid, x, NS, None)),
             };
+            let frozen = doc.node_frozen(NodeId::Object(oid)).is_some();
             match result {
                 None | Some(Ok(_)) | Some(Err(DocumentError::UnknownAttr)) => {}
+                // A frozen object's dictionaries are part of it (OW-1).
+                Some(Err(DocumentError::LockedNode { .. })) if frozen => {}
                 Some(Err(e)) => {
                     return Err(TestCaseError::fail(format!(
                         "step {step}: an attribute write on a live element refused: {e}"
@@ -4956,6 +5161,44 @@ fn apply_doc_op(
             apply_draw_detached(
                 doc, step, *obj_sel, *face_sel, *ground, *circle, *a, *b, *segments,
             )?;
+        }
+        DocOp::FrozenFaceDraft {
+            obj_sel,
+            face_sel,
+            circle,
+            a,
+            b,
+            segments,
+        } => {
+            // The frozen Object's index among the visible ones, which is
+            // what `draft_lattice` selects by.
+            let visible = doc.visible_object_ids();
+            let frozen_of = |doc: &Document| -> Vec<usize> {
+                (0..visible.len())
+                    .filter(|&i| doc.node_frozen(NodeId::Object(visible[i])).is_some())
+                    .collect()
+            };
+            let mut frozen = frozen_of(doc);
+            // Nothing frozen yet: lock one first (its own undo step), so
+            // the draw runs whether or not an earlier Lock picked an Object.
+            if frozen.is_empty()
+                && let Some(o) = nth(&visible, *obj_sel)
+                && doc.set_nodes_locked(&[NodeId::Object(o)], true).is_ok()
+            {
+                frozen = frozen_of(doc);
+            }
+            if let Some(idx) = nth(&frozen, *obj_sel) {
+                prop_assert!(
+                    doc.face_draw_detaches(visible[idx]),
+                    "step {}: a frozen Object's face draw does not detach",
+                    step
+                );
+                // The step's own oracle, from after the lock above.
+                let kept = lock_oracle::frozen_snapshot(doc);
+                apply_draw_detached(doc, step, idx, *face_sel, false, *circle, *a, *b, *segments)?;
+                lock_oracle::check_frozen_kept(doc, &kept, lock_oracle::StepKind::Edit)
+                    .map_err(|e| TestCaseError::fail(format!("step {step}: {e}")))?;
+            }
         }
         DocOp::EditDetached {
             sk_sel,
@@ -5231,11 +5474,25 @@ fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseErro
     for (step, op) in ops.iter().enumerate() {
         let detached_before = detached_snapshot(&doc);
         let target = op_target_sketch(&doc, op);
+        let frozen = lock_oracle::frozen_snapshot(&doc);
         take_gesture();
         if !apply_compound_op(&mut doc, step, op, &mut open)?
             && !apply_doc_op(&mut doc, step, op, &materials)?
         {
             return Ok(());
+        }
+        // The lock oracle, for forward steps: undo, redo and an aborted
+        // compound move between accepted states.
+        if !matches!(op, DocOp::Undo | DocOp::Redo | DocOp::AbortCompound) {
+            let kind = match op {
+                DocOp::MakeUnique { .. } => lock_oracle::StepKind::MakeUnique,
+                DocOp::Lock { locked: false, .. } | DocOp::UnlockAll => {
+                    lock_oracle::StepKind::Unlock
+                }
+                _ => lock_oracle::StepKind::Edit,
+            };
+            lock_oracle::check_frozen_kept(&doc, &frozen, kind)
+                .map_err(|e| TestCaseError::fail(format!("step {step} ({op:?}): {e}")))?;
         }
         let gesture = take_gesture();
         check_doc(&doc, step, "apply")?;

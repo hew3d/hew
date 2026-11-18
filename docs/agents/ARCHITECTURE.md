@@ -585,6 +585,47 @@ definition's members are already ordinary Objects (just owned by a
 `ComponentId` rather than the world), editing one in place is a matter of
 temporarily changing what owns them, not a distinct editing mode.
 
+**Lock.** A lock belongs to a shape, not to one copy of it. Objects and
+groups carry their own `locked` flag, and so does a component definition;
+an instance has none and is locked exactly when its definition is, so
+locking any copy of a component or linked set locks every copy by
+construction (`Document::set_nodes_locked`, one undo entry labeled Lock or
+Unlock, an instance standing for its definition). A node is *frozen*
+(`Document::node_frozen`, which names the locked node behind it) when it
+is locked, when a group above it is frozen, or when it is part of a shape
+whose contents are frozen: a definition that is locked, or that has a
+placement which is itself frozen, since editing such a shape would change
+the locked thing that places it. A copy placed outside the locked thing
+is not frozen itself (moving it changes no shape); Make Unique gives it a
+shape of its own, and the new definition starts with the lock of the one
+it left. Locking is itself an undo entry, so undo and redo never meet a
+frozen node (rule 9 needs no exception). The flags are saved as
+`objects[].locked`, `groups[].locked` and `components[].locked` (manifest
+v33).
+
+A definition's contents are frozen when `Document::def_frozen` answers:
+the definition is locked, or one of its placements is frozen. Every edit
+to a definition (its member geometry, its member list, its name, its
+attributes) is refused then, including one made through a placement
+that is not itself frozen; the refusal says so (`via_shared_shape`), and
+the way out is Make Unique on that placement. Enforcement is two layers.
+Every mutating method checks up front (`refuse_frozen` on the nodes it
+would modify or remove, `refuse_def_frozen` on a definition it would
+edit, `refuse_frozen_container` for an edit to a node's container only)
+and refuses `DocumentError::LockedNode { node, via_shared_shape }` before
+any work. Then, in debug and test builds, `commit_new_action` runs every
+committed entry through its change set and panics when anything modified
+or removed is frozen; only a wrap and Make Unique are exempt, by entry
+kind (`audit_exempt`), because they re-own a locked subtree without
+changing it. A linked copy of a locked Object or group wraps it, and the
+wrap moves the node's lock onto the new definition, so every placement of
+the set carries it (`WrappedLinked.moved_lock`; undo puts it back on the
+node). A root member of a linked set therefore never carries a lock of
+its own: locking it by its path locks the set, and a file that carries
+one there is read as the set's lock. Drawing on a frozen Object's face
+leaves it out of the draft (`draft_participants`), so the drawing is free
+and the face is not cut.
+
 ### 2.8 Materials and Tags
 
 Materials are a document-level palette; each face carries an optional

@@ -362,6 +362,7 @@ fn capping_a_definition_member_reaches_every_instance() {
             vec![DefRecipe {
                 name: Some("Tank".into()),
                 children: vec![ImportNode::Mesh(open_box())],
+                locked: false,
             }],
         ),
         Vec::new(),
@@ -437,6 +438,7 @@ fn deleting_a_bridge_splits_the_rest_into_objects_in_the_same_group() {
             tags: Vec::new(),
             hidden: false,
             key: None,
+            locked: false,
         }],
     );
     let id = only_object(&doc);
@@ -509,6 +511,7 @@ fn a_marked_surface_survives_save_and_load_on_a_definition_member() {
             vec![DefRecipe {
                 name: Some("Sign".into()),
                 children: vec![ImportNode::Mesh(strip())],
+                locked: false,
             }],
         ),
         Vec::new(),
@@ -775,6 +778,7 @@ fn thickening_a_definition_member_reaches_every_instance() {
             vec![DefRecipe {
                 name: Some("Sign".into()),
                 children: vec![ImportNode::Mesh(pane())],
+                locked: false,
             }],
         ),
         Vec::new(),
@@ -972,8 +976,10 @@ fn removing_every_face_of_a_member_in_a_nested_group_deletes_it() {
                         tags: Vec::new(),
                         hidden: false,
                         key: None,
+                        locked: false,
                     },
                 ],
+                locked: false,
             }],
         ),
         Vec::new(),

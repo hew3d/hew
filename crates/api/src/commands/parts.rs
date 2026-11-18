@@ -240,6 +240,11 @@ pub(crate) fn occurrence_json(
         "name": name,
         "definition_name": definition_name,
         "depth": o.depth,
+        "locked": ctx.doc.node_locked(o.node),
+        // A node reached through a frozen placement is frozen by it too
+        // (`Document::node_frozen`, rule 3), so the node's own answer
+        // covers the path.
+        "frozen": ctx.doc.node_frozen(o.node).is_some(),
     });
     if let Some(facts) = facts {
         row["members"] = members_json(ctx, o, facts.include_hidden)?;

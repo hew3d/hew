@@ -74,7 +74,7 @@ import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retyp
 import { segmentLength } from './lineInput'
 import { DetachedMode, type OnDetachedChange } from './detachedMode'
 import type { SketchTarget } from './sketchGesture'
-import { runDraft, addDraftLoop, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
+import { runDraft, addDraftLoop, refreshAfterDraft, draftTargetFromSketchTarget, faceDrawsDetached } from './draftCommit'
 import { cameraView } from './viewPlaneInference'
 import { namedPointLeavesPlane, isNamedPointSnap, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, DrawPlaneTracker, pinnedPlaneThrough, faceStageDrawPlane, idleFallbackPlane, customPipPlaneFor, pinCustomPlane, type DrawPlane, type IdleDrawTarget, type CameraView, type DrawPlaneState, type IdleHoverResolution } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
@@ -857,7 +857,7 @@ export class CircleTool implements Tool {
       this._lastFaceCursor = cursorOnPlane
       const verts = circlePolygonFace(center, cursorOnPlane, normal, faceSegments(center, cursorOnPlane))
       if (verts !== null) {
-        this._drawRubberBandFace(verts, true)
+        this._drawRubberBandFace(verts, !this._faceDetached(this.faceStage.object))
         this._reportMeasurement(center, cursorOnPlane)
       } else {
         this._clearPreview()
@@ -1254,7 +1254,7 @@ export class CircleTool implements Tool {
       this._clearPreview()
       this.onMeasurementCb('')
       if (this._commitFaceCircle(object, face, center, rim, normal)) {
-        this.retype.arm({ mode: 'face', object, face, normal, center, rim, detached: this.sep.on })
+        this.retype.arm({ mode: 'face', object, face, normal, center, rim, detached: this._faceDetached(object) })
       }
     }
   }
@@ -1443,7 +1443,7 @@ export class CircleTool implements Tool {
       this.onMeasurementCb('')
 
       if (this._commitFaceVerts(object, face, verts, center)) {
-        this.retype.arm({ mode: 'face', object, face, normal, center, rim: cursorOnPlane, detached: this.sep.on })
+        this.retype.arm({ mode: 'face', object, face, normal, center, rim: cursorOnPlane, detached: this._faceDetached(object) })
       }
     }
   }
@@ -1470,7 +1470,7 @@ export class CircleTool implements Tool {
   }
 
   /** Split the given face with a circle loop defined by center/rim/normal. */
-  private _commitFaceCircle(object: bigint, face: bigint, center: V3, rim: V3, normal: V3, detached = this.sep.on): boolean {
+  private _commitFaceCircle(object: bigint, face: bigint, center: V3, rim: V3, normal: V3, detached = this._faceDetached(object)): boolean {
     const verts = circlePolygonFace(center, rim, normal, faceSegments(center, rim))
     if (verts === null) return false // degenerate — ignore
     return this._commitFaceVerts(object, face, verts, center, detached)
@@ -1485,7 +1485,7 @@ export class CircleTool implements Tool {
    * the loop's own first vertex, so it matches the imprinted points exactly
    * (the kernel refuses a claim that does not describe the loop).
    */
-  private _commitFaceVerts(object: bigint, face: bigint, verts: V3[], center: V3, detached = this.sep.on): boolean {
+  private _commitFaceVerts(object: bigint, face: bigint, verts: V3[], center: V3, detached = this._faceDetached(object)): boolean {
     const radius = Math.hypot(
       verts[0][0] - center[0],
       verts[0][1] - center[1],
@@ -1539,6 +1539,12 @@ export class CircleTool implements Tool {
       pts[base + 3] = b[0]; pts[base + 4] = b[1]; pts[base + 5] = b[2]
     }
     this.preview.add(makeFatSegments(pts, this.sep.previewStyle(joinsFace)))
+  }
+
+  /** Detached on this face: the toggle, or a locked Object (its face is
+   *  never imprinted; the kernel opens a free sketch there). */
+  private _faceDetached(object: bigint): boolean {
+    return this.sep.on || faceDrawsDetached(this.wasmScene, object)
   }
 
   private _clearPreview(): void {

@@ -257,6 +257,7 @@ fn the_result_keeps_the_cells_group_parent() {
             tags: Vec::new(),
             hidden: false,
             key: None,
+            locked: false,
         },
     ]);
     let left = by_name(&doc, "Left");
@@ -285,6 +286,7 @@ fn a_grouped_rejoin_reports_the_group_as_changed() {
         tags: Vec::new(),
         hidden: false,
         key: None,
+        locked: false,
     }]);
     let group = doc
         .node_parent(NodeId::Object(by_name(&doc, "Left")))
@@ -501,6 +503,7 @@ fn cells_under_different_parents_refuse_rejoin_not_possible() {
             tags: Vec::new(),
             hidden: false,
             key: None,
+            locked: false,
         },
         ImportNode::Mesh(half("Right", 1.0, 2.0, &[5])),
         ImportNode::Mesh(wall(1.0)),
@@ -538,6 +541,7 @@ fn a_definitions_split_shape_rejoins_inside_the_definition() {
             ImportNode::Mesh(big),
             ImportNode::Mesh(wall(1.5)),
         ],
+        locked: false,
     }];
     let mut doc = Document::new();
     doc.ingest(s, Vec::new()).unwrap();
@@ -657,6 +661,7 @@ fn group(name: &str, children: Vec<ImportNode>) -> ImportNode {
         tags: Vec::new(),
         hidden: false,
         key: None,
+        locked: false,
     }
 }
 
@@ -723,6 +728,7 @@ fn a_definition_wall_in_a_group_beside_top_level_pieces_refuses_untouched() {
             ImportNode::Mesh(half("Right", 1.0, 2.0, &[5])),
             group("Inner", vec![ImportNode::Mesh(wall(1.0))]),
         ],
+        locked: false,
     }];
     let mut doc = Document::new();
     doc.ingest(s, Vec::new()).unwrap();
@@ -743,6 +749,7 @@ fn a_definition_wall_is_never_in_a_family_with_world_pieces() {
     s.defs = vec![kernel::DefRecipe {
         name: Some("Wall".into()),
         children: vec![ImportNode::Mesh(wall(1.0))],
+        locked: false,
     }];
     let mut doc = Document::new();
     doc.ingest(s, Vec::new()).unwrap();

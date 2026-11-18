@@ -1982,3 +1982,49 @@ describe('PushPullTool — the face cue names what the click commits to (OW-14)'
     expect(scene.plane_units_json).toHaveBeenCalledTimes(1)
   })
 })
+
+// ── Lock (OW-1): a locked thing says so before the click and refuses it ──
+describe('PushPullTool — a locked thing refuses with the Unlock toast', () => {
+  /** `scene` plus a lock model: nodes in `locked` (`kind:id`) are frozen by themselves. */
+  function withLocks(scene: WasmScene, locked: string[], copies?: { def: bigint; usage: number }) {
+    return {
+      ...scene,
+      node_frozen: vi.fn((kind: number, id: bigint) => (locked.includes(`${kind}:${id}`) ? { kind: kind === 2 ? 'instance' : 'object', id } : undefined)),
+      node_locked: vi.fn((kind: number, id: bigint) => locked.includes(`${kind}:${id}`)),
+      instance_def: vi.fn(() => copies?.def),
+      definition_usage: vi.fn(() => copies?.usage ?? 1),
+      instances_of: vi.fn(() => BigUint64Array.from([])),
+    } as unknown as WasmScene
+  }
+
+  it('hovering a locked box says "Locked. Unlock it to change it." beside the cursor; the click toasts it with its target', () => {
+    const scene = withLocks(makeWasmScene({ facePick: makeFacePick(3n, 4n) }), ['0:3'])
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).toBe('Locked. Unlock it to change it.')
+    expect(onToast).not.toHaveBeenCalled() // a hover never toasts
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    expect(onToast).toHaveBeenCalledWith('Locked. Unlock it to change it.', 'LockedHint:object:3')
+    // Nothing starts: no drag, no kernel call.
+    expect(tool.capturingInput()).toBe(false)
+    expect(scene.push_pull).not.toHaveBeenCalled()
+  })
+
+  it('a locked copy of a set says how many others share it', () => {
+    const scene = withLocks(makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) }), ['2:12'], { def: 5n, usage: 4 })
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).toBe('Locked, along with its 3 copies.')
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    expect(onToast).toHaveBeenCalledWith('Locked, along with its 3 copies.', 'LockedHint:instance:12')
+  })
+
+  it('a free box still pushes and pulls', () => {
+    const scene = withLocks(makeWasmScene({ facePick: makeFacePick(3n, 4n) }), ['0:99'])
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+    expect(scene.push_pull).toHaveBeenCalledTimes(1)
+    expect(onToast).not.toHaveBeenCalled()
+  })
+})

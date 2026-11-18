@@ -111,7 +111,7 @@ import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, axis
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import type { SketchTarget } from './sketchGesture'
 import { DetachedMode, type OnDetachedChange } from './detachedMode'
-import { runDraft, addDraftSegment, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
+import { runDraft, addDraftSegment, refreshAfterDraft, draftTargetFromSketchTarget, faceDrawsDetached } from './draftCommit'
 import { cameraView } from './viewPlaneInference'
 import { namedPointLeavesPlane, isNamedPointSnap, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, DrawPlaneTracker, pinnedPlaneThrough, faceStageDrawPlane, idleFallbackPlane, customPipPlaneFor, pinCustomPlane, type DrawPlane, type IdleDrawTarget, type CameraView, type DrawPlaneState, type IdleHoverResolution } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
@@ -1397,7 +1397,7 @@ export class ArcTool implements Tool {
     this._clearPreview()
     this.onMeasurementCb('')
     if (this._commitFace(object, face, normal, verts, sign * distance)) {
-      this.retype.arm({ mode: 'face', object, face, normal, a, b, s: sign * distance, completion: this.completion, detached: this.sep.on })
+      this.retype.arm({ mode: 'face', object, face, normal, a, b, s: sign * distance, completion: this.completion, detached: this._faceDetached(object) })
     }
   }
 
@@ -1914,7 +1914,7 @@ export class ArcTool implements Tool {
       const { a } = this.faceStage
       this._lastFaceCursor = cursor
       this._clearPreview()
-      this._drawSegments([a, cursor], true)
+      this._drawSegments([a, cursor], !this._faceDetached(this.faceStage.object))
       this.onMeasurementCb(this._measurementText(formatLength(segmentLength(a, cursor))))
       return
     }
@@ -1927,13 +1927,13 @@ export class ArcTool implements Tool {
     const verts = this._facePolyline(a, b, normal, cursor)
     this._clearPreview()
     if (verts === null || s === null) {
-      this._drawSegments([a, b], true)
+      this._drawSegments([a, b], !this._faceDetached(this.faceStage.object))
       this.onMeasurementCb(this._measurementText(''))
       return
     }
     // Preview the arc plus any completion-mode closing edges; the radius
     // readout still derives from the bare arc vertices.
-    this._drawSegments(verts.concat(this._closingVerts(verts, this._faceCenter(a, b, normal, s))), true)
+    this._drawSegments(verts.concat(this._closingVerts(verts, this._faceCenter(a, b, normal, s))), !this._faceDetached(this.faceStage.object))
     this._reportRadiusFromChain(verts)
   }
 
@@ -2009,7 +2009,7 @@ export class ArcTool implements Tool {
     this._clearPreview()
     this.onMeasurementCb('')
     if (this._commitFace(object, face, normal, verts, s)) {
-      this.retype.arm({ mode: 'face', object, face, normal, a, b, s, completion: this.completion, detached: this.sep.on })
+      this.retype.arm({ mode: 'face', object, face, normal, a, b, s, completion: this.completion, detached: this._faceDetached(object) })
     }
   }
 
@@ -2039,7 +2039,7 @@ export class ArcTool implements Tool {
    * whose center is unresolvable (degenerate basis — cannot happen when
    * `verts` built) falls back to the open arc. When the center can't be
    * resolved there is no analytic circle to carry. */
-  private _commitFace(object: bigint, face: bigint, normal: V3, verts: V3[], s: number, detached = this.sep.on): boolean {
+  private _commitFace(object: bigint, face: bigint, normal: V3, verts: V3[], s: number, detached = this._faceDetached(object)): boolean {
     const center = this._faceCenter(verts[0], verts[verts.length - 1], normal, s)
     const arcSegments = verts.length - 1
     const chain = verts.concat(this._closingVerts(verts, center))
@@ -2113,6 +2113,12 @@ export class ArcTool implements Tool {
       pts[base + 3] = b[0]; pts[base + 4] = b[1]; pts[base + 5] = b[2]
     }
     this.preview.add(makeFatSegments(pts, this.sep.previewStyle(joinsFace)))
+  }
+
+  /** Detached on this face: the toggle, or a locked Object (its face is
+   *  never imprinted; the kernel opens a free sketch there). */
+  private _faceDetached(object: bigint): boolean {
+    return this.sep.on || faceDrawsDetached(this.wasmScene, object)
   }
 
   private _clearPreview(): void {

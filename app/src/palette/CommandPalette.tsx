@@ -109,6 +109,10 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
   const isDisabled = (entry: PaletteEntry): boolean =>
     entry.gate !== undefined && (gates?.[entry.gate] ?? false) === false
 
+  /** Why a gated entry is greyed: most need a selection; Unlock All never does. */
+  const disabledReason = (entry: PaletteEntry): string =>
+    entry.gate === 'canUnlockAll' ? t`nothing is locked` : t`needs a selection`
+
   const run = (entry: PaletteEntry) => {
     if (isDisabled(entry)) return
     recordRun(entry.id)
@@ -360,7 +364,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
                           whiteSpace: 'nowrap',
                         }}
                       >
-                        <Trans>needs a selection</Trans>
+                        {disabledReason(entry)}
                       </span>
                     )}
                     {shortcut !== '' && (

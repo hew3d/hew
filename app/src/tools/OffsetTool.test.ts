@@ -973,3 +973,25 @@ describe('OffsetTool — the offset loops are session geometry, mirrored onto si
     expect(mirror.mirrorCount).toBe(0)
   })
 })
+
+// ── Lock (OW-1) ──
+describe('OffsetTool — a locked thing refuses with the Unlock toast', () => {
+  function locked(scene: WasmScene) {
+    return {
+      ...scene,
+      node_frozen: vi.fn((kind: number, id: bigint) => (kind === 0 && id === 3n ? { kind: 'object', id } : undefined)),
+      node_locked: vi.fn(() => true),
+      definition_usage: vi.fn(() => 1),
+    } as unknown as WasmScene
+  }
+
+  it('hover and click on a face of a locked object say Locked, with its target, and start nothing', () => {
+    const scene = locked(makeWasmScene({ facePick: makeFacePick(3n, 4n) }))
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayAt(1, 1))
+    expect(tool.hoverHint()).toBe('Locked. Unlock it to change it.')
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayAt(1, 1))
+    expect(onToast).toHaveBeenCalledWith('Locked. Unlock it to change it.', 'LockedHint:object:3')
+    expect(tool.capturingInput()).toBe(false)
+  })
+})

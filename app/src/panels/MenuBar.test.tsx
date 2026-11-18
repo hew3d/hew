@@ -1142,3 +1142,42 @@ describe('MenuBar', () => {
     expect(soften.compareDocumentPosition(solid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })
+
+describe('MenuBar: Edit ▸ Lock and Unlock (OW-1)', () => {
+  const closed = { canGroup: false, canUngroup: false, canMakeComponent: false, canPlaceCopy: false, canExplode: false, canMakeUnique: false, canBoolean: false }
+
+  function openEdit(): void {
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+  }
+
+  it('Lock and Unlock ▸ Selected / All follow their gates', () => {
+    const onEditAction = vi.fn()
+    const { rerender } = render(<MenuBar {...defaultProps} editGates={closed} onEditAction={onEditAction} />)
+    openEdit()
+    fireEvent.mouseDown(screen.getByText('Lock'))
+    expect(onEditAction).not.toHaveBeenCalled()
+    rerender(<MenuBar {...defaultProps} editGates={{ ...closed, canLock: true, canUnlock: true, canUnlockAll: true }} onEditAction={onEditAction} />)
+    if (screen.queryByText('Lock') === null) openEdit()
+    fireEvent.mouseDown(screen.getByText('Lock'))
+    expect(onEditAction).toHaveBeenLastCalledWith('edit-lock')
+    if (screen.queryByText('Unlock') === null) openEdit()
+    openSubmenu('Unlock')
+    fireEvent.mouseDown(screen.getByText('Selected'))
+    expect(onEditAction).toHaveBeenLastCalledWith('edit-unlock-selected')
+    if (screen.queryByText('Unlock') === null) openEdit()
+    openSubmenu('Unlock')
+    fireEvent.mouseDown(screen.getByText('All'))
+    expect(onEditAction).toHaveBeenLastCalledWith('edit-unlock-all')
+  })
+
+  it('Unlock stays off when nothing is locked', () => {
+    const onEditAction = vi.fn()
+    render(<MenuBar {...defaultProps} editGates={{ ...closed, canLock: true, canUnlock: false, canUnlockAll: false }} onEditAction={onEditAction} />)
+    openEdit()
+    openSubmenu('Unlock')
+    fireEvent.mouseDown(screen.getByText('All'))
+    fireEvent.mouseDown(screen.getByText('Selected'))
+    expect(onEditAction).not.toHaveBeenCalled()
+  })
+})
+

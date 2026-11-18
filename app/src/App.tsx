@@ -62,6 +62,9 @@ import { ChangesPanel } from './panels/ChangesPanel'
 import { ModelHealthPanel, selectionObjectIds } from './panels/ModelHealthPanel'
 import { bakeSmooth, setSmoothLevel, smoothDenseToasts, smoothLevels, smoothRefusal } from './panels/smoothActions'
 import { ACTION_TOAST_MS, toastActionFor, type ToastAction } from './toastActions'
+import { anyLocked, allLockableNodes, isLocked, gateSelection, leftBehindMessage, lockHintFor, lockToastSteps } from './lock/lockModel'
+import { lockedAmong, setNodesLocked, unlockedAmong } from './lock/lockActions'
+import { leaveBehind, refuseIfLocked, toastLocked } from './lock/lockGate'
 import { HISTORY_TRIM_NOTE_MS, HISTORY_TRIM_TOOLTIP, historyTrimNote, takeHistoryTrim } from './historyTrim'
 import { FloatingWindow } from './panels/FloatingWindow'
 import { MakeSolidWizard } from './panels/MakeSolidWizard'
@@ -297,8 +300,9 @@ interface Toast {
    * it to edit the component"): drawn in the accent tint, larger, and kept
    * up longer, so the way in is not missed at the bottom of the window. */
   emphasis?: boolean
-  /** A button on the toast (the DegenerateInput toast offers Model Health). */
-  action?: ToastAction
+  /** Buttons on the toast (the DegenerateInput toast offers Model Health; a
+   * locked hint offers Unlock and Make Unique). */
+  actions?: ToastAction[]
   /** Stays up until the person dismisses it (a click). For an error they
    * must be able to read, such as a failed import or open: the ordinary
    * 4 s toast can vanish before a long reason is read. */
@@ -1716,6 +1720,9 @@ export default function App() {
 
   // The DegenerateInput toast (below) reaches Model Health through this ref.
   const openModelHealthRef = useRef(openModelHealth)
+  // Buttons for a locked hint's toast (assigned each render, beside the
+  // handlers it calls; handleToast below reads it).
+  const lockToastActionsRef = useRef<(code: string | undefined) => ToastAction[] | undefined>(() => undefined)
   openModelHealthRef.current = openModelHealth
 
   // The viewport draws ONE health overlay. The Model Health panel and the
@@ -2024,6 +2031,14 @@ export default function App() {
       // No kernel NodeId / container chain — select-only, same as today.
       setSelection([target])
       return { ok: true }
+    }
+    // A locked thing (or a shape also used inside a locked group) is not
+    // opened for editing, from the Outliner and the path strip as from the
+    // viewport: say so, with Unlock (OW-1). Nothing is half-entered.
+    const locked = lockHintFor(scene, target, { shape: true })
+    if (locked !== null) {
+      handleToastRef.current(locked.message, locked.code)
+      return { refused: { name: 'locked_node' } }
     }
 
     // Build the root→leaf container chain by walking node_parent upward,
@@ -2582,16 +2597,25 @@ export default function App() {
     const emphasis = code === EDIT_CONTEXT_HINT_CODE
     // A boolean refused for a zero-area face points at the repair: the
     // selection is the operands, so Model Health lists them.
-    const action = toastActionFor(code, (view) => openModelHealthRef.current(view))
+    const modelHealth = toastActionFor(code, (view) => openModelHealthRef.current(view))
+    // A locked hint (or the kernel's own locked refusal) offers the way out.
+    const actions = modelHealth !== undefined ? [modelHealth] : lockToastActionsRef.current(code)
     const persistent = opts?.persistent === true
-    setToasts((prev) => [...prev, { id, message, code, isError, emphasis, action, persistent }])
+    setToasts((prev) => [...prev, { id, message, code, isError, emphasis, actions, persistent }])
     if (persistent) return
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id))
-    }, action !== undefined ? ACTION_TOAST_MS : emphasis ? 7000 : 4000)
+    }, actions !== undefined ? ACTION_TOAST_MS : emphasis ? 7000 : 4000)
   }, [])
   const handleToastRef = useRef(handleToast)
   handleToastRef.current = handleToast
+
+  // A lock changes the color of a selected thing's edges and nothing else the
+  // renderer reads, so every document change (Lock, Unlock, undo, redo, Make
+  // Unique) re-colors the selection.
+  useEffect(() => {
+    viewportApi.current?.refreshSelectionColors?.()
+  }, [docRev])
 
   // A failed open's persistent error toast — except while a new window is
   // running the open handed to it by another window (`open_in_new_window`):
@@ -2980,7 +3004,24 @@ export default function App() {
       smoothObjects = []
     }
     const linkedSelection = linkedPlacementOf(scene, selectedIds) !== null
+    // Lock (OW-1): Lock needs something unlocked selected, Unlock ▸ Selected
+    // something locked, Unlock ▸ All anything locked anywhere. A component
+    // open for editing refuses Lock (the kernel's ExplodeSessionScope) but
+    // not Unlock: "unlocking stays allowed".
+    let canLock = false
+    let canUnlock = false
+    let canUnlockAll = false
+    try {
+      canLock = !componentFrameOpen && unlockedAmong(scene, selectedIds).length > 0
+      canUnlock = lockedAmong(scene, selectedIds).length > 0
+      canUnlockAll = anyLocked(scene)
+    } catch {
+      canLock = canUnlock = canUnlockAll = false
+    }
     return {
+      canLock,
+      canUnlock,
+      canUnlockAll,
       booleanOperands,
       canSmooth: smoothObjects.length > 0,
       canSoften,
@@ -6142,7 +6183,17 @@ export default function App() {
     } else if (loneAnnotation !== null) {
       viewportApi.current?.runDeleteAnnotation(loneAnnotation)
     } else if (selection.length > 0) {
-      viewportApi.current?.runDelete(selectedIds, selectedGuides, selectedAnnotations)
+      // Locked items are left behind: the delete runs on the rest (OW-1).
+      // Guides and annotations carry no lock and always go.
+      const scene = sceneRef.current
+      const go = scene === null || selectedIds.length === 0
+        ? selectedIds
+        : (leaveBehind(scene, selectedIds, handleToast, { descendants: true }) ?? [])
+      if (go.length === 0 && selectedGuides.length === 0 && selectedAnnotations.length === 0) return
+      viewportApi.current?.runDelete(go, selectedGuides, selectedAnnotations)
+      setSelection(selectedIds.filter((n) => !go.some((c) => nodeEq(c, n))))
+      setDocRev((r) => r + 1)
+      return
     } else {
       return
     }
@@ -6298,9 +6349,14 @@ export default function App() {
     if (copied === null) return
     const scene = sceneRef.current
     // Delete exactly what the copy carried (a picked edge's whole shape).
-    viewportApi.current?.runDelete(scene === null ? copied : cutTargets(scene, copied))
+    // Copying a locked thing is allowed; deleting it is not, so Cut leaves
+    // locked items in place (OW-1).
+    const targets = scene === null ? copied : cutTargets(scene, copied)
+    const go = scene === null ? targets : leaveBehind(scene, targets, handleToast, { descendants: true })
+    if (go === null) return
+    viewportApi.current?.runDelete(go)
     // Only nodes were copied: guides and annotations stay, still selected.
-    setSelection((cur) => cur.filter((n) => !isNodeItem(n) || !copied.some((c) => nodeEq(c, n))))
+    setSelection((cur) => cur.filter((n) => !isNodeItem(n) || !go.some((c) => nodeEq(c, n))))
     setDocRev((r) => r + 1)
   }
 
@@ -6859,6 +6915,9 @@ export default function App() {
       case 'edit-unlink': handleUnlink(false); break
       case 'edit-unlink-all': handleUnlink(true); break
       case 'edit-select-all-copies': handleSelectAllCopies(); break
+      case 'edit-lock': handleLock(); break
+      case 'edit-unlock-selected': handleUnlock(false); break
+      case 'edit-unlock-all': handleUnlock(true); break
       case 'edit-flip-red': handleFlipAlong(0); break
       case 'edit-flip-green': handleFlipAlong(1); break
       case 'edit-flip-blue': handleFlipAlong(2); break
@@ -7516,6 +7575,9 @@ export default function App() {
       'edit-unlink': menuGates?.canUnlink ?? false,
       'edit-unlink-all': menuGates?.canUnlinkAll ?? false,
       'edit-select-all-copies': menuGates?.canUnlinkAll ?? false,
+      'edit-lock': menuGates?.canLock ?? false,
+      'edit-unlock-selected': menuGates?.canUnlock ?? false,
+      'edit-unlock-all': menuGates?.canUnlockAll ?? false,
       'edit-flip-red': menuGates?.canFlip ?? false,
       'edit-flip-green': menuGates?.canFlip ?? false,
       'edit-flip-blue': menuGates?.canFlip ?? false,
@@ -8096,6 +8158,8 @@ export default function App() {
     // order so the first selected is what a Subtract keeps.
     if (!(menuGates?.canBoolean ?? false)) return
     const scene0 = sceneRef.current
+    // A boolean needs every operand: a locked one refuses it whole.
+    if (scene0 !== null && refuseIfLocked(scene0, booleanOperands, handleToast, { descendants: true })) return
     // Cutting a part that has other linked copies: ask how far the cut
     // reaches first (the strip above the status bar). Everything else runs.
     if (scene0 !== null && routeBooleanMany(op, booleanOperands, (id) => scene0.is_linked(id)) === 'through-placement') {
@@ -8116,7 +8180,27 @@ export default function App() {
     // Without this a single selected node becomes a silent 1-member group
     // (the kernel accepts any non-empty sibling list).
     if (!(menuGates?.canGroup ?? false)) return
-    const newGroupId = viewportApi.current?.runGroup(selectedIds)
+    // Locked items are left behind; grouping what is left needs two or more.
+    const scene = sceneRef.current
+    let go: NodeRef[] = selectedIds
+    if (scene !== null) {
+      const outcome = gateSelection(scene, selectedIds, { descendants: true })
+      if (outcome.kind === 'refused') {
+        toastLocked(handleToast, outcome.node, outcome.block)
+        return
+      }
+      go = outcome.go
+      if (outcome.kind === 'left-behind') {
+        // Say so plainly when too little is left to group: no silent no-op.
+        handleToast(
+          go.length < 2
+            ? `${leftBehindMessage(scene, outcome.left)} ${t`Grouping needs two or more, so nothing was grouped.`}`
+            : leftBehindMessage(scene, outcome.left),
+        )
+      }
+    }
+    if (go.length < 2) return
+    const newGroupId = viewportApi.current?.runGroup(go)
     if (newGroupId != null) {
       setSelection((cur) => withNodes(cur, [{ kind: 'group', id: newGroupId }]))
       setDocRev((r) => r + 1)
@@ -8142,6 +8226,8 @@ export default function App() {
 
   const handleUngroup = () => {
     if (selectedIds.length === 1 && selectedIds[0].kind === 'group') {
+      const scene = sceneRef.current
+      if (scene !== null && refuseIfLocked(scene, selectedIds, handleToast, { descendants: true })) return
       viewportApi.current?.runUngroup(selectedIds[0].id)
       setSelection((cur) => withNodes(cur, []))
       setDocRev((r) => r + 1)
@@ -8152,6 +8238,8 @@ export default function App() {
     // One placement of a linked set: Make component is the promote — the
     // set becomes a named component. Ask for the name first.
     const scene = sceneRef.current
+    // Make Component needs every operand: a locked one refuses it whole.
+    if (scene !== null && refuseIfLocked(scene, selectedIds, handleToast, { descendants: true })) return
     const linked = scene !== null && !componentFrameOpen ? linkedPlacementOf(scene, selectedIds) : null
     if (linked !== null) {
       setPromoteTarget({ instance: linked.instance, defaultName: linkedLabelOf(linked.instance) })
@@ -8208,8 +8296,13 @@ export default function App() {
     const scene = sceneRef.current
     if (scene === null) return
     let message = ''
+    // Joining needs every operand free: a locked Object in a look-alike
+    // group refuses the whole link (no merged lock state exists).
+    const groups = findLookAlikes(scene, linkSimilarScope(origin, selectedIds))
+    const operands = groups.flatMap((g) => g.members.map((m) => ({ kind: 'object' as const, id: m.object })))
+    if (refuseIfLocked(scene, operands, handleToast)) return
     const ok = runLinkedOp((s) => {
-      message = linkSimilarMessage(linkSimilar(s, findLookAlikes(s, linkSimilarScope(origin, selectedIds))))
+      message = linkSimilarMessage(linkSimilar(s, groups))
     })
     if (ok) handleToast(message)
   }
@@ -8255,6 +8348,8 @@ export default function App() {
 
   const handleExplodeInstance = () => {
     if (selectedIds.length === 1 && selectedIds[0].kind === 'instance') {
+      const scene = sceneRef.current
+      if (scene !== null && refuseIfLocked(scene, selectedIds, handleToast, { descendants: true })) return
       const objectIds = viewportApi.current?.runExplodeInstance(selectedIds[0].id)
       if (objectIds != null && objectIds.length > 0) {
         setSelection((cur) => withNodes(cur, objectIds.map((id) => ({ kind: 'object' as const, id }))))
@@ -8271,7 +8366,11 @@ export default function App() {
    *  copy toggle does not apply; the Flip tool makes copies. */
   const handleFlipAlong = (axis: 0 | 1 | 2) => {
     if (!(menuGates?.canFlip ?? false)) return
-    if (viewportApi.current?.runFlipAlong?.([...selectedIds], axis) != null) setDocRev((r) => r + 1)
+    // Locked items are left behind: the flip runs on the rest.
+    const scene = sceneRef.current
+    const go = scene === null ? [...selectedIds] : leaveBehind(scene, selectedIds, handleToast, { descendants: true })
+    if (go === null) return
+    if (viewportApi.current?.runFlipAlong?.(go, axis) != null) setDocRev((r) => r + 1)
   }
 
   const handleMakeUnique = () => {
@@ -8279,9 +8378,80 @@ export default function App() {
       const kept = viewportApi.current?.runMakeUnique(selectedIds[0].id)
       if (kept != null) {
         // Keep the same instance selected — its id is unchanged.
+        viewportApi.current?.refreshSelectionColors?.()
         setDocRev((r) => r + 1)
       }
     }
+  }
+
+  // ---------------------------------------------------------------- Lock (OW-1)
+
+
+  /** Lock or unlock nodes: one undo step, a typed refusal is a toast. The
+   *  selection stays; its edges change color when the lock lands. */
+  const applyLock = (nodes: readonly NodeRef[], locked: boolean): boolean => {
+    const scene = sceneRef.current
+    if (scene === null || nodes.length === 0) return false
+    try {
+      setNodesLocked(scene, nodes, locked)
+    } catch (err) {
+      const code = parseKernelErrorCode(err)
+      const rawMsg = err instanceof Error ? err.message : String(err)
+      handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+      return false
+    }
+    viewportApi.current?.refreshSelectionColors?.()
+    setDocRev((r) => r + 1)
+    return true
+  }
+
+  /** Edit ▸ Lock: lock the selection. Only what is not already locked is
+   *  sent, so a selection that is entirely locked records no step. */
+  const handleLock = () => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    applyLock(unlockedAmong(scene, selectedIds), true)
+  }
+
+  /** Edit ▸ Unlock ▸ Selected / All. Unlocking a copy unlocks its shape's
+   *  every copy; a node inside a locked group is unlocked by unlocking the
+   *  group (the selection names the group, not the member). */
+  const handleUnlock = (all: boolean) => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    if (all) {
+      const everything = allLockableNodes(scene).filter((n) => isLocked(scene, n))
+      applyLock(everything, false)
+      return
+    }
+    applyLock(lockedAmong(scene, selectedIds), false)
+  }
+
+  /** The buttons a locked hint's toast carries, read from its code (the
+   *  node the hint is about) or, for the kernel's own refusal that names no
+   *  node, from the selection. */
+  lockToastActionsRef.current = (code) => {
+    const scene = sceneRef.current
+    if (scene === null) return undefined
+    const steps = lockToastSteps(scene, code, selectedIds)
+    if (steps === undefined) return undefined
+    return steps.map(({ action, node }): ToastAction => {
+      if (action === 'unlock') return { label: t`Unlock`, run: () => void applyLock([node], false) }
+      return {
+        label: t`Make Unique`,
+        run: () => {
+          const s = sceneRef.current
+          if (s === null) return
+          if (s.is_linked(node.id)) {
+            runLinkedOp((sc) => unlinkCopy(sc, node.id))
+          } else {
+            viewportApi.current?.runMakeUnique(node.id)
+          }
+          viewportApi.current?.refreshSelectionColors?.()
+          setDocRev((r) => r + 1)
+        },
+      }
+    })
   }
 
   return (
@@ -8453,6 +8623,9 @@ export default function App() {
           canLinkSimilar: canLinkSimilarNow,
           canPromote: menuGates?.canPromote ?? false,
           canFlip: menuGates?.canFlip ?? false,
+          canLock: menuGates?.canLock ?? false,
+          canUnlock: menuGates?.canUnlock ?? false,
+          canUnlockAll: menuGates?.canUnlockAll ?? false,
           canBoolean,
           canSmooth: menuGates?.canSmooth ?? false,
           canSoften: menuGates?.canSoften ?? false,
@@ -8852,7 +9025,7 @@ export default function App() {
               hidden={cameraDragging}
               activeToolId={toolActionId(activeTool)}
               hoveringSketchRegion={hoveringSketchRegion}
-              gates={{ canGroup: canGroupNow, canMakeComponent: canMakeComp || (menuGates?.canPromote ?? false), canBoolean, canSaveToLibrary: libraryStore().available(), canUnlink: menuGates?.canUnlink ?? false, canUnlinkAll: menuGates?.canUnlinkAll ?? false }}
+              gates={{ canGroup: canGroupNow, canMakeComponent: canMakeComp || (menuGates?.canPromote ?? false), canBoolean, canSaveToLibrary: libraryStore().available(), canUnlink: menuGates?.canUnlink ?? false, canUnlinkAll: menuGates?.canUnlinkAll ?? false, canLock: menuGates?.canLock ?? false, canUnlock: menuGates?.canUnlock ?? false }}
               onRun={(id) => menuActionRef.current(id)}
             />
           </div>
@@ -8940,13 +9113,14 @@ export default function App() {
                       </span>
                     )}
                   </span>
-                  {toast.action !== undefined && (
+                  {toast.actions?.map((action) => (
                     <button
+                      key={action.label}
                       type="button"
                       data-toast-action
                       onClick={(e) => {
                         e.stopPropagation()
-                        toast.action?.run()
+                        action.run()
                         dismissToast(toast.id)
                       }}
                       style={{
@@ -8962,9 +9136,9 @@ export default function App() {
                         whiteSpace: 'nowrap',
                       }}
                     >
-                      {toast.action.label}
+                      {action.label}
                     </button>
-                  )}
+                  ))}
                 </div>
               )
             })}
@@ -9069,6 +9243,10 @@ export default function App() {
               onNameChanged={handleNameChanged}
               onGeometryChanged={refreshAfterPanelMutation}
               onTagsChanged={handleObjectInfoTagsChanged}
+              onLockChanged={() => {
+                viewportApi.current?.refreshSelectionColors?.()
+                setDocRev((r) => r + 1)
+              }}
               onSelectMany={handleReplaceSelection}
               onSelectTag={(path) => revealInTray('tags', path)}
               onSelectMaterial={(id) => revealInTray('materials', id)}
@@ -9100,6 +9278,7 @@ export default function App() {
               onToggleHidden={handleToggleHidden}
               onSetHiddenMany={handleSetHiddenMany}
               onReparent={handleReparent}
+              onUnlock={(node) => void applyLock([node], false)}
               onDropRefused={(reason) => handleToast(reason)}
               linkedActions={linkedRowActions}
             />
@@ -9746,6 +9925,9 @@ export default function App() {
           canLinkSimilar: canLinkSimilarNow,
           canPromote: menuGates?.canPromote ?? false,
           canFlip: menuGates?.canFlip ?? false,
+          canLock: menuGates?.canLock ?? false,
+          canUnlock: menuGates?.canUnlock ?? false,
+          canUnlockAll: menuGates?.canUnlockAll ?? false,
           canPasteLinked: (menuGates?.clipboardHasContent ?? false) && !copiesLinked,
           canBoolean: menuGates?.canBoolean ?? false,
           canSoften: menuGates?.canSoften ?? false,

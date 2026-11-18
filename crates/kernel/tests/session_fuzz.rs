@@ -52,6 +52,16 @@
 //! exactly; salted with a stale guide handle it refuses with the document
 //! and its history untouched.
 //!
+//! Locks join in too (OW-1): Lock and Unlock any live node (definition
+//! members included), Unlock All, linked copies and joins over locked
+//! operands, and face drafts on frozen Objects (opened detached). Besides the kernel's own commit audit (debug builds), the
+//! harness holds an oracle of its own: a node frozen before a forward step
+//! is still there after it, still frozen unless the step unlocked, and
+//! keeps its geometry where it stands, its name and its tags
+//! (`lock_oracle`). Opening and closing a component session re-owns its
+//! members (world-baked for the session), so those steps are left out, as
+//! undo and redo are.
+//!
 //! Failures shrink to a short op list. Run deeper than the default 256
 //! cases with `PROPTEST_CASES=20000 cargo test -p kernel --test all
 //! session_fuzz::`.
@@ -61,6 +71,8 @@ use kernel::{
     Transform, Vec3,
 };
 use proptest::prelude::*;
+
+use crate::lock_oracle;
 
 /// Abstract op; selectors resolve against live ids at apply time, so a
 /// shrunk sequence stays meaningful.
@@ -236,6 +248,30 @@ enum Op {
         mask: u8,
         stale: bool,
     },
+    /// A face draft on a frozen Object, as the app opens one (OW-1, v1.5
+    /// owner's items D1): a rectangle on the `face`-th face of the
+    /// `sel`-th live Object that `face_draw_detaches`, drawn as a NEW
+    /// detached shape in the Object's own frame. It never changes an
+    /// Object; a frozen frame (a member of a frozen shape) refuses
+    /// `LockedNode` and changes nothing. A no-op while nothing is frozen.
+    FrozenFaceDraft {
+        sel: usize,
+        face: usize,
+    },
+    /// Lock (or unlock) any live node, a definition member included.
+    Lock {
+        sel: usize,
+        locked: bool,
+    },
+    /// Edit ▸ Unlock ▸ All.
+    UnlockAll,
+    /// "Link identical copies": a separate copy of a world Object, then
+    /// joined to the linked set of a placement (refused unless it is one,
+    /// and whenever a lock is involved).
+    JoinLinked {
+        set: usize,
+        sel: usize,
+    },
 }
 
 fn arb_op() -> impl Strategy<Value = Op> {
@@ -291,6 +327,10 @@ fn arb_op() -> impl Strategy<Value = Op> {
                 stale,
             }
         ),
+        4 => (sel(), any::<bool>()).prop_map(|(sel, locked)| Op::Lock { sel, locked }),
+        2 => (sel(), sel()).prop_map(|(sel, face)| Op::FrozenFaceDraft { sel, face }),
+        1 => Just(Op::UnlockAll),
+        1 => (sel(), sel()).prop_map(|(set, sel)| Op::JoinLinked { set, sel }),
     ]
 }
 
@@ -979,13 +1019,130 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
                 Err(_) if (doc.state_hash(), doc.history_generation()) != before => {
                     return Err("a refused mixed delete changed the document".to_string());
                 }
+                Err(kernel::DocumentError::LockedNode { .. }) => {
+                    // A lock on a listed node (or on what holds it) refuses
+                    // the whole batch, and it changed nothing (checked
+                    // above).
+                }
                 Err(e) => {
                     // Every handle here is live (a stale guide is the only
-                    // deliberate bad one), so a refusal is a defect.
+                    // deliberate bad one), so any other refusal is a defect.
                     if !stale {
                         return Err(format!("a batch of live items was refused: {e:?}"));
                     }
                 }
+            }
+        }
+        Op::FrozenFaceDraft { sel, face } => {
+            let frozen: Vec<ObjectId> = doc
+                .live_object_ids()
+                .into_iter()
+                .filter(|&o| doc.face_draw_detaches(o))
+                .collect();
+            let Some(o) = pick(&frozen, sel) else {
+                return Ok(());
+            };
+            if doc.node_frozen(NodeId::Object(o)).is_none() {
+                return Err("face_draw_detaches on an Object that is not frozen".to_string());
+            }
+            let obj = doc.object(o).expect("live");
+            let f = obj
+                .faces()
+                .keys()
+                .nth(face % obj.faces().len())
+                .expect("a solid has faces");
+            let plane = obj.faces()[f].plane;
+            let ring: Vec<Point3> = obj.loop_positions(obj.faces()[f].outer_loop).collect();
+            let Ok(u) = (ring[1] - ring[0]).normalized() else {
+                return Ok(());
+            };
+            let v = plane.normal().cross(u);
+            let at = |x: f64, y: f64| ring[0] + u * x + v * y;
+            let c = [at(0.1, 0.1), at(0.3, 0.1), at(0.3, 0.3), at(0.1, 0.3)];
+            let frame = doc.object_owner_component(o);
+            let before = (doc.state_hash(), doc.history_generation());
+            let drawn = doc.draft_detached_new(plane, frame, "Rectangle", |w| {
+                for i in 0..4 {
+                    w.add_segment(c[i], c[(i + 1) % 4])?;
+                }
+                Ok(())
+            });
+            match drawn {
+                Ok((report, _)) if !report.objects.is_empty() => {
+                    return Err(format!(
+                        "a face draft on a frozen Object changed an Object: {report:?}"
+                    ));
+                }
+                Ok((report, _)) if report.sketches.len() != 1 => {
+                    return Err(format!(
+                        "a face draft on a frozen Object made no one sketch: {report:?}"
+                    ));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    if (doc.state_hash(), doc.history_generation()) != before {
+                        return Err(format!("a refused face draft changed the document: {e:?}"));
+                    }
+                    let frame_frozen = frame.is_some_and(|d| doc.def_frozen(d).is_some());
+                    let expected = match e {
+                        kernel::DocumentError::LockedNode { .. } => frame_frozen,
+                        kernel::DocumentError::ExplodeSessionScope
+                        | kernel::DocumentError::UnknownComponent => true,
+                        _ => false,
+                    };
+                    if !expected {
+                        return Err(format!("a face draft on a frozen Object refused: {e:?}"));
+                    }
+                }
+            }
+        }
+        Op::Lock { sel, locked } => {
+            let all = lock_oracle::all_live_nodes(doc);
+            if let Some(n) = pick(&all, sel) {
+                let before = doc.state_hash();
+                if doc.set_nodes_locked(&[n], locked).is_err() && doc.state_hash() != before {
+                    return Err("a refused lock changed the document".to_string());
+                }
+            }
+        }
+        Op::UnlockAll => {
+            let _ = doc.unlock_all();
+        }
+        Op::JoinLinked { set, sel } => {
+            let linked: Vec<InstanceId> = instances
+                .iter()
+                .copied()
+                .filter(|&i| doc.instance_def(i).is_some_and(|d| doc.is_linked_set(d)))
+                .collect();
+            let (Some(set), Some(NodeId::Object(joiner))) = (pick(&linked, set), pick(&nodes, sel))
+            else {
+                return Ok(());
+            };
+            // The pose that lands the set's solid on the joiner when both
+            // are the same unrotated box: the step between their corners.
+            let min = |o: ObjectId| {
+                doc.object(o).map(|obj| {
+                    obj.vertices().values().fold(
+                        Point3::new(f64::MAX, f64::MAX, f64::MAX),
+                        |m, v| {
+                            Point3::new(
+                                m.x.min(v.position.x),
+                                m.y.min(v.position.y),
+                                m.z.min(v.position.z),
+                            )
+                        },
+                    )
+                })
+            };
+            let def = doc.instance_def(set).expect("live");
+            let member = doc.def_members(def).unwrap_or_default().first().copied();
+            let (Some(m), Some(w)) = (member.and_then(min), min(joiner)) else {
+                return Ok(());
+            };
+            let pose = Transform::translation(w - m);
+            let before = doc.state_hash();
+            if doc.join_linked(set, joiner, pose).is_err() && doc.state_hash() != before {
+                return Err("a refused join changed the document".to_string());
             }
         }
         Op::CopySketch { sel, step } => {
@@ -1227,8 +1384,24 @@ fn run_case(boxes: usize, ops: Vec<Op>) -> Result<(), TestCaseError> {
     for (step, op) in ops.iter().enumerate() {
         let mut before = (doc.state_hash(), doc.history_generation());
         LAST_STEP_BEFORE.set(None);
+        let frozen = lock_oracle::frozen_snapshot(&doc);
         apply(&mut doc, op)
             .map_err(|e| TestCaseError::fail(format!("step {step} ({op:?}): {e}")))?;
+        // The lock oracle, for forward steps (see the module comment).
+        if !matches!(
+            op,
+            Op::Undo | Op::Redo | Op::OpenComponentSession { .. } | Op::CloseSession
+        ) {
+            let kind = match op {
+                Op::MakeUnique { .. }
+                | Op::MakeUniqueByPath { .. }
+                | Op::UnlinkPlacement { .. } => lock_oracle::StepKind::MakeUnique,
+                Op::Lock { locked: false, .. } | Op::UnlockAll => lock_oracle::StepKind::Unlock,
+                _ => lock_oracle::StepKind::Edit,
+            };
+            lock_oracle::check_frozen_kept(&doc, &frozen, kind)
+                .map_err(|e| TestCaseError::fail(format!("step {step} ({op:?}): {e}")))?;
+        }
         if let Some(last) = LAST_STEP_BEFORE.take() {
             before = last;
         }
@@ -1390,6 +1563,47 @@ fn a_rectangle_from_the_joint_of_a_split_diagonal_undoes_exactly() {
             a: 7346897907336210354,
             b: 16510158797029363534,
             flip: true,
+        },
+    ];
+    run_case(3, ops).unwrap();
+}
+
+/// Fuzz find (OW-1): a plane draft rewrote the drawing a locked group holds
+/// (the group's own lines on the plane). A frozen sketch takes no part in a
+/// plane draft: the new drawing is separate from it, as from a frozen Object.
+#[test]
+fn a_plane_draft_leaves_a_locked_groups_drawing_alone() {
+    let ops = vec![
+        Op::Group {
+            a: 1908474449339777841,
+            b: 509374639357145375,
+        },
+        Op::Delete {
+            sel: 4918931407275104233,
+        },
+        Op::InsertAsDefinition { sel: 0, key: 0 },
+        Op::OpenGroupSession { sel: 0 },
+        Op::FaceBox {
+            at: 182,
+            detached: false,
+        },
+        Op::DuplicateLinked {
+            sel: 8090201386819040159,
+        },
+        Op::DeleteLinkedPlacement { sel: 0 },
+        Op::CloseSession,
+        Op::InsertAsDefinition {
+            sel: 245807946417544745,
+            key: 1,
+        },
+        Op::Lock {
+            sel: 13016010298318116339,
+            locked: true,
+        },
+        Op::Rect3D {
+            a: 1505235401332051149,
+            b: 6629831233827239613,
+            flip: false,
         },
     ];
     run_case(3, ops).unwrap();

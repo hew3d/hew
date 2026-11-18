@@ -75,6 +75,7 @@ import { PositionTextureTool } from '../tools/PositionTextureTool'
 import { MoveTool } from '../tools/MoveTool'
 import { RotateTool } from '../tools/RotateTool'
 import { ScaleTool } from '../tools/ScaleTool'
+import { lockHintFor } from '../lock/lockModel'
 import { FlipTool, flipAlongAxis } from '../tools/FlipTool'
 import { TapeMeasureTool, type RescaleConfirmInfo, type SessionScopeIds } from '../tools/TapeMeasureTool'
 export type { RescaleConfirmInfo } from '../tools/TapeMeasureTool'
@@ -927,6 +928,9 @@ export interface ViewportApi {
    * harness geometry exists in the kernel but never reaches the GPU.
    */
   refreshScene: () => void
+  /** Re-color the selected edges after a lock changed (Lock, Unlock, undo,
+   *  redo, Make Unique): nothing else about the scene did. */
+  refreshSelectionColors?: () => void
   /**
    * Rebuild the drafting lines and region fills alone (`refreshAllSketches`)
    * and draw a frame: what a visibility change needs, since a sketch hides
@@ -3233,6 +3237,15 @@ export default function Viewport({
     // ------------------------------------------------------------------ scene renderer
     const sceneRenderer = new SceneRenderer(threeScene, wasmScene)
     sceneRendererRef.current = sceneRenderer
+    // A selected thing that is locked (or sits inside something locked)
+    // draws its edges red instead of orange.
+    sceneRenderer.setFrozenResolver((kind, id) => {
+      try {
+        return wasmScene.node_frozen(kind === 'object' ? 0 : 2, id) !== undefined
+      } catch {
+        return false
+      }
+    })
     sceneRenderer.onUnrenderable = () =>
       onToastRef.current?.(t`Part of this file can't be drawn, so it was left out. The rest of the model is unaffected.`)
     // Initial refresh (empty scene is fine — just populates nothing)
@@ -4497,6 +4510,9 @@ export default function Viewport({
     /** Identity of what the hover highlight currently shows (null: nothing),
      * so a pointer move over the same target rebuilds nothing. */
     let acquireHoverKey: string | null = null
+    /** The "Locked" line for the node a click would pick up (Move, Rotate,
+     *  Scale), shown beside the cursor like a tool's own `hoverHint` (OW-1). */
+    let acquireHoverLock: string | null = null
 
     /**
      * Highlight what a click would pick up right now (types.ts
@@ -4521,6 +4537,7 @@ export default function Viewport({
         if (spec.guides) guide = pickGuideTarget(at)
         if (guide === null && spec.nodes) node = pickTransformableUnderCursor(at)
       }
+      acquireHoverLock = node !== null ? (lockHintFor(wasmScene, node)?.message ?? null) : null
       const activeInstance = activeInstanceOf(activeContextRef.current)
       const key = guide !== null
         ? `guide:${guide}`
@@ -8428,7 +8445,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, operandTriangles, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runFlipAlong, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setViewDirection, orbitDrag, endOrbitDrag, subscribeCameraOrientation, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => {
+      apiRefRef.current.current = { refreshSelectionColors: () => { sceneRenderer.refreshSelectionColors(); scheduleRender() }, runBoolean, operandTriangles, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runFlipAlong, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setViewDirection, orbitDrag, endOrbitDrag, subscribeCameraOrientation, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => {
         const isolation = isolationCtl.state()
         return isolation === null ? null : [...isolation.targets]
       }, collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getFaceCue: () => faceCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, getHoverHighlight: () => sceneRenderer.getHoverHighlight(), rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setPartAxesVisible, getPartAxesInfo, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, setTangentEdgesVisible, getTangentEdgeInfo: () => sceneRenderer.getTangentEdgeInfo(), deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getInstanceRenderedInherited: (id: bigint) => sceneRenderer.debugInstanceInherited(id), getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
@@ -11114,7 +11131,7 @@ export default function Viewport({
           // A tool's own hover guidance (Tool.hoverHint): the refusal a
           // click would toast, shown beside the cursor before the click.
           ...((): { hint?: string } => {
-            const hint = activeTool.hoverHint?.() ?? null
+            const hint = activeTool.hoverHint?.() ?? acquireHoverLock
             return hint === null ? {} : { hint }
           })(),
           // Hover identification is a Select-only, idle-only second line.
@@ -11657,6 +11674,13 @@ export default function Viewport({
       // session or a component session.
       const enterSelectable = (selectable: NodeRef | null): void => {
         if (selectable !== null) {
+          // A locked thing (or a shape also used inside a locked group) is
+          // not opened for editing: say so, with Unlock (OW-1).
+          const locked = lockHintFor(wasmScene, selectable, { shape: true })
+          if (locked !== null) {
+            handleToast(locked.message, locked.code)
+            return
+          }
           if (activeContextRef.current.length > 0) {
             // Already drilled into an object/K1-K2-instance context on top
             // of whatever session (if any) sits beneath it — the resolved

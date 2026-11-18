@@ -1459,3 +1459,233 @@ fn a_cylinder_far_out_turns_and_scales_and_the_file_reopens() {
         assert_eq!(back.state_hash(), doc.state_hash(), "{method}: reopens");
     }
 }
+
+// ---------------------------------------------------- hew.entity.lock / unlock
+
+/// A box made a set of four linked copies: the four placements.
+fn four_linked(doc: &mut Document) -> Vec<kernel::InstanceId> {
+    let o = build_box(doc, 0.0);
+    let (copies, change) = doc
+        .duplicate_nodes_array(
+            &[kernel::NodeId::Object(o)],
+            &kernel::Transform::translation(kernel::Vec3::new(3.0, 0.0, 0.0)),
+            std::num::NonZeroU32::new(3).unwrap(),
+            kernel::LinkPolicy::Linked,
+        )
+        .expect("linked copies");
+    let mut all = vec![change.linked[0].instance];
+    all.extend(copies.into_iter().map(|n| match n {
+        kernel::NodeId::Instance(i) => i,
+        other => panic!("{other:?}"),
+    }));
+    all
+}
+
+#[test]
+fn lock_is_one_undo_step_and_query_entity_reports_it() {
+    let mut doc = Document::new();
+    let obj = build_box(&mut doc, 0.0);
+    let public = public_of(&doc, &kernel::EntityRef::Object(obj));
+    let mut conn = Connection::new(Grant::core(), "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
+    let bytes_before = doc.save();
+
+    let r = call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.entity.lock",
+        json!({ "targets": [public] }),
+    );
+    assert_eq!(r["changed"], 1);
+    assert!(doc.node_locked(kernel::NodeId::Object(obj)));
+    let e = call_ok(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.query.entity",
+        json!({ "id": public }),
+    );
+    assert_eq!(e["locked"], true);
+    assert_eq!(e["frozen"], true);
+    assert_one_undo_and_clean_undo(&mut doc, depth_before, &bytes_before);
+    let e = call_ok(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.query.entity",
+        json!({ "id": public }),
+    );
+    assert_eq!(e["locked"], false);
+    assert_eq!(e["frozen"], false);
+}
+
+#[test]
+fn locking_one_copy_locks_every_copy_and_rows_report_it() {
+    let mut doc = Document::new();
+    let legs = four_linked(&mut doc);
+    let ids: Vec<String> = legs
+        .iter()
+        .map(|&i| public_of(&doc, &kernel::EntityRef::Instance(i)))
+        .collect();
+    let mut conn = Connection::new(Grant::core(), "test");
+    hello_attach(&mut conn, &mut doc);
+
+    let r = call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.entity.lock",
+        json!({ "targets": [ids[2]] }),
+    );
+    assert_eq!(r["changed"], 1, "one shape changed");
+    for (n, id) in ids.iter().enumerate() {
+        let e = call_ok(
+            &mut conn,
+            &mut doc,
+            10 + n as i64,
+            "hew.query.entity",
+            json!({ "id": id }),
+        );
+        assert_eq!(e["locked"], true, "{id}");
+        assert_eq!(e["frozen"], true, "{id}");
+    }
+    let def = doc.instance_def(legs[0]).unwrap();
+    let def_public = public_of(&doc, &kernel::EntityRef::Component(def));
+    let e = call_ok(
+        &mut conn,
+        &mut doc,
+        20,
+        "hew.query.entity",
+        json!({ "id": def_public }),
+    );
+    assert_eq!(e["locked"], true, "the lock is on the shape");
+
+    let rows = call_ok(&mut conn, &mut doc, 21, "hew.query.occurrences", json!({}));
+    let rows = rows["occurrences"].as_array().unwrap();
+    assert!(!rows.is_empty());
+    for row in rows {
+        // The copies are locked; the board inside them is frozen with them.
+        let is_instance = row["kind"] == "instance";
+        assert_eq!(row["locked"], is_instance, "{row}");
+        assert_eq!(row["frozen"], true, "{row}");
+    }
+
+    // Unlock from another copy unlocks them all, as one step.
+    let depth = doc.undo_depth();
+    call_ok(
+        &mut conn,
+        &mut doc,
+        22,
+        "hew.entity.unlock",
+        json!({ "targets": [ids[0]] }),
+    );
+    assert_eq!(doc.undo_depth(), depth + 1);
+    for &leg in &legs {
+        assert!(!doc.node_locked(kernel::NodeId::Instance(leg)));
+    }
+}
+
+#[test]
+fn unlock_all_unlocks_everything() {
+    let mut doc = Document::new();
+    let a = build_box(&mut doc, 0.0);
+    let b = build_box(&mut doc, 5.0);
+    let (g, _) = doc.group_nodes(&[kernel::NodeId::Object(b)]).unwrap();
+    doc.set_nodes_locked(&[kernel::NodeId::Object(a), kernel::NodeId::Group(g)], true)
+        .unwrap();
+    let mut conn = Connection::new(Grant::core(), "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
+    let bytes_before = doc.save();
+    let r = call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.entity.unlock",
+        json!({ "all": true }),
+    );
+    assert_eq!(r["changed"], 2);
+    assert!(!doc.node_locked(kernel::NodeId::Object(a)));
+    assert!(!doc.node_locked(kernel::NodeId::Group(g)));
+    assert_eq!(doc.node_frozen(kernel::NodeId::Object(b)), None);
+    assert_one_undo_and_clean_undo(&mut doc, depth_before, &bytes_before);
+
+    // Nothing to change: success, no entry.
+    doc.unlock_all().unwrap();
+    let depth = doc.undo_depth();
+    let r = call_ok(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.entity.unlock",
+        json!({ "all": true }),
+    );
+    assert_eq!(r["changed"], 0);
+    assert_eq!(doc.undo_depth(), depth);
+}
+
+#[test]
+fn lock_refuses_bad_targets_and_changes_nothing() {
+    let mut doc = Document::new();
+    let obj = build_box(&mut doc, 0.0);
+    let public = public_of(&doc, &kernel::EntityRef::Object(obj));
+    let mat = doc.add_material(kernel::Material::solid(
+        "Oak",
+        kernel::Rgba8::rgb(180, 140, 90),
+    ));
+    let mat_public = public_of(&doc, &kernel::EntityRef::Material(mat));
+    let mut conn = Connection::new(Grant::core(), "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth = doc.undo_depth();
+
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.entity.lock",
+        json!({ "targets": [public, "obj_ffffff"] }),
+    );
+    assert_eq!(data["refusal"], "unknown_entity");
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.entity.lock",
+        json!({ "targets": [mat_public] }),
+    );
+    assert_eq!(data["refusal"], "not_a_node");
+    assert!(!doc.node_locked(kernel::NodeId::Object(obj)));
+    assert_eq!(doc.undo_depth(), depth);
+
+    for (n, params) in [
+        json!({ "targets": [] }),
+        json!({}),
+        json!({ "targets": [public], "extra": 1 }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let r = call(&mut conn, &mut doc, 4 + n as i64, "hew.entity.lock", params);
+        assert_eq!(r.error.as_ref().unwrap().code, codes::INVALID_PARAMS);
+    }
+    for (n, params) in [
+        json!({}),
+        json!({ "all": true, "targets": [public] }),
+        json!({ "all": false }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let r = call(
+            &mut conn,
+            &mut doc,
+            10 + n as i64,
+            "hew.entity.unlock",
+            params,
+        );
+        assert_eq!(r.error.as_ref().unwrap().code, codes::INVALID_PARAMS);
+    }
+    assert_eq!(doc.undo_depth(), depth);
+}

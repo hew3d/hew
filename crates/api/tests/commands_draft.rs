@@ -1377,3 +1377,140 @@ fn extruding_a_detached_region_makes_a_new_object() {
     assert_ne!(first(&made)["object_id"].as_str().unwrap(), object_id);
     assert_eq!(doc.visible_object_ids().len(), 3);
 }
+
+// ------------------------------------------ drawing on a locked Object's face
+
+/// The box's geometry as a lock keeps it: its vertices, quantized and
+/// sorted, and its face count.
+fn box_print(doc: &Document, o: kernel::ObjectId) -> (Vec<[i64; 3]>, usize) {
+    let obj = doc.object(o).expect("the box is live");
+    let mut pts: Vec<[i64; 3]> = obj
+        .vertices()
+        .values()
+        .map(|v| {
+            let p = v.position;
+            [
+                (p.x * 1e9).round() as i64,
+                (p.y * 1e9).round() as i64,
+                (p.z * 1e9).round() as i64,
+            ]
+        })
+        .collect();
+    pts.sort_unstable();
+    (pts, obj.faces().len())
+}
+
+/// OW-1 (v1.5 owner's items D1): a rectangle drawn on a locked box's face
+/// is drawn detached whatever `detached` says (omitted or `false`): the
+/// detached result shape, one detached sketch, and extruding its region in
+/// the same transaction makes a new Object; the box is unchanged and
+/// still locked.
+#[test]
+fn a_draw_on_a_locked_face_is_detached_and_pulls_into_a_new_object() {
+    for detached in [None, Some(false)] {
+        let (mut conn, mut doc, object_id) = setup();
+        let o = doc.visible_object_ids()[0];
+        call_ok(
+            &mut conn,
+            &mut doc,
+            3,
+            "hew.entity.lock",
+            json!({ "targets": [object_id] }),
+        );
+        let print = box_print(&doc, o);
+        let mut rect = json!({
+            "plane": top_plane(&object_id),
+            "corner_a": [0.05, 0.05, 0.2],
+            "corner_b": [0.15, 0.15, 0.2]
+        });
+        if let Some(d) = detached {
+            rect["detached"] = json!(d);
+        }
+        let r = call_ok_one_undo(
+            &mut conn,
+            &mut doc,
+            4,
+            "hew.doc.transact",
+            json!({
+                "label": "Boss",
+                "commands": [
+                    { "method": "hew.sketch.draw_rect", "as": "r", "params": rect },
+                    { "method": "hew.solid.extrude", "params": {
+                        "region": { "$ref": "r#/region_id" }, "distance": 0.1
+                    }}
+                ]
+            }),
+        );
+        let drawn = first(&r);
+        assert!(drawn.get("object_id").is_none(), "no face cut: {drawn}");
+        assert!(drawn["sketch"].is_string(), "{drawn}");
+        assert_eq!(drawn["region_ids"].as_array().unwrap().len(), 1, "{drawn}");
+        let made = r["results"][1]["object_id"].as_str().unwrap();
+        assert_ne!(made, object_id, "a new Object ({detached:?})");
+        assert_eq!(doc.visible_object_ids().len(), 2);
+        assert_eq!(box_print(&doc, o), print, "the box is unchanged");
+        assert!(doc.node_locked(kernel::NodeId::Object(o)), "still locked");
+    }
+    // Without the extrude, the sketch stays and is detached.
+    let (mut conn, mut doc, object_id) = setup();
+    call_ok(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.entity.lock",
+        json!({ "targets": [object_id] }),
+    );
+    let r = call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.sketch.draw_rect",
+        json!({
+            "plane": top_plane(&object_id),
+            "corner_a": [0.0, 0.0, 0.2],
+            "corner_b": [0.2, 0.2, 0.2]
+        }),
+    );
+    let seps = detached_sketches(&mut conn, &mut doc);
+    assert_eq!(seps.len(), 1, "one detached sketch");
+    assert_eq!(seps[0]["id"], first(&r)["sketch"]);
+}
+
+/// A face of a member of a locked shape still refuses `locked_node`: a
+/// drawing in the shape's frame, detached or not, edits the shape.
+#[test]
+fn a_draw_on_a_locked_shapes_member_face_refuses_locked_node() {
+    let (mut conn, mut doc, object_id) = setup();
+    let created = call_ok(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.component.create",
+        json!({ "members": [object_id.clone()] }),
+    );
+    let instance = created["results"][0]["instance"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call_ok(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.entity.lock",
+        json!({ "targets": [instance] }),
+    );
+    for detached in [None, Some(false), Some(true)] {
+        let before = doc.save();
+        let mut rect = json!({
+            "plane": top_plane(&object_id),
+            "corner_a": [0.05, 0.05, 0.2],
+            "corner_b": [0.15, 0.15, 0.2]
+        });
+        if let Some(d) = detached {
+            rect["detached"] = json!(d);
+        }
+        let data = call_err(&mut conn, &mut doc, 5, "hew.sketch.draw_rect", rect);
+        assert_eq!(data["refusal"], "locked_node", "{detached:?}: {data}");
+        assert_eq!(doc.save(), before, "nothing changed ({detached:?})");
+    }
+}

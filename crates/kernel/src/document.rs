@@ -193,6 +193,12 @@ struct ObjectRecord {
     /// undo step ([`DocAction::ObjectImportCleared`]). Persisted as
     /// `objects[].imported` (manifest v30+).
     imported: bool,
+    /// The person locked this Object (OW-1): nothing changes on it until
+    /// it is unlocked ([`Document::set_nodes_locked`]). Undoable
+    /// ([`DocAction::NodeLockChanged`]); persisted as `objects[].locked`
+    /// (manifest v33+). A copy that is separate from the start does not
+    /// inherit it.
+    locked: bool,
 }
 
 /// The owned-sketch drawing that rides with a pushed face
@@ -369,6 +375,11 @@ struct GroupRecord {
     name: Option<String>,
     /// Per-node tag paths (root-first segment lists). Empty by default.
     tags: Vec<Vec<String>>,
+    /// The person locked this group (OW-1); see [`ObjectRecord::locked`].
+    /// Everything inside a locked group is frozen with it
+    /// ([`Document::node_frozen`]). Persisted as `groups[].locked`
+    /// (manifest v33+).
+    locked: bool,
 }
 
 /// A component definition (ARCHITECTURE.md): shared geometry as a flat set of leaf
@@ -394,6 +405,13 @@ struct ComponentDef {
     /// display name for this definition's instances. `None` falls back to a
     /// positional label in the UI.
     name: Option<String>,
+    /// The shape is locked (OW-1). A lock belongs to a shape, not to one
+    /// copy of it: an [`InstanceRecord`] has no flag of its own and is
+    /// locked exactly when its definition is, so locking any copy locks
+    /// every copy by construction. The definition's contents are frozen
+    /// everywhere it is placed ([`Document::node_frozen`]). Persisted as
+    /// `components[].locked` (manifest v33+).
+    locked: bool,
 }
 
 /// A component instance (ARCHITECTURE.md): a tree node placing a
@@ -1141,6 +1159,8 @@ pub fn render_history_label(kind: &HistoryKind) -> String {
         },
         "delete-tags" => format!("Delete {}", count_label(count("count"), "tag")),
         "rename-tag" => "Rename tag".to_string(),
+        "lock" => "Lock".to_string(),
+        "unlock" => "Unlock".to_string(),
         "import" => format!("Import {}", count_label(count("count"), "item")),
         "delete-component-member" => "Delete component member".to_string(),
         other => other.to_string(),
@@ -1195,16 +1215,6 @@ enum RepairKind {
     },
 }
 
-/// One document-level step on the undo stack.
-///
-/// Object creation is undone by hiding (not deleting), so the `ObjectId` never
-/// churns — redo just unhides, and a later `ObjectOp` still refers to a live
-/// handle.
-// `Transform` carries f64s (no `Eq`) and the `Vec` fields (transform targets,
-// grouped membership) make this non-`Copy`. Not `PartialEq`: `Rescale` snapshots
-// full `Object`/`Sketch` clones, neither of which derives it, and nothing
-// outside this private enum ever compares two actions (`matches!` needs no
-// such bound) — a manual impl would be dead weight.
 /// A linked set's shared-solid base moved onto its copies, as
 /// [`Document::join_linked`] and a paint on one copy
 /// ([`Document::set_instance_material`]) do: every placement in
@@ -1217,6 +1227,252 @@ struct LinkedBaseMove {
     restamped: Vec<(InstanceId, FaceMaterial)>,
 }
 
+/// What carries a lock (OW-1): an Object, a group, or a component
+/// definition. A component instance has no flag of its own; it stands for
+/// its definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LockHolder {
+    Object(ObjectId),
+    Group(GroupId),
+    Component(ComponentId),
+}
+
+/// Why a node is frozen (OW-1): the locked node to name, and whether the
+/// lock reaches it only through a shared shape
+/// ([`DocumentError::LockedNode`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Freeze {
+    cause: NodeId,
+    via_shared_shape: bool,
+}
+
+impl Freeze {
+    fn error(self) -> DocumentError {
+        DocumentError::LockedNode {
+            node: self.cause,
+            via_shared_shape: self.via_shared_shape,
+        }
+    }
+}
+
+/// Each unlocked definition's freeze cause, answered once per query.
+type FreezeMemo = BTreeMap<ComponentId, Option<NodeId>>;
+
+impl LockHolder {
+    /// The entity carrying the flag, for change sets.
+    fn entity(self) -> EntityRef {
+        match self {
+            LockHolder::Object(o) => EntityRef::Object(o),
+            LockHolder::Group(g) => EntityRef::Group(g),
+            LockHolder::Component(c) => EntityRef::Component(c),
+        }
+    }
+}
+
+/// What the commit audit ([`Document::audit_locks`]) lets a committed
+/// entry change on a frozen node (OW-1). Exactly two kinds of entry re-own
+/// a locked subtree without changing it, so their own records are exempt:
+///
+/// - a wrap ([`DocAction::WrappedLinked`], and each one inside a
+///   [`DocAction::LinkedCopies`]): the wrapped node, the leaf Objects it
+///   re-owned, and the groups and placements folded with it. The parent
+///   group and the outer definition whose member lists it rewrote are NOT
+///   exempt: a wrap is an edit to its container
+///   ([`Document::refuse_frozen_container`]);
+/// - Make Unique ([`DocAction::MadeUnique`]): the placement it repointed
+///   (its own record only: the audit still checks the group or definition
+///   holding it, [`Document::audit_repoint_container`]), the definition it
+///   left (which lost a placement, nothing else), and a linked set it
+///   emptied (hidden with its members, unchanged). The copies the same
+///   call made and repointed are new, not exempt by kind
+///   ([`made_unique_fresh`]).
+///
+/// The match is exhaustive with no catch-all, so a new kind of entry must
+/// decide here.
+#[cfg(any(debug_assertions, test))]
+fn audit_exempt(action: &DocAction) -> Vec<EntityRef> {
+    match action {
+        DocAction::WrappedLinked {
+            node,
+            member_prior_parents,
+            folded_groups,
+            folded_instances,
+            ..
+        } => {
+            let mut out = vec![change_entity(*node)];
+            out.extend(
+                member_prior_parents
+                    .iter()
+                    .map(|&(o, _)| EntityRef::Object(o)),
+            );
+            out.extend(folded_groups.iter().map(|&g| EntityRef::Group(g)));
+            out.extend(folded_instances.iter().map(|&i| EntityRef::Instance(i)));
+            out
+        }
+        DocAction::LinkedCopies { wraps, .. } => wraps.iter().flat_map(audit_exempt).collect(),
+        DocAction::MadeUnique {
+            instance,
+            prev_def,
+            hidden_defs,
+            ..
+        } => {
+            let mut out = vec![
+                EntityRef::Instance(*instance),
+                EntityRef::Component(*prev_def),
+            ];
+            for (d, nodes) in hidden_defs {
+                out.push(EntityRef::Component(*d));
+                out.extend(nodes.iter().map(|&n| change_entity(n)));
+            }
+            out
+        }
+        DocAction::Compound { .. }
+        | DocAction::AttrSet { .. }
+        | DocAction::AttrDeleted { .. }
+        | DocAction::FaceAttrSet { .. }
+        | DocAction::FaceAttrDeleted { .. }
+        | DocAction::EdgeAttrSet { .. }
+        | DocAction::EdgeAttrDeleted { .. }
+        | DocAction::CreatedObject { .. }
+        | DocAction::ObjectOp { .. }
+        | DocAction::Boolean { .. }
+        | DocAction::BooleanNodes { .. }
+        | DocAction::Sliced { .. }
+        | DocAction::Repaired { .. }
+        | DocAction::Reshaped { .. }
+        | DocAction::PushThrough { .. }
+        | DocAction::CreatedObjectFromFaces { .. }
+        | DocAction::GrewObjectFromFaces { .. }
+        | DocAction::Transform { .. }
+        | DocAction::TransformSketch { .. }
+        | DocAction::TransformSketchIsland { .. }
+        | DocAction::DetachedSketchIsland { .. }
+        | DocAction::CopiedSketchIslands { .. }
+        | DocAction::SketchOwnerChanged { .. }
+        | DocAction::SketchGroupChanged { .. }
+        | DocAction::ObjectImportCleared { .. }
+        | DocAction::TransformSelection { .. }
+        | DocAction::Rescale { .. }
+        | DocAction::SetAxes { .. }
+        | DocAction::SetGeoReference { .. }
+        | DocAction::MovedSketchVertex { .. }
+        | DocAction::RearrangedSketchVertex { .. }
+        | DocAction::SketchGesture { .. }
+        | DocAction::Grouped { .. }
+        | DocAction::Reparented { .. }
+        | DocAction::Ungrouped { .. }
+        | DocAction::Deleted { .. }
+        | DocAction::MadeComponent { .. }
+        | DocAction::JoinedLinked { .. }
+        | DocAction::PlacedInstance { .. }
+        | DocAction::Duplicated { .. }
+        | DocAction::DuplicatedArray { .. }
+        | DocAction::CreatedGuide { .. }
+        | DocAction::DeletedGuide { .. }
+        | DocAction::DeletedGuides { .. }
+        | DocAction::TransformedGuide { .. }
+        | DocAction::DuplicatedGuides { .. }
+        | DocAction::CreatedAnnotation { .. }
+        | DocAction::DeletedAnnotation { .. }
+        | DocAction::UpdatedAnnotation { .. }
+        | DocAction::DeletedSketch { .. }
+        | DocAction::TransformInstance { .. }
+        | DocAction::RebasedDefinition { .. }
+        | DocAction::DefObjectOp { .. }
+        | DocAction::Exploded { .. }
+        | DocAction::SessionOpened { .. }
+        | DocAction::SessionClosed { .. }
+        | DocAction::GroupSessionOpened { .. }
+        | DocAction::GroupSessionClosed { .. }
+        | DocAction::PaintFace { .. }
+        | DocAction::SetObjectMaterial { .. }
+        | DocAction::SetInstanceMaterial { .. }
+        | DocAction::SetFaceUvFrame { .. }
+        | DocAction::ReplaceMaterial { .. }
+        | DocAction::SetMaterialAlpha { .. }
+        | DocAction::SetMaterialPbr { .. }
+        | DocAction::MaterialRenamed { .. }
+        | DocAction::MaterialDeleted { .. }
+        | DocAction::DefinitionDeleted { .. }
+        | DocAction::NodeMetaChanged { .. }
+        | DocAction::ComponentRenamed { .. }
+        | DocAction::NodeLockChanged { .. }
+        | DocAction::TagDeleted { .. }
+        | DocAction::TagRenamed { .. }
+        | DocAction::Generated { .. }
+        | DocAction::FollowMeFace { .. }
+        | DocAction::Imported { .. }
+        | DocAction::DeletedDefMember { .. }
+        | DocAction::ConsumedScaffolding { .. }
+        | DocAction::PlaceTextCompound(_) => Vec::new(),
+    }
+}
+
+/// The entry's variant name, for the audit's panic message.
+#[cfg(any(debug_assertions, test))]
+fn action_variant_name(action: &DocAction) -> String {
+    format!("{action:?}")
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect()
+}
+
+/// What one Make Unique call created, for the commit audit: each step's
+/// new definition and every copy it made (members, nested groups and
+/// placements, sketches). A step after the first repoints only these (a
+/// cascade's next path element, a deep fork's nested copies, the copies
+/// sharing one private definition), so neither the records it repoints
+/// nor the definitions holding them existed before the call.
+#[cfg(any(debug_assertions, test))]
+fn made_unique_fresh(steps: &[DocAction]) -> Vec<EntityRef> {
+    let mut out = Vec::new();
+    for step in steps {
+        if let DocAction::MadeUnique {
+            new_def, copied, ..
+        } = step
+        {
+            out.push(EntityRef::Component(*new_def));
+            out.extend(copied.iter().map(|(new, _)| new.clone()));
+        }
+    }
+    out
+}
+
+/// Whether `action` is, or bundles, a lock change.
+#[cfg(any(debug_assertions, test))]
+fn action_holds_lock_change(action: &DocAction) -> bool {
+    match action {
+        DocAction::NodeLockChanged { .. } => true,
+        DocAction::Compound { actions, .. } | DocAction::PlaceTextCompound(actions) => {
+            actions.iter().any(action_holds_lock_change)
+        }
+        DocAction::LinkedCopies { wraps, array } => {
+            wraps.iter().any(action_holds_lock_change) || action_holds_lock_change(array)
+        }
+        _ => false,
+    }
+}
+
+/// A node as the change-set entity naming it.
+#[cfg(any(debug_assertions, test))]
+fn change_entity(node: NodeId) -> EntityRef {
+    match node {
+        NodeId::Object(o) => EntityRef::Object(o),
+        NodeId::Group(g) => EntityRef::Group(g),
+        NodeId::Instance(i) => EntityRef::Instance(i),
+    }
+}
+
+/// One document-level step on the undo stack.
+///
+/// Object creation is undone by hiding (not deleting), so the `ObjectId` never
+/// churns — redo just unhides, and a later `ObjectOp` still refers to a live
+/// handle.
+// `Transform` carries f64s (no `Eq`) and the `Vec` fields (transform targets,
+// grouped membership) make this non-`Copy`. Not `PartialEq`: `Rescale` snapshots
+// full `Object`/`Sketch` clones, neither of which derives it, and nothing
+// outside this private enum ever compares two actions (`matches!` needs no
+// such bound) — a manual impl would be dead weight.
 #[derive(Debug, Clone)]
 enum DocAction {
     /// Several ordinary actions committed as one step. Children stay
@@ -1857,6 +2113,11 @@ enum DocAction {
         /// back on the Object and clears the instance's; redo moves it
         /// again. `None` for a Group or an unpainted Object.
         moved_material: FaceMaterial,
+        /// The wrapped node was locked, and its lock moved onto `def` (OW-1:
+        /// a lock belongs to a shape, so the set's placements carry it and
+        /// the member carries none). Undo puts the flag back on the node
+        /// and clears the definition's; redo moves it again.
+        moved_lock: bool,
     },
     /// A [`LinkPolicy::Linked`] copy as one entry: the wraps it made, then
     /// the copies. Undo reverses `array`, then each wrap last to first;
@@ -2462,6 +2723,17 @@ enum DocAction {
         prev_name: Option<String>,
         next_name: Option<String>,
     },
+    /// [`Document::set_nodes_locked`] / [`Document::unlock_all`] changed the
+    /// lock of one or more shapes (OW-1). `holders` lists only the records
+    /// whose flag actually flipped (so each one's previous value is the
+    /// opposite of `locked`); undo sets each back to `!locked`, redo to
+    /// `locked`. Handle-stable: nothing is created or destroyed. A lock
+    /// is itself an entry on the stack, so undo and redo never meet a
+    /// frozen node (DEVELOPMENT.md rule 9 stays intact).
+    NodeLockChanged {
+        holders: Vec<LockHolder>,
+        locked: bool,
+    },
     /// `delete_tag` removed a tag path (and every registered tag nested under
     /// it) from the document: unregistered from the tag metadata registry and
     /// unassigned from every visible node that carried it. Geometry is never
@@ -2943,6 +3215,15 @@ impl DocAction {
                 _ => Vec::new(),
             },
             DocAction::ComponentRenamed { .. } => Vec::new(),
+            // Like a rename: an Object whose lock flipped is named, so a
+            // session closing over it keeps the record it now has.
+            DocAction::NodeLockChanged { holders, .. } => holders
+                .iter()
+                .filter_map(|h| match h {
+                    LockHolder::Object(o) => Some(*o),
+                    _ => None,
+                })
+                .collect(),
             DocAction::TagDeleted { nodes, .. } | DocAction::TagRenamed { nodes, .. } => nodes
                 .iter()
                 .filter_map(|(n, ..)| match n {
@@ -3065,6 +3346,7 @@ impl DocAction {
             | DocAction::DefinitionDeleted { .. }
             | DocAction::NodeMetaChanged { .. }
             | DocAction::ComponentRenamed { .. }
+            | DocAction::NodeLockChanged { .. }
             | DocAction::TagDeleted { .. }
             | DocAction::TagRenamed { .. }
             | DocAction::FollowMeFace { .. }
@@ -3943,6 +4225,22 @@ pub enum DocumentError {
     /// signature's 1 µm quantum), or the set holds more than one solid.
     /// The document is untouched.
     NotIdentical,
+    /// The edit would change a frozen node (OW-1): one that is locked, sits
+    /// inside a locked group, or is part of a locked shape
+    /// ([`Document::node_frozen`]). `node` is the locked node that is the
+    /// cause, so a caller can name it and offer to unlock it. Nothing is
+    /// changed.
+    ///
+    /// `via_shared_shape` is true when the lock reaches the edit only
+    /// through a shared shape: the shape the edit would change is also
+    /// placed inside something locked (a locked group, or a locked
+    /// component), and the shape itself is not locked. The cause is then
+    /// neither the target nor anything above it, and the way out is Make
+    /// Unique on the copy being edited (or unlocking `node`).
+    LockedNode {
+        node: NodeId,
+        via_shared_shape: bool,
+    },
 }
 
 impl std::fmt::Display for DocumentError {
@@ -4183,6 +4481,17 @@ impl std::fmt::Display for DocumentError {
                 write!(f, "these pieces can't be rejoined into one solid")
             }
             DocumentError::NotIdentical => write!(f, "these aren't the same shape"),
+            DocumentError::LockedNode {
+                via_shared_shape: false,
+                ..
+            } => write!(f, "this is locked; unlock it to change it"),
+            DocumentError::LockedNode {
+                via_shared_shape: true,
+                ..
+            } => write!(
+                f,
+                "this shape is also used inside a locked group; make this copy unique to change it"
+            ),
             DocumentError::GroupCycle => write!(
                 f,
                 "a group can't be moved into itself or into one of its own members"
@@ -4844,6 +5153,7 @@ impl Document {
             return Err(DocumentError::InvalidAttrName);
         }
         self.attr_target_live(&target)?;
+        self.refuse_frozen_attr_target(&target)?;
         value.validate().map_err(|e| match e {
             crate::attr::AttrValueError::TooDeep => DocumentError::AttrValueTooDeep,
             _ => DocumentError::NonFiniteAttrValue,
@@ -4889,6 +5199,7 @@ impl Document {
             return Err(DocumentError::InvalidAttrName);
         }
         self.attr_target_live(&target)?;
+        self.refuse_frozen_attr_target(&target)?;
         let holds = self
             .attrs
             .get(&target)
@@ -5108,6 +5419,8 @@ impl Document {
             return Err(DocumentError::InvalidAttrName);
         }
         let obj = self.attr_elem_object(object)?;
+        // A locked Object's face and edge dictionaries are part of it (OW-1).
+        self.refuse_frozen_object(object)?;
         value.validate().map_err(|e| match e {
             crate::attr::AttrValueError::TooDeep => DocumentError::AttrValueTooDeep,
             _ => DocumentError::NonFiniteAttrValue,
@@ -5780,7 +6093,25 @@ impl Document {
                 .filter(|(_, r)| r.imported)
                 .map(|(id, _)| id)
                 .collect(),
+            obj_locked: self
+                .objects
+                .iter()
+                .filter(|(_, r)| r.locked)
+                .map(|(id, _)| id)
+                .collect(),
             group_hidden: self.user_hidden_groups.clone(),
+            group_locked: self
+                .groups
+                .iter()
+                .filter(|(_, r)| r.locked)
+                .map(|(id, _)| id)
+                .collect(),
+            component_locked: self
+                .components
+                .iter()
+                .filter(|(_, c)| c.locked)
+                .map(|(id, _)| id)
+                .collect(),
             instance_hidden: self.user_hidden_instances.clone(),
             camera: self.camera,
             view_style: self.view_style,
@@ -5909,6 +6240,7 @@ impl Document {
                 name: raw.obj_names.get(i).cloned().flatten(),
                 tags: raw.obj_tags.get(i).cloned().unwrap_or_default(),
                 imported: raw.obj_imported.get(i).copied().unwrap_or(false),
+                locked: raw.obj_locked.get(i).copied().unwrap_or(false),
             });
             dense_obj_ids.push(oid);
         }
@@ -5945,6 +6277,7 @@ impl Document {
                 members: Vec::new(),
                 hidden: false,
                 name: raw.component_names.get(ci).cloned().flatten(),
+                locked: raw.component_locked.get(ci).copied().unwrap_or(false),
             });
             comp_ids.push(cid);
         }
@@ -6008,6 +6341,7 @@ impl Document {
                 hidden: false,
                 name: raw.group_names.get(gi).cloned().flatten(),
                 tags: raw.group_tags.get(gi).cloned().unwrap_or_default(),
+                locked: raw.group_locked.get(gi).copied().unwrap_or(false),
             });
             grp_ids.push(gid);
         }
@@ -6547,6 +6881,13 @@ impl Document {
             put(AttrTarget::Document, &raw.doc_attrs);
         }
 
+        // ── Lock on a linked set's root member (OW-1) ─────────────────────
+        // A lock belongs to a shape: a root member of a linked set stands
+        // for the set (`Document::lock_holder`), so a file that carries the
+        // flag on one is read as the set's lock — hoisted onto the
+        // definition, the member's own flag cleared (HEW_FILE_FORMAT.md).
+        doc.hoist_linked_root_locks();
+
         // ── USER-hidden view state (manifest v6; empty pre-v6) ────────────
         for (i, &h) in raw.obj_hidden.iter().enumerate() {
             if h && let Some(&oid) = dense_obj_ids.get(i) {
@@ -6792,6 +7133,9 @@ impl Document {
                 members: Vec::new(),
                 hidden: false,
                 name: def_recipe.name,
+                // As the recipe says (OW-1); a linked set's root member's
+                // own lock is hoisted here in `ingest_finish`.
+                locked: def_recipe.locked,
             });
             def_cid.push(Some(cid));
             def_children.push(Some(def_recipe.children));
@@ -7217,6 +7561,13 @@ impl Document {
                 }
             }
         }
+
+        // ── 4e. Lock on a linked set's root member (OW-1) ────────────────
+        // The attributes just set say which new definitions are linked
+        // sets; a root member of one stands for the set, so a lock the
+        // recipe put on it is the set's: hoisted onto the definition, as
+        // the loader does. Part of the import, undone with it.
+        self.hoist_linked_root_locks_of(&all_components);
 
         let scene_sids: Vec<Option<u64>> = scenes
             .into_iter()
@@ -8203,6 +8554,7 @@ impl Document {
                 .map(str::trim)
                 .filter(|n| !n.is_empty())
                 .map(str::to_string),
+            locked: false,
         });
         let mut members: Vec<NodeId> = Vec::with_capacity(roots.len());
         for root in roots {
@@ -8805,6 +9157,7 @@ impl Document {
                     members: Vec::new(),
                     hidden: false,
                     name: src_name,
+                    locked: false,
                 });
                 let new_oid = library_copy_object(
                     &mut item,
@@ -9110,6 +9463,9 @@ impl Document {
             .ok_or(DocumentError::UnknownInstance)?;
         let component = rec.def;
         let pose_inv = rec.pose.inverse().map_err(DocumentError::Transform)?;
+        // A sketch in the definition is an edit to the shape (OW-1).
+        self.refuse_frozen(&[NodeId::Instance(instance)])?;
+        self.refuse_def_frozen(component)?;
         // Side-keeping: the plane's normal is the user's up. Rendered back
         // through this instance's pose (mirrored or not) the local normal
         // lands on that same up, so a positive extrusion goes where the
@@ -9158,6 +9514,9 @@ impl Document {
         if self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
+        // A drawing that belongs to a frozen Object, group or shape is
+        // frozen with it (OW-1).
+        self.refuse_frozen_sketch(sketch)?;
         let s = self
             .sketches
             .get(sketch)
@@ -9310,7 +9669,11 @@ impl Document {
         self.sketches.get(id)
     }
 
-    /// A mutable sketch by handle, or `None` if stale or hidden (deleted).
+    /// A mutable sketch by handle, or `None` if stale or hidden (deleted),
+    /// or frozen by a lock (OW-1): a drawing that belongs to a locked
+    /// Object or group, or to a shape whose contents are frozen, is not
+    /// handed out for raw edits. A caller that wants the typed refusal
+    /// asks [`Document::check_sketch_editable`] first.
     ///
     /// Sketch edits do not flow through the document undo log (sketch-level undo
     /// is a later milestone); they are surfaced to the caller via the returned
@@ -9319,7 +9682,20 @@ impl Document {
         if self.sketch_tombstoned(&id) {
             return None;
         }
+        if self.sketch_freeze(id, &mut FreezeMemo::new()).is_some() {
+            return None;
+        }
         self.sketches.get_mut(id)
+    }
+
+    /// Whether `sketch` may be edited, as far as locks go (OW-1): `Err`
+    /// with [`DocumentError::LockedNode`] when it belongs to a frozen
+    /// Object or group or to a shape whose contents are frozen, so a caller
+    /// of [`Document::sketch_mut`] can answer with the lock's refusal
+    /// instead of a missing sketch. `Ok` for a free sketch and for a stale
+    /// one (the caller's own lookup refuses that).
+    pub fn check_sketch_editable(&self, sketch: SketchId) -> Result<(), DocumentError> {
+        self.refuse_frozen_sketch(sketch)
     }
 
     /// All **world** sketch handles, in unspecified but stable order.
@@ -9391,7 +9767,8 @@ impl Document {
     /// not an Object's, in the frame, no tag of its own or above one hidden,
     /// and in no group or in the group an open session is editing. (The
     /// ordinary on-plane lift of a draft does not use this: a draft still
-    /// arranges with such sketches on its own plane.)
+    /// arranges with such sketches on its own plane, unless a lock freezes
+    /// them, OW-1.)
     pub(crate) fn sketch_takes_part(&self, s: SketchId, frame: Option<ComponentId>) -> bool {
         self.sketches.contains_key(s)
             && !self.sketch_tombstoned(&s)
@@ -9529,6 +9906,11 @@ impl Document {
         if !self.sketches.contains_key(sketch) || self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
+        // The drawing's owner before and after both change (OW-1).
+        self.refuse_frozen_sketch(sketch)?;
+        if let Some(o) = object {
+            self.refuse_frozen_object(o)?;
+        }
         if let Some(o) = object {
             let rec = self
                 .objects
@@ -9660,6 +10042,11 @@ impl Document {
         if !self.sketches.contains_key(sketch) || self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
+        // The group the drawing leaves and the one it joins both change.
+        self.refuse_frozen_sketch(sketch)?;
+        if let Some(g) = group {
+            self.refuse_frozen(&[NodeId::Group(g)])?;
+        }
         if let Some(g) = group {
             let rec = self
                 .groups
@@ -9756,6 +10143,7 @@ impl Document {
         if !self.sketches.contains_key(sketch) || self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
+        self.refuse_frozen_sketch(sketch)?;
         self.hidden_sketches.insert(sketch);
         self.undo.push(DocAction::DeletedSketch { sketch });
         self.commit_new_action();
@@ -9948,6 +10336,9 @@ impl Document {
         if !self.material_is_live(id) {
             return Err(DocumentError::UnknownMaterial);
         }
+        // Deleting a material unpaints whatever wears it: a frozen Object
+        // or placement wearing it would change (OW-1).
+        self.refuse_frozen_wearers(id)?;
         let (faces, back_faces, defaults, instances) = self.clear_material_references(id);
         self.deleted_materials.insert(id);
         let mut change = self.material_delete_change(&with_backs(&faces, &back_faces), &defaults);
@@ -9967,6 +10358,32 @@ impl Document {
     /// Clears every reference to `id` over every object and instance row
     /// (live or tombstoned) and returns exactly what was cleared, in
     /// slotmap order, so a replay can restore or re-clear the same set.
+    /// Typed refusal when a frozen live Object (by its base, a face, or a
+    /// face's back) or a frozen live placement wears material `id`
+    /// ([`Document::delete_material`]).
+    fn refuse_frozen_wearers(&self, id: MaterialId) -> Result<(), DocumentError> {
+        let mut nodes: Vec<NodeId> = self
+            .objects
+            .iter()
+            .filter(|(_, r)| {
+                !r.hidden
+                    && (r.object.default_material == Some(id)
+                        || r.object
+                            .faces
+                            .values()
+                            .any(|f| f.material == Some(id) || f.back_material == Some(id)))
+            })
+            .map(|(o, _)| NodeId::Object(o))
+            .collect();
+        nodes.extend(
+            self.instances
+                .iter()
+                .filter(|(_, r)| !r.hidden && r.material == Some(id))
+                .map(|(i, _)| NodeId::Instance(i)),
+        );
+        self.refuse_frozen(&nodes)
+    }
+
     #[allow(clippy::type_complexity)]
     fn clear_material_references(
         &mut self,
@@ -10226,6 +10643,7 @@ impl Document {
         {
             return Err(DocumentError::UnknownMaterial);
         }
+        self.refuse_frozen_object(object)?;
         let rec = match self.objects.get_mut(object) {
             Some(rec) if !rec.hidden => rec,
             _ => return Err(DocumentError::UnknownObject),
@@ -10269,6 +10687,7 @@ impl Document {
         {
             return Err(DocumentError::UnknownMaterial);
         }
+        self.refuse_frozen_object(object)?;
         let rec = match self.objects.get_mut(object) {
             Some(rec) if !rec.hidden => rec,
             _ => return Err(DocumentError::UnknownObject),
@@ -10356,10 +10775,17 @@ impl Document {
         if self.instances.get(instance).is_none_or(|r| r.hidden) {
             return Err(DocumentError::UnknownInstance);
         }
+        self.refuse_frozen(&[NodeId::Instance(instance)])?;
         // A copy of a linked set whose shared solid has a base would show
         // the base, not its own color: move the base onto every other copy
         // first, as joining does, so nothing else changes on screen.
         let moved_base = self.linked_base_move(instance).map(Box::new);
+        if let Some(m) = &moved_base {
+            // The move rewrites the shared member and every other copy.
+            let mut touched = vec![NodeId::Object(m.keeper)];
+            touched.extend(m.restamped.iter().map(|&(i, _)| NodeId::Instance(i)));
+            self.refuse_frozen(&touched)?;
+        }
         if let Some(m) = &moved_base {
             self.apply_join_material_move(m.keeper, m.cleared_base, &m.restamped);
         }
@@ -10468,6 +10894,7 @@ impl Document {
             Some(c) if !c.hidden => c.members.clone(),
             _ => return Err(DocumentError::UnknownComponent),
         };
+        self.refuse_def_frozen(component)?;
         // Walk the definition's own tree: members, then member groups'
         // members (an explicit stack; nested placements are not entered).
         let mut owned: Vec<ObjectId> = Vec::new();
@@ -10568,6 +10995,7 @@ impl Document {
         {
             return Err(DocumentError::DegenerateUvFrame);
         }
+        self.refuse_frozen_object(object)?;
         let rec = match self.objects.get_mut(object) {
             Some(rec) if !rec.hidden => rec,
             _ => return Err(DocumentError::UnknownObject),
@@ -10707,6 +11135,40 @@ impl Document {
             .flatten()
             .collect();
 
+        // Refuse before anything changes when a frozen Object or placement
+        // would be repainted (OW-1): the same selection as the loops below.
+        {
+            let mut touched: Vec<NodeId> = object_ids
+                .iter()
+                .copied()
+                .filter(|&oid| {
+                    let o = &self.objects[oid].object;
+                    (o.default_material == from && !linked_unpainted.iter().any(|&(l, _)| l == oid))
+                        || from.is_some_and(|from_id| {
+                            o.faces.values().any(|f| {
+                                f.material == Some(from_id)
+                                    || (f.back_material == Some(from_id) && to.is_some())
+                            })
+                        })
+                })
+                .map(NodeId::Object)
+                .collect();
+            touched.extend(
+                self.instances
+                    .iter()
+                    .filter(|&(iid, r)| {
+                        (matches!(scope, MaterialScope::Document)
+                            && from.is_some()
+                            && !r.hidden
+                            && r.material == from)
+                            || ((!r.hidden || session_hid.contains(&iid))
+                                && r.material.is_none()
+                                && linked_unpainted.iter().any(|&(_, c)| c == r.def))
+                    })
+                    .map(|(iid, _)| NodeId::Instance(iid)),
+            );
+            self.refuse_frozen(&touched)?;
+        }
         let mut faces: Vec<(ObjectId, FaceId)> = Vec::new();
         let mut back_faces: Vec<(ObjectId, FaceId)> = Vec::new();
         let mut defaults: Vec<ObjectId> = Vec::new();
@@ -11962,6 +12424,7 @@ impl Document {
         name: Option<String>,
     ) -> Result<DocChange, DocumentError> {
         let (prev_name, prev_tags) = self.node_meta(node)?;
+        self.refuse_frozen(&[node])?;
         if name == prev_name {
             // No change — return a touching change without an undo entry.
             return Ok(self.node_change(node));
@@ -11978,6 +12441,553 @@ impl Document {
         self.commit_new_action();
         self.debug_validate();
         Ok(self.node_change(node))
+    }
+
+    // ------------------------------------------------------------------ lock
+
+    /// Whether `node` is locked (OW-1): an Object's or a group's own flag,
+    /// or for a component instance its definition's (a lock belongs to a
+    /// shape, not to one copy of it). `false` for a stale or hidden node.
+    /// Being inside a locked group does not make a node *locked*, only
+    /// frozen ([`Document::node_frozen`]).
+    pub fn node_locked(&self, node: NodeId) -> bool {
+        match node {
+            NodeId::Object(id) => self.objects.get(id).is_some_and(|r| !r.hidden && r.locked),
+            NodeId::Group(id) => self.groups.get(id).is_some_and(|r| !r.hidden && r.locked),
+            NodeId::Instance(id) => self
+                .instances
+                .get(id)
+                .filter(|r| !r.hidden)
+                .and_then(|r| self.components.get(r.def))
+                .is_some_and(|c| c.locked),
+        }
+    }
+
+    /// Whether the component definition `component` (the shape every one
+    /// of its copies places) is locked. `false` for a stale or hidden
+    /// definition.
+    pub fn component_locked(&self, component: ComponentId) -> bool {
+        self.components
+            .get(component)
+            .is_some_and(|c| !c.hidden && c.locked)
+    }
+
+    /// Whether an edit to `node` must be refused because of a lock (OW-1),
+    /// and if so the locked node that is the cause, so a caller can name it
+    /// and offer to unlock it. `None` for a node nothing locks, and for a
+    /// stale or hidden one.
+    ///
+    /// A node is frozen when:
+    ///
+    /// 1. it is locked ([`Document::node_locked`]; an instance by its
+    ///    definition's lock): the cause is the node itself;
+    /// 2. a group above it is frozen: the cause is that group's cause; or
+    /// 3. it is part of a shape whose contents are frozen: a member (at any
+    ///    depth) of a definition that is locked, or that has a placement
+    ///    which is itself frozen. The cause is a placement of the locked
+    ///    definition (the first live one in slotmap order, or the node
+    ///    itself when the definition is placed nowhere), or the frozen
+    ///    placement's own cause.
+    ///
+    /// The second half of rule 3 is what keeps "nothing in a locked thing
+    /// changes" true for shared shapes: a component placed inside a locked
+    /// group (or inside a locked component) cannot be edited through
+    /// another of its placements, since that would change the locked
+    /// thing too. Make Unique gives that placement a shape of its own.
+    /// Moving a placement that is not itself frozen stays allowed: it does
+    /// not change the shape.
+    pub fn node_frozen(&self, node: NodeId) -> Option<NodeId> {
+        self.node_freeze(node, &mut BTreeMap::new())
+            .map(|f| f.cause)
+    }
+
+    /// Whether `def`'s contents are frozen (OW-1), and if so the locked
+    /// node that is the cause: the definition is locked (the cause is its
+    /// first live placement, or its first live member when it is placed
+    /// nowhere), or one of its placements is frozen (a copy placed inside
+    /// a locked group or a locked component: that placement's cause).
+    /// Every edit to a definition (its member geometry, its member list,
+    /// its name, its attributes) is refused while this is `Some`. `None`
+    /// for a stale or hidden definition, and for a locked one that has
+    /// neither a placement nor a member (there is nothing to edit).
+    pub fn def_frozen(&self, def: ComponentId) -> Option<NodeId> {
+        self.def_freeze(def, &mut BTreeMap::new()).map(|f| f.cause)
+    }
+
+    /// Whether something that CONTAINS `node` freezes it (OW-1): its parent
+    /// group is frozen, or the definition owning it has its contents
+    /// frozen ([`Document::def_frozen`]). This is [`Document::node_frozen`]
+    /// minus the node's own lock (for an instance, its definition's).
+    /// `None` for a stale or hidden node.
+    ///
+    /// The edits that are not edits to the node itself but are edits to
+    /// its container ask this: a linked or separate copy of a locked
+    /// Object or group (the copy lands in the same container and a linked
+    /// copy rewrites its member list), and Make Unique on a locked copy.
+    pub fn frozen_by_container(&self, node: NodeId) -> Option<NodeId> {
+        self.container_freeze(node, &mut BTreeMap::new())
+            .map(|f| f.cause)
+    }
+
+    /// [`Document::node_frozen`] with the cause's kind and a memo of each
+    /// definition's answer shared across the call, so a definition reached
+    /// by many placements (or asked about for many nodes) is answered once:
+    /// each unanswered definition scans every instance (`instances_of`).
+    /// The definition graph is a DAG bounded by [`MAX_COMPONENT_DEPTH`], so
+    /// the recursion terminates.
+    fn node_freeze(&self, node: NodeId, memo: &mut FreezeMemo) -> Option<Freeze> {
+        if !self.node_live(node) {
+            return None;
+        }
+        if self.node_locked(node) {
+            return Some(Freeze {
+                cause: node,
+                via_shared_shape: false,
+            });
+        }
+        self.container_freeze(node, memo)
+    }
+
+    /// [`Document::frozen_by_container`] with the shared memo.
+    fn container_freeze(&self, node: NodeId, memo: &mut FreezeMemo) -> Option<Freeze> {
+        if !self.node_live(node) {
+            return None;
+        }
+        // A parent group shares the node's owner, so its own answer covers
+        // the definition the node belongs to as well.
+        if let Some(g) = self.node_parent(node) {
+            return self.node_freeze(NodeId::Group(g), memo);
+        }
+        match self.node_owner_def(node) {
+            Ok(Some(def)) => self
+                .def_contents_freeze(def, memo)
+                .map(|(cause, via)| Freeze {
+                    cause: cause.unwrap_or(node),
+                    via_shared_shape: via,
+                }),
+            _ => None,
+        }
+    }
+
+    /// [`Document::def_frozen`] with the shared memo.
+    fn def_freeze(&self, def: ComponentId, memo: &mut FreezeMemo) -> Option<Freeze> {
+        let (cause, via) = self.def_contents_freeze(def, memo)?;
+        let cause = cause.or_else(|| {
+            self.components[def]
+                .members
+                .iter()
+                .copied()
+                .find(|&m| self.node_live(m))
+        })?;
+        Some(Freeze {
+            cause,
+            via_shared_shape: via,
+        })
+    }
+
+    /// Whether `def`'s contents are frozen (rule 3 of
+    /// [`Document::node_frozen`]): `Some((Some(cause), via))` with the node
+    /// to name, `Some((None, false))` for a locked definition placed
+    /// nowhere (the caller names the member it asked about), `None` when
+    /// they are free. `via` is true when the definition is not locked
+    /// itself and a frozen placement freezes it: the lock reaches the
+    /// contents only through the shared shape.
+    fn def_contents_freeze(
+        &self,
+        def: ComponentId,
+        memo: &mut FreezeMemo,
+    ) -> Option<(Option<NodeId>, bool)> {
+        let c = self.components.get(def).filter(|c| !c.hidden)?;
+        if c.locked {
+            let first = self
+                .instances
+                .iter()
+                .find(|(_, r)| !r.hidden && r.def == def)
+                .map(|(i, _)| NodeId::Instance(i));
+            return Some((first, false));
+        }
+        if let Some(answer) = memo.get(&def) {
+            return answer.map(|cause| (Some(cause), true));
+        }
+        // Mark the definition free while its placements are walked: the
+        // graph is a DAG, so the walk up through them never comes back to
+        // it, and a malformed cycle answers free rather than looping.
+        memo.insert(def, None);
+        let answer = self
+            .instances_of(def)
+            .into_iter()
+            .find_map(|i| self.node_freeze(NodeId::Instance(i), memo))
+            .map(|f| f.cause);
+        memo.insert(def, answer);
+        answer.map(|cause| (Some(cause), true))
+    }
+
+    /// Typed refusal for an edit to any of `nodes` while a lock freezes it
+    /// (OW-1, [`Document::node_frozen`]): [`DocumentError::LockedNode`]
+    /// naming the first frozen node's cause. One memo serves the whole
+    /// call. Stale or hidden nodes pass (the caller's own lookups refuse
+    /// them). The up-front half of the lock's two-layer enforcement; the
+    /// commit audit ([`Document::audit_locks`]) is the other.
+    fn refuse_frozen(&self, nodes: &[NodeId]) -> Result<(), DocumentError> {
+        let mut memo = FreezeMemo::new();
+        for &n in nodes {
+            if let Some(f) = self.node_freeze(n, &mut memo) {
+                return Err(f.error());
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Document::refuse_frozen`] over Objects.
+    fn refuse_frozen_objects(&self, objects: &[ObjectId]) -> Result<(), DocumentError> {
+        let mut memo = FreezeMemo::new();
+        for &o in objects {
+            if let Some(f) = self.node_freeze(NodeId::Object(o), &mut memo) {
+                return Err(f.error());
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Document::refuse_frozen`] for one Object.
+    fn refuse_frozen_object(&self, object: ObjectId) -> Result<(), DocumentError> {
+        self.refuse_frozen_objects(&[object])
+    }
+
+    /// Typed refusal for an edit to `node`'s CONTAINER (OW-1,
+    /// [`Document::frozen_by_container`]): a copy that lands beside it, a
+    /// wrap that rewrites its parent's member list, Make Unique.
+    fn refuse_frozen_container(&self, node: NodeId) -> Result<(), DocumentError> {
+        match self.container_freeze(node, &mut FreezeMemo::new()) {
+            Some(f) => Err(f.error()),
+            None => Ok(()),
+        }
+    }
+
+    /// Typed refusal for an edit to definition `def` (its members, member
+    /// list, name, attributes) while its contents are frozen (OW-1,
+    /// [`Document::def_frozen`]).
+    fn refuse_def_frozen(&self, def: ComponentId) -> Result<(), DocumentError> {
+        match self.def_freeze(def, &mut FreezeMemo::new()) {
+            Some(f) => Err(f.error()),
+            None => Ok(()),
+        }
+    }
+
+    /// The freeze on a sketch (OW-1): a drawing that belongs to a frozen
+    /// Object or group (the face sketches the kernel keeps beside an
+    /// Object, a group's own lines), or to a definition whose contents are
+    /// frozen, is frozen with it. A free sketch is never frozen.
+    fn sketch_freeze(&self, sketch: SketchId, memo: &mut FreezeMemo) -> Option<Freeze> {
+        if let Some(&o) = self.object_sketches.get(&sketch)
+            && let Some(f) = self.node_freeze(NodeId::Object(o), memo)
+        {
+            return Some(f);
+        }
+        if let Some(&g) = self.group_sketches.get(&sketch)
+            && let Some(f) = self.node_freeze(NodeId::Group(g), memo)
+        {
+            return Some(f);
+        }
+        match self.def_sketches.get(&sketch) {
+            Some(&def) => self.def_freeze(def, memo),
+            None => None,
+        }
+    }
+
+    /// Typed refusal for an attribute write on a frozen entity (OW-1):
+    /// changing a locked thing's attributes is an edit to it. The
+    /// document's own dictionary and non-node entities (guides, materials,
+    /// tags) are never frozen.
+    fn refuse_frozen_attr_target(&self, target: &AttrTarget) -> Result<(), DocumentError> {
+        match target {
+            AttrTarget::Document => Ok(()),
+            AttrTarget::Entity(e) => self.refuse_frozen_entity(e),
+        }
+    }
+
+    /// Typed refusal for an edit to `entity` while a lock freezes it: a
+    /// node as [`Document::node_frozen`] answers, a definition as
+    /// [`Document::def_frozen`], a sketch with its owner.
+    fn refuse_frozen_entity(&self, entity: &EntityRef) -> Result<(), DocumentError> {
+        match entity {
+            EntityRef::Object(o) => self.refuse_frozen(&[NodeId::Object(*o)]),
+            EntityRef::Group(g) => self.refuse_frozen(&[NodeId::Group(*g)]),
+            EntityRef::Instance(i) => self.refuse_frozen(&[NodeId::Instance(*i)]),
+            EntityRef::Component(c) => self.refuse_def_frozen(*c),
+            EntityRef::Sketch(s) => self.refuse_frozen_sketch(*s),
+            EntityRef::Guide(_)
+            | EntityRef::Material(_)
+            | EntityRef::Tag(_)
+            | EntityRef::Annotation(_) => Ok(()),
+        }
+    }
+
+    /// Typed refusal for an edit to definition `component` made through its
+    /// placement `instance` (OW-1): the placement's own freeze is named
+    /// first (a locked copy, or one inside a locked group), then the
+    /// shape's (a lock reaching it through another placement).
+    fn refuse_def_edit(
+        &self,
+        instance: InstanceId,
+        component: ComponentId,
+    ) -> Result<(), DocumentError> {
+        self.refuse_frozen(&[NodeId::Instance(instance)])?;
+        self.refuse_def_frozen(component)
+    }
+
+    /// Typed refusal for an edit to definition `component` reached through
+    /// the placement chain `path` (outermost first): a frozen placement on
+    /// the path is named first, then the shape's own freeze (OW-1).
+    pub(crate) fn refuse_path_edit(
+        &self,
+        path: &[InstanceId],
+        component: ComponentId,
+    ) -> Result<(), DocumentError> {
+        let nodes: Vec<NodeId> = path.iter().map(|&i| NodeId::Instance(i)).collect();
+        self.refuse_frozen(&nodes)?;
+        self.refuse_def_frozen(component)
+    }
+
+    /// Typed refusal when `component`'s member subtree (through member
+    /// groups and nested placements) holds a node frozen by a lock of its
+    /// own ([`Document::delete_definition`], [`Document::purge_unused`]).
+    fn refuse_def_holds_lock(&self, component: ComponentId) -> Result<(), DocumentError> {
+        let mut nodes = Vec::new();
+        for m in self.components[component].members.clone() {
+            self.collect_def_subtree(m, &mut nodes);
+        }
+        nodes.retain(|&n| self.node_live(n));
+        self.refuse_frozen(&nodes)
+    }
+
+    /// Typed refusal for an edit to `sketch` while it is frozen
+    /// ([`Document::sketch_freeze`]).
+    fn refuse_frozen_sketch(&self, sketch: SketchId) -> Result<(), DocumentError> {
+        match self.sketch_freeze(sketch, &mut FreezeMemo::new()) {
+            Some(f) => Err(f.error()),
+            None => Ok(()),
+        }
+    }
+
+    /// The record that carries `node`'s lock: the Object or group itself,
+    /// or an instance's definition.
+    ///
+    /// A root member of a linked set (an Object or group directly in the
+    /// set's definition, reached by path) stands for the set: its lock is
+    /// the set's, as a wrap moved it there (OW-1), so locking it through
+    /// its path locks every copy and unlocking it unlocks them all.
+    fn lock_holder(&self, node: NodeId) -> Result<LockHolder, DocumentError> {
+        match node {
+            NodeId::Object(id) => {
+                let rec = self
+                    .objects
+                    .get(id)
+                    .filter(|r| !r.hidden)
+                    .ok_or(DocumentError::UnknownObject)?;
+                match rec.owner {
+                    ObjectOwner::Definition { def, parent: None } if self.is_linked_set(def) => {
+                        Ok(LockHolder::Component(def))
+                    }
+                    _ => Ok(LockHolder::Object(id)),
+                }
+            }
+            NodeId::Group(id) => {
+                let rec = self
+                    .groups
+                    .get(id)
+                    .filter(|r| !r.hidden)
+                    .ok_or(DocumentError::UnknownGroup)?;
+                match (rec.parent, rec.owner_def) {
+                    (None, Some(def)) if self.is_linked_set(def) => Ok(LockHolder::Component(def)),
+                    _ => Ok(LockHolder::Group(id)),
+                }
+            }
+            NodeId::Instance(id) => {
+                let def = self
+                    .instances
+                    .get(id)
+                    .filter(|r| !r.hidden)
+                    .ok_or(DocumentError::UnknownInstance)?
+                    .def;
+                self.components
+                    .get(def)
+                    .filter(|c| !c.hidden)
+                    .ok_or(DocumentError::UnknownComponent)?;
+                Ok(LockHolder::Component(def))
+            }
+        }
+    }
+
+    /// A lock holder's current flag (`false` for a stale record).
+    fn holder_locked(&self, holder: LockHolder) -> bool {
+        match holder {
+            LockHolder::Object(o) => self.objects.get(o).is_some_and(|r| r.locked),
+            LockHolder::Group(g) => self.groups.get(g).is_some_and(|r| r.locked),
+            LockHolder::Component(c) => self.components.get(c).is_some_and(|r| r.locked),
+        }
+    }
+
+    /// Writes `locked` onto every holder (no guards: the caller validated,
+    /// or this is undo/redo replaying a recorded entry) and returns what it
+    /// touched.
+    fn apply_locks(&mut self, holders: &[LockHolder], locked: bool) -> DocChange {
+        let mut change = DocChange::default();
+        for &h in holders {
+            match h {
+                LockHolder::Object(o) => {
+                    if let Some(r) = self.objects.get_mut(o) {
+                        r.locked = locked;
+                    }
+                    merge_unique(&mut change.objects_touched, vec![o]);
+                }
+                LockHolder::Group(g) => {
+                    if let Some(r) = self.groups.get_mut(g) {
+                        r.locked = locked;
+                    }
+                    merge_unique(&mut change.groups_touched, vec![g]);
+                }
+                LockHolder::Component(c) => {
+                    if let Some(r) = self.components.get_mut(c) {
+                        r.locked = locked;
+                    }
+                    merge_doc_change(&mut change, self.component_change(c));
+                    merge_unique(&mut change.instances_touched, self.instances_of(c));
+                }
+            }
+        }
+        change
+    }
+
+    /// Locks or unlocks `nodes` as ONE undo step (OW-1), labeled "Lock" or
+    /// "Unlock" ([`DocAction::NodeLockChanged`]). A lock belongs to a
+    /// shape: an Object or a group carries its own, and a component
+    /// instance stands for its definition, so locking any copy locks every
+    /// copy and unlocking any copy unlocks them all. Nodes already in the
+    /// asked state are left alone; when nothing changes, no entry is
+    /// pushed. Locking is never refused by a lock (unlocking a frozen node
+    /// is how a person gets out of one) and is not an edit to the shape.
+    ///
+    /// # Errors
+    /// - [`DocumentError::EmptySelection`] — `nodes` is empty.
+    /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`]
+    ///   / [`DocumentError::UnknownInstance`] /
+    ///   [`DocumentError::UnknownComponent`] — a stale or hidden node, or
+    ///   an instance whose definition is gone.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn set_nodes_locked(
+        &mut self,
+        nodes: &[NodeId],
+        locked: bool,
+    ) -> Result<DocChange, DocumentError> {
+        if nodes.is_empty() {
+            return Err(DocumentError::EmptySelection);
+        }
+        let mut holders: Vec<LockHolder> = Vec::with_capacity(nodes.len());
+        for &node in nodes {
+            let h = self.lock_holder(node)?;
+            if !holders.contains(&h) {
+                holders.push(h);
+            }
+        }
+        if locked {
+            self.refuse_lock_into_session(&holders)?;
+        }
+        self.commit_locks(holders, locked)
+    }
+
+    /// Typed refusal for a lock that an open editing session would edit
+    /// through (OW-1): the session would change a locked thing and close
+    /// into it.
+    ///
+    /// - While a component is open, no lock is taken at all: its members
+    ///   are on loan as world geometry, and a lock taken on one of them (or
+    ///   on anything that places the open definition) would either freeze
+    ///   the open definition or strand a lock on what becomes a member of
+    ///   a linked set at the close. Unlocking stays allowed.
+    /// - While only groups are open, a lock that would freeze an open group
+    ///   (a lock on a group above it, or on a definition it sits in) is
+    ///   refused; locking a member of the open group, or anything outside,
+    ///   is allowed.
+    ///
+    /// # Errors
+    /// - [`DocumentError::ExplodeSessionScope`] — as above.
+    fn refuse_lock_into_session(&mut self, holders: &[LockHolder]) -> Result<(), DocumentError> {
+        if self.sessions.is_empty() {
+            return Ok(());
+        }
+        if !self.defs_on_loan().is_empty() {
+            return Err(DocumentError::ExplodeSessionScope);
+        }
+        // Try the locks on, ask each open group, and take them off again:
+        // flag flips only, nothing recorded.
+        let fresh: Vec<LockHolder> = holders
+            .iter()
+            .copied()
+            .filter(|&h| !self.holder_locked(h))
+            .collect();
+        self.apply_locks(&fresh, true);
+        let mut memo = FreezeMemo::new();
+        let freezes_open_group = self.sessions.iter().any(|f| match f {
+            SessionFrame::Group(sess) => self
+                .raw_node_freeze(NodeId::Group(sess.group), &mut memo)
+                .is_some(),
+            SessionFrame::Component(_) => false,
+        });
+        self.apply_locks(&fresh, false);
+        if freezes_open_group {
+            return Err(DocumentError::ExplodeSessionScope);
+        }
+        Ok(())
+    }
+
+    /// Unlocks every locked Object, group and component definition in the
+    /// document as ONE undo step labeled "Unlock" (Edit ▸ Unlock ▸ All).
+    /// No entry when nothing is locked.
+    pub fn unlock_all(&mut self) -> Result<DocChange, DocumentError> {
+        let mut holders: Vec<LockHolder> = Vec::new();
+        holders.extend(
+            self.objects
+                .iter()
+                .filter(|(_, r)| !r.hidden && r.locked)
+                .map(|(id, _)| LockHolder::Object(id)),
+        );
+        holders.extend(
+            self.groups
+                .iter()
+                .filter(|(_, r)| !r.hidden && r.locked)
+                .map(|(id, _)| LockHolder::Group(id)),
+        );
+        holders.extend(
+            self.components
+                .iter()
+                .filter(|(_, c)| !c.hidden && c.locked)
+                .map(|(id, _)| LockHolder::Component(id)),
+        );
+        self.commit_locks(holders, false)
+    }
+
+    /// Sets `locked` on the holders whose flag differs and records one
+    /// [`DocAction::NodeLockChanged`] for them; nothing when none differ.
+    fn commit_locks(
+        &mut self,
+        holders: Vec<LockHolder>,
+        locked: bool,
+    ) -> Result<DocChange, DocumentError> {
+        let holders: Vec<LockHolder> = holders
+            .into_iter()
+            .filter(|&h| self.holder_locked(h) != locked)
+            .collect();
+        if holders.is_empty() {
+            return Ok(DocChange::default());
+        }
+        let change = self.apply_locks(&holders, locked);
+        self.undo
+            .push(DocAction::NodeLockChanged { holders, locked });
+        self.commit_new_action();
+        self.debug_validate();
+        Ok(change)
     }
 
     /// [`Document::add_node_tag`] across several nodes as ONE undo step
@@ -12055,6 +13065,7 @@ impl Document {
         path: Vec<String>,
     ) -> Result<DocChange, DocumentError> {
         let (prev_name, prev_tags) = self.node_meta(node)?;
+        self.refuse_frozen(&[node])?;
         // Only add if not already present.
         if prev_tags.contains(&path) {
             // No change — return a touching change without an undo entry.
@@ -12089,6 +13100,7 @@ impl Document {
         path: &[String],
     ) -> Result<DocChange, DocumentError> {
         let (prev_name, prev_tags) = self.node_meta(node)?;
+        self.refuse_frozen(&[node])?;
         let Some(pos) = prev_tags.iter().position(|t| t.as_slice() == path) else {
             // Not present — no undo entry.
             return Ok(self.node_change(node));
@@ -12187,6 +13199,9 @@ impl Document {
                 return Err(DocumentError::DuplicateTag);
             }
         }
+        // A frozen node or drawing carrying the tag would have its tag
+        // list rewritten (OW-1).
+        self.refuse_frozen_tag_carriers(path)?;
 
         // Registry: move each covered entry, keeping id/flag/dictionaries.
         let registry: Vec<(Vec<String>, Vec<String>)> = self
@@ -12344,6 +13359,9 @@ impl Document {
             return Ok(DocChange::default());
         }
         let covers = |tag: &[String]| tag.len() >= path.len() && tag[..path.len()] == *path;
+        // Deleting a tag a locked thing carries is refused (OW-1, D1
+        // decision 7): its tag list would change.
+        self.refuse_frozen_tag_carriers(path)?;
 
         // Unregister the path and its registered descendants.
         let registry: Vec<(Vec<String>, bool)> = self
@@ -12518,6 +13536,44 @@ impl Document {
     }
 
     /// Read name + tags of a live, visible node. Returns `Err` for stale/hidden.
+    /// Typed refusal when a frozen live node or sketch carries `path` or a
+    /// tag nested under it ([`Document::rename_tag`],
+    /// [`Document::delete_tag`] rewrite every carrier's list).
+    fn refuse_frozen_tag_carriers(&self, path: &[String]) -> Result<(), DocumentError> {
+        let covers = |tag: &[String]| tag.len() >= path.len() && tag[..path.len()] == *path;
+        let carries = |tags: &[Vec<String>]| tags.iter().any(|t| covers(t));
+        let mut nodes: Vec<NodeId> = Vec::new();
+        nodes.extend(
+            self.objects
+                .iter()
+                .filter(|(_, r)| !r.hidden && carries(&r.tags))
+                .map(|(id, _)| NodeId::Object(id)),
+        );
+        nodes.extend(
+            self.groups
+                .iter()
+                .filter(|(_, r)| !r.hidden && carries(&r.tags))
+                .map(|(id, _)| NodeId::Group(id)),
+        );
+        nodes.extend(
+            self.instances
+                .iter()
+                .filter(|(_, r)| !r.hidden && carries(&r.tags))
+                .map(|(id, _)| NodeId::Instance(id)),
+        );
+        self.refuse_frozen(&nodes)?;
+        let mut memo = FreezeMemo::new();
+        for (s, tags) in &self.sketch_tags {
+            if !self.sketch_tombstoned(s)
+                && carries(tags)
+                && let Some(f) = self.sketch_freeze(*s, &mut memo)
+            {
+                return Err(f.error());
+            }
+        }
+        Ok(())
+    }
+
     fn node_meta(&self, node: NodeId) -> Result<(Option<String>, Vec<Vec<String>>), DocumentError> {
         match node {
             NodeId::Object(id) => {
@@ -12779,6 +13835,23 @@ impl Document {
         out
     }
 
+    /// `node` and every live node beneath it through groups (not into a
+    /// placement's definition), parents first.
+    fn world_subtree_nodes(&self, node: NodeId) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            if !self.node_live(n) {
+                continue;
+            }
+            out.push(n);
+            if let NodeId::Group(g) = n {
+                stack.extend(self.groups[g].members.iter().rev().copied());
+            }
+        }
+        out
+    }
+
     fn collect_leaves(&self, node: NodeId, out: &mut Vec<ObjectId>) {
         match node {
             NodeId::Object(id) => {
@@ -12963,6 +14036,7 @@ impl Document {
             Some(c) if !c.hidden => c.name.clone(),
             _ => return Err(DocumentError::UnknownComponent),
         };
+        self.refuse_def_frozen(component)?;
         if name == prev_name {
             // No change — return a touching change without an undo entry.
             return Ok(self.component_change(component));
@@ -13026,6 +14100,22 @@ impl Document {
         });
         if nested_in_live_def {
             return Err(DocumentError::DefinitionNestedInDefinition);
+        }
+        // Deleting a definition deletes every placement of it and its
+        // whole member subtree: refused while the shape is locked or placed
+        // inside something locked, or while it holds a locked member.
+        self.refuse_def_frozen(component)?;
+        self.refuse_def_holds_lock(component)?;
+        {
+            let mut going: Vec<NodeId> = self
+                .instances_of(component)
+                .into_iter()
+                .map(NodeId::Instance)
+                .collect();
+            for m in self.components[component].members.clone() {
+                self.collect_def_subtree(m, &mut going);
+            }
+            self.refuse_emptied_sets_frozen(&going)?;
         }
         let world_instances: Vec<InstanceId> = self
             .instances
@@ -13256,7 +14346,14 @@ impl Document {
     /// nothing and reports zeros.
     pub fn purge_unused(&mut self) -> Result<PurgeReport, DocumentError> {
         info!(target: "kernel::op", op = "purge_unused");
-        let definitions = self.unused_definitions();
+        // A locked definition, or one holding a lock, is never purged
+        // (OW-1): it is left in place, with any definition placed inside
+        // it (frozen through it).
+        let definitions: Vec<ComponentId> = self
+            .unused_definitions()
+            .into_iter()
+            .filter(|&c| self.def_frozen(c).is_none() && self.refuse_def_holds_lock(c).is_ok())
+            .collect();
         let checkpoint = self.clone();
         let undo_start = self.undo.actions.len();
         let start_epoch = self.document_epoch;
@@ -13267,6 +14364,17 @@ impl Document {
             // with that definition's delete (containers come first).
             if self.components[component].hidden {
                 report.definitions += 1;
+                continue;
+            }
+            // Still placed inside a definition left in place above (one
+            // holding a lock): it stays with it.
+            let nested_in_kept = self.instances.iter().any(|(_, r)| {
+                !r.hidden
+                    && r.def == component
+                    && r.owner_def
+                        .is_some_and(|o| self.components.get(o).is_some_and(|c| !c.hidden))
+            });
+            if nested_in_kept {
                 continue;
             }
             if let Err(e) = self.delete_definition(component) {
@@ -13650,6 +14758,9 @@ impl Document {
         if self.sketch_owner_component(sketch).is_some() {
             return Err(DocumentError::UnknownSketch);
         }
+        // The region's edges leave the sketch (OW-1: a locked Object's own
+        // drawing is frozen with it).
+        self.refuse_frozen_sketch(sketch)?;
         let s = self
             .sketches
             .get(sketch)
@@ -13717,6 +14828,7 @@ impl Document {
         if self.sketch_owner_component(sketch) != Some(component) {
             return Err(DocumentError::UnknownSketch);
         }
+        self.refuse_def_edit(instance, component)?;
         let scale = pose
             .similarity_scale()
             .ok_or(DocumentError::AmbiguousInstanceScale)?;
@@ -13866,6 +14978,12 @@ impl Document {
         if self.sketch_owner_component(sketch).is_some() {
             return Err(DocumentError::UnknownSketch);
         }
+        // The profile's edges leave the sketch, and a result born into a
+        // group changes that group (OW-1).
+        self.refuse_frozen_sketch(sketch)?;
+        if let Some(gid) = parent_group {
+            self.refuse_frozen(&[NodeId::Group(gid)])?;
+        }
         let s = self
             .sketches
             .get(sketch)
@@ -13932,6 +15050,9 @@ impl Document {
         if self.sketch_owner_component(sketch).is_some() {
             return Err(DocumentError::UnknownSketch);
         }
+        // The base is consumed by the merge (OW-1).
+        self.refuse_frozen_sketch(sketch)?;
+        self.refuse_frozen_object(base_id)?;
         let s = self
             .sketches
             .get(sketch)
@@ -14015,6 +15136,11 @@ impl Document {
             .map_err(DocumentError::FollowMe)?;
 
         let merges = matches!(path, FollowMePath::FaceLoop { object: po, .. } if *po == object);
+        // A sweep that merges consumes the source solid (OW-1); one that
+        // only reads its face makes a new Object and leaves it alone.
+        if merges {
+            self.refuse_frozen_object(object)?;
+        }
         if !merges {
             let id = self.insert_object_record(ObjectRecord {
                 object: swept,
@@ -14024,6 +15150,7 @@ impl Document {
                 name: None,
                 tags: Vec::new(),
                 imported: false,
+                locked: false,
             });
             self.undo.push(DocAction::FollowMeFace {
                 result: id,
@@ -14069,6 +15196,7 @@ impl Document {
             name: None,
             tags: Vec::new(),
             imported: base_imported,
+            locked: false,
         });
         self.objects[object].hidden = true;
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
@@ -14166,6 +15294,7 @@ impl Document {
     ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "follow_me_in_instance");
         let (component, pose) = self.instance_component(instance)?;
+        self.refuse_def_edit(instance, component)?;
         let opts = curves::local_sweep_options(&pose, opts);
         let local_stop = stop_len
             .map(|stop| self.map_world_distance_through_pose(pose, stop))
@@ -14239,6 +15368,7 @@ impl Document {
             return Err(DocumentError::UnknownObject);
         };
         let (component, pose) = self.instance_component(instance)?;
+        self.refuse_def_edit(instance, component)?;
         let opts = curves::local_sweep_options(&pose, opts);
         let local_stop = stop_len
             .map(|stop| self.map_world_distance_through_pose(pose, stop))
@@ -14333,6 +15463,7 @@ impl Document {
     ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "follow_me_face_in_instance");
         let (component, pose) = self.instance_component(instance)?;
+        self.refuse_def_edit(instance, component)?;
         let opts = curves::local_sweep_options(&pose, opts);
         let local_stop = stop_len
             .map(|stop| self.map_world_distance_through_pose(pose, stop))
@@ -14367,6 +15498,7 @@ impl Document {
                 name: None,
                 tags: Vec::new(),
                 imported: false,
+                locked: false,
             });
             self.components[component].members.push(NodeId::Object(id));
             self.undo.push(DocAction::FollowMeFace {
@@ -14408,6 +15540,7 @@ impl Document {
             name: None,
             tags: Vec::new(),
             imported: base_imported,
+            locked: false,
         });
         self.objects[object].hidden = true;
         self.components[component].members.push(NodeId::Object(id));
@@ -14490,6 +15623,7 @@ impl Document {
             name: None,
             tags: Vec::new(),
             imported: false,
+            locked: false,
         });
         self.undo.push(DocAction::FollowMeFace {
             result: id,
@@ -14741,6 +15875,7 @@ impl Document {
             name: None,
             tags: Vec::new(),
             imported: false,
+            locked: false,
         });
         let mut groups_touched = Vec::new();
         let mut components_touched = Vec::new();
@@ -14823,6 +15958,8 @@ impl Document {
         // Plan (and pre-build) the owned-sketch drawing that rides with a
         // pushed face BEFORE the op, so a refusal anywhere leaves everything
         // as it was.
+        // A member of a frozen shape is frozen with it (OW-1).
+        self.refuse_frozen_object(object)?;
         let ride = self.plan_face_ride(object, &op)?;
         let rec = &mut self.objects[object];
         let report = rec
@@ -15124,6 +16261,7 @@ impl Document {
         if rec_a.group_parent().is_some() || rec_b.group_parent().is_some() {
             return Err(DocumentError::GroupedOperand);
         }
+        self.refuse_frozen_objects(&[a, b])?;
 
         // Dissolve the coplanar seams the boolean introduced (two coplanar
         // top faces joined by a union must read as ONE face), but preserve
@@ -15155,6 +16293,7 @@ impl Document {
             name,
             tags,
             imported,
+            locked: false,
         });
         self.copy_identity_attrs(&EntityRef::Object(a), EntityRef::Object(id));
         self.drop_copied_smooth_level(id);
@@ -15250,6 +16389,8 @@ impl Document {
         if operands.len() < 2 {
             return Err(DocumentError::BooleanNeedsTwo);
         }
+        self.refuse_frozen_objects(operands)?;
+        self.refuse_def_frozen(component)?;
         for (i, o) in operands.iter().enumerate() {
             if operands[..i].contains(o) {
                 // An object cannot be combined with itself (its faces would
@@ -15311,6 +16452,7 @@ impl Document {
             name,
             tags,
             imported,
+            locked: false,
         });
         self.copy_identity_attrs(&EntityRef::Object(operands[0]), EntityRef::Object(id));
         self.drop_copied_smooth_level(id);
@@ -15462,6 +16604,12 @@ impl Document {
         if operands.iter().any(|&n| self.node_parent(n).is_some()) {
             return Err(DocumentError::GroupedOperand);
         }
+        // Every operand is consumed whole, with everything inside it (OW-1).
+        let consumed: Vec<NodeId> = operands
+            .iter()
+            .flat_map(|&n| self.world_subtree_nodes(n))
+            .collect();
+        self.refuse_frozen(&consumed)?;
 
         // ── Fallible geometry, entirely on clones (document untouched) ─────
         let mut tidy = BooleanTidy::default();
@@ -15533,6 +16681,7 @@ impl Document {
                 hidden: false,
                 name: Some(name),
                 tags: Vec::new(),
+                locked: false,
             })
         });
         // A single-piece result carries operand `a`'s identity when `a` is
@@ -15560,6 +16709,7 @@ impl Document {
                 name: a_name.clone(),
                 tags: a_tags.clone(),
                 imported,
+                locked: false,
             });
             result_objects.push(id);
         }
@@ -15701,6 +16851,7 @@ impl Document {
         let n = plane.normal();
         info!(target: "kernel::op", op = "slice_node", nx = n.x, ny = n.y, nz = n.z);
         self.explode_scope_object(object)?;
+        self.refuse_frozen_object(object)?;
         let rec = self
             .objects
             .get(object)
@@ -15726,6 +16877,7 @@ impl Document {
             name: None,
             tags: Vec::new(),
             imported,
+            locked: false,
         });
         let b = self.insert_object_record(ObjectRecord {
             object: negative,
@@ -15735,6 +16887,7 @@ impl Document {
             name: None,
             tags: Vec::new(),
             imported,
+            locked: false,
         });
         self.objects[object].hidden = true;
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
@@ -15802,6 +16955,7 @@ impl Document {
         let n = plane.normal();
         info!(target: "kernel::op", op = "slice_def_member", nx = n.x, ny = n.y, nz = n.z);
         let (component, pose) = self.instance_component(instance)?;
+        self.refuse_def_edit(instance, component)?;
         self.slice_member_through_pose(component, &pose, object, plane)
     }
 
@@ -15852,6 +17006,7 @@ impl Document {
             name: None,
             tags: Vec::new(),
             imported,
+            locked: false,
         });
         let b = self.insert_object_record(ObjectRecord {
             object: negative,
@@ -15864,6 +17019,7 @@ impl Document {
             name: None,
             tags: Vec::new(),
             imported,
+            locked: false,
         });
         self.objects[object].hidden = true;
         // Shared-geometry birth (component-edit-parity.md phase K2): see
@@ -15922,6 +17078,7 @@ impl Document {
     ) -> Result<(Vec<ObjectId>, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "push_pull_through", distance);
         self.explode_scope_object(object)?;
+        self.refuse_frozen_object(object)?;
         let rec = self
             .objects
             .get(object)
@@ -15953,6 +17110,7 @@ impl Document {
                 name: name.clone(),
                 tags: tags.clone(),
                 imported,
+                locked: false,
             });
             results.push(id);
         }
@@ -16021,6 +17179,8 @@ impl Document {
         if self.components.get(component).is_none_or(|c| c.hidden) {
             return Err(DocumentError::UnknownComponent);
         }
+        self.refuse_frozen_object(object)?;
+        self.refuse_def_frozen(component)?;
         let rec = self
             .objects
             .get(object)
@@ -16055,6 +17215,7 @@ impl Document {
                 name: name.clone(),
                 tags: tags.clone(),
                 imported,
+                locked: false,
             });
             self.components[component].members.push(NodeId::Object(id));
             results.push(id);
@@ -16491,6 +17652,8 @@ impl Document {
             .get(object)
             .filter(|r| !r.hidden)
             .ok_or(DocumentError::UnknownObject)?;
+        // Every repair rewrites the Object (OW-1).
+        self.refuse_frozen_object(object)?;
         match rec.owner {
             ObjectOwner::World { .. } => self.explode_scope_object(object),
             ObjectOwner::Definition { def, .. } => match self.components.get(def) {
@@ -16528,6 +17691,7 @@ impl Document {
                 name: name.clone(),
                 tags: tags.clone(),
                 imported,
+                locked: false,
             });
             match (owner, parent) {
                 (_, Some(g)) => self.groups[g].members.push(NodeId::Object(id)),
@@ -16598,6 +17762,7 @@ impl Document {
         {
             return Err(DocumentError::UnknownObject);
         }
+        self.refuse_frozen_object(object)?;
         // Snapshot the PRE-transform state, and bake into copies of the
         // object and its owned sketches (which ride along) before mutating
         // anything: a refusal leaves everything as it was.
@@ -16679,6 +17844,8 @@ impl Document {
     ) -> Result<DocChange, DocumentError> {
         info!(target: "kernel::op", op = "transform_def_member");
         let (component, pose) = self.instance_component(instance)?;
+        self.refuse_def_edit(instance, component)?;
+        self.refuse_frozen_object(object)?;
         let pose_inv = pose.inverse().map_err(DocumentError::Transform)?;
         // local_t maps a LOCAL point p the way `t` maps its world image:
         // world = pose(p); world' = t(world); p' = pose⁻¹(world').
@@ -16740,6 +17907,7 @@ impl Document {
         if self.sketch_owner_component(sketch) != Some(component) {
             return Err(DocumentError::UnknownSketch);
         }
+        self.refuse_def_edit(instance, component)?;
         let pose_inv = pose.inverse().map_err(DocumentError::Transform)?;
         let local_t = pose.then(t).then(&pose_inv);
         let mut change = self.transform_sketch(sketch, &local_t)?;
@@ -16775,6 +17943,7 @@ impl Document {
         if self.sketch_owner_component(sketch) != Some(component) {
             return Err(DocumentError::UnknownSketch);
         }
+        self.refuse_def_edit(instance, component)?;
         let pose_inv = pose.inverse().map_err(DocumentError::Transform)?;
         let local_t = pose.then(t).then(&pose_inv);
         let mut change = self.transform_sketch_islands(sketch, islands, &local_t)?;
@@ -16800,6 +17969,10 @@ impl Document {
     ) -> Result<DocChange, DocumentError> {
         if objects.is_empty() && sketches.is_empty() && islands.is_empty() {
             return Err(DocumentError::EmptySelection);
+        }
+        // Refused whole, before any work, when the shape is frozen (OW-1).
+        if let Ok((component, _)) = self.instance_component(instance) {
+            self.refuse_def_edit(instance, component)?;
         }
         let checkpoint = self.clone();
         let undo_start = self.undo.actions.len();
@@ -16905,6 +18078,7 @@ impl Document {
         if !self.sketches.contains_key(sketch) || self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
+        self.refuse_frozen_sketch(sketch)?;
         // Snapshot the PRE-transform state before mutating anything.
         let prior = self.sketches[sketch].clone();
         self.sketches[sketch]
@@ -16996,6 +18170,7 @@ impl Document {
         if !self.sketches.contains_key(sketch) || self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
+        self.refuse_frozen_sketch(sketch)?;
         // Snapshot the WHOLE sketch's PRE-transform state before mutating
         // anything (rule 9 posture — see the `DocAction::TransformSketchIsland`
         // doc comment for why whole-sketch, not island-scoped).
@@ -17264,6 +18439,7 @@ impl Document {
         if !self.sketches.contains_key(sketch) || self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
+        self.refuse_frozen_sketch(sketch)?;
         let before = self.sketches[sketch].clone();
         let moved = self.sketches[sketch]
             .move_vertex_arranging(vertex, new_pos)
@@ -17393,6 +18569,10 @@ impl Document {
         if members[1..].iter().any(|&m| self.node_parent(m) != parent) {
             return Err(DocumentError::MixedParents);
         }
+        // Grouping moves each member into the new group (OW-1: a locked
+        // node is not moved in or out of a group, and nothing in a locked
+        // group is regrouped).
+        self.refuse_frozen(members)?;
 
         let prev_parent_members = parent.map(|pg| self.groups[pg].members.clone());
         let group = self.insert_group_record(GroupRecord {
@@ -17402,6 +18582,7 @@ impl Document {
             hidden: false,
             name: None,
             tags: Vec::new(),
+            locked: false,
         });
         for &m in members {
             self.set_node_parent(m, Some(group));
@@ -17421,16 +18602,6 @@ impl Document {
         Ok((group, group_change(group, parent, members)))
     }
 
-    /// Dissolves a group, returning its members to the group's own parent (the
-    /// members keep their subtrees). The exact inverse of [`group_nodes`]. The
-    /// `GroupId` is retained but hidden, so redo can re-form it. `Err` (document
-    /// untouched) if the group handle is stale or already hidden.
-    ///
-    /// Hiding the group node is a consumption event for any annotation
-    /// anchored to it directly (its members are only reparented, never
-    /// hidden, so they stay live throughout) — the liveness pass runs over
-    /// exactly `[NodeId::Group(group)]`, mirroring `delete_node`'s treatment
-    /// of the same node kind.
     /// Move live world `nodes` into `parent` (a live group) or out to the
     /// top level (`None`), as ONE undo entry — the "Add to Group" the
     /// Outliner's drag-and-drop performs. Geometry is untouched: a group
@@ -17487,6 +18658,12 @@ impl Document {
             .collect();
         if moving.is_empty() {
             return Ok(DocChange::default());
+        }
+        // A frozen node stays where it is, and nothing moves into a frozen
+        // group (OW-1).
+        self.refuse_frozen(&moving)?;
+        if let Some(pg) = parent {
+            self.refuse_frozen(&[NodeId::Group(pg)])?;
         }
         let label = match parent {
             Some(pg) => match self.group_name(pg) {
@@ -17563,6 +18740,16 @@ impl Document {
         reparent_change(node, prev_parent, next_parent)
     }
 
+    /// Dissolves a group, returning its members to the group's own parent (the
+    /// members keep their subtrees). The exact inverse of [`group_nodes`]. The
+    /// `GroupId` is retained but hidden, so redo can re-form it. `Err` (document
+    /// untouched) if the group handle is stale or already hidden.
+    ///
+    /// Hiding the group node is a consumption event for any annotation
+    /// anchored to it directly (its members are only reparented, never
+    /// hidden, so they stay live throughout) — the liveness pass runs over
+    /// exactly `[NodeId::Group(group)]`, mirroring `delete_node`'s treatment
+    /// of the same node kind.
     pub fn ungroup(&mut self, group: GroupId) -> Result<DocChange, DocumentError> {
         info!(target: "kernel::op", op = "ungroup");
         if !self.group_is_live(group) {
@@ -17588,6 +18775,11 @@ impl Document {
         }
         let parent = self.groups[group].parent;
         let members = self.groups[group].members.clone();
+        // A frozen group is not dissolved, and an unlocked group holding a
+        // frozen member is not either: the member would be reparented
+        // (OW-1).
+        self.refuse_frozen(&[NodeId::Group(group)])?;
+        self.refuse_frozen(&members)?;
         let prev_parent_members = parent.map(|pg| self.groups[pg].members.clone());
 
         for &m in &members {
@@ -17645,6 +18837,10 @@ impl Document {
 
         let mut hidden_subtree = Vec::new();
         self.collect_subtree(node, &mut hidden_subtree);
+        // Delete refuses a frozen node, and anything holding one (OW-1),
+        // a linked set it would take with its last placement included.
+        self.refuse_frozen(&hidden_subtree)?;
+        self.refuse_emptied_sets_frozen(&hidden_subtree)?;
         for &n in &hidden_subtree {
             match n {
                 NodeId::Object(id) => self.objects[id].hidden = true,
@@ -17835,6 +19031,10 @@ impl Document {
         if !self.group_is_live(group) {
             return Err(DocumentError::UnknownGroup);
         }
+        // Moving a group bakes into every leaf and moves every placement
+        // in it, so a frozen node anywhere inside refuses it, named (OW-1:
+        // a locked thing does not move, even inside an unlocked group).
+        self.refuse_frozen(&self.world_subtree_nodes(NodeId::Group(group)))?;
         let leaves = self.leaf_objects_under(NodeId::Group(group));
         // A group can hold component instances as members (`group_nodes`
         // accepts `NodeId::Instance`), so the transform must also compose
@@ -17986,6 +19186,16 @@ impl Document {
             if !self.sketches.contains_key(s) || self.sketch_tombstoned(&s) {
                 return Err(DocumentError::UnknownSketch);
             }
+        }
+        // Refused whole when anything that would move is frozen (OW-1).
+        // "Left behind" is the caller's choice of what to send.
+        let moving: Vec<NodeId> = nodes
+            .iter()
+            .flat_map(|&n| self.world_subtree_nodes(n))
+            .collect();
+        self.refuse_frozen(&moving)?;
+        for &s in sketches {
+            self.refuse_frozen_sketch(s)?;
         }
 
         // Flatten to unique leaf targets in first-listing order. Select-all →
@@ -18169,6 +19379,9 @@ impl Document {
         if !factor.is_finite() || factor <= 0.0 {
             return Err(DocumentError::InvalidRescaleFactor);
         }
+        // A whole-document rescale changes every locked thing (OW-1, D1
+        // decision 7).
+        self.refuse_while_anything_locked()?;
         let scale = Transform::uniform_scale(factor);
 
         // Snapshot every touched entity's PRE-scale state before mutating
@@ -18304,6 +19517,7 @@ impl Document {
         if !factor.is_finite() || factor <= 0.0 || !point_is_finite(anchor) {
             return Err(DocumentError::InvalidRescaleFactor);
         }
+        self.refuse_while_anything_locked()?;
         let scale = rescale_transform(factor, anchor);
 
         let undo_len = match self.sessions.last().expect("stack checked non-empty") {
@@ -18641,6 +19855,14 @@ impl Document {
         if members[1..].iter().any(|&m| self.node_parent(m) != parent) {
             return Err(DocumentError::MixedParents);
         }
+        // The selection is folded into the new definition, whole (OW-1: a
+        // locked Object, or a selection holding anything frozen, is
+        // refused).
+        let folded: Vec<NodeId> = members
+            .iter()
+            .flat_map(|&m| self.world_subtree_nodes(m))
+            .collect();
+        self.refuse_frozen(&folded)?;
 
         // A selected instance (direct, or nested under a selected group)
         // nests its definition inside the new one. The new definition
@@ -18815,6 +20037,7 @@ impl Document {
             members: members.to_vec(),
             hidden: false,
             name: def_name,
+            locked: false,
         });
         if linked {
             self.apply_attr_set(
@@ -19077,6 +20300,9 @@ impl Document {
         info!(target: "kernel::op", op = "wrap_linked", node = ?node);
         self.refuse_wrap_in_nested_frames()?;
         self.check_wrappable(node)?;
+        // The wrap is not an edit to the node (its lock moves onto the new
+        // shape) but it is one to the node's container (OW-1).
+        self.refuse_frozen_container(node)?;
         self.refuse_wrap_growth(&[node], 0)?;
         let (action, wrap, change) = self.wrap_linked_core(node)?;
         self.undo.push(action);
@@ -19109,6 +20335,15 @@ impl Document {
         node: NodeId,
     ) -> Result<(DocAction, LinkedWrap, DocChange), DocumentError> {
         let name = self.node_meta(node)?.0;
+        // The wrap re-owns a subtree without changing it (OW-1): the commit
+        // audit exempts the subtree, so check here that the exemption is
+        // honest — the same effective lock and the same geometry where it
+        // stands.
+        #[cfg(any(debug_assertions, test))]
+        let before = (
+            self.node_frozen(node).is_some(),
+            self.debug_node_points(node),
+        );
         let fold = self.fold_into_component(&[node], name, true)?;
         let mut change = made_component_change(
             fold.component,
@@ -19138,6 +20373,23 @@ impl Document {
         if moved_material.is_some() {
             self.instances[fold.instance].material = moved_material;
         }
+        // A lock belongs to a shape (OW-1): the wrapped node's own lock
+        // moves onto the new definition, so every placement of the set
+        // carries it and unlocking any of them unlocks the member too.
+        let moved_lock = self.apply_wrap_lock_move(node, fold.component, true);
+        #[cfg(any(debug_assertions, test))]
+        {
+            assert_eq!(
+                self.node_frozen(node).is_some(),
+                before.0,
+                "a wrap changed {node:?}'s effective lock"
+            );
+            let after = self.debug_node_points(NodeId::Instance(fold.instance));
+            assert!(
+                same_point_set(&before.1, &after, tol::POINT_MERGE),
+                "a wrap moved {node:?}'s geometry"
+            );
+        }
         let action = DocAction::WrappedLinked {
             def: fold.component,
             instance: fold.instance,
@@ -19151,8 +20403,104 @@ impl Document {
             folded_instances: fold.folded_instances,
             reanchored: fold.reanchored,
             moved_material,
+            moved_lock,
         };
         Ok((action, wrap, change))
+    }
+
+    /// Every vertex of every live Object `node` renders, in `node`'s own
+    /// frame (through placements' poses), for the wrap's debug check.
+    #[cfg(any(debug_assertions, test))]
+    fn debug_node_points(&self, node: NodeId) -> Vec<Point3> {
+        let mut out = Vec::new();
+        let mut stack = vec![(node, Transform::IDENTITY)];
+        while let Some((n, xf)) = stack.pop() {
+            if !self.node_live(n) {
+                continue;
+            }
+            match n {
+                NodeId::Object(o) => out.extend(
+                    self.objects[o]
+                        .object
+                        .vertices()
+                        .values()
+                        .map(|v| xf.apply_point(v.position)),
+                ),
+                NodeId::Group(g) => {
+                    stack.extend(self.groups[g].members.iter().map(|&m| (m, xf)));
+                }
+                NodeId::Instance(i) => {
+                    let rec = &self.instances[i];
+                    let inner = rec.pose.then(&xf);
+                    if let Some(c) = self.components.get(rec.def) {
+                        stack.extend(c.members.iter().map(|&m| (m, inner)));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The loader's hoist (OW-1): every lock a root member of a linked set
+    /// carries (an Object or group directly in a definition carrying
+    /// `hew` / `linked` = `true`) moves onto the definition. Not recorded:
+    /// a load starts with an empty history.
+    fn hoist_linked_root_locks(&mut self) {
+        let all: Vec<ComponentId> = self.components.keys().collect();
+        self.hoist_linked_root_locks_of(&all);
+    }
+
+    /// [`Document::hoist_linked_root_locks`] over `components` alone (an
+    /// import hoists in the definitions it made). Not recorded.
+    fn hoist_linked_root_locks_of(&mut self, components: &[ComponentId]) {
+        let sets: Vec<ComponentId> = components
+            .iter()
+            .copied()
+            .filter(|&c| self.components.get(c).is_some_and(|d| !d.hidden) && self.is_linked_set(c))
+            .collect();
+        for c in sets {
+            let members = self.components[c].members.clone();
+            for m in members {
+                let flag = match m {
+                    NodeId::Object(o) => match self.objects.get_mut(o) {
+                        Some(r) if !r.hidden && r.group_parent().is_none() => &mut r.locked,
+                        _ => continue,
+                    },
+                    NodeId::Group(g) => match self.groups.get_mut(g) {
+                        Some(r) if !r.hidden && r.parent.is_none() => &mut r.locked,
+                        _ => continue,
+                    },
+                    NodeId::Instance(_) => continue,
+                };
+                if *flag {
+                    *flag = false;
+                    self.components[c].locked = true;
+                }
+            }
+        }
+    }
+
+    /// Moves a wrapped node's own lock onto its new definition (`forward`)
+    /// or back (undo), for [`Document::wrap_linked_core`] and its undo and
+    /// redo. Forward returns whether there was a lock to move; backward
+    /// always moves (the caller checked the recorded `moved_lock`).
+    fn apply_wrap_lock_move(&mut self, node: NodeId, def: ComponentId, forward: bool) -> bool {
+        let flag = match node {
+            NodeId::Object(o) => &mut self.objects[o].locked,
+            NodeId::Group(g) => &mut self.groups[g].locked,
+            NodeId::Instance(_) => return false,
+        };
+        if forward {
+            if !*flag {
+                return false;
+            }
+            *flag = false;
+            self.components[def].locked = true;
+        } else {
+            *flag = true;
+            self.components[def].locked = false;
+        }
+        true
     }
 
     /// The expansion growth of wrapping `roots` (Objects and Groups) and
@@ -19219,6 +20567,7 @@ impl Document {
         if !self.is_linked_set(component) {
             return Err(DocumentError::UnknownAttr);
         }
+        self.refuse_def_frozen(component)?;
         self.attr_delete(
             AttrTarget::Entity(EntityRef::Component(component)),
             HEW_ATTR_NS,
@@ -19310,6 +20659,11 @@ impl Document {
             ObjectOwner::World { parent: Some(_) } => return Err(DocumentError::GroupedOperand),
             ObjectOwner::World { parent: None } => {}
         }
+        // No merged lock state exists: refused whenever a lock is involved
+        // (OW-1) — a locked joiner, a locked set, or a set whose shape is
+        // frozen through another placement.
+        self.refuse_frozen(&[NodeId::Object(joiner), NodeId::Instance(set)])?;
+        self.refuse_def_frozen(set_def)?;
         if pose.to_affine().iter().any(|v| !v.is_finite()) {
             return Err(DocumentError::Transform(TransformError::Singular));
         }
@@ -19610,6 +20964,51 @@ impl Document {
 
     /// [`Document::hide_emptied_linked_sets`] seeded with each definition
     /// placed by an instance in `removed`, in first-seen order.
+    /// Typed refusal when removing `removed` would take a linked set with
+    /// its last placement ([`Document::hide_emptied_linked_sets`], applied
+    /// transitively) and that set holds a frozen node (OW-1): the set's
+    /// members go with it, so the removal would remove a locked thing.
+    /// Read-only: the same walk the hide makes, on the current state.
+    fn refuse_emptied_sets_frozen(&self, removed: &[NodeId]) -> Result<(), DocumentError> {
+        let mut gone: BTreeSet<InstanceId> = removed
+            .iter()
+            .filter_map(|&n| match n {
+                NodeId::Instance(i) => Some(i),
+                _ => None,
+            })
+            .collect();
+        let mut queue: std::collections::VecDeque<ComponentId> =
+            self.defs_placed_by(removed).into();
+        let mut seen: BTreeSet<ComponentId> = BTreeSet::new();
+        let mut hidden: Vec<NodeId> = Vec::new();
+        let on_loan = self.defs_on_loan();
+        while let Some(d) = queue.pop_front() {
+            if !seen.insert(d) || !self.is_linked_set(d) || on_loan.contains(&d) {
+                continue;
+            }
+            let placed = self
+                .instances
+                .iter()
+                .any(|(i, r)| !r.hidden && r.def == d && !gone.contains(&i));
+            if placed {
+                continue;
+            }
+            let mut nodes = Vec::new();
+            for m in self.components[d].members.clone() {
+                self.collect_def_subtree(m, &mut nodes);
+            }
+            for &n in &nodes {
+                if let NodeId::Instance(i) = n {
+                    gone.insert(i);
+                }
+            }
+            queue.extend(self.defs_placed_by(&nodes));
+            hidden.extend(nodes);
+        }
+        hidden.retain(|&n| self.node_live(n));
+        self.refuse_frozen(&hidden)
+    }
+
     fn hide_emptied_linked_sets_of(&mut self, removed: &[NodeId]) -> Vec<HiddenDef> {
         let seeds = self.defs_placed_by(removed);
         self.hide_emptied_linked_sets(seeds)
@@ -19853,6 +21252,12 @@ impl Document {
         if regions.is_empty() {
             return Err(DocumentError::EmptyComponent);
         }
+        // The letters' edges leave the sketch, and the text lands in the
+        // group (OW-1).
+        self.refuse_frozen_sketch(sketch)?;
+        if let Some(gid) = group {
+            self.refuse_frozen(&[NodeId::Group(gid)])?;
+        }
 
         // Validate & build every extrusion before committing anything (the
         // strong guarantee) — `extrude_region`'s own single-region body,
@@ -20002,6 +21407,7 @@ impl Document {
         // either: the session's frame is captured from the entered pose
         // and the sibling renders through it (ARCHITECTURE.md 2.11).
         self.refuse_def_on_loan(def)?;
+        self.refuse_frozen(&[NodeId::Instance(instance)])?;
         let prev = self.compose_instance_pose(instance, t);
         let next = self.instances[instance].pose;
         // `t` is exactly the world-space delta this call composed into the
@@ -20054,6 +21460,8 @@ impl Document {
     /// - [`DocumentError::RebaseDuringSession`] — an editing session is open.
     /// - [`DocumentError::UnknownComponent`] — the definition is stale or
     ///   hidden.
+    /// - [`DocumentError::LockedNode`] — the definition's contents are
+    ///   frozen, or a member in its subtree is (OW-1).
     /// - [`DocumentError::InvalidFrame`] — the frame is non-finite, or `x`
     ///   and `y` are not unit length and perpendicular.
     /// - [`DocumentError::Transform`] — a member refused the map (cannot
@@ -20077,11 +21485,22 @@ impl Document {
             return Err(DocumentError::UnknownComponent);
         };
         let members = def.members.clone();
+        // Rebasing moves the members and every placement (OW-1).
+        self.refuse_def_frozen(component)?;
+        let (member_objects, member_instances) = self.def_subtree_live(&members);
+        // A member carrying a lock of its own (or held by a locked group
+        // inside the shape, or a nested copy of a locked shape) is
+        // re-expressed in the new frame too, which edits it.
+        let subtree: Vec<NodeId> = member_objects
+            .iter()
+            .map(|&o| NodeId::Object(o))
+            .chain(member_instances.iter().map(|&i| NodeId::Instance(i)))
+            .collect();
+        self.refuse_frozen(&subtree)?;
         let frame = AxesFrame::new(origin, x, y).map_err(DocumentError::InvalidFrame)?;
         let f = rebase_frame_transform(&frame);
         let f_inv = f.inverse().map_err(DocumentError::Transform)?;
 
-        let (member_objects, member_instances) = self.def_subtree_live(&members);
         let def_sketches: Vec<SketchId> = self
             .def_sketches
             .iter()
@@ -20238,6 +21657,7 @@ impl Document {
             Some(rec) if !rec.hidden && rec.owner_def.is_none() => rec.pose,
             _ => return Err(DocumentError::UnknownInstance),
         };
+        self.refuse_frozen(&[NodeId::Instance(instance)])?;
         let flip = match axis {
             Axis::X => Vec3::new(-1.0, 1.0, 1.0),
             Axis::Y => Vec3::new(1.0, -1.0, 1.0),
@@ -20491,6 +21911,8 @@ impl Document {
         if self.objects.get(object).is_none_or(|r| r.hidden) {
             return Err(DocumentError::UnknownObject);
         }
+        // A member of a frozen shape is frozen with it (OW-1).
+        self.refuse_frozen_object(object)?;
         let ride = self.plan_face_ride(object, &op)?;
         let rec = &mut self.objects[object];
         let report = rec
@@ -20562,6 +21984,8 @@ impl Document {
         {
             return Err(DocumentError::UnknownObject);
         }
+        self.refuse_frozen_object(object)?;
+        self.refuse_def_frozen(component)?;
         let live_members = self
             .objects
             .values()
@@ -20664,6 +22088,12 @@ impl Document {
             Some(rec) if !rec.hidden && rec.owner_def.is_none() => (rec.def, rec.pose, rec.parent),
             _ => return Err(DocumentError::UnknownInstance),
         };
+        // A frozen placement is not exploded. An unfrozen placement of a
+        // shape whose contents are frozen (through another placement) is:
+        // the definition is untouched (OW-1). The last placement of a
+        // linked set that holds a lock is not either: the set goes with it.
+        self.refuse_frozen(&[NodeId::Instance(instance)])?;
+        self.refuse_emptied_sets_frozen(&[NodeId::Instance(instance)])?;
         let member_nodes: Vec<NodeId> = match self.components.get(def) {
             Some(c) if !c.hidden => c
                 .members
@@ -20746,6 +22176,9 @@ impl Document {
                         name,
                         tags: self.objects[o].tags.clone(),
                         imported: self.objects[o].imported,
+                        // A member's own lock is carried onto its baked
+                        // copy (OW-1), as Make Unique carries it.
+                        locked: self.objects[o].locked,
                     });
                     self.copy_attrs(&EntityRef::Object(o), EntityRef::Object(id));
                     member_copies.insert(o, id);
@@ -20929,10 +22362,18 @@ impl Document {
         group_copies: &mut BTreeMap<GroupId, GroupId>,
         copied: &mut Vec<(EntityRef, EntityRef)>,
     ) -> GroupId {
-        let (name, tags, src_members) = {
+        let (name, tags, src_members, locked) = {
             let rec = &self.groups[src];
-            (rec.name.clone(), rec.tags.clone(), rec.members.clone())
+            (
+                rec.name.clone(),
+                rec.tags.clone(),
+                rec.members.clone(),
+                rec.locked,
+            )
         };
+        // A faithful copy: a member's own lock rides along, as its name,
+        // tags and hidden state do (OW-1, Make Unique splits a shape off
+        // whole).
         let gid = self.insert_group_record(GroupRecord {
             members: Vec::new(),
             parent,
@@ -20940,6 +22381,7 @@ impl Document {
             hidden: false,
             name,
             tags,
+            locked,
         });
         self.copy_attrs(&EntityRef::Group(src), EntityRef::Group(gid));
         if self.user_hidden_groups.contains(&src) {
@@ -20998,11 +22440,12 @@ impl Document {
         copied: &mut Vec<(EntityRef, EntityRef)>,
     ) -> ObjectId {
         let rec = &self.objects[src];
-        let (object, name, tags, imported) = (
+        let (object, name, tags, imported, locked) = (
             rec.object.clone(),
             rec.name.clone(),
             rec.tags.clone(),
             rec.imported,
+            rec.locked,
         );
         let id = self.insert_object_record(ObjectRecord {
             object,
@@ -21015,6 +22458,7 @@ impl Document {
             name,
             tags,
             imported,
+            locked,
         });
         self.copy_identity_attrs(&EntityRef::Object(src), EntityRef::Object(id));
         if self.user_hidden_objects.contains(&src) {
@@ -21118,6 +22562,8 @@ impl Document {
             let rec = &self.groups[src];
             (rec.name.clone(), rec.tags.clone(), rec.members.clone())
         };
+        // A member group's own lock is carried onto its copy (OW-1).
+        let locked = self.groups[src].locked;
         let gid = self.insert_group_record(GroupRecord {
             members: Vec::new(),
             parent,
@@ -21125,6 +22571,7 @@ impl Document {
             hidden: false,
             name,
             tags,
+            locked,
         });
         self.copy_attrs(&EntityRef::Group(src), EntityRef::Group(gid));
         if self.user_hidden_groups.contains(&src) {
@@ -21140,7 +22587,8 @@ impl Document {
                         continue;
                     };
                     let mut object = rec.object.clone();
-                    let (name, tags, imported) = (rec.name.clone(), rec.tags.clone(), rec.imported);
+                    let (name, tags, imported, locked) =
+                        (rec.name.clone(), rec.tags.clone(), rec.imported, rec.locked);
                     object
                         .apply_transform(outer)
                         .map_err(DocumentError::Transform)?;
@@ -21152,6 +22600,7 @@ impl Document {
                         name,
                         tags,
                         imported,
+                        locked,
                     });
                     self.copy_attrs(&EntityRef::Object(o), EntityRef::Object(id));
                     member_copies.insert(o, id);
@@ -21285,6 +22734,10 @@ impl Document {
     ///   stale or hidden definition.
     /// - [`DocumentError::ExplodeSessionScope`] — a definition the call
     ///   would read or fork is on loan to an open session.
+    /// - [`DocumentError::LockedNode`] — the placement repointed in place
+    ///   sits in a frozen group or definition, or a cascade's later
+    ///   element sits inside a locked shape on the path (OW-1). A locked
+    ///   copy itself may be made unique.
     ///
     /// On `Err` the document is untouched.
     pub fn make_unique_by_path(
@@ -21296,6 +22749,17 @@ impl Document {
         info!(target: "kernel::op", op = "make_unique_by_path", depth = path.len(), cascade, deep);
         let defs = self.resolve_unique_chain(path)?;
         let last = path.len() - 1;
+        // Make Unique is the one edit that works on a locked copy (OW-1):
+        // the placement is repointed and nothing in the shape it leaves
+        // changes. But the placement repointed in place sits in a container
+        // whose member is rewritten, so a frozen container refuses: a copy
+        // inside a locked group is not "a locked copy" (unlock the group),
+        // and an in-place fork inside a definition edits that definition.
+        let in_place = if cascade { 0 } else { last };
+        self.refuse_frozen_container(NodeId::Instance(path[in_place]))?;
+        if cascade {
+            self.refuse_cascade_into_lock(path, &defs)?;
+        }
         if deep {
             let leaf_def = defs[last];
             if self
@@ -21424,6 +22888,46 @@ impl Document {
         Ok((new_def, leaf, remap, change))
     }
 
+    /// Typed refusal for a cascading [`Document::make_unique_by_path`]
+    /// whose later path elements sit inside a locked shape (OW-1): a copy
+    /// inside a locked component, or inside a locked group within one, is
+    /// not a locked copy, the same as a copy inside a locked world group
+    /// (the rulings' "the outer definition has def_frozen"). Each step
+    /// after the first repoints the element's copy inside the new copy of
+    /// the definition above it, which carries that definition's lock, so
+    /// the refusal follows the locks the copies would carry: a locked
+    /// definition on the path above the element (the cause is its
+    /// placement on the path), or a locked group holding the element
+    /// inside its definition. A definition frozen only through another of
+    /// its placements does not refuse: the cascade forks this path's own
+    /// copy, which that placement does not freeze (the way out the
+    /// rulings give for a shape used inside a locked group).
+    fn refuse_cascade_into_lock(
+        &self,
+        path: &[InstanceId],
+        defs: &[ComponentId],
+    ) -> Result<(), DocumentError> {
+        for k in 1..path.len() {
+            if self.components[defs[k - 1]].locked {
+                return Err(DocumentError::LockedNode {
+                    node: NodeId::Instance(path[k - 1]),
+                    via_shared_shape: false,
+                });
+            }
+            let mut parent = self.instances[path[k]].parent;
+            while let Some(g) = parent {
+                if self.groups[g].locked {
+                    return Err(DocumentError::LockedNode {
+                        node: NodeId::Group(g),
+                        via_shared_shape: false,
+                    });
+                }
+                parent = self.groups[g].parent;
+            }
+        }
+        Ok(())
+    }
+
     /// Validate a [`Document::make_unique_by_path`] chain and return the
     /// definition each element places: `path[0]` a live, visible world
     /// instance, each later element a live, visible member of the previous
@@ -21516,10 +23020,14 @@ impl Document {
 
         // Deep-copy each member into a fresh private definition (def-local
         // geometry, fresh per-object history).
+        // The new shape starts with the lock of the one it left (OW-1): a
+        // locked copy made unique is a separate shape with a lock of its
+        // own, so unlocking it later touches nothing else.
         let new_def = self.insert_component_record(ComponentDef {
             members: Vec::new(),
             hidden: false,
             name: new_name,
+            locked: self.components[prev_def].locked,
         });
         let mut copied: Vec<(EntityRef, EntityRef)> = vec![(
             EntityRef::Component(new_def),
@@ -22359,6 +23867,11 @@ impl Document {
         if self.defs_on_loan().contains(&component) {
             return Err(DocumentError::ExplodeSessionOpen);
         }
+        // A frozen placement is not opened, nor one whose shape is frozen
+        // through another placement: its members would stop being the
+        // shape's for the session, and the close would write into a locked
+        // thing (OW-1).
+        self.refuse_def_edit(instance, component)?;
         if pose.similarity_scale().is_none() {
             return Err(DocumentError::ExplodeSessionPoseUnsupported);
         }
@@ -23147,6 +24660,10 @@ impl Document {
         if self.groups[group].parent.is_some() {
             return Err(DocumentError::ExplodeSessionNestedGroup);
         }
+        // A frozen group is not opened for editing (OW-1). A group that
+        // is a definition's member (opened under a component frame) is
+        // frozen when the shape is.
+        self.refuse_frozen(&[NodeId::Group(group)])?;
 
         let members = self.groups[group].members.clone();
         for &m in &members {
@@ -23776,6 +25293,9 @@ impl Document {
             });
         }
         self.refuse_expansion_growth(&[node], 1)?;
+        // A separate copy is not locked, and lands beside the source: a
+        // frozen container refuses it (OW-1).
+        self.refuse_frozen_container(node)?;
         // Validate invertibility up front; a reflecting `placement` bakes a mirrored
         // copy per object leaf during the clone.
         placement.inverse().map_err(DocumentError::Transform)?;
@@ -23958,6 +25478,9 @@ impl Document {
             placement.inverse().map_err(DocumentError::Transform)?;
         }
         self.refuse_expansion_growth(nodes, placements.len())?;
+        for &n in nodes {
+            self.refuse_frozen_container(n)?;
+        }
 
         let mut created = CreatedClone::default();
         let sid_mark = self.next_sid;
@@ -24063,6 +25586,12 @@ impl Document {
             if nodes.iter().any(|&m| m != n && self.node_is_inside(n, m)) {
                 return Err(DocumentError::DuplicateMember);
             }
+        }
+        // Copying a locked thing is allowed; the copy lands in the same
+        // container and the wrap rewrites its member list, so a frozen
+        // container refuses (OW-1).
+        for &n in nodes {
+            self.refuse_frozen_container(n)?;
         }
         for placement in placements {
             placement.inverse().map_err(DocumentError::Transform)?;
@@ -24295,6 +25824,7 @@ impl Document {
                     name,
                     tags,
                     imported,
+                    locked: false,
                 });
                 created.objects.push(new_id);
                 created
@@ -24353,6 +25883,7 @@ impl Document {
                     hidden: false,
                     name,
                     tags,
+                    locked: false,
                 });
                 created.groups.push(new_gid);
                 created
@@ -24544,6 +26075,13 @@ impl Document {
     /// call this: they move between states that all keep their depth
     /// identity, so the mark stays valid across them.
     fn commit_new_action(&mut self) {
+        // The lock's second layer (OW-1): an edit that reached a frozen
+        // node past the up-front checks fails here, by name, in every debug
+        // and test build. Release builds rely on the checks it proved.
+        #[cfg(any(debug_assertions, test))]
+        if let Some(action) = self.undo.last() {
+            self.audit_locks(action);
+        }
         self.document_epoch += 1;
         self.faces_closed_last.clear();
         self.cells_last.clear();
@@ -24564,6 +26102,277 @@ impl Document {
             crate::changes::ChangeKind::Commit,
             self.history_generation() - 1,
         );
+    }
+
+    /// The commit audit, the lock's second layer (OW-1): panics when
+    /// `action`, just committed, modified or removed a frozen entity. The
+    /// entry's change set ([`Document::action_changes`]) names what it
+    /// touched; an Object, group or instance is frozen as
+    /// [`Document::node_frozen`] answers (a removed one, now a tombstone,
+    /// by its record's own flag and containers), a definition as
+    /// [`Document::def_frozen`] answers, a sketch with its owner, and an
+    /// attribute write with its entity. Exempt: the lock entry itself, and
+    /// what [`audit_exempt`] lists for a wrap and for Make Unique, which
+    /// re-own a locked subtree without changing it.
+    ///
+    /// A compound is audited child by child, except one that holds a lock
+    /// entry: its children were each audited when they were committed (a
+    /// lock is only ever committed on its own), and auditing them again
+    /// against the state after the lock would flag an edit made before it.
+    /// Undo and redo never pass here (DEVELOPMENT.md rule 9).
+    ///
+    /// Make Unique is checked for where it repoints as well as what: the
+    /// group or definition holding each placement it repointed must not
+    /// be frozen ([`Document::audit_repoint_container`]), unless the same
+    /// call made it ([`made_unique_fresh`]). Its change set names the
+    /// placement but not that container, so without this an in-place fork
+    /// inside a locked shape would pass unseen.
+    #[cfg(any(debug_assertions, test))]
+    fn audit_locks(&self, action: &DocAction) {
+        self.audit_locks_in(action, &[]);
+    }
+
+    /// [`Document::audit_locks`] for one entry or compound child. `fresh`
+    /// is what the Make Unique call this child belongs to created (empty
+    /// outside one): a cascading or deep call is one "Make Unique"
+    /// compound of its steps.
+    #[cfg(any(debug_assertions, test))]
+    fn audit_locks_in(&self, action: &DocAction, fresh: &[EntityRef]) {
+        match action {
+            DocAction::Compound { actions, meta } => {
+                if !actions.iter().any(action_holds_lock_change) {
+                    let one_call = meta.as_ref().is_some_and(|m| m.label == "Make Unique")
+                        && actions
+                            .iter()
+                            .all(|a| matches!(a, DocAction::MadeUnique { .. }));
+                    let call = if one_call {
+                        made_unique_fresh(actions)
+                    } else {
+                        Vec::new()
+                    };
+                    for child in actions {
+                        self.audit_locks_in(child, &call);
+                    }
+                }
+                return;
+            }
+            DocAction::PlaceTextCompound(actions) => {
+                if !actions.iter().any(action_holds_lock_change) {
+                    for child in actions {
+                        self.audit_locks_in(child, &[]);
+                    }
+                }
+                return;
+            }
+            DocAction::NodeLockChanged { .. } => return,
+            _ => {}
+        }
+        let exempt = audit_exempt(action);
+        // A Make Unique step's own copies are new: repointing them changes
+        // nothing that existed before the call.
+        let fresh: Vec<EntityRef> = match action {
+            DocAction::MadeUnique { .. } => {
+                let mut own = fresh.to_vec();
+                own.extend(made_unique_fresh(std::slice::from_ref(action)));
+                own
+            }
+            _ => Vec::new(),
+        };
+        let changes = self.action_changes(action);
+        if changes.full {
+            // A rescale and an import name everything. A rescale is refused
+            // while anything is locked; an import only adds.
+            if matches!(action, DocAction::Rescale { .. })
+                && self.refuse_while_anything_locked().is_err()
+            {
+                panic!("lock audit: Rescale ran while something is locked");
+            }
+            return;
+        }
+        let mut memo = FreezeMemo::new();
+        for r in changes.modified.iter().chain(changes.removed.iter()) {
+            if exempt.contains(&r.entity) || fresh.contains(&r.entity) {
+                continue;
+            }
+            if let Some(f) = self.audit_entity_freeze(&r.entity, &mut memo) {
+                panic!(
+                    "lock audit: {} changed {:?}, frozen by {:?} (shared shape: {})",
+                    action_variant_name(action),
+                    r.entity,
+                    f.cause,
+                    f.via_shared_shape
+                );
+            }
+        }
+        for a in &changes.attrs {
+            let entity = match (&a.object, &a.target) {
+                (Some(o), _) => o.entity.clone(),
+                (None, Some(AttrTarget::Entity(e))) => e.clone(),
+                _ => continue,
+            };
+            if exempt.contains(&entity) || fresh.contains(&entity) {
+                continue;
+            }
+            if let Some(f) = self.audit_entity_freeze(&entity, &mut memo) {
+                panic!(
+                    "lock audit: {} wrote attributes on {:?}, frozen by {:?}",
+                    action_variant_name(action),
+                    entity,
+                    f.cause
+                );
+            }
+        }
+        if let DocAction::MadeUnique {
+            instance, shared, ..
+        } = action
+        {
+            for &i in std::iter::once(instance).chain(shared) {
+                if let Some(f) = self.audit_repoint_container(i, &fresh, &mut memo) {
+                    panic!(
+                        "lock audit: MadeUnique repointed {:?} inside a frozen container, \
+                         frozen by {:?} (shared shape: {})",
+                        i, f.cause, f.via_shared_shape
+                    );
+                }
+            }
+        }
+    }
+
+    /// The freeze on the group or definition holding a placement Make
+    /// Unique repointed (OW-1's commit audit): repointing a member edits
+    /// its container, which the entry's change set does not name. `None`
+    /// for a world placement outside any group, and for a container the
+    /// same call made (`fresh`). A tombstoned container answers by its
+    /// record, as [`Document::raw_node_freeze`] does.
+    #[cfg(any(debug_assertions, test))]
+    fn audit_repoint_container(
+        &self,
+        instance: InstanceId,
+        fresh: &[EntityRef],
+        memo: &mut FreezeMemo,
+    ) -> Option<Freeze> {
+        let r = self.instances.get(instance)?;
+        if let Some(g) = r.parent {
+            if fresh.contains(&EntityRef::Group(g)) {
+                return None;
+            }
+            return self.raw_node_freeze(NodeId::Group(g), memo);
+        }
+        let d = r.owner_def?;
+        if fresh.contains(&EntityRef::Component(d)) {
+            return None;
+        }
+        self.raw_def_freeze(d, memo)
+    }
+
+    /// Typed refusal while any Object, group or definition carries a lock
+    /// ([`Document::rescale_document`], [`Document::rescale_session`]),
+    /// naming the first: an Object, then a group, then a placement of a
+    /// locked definition (or its first member when it is placed nowhere).
+    fn refuse_while_anything_locked(&self) -> Result<(), DocumentError> {
+        let cause = self
+            .objects
+            .iter()
+            .find(|(_, r)| !r.hidden && r.locked)
+            .map(|(o, _)| NodeId::Object(o))
+            .or_else(|| {
+                self.groups
+                    .iter()
+                    .find(|(_, r)| !r.hidden && r.locked)
+                    .map(|(g, _)| NodeId::Group(g))
+            })
+            .or_else(|| {
+                self.components
+                    .iter()
+                    .filter(|(_, c)| !c.hidden && c.locked)
+                    .find_map(|(c, _)| self.def_frozen(c))
+            });
+        match cause {
+            Some(node) => Err(DocumentError::LockedNode {
+                node,
+                via_shared_shape: false,
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// The audit's freeze test for one entity a change named. A live node
+    /// answers as [`Document::node_frozen`]; a removed one (a tombstone
+    /// now) by its record: its own flag (an instance's definition's), then
+    /// its parent group's and its owning definition's answers, so deleting
+    /// a locked node or one inside a locked group is caught after the fact.
+    #[cfg(any(debug_assertions, test))]
+    fn audit_entity_freeze(&self, entity: &EntityRef, memo: &mut FreezeMemo) -> Option<Freeze> {
+        match entity {
+            EntityRef::Object(o) => self.raw_node_freeze(NodeId::Object(*o), memo),
+            EntityRef::Group(g) => self.raw_node_freeze(NodeId::Group(*g), memo),
+            EntityRef::Instance(i) => self.raw_node_freeze(NodeId::Instance(*i), memo),
+            EntityRef::Component(c) => self.raw_def_freeze(*c, memo),
+            EntityRef::Sketch(s) => self.sketch_freeze(*s, memo),
+            EntityRef::Guide(_)
+            | EntityRef::Material(_)
+            | EntityRef::Tag(_)
+            | EntityRef::Annotation(_) => None,
+        }
+    }
+
+    /// [`Document::node_freeze`] that also answers for a tombstone or a
+    /// node an open session hides, by its record: its own flag (an
+    /// instance's definition's), then its parent group's and its owning
+    /// definition's answers.
+    fn raw_node_freeze(&self, node: NodeId, memo: &mut FreezeMemo) -> Option<Freeze> {
+        if self.node_live(node) {
+            return self.node_freeze(node, memo);
+        }
+        let (own, parent, owner) = match node {
+            NodeId::Object(o) => {
+                let r = self.objects.get(o)?;
+                let owner = match r.owner {
+                    ObjectOwner::Definition { def, .. } => Some(def),
+                    ObjectOwner::World { .. } => None,
+                };
+                (r.locked, r.group_parent(), owner)
+            }
+            NodeId::Group(g) => {
+                let r = self.groups.get(g)?;
+                (r.locked, r.parent, r.owner_def)
+            }
+            NodeId::Instance(i) => {
+                let r = self.instances.get(i)?;
+                let own = self.components.get(r.def).is_some_and(|c| c.locked);
+                (own, r.parent, r.owner_def)
+            }
+        };
+        let direct = Freeze {
+            cause: node,
+            via_shared_shape: false,
+        };
+        if own {
+            return Some(direct);
+        }
+        if let Some(g) = parent {
+            return self.raw_node_freeze(NodeId::Group(g), memo);
+        }
+        owner.and_then(|d| self.raw_def_freeze(d, memo))
+    }
+
+    /// [`Document::def_freeze`] that also answers for a hidden definition,
+    /// by its own flag.
+    fn raw_def_freeze(&self, def: ComponentId, memo: &mut FreezeMemo) -> Option<Freeze> {
+        let c = self.components.get(def)?;
+        if !c.hidden {
+            return self.def_freeze(def, memo);
+        }
+        // A definition removed by this entry (its last placement went):
+        // its own flag still says whether it was locked.
+        c.locked.then(|| Freeze {
+            cause: c
+                .members
+                .first()
+                .copied()
+                .unwrap_or(NodeId::Group(GroupId::default())),
+            via_shared_shape: false,
+        })
     }
 
     /// Records the top of the undo stack (a commit or a redo just put it
@@ -25227,6 +27036,13 @@ impl Document {
             } => k("rename-component")
                 .maybe_text("from", prev_name.clone())
                 .maybe_text("to", next_name.clone()),
+            DocAction::NodeLockChanged { locked, .. } => {
+                if *locked {
+                    k("lock")
+                } else {
+                    k("unlock")
+                }
+            }
             DocAction::TagDeleted { registry, .. } => {
                 k("delete-tags").count("count", registry.len())
             }
@@ -27305,17 +29121,22 @@ impl Document {
                 folded_instances,
                 reanchored,
                 moved_material,
+                moved_lock,
             } => {
                 // Unwrap: the node and its subtree go back to their owner
                 // (world, or the outer definition) under the same ids, the
                 // parent's or the outer definition's order is restored, the
-                // Object's base material comes back from the placement, and
-                // the definition and its instance are hidden.
+                // Object's base material comes back from the placement, the
+                // lock comes back from the definition, and the definition
+                // and its instance are hidden.
                 let (def, instance, node, parent, owner_def) =
                     (*def, *instance, *node, *parent, *owner_def);
                 if let (Some(_), NodeId::Object(o)) = (moved_material, node) {
                     self.objects[o].object.default_material = *moved_material;
                     self.instances[instance].material = None;
+                }
+                if *moved_lock {
+                    self.apply_wrap_lock_move(node, def, false);
                 }
                 for &(o, prior) in member_prior_parents {
                     self.objects[o].owner = match owner_def {
@@ -28193,6 +30014,11 @@ impl Document {
                 let component = *component;
                 self.components[component].name = prev_name.clone();
                 self.component_change(component)
+            }
+            DocAction::NodeLockChanged { holders, locked } => {
+                // Undo: every listed flag flipped, so each was `!locked`.
+                let holders = holders.clone();
+                self.apply_locks(&holders, !*locked)
             }
             DocAction::TagDeleted {
                 registry,
@@ -29296,18 +31122,23 @@ impl Document {
                 folded_instances,
                 reanchored,
                 moved_material,
+                moved_lock,
                 ..
             } => {
                 // Re-wrap: re-own the subtree into the definition (the node
                 // a def-local root, everything beneath it keeping its parent
-                // link), move an Object's base onto the placement again,
-                // reveal the definition and its instance, and splice the
-                // instance back into the node's spot.
+                // link), move an Object's base onto the placement and the
+                // node's lock onto the definition again, reveal the
+                // definition and its instance, and splice the instance back
+                // into the node's spot.
                 let (def, instance, node, parent, owner_def) =
                     (*def, *instance, *node, *parent, *owner_def);
                 if let (Some(_), NodeId::Object(o)) = (moved_material, node) {
                     self.objects[o].object.default_material = None;
                     self.instances[instance].material = *moved_material;
+                }
+                if *moved_lock {
+                    self.apply_wrap_lock_move(node, def, true);
                 }
                 for &(o, prior) in member_prior_parents {
                     self.objects[o].owner = ObjectOwner::Definition {
@@ -29959,6 +31790,11 @@ impl Document {
                 self.components[component].name = next_name.clone();
                 self.component_change(component)
             }
+            DocAction::NodeLockChanged { holders, locked } => {
+                // Redo: set every listed flag to `locked` again.
+                let holders = holders.clone();
+                self.apply_locks(&holders, *locked)
+            }
             DocAction::TagDeleted {
                 registry,
                 nodes,
@@ -30139,6 +31975,36 @@ impl Document {
             self.debug_validate_materials();
             self.debug_validate_owned_sketches();
             self.debug_validate_guides();
+            self.debug_validate_locks();
+        }
+    }
+
+    /// Lock invariants (OW-1): the sole live root member of a linked-set
+    /// definition never carries its own lock — a wrap moves it onto the
+    /// definition and the loader hoists it there, so a set's lock is one
+    /// flag every placement reads.
+    fn debug_validate_locks(&self) {
+        for (c, def) in self.components.iter().filter(|(_, d)| !d.hidden) {
+            if !self.is_linked_set(c) {
+                continue;
+            }
+            let live: Vec<NodeId> = def
+                .members
+                .iter()
+                .copied()
+                .filter(|&m| self.node_live(m))
+                .collect();
+            if let [only] = live.as_slice() {
+                let own = match *only {
+                    NodeId::Object(o) => self.objects[o].locked,
+                    NodeId::Group(g) => self.groups[g].locked,
+                    NodeId::Instance(_) => false,
+                };
+                assert!(
+                    !own,
+                    "the sole root member {only:?} of linked set {c:?} carries its own lock"
+                );
+            }
         }
     }
 
@@ -30781,6 +32647,7 @@ fn ingest_build_mesh(
                 // As the recipe says; `ingest_finish` marks every object of
                 // a foreign import (`ImportSceneExtra::native`).
                 imported: recipe.extra.imported,
+                locked: recipe.extra.locked,
             });
             all_objects.push(oid);
             Some(oid)
@@ -30874,6 +32741,7 @@ fn ingest_build_node(
             children,
             tags,
             hidden,
+            locked,
             key,
         } => {
             let gid = doc.insert_group_record(GroupRecord {
@@ -30883,6 +32751,7 @@ fn ingest_build_node(
                 hidden: false,
                 name: if name.is_empty() { None } else { Some(name) },
                 tags,
+                locked,
             });
             if hidden {
                 doc.user_hidden_groups.insert(gid);
@@ -31142,6 +33011,7 @@ fn library_copy_object(
         name: rec.name.clone(),
         tags: rec.tags.clone(),
         imported: rec.imported,
+        locked: false,
     });
     library_copy_entity_attrs(
         dst,
@@ -31195,6 +33065,7 @@ fn library_copy_def(
         members: Vec::new(),
         hidden: false,
         name: def.name.clone(),
+        locked: false,
     });
     let src_members = def.members.clone();
     let mut members: Vec<NodeId> = Vec::with_capacity(src_members.len());
@@ -31385,6 +33256,7 @@ fn library_copy_def_group(
         hidden: false,
         name,
         tags,
+        locked: false,
     });
     library_copy_entity_attrs(dst, src, &EntityRef::Group(gid), EntityRef::Group(new_gid));
     if src.user_hidden_groups.contains(&gid) {
@@ -31519,6 +33391,7 @@ fn library_copy_node(
                 hidden: false,
                 name,
                 tags,
+                locked: false,
             });
             library_copy_entity_attrs(dst, src, &EntityRef::Group(gid), EntityRef::Group(new_gid));
             if src.user_hidden_groups.contains(&gid) {
@@ -32196,6 +34069,101 @@ mod tests {
             ],
         )
         .expect("a box is a valid solid")
+    }
+
+    /// The commit audit (OW-1's second layer) catches an edit that reached
+    /// a frozen node past the up-front checks: a rename recorded on a
+    /// locked Object with the guard skipped panics by name.
+    #[test]
+    #[should_panic(expected = "lock audit")]
+    fn the_lock_audit_catches_an_unguarded_edit() {
+        let mut doc = Document::new();
+        let o = extrude_unit_box(&mut doc);
+        let n = NodeId::Object(o);
+        doc.set_nodes_locked(&[n], true).expect("locks");
+        // What `set_node_name` does after its guard, without the guard.
+        let (prev_name, tags) = doc.node_meta(n).expect("live");
+        doc.apply_node_meta(n, Some("renamed".to_string()), tags.clone());
+        doc.undo.push(DocAction::NodeMetaChanged {
+            node: n,
+            prev_name,
+            next_name: Some("renamed".to_string()),
+            prev_tags: tags.clone(),
+            next_tags: tags,
+        });
+        doc.commit_new_action();
+    }
+
+    /// The same audit lets a wrap of the locked node through: the wrap
+    /// re-owns it without changing it (its lock moves onto the new shape).
+    #[test]
+    fn the_lock_audit_lets_a_wrap_of_a_locked_node_through() {
+        let mut doc = Document::new();
+        let o = extrude_unit_box(&mut doc);
+        let n = NodeId::Object(o);
+        doc.set_nodes_locked(&[n], true).expect("locks");
+        let (def, inst, _) = doc.wrap_linked(n).expect("a locked Object can be wrapped");
+        assert!(doc.component_locked(def));
+        assert!(
+            !doc.objects[o].locked,
+            "the member carries no lock of its own"
+        );
+        assert!(doc.node_locked(NodeId::Instance(inst)));
+    }
+
+    /// The deletion of a locked node is caught after the fact too: the
+    /// tombstone's own flag still answers.
+    #[test]
+    #[should_panic(expected = "lock audit")]
+    fn the_lock_audit_catches_an_unguarded_delete() {
+        let mut doc = Document::new();
+        let o = extrude_unit_box(&mut doc);
+        let n = NodeId::Object(o);
+        doc.set_nodes_locked(&[n], true).expect("locks");
+        doc.objects[o].hidden = true;
+        doc.undo.push(DocAction::Deleted {
+            node: n,
+            parent: None,
+            prev_parent_members: None,
+            hidden_subtree: vec![n],
+            reanchored: Vec::new(),
+            hidden_defs: Vec::new(),
+        });
+        doc.commit_new_action();
+    }
+
+    /// Make Unique's exemption covers the placement it repoints, not the
+    /// shape holding it: an in-place fork of a placement inside a locked
+    /// component, with `make_unique_by_path`'s guard skipped, edits that
+    /// shape (every copy of it now places the new definition) and is
+    /// caught by the audit, although the entry's change set names only
+    /// the placement and the two definitions.
+    #[test]
+    #[should_panic(expected = "lock audit")]
+    fn the_lock_audit_catches_an_unguarded_in_place_make_unique() {
+        let mut doc = Document::new();
+        let o = extrude_unit_box(&mut doc);
+        let (_, nested, _) = doc.make_component(&[NodeId::Object(o)]).expect("window");
+        let (_, house_i, _) = doc
+            .make_component(&[NodeId::Instance(nested)])
+            .expect("house");
+        doc.set_nodes_locked(&[NodeId::Instance(house_i)], true)
+            .expect("locks");
+        // What `make_unique_by_path(&[house_i, nested], false, false)`
+        // does after its guard, without the guard.
+        let mut actions = Vec::new();
+        doc.fork_instance_definition(
+            nested,
+            true,
+            false,
+            &mut BTreeMap::new(),
+            &mut Remap::default(),
+            &mut actions,
+            &mut Vec::new(),
+        )
+        .expect("forks");
+        doc.undo.push(actions.pop().expect("one step"));
+        doc.commit_new_action();
     }
 
     /// `merge_sweep` carves a sweep that shares volume with its base, fuses

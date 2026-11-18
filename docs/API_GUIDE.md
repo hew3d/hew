@@ -591,6 +591,51 @@ how new capability arrives.
 refusal to stderr as JSON. `hew-cli dispatch` does the same for one
 envelope.
 
+## Lock what must not change
+
+A model often has a part that must not move while everything around it
+does: an imported house, a reference part. `hew.entity.lock` and
+`hew.entity.unlock` take `targets` (objects, groups, and component
+instances) and are one undo entry each. Pass `{"all": true}` alone to
+`hew.entity.unlock` to unlock everything.
+
+```json
+{"jsonrpc": "2.0", "id": 4, "method": "hew.entity.lock",
+ "params": {"targets": ["obj_1"]}}
+```
+
+A lock belongs to a shape, not to one copy of it. Lock one copy of a
+component, or of a set of linked copies, and every copy is locked;
+unlock any copy and every copy is unlocked. To change one copy alone,
+call `hew.component.make_unique` on it, which works on a locked copy and
+gives the copy a shape and a lock of its own. A copy inside a locked
+group, or inside a locked component, is not a locked copy: unlock what
+holds it first.
+
+`hew.query.entity` and every `hew.query.occurrences` row report `locked`
+(the entity's own lock) and `frozen` (whether any lock keeps it from
+changing: its own, a locked group above it, or a locked shape it is part
+of). A command that would change a frozen entity is refused whole, with
+the document untouched:
+
+```json
+{"refusal": "locked_node",
+ "detail": {"node": "grp_5", "via_shared_shape": false},
+ "explanation": "Locked. Unlock it to change it."}
+```
+
+`detail.node` names the locked entity behind the refusal. When
+`via_shared_shape` is `true` the edit reached a locked thing only through
+a shape the entity shares: the component you are editing is also placed
+inside a locked group, and the copy you named is not locked. The way out
+is `hew.component.make_unique` on that copy, or unlocking `node`.
+
+Leaving the locked ones out of a command is your choice, never the
+kernel's: a call that names a locked entity among others is refused as a
+whole. Reading, hiding and showing, and copying a locked entity still
+work, and so does drawing on its face (the drawing is free and does not
+cut the face).
+
 ## Look at what you built
 
 `hew.query.scene` returns the document tree with a summary per entity —

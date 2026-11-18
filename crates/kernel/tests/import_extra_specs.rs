@@ -106,6 +106,7 @@ fn soft_edges_rims_and_surfaces_are_adopted_where_they_hold() {
             hidden: false,
             face_back_materials: Vec::new(),
             imported: false,
+            locked: false,
         }))]),
         Vec::new(),
     )
@@ -154,6 +155,7 @@ fn a_claim_the_geometry_contradicts_is_dropped_not_forced() {
             hidden: false,
             face_back_materials: Vec::new(),
             imported: false,
+            locked: false,
         }))]),
         Vec::new(),
     )
@@ -611,6 +613,7 @@ fn a_hidden_member_is_hidden_in_every_placement() {
         DefRecipe {
             name: Some("Frame".into()),
             children: vec![mesh("post", Vec::new())],
+            locked: false,
         },
         DefRecipe {
             name: Some("Ceiling".into()),
@@ -626,6 +629,7 @@ fn a_hidden_member_is_hidden_in_every_placement() {
                 },
                 mesh("plain", Vec::new()),
             ],
+            locked: false,
         },
     ];
     let place = |x: f64| ImportNode::Instance {
@@ -1085,6 +1089,7 @@ fn a_definition_of_drawing_alone_is_placed_with_its_sketches() {
     s.defs = vec![DefRecipe {
         name: Some("Bare Wire Component".into()),
         children: Vec::new(),
+        locked: false,
     }];
     s.extra.sketches = vec![ImportSketch {
         plane: ground,

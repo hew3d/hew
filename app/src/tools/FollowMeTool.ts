@@ -172,6 +172,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { defaultFaceEligible, type FaceEligible } from './faceDraw'
+import { lockHintForPick } from '../lock/lockModel'
 import { clearPreview } from './transformPreview'
 import { getResolvedTheme } from '../settings/theme'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
@@ -568,6 +569,9 @@ export class FollowMeTool implements Tool {
    *  the hover highlight and status hint. Only ever set while `pathSource`
    *  is `'in-tool'` (see `_hoverProfileFace`'s doc). */
   private hoveredProfileFace: ProfileFaceTarget | null = null
+  /** The "Locked." line when the face under the cursor belongs to a locked
+   *  thing (it is not offered as a profile; the click says the same). */
+  private hoverLockedHint: string | null = null
 
   /** VCB buffer — raw string being typed by the user, live at the profile
    *  stage and while dragging (see `capturesKey`). */
@@ -698,6 +702,7 @@ export class FollowMeTool implements Tool {
    *  with the active sweep options appended once any are set. */
   statusHint(): string {
     if (this.note !== '') return this.note
+    if (this.stage.kind === 'pick-profile' && this.hoverLockedHint !== null) return this.hoverLockedHint
     const base = this._stageHint()
     const opts = sweepOptsText(this.opts)
     if (opts !== '') {
@@ -1113,6 +1118,13 @@ export class FollowMeTool implements Tool {
         this.stage.path.instance !== undefined &&
         (activeInstance === null || this.stage.path.instance !== activeInstance)
       if (pathIsOutsideInstanceFace) return
+      // A face of a locked thing is not swept: the click says so and offers
+      // Unlock (OW-1). The path alone may be locked — it is only read.
+      const lockedProfile = lockHintForPick(this.wasmScene, object, instance, { shape: true })
+      if (lockedProfile !== null) {
+        this.onToast(lockedProfile.message, lockedProfile.code)
+        return
+      }
       if (!this._faceFollowable(object, instance, true)) {
         this._notifyMiss(this._ineligibleFaceHint(instance, true))
         return
@@ -1308,6 +1320,7 @@ export class FollowMeTool implements Tool {
         this.typed = ''
         this.hoveredRegion = null
         this.hoveredProfileFace = null
+        this.hoverLockedHint = null
         this.opts = { ...DEFAULT_SWEEP_OPTS }
         this._clearPath()
         this._clearHover()
@@ -2135,6 +2148,7 @@ export class FollowMeTool implements Tool {
    * IS offered then (see `onPointerDown`'s identical exception).
    */
   private _hoverProfileFace(ray: Ray): void {
+    this.hoverLockedHint = null
     const activeInstance = this._activeInstance
     const pathIsOutsideInstanceFace =
       this.stage.kind === 'pick-profile' &&
@@ -2162,6 +2176,15 @@ export class FollowMeTool implements Tool {
       return
     }
     const { objectHandle: object, faceHandle: face, instance } = faceHit
+    // A face of a locked thing is not offered: say so beside the cursor, as
+    // every other tool does (the click's refusal stays the backstop).
+    const locked = lockHintForPick(this.wasmScene, object, instance, { shape: true })
+    if (locked !== null) {
+      this.hoverLockedHint = locked.message
+      this.hoveredProfileFace = null
+      this._clearHover()
+      return
+    }
     if (!this._faceFollowable(object, instance, true)) {
       this.hoveredProfileFace = null
       this._clearHover()

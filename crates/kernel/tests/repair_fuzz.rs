@@ -264,6 +264,7 @@ fn seed() -> Document {
             defs: vec![DefRecipe {
                 name: Some("Bin".into()),
                 children: vec![ImportNode::Mesh(open_box("Bin", 0.0, false))],
+                locked: false,
             }],
             roots: vec![
                 ImportNode::Mesh(open_box("Tank", 0.0, false)),
@@ -276,6 +277,7 @@ fn seed() -> Document {
                     tags: Vec::new(),
                     hidden: false,
                     key: None,
+                    locked: false,
                 },
                 ImportNode::Mesh(pipe(11.0)),
                 ImportNode::Mesh(crate_with_sheet(15.0)),

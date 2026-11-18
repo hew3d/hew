@@ -2629,6 +2629,53 @@ axes are `rebase`'s). This command is the one first-party writer of the
 `hew.part` namespace; `hew.attr.set` on it stays subject to the
 attribute namespace rule (§10.1).
 
+`hew.entity.lock` `{targets}` and `hew.entity.unlock` `{targets}` lock
+and unlock objects, groups, and component instances. A lock belongs to a
+shape, not to one copy of it: an instance stands for its component, so
+locking or unlocking any copy of a component or a set of linked copies
+does it to every copy. `hew.entity.unlock` `{all: true}` (alone) unlocks
+everything in the document. Each call is one undo entry, labeled Lock or
+Unlock; targets already in the asked state are left alone, and a call
+that changes nothing records nothing. Result `{changed}`: how many
+objects, groups, and shapes changed state. A target that is not an
+object, group, or instance refuses `not_a_node`. `hew.query.entity` and
+every `hew.query.occurrences` row report `locked` (the entity's own lock,
+an instance's being its component's) and `frozen` (whether a lock keeps
+it from changing: its own, a locked group above it, or a locked shape it
+is part of, reached through any placement); a component's entity reports
+`locked`.
+
+Every command that would change a frozen entity refuses `locked_node`,
+whole, with the document untouched: moving, rotating, scaling or
+flipping it; any geometry edit (push/pull, booleans, slices, blends,
+repairs); paint, its name, its tags or its attributes; deleting it;
+grouping, ungrouping or reparenting it; making a component of it;
+exploding it; entering it with `hew.view.enter`; and an edit to a
+component's contents while that component is locked or placed inside
+something locked. Deleting or renaming a tag a frozen entity carries,
+deleting or replacing a material it wears, and a whole-document rescale
+while anything is locked refuse too. The refusal's `detail` is
+`{node, via_shared_shape}`: `node` is the public id of the locked node
+behind it (the entity itself, a locked group above it, or a placement of
+the locked component), and `via_shared_shape` is `true` when the lock
+reaches the edit only through a shared shape: the component being edited
+is also placed inside something locked, and the copy named in the call
+is not. Its explanation then says so, and the way out is
+`hew.component.make_unique` on that copy (or unlocking `node`). A
+command that names several entities is refused whole when any of them
+is frozen; leaving the locked ones out is the caller's choice.
+
+Some things still work on a frozen entity: reading it, hiding and
+showing it, copying it (a separate copy is not locked; a linked copy of
+a locked object or group moves the lock onto the new set, so the
+original and every copy are locked together; a copy that would land
+inside a frozen group refuses), drawing on its face (the drawing is free
+and does not cut the face), and `hew.component.make_unique` on a locked
+copy, which gives it a shape of its own that keeps a lock of its own
+(refused for a copy inside a locked group, and for a `path` whose copy
+sits inside a locked component). Locking refuses
+`explode_session_scope` while a component is open for editing.
+
 The app's Link identical copies (not a bus command) leaves a joined
 Object's `hew.part` / `frame` behind: its new placement has none, and
 the shared member's override serves every placement through the pose.

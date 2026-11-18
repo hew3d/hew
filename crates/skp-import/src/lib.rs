@@ -290,6 +290,12 @@ pub const INCOMPLETE_NOTE: &str = "this .skp file looks incomplete or damaged, s
      of the model may be missing. If it was downloaded or copied, a fresh copy may \
      open whole";
 
+/// One of [`SkpScene::warnings`] when a component had locked and unlocked
+/// copies in the file: SketchUp locks one copy at a time, Hew locks the
+/// shape, so every copy opens locked. Exported so a caller can tell this
+/// note from the rest.
+pub const LOCKED_COPIES_NOTE: &str = "Locked copies lock the whole component in Hew.";
+
 /// True when a whole-file refusal's `detail` says the stream ran out: a
 /// read past the last byte, a declared count larger than the bytes left, or
 /// a string longer than them. These are Skpwright 0.5's three wordings (its

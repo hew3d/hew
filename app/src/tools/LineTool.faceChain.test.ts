@@ -576,3 +576,35 @@ describe('LineTool — an arrow lock on a face chain covers one segment (R19, _a
     expect(scene.log.segments[1].slice(3, 6)).toEqual([0.5, 0.9, 1])
   })
 })
+
+describe('LineTool — the status hint on a chain forced detached by a locked face', () => {
+  const startChain = (frozen: boolean) => {
+    const scene = makeScene()
+    if (frozen) {
+      const s = scene as unknown as Record<string, unknown>
+      s.node_frozen = vi.fn((kind: number, id: bigint) => (kind === 0 && id === 7n ? { kind: 'object', id } : undefined))
+    }
+    const { tool } = makeTool(scene)
+    tool.onPointerMove(hardOnFace(0.2, 0.2), rayThrough(0.2, 0.2))
+    tool.onPointerDown(hardOnFace(0.2, 0.2), rayThrough(0.2, 0.2))
+    tool.onPointerMove(hardOnFace(0.8, 0.2), rayThrough(0.8, 0.2))
+    return tool
+  }
+
+  it('shows no "stays detached" mismatch when the lock, not the toggle, forced it', () => {
+    const tool = startChain(true)
+    expect(tool.statusHint()).not.toMatch(/stays detached/)
+  })
+
+  it('still shows the mismatch when the person latched Detached and then turned it off', () => {
+    const scene = makeScene()
+    const { tool } = makeTool(scene)
+    tool.toggleDetached() // on before the first segment
+    tool.onPointerMove(hardOnFace(0.2, 0.2), rayThrough(0.2, 0.2))
+    tool.onPointerDown(hardOnFace(0.2, 0.2), rayThrough(0.2, 0.2))
+    tool.onPointerDown(hardOnFace(0.8, 0.2), rayThrough(0.8, 0.2))
+    tool.toggleDetached() // off mid-chain: the chain keeps its latch
+    tool.onPointerMove(hardOnFace(0.8, 0.8), rayThrough(0.8, 0.8))
+    expect(tool.statusHint()).toMatch(/This line stays detached/)
+  })
+})

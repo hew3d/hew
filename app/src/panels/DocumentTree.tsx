@@ -49,6 +49,9 @@ import {
 } from '../settings/view'
 import { OutlinerSortToggle } from './OutlinerSortToggle'
 import { useViewSetting } from '../settings/useViewSetting'
+import lockSvg from '@material-symbols/svg-400/outlined/lock.svg?raw'
+import { InlineIcon } from './InlineIcon'
+import { frozenCause, isLockableKind, isLocked } from '../lock/lockModel'
 import { copiesRow, unlinkLabel, unlinkAllLabel, makeComponentLabel, selectAllCopiesLabel } from '../linkedCopyCopy'
 
 interface Props {
@@ -138,6 +141,10 @@ interface Props {
    *  member, a sketch row) is indistinguishable from a drag that never
    *  registered. */
   onDropRefused?: (reason: string) => void
+  /** The padlock on a locked row was clicked: unlock that node (a copy of a
+   *  shared shape unlocks every copy). A row inside something locked passes
+   *  the locked node above it. When omitted the padlock only shows. */
+  onUnlock?: (node: NodeRef) => void
   /** Actions on a placement of a linked set (the row's "Copies" menu). When
    *  omitted, linked rows still show their glyph and count but offer no menu. */
   linkedActions?: LinkedCopyActions
@@ -161,6 +168,20 @@ interface LinkedRowContext {
 }
 
 const LinkedRowCtx = createContext<LinkedRowContext>({ actions: undefined, highlightDef: null, setHighlightDef: () => {} })
+
+/** The padlock on a row (OW-1): what clicking it does. */
+interface LockRowContext {
+  onUnlock: ((node: NodeRef) => void) | undefined
+}
+const LockRowCtx = createContext<LockRowContext>({ onUnlock: undefined })
+
+/** How a row shows the lock: its own padlock (click unlocks), or a dimmed
+ *  one when it is inside something locked (the way a row hidden by its
+ *  parent shows a dimmed eye). `target` is what clicking unlocks. */
+interface RowLock {
+  state: 'own' | 'inherited'
+  target: NodeRef
+}
 
 const EMPTY_KEYS: ReadonlySet<string> = new Set()
 
@@ -245,9 +266,13 @@ export function DocumentTree({
   onSetHiddenMany,
   onReparent,
   onDropRefused,
+  onUnlock,
   linkedActions,
 }: Props) {
   const { t } = useLingui()
+  // Frozen rows (locked, or inside something locked) neither drag nor take drops.
+  const isFrozen = useCallback((n: NodeRef) => frozenCause(scene, n) !== null, [scene])
+  const lockCtx = useMemo<LockRowContext>(() => ({ onUnlock }), [onUnlock])
   const [highlightDef, setHighlightDef] = useState<bigint | null>(null)
   const linkedCtx = useMemo<LinkedRowContext>(
     () => ({ actions: linkedActions, highlightDef, setHighlightDef }),
@@ -640,7 +665,7 @@ export function DocumentTree({
     const resolved = resolveDropTarget(e.clientX, e.clientY)
     const valid =
       resolved !== null &&
-      dropTargetFor(st.dragged, resolved.node, { getGroupMembers, sessionOpen }) !== null
+      dropTargetFor(st.dragged, resolved.node, { getGroupMembers, sessionOpen, isFrozen }) !== null
     const nextKey = valid ? (resolved as { key: string }).key : null
     if (st.lastHighlightKey !== nextKey) {
       st.lastHighlightKey = nextKey
@@ -655,12 +680,16 @@ export function DocumentTree({
       const resolved = resolveDropTarget(e.clientX, e.clientY)
       const result =
         resolved !== null
-          ? dropTargetFor(st.dragged, resolved.node, { getGroupMembers, sessionOpen })
+          ? dropTargetFor(st.dragged, resolved.node, { getGroupMembers, sessionOpen, isFrozen })
           : null
       if (result !== null) {
         onReparent(st.dragged, result.group)
       } else if (sessionOpen) {
         onDropRefused?.(t`Close the group you are editing before moving items between groups.`)
+      } else if (st.dragged.some(isFrozen)) {
+        onDropRefused?.(t`A locked item can't be moved. Unlock it first.`)
+      } else if (resolved !== null && resolved.node !== 'root' && isFrozen(resolved.node)) {
+        onDropRefused?.(t`A locked group can't take new items. Unlock it first.`)
       } else if (resolved !== null) {
         onDropRefused?.(
           resolved.node === 'root'
@@ -700,6 +729,8 @@ export function DocumentTree({
     // drag still runs so the not-allowed cursor and the drop toast say so,
     // instead of the row simply not moving.
     if (nodeKindToNumber(node.kind) < 0) return // sketch-scoped: no kernel NodeId
+    // A locked row cannot be dragged (the kernel refuses to move it).
+    if (isFrozen(node)) return
     // A text selection or the row's own image would start WebKit's native
     // drag on mouse movement and cancel the pointer stream mid-drag.
     e.preventDefault()
@@ -733,6 +764,7 @@ export function DocumentTree({
 
   return (
     <LinkedRowCtx.Provider value={linkedCtx}>
+    <LockRowCtx.Provider value={lockCtx}>
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
       {dragGhost !== null && (
         <div
@@ -1037,6 +1069,7 @@ export function DocumentTree({
         )}
       </div>
     </div>
+    </LockRowCtx.Provider>
     </LinkedRowCtx.Provider>
   )
 }
@@ -1251,6 +1284,17 @@ const NodeRow = memo(function NodeRowInner({
     [node.kind, node.id, scene, docRev, hiddenKeys, ownHidden],
   )
   const hidden = ownHidden || hiddenByParent
+  // The padlock: own when this node is locked, dimmed when it sits inside
+  // something locked (a locked group above it, or a member of a locked shape).
+  const lockCtx = useContext(LockRowCtx)
+  const rowLock = useMemo<RowLock | null>(() => {
+    if (!isLockableKind(node.kind)) return null
+    if (isLocked(scene, node)) return { state: 'own', target: node }
+    const cause = frozenCause(scene, node)
+    return cause === null ? null : { state: 'inherited', target: cause }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [node.kind, node.id, scene, docRev])
+  const lockProps = { lock: rowLock, onUnlock: lockCtx.onUnlock }
   // Imprints (drawn-but-not-yet-pushed shapes on this object's faces —
   // imprints.ts) render below as indented, always-visible child rows; a
   // circle or arc other shapes cut into runs is one row, the curve drawn.
@@ -1282,6 +1326,7 @@ const NodeRow = memo(function NodeRowInner({
         <Row
           label={resolveLabel(scene.object_name(node.id), undefined, 'object', index)}
           icon={<NodeIcon kind="object" health={health} />}
+          {...lockProps}
           selected={selected}
           isPrimary={isPrimary}
           active={active}
@@ -1343,6 +1388,7 @@ const NodeRow = memo(function NodeRowInner({
       <Row
         label={label}
         icon={<NodeIcon kind="instance" linked={linked} />}
+        {...lockProps}
         selected={selected}
         isPrimary={isPrimary}
         active={active}
@@ -1417,6 +1463,7 @@ const NodeRow = memo(function NodeRowInner({
       <Row
         label={resolveLabel(scene.group_name(node.id), undefined, 'group', index)}
         icon={<NodeIcon kind="group" />}
+        {...lockProps}
         selected={selected}
         isPrimary={isPrimary}
         active={active}
@@ -1709,6 +1756,8 @@ function Row({
   isDropTarget,
   onRowPointerDown,
   copies,
+  lock,
+  onUnlock,
 }: {
   label: string
   icon: React.ReactNode
@@ -1749,6 +1798,9 @@ function Row({
   /** Set on a placement of a linked set: the "×N" count, the hover
    *  highlight of the other placements, and the "Copies" menu. */
   copies?: RowCopies
+  /** The row's padlock, when it is locked or inside something locked. */
+  lock?: RowLock | null
+  onUnlock?: (node: NodeRef) => void
 }) {
   const { t } = useLingui()
   const copyCount = copies?.count ?? 0
@@ -1924,6 +1976,35 @@ function Row({
           }}
         >
           {anyChildHidden === true ? '○○' : '●●'}
+        </button>
+      )}
+      {/* The padlock (OW-1): a locked row shows it, and clicking unlocks.
+          A row inside something locked shows it dimmed, the way a row
+          hidden by its parent shows a dimmed eye; clicking it unlocks the
+          locked node above. */}
+      {lock !== null && lock !== undefined && (
+        <button
+          data-testid="outliner-lock"
+          data-lock-state={lock.state}
+          onClick={(e) => {
+            e.stopPropagation()
+            onUnlock?.(lock.target)
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          title={lock.state === 'own' ? t`Locked. Click to unlock.` : t`Inside something that is locked. Click to unlock it.`}
+          aria-label={lock.state === 'own' ? t`Unlock` : t`Unlock the locked item above`}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: 'var(--text-muted)',
+            cursor: onUnlock !== undefined ? 'pointer' : 'default',
+            padding: '0 2px',
+            lineHeight: 1,
+            flexShrink: 0,
+            opacity: lock.state === 'inherited' ? 0.55 : 1,
+          }}
+        >
+          <InlineIcon svg={lockSvg} size={12} />
         </button>
       )}
       {/* Primary eye toggle — always visible (no hover-only class

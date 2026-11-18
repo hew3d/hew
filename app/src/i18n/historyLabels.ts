@@ -98,6 +98,8 @@ const SIMPLE: Record<string, MessageDescriptor> = {
   'change-tags': msg`Change tags`,
   'rename-tag': msg`Rename tag`,
   'delete-component-member': msg`Delete component member`,
+  lock: msg`Lock`,
+  unlock: msg`Unlock`,
 }
 
 /** "{verb} {count} {noun}" — the transform family's verb and noun words. */

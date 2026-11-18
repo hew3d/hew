@@ -45,6 +45,7 @@ import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../view
 import { markSessionGhost } from './transformPreview'
 import { signedOffsetDistance, decodeOffsetLoops, loopToSegmentPairs } from './offsetMath'
 import { runDraft, refreshAfterDraft } from './draftCommit'
+import { lockHintForPick } from '../lock/lockModel'
 import { defaultFaceEligible, ineligibleFaceHint, sessionIsOpen, EDIT_CONTEXT_HINT_CODE, type FaceEligible } from './faceDraw'
 import { ctxOfFace, ctxOfSketchUnits, keyToId, type PlaneUnitsScene } from './planeUnits'
 import {
@@ -184,7 +185,9 @@ export class OffsetTool implements Tool {
       try {
         const objectHandle = pick.object()
         const instanceHandle = pick.instance()
-        if (instanceHandle !== undefined) next = this._componentFaceHint()
+        const locked = lockHintForPick(this.wasmScene, objectHandle, instanceHandle, { shape: true })
+        if (locked !== null) next = locked.message
+        else if (instanceHandle !== undefined) next = this._componentFaceHint()
         else if (!this._isEligible(objectHandle, instanceHandle)) next = this._ineligibleFaceHint(instanceHandle)
       } catch {
         next = null
@@ -422,6 +425,12 @@ export class OffsetTool implements Tool {
       try {
         const objectHandle = pick.object()
         const instanceHandle = pick.instance()
+        // A locked thing refuses first, with the Unlock button (OW-1).
+        const locked = lockHintForPick(this.wasmScene, objectHandle, instanceHandle, { shape: true })
+        if (locked !== null) {
+          this.onToast(locked.message, locked.code)
+          return
+        }
         // A component member's face is refused with a hint rather than
         // silently ignored — ALWAYS toast, regardless of context: the far
         // more common case is a top-level click on an ordinary placed

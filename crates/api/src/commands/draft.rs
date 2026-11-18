@@ -77,9 +77,12 @@ pub(super) struct DraftCtx {
 /// `addressed` is the object whose face the caller named: it always takes
 /// part, even where the plane's drawable set leaves it out (a group member,
 /// which the UI only draws on once the group is entered) — unless an
-/// editing session is open and the object is outside it: then the face
-/// only gives the plane, and the drawing is the session's
-/// (`Document::draft_participants`, which narrows the rest the same way).
+/// editing session is open and the object is outside it, or a lock freezes
+/// it (OW-1): then the face only gives the plane, and the drawing is free
+/// drawing that does not cut it (`Document::draft_participants`, which
+/// narrows the rest the same way). A `hew.sketch.draw_*` on a frozen
+/// Object's face never gets here: it draws detached instead
+/// (`Document::face_draw_detaches`).
 pub(super) fn context_of(
     ctx: &Ctx,
     plane: Plane,
@@ -91,6 +94,7 @@ pub(super) fn context_of(
         && !objects.contains(&o)
         && ctx.doc.object(o).is_some()
         && ctx.doc.draft_scope_holds_object(o)
+        && ctx.doc.node_frozen(kernel::NodeId::Object(o)).is_none()
     {
         objects.push(o);
     }

@@ -244,6 +244,9 @@ export interface HewTestHarness {
   getNodeParent(kind: string, id: string): string | null
   /** Whether an object is currently a watertight solid (`object_solid`). */
   isObjectSolid(id: string): boolean
+  /** Whether a node (`object` / `group` / `instance`) is locked: its own
+   *  lock, or for a placement its shape's (OW-1). A read. */
+  isNodeLocked(kind: string, id: string): boolean
   /**
    * World-axis-aligned bounding box of `object`'s current mesh, as
    * `[minX,minY,minZ,maxX,maxY,maxZ]` (meters) — read from `object_mesh`'s
@@ -1793,6 +1796,8 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       }),
 
     isObjectSolid: (id) => query((s) => s.object_solid(BigInt(id))),
+    isNodeLocked: (kind, id) =>
+      query((s) => s.node_locked(kind === 'group' ? 1 : kind === 'instance' ? 2 : 0, BigInt(id))),
 
     getObjectBounds: (id) =>
       query((s) => {

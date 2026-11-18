@@ -153,7 +153,7 @@ pub(crate) fn dispatch_local(method: &str, params: &Value) -> Response {
             id,
             codes::REFUSED,
             "refused",
-            refusal.into_data(0, &inner_method),
+            refusal.with_document(ctx.doc).into_data(0, &inner_method),
         ),
         Err(CmdError::Internal(msg)) => Response::err(id, codes::INTERNAL_FAULT, &msg),
     }

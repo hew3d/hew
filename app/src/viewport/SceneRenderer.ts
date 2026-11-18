@@ -104,6 +104,9 @@ const CAGE_OPACITY = 0.7
  *  selection-highlight semantics (FollowMeTool's picked-path highlight) reuse
  *  this one color rather than drifting a second copy of it. */
 export const EDGE_COLOR_SELECTED = 0xffaa00
+/** Red for the selected edges of a locked or frozen thing (fallback of the
+ *  `--selection-locked` theme token): SketchUp's cue for a locked entity. */
+export const EDGE_COLOR_SELECTED_LOCKED = 0xe5392e
 /** Edge color of the placement the Paint tool would paint (hover). */
 export const EDGE_COLOR_HOVER = 0xffd08a
 
@@ -827,6 +830,27 @@ export class SceneRenderer {
   private sketchLinesPlain: LineSegments2 | null = null
   /** The current draw-color tokens (see `_readDrawColors`). */
   private drawColors: DrawColors = this._readDrawColors()
+  /** Whether a node is frozen (locked, or inside something locked): its
+   *  selected edges draw in the locked red. Pushed by the Viewport. */
+  private frozenResolver: ((kind: 'object' | 'instance', id: bigint) => boolean) | null = null
+  setFrozenResolver(fn: ((kind: 'object' | 'instance', id: bigint) => boolean) | null): void {
+    this.frozenResolver = fn
+  }
+  /** The selected-edge color of one node: the locked red, or the usual orange. */
+  private _selectedColor(kind: 'object' | 'instance', id: bigint): number {
+    if (this.frozenResolver !== null && this.frozenResolver(kind, id)) {
+      return readPreviewTint('--selection-locked', EDGE_COLOR_SELECTED_LOCKED)
+    }
+    return EDGE_COLOR_SELECTED
+  }
+  /** Re-color the selection after a lock changed (nothing else did). */
+  refreshSelectionColors(): void {
+    for (const id of this.selectedObjectIds) this._applyObjectColors(id, true)
+    for (const id of this.instanceGroups.keys()) {
+      if (id === this.selectedMemberInstance) this._applyInstanceMemberColors(id)
+      else this._applyInstanceColors(id, this.selectedInstanceIds.includes(id))
+    }
+  }
   /** One fill mesh per sketch region, keyed by `${sketchHandle}:${regionHandle}`
    *  (region handles are per-sketch, so they can collide across sketches). */
   private sketchRegionMeshes: Map<string, THREE.Mesh> = new Map()
@@ -6103,7 +6127,7 @@ export class SceneRenderer {
     if (g === undefined) return
 
     // Face fill is owned by material color — only edge color changes for selection.
-    const edgeColor = selected ? EDGE_COLOR_SELECTED : this._edgeColor()
+    const edgeColor = selected ? this._selectedColor('object', objectId) : this._edgeColor()
     const edgeMat = g.edgesLines.material as THREE.LineBasicMaterial
     edgeMat.color.setHex(edgeColor)
     if (g.tangentLines !== null) (g.tangentLines.material as THREE.LineBasicMaterial).color.setHex(edgeColor)
@@ -6115,7 +6139,7 @@ export class SceneRenderer {
     // Face fill is owned by material color — only edge color changes for
     // selection (and for the Paint tool's hovered placement).
     const edgeColor = selected
-      ? EDGE_COLOR_SELECTED
+      ? this._selectedColor('instance', instanceId)
       : instanceId === this.hoveredInstance
         ? EDGE_COLOR_HOVER
         : this._edgeColor()
@@ -6134,13 +6158,17 @@ export class SceneRenderer {
       ? new Set(this.selectedMemberIds)
       : new Set<bigint>()
     const wholeInstanceSelected = this.selectedInstanceIds.includes(instanceId)
+    // A whole selected placement of a locked shape draws red; members being
+    // edited are never frozen, so they keep the usual selection color.
+    const wholeColor = wholeInstanceSelected ? this._selectedColor('instance', instanceId) : EDGE_COLOR_SELECTED
     for (let i = 0; i < g.edgesLines.length; i++) {
       const highlighted = wholeInstanceSelected || selected.has(g.memberIds[i])
+      const color = wholeInstanceSelected ? wholeColor : EDGE_COLOR_SELECTED
       ;(g.edgesLines[i].material as THREE.LineBasicMaterial).color.setHex(
-        highlighted ? EDGE_COLOR_SELECTED : this._edgeColor(),
+        highlighted ? color : this._edgeColor(),
       )
       const t = g.tangentLines[i]
-      if (t !== null) (t.material as THREE.LineBasicMaterial).color.setHex(highlighted ? EDGE_COLOR_SELECTED : EDGE_COLOR)
+      if (t !== null) (t.material as THREE.LineBasicMaterial).color.setHex(highlighted ? color : EDGE_COLOR)
     }
   }
 

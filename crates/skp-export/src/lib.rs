@@ -1037,6 +1037,12 @@ impl<'d> Author<'d> {
         if !dictionaries.is_empty() {
             self.placement_dicts.push((pid, dictionaries));
         }
+        // The shape's lock, on every copy (OW-1): SketchUp locks one
+        // placement at a time, Hew a shape, so an Object or group writes
+        // its own lock and an instance its definition's. (A linked set's
+        // root member carries none of its own; its placements carry the
+        // set's.)
+        let locked = self.doc.node_locked(node);
         // One name record per pid.
         self.model.instances.retain(|i| i.pid != pid);
         if let Some(n) = name.filter(|n| !n.is_empty()) {
@@ -1054,7 +1060,7 @@ impl<'d> Author<'d> {
                 hidden: Some(self.doc.node_user_hidden(node)),
                 casts_shadows: Some(true),
                 receives_shadows: Some(true),
-                locked: Some(false),
+                locked: Some(locked),
                 layer: None,
                 slot: None,
                 guid: String::new(),
@@ -1069,6 +1075,7 @@ impl<'d> Author<'d> {
             material,
             hidden: self.doc.node_user_hidden(node),
             layer,
+            locked,
             ..Default::default()
         }
     }

@@ -102,6 +102,10 @@ struct DraftCtx {
     scope: DraftScope,
     form: CtxForm,
     instance: Option<u64>,
+    /// The Object whose face a `{"face":..}` context addresses; `None` for
+    /// every other form. A face of a frozen Object opens its draft
+    /// detached ([`kernel::Document::face_draw_detaches`]).
+    addressed: Option<ObjectId>,
 }
 
 fn p3(a: [f64; 3]) -> Point3 {
@@ -327,6 +331,7 @@ impl Scene {
             scope: DraftScope::Plane,
             form: CtxForm::Plane,
             instance,
+            addressed: None,
         })
     }
 
@@ -352,6 +357,7 @@ impl Scene {
             scope: DraftScope::Plane,
             form: CtxForm::ObjectPlane,
             instance: None,
+            addressed: None,
         })
     }
 
@@ -402,6 +408,7 @@ impl Scene {
             scope: DraftScope::Plane,
             form: CtxForm::Face,
             instance,
+            addressed: Some(oid),
         })
     }
 
@@ -448,6 +455,7 @@ impl Scene {
             scope,
             form: CtxForm::Sketch,
             instance,
+            addressed: None,
         })
     }
 
@@ -514,7 +522,19 @@ impl Scene {
         if self.open_draft.is_some() && self.doc.draft_sketch().is_none() {
             self.open_draft = None;
         }
+        // Drawing on a face of a frozen Object opens a NEW detached shape on
+        // its plane (OW-1, v1.5 owner's items D1): the face is not cut, and
+        // the shape pulls into a new Object. Only the draft is redirected;
+        // the context stays a plane context, so the face's listing
+        // (`plane_units_json`) is what it was.
+        let detaches = ctx.scope == DraftScope::Plane
+            && ctx
+                .addressed
+                .is_some_and(|o| self.doc.face_draw_detaches(o));
         match ctx.scope {
+            DraftScope::Plane if detaches => self
+                .doc
+                .begin_draft_detached_new(ctx.plane, ctx.frame, label),
             DraftScope::Plane => self
                 .doc
                 .begin_draft(ctx.plane, ctx.frame, &ctx.objects, label),
@@ -750,6 +770,10 @@ impl Scene {
 
     /// Opens the draft on `face` of `object` (its plane; the object's
     /// owning definition as frame). Refuses a stale or hidden object/face.
+    /// On a face of a locked (frozen) Object the draft draws ONE new
+    /// detached shape, as [`Scene::draft_begin_detached`] does, so the face
+    /// is not cut; the same holds for the `{"face":..}` form of
+    /// [`Scene::draft_begin_ctx`].
     pub fn draft_begin_face(
         &mut self,
         object: u64,
@@ -1421,7 +1445,10 @@ impl Scene {
     /// objects; shown dimmed, never opened for editing), then the session's
     /// drawing on the plane as the ordinary entry, whose keys are the
     /// draft's. A detached sketch outside the session is marked
-    /// `context: true` too. The flag is omitted otherwise.
+    /// `context: true` too. Frozen drawing (a locked group's lines, OW-1)
+    /// lists the same way, session or not: a plane draft leaves it out, so
+    /// it is a `context: true` entry of its own. The flag is omitted
+    /// otherwise.
     pub fn plane_units_all_json(&self) -> Result<String, ApiError> {
         let mut out = Vec::new();
         let on = |plane: Plane| {
@@ -4292,5 +4319,118 @@ mod tests {
             .extract_clipboard(&[], &[], "[]", "win".into())
             .unwrap_err();
         assert!(err.0.starts_with("EmptyComponent"), "{}", err.0);
+    }
+
+    /// A box at the origin, locked; its id and top face.
+    fn locked_ground_box(scene: &mut Scene) -> (u64, u64) {
+        let b = ground_box(scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        scene.set_nodes_locked(&[0], &[b], true).unwrap();
+        (b, top_face(scene, b))
+    }
+
+    /// The report of a rectangle drawn in draft `d` on the box's top, and
+    /// the new sketch it names, which must be detached and leave the box.
+    fn locked_face_rect(scene: &mut Scene, b: u64, d: u64) -> u64 {
+        let faces = scene.doc.object(object_id(b)).unwrap().faces().len();
+        rect(scene, d, 0.5, 0.5, 1.5, 1.5, 1.0);
+        let report = json(&scene.draft_end(d).unwrap());
+        assert_eq!(report["objects"], serde_json::json!([]), "{report}");
+        let sketches = report["sketches"].as_array().unwrap();
+        assert_eq!(sketches.len(), 1, "one new sketch: {report}");
+        let s = sketches[0].as_u64().unwrap();
+        assert!(scene.doc.sketch(sketch_id(s)).unwrap().detached());
+        assert_eq!(
+            scene.doc.object(object_id(b)).unwrap().faces().len(),
+            faces,
+            "the locked face is not cut"
+        );
+        s
+    }
+
+    /// OW-1 (v1.5 owner's items D1): drawing on a face of a locked Object
+    /// opens the draft detached, so the shape is one new detached sketch
+    /// and the face is whole. The face's own context stays a plane
+    /// context: its listing is what it was before the draw (a frozen
+    /// Object takes no part in it, so it lists nothing), and after unlock
+    /// it is the face alone, whole. The shape pulls into a new Object.
+    #[test]
+    fn a_face_draft_on_a_locked_object_draws_a_detached_shape() {
+        let mut scene = Scene::new();
+        let (b, f) = locked_ground_box(&mut scene);
+        let face_ctx = format!(r#"{{"face":{{"object":{b},"face":{f}}}}}"#);
+        let listed = units(&scene, &face_ctx);
+        let d = scene.draft_begin_face(b, f, "Rectangle").unwrap();
+        let s = locked_face_rect(&mut scene, b, d);
+        assert_eq!(units(&scene, &face_ctx), listed, "the face's listing");
+
+        scene.set_nodes_locked(&[0], &[b], false).unwrap();
+        let u = units(&scene, &face_ctx);
+        let regions = u["regions"].as_array().unwrap();
+        assert_eq!(regions.len(), 1, "the face alone: {u}");
+        assert_eq!(regions[0]["over"]["object"], serde_json::json!(b), "{u}");
+        assert_eq!(regions[0]["over"]["face"], serde_json::json!(f), "{u}");
+        assert_eq!(regions[0]["holes"], serde_json::json!([]), "whole: {u}");
+        assert!(u["units"].as_array().unwrap().is_empty(), "{u}");
+
+        // It pulls into a new Object; the box keeps its faces.
+        let faces = scene.doc.object(object_id(b)).unwrap().faces().len();
+        let own = units(&scene, &sketch_ctx(s));
+        let ex = &own["regions"][0]["extrude"];
+        let made = scene
+            .extrude_region(
+                ex["sketch"].as_u64().unwrap(),
+                ex["region"].as_u64().unwrap(),
+                0.5,
+            )
+            .unwrap();
+        assert_ne!(made, b);
+        assert_eq!(scene.doc.object(object_id(b)).unwrap().faces().len(), faces);
+    }
+
+    /// The same through `draft_begin_ctx` with a face form.
+    #[test]
+    fn a_face_context_draft_on_a_locked_object_draws_a_detached_shape() {
+        let mut scene = Scene::new();
+        let (b, f) = locked_ground_box(&mut scene);
+        let face_ctx = format!(r#"{{"face":{{"object":{b},"face":{f}}}}}"#);
+        let d = scene.draft_begin_ctx(&face_ctx, "Rectangle").unwrap();
+        locked_face_rect(&mut scene, b, d);
+    }
+
+    /// A face of a member of a locked shape still refuses: even a detached
+    /// drawing in the shape's frame would edit it.
+    #[test]
+    fn a_face_draft_in_a_locked_shape_is_refused() {
+        let mut scene = Scene::new();
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let inst = scene.make_component(&[0], &[b]).unwrap();
+        let def = scene.instance_def(inst).unwrap();
+        let member = scene.component_member_objects(def)[0];
+        let f = top_face(&scene, member);
+        scene.set_nodes_locked(&[2], &[inst], true).unwrap();
+        let before = scene.doc.state_hash();
+        let err = scene
+            .draft_begin_face_in_instance(inst, member, f, "Rectangle")
+            .unwrap_err();
+        assert!(err.0.starts_with("LockedNode"), "{}", err.0);
+        assert!(scene.doc.draft_sketch().is_none(), "no draft opened");
+        assert_eq!(scene.doc.state_hash(), before);
+    }
+
+    /// A recorded face draw on a locked Object replays to the same state:
+    /// `DraftBeginFace` replays through the same detached branch.
+    #[test]
+    fn a_locked_face_draw_recording_round_trips() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (b, f) = locked_ground_box(&mut scene);
+        let d = scene.draft_begin_face(b, f, "Rectangle").unwrap();
+        locked_face_rect(&mut scene, b, d);
+        let hash = scene.doc.state_hash();
+        let rec = scene.take_recording();
+        assert!(rec.contains("\"method\":\"draft_begin_face\""), "{rec}");
+        let mut fresh = Scene::new();
+        assert_eq!(fresh.replay(&rec).unwrap(), hash);
     }
 }

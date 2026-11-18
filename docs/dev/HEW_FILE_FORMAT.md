@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `32`**, and **geometry buffer format version `11`**. Both are covered
+version `33`**, and **geometry buffer format version `11`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,7 +59,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 32,
+  "format_version": 33,
   "geometry_version": 11,
   "app": "hew",
   "app_version": "1.2.1",
@@ -88,18 +88,22 @@ ascending dense-id order (the array index equals the entry's own `id` field).
                     "trimmed": [ /* ... */ ], "marks": [ /* ... */ ] } ],
                                      // v31+; what each fillet on the object
                                      // replaced (§4.3); omitted when none
-      "imported": true }             // v32+, optional; omitted = not imported (§4.3)
+      "imported": true,              // v32+, optional; omitted = not imported (§4.3)
+      "locked": true }               // v33+, optional; omitted = not locked (§4.3)
   ],
   "groups": [
     { "id": 0, "sid": 4, "members": [ {"kind":"object","id":0}, {"kind":"group","id":1} ],
       "name": "MyGroup",
-      "tags": [["Architecture"]] }
+      "tags": [["Architecture"]],
+      "locked": true }   // v33+, optional; omitted = not locked (§4.4)
   ],
   "components": [
     { "id": 0, "sid": 5, "name": "MyComponent",
       "members": [ {"kind":"object","id":2}, {"kind":"object","id":3},
-                   {"kind":"instance","id":1} ] }  // NodeRefs at v15+; bare
-                                                   // object ids at v14-
+                   {"kind":"instance","id":1} ],  // NodeRefs at v15+; bare
+                                                  // object ids at v14-
+      "locked": true }   // v33+, optional; omitted = not locked. Every
+                         // instance of it is locked (§4.4)
   ],
   "instances": [
     { "id": 0, "sid": 6, "def": 0,
@@ -198,7 +202,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `32`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `33`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `11`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -366,6 +370,7 @@ of the manifest:
 | `sketches[].curves[].kind = "smooth"` (an entry with no `center` and no `radius`) | 30 | no chain is marked smooth; a chain without a `curves[]` entry is identity-only |
 | `objects[].blends` | 31 | empty list: every blend on the object restores by derivation from its tagged faces (§4.3), as every blend did before v31 |
 | `objects[].imported`, `sketches[].imported` | 32 | `false`: nothing is marked imported. An older file is never marked retroactively on load |
+| `objects[].locked`, `groups[].locked`, `components[].locked` | 33 | `false`: nothing is locked |
 
 Manifest v28 adds no manifest field: it marks geometry buffer v9 (face
 and edge attribute dictionaries, §3), so a v28 manifest names
@@ -378,7 +383,8 @@ smooth chain entry or blend records, and its geometry buffers are at most
 v9, whatever a reader of a newer version expects.
 
 Manifest v32 also marks geometry buffer v11 (each face's plane stored,
-§3), introduced with it: a v32 manifest names `geometry_version` 11.
+§3), introduced with it: a v32 or v33 manifest names `geometry_version`
+11. Manifest v33 adds the `locked` flags and changes no geometry.
 
 `document_id` (v29) is version-gated the usual single direction: a file
 declaring a version older than 29 that carries it is malformed for its own
@@ -947,6 +953,16 @@ carry it. A reader MUST reject a file declaring `format_version < 32`
 whose `objects[]` sets `imported` (reject-not-repair), and MUST NOT mark
 anything imported when loading an older file.
 
+`locked` (v33+, `bool`, optional, omitted when `false`) marks an object
+the user **locked**: nothing about it may change until it is unlocked,
+whether its geometry, its place, its paint, its name, its tags or its
+attributes. Hiding and showing it, selecting it, measuring it and
+snapping to it are not changes. A copy made of a locked object as a
+separate object is not locked. A reader MUST reject a file declaring
+`format_version < 33` whose `objects[]`, `groups[]` or `components[]`
+sets `locked` (reject-not-repair), and loads an older file with nothing
+locked.
+
 **`blends`** (v31+, optional, omitted when empty) holds, for every fillet,
 chamfer or profile blend whose faces carry a blend tag in the object's
 geometry buffer (§3.1), what that blend replaced, ascending `id`:
@@ -1040,6 +1056,9 @@ from winding alone (). A mirrored placement may also exist as a component
 - **Groups** (`groups[]`) are a plain, ordered membership list of
   `NodeRef`s — objects or other groups, nesting unrestricted — plus an
   optional name and tags. A group has no geometry or transform of its own.
+  A group may be `locked` (v33+, optional, omitted when `false`): it and
+  everything inside it, at any depth, stays as it is until the group is
+  unlocked.
 - **Component definitions** (`components[]`) are an ordered list of member
   `NodeRef`s (v15+; pre-v15 files carry bare object dense ids, the only
   member kind that existed), plus an optional name. Members may be
@@ -1048,7 +1067,16 @@ from winding alone (). A mirrored placement may also exist as a component
   reader rejects a file whose definitions reach themselves, nest beyond
   64 levels, or whose expansion exceeds 1,000,000 leaf placements (per
   definition, and summed over the world instances) — all with typed
-  malformed-manifest errors. The width bound exists because a DAG
+  malformed-manifest errors. A definition may be `locked` (v33+,
+  optional, omitted when `false`): a lock belongs to the shape, not to
+  one copy of it, so **every instance of a locked definition is locked**,
+  and its contents are frozen wherever it is placed. An instance has no
+  `locked` field of its own; a reader MUST NOT look for one. A lock on a
+  root member of a linked set (an object or group listed directly in the
+  `members` of a definition whose attributes carry `hew` / `linked` =
+  `true`) is the set's lock: a reader moves it onto the definition (the
+  definition becomes `locked`, the member does not), and a writer never
+  writes one there. The width bound exists because a DAG
   multiplies: twenty levels of two instances each is a million
   placements. Writers cannot produce such a file through the ops (the
   same bound refuses growth at every op), so the reader bound only ever

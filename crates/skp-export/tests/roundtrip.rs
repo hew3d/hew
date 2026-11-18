@@ -4,7 +4,7 @@
 //! Sources: every `skp-import` fixture (2017 and its 2026 twin) imported
 //! into a fresh document, and `fixtures/native.hew`, drawn in Hew. The
 //! comparison is a canonical digest of what the user sees and edits — the
-//! node tree with names, tags, hidden state, poses and attributes, each
+//! node tree with names, tags, hidden state, locks, poses and attributes, each
 //! Object's faces (positions to a micron, each face's effective material,
 //! textured corners' UVs), its soft edges, circle claims and curved faces,
 //! definitions, sketches with their curves, the tag registry, guides, the

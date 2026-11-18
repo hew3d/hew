@@ -381,7 +381,21 @@ pub(crate) const CURVES_GEOMETRY_VERSION: u32 = 10;
 /// The same version also marks geometry buffer v11 (each face's plane
 /// stored, HEW_FILE_FORMAT.md §3), introduced with it: a v32 manifest
 /// names `geometry_version` 11.
-pub const MANIFEST_FORMAT_VERSION: u32 = 32;
+/// **v33**: `objects[].locked`, `groups[].locked` and
+/// `components[].locked` (OW-1) — the person locked the Object, the
+/// group, or the shape every copy of a component places: nothing changes
+/// on it until it is unlocked. An instance has no lock of its own; it is
+/// locked when its definition is. Optional and omitted when false, so a
+/// document with nothing locked writes the same manifest as v32 apart
+/// from the version (and hashes as before, [`HASHED_FORMAT_VERSION`]); a
+/// file older than v33 loads with nothing locked. Gated by
+/// [`LOCKED_MIN_VERSION`]. Geometry buffer unchanged.
+pub const MANIFEST_FORMAT_VERSION: u32 = 33;
+
+/// The manifest version at which `objects[].locked`, `groups[].locked`
+/// and `components[].locked` were introduced. A file declaring an older
+/// version that sets any of them is rejected (reject-not-repair).
+pub(crate) const LOCKED_MIN_VERSION: u32 = 33;
 
 /// The manifest version at which `objects[].imported` and
 /// `sketches[].imported` were introduced. A file declaring an older version
@@ -3715,6 +3729,10 @@ pub(crate) struct ObjectDto {
     /// v32+). Omitted when false; `true` in an older file is rejected.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub imported: bool,
+    /// Locked by the person (manifest v33+, OW-1). Omitted when false;
+    /// `true` in an older file is rejected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 /// What one blend replaced on its object (`objects[].blends[]`, manifest
@@ -4436,6 +4454,11 @@ pub(crate) struct GroupDto {
     /// smuggled field and rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<u32>,
+    /// Locked by the person (manifest v33+, OW-1): everything inside is
+    /// frozen with it. Omitted when false; `true` in an older file is
+    /// rejected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 /// A component definition.
@@ -4464,6 +4487,12 @@ pub(crate) struct ComponentDto {
     /// Optional definition name (manifest v2+). Absent in v1 files → `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The shape is locked (manifest v33+, OW-1): every instance of it is
+    /// locked, and its contents are frozen everywhere it is placed. An
+    /// instance carries no lock of its own. Omitted when false; `true` in
+    /// an older file is rejected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 /// A component instance.
@@ -4814,7 +4843,16 @@ pub(crate) struct DocSaveData {
     /// Objects built from a foreign file's mesh and not drawn on since
     /// (manifest v32+), same key space as `obj_hidden`.
     pub obj_imported: std::collections::BTreeSet<ObjectId>,
+    /// Locked objects (manifest v33+, OW-1), same key space as
+    /// `obj_hidden`. Only live rows are looked up, so a tombstone's flag
+    /// never serializes.
+    pub obj_locked: std::collections::BTreeSet<ObjectId>,
     pub group_hidden: std::collections::BTreeSet<GroupId>,
+    /// Locked groups (manifest v33+).
+    pub group_locked: std::collections::BTreeSet<GroupId>,
+    /// Locked component definitions (manifest v33+). An instance has no
+    /// lock of its own: it is locked when its definition is.
+    pub component_locked: std::collections::BTreeSet<ComponentId>,
     pub instance_hidden: std::collections::BTreeSet<InstanceId>,
     /// The working camera view at last save (manifest v13+; docs/design/
     /// camera.md §5), or `None` if none was ever set — NOT undoable (see
@@ -4989,6 +5027,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 hidden: data.obj_hidden.contains(oid),
                 blends: blend_records_to_dtos(obj, &material_dense),
                 imported: data.obj_imported.contains(oid),
+                locked: data.obj_locked.contains(oid),
             }
         })
         .collect();
@@ -5006,6 +5045,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
             tags: tags.clone(),
             hidden: data.group_hidden.contains(gid),
             owner: owner_def.as_ref().map(|cid| comp_to_dense[cid]),
+            locked: data.group_locked.contains(gid),
         })
         .collect();
 
@@ -5024,6 +5064,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 .map(|m| MemberDto::Node(node_to_dto(m)))
                 .collect(),
             name: name.clone(),
+            locked: data.component_locked.contains(cid),
         })
         .collect();
 
@@ -5577,6 +5618,11 @@ pub(crate) struct DocLoadRaw {
     /// Imported flags per object dense id (manifest v32+; all false for
     /// older files).
     pub obj_imported: Vec<bool>,
+    /// Lock flags per object, group and component dense id (manifest
+    /// v33+; all false for older files).
+    pub obj_locked: Vec<bool>,
+    pub group_locked: Vec<bool>,
+    pub component_locked: Vec<bool>,
     pub group_hidden: Vec<bool>,
     pub instance_hidden: Vec<bool>,
     /// The working camera view at last save (manifest v13+; `None` for
@@ -5982,6 +6028,36 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         }
     }
 
+    if manifest.format_version < LOCKED_MIN_VERSION {
+        let locked = manifest
+            .objects
+            .iter()
+            .find(|o| o.locked)
+            .map(|o| format!("object {}", o.id))
+            .or_else(|| {
+                manifest
+                    .groups
+                    .iter()
+                    .find(|g| g.locked)
+                    .map(|g| format!("group {}", g.id))
+            })
+            .or_else(|| {
+                manifest
+                    .components
+                    .iter()
+                    .find(|c| c.locked)
+                    .map(|c| format!("component {}", c.id))
+            });
+        if let Some(what) = locked {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "{what} is locked in a v{} manifest (introduced at v{})",
+                    manifest.format_version, LOCKED_MIN_VERSION
+                ),
+            });
+        }
+    }
+
     if manifest.format_version < IMPORTED_MIN_VERSION
         && let Some(o) = manifest.objects.iter().find(|o| o.imported)
     {
@@ -6231,6 +6307,9 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
             .collect(),
         obj_hidden: manifest.objects.iter().map(|o| o.hidden).collect(),
         obj_imported: manifest.objects.iter().map(|o| o.imported).collect(),
+        obj_locked: manifest.objects.iter().map(|o| o.locked).collect(),
+        group_locked: manifest.groups.iter().map(|g| g.locked).collect(),
+        component_locked: manifest.components.iter().map(|c| c.locked).collect(),
         group_hidden: manifest.groups.iter().map(|g| g.hidden).collect(),
         instance_hidden: manifest.instances.iter().map(|i| i.hidden).collect(),
         camera,

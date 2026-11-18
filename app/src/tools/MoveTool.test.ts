@@ -2140,3 +2140,106 @@ describe('MoveTool — dashed line from the base point to the destination', () =
     expect(dashedLines(preview)).toHaveLength(0)
   })
 })
+
+// ── Lock (OW-1): locked items are left behind ──
+describe('MoveTool — locked items are left behind', () => {
+  /** Object 2 is locked; everything else is free. */
+  function lockObject2(scene: unknown): void {
+    const s = scene as Record<string, unknown>
+    s.node_frozen = vi.fn((kind: number, id: bigint) => (kind === 0 && id === 2n ? { kind: 'object', id } : undefined))
+    s.node_locked = vi.fn((kind: number, id: bigint) => kind === 0 && id === 2n)
+    s.group_members = vi.fn(() => [])
+    s.definition_usage = vi.fn(() => 1)
+  }
+
+  it('a mixed selection moves the unlocked box only, with one "left alone" toast', () => {
+    const { tool, scene, onToast } = makeTool([{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }])
+    lockObject2(scene)
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast).toHaveBeenCalledWith('1 locked item was left alone.')
+    tool.onPointerDown(makeSnap(3, 0, 0), rayThrough(3, 0))
+    expect(scene.transform_selection).toHaveBeenCalledTimes(1)
+    const [kinds, ids] = (scene.transform_selection as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(Array.from(kinds)).toEqual([0])
+    expect(Array.from(ids)).toEqual([1n])
+  })
+
+  it('a selection that is all locked does not start: the toast is the Locked line with its target', () => {
+    const { tool, scene, onToast } = makeTool([{ kind: 'object', id: 2n }])
+    lockObject2(scene)
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(onToast).toHaveBeenCalledWith('Locked. Unlock it to change it.', 'LockedHint:object:2')
+    expect(tool.capturingInput()).toBe(false)
+    tool.onPointerDown(makeSnap(3, 0, 0), rayThrough(3, 0))
+    expect(scene.transform_selection).not.toHaveBeenCalled()
+  })
+
+  it('copy mode copies a locked object and leaves the original where it is', () => {
+    const { tool, scene, onToast } = makeTool([{ kind: 'object', id: 2n }])
+    lockObject2(scene)
+    tool.onKey(makeKeyEvent('Alt'))
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(onToast).not.toHaveBeenCalled()
+    tool.onPointerDown(makeSnap(3, 0, 0), rayThrough(3, 0))
+    expect(scene.transform_selection).not.toHaveBeenCalled()
+    expect(scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    const [kinds, ids] = (scene.duplicate_selection_array as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(Array.from(kinds)).toEqual([0])
+    expect(Array.from(ids)).toEqual([2n])
+  })
+
+  it('copy mode still refuses a node frozen by a locked group above it', () => {
+    const { tool, scene, onToast } = makeTool([{ kind: 'object', id: 1n }])
+    const s = scene as unknown as Record<string, unknown>
+    s.node_frozen = vi.fn(() => ({ kind: 'group', id: 9n }))
+    s.node_locked = vi.fn(() => false)
+    s.group_members = vi.fn(() => [])
+    s.definition_usage = vi.fn(() => 1)
+    tool.onKey(makeKeyEvent('Alt'))
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(onToast).toHaveBeenCalledWith('Locked. Unlock it to change it.', 'LockedHint:group:9')
+    expect(tool.capturingInput()).toBe(false)
+  })
+
+  it('copy mode refuses a locked box that sits in a locked group, naming the group', () => {
+    // The kernel answers the box itself as the cause when it is locked too;
+    // the group above is what keeps the copy from landing.
+    const { tool, scene, onToast } = makeTool([{ kind: 'object', id: 2n }])
+    const s = scene as unknown as Record<string, unknown>
+    s.node_locked = vi.fn(() => true)
+    s.node_frozen = vi.fn((kind: number, id: bigint) => ({ kind: kind === 1 ? 'group' : 'object', id }))
+    s.node_parent = vi.fn((kind: number, id: bigint) => (kind === 0 && id === 2n ? 9n : undefined))
+    s.owner_definition = vi.fn(() => undefined)
+    s.instances_of = vi.fn(() => [])
+    s.group_members = vi.fn(() => [])
+    s.definition_usage = vi.fn(() => 1)
+    tool.onKey(makeKeyEvent('Alt'))
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(onToast).toHaveBeenCalledWith('Locked. Unlock it to change it.', 'LockedHint:group:9')
+    expect(tool.capturingInput()).toBe(false)
+    expect(scene.duplicate_selection_array).not.toHaveBeenCalled()
+  })
+
+  it('digits typed after a refused click are swallowed, not sent to the view hotkeys', () => {
+    const { tool, scene } = makeTool([{ kind: 'object', id: 2n }])
+    lockObject2(scene)
+    expect(tool.capturesKey('3')).toBe(false)
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0)) // refused: it is locked
+    expect(tool.capturesKey('3')).toBe(true)
+    expect(tool.capturesKey('-')).toBe(true)
+    expect(tool.capturesKey('v')).toBe(false)
+    // The next click, or Escape, gives the keys back.
+    tool.onKey(makeKeyEvent('Escape'))
+    expect(tool.capturesKey('3')).toBe(false)
+  })
+
+  it('an unlocked selection moves with no toast', () => {
+    const { tool, scene, onToast } = makeTool([{ kind: 'object', id: 1n }])
+    lockObject2(scene)
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap(3, 0, 0), rayThrough(3, 0))
+    expect(onToast).not.toHaveBeenCalled()
+    expect(scene.transform_selection).toHaveBeenCalledTimes(1)
+  })
+})

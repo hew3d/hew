@@ -79,6 +79,8 @@ pub enum NodeD {
         /// Soft edges, circle-claimed edges, faces on a curved surface.
         claims: [usize; 3],
         attrs: String,
+        /// Its own lock (OW-1).
+        locked: bool,
     },
     Group {
         name: Option<String>,
@@ -86,6 +88,7 @@ pub enum NodeD {
         hidden: bool,
         children: Vec<NodeD>,
         attrs: String,
+        locked: bool,
     },
     Instance {
         def: Box<DefD>,
@@ -103,6 +106,8 @@ pub struct DefD {
     members: Vec<NodeD>,
     sketches: Vec<String>,
     attrs: String,
+    /// The shape's lock, which every placement of it reads (OW-1).
+    locked: bool,
 }
 
 struct Digester<'d> {
@@ -216,6 +221,7 @@ impl Digester<'_> {
                     faces: self.faces(obj),
                     claims: effective_claims(obj),
                     attrs: self.attrs(EntityRef::Object(id)),
+                    locked: self.doc.node_locked(node),
                 }
             }
             NodeId::Group(id) => {
@@ -233,6 +239,7 @@ impl Digester<'_> {
                     hidden,
                     children,
                     attrs: self.attrs(EntityRef::Group(id)),
+                    locked: self.doc.node_locked(node),
                 }
             }
             NodeId::Instance(id) => {
@@ -259,6 +266,7 @@ impl Digester<'_> {
                         members,
                         sketches,
                         attrs: self.attrs(EntityRef::Component(def)),
+                        locked: self.doc.component_locked(def),
                     }),
                     pose: self
                         .doc

@@ -361,6 +361,13 @@ fn doc_err(e: DocumentError) -> ApiError {
         DocumentError::Repair(inner) => api_err(inner, &e),
         DocumentError::Shape(inner) => api_err(inner, &e),
         DocumentError::Blend(inner) => api_err(inner, &e),
+        // The indirect lock (OW-1) answers a code of its own, so the app
+        // can say why and offer Make Unique first: the shape is also used
+        // inside something locked.
+        DocumentError::LockedNode {
+            via_shared_shape: true,
+            ..
+        } => ApiError::new("LockedNodeViaSharedShape", &e.to_string()),
         // UnknownSketch/UnknownObject/UnknownFace/UnknownMaterial/NothingTo{Undo,Redo}/
         // InverseFailed carry no separate inner code: the variant name is the code.
         _ => api_err(&e, &e),
@@ -4721,6 +4728,8 @@ impl Scene {
     ) -> Result<SegmentAddedJs, ApiError> {
         self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -4749,6 +4758,8 @@ impl Scene {
         self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
         let eid = SketchEdgeId::from(KeyData::from_ffi(edge));
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -4778,6 +4789,8 @@ impl Scene {
         self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
         let rid = SketchRegionId::from(KeyData::from_ffi(region));
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -4831,6 +4844,8 @@ impl Scene {
     pub fn sketch_begin_curve(&mut self, sketch: u64) -> Result<u64, ApiError> {
         self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -4855,6 +4870,8 @@ impl Scene {
     ) -> Result<u64, ApiError> {
         self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -4890,6 +4907,8 @@ impl Scene {
     ) -> Result<u64, ApiError> {
         self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -4937,6 +4956,8 @@ impl Scene {
         self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
         let cid = kernel::SketchCurveId::from(KeyData::from_ffi(curve));
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -4975,6 +4996,8 @@ impl Scene {
     pub fn sketch_end_curve(&mut self, sketch: u64) -> Result<(), ApiError> {
         self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -8510,6 +8533,57 @@ impl Scene {
         let change = self.doc.rename_tag(&from, to).map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::RenameTag { path, new_path });
+        Ok(())
+    }
+
+    /// Whether a node is locked (OW-1): an object's or group's own lock, or
+    /// for an instance its definition's, which every copy shares
+    /// ([`kernel::Document::node_locked`]). `false` for a stale node.
+    ///
+    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    pub fn node_locked(&self, kind: u8, id: u64) -> Result<bool, ApiError> {
+        let node = node_id(kind, id)?;
+        Ok(self.doc.node_locked(node))
+    }
+
+    /// The locked node that keeps `(kind, id)` from changing, or
+    /// `undefined` when nothing does ([`kernel::Document::node_frozen`]):
+    /// the node itself when it is locked, a locked group above it, or a
+    /// placement of a locked shape it is part of. The app names it in the
+    /// "Locked" hint and offers to unlock it. Read-only.
+    ///
+    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    pub fn node_frozen(&self, kind: u8, id: u64) -> Result<Option<NodeJs>, ApiError> {
+        let node = node_id(kind, id)?;
+        Ok(self.doc.node_frozen(node).map(node_js))
+    }
+
+    /// Locks (`locked = true`) or unlocks the nodes as ONE undo step
+    /// labeled "Lock" or "Unlock" ([`kernel::Document::set_nodes_locked`]).
+    /// An instance stands for its definition, so every copy changes with
+    /// it. `kinds`/`ids` are parallel; nodes already in the asked state are
+    /// left alone, and a call that changes nothing records no entry. A
+    /// stale handle anywhere refuses the whole call with nothing applied.
+    ///
+    /// # Errors
+    /// - `BadNodeList` / `BadNodeKind` — malformed lists.
+    /// - `UnknownObject` / `UnknownGroup` / `UnknownInstance` /
+    ///   `UnknownComponent` — a stale or hidden node.
+    pub fn set_nodes_locked(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        locked: bool,
+    ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        let nodes = node_ids(kinds, ids)?;
+        let change = self.doc.set_nodes_locked(&nodes, locked).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetNodesLocked {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            locked,
+        });
         Ok(())
     }
 
@@ -14588,6 +14662,9 @@ impl Scene {
                 RemoveNodeTagMany { kinds, ids, path } => {
                     self.remove_node_tag_many(&kinds, &ids, path)?;
                 }
+                SetNodesLocked { kinds, ids, locked } => {
+                    self.set_nodes_locked(&kinds, &ids, locked)?;
+                }
                 SetTagHidden { path, hidden } => {
                     self.set_tag_hidden(path, hidden)?;
                 }
@@ -20059,6 +20136,67 @@ mod tests {
             "replaying a structural/metadata session reproduces the golden state_hash"
         );
         assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// Lock over the boundary (OW-1): `set_nodes_locked` is one undo entry
+    /// for the whole call, an instance stands for its definition so every
+    /// copy reports locked, `node_frozen` names the locked node behind a
+    /// freeze, malformed lists refuse with nothing applied, and the session
+    /// records and replays to the same state.
+    #[test]
+    fn lock_and_unlock_over_the_boundary_record_and_replay() {
+        recording::reset();
+        const SHIFT_X3: [f64; 12] = [1.0, 0.0, 0.0, 3.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 6.0, 0.0);
+        let b = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let g = scene.group_nodes(&[0], &[b]).unwrap();
+        let inst = scene.make_component(&[0], &[a]).unwrap();
+        let def = scene.instance_def(inst).unwrap();
+        let copy = scene.place_instance(def, &SHIFT_X3).unwrap();
+
+        assert!(!scene.node_locked(2, inst).unwrap());
+        assert!(scene.node_frozen(2, inst).unwrap().is_none());
+        let depth = scene.doc.undo_depth();
+        scene.set_nodes_locked(&[2, 1], &[inst, g], true).unwrap();
+        assert_eq!(scene.doc.undo_depth(), depth + 1, "one entry for the call");
+        assert!(scene.node_locked(2, copy).unwrap(), "every copy is locked");
+        assert!(scene.node_locked(1, g).unwrap());
+        let cause = scene
+            .node_frozen(0, b)
+            .unwrap()
+            .expect("frozen by its group");
+        assert_eq!((cause.kind().as_str(), cause.id()), ("group", g));
+        assert!(!scene.node_locked(0, b).unwrap(), "frozen, not locked");
+
+        // Malformed or stale input refuses whole.
+        assert!(scene.set_nodes_locked(&[2], &[inst, g], false).is_err());
+        assert!(scene.set_nodes_locked(&[], &[], false).is_err());
+        let err = scene.set_nodes_locked(&[0, 2], &[u64::MAX, inst], false);
+        assert!(err.unwrap_err().0.starts_with("UnknownObject"));
+        assert!(scene.node_locked(2, inst).unwrap(), "nothing applied");
+        assert!(scene.node_locked(9, inst).is_err(), "bad kind");
+
+        scene.set_nodes_locked(&[2], &[copy], false).unwrap();
+        assert!(
+            !scene.node_locked(2, inst).unwrap(),
+            "unlock any copy, all unlock"
+        );
+        scene.scene_undo().unwrap();
+        assert!(scene.node_locked(2, inst).unwrap());
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("set_nodes_locked"), "{json}");
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+        assert!(replayed.node_locked(2, copy).unwrap());
     }
 
     /// `object_materials` lists each distinct material once: base plus face

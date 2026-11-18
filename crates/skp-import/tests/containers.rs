@@ -87,6 +87,7 @@ enum NodeDigest {
         children: Vec<NodeDigest>,
         tags: Vec<Vec<String>>,
         hidden: bool,
+        locked: bool,
         keyed: bool,
     },
     Instance {
@@ -196,12 +197,14 @@ fn nodes(scene: &ImportScene, list: &[ImportNode]) -> Vec<NodeDigest> {
                 children,
                 tags,
                 hidden,
+                locked,
                 key,
             } => NodeDigest::Group {
                 name: name.clone(),
                 children: nodes(scene, children),
                 tags: tags.clone(),
                 hidden: *hidden,
+                locked: *locked,
                 keyed: key.is_some(),
             },
             ImportNode::Instance {
@@ -383,6 +386,7 @@ fn diff_digest(a: &Digest, b: &Digest) -> Vec<String> {
                         children: ca,
                         tags: ta,
                         hidden: ha,
+                        locked: la,
                         keyed: ka,
                     },
                     NodeDigest::Group {
@@ -390,12 +394,14 @@ fn diff_digest(a: &Digest, b: &Digest) -> Vec<String> {
                         children: cb,
                         tags: tb,
                         hidden: hb,
+                        locked: lb,
                         keyed: kb,
                     },
                 ) => {
                     field(out, &format!("{p}.name"), na, nb);
                     field(out, &format!("{p}.tags"), ta, tb);
                     field(out, &format!("{p}.hidden"), ha, hb);
+                    field(out, &format!("{p}.locked"), la, lb);
                     field(out, &format!("{p}.keyed"), ka, kb);
                     nodes(out, &format!("{p}.children"), ca, cb);
                 }

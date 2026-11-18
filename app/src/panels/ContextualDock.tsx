@@ -31,6 +31,8 @@ import contentCopySvg from '@material-symbols/svg-400/outlined/content_copy.svg?
 import callSplitSvg from '@material-symbols/svg-400/outlined/call_split.svg?raw'
 import linkOffSvg from '@material-symbols/svg-400/outlined/link_off.svg?raw'
 import layersClearSvg from '@material-symbols/svg-400/outlined/layers_clear.svg?raw'
+import lockSvg from '@material-symbols/svg-400/outlined/lock.svg?raw'
+import lockOpenSvg from '@material-symbols/svg-400/outlined/lock_open.svg?raw'
 import textFieldsSvg from '@material-symbols/svg-400/outlined/text_fields.svg?raw'
 import bookmarkAddSvg from '@material-symbols/svg-400/outlined/bookmark_add.svg?raw'
 import joinSvg from '@material-symbols/svg-400/outlined/join.svg?raw'
@@ -49,6 +51,8 @@ const NON_TOOL_ICON_SVG: Record<string, string> = {
   'edit-unlink': linkOffSvg,
   'edit-unlink-all': layersClearSvg,
   'explode-instance': callSplitSvg,
+  'edit-lock': lockSvg,
+  'edit-unlock-selected': lockOpenSvg,
   'draw-3d-text': textFieldsSvg,
   'save-to-library': bookmarkAddSvg,
   // Two overlapping circles: the whole, the left-only part, the shared lens.

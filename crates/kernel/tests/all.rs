@@ -32,6 +32,7 @@
 
 mod common;
 mod face_arrangement_support;
+mod lock_oracle;
 
 mod arc_on_face_specs;
 mod asset_lifecycle_specs;
@@ -103,6 +104,8 @@ mod instance_materials;
 mod kb25_specs;
 mod library_specs;
 mod linked_copies_specs;
+mod lock_enforcement_specs;
+mod lock_specs;
 mod loft_specs;
 mod make_solid_faces_specs;
 mod make_unique_by_path_specs;

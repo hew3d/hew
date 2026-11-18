@@ -788,3 +788,171 @@ describe('ObjectInfoPanel — Volume, Surface area, and Size rows', () => {
     expect(screen.getByTestId('measure-volume')).toHaveTextContent('200000 cm³')
   })
 })
+
+describe('ObjectInfoPanel — Locked checkbox and read-only fields (OW-1)', () => {
+  /** Objects 1 (free) and 2 (locked), and 3 inside a locked group 9. */
+  function lockScene(set: ReturnType<typeof vi.fn>) {
+    const locked = new Set<string>(['0:2', '1:9'])
+    const frozenBy = (kind: number, id: bigint) => {
+      if (locked.has(`${kind}:${id}`)) return { kind: kind === 1 ? 'group' : 'object', id }
+      if (kind === 0 && id === 3n) return { kind: 'group', id: 9n }
+      return undefined
+    }
+    return makeScene({
+      top_level_nodes: () => [{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }, { kind: 'group', id: 9n }],
+      group_members: (id: bigint) => (id === 9n ? [{ kind: 'object', id: 3n }] : []),
+      node_tags: (_k: number, id: bigint) => (id === 2n || id === 3n ? ['Walls'] : []),
+      node_parent: (_k: number, id: bigint) => (id === 3n ? 9n : undefined),
+      object_solid: () => true,
+      object_name: (id: bigint) => `Obj${id}`,
+      group_name: () => undefined,
+      object_materials: () => [],
+      node_locked: (kind: number, id: bigint) => locked.has(`${kind}:${id}`),
+      node_frozen: frozenBy,
+      set_nodes_locked: set,
+    })
+  }
+  const obj = (id: bigint): NodeRef => ({ kind: 'object', id })
+
+  it('a free object shows an unchecked Locked box; ticking it locks the selection and tells the app', () => {
+    const set = vi.fn()
+    const onLockChanged = vi.fn()
+    render(<ObjectInfoPanel {...baseProps} onLockChanged={onLockChanged} scene={lockScene(set)} selectedIds={[obj(1n)]} />)
+    const box = within(screen.getByTestId('object-info-locked')).getByRole('checkbox') as HTMLInputElement
+    expect(box.checked).toBe(false)
+    fireEvent.click(box)
+    expect(set).toHaveBeenCalledTimes(1)
+    const [kinds, ids, locked] = set.mock.calls[0]
+    expect(Array.from(kinds)).toEqual([0])
+    expect(Array.from(ids)).toEqual([1n])
+    expect(locked).toBe(true)
+    expect(onLockChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it('a locked object shows the box ticked, with its name and tags read-only', () => {
+    const set = vi.fn()
+    render(<ObjectInfoPanel {...baseProps} scene={lockScene(set)} selectedIds={[obj(2n)]} />)
+    const box = within(screen.getByTestId('object-info-locked')).getByRole('checkbox') as HTMLInputElement
+    expect(box.checked).toBe(true)
+    expect((screen.getAllByRole('textbox')[0] as HTMLInputElement).readOnly).toBe(true)
+    // The tag chip stays, with no × and no +.
+    expect(screen.getByText('Walls')).toBeTruthy()
+    expect(screen.queryByLabelText(/Remove tag/)).toBeNull()
+    expect(screen.queryByLabelText('Add tag')).toBeNull()
+    fireEvent.click(box)
+    expect(set.mock.calls[0][2]).toBe(false)
+  })
+
+  it('a rename attempt on a locked object never reaches the kernel', () => {
+    const rename = vi.fn()
+    const scene = { ...lockScene(vi.fn()), set_node_name: rename } as unknown as WasmScene
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[obj(2n)]} />)
+    const input = screen.getAllByRole('textbox')[0]
+    fireEvent.blur(input)
+    expect(rename).not.toHaveBeenCalled()
+  })
+
+  it('an object inside a locked group is read-only too, and says why', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={lockScene(vi.fn())} selectedIds={[obj(3n)]} />)
+    const row = screen.getByTestId('object-info-locked')
+    expect((within(row).getByRole('checkbox') as HTMLInputElement).checked).toBe(false)
+    expect(within(row).getByText('Part of something that is locked.')).toBeTruthy()
+    expect(screen.queryByLabelText('Add tag')).toBeNull()
+  })
+
+  it('a free object keeps its fields editable', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={lockScene(vi.fn())} selectedIds={[obj(1n)]} />)
+    expect((screen.getAllByRole('textbox')[0] as HTMLInputElement).readOnly).toBe(false)
+    expect(screen.getByLabelText('Add tag')).toBeTruthy()
+  })
+
+  it('a mixed multi-selection shows the box mixed; ticking locks everything', () => {
+    const set = vi.fn()
+    render(<ObjectInfoPanel {...baseProps} scene={lockScene(set)} selectedIds={[obj(1n), obj(2n)]} />)
+    const box = within(screen.getByTestId('object-info-locked')).getByRole('checkbox') as HTMLInputElement
+    expect(box.indeterminate).toBe(true)
+    fireEvent.click(box)
+    const [kinds, ids, locked] = set.mock.calls[0]
+    expect(Array.from(kinds)).toEqual([0, 0])
+    expect(Array.from(ids)).toEqual([1n, 2n])
+    expect(locked).toBe(true)
+  })
+
+  it('a kernel refusal of the lock is toasted, not swallowed', () => {
+    const onToast = vi.fn()
+    const set = vi.fn(() => {
+      throw new Error('ExplodeSessionScope: close the component first')
+    })
+    render(<ObjectInfoPanel {...baseProps} onToast={onToast} scene={lockScene(set)} selectedIds={[obj(1n)]} />)
+    fireEvent.click(within(screen.getByTestId('object-info-locked')).getByRole('checkbox'))
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][1]).toBe('ExplodeSessionScope')
+  })
+
+  it('tagging a multi-selection leaves the locked item behind and says so once', () => {
+    const add = vi.fn()
+    const onToast = vi.fn()
+    const scene = { ...lockScene(vi.fn()), add_node_tag_many: add } as unknown as WasmScene
+    render(<ObjectInfoPanel {...baseProps} onToast={onToast} scene={scene} selectedIds={[obj(1n), obj(2n)]} />)
+    fireEvent.click(screen.getByLabelText('Add tag to all selected'))
+    const input = screen.getByLabelText('New tag for all selected')
+    fireEvent.change(input, { target: { value: 'Roof' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(add).toHaveBeenCalledTimes(1)
+    expect(Array.from(add.mock.calls[0][1])).toEqual([1n])
+    expect(onToast).toHaveBeenCalledWith('1 locked item was left alone.')
+  })
+
+  /** Instance 5 (free, shape 7) and instance 6 of the same shape inside locked group 9. */
+  function sharedScene(rename: ReturnType<typeof vi.fn>, usedInLockedGroup: boolean) {
+    return makeScene({
+      top_level_nodes: () => [{ kind: 'instance', id: 5n }, { kind: 'group', id: 9n }],
+      group_members: (id: bigint) => (id === 9n && usedInLockedGroup ? [{ kind: 'instance', id: 6n }] : []),
+      node_tags: () => [],
+      node_parent: (_k: number, id: bigint) => (id === 6n ? 9n : undefined),
+      group_name: () => undefined,
+      instance_name: () => undefined,
+      instance_def: () => 7n,
+      is_linked: () => false,
+      component_name: () => 'Window',
+      instances_of: () => (usedInLockedGroup ? [5n, 6n] : [5n]),
+      instance_expanded_members: () => [],
+      instance_expanded_inherited: () => [],
+      instance_pose: () => undefined,
+      object_materials: () => [],
+      node_locked: (kind: number, id: bigint) => kind === 1 && id === 9n,
+      node_frozen: (kind: number, id: bigint) =>
+        kind === 1 && id === 9n ? { kind: 'group', id: 9n } : kind === 2 && id === 6n && usedInLockedGroup ? { kind: 'group', id: 9n } : undefined,
+      set_component_name: rename,
+    })
+  }
+  const defNameInput = () => screen.getByLabelText('Definition Name') as HTMLInputElement
+
+  it('the Definition Name of an outside copy is read-only when its shape is used inside a locked group', () => {
+    const rename = vi.fn()
+    const onToast = vi.fn()
+    render(<ObjectInfoPanel {...baseProps} onToast={onToast} scene={sharedScene(rename, true)} selectedIds={[{ kind: 'instance', id: 5n }]} />)
+    expect(defNameInput().readOnly).toBe(true)
+    fireEvent.blur(defNameInput())
+    expect(rename).not.toHaveBeenCalled()
+  })
+
+  it('the Definition Name stays editable when the shape is used nowhere locked', () => {
+    const rename = vi.fn()
+    render(<ObjectInfoPanel {...baseProps} scene={sharedScene(rename, false)} selectedIds={[{ kind: 'instance', id: 5n }]} />)
+    expect(defNameInput().readOnly).toBe(false)
+  })
+
+  it("a kernel lock refusal from a rename is toasted with its code, not thrown", () => {
+    const rename = vi.fn(() => {
+      throw new Error('LockedNodeViaSharedShape: the shape is used inside a locked group')
+    })
+    const onToast = vi.fn()
+    render(<ObjectInfoPanel {...baseProps} onToast={onToast} scene={sharedScene(rename, false)} selectedIds={[{ kind: 'instance', id: 5n }]} />)
+    fireEvent.change(defNameInput(), { target: { value: 'Door' } })
+    expect(() => fireEvent.blur(defNameInput())).not.toThrow()
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][0]).toBe('This shape is also used inside a locked group. Make this copy unique to change it.')
+    expect(onToast.mock.calls[0][1]).toBe('LockedNodeViaSharedShape')
+  })
+})

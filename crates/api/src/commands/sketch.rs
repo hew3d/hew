@@ -207,6 +207,16 @@ fn detached_plane(ctx: &Ctx, target: &PlaneTarget) -> Result<Plane, CmdError> {
     }
 }
 
+/// Whether a draw takes the detached path: `detached: true`, or a face of
+/// a locked (frozen) Object whatever `detached` says (OW-1, v1.5 owner's
+/// items D1): the face is not cut, and the shape is a separate drawing
+/// that pulls into a new Object. A face of a member of a frozen
+/// definition still refuses `locked_node` there (the frame is frozen).
+fn draws_detached(ctx: &Ctx, detached: Option<bool>, target: &PlaneTarget) -> bool {
+    detached == Some(true)
+        || matches!(*target, PlaneTarget::Face(f) if ctx.doc.face_draw_detaches(f.object))
+}
+
 /// Draws `runs` as one new detached sketch on the target's plane
 /// ([`detached_plane`] resolved it) and answers the sketch result shape.
 fn draw_detached(
@@ -382,7 +392,7 @@ pub(super) fn draw_line(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
         .map(|v| locate::resolve_point(ctx, v))
         .collect::<Result<_, _>>()?;
 
-    if p.detached == Some(true) {
+    if draws_detached(ctx, p.detached, &target) {
         detached_plane(ctx, &target)?;
         return draw_detached(ctx, target, "Draw line", vec![Run::plain(pts)]);
     }
@@ -422,7 +432,7 @@ pub(super) fn draw_rect(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     let a = locate::resolve_point(ctx, &p.corner_a)?;
     let b = locate::resolve_point(ctx, &p.corner_b)?;
 
-    if p.detached == Some(true) {
+    if draws_detached(ctx, p.detached, &target) {
         let plane = detached_plane(ctx, &target)?;
         let ring = draft::closed(rect_corners(&plane, a, b).to_vec());
         return draw_detached(ctx, target, "Draw rectangle", vec![Run::plain(ring)]);
@@ -488,7 +498,7 @@ pub(super) fn draw_circle(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdErr
         radius: p.radius,
     };
 
-    if p.detached == Some(true) {
+    if draws_detached(ctx, p.detached, &target) {
         let plane = detached_plane(ctx, &target)?;
         let ring = draft::closed(ring_points(&plane, center, p.radius, n));
         let runs = vec![Run::curve(ring, geom, SketchCurveKind::Circle)];
@@ -692,7 +702,7 @@ pub(super) fn draw_arc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError>
             ],
         }
     };
-    if p.detached == Some(true) {
+    if draws_detached(ctx, p.detached, &target) {
         let plane = detached_plane(ctx, &target)?;
         let runs = arc_runs(&plane);
         return draw_detached(ctx, target, "Draw arc", runs);
@@ -784,7 +794,7 @@ pub(super) fn draw_polygon(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdEr
     };
     let n = p.sides;
 
-    if p.detached == Some(true) {
+    if draws_detached(ctx, p.detached, &target) {
         let plane = detached_plane(ctx, &target)?;
         let ring = draft::closed(ring_points(&plane, center, p.radius, n));
         let runs = vec![Run::curve(ring, geom, SketchCurveKind::Polygon)];

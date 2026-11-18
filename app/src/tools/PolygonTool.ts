@@ -97,7 +97,7 @@ import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retyp
 import { segmentLength } from './lineInput'
 import type { SketchTarget } from './sketchGesture'
 import { DetachedMode, type OnDetachedChange } from './detachedMode'
-import { runDraft, addDraftLoop, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
+import { runDraft, addDraftLoop, refreshAfterDraft, draftTargetFromSketchTarget, faceDrawsDetached } from './draftCommit'
 import { cameraView } from './viewPlaneInference'
 import { namedPointLeavesPlane, isNamedPointSnap, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, DrawPlaneTracker, pinnedPlaneThrough, faceStageDrawPlane, idleFallbackPlane, customPipPlaneFor, pinCustomPlane, type DrawPlane, type IdleDrawTarget, type CameraView, type DrawPlaneState, type IdleHoverResolution } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
@@ -1297,7 +1297,7 @@ export class PolygonTool implements Tool {
       this._clearPreview()
       this.onMeasurementCb('')
       if (this._commitFacePolygon(object, face, rim, center, normal)) {
-        this.retype.arm({ mode: 'face', object, face, normal, center, rim, sides: this.sides, detached: this.sep.on })
+        this.retype.arm({ mode: 'face', object, face, normal, center, rim, sides: this.sides, detached: this._faceDetached(object) })
       }
     }
   }
@@ -1520,7 +1520,7 @@ export class PolygonTool implements Tool {
       this.onMeasurementCb('')
 
       if (this._commitFacePolygon(object, face, cursorOnPlane, center, normal)) {
-        this.retype.arm({ mode: 'face', object, face, normal, center, rim: cursorOnPlane, sides: this.sides, detached: this.sep.on })
+        this.retype.arm({ mode: 'face', object, face, normal, center, rim: cursorOnPlane, sides: this.sides, detached: this._faceDetached(object) })
       }
     }
   }
@@ -1547,7 +1547,7 @@ export class PolygonTool implements Tool {
   }
 
   /** Split the given face with an N-gon loop defined by center/rim/normal. */
-  private _commitFacePolygon(object: bigint, face: bigint, rim: V3, center: V3, normal: V3, detached = this.sep.on): boolean {
+  private _commitFacePolygon(object: bigint, face: bigint, rim: V3, center: V3, normal: V3, detached = this._faceDetached(object)): boolean {
     const verts = circlePolygonFace(center, rim, normal, this.sides)
     if (verts === null) return false // degenerate — ignore
 
@@ -1588,7 +1588,7 @@ export class PolygonTool implements Tool {
     const cursor = this._lastFaceCursor
     const verts = circlePolygonFace(center, cursor, normal, this.sides)
     if (verts !== null) {
-      this._drawRubberBandVerts(verts, true)
+      this._drawRubberBandVerts(verts, !this._faceDetached(this.faceStage.object))
       this._reportMeasurement(center, cursor)
     } else {
       this._clearPreview()
@@ -1616,6 +1616,12 @@ export class PolygonTool implements Tool {
       pts[base + 3] = b[0]; pts[base + 4] = b[1]; pts[base + 5] = b[2]
     }
     this.preview.add(makeFatSegments(pts, this.sep.previewStyle(joinsFace)))
+  }
+
+  /** Detached on this face: the toggle, or a locked Object (its face is
+   *  never imprinted; the kernel opens a free sketch there). */
+  private _faceDetached(object: bigint): boolean {
+    return this.sep.on || faceDrawsDetached(this.wasmScene, object)
   }
 
   private _clearPreview(): void {

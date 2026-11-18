@@ -764,6 +764,13 @@ impl Document {
             }
             DocAction::NodeMetaChanged { node, .. } => b.node(Modified, *node),
             DocAction::ComponentRenamed { component, .. } => b.component(Modified, *component),
+            // The record whose lock flipped is modified, like a rename;
+            // nothing else changed (an instance's lock is its definition's).
+            DocAction::NodeLockChanged { holders, .. } => {
+                for h in holders {
+                    b.put(Modified, h.entity());
+                }
+            }
             DocAction::TagDeleted {
                 registry,
                 identities,

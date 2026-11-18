@@ -199,6 +199,7 @@ impl Ctx<'_> {
                         tags: Vec::new(),
                         hidden: false,
                         key: None,
+                        locked: false,
                     }),
                 }
             }
@@ -223,6 +224,7 @@ impl Ctx<'_> {
                     tags: Vec::new(),
                     hidden: false,
                     key: None,
+                    locked: false,
                 })
             }
             (None, false) => Some(ImportNode::Group {
@@ -231,6 +233,7 @@ impl Ctx<'_> {
                 tags: Vec::new(),
                 hidden: false,
                 key: None,
+                locked: false,
             }),
             (None, true) => None,
         }

@@ -20,6 +20,7 @@ import type { DrawPlane } from './drawPlane'
 import { applyAffine3x4 } from '../viewport/geoHelpers'
 import type { SketchTarget } from './sketchGesture'
 import type { Scene as WasmScene } from '../wasm/loader'
+import { frozenCause } from '../lock/lockModel'
 
 /** What a draft lowered: objects whose face topology changed, sketches
  *  (owned or free) that gained edges, and the loose segments kept as
@@ -81,6 +82,14 @@ export function draftTargetFromSketchTarget(
   return t.kind === 'existing'
     ? { kind: 'sketch', handle: t.handle, instance: t.instance }
     : { kind: 'plane', plane: t.plane, instance: t.instance }
+}
+
+/** Whether a draw tool's face draft on `object` opens detached on its own:
+ *  the kernel keeps a locked (frozen) Object's face untouched, so a shape
+ *  drawn there is a free sketch on the face's plane, never an imprint. The
+ *  app matches so its cue (blue preview) and its post-commit paths agree. */
+export function faceDrawsDetached(scene: Pick<WasmScene, 'node_frozen'>, object: bigint): boolean {
+  return frozenCause(scene, { kind: 'object', id: object }) !== null
 }
 
 function openDraft(wasmScene: WasmScene, target: DraftTarget, label: string): bigint {

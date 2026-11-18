@@ -388,6 +388,7 @@ impl Document {
         {
             return Err(DocumentError::UnknownMaterial);
         }
+        self.refuse_frozen_object(object)?;
         let rec = match self.objects.get_mut(object) {
             Some(rec) if !rec.hidden => rec,
             _ => return Err(DocumentError::UnknownObject),
@@ -553,6 +554,8 @@ impl Document {
             Some(ObjectOwner::Definition { def: d, .. }) if d == def => {}
             _ => return Err(DocumentError::UnknownObject),
         }
+        // A blend through a placement edits the shape (OW-1).
+        self.refuse_def_edit(instance, def)?;
         let s = pose
             .similarity_scale()
             .ok_or(DocumentError::Blend(BlendError::NonUniformInstance))?;
@@ -601,6 +604,7 @@ impl Document {
                 name: name.clone(),
                 tags: tags.clone(),
                 imported,
+                locked: false,
             });
             match (owner, parent) {
                 (_, Some(g)) => self.groups[g].members.push(NodeId::Object(id)),
@@ -735,6 +739,8 @@ impl Document {
                 {
                     return Err(DocumentError::UnknownSketch);
                 }
+                // The profile's edges leave the sketch (OW-1).
+                self.refuse_frozen_sketch(sketch)?;
                 let s = self
                     .sketches
                     .get(sketch)
@@ -810,6 +816,8 @@ impl Document {
     ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "revolve_in_instance");
         let (component, pose) = self.instance_component(instance)?;
+        // The result is a new member of the shape (OW-1).
+        self.refuse_def_edit(instance, component)?;
         pose.similarity_scale()
             .ok_or(DocumentError::AmbiguousInstanceScale)?;
         let inv = pose.inverse().map_err(DocumentError::Transform)?;
@@ -847,6 +855,7 @@ impl Document {
             name: None,
             tags: Vec::new(),
             imported: false,
+            locked: false,
         });
         self.components[component].members.push(NodeId::Object(id));
         self.undo.push(DocAction::FollowMeFace {
@@ -884,6 +893,7 @@ impl Document {
             name: None,
             tags: Vec::new(),
             imported: false,
+            locked: false,
         });
         if let Some(g) = parent {
             self.groups[g].members.push(NodeId::Object(id));
@@ -1194,6 +1204,10 @@ impl Document {
             }
             _ => None,
         });
+        // The loft lands in its face source's group (OW-1: not a frozen one).
+        if let Some(g) = parent {
+            self.refuse_frozen(&[NodeId::Group(g)])?;
+        }
         Ok(self.commit_generated_world_object(object, parent, "Loft"))
     }
 

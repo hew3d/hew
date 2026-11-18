@@ -149,6 +149,9 @@ pub struct MeshExtra {
     /// (`NO_MATERIAL` for none; empty for a mesh with none): a `.skp`
     /// face painted on its back (see [`crate::topo::Face::back_material`]).
     pub face_back_materials: Vec<u32>,
+    /// Locked in the source (a locked `.skp` group standing for one
+    /// solid): the Object is built locked ([`crate::Document::node_locked`]).
+    pub locked: bool,
     /// In a native import ([`ImportSceneExtra::native`]: a `.skp` Hew
     /// wrote), the mesh is still a foreign file's solid the user had not
     /// drawn on when Hew saved it, and its Object is marked imported again
@@ -252,6 +255,12 @@ pub struct DefRecipe {
     /// back through the recipe graph — `ingest` refuses cyclic scenes with a
     /// typed error, never repairs them).
     pub children: Vec<ImportNode>,
+    /// The definition is built locked. A lock belongs to the shared shape,
+    /// so every placement of it is locked; an importer whose source locks
+    /// one copy at a time decides how its copies combine (`skp-import`:
+    /// any locked copy locks the shape). A linked set's root member never
+    /// carries a lock of its own: `ingest` hoists one onto the definition.
+    pub locked: bool,
 }
 
 impl DefRecipe {
@@ -261,6 +270,7 @@ impl DefRecipe {
         DefRecipe {
             name,
             children: meshes.into_iter().map(ImportNode::Mesh).collect(),
+            locked: false,
         }
     }
 
@@ -299,6 +309,11 @@ pub enum ImportNode {
         /// USER-hidden in the source (a `.skp` hidden group): imported,
         /// registered hidden-by-default (manifest v6), never dropped.
         hidden: bool,
+        /// Locked in the source (a locked `.skp` group): the Group is
+        /// built locked. (An [`ImportNode::Instance`] carries no lock: a
+        /// placement is locked when its definition is,
+        /// [`DefRecipe::locked`].)
+        locked: bool,
         /// The importer's own identity for this node (a `.skp` archive
         /// slot), so an [`ImportSceneRecipe`]'s hidden-node list can name
         /// it before the node exists. `None` when no scene refers to it.

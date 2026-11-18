@@ -225,6 +225,7 @@ fn ingest_is_atomic_undo_hides_all() {
                 tags: Vec::new(),
                 hidden: false,
                 key: None,
+                locked: false,
             },
         ],
         guides: Vec::new(),
@@ -378,6 +379,7 @@ fn ingest_then_save_load_preserves_names() {
                 tags: Vec::new(),
                 hidden: false,
                 key: None,
+                locked: false,
             },
             ImportNode::Instance {
                 def: 0,
@@ -583,6 +585,7 @@ fn ingest_builds_nested_definitions() {
                         key: None,
                     },
                 ],
+                locked: false,
             },
             DefRecipe::from_meshes(Some("Inner".to_string()), vec![box_recipe("inner_body")]),
         ],
@@ -648,10 +651,12 @@ fn ingest_refuses_cyclic_definition_recipes() {
             DefRecipe {
                 name: None,
                 children: vec![ImportNode::Mesh(box_recipe("a")), inst(1)],
+                locked: false,
             },
             DefRecipe {
                 name: None,
                 children: vec![ImportNode::Mesh(box_recipe("b")), inst(0)],
+                locked: false,
             },
         ],
         roots: vec![],
@@ -695,6 +700,7 @@ fn ingest_skips_nested_instances_of_failed_defs() {
                         key: None,
                     },
                 ],
+                locked: false,
             },
             DefRecipe::from_meshes(Some("Broken".to_string()), vec![degenerate_recipe("bad")]),
         ],
@@ -742,6 +748,7 @@ fn ingest_refuses_over_wide_definition_recipes() {
         defs.push(DefRecipe {
             name: None,
             children: vec![inst(k - 1), inst(k - 1)],
+            locked: false,
         });
     }
     let scene = ImportScene {
@@ -797,6 +804,7 @@ fn ingest_creates_scenes_from_recipes_keyed_to_the_nodes_it_makes() {
                 tags: vec![],
                 hidden: false,
                 key: Some(7),
+                locked: false,
             },
             ImportNode::Mesh(box_recipe("floor")),
         ],
@@ -930,6 +938,7 @@ fn ingest_puts_a_file_cameras_target_on_the_model() {
         defs: vec![kernel::DefRecipe {
             name: Some("hidden box".into()),
             children: vec![ImportNode::Mesh(box_recipe("hidden"))],
+            locked: false,
         }],
         roots: vec![
             ImportNode::Mesh(box_recipe("box")),
@@ -1052,10 +1061,12 @@ fn an_import_built_in_steps_is_the_import_built_at_once() {
                         key: None,
                     },
                 ],
+                locked: false,
             },
             DefRecipe {
                 name: Some("leg".into()),
                 children: vec![ImportNode::Mesh(box_recipe("leg"))],
+                locked: false,
             },
         ],
         roots: vec![
@@ -1066,6 +1077,7 @@ fn an_import_built_in_steps_is_the_import_built_at_once() {
                 tags: Vec::new(),
                 hidden: false,
                 key: None,
+                locked: false,
             },
             ImportNode::Instance {
                 def: 0,
@@ -1149,4 +1161,159 @@ fn finishing_an_unstepped_import_builds_it_whole() {
     let (report, _) = doc.ingest_finish(job);
     assert_eq!(report.objects_created, 2);
     assert_eq!(doc.visible_object_ids().len(), 2);
+}
+
+// ───────────────────────────────────────────────────────────── locks ─────────
+
+/// OW-1: a recipe's locks land on the records `ingest` builds. A lock is a
+/// shape's: an Object's or a Group's own, a definition's for every
+/// placement of it. Undo of the import takes it all away and redo brings
+/// it back locked.
+#[test]
+fn ingest_builds_locked_objects_groups_and_definitions() {
+    use kernel::NodeId;
+    let mut locked_mesh = box_recipe("Pinned");
+    locked_mesh.extra.locked = true;
+    let mut scene = empty_scene(vec![
+        ImportNode::Mesh(locked_mesh),
+        ImportNode::Mesh(box_recipe("Free")),
+        ImportNode::Group {
+            name: "Shed".into(),
+            children: vec![ImportNode::Mesh(box_recipe("Wall"))],
+            tags: Vec::new(),
+            hidden: false,
+            locked: true,
+            key: None,
+        },
+        ImportNode::Instance {
+            def: 0,
+            pose: Transform::IDENTITY,
+            name: None,
+            tags: Vec::new(),
+            hidden: false,
+            key: None,
+        },
+        ImportNode::Instance {
+            def: 0,
+            pose: Transform::translation(kernel::Vec3::new(3.0, 0.0, 0.0)),
+            name: None,
+            tags: Vec::new(),
+            hidden: false,
+            key: None,
+        },
+    ]);
+    scene.defs = vec![DefRecipe {
+        name: Some("Window".into()),
+        children: vec![ImportNode::Mesh(box_recipe("Pane"))],
+        locked: true,
+    }];
+    let mut doc = Document::new();
+    let before = doc.state_hash();
+    let (report, _) = doc.ingest(scene, Vec::new()).unwrap();
+    let def = report.defs[0].unwrap();
+
+    let check = |doc: &Document| {
+        let nodes = doc.top_level_nodes();
+        let named = |n: &NodeId| match *n {
+            NodeId::Object(o) => doc.object_name(o).map(str::to_string),
+            NodeId::Group(g) => doc.group_name(g).map(str::to_string),
+            NodeId::Instance(_) => None,
+        };
+        let by_name = |name: &str| {
+            *nodes
+                .iter()
+                .find(|n| named(n).as_deref() == Some(name))
+                .unwrap()
+        };
+        assert!(doc.node_locked(by_name("Pinned")));
+        assert!(!doc.node_locked(by_name("Free")));
+        let shed = by_name("Shed");
+        assert!(doc.node_locked(shed));
+        // A member of a locked group is frozen by it, not locked itself.
+        let NodeId::Group(g) = shed else {
+            unreachable!()
+        };
+        let wall = doc.group_members(g).unwrap()[0];
+        assert!(!doc.node_locked(wall));
+        assert_eq!(doc.node_frozen(wall), Some(shed));
+        assert!(doc.component_locked(def));
+        let copies: Vec<NodeId> = nodes
+            .iter()
+            .copied()
+            .filter(|n| matches!(n, NodeId::Instance(_)))
+            .collect();
+        assert_eq!(copies.len(), 2);
+        assert!(copies.iter().all(|&c| doc.node_locked(c)));
+    };
+    check(&doc);
+    let after = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before, "undo takes the import away");
+    doc.redo().unwrap();
+    assert_eq!(
+        doc.state_hash(),
+        after,
+        "redo brings it back, locks and all"
+    );
+    check(&doc);
+}
+
+/// OW-1: a linked set's root member never carries a lock of its own. A
+/// recipe that puts one there (a `.skp` Hew wrote, its set's member group
+/// locked in SketchUp) has it hoisted onto the definition, as the loader
+/// does, and the document passes its invariants.
+#[test]
+fn ingest_hoists_a_linked_sets_root_member_lock_onto_the_set() {
+    use kernel::{AttrDict, AttrValue, ImportAttrTarget, NodeId};
+    let mut member = box_recipe("Leg");
+    member.extra.locked = true;
+    let place = |x: f64| ImportNode::Instance {
+        def: 0,
+        pose: Transform::translation(kernel::Vec3::new(x, 0.0, 0.0)),
+        name: None,
+        tags: Vec::new(),
+        hidden: false,
+        key: None,
+    };
+    let mut scene = empty_scene(vec![place(0.0), place(2.0)]);
+    scene.defs = vec![DefRecipe {
+        name: Some("Leg".into()),
+        children: vec![ImportNode::Mesh(member)],
+        locked: false,
+    }];
+    let mut linked = AttrDict::new();
+    linked
+        .entry(kernel::HEW_ATTR_NS.to_string())
+        .or_default()
+        .insert(kernel::LINKED_ATTR_KEY.to_string(), AttrValue::Bool(true));
+    scene.extra.attrs = vec![(ImportAttrTarget::Def(0), linked)];
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(scene, Vec::new()).unwrap();
+    let def = report.defs[0].unwrap();
+    assert!(doc.is_linked_set(def));
+    assert!(doc.component_locked(def), "the set is locked");
+    let member = doc.def_member_nodes(def).unwrap()[0];
+    assert!(matches!(member, NodeId::Object(_)), "{member:?}");
+    assert!(
+        !doc.node_locked(member),
+        "the root member's own lock moved onto the set"
+    );
+    for n in doc.top_level_nodes() {
+        assert!(doc.node_locked(n), "every placement of the set is locked");
+    }
+    // The same member in a definition that is not a linked set keeps its
+    // own lock: it is a locked part of a free component.
+    let mut member = box_recipe("Knob");
+    member.extra.locked = true;
+    let mut scene = empty_scene(vec![place(0.0)]);
+    scene.defs = vec![DefRecipe {
+        name: Some("Drawer".into()),
+        children: vec![ImportNode::Mesh(member)],
+        locked: false,
+    }];
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(scene, Vec::new()).unwrap();
+    let def = report.defs[0].unwrap();
+    assert!(!doc.component_locked(def));
+    assert!(doc.node_locked(doc.def_member_nodes(def).unwrap()[0]));
 }

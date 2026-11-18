@@ -359,6 +359,12 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   NotLinkable: msg`A component can't be turned back into linked copies. Copy one of its parts to start a new set.`,
   NotLinked: msg`This is already a component, not a set of linked copies, so there's nothing to change.`,
   NotIdentical: msg`These aren't the same shape.`,
+  LockedNode: msg`Locked. Unlock it to change it.`,
+  // The indirect lock: the shape being edited is also used inside a locked
+  // group or component, so editing it would change that locked thing. Not
+  // a kernel variant — the wasm boundary's code for `LockedNode` with
+  // `via_shared_shape` (the API's `locked_node` with that detail flag).
+  LockedNodeViaSharedShape: msg`This shape is also used inside a locked group. Make this copy unique to change it.`,
   BooleanOperandNotSolid:
     msg`Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…`,
   BooleanOperandEmpty:

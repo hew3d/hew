@@ -135,6 +135,7 @@ import {
 import { rayPlaneIntersect } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { clearPreview } from './transformPreview'
+import { leaveBehind } from '../lock/lockGate'
 import {
   commitSelectionTransform,
   buildSelectionPreview,
@@ -765,6 +766,15 @@ export class RotateTool implements Tool {
       if (nodes.length === 0 && guide === null) {
         this.onToast(t`Click an object to rotate it`)
         return
+      }
+      // Locked things are left behind (OW-1); see MoveTool.
+      if (guide === null) {
+        const go = leaveBehind(this.wasmScene, nodes, this.onToast, { descendants: true })
+        if (go === null) {
+          this._releaseAcquiredNodes()
+          return
+        }
+        nodes = go
       }
       // Starting a new gesture ends the ×N / /N refinement window.
       this.arrayHot = null

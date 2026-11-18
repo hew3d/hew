@@ -1946,3 +1946,27 @@ describe('RotateTool — dashed line from the center to the first point', () => 
     expect(dashedLine(preview)).toBeUndefined()
   })
 })
+
+// ── Lock (OW-1) ──
+describe('RotateTool — locked items are left behind', () => {
+  it('rotates the rest of a mixed selection and says so once; an all-locked selection never starts', () => {
+    const lock = (s: unknown) => {
+      const x = s as Record<string, unknown>
+      x.node_frozen = vi.fn((kind: number, id: bigint) => (kind === 0 && id === 2n ? { kind: 'object', id } : undefined))
+      x.node_locked = vi.fn((kind: number, id: bigint) => kind === 0 && id === 2n)
+      x.group_members = vi.fn(() => [])
+      x.definition_usage = vi.fn(() => 1)
+    }
+    const mixed = makeTool({ selection: [{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }] })
+    lock(mixed.wasmScene)
+    mixed.tool.onPointerDown(makeSnap(), { origin: [0, 0, 5], direction: [0, 0, -1] })
+    expect(mixed.onToast).toHaveBeenCalledTimes(1)
+    expect(mixed.onToast).toHaveBeenCalledWith('1 locked item was left alone.')
+
+    const all = makeTool({ selection: [{ kind: 'object', id: 2n }] })
+    lock(all.wasmScene)
+    all.tool.onPointerDown(makeSnap(), { origin: [0, 0, 5], direction: [0, 0, -1] })
+    expect(all.onToast).toHaveBeenCalledWith('Locked. Unlock it to change it.', 'LockedHint:object:2')
+    expect(all.tool.capturingInput()).toBe(false)
+  })
+})

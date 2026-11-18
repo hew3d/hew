@@ -372,6 +372,8 @@ fn occurrence_json_schema() -> serde_json::Value {
             "name": nullable_string,
             "definition_name": nullable_string,
             "depth": { "type": "integer", "minimum": 0 },
+            "locked": { "type": "boolean", "description": "locked itself: an object's or group's own lock, an instance's component's (shared by every copy)" },
+            "frozen": { "type": "boolean", "description": "a lock keeps the node from changing: its own, a locked group above it, or a locked shape it is part of (through any placement). Edits to it refuse locked_node" },
             "members": {
                 "type": "object",
                 "description": "the node's direct members by kind, in member order: a group's members, an instance's definition's members, three empty lists for an object. Hidden members are left out unless include_hidden",
@@ -388,7 +390,7 @@ fn occurrence_json_schema() -> serde_json::Value {
             "family_closed": { "type": ["boolean", "null"], "description": "object rows only: every shared rim of the family can take a cap; null exactly when family is null" },
             "linked": { "type": "boolean", "description": "instance rows only: the definition is a set of linked copies (hew / linked)" }
         },
-        "required": ["path", "id", "kind", "definition", "parent", "world_pose", "mirrored", "hidden", "user_hidden", "material", "material_effective", "tags", "name", "definition_name", "depth", "members"],
+        "required": ["path", "id", "kind", "definition", "parent", "world_pose", "mirrored", "hidden", "user_hidden", "material", "material_effective", "tags", "name", "definition_name", "depth", "locked", "frozen", "members"],
         "additionalProperties": false
     })
 }
@@ -743,35 +745,35 @@ impl Registry {
             M,
             Kernel,
             Req,
-            "Draw a line (chain) on a plane spec.",
+            "Draw a line (chain) on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.",
         );
         add(
             "hew.sketch.draw_rect",
             M,
             Kernel,
             Req,
-            "Draw an axis-aligned rectangle on a plane spec.",
+            "Draw an axis-aligned rectangle on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.",
         );
         add(
             "hew.sketch.draw_circle",
             M,
             Kernel,
             Req,
-            "Draw a circle on a plane spec.",
+            "Draw a circle on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.",
         );
         add(
             "hew.sketch.draw_arc",
             M,
             Kernel,
             Req,
-            "Draw an arc on a plane spec.",
+            "Draw an arc on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.",
         );
         add(
             "hew.sketch.draw_polygon",
             M,
             Kernel,
             Req,
-            "Draw a regular N-gon on a plane spec.",
+            "Draw a regular N-gon on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.",
         );
         add(
             "hew.sketch.offset",
@@ -1061,6 +1063,20 @@ impl Registry {
             Kernel,
             Std,
             "Set or clear the part frame override (hew.part / frame) of an object or group.",
+        );
+        add(
+            "hew.entity.lock",
+            M,
+            Kernel,
+            Std,
+            "Lock objects, groups, and component copies so nothing about them changes until they are unlocked; locking one copy of a component or linked set locks every copy.",
+        );
+        add(
+            "hew.entity.unlock",
+            M,
+            Kernel,
+            Std,
+            "Unlock objects, groups, and component copies (every copy of a shared shape with them), or everything with all: true.",
         );
         // hew.context — the shared editing-context stack (§6.3).
         add(
@@ -2032,7 +2048,12 @@ impl Registry {
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "kind": { "type": "string" }, "id": { "type": "string" } },
+                "properties": {
+                    "kind": { "type": "string" },
+                    "id": { "type": "string" },
+                    "locked": { "type": "boolean", "description": "objects, groups, instances, and components: locked itself (an instance by its component's lock, shared by every copy)" },
+                    "frozen": { "type": "boolean", "description": "objects, groups, and instances: whether a lock keeps it from changing — its own, a locked group above it, or a locked shape it is part of. Edits to a frozen entity refuse locked_node" }
+                },
                 "required": ["kind", "id"]
             });
             cmd.refusals = vec!["unknown_entity"];
@@ -4688,6 +4709,67 @@ impl Registry {
             });
             cmd.refusals = vec!["unknown_entity", "not_a_part", "invalid_frame"];
         }
+        // hew.entity.lock / unlock (OW-1): a lock belongs to a shape, so a
+        // component instance stands for its definition.
+        {
+            let targets = serde_json::json!({
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 10000,
+                "items": { "type": "string" },
+                "description": "objects (\"obj_…\"), groups (\"grp_…\"), and component instances (\"ins_…\"); an instance stands for its definition, so every copy of it changes together"
+            });
+            let lock_result = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "changed": { "type": "integer", "minimum": 0, "description": "how many objects, groups, and shapes changed state; 0 when all were already as asked (and no undo entry was made)" }
+                },
+                "required": ["changed"],
+                "additionalProperties": false
+            });
+            let cmd = commands.get_mut("hew.entity.lock").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "targets": targets.clone() },
+                "required": ["targets"],
+                "additionalProperties": false,
+                "description": "One undo step labeled Lock. Hiding, selecting, measuring, and copying a locked thing still work; edits to it refuse locked_node. Refused explode_session_scope while a component is open for editing, or when the lock would freeze an open group."
+            });
+            cmd.result_schema = lock_result.clone();
+            cmd.refusals = vec![
+                "unknown_entity",
+                "not_a_node",
+                "unknown_object",
+                "unknown_group",
+                "unknown_instance",
+                "unknown_component",
+                "explode_session_scope",
+            ];
+
+            let cmd = commands
+                .get_mut("hew.entity.unlock")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "targets": targets,
+                    "all": { "type": "boolean", "description": "true unlocks every locked object, group, and shape in the document; give it alone" }
+                },
+                "additionalProperties": false,
+                "description": "Give targets, or all: true. One undo step labeled Unlock."
+            });
+            cmd.result_schema = lock_result;
+            cmd.refusals = vec![
+                "unknown_entity",
+                "not_a_node",
+                "unknown_object",
+                "unknown_group",
+                "unknown_instance",
+                "unknown_component",
+            ];
+        }
         {
             let cmd = commands
                 .get_mut("hew.material.create")
@@ -5602,7 +5684,7 @@ impl Registry {
             });
             let sketch_result_schema = serde_json::json!({
                 "type": "object",
-                "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec",
+                "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec, and every draw on a face of a locked Object",
                 "properties": {
                     "sketch": { "type": "string" },
                     "region_ids": { "type": "array", "items": { "type": "string" } },
@@ -7693,6 +7775,47 @@ impl Registry {
                 .push("document_busy");
         }
 
+        // Lock (OW-1): every implemented command that can edit a node can
+        // be refused by a lock, so each one lists `locked_node`. The
+        // mutating commands that never reach a node's contents, placement,
+        // name, tags, attributes, material or structure are left out:
+        // locking itself, view state (scenes, tag visibility), guides,
+        // geo-location, palette edits, additions that make something new
+        // (a library insert, a new placement, a new tag or material), a
+        // purge (it leaves a definition holding a lock in place), and
+        // closing an editing context. Opening one (`hew.view.enter`) can
+        // be refused.
+        const CANNOT_MEET_A_LOCK: &[&str] = &[
+            "hew.entity.lock",
+            "hew.entity.unlock",
+            "hew.doc.transact",
+            "hew.context.exit",
+            "hew.geo.set",
+            "hew.guide.angular",
+            "hew.guide.clear",
+            "hew.guide.line",
+            "hew.guide.point",
+            "hew.library.insert",
+            "hew.component.place",
+            "hew.doc.purge_unused",
+            "hew.material.create",
+            "hew.material.set_opacity",
+            "hew.material.set_pbr",
+            "hew.tag.create",
+            "hew.tag.set_visible",
+        ];
+        for (name, draft) in commands.iter_mut() {
+            let edits = matches!(draft.class, CommandClass::ModelMutating)
+                && !name.starts_with("hew.scenes.")
+                && !CANNOT_MEET_A_LOCK.contains(name);
+            if (edits || *name == "hew.view.enter")
+                && draft.implemented
+                && !draft.refusals.contains(&"locked_node")
+            {
+                draft.refusals.push("locked_node");
+            }
+        }
+
         for (name, permission) in permission_table() {
             commands
                 .get_mut(name)
@@ -8043,6 +8166,8 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.entity.rotate",
                 "hew.entity.scale",
                 "hew.entity.set_frame",
+                "hew.entity.lock",
+                "hew.entity.unlock",
                 "hew.context.enter",
                 "hew.context.exit",
                 "hew.group.create",

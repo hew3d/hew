@@ -182,9 +182,20 @@ impl Document {
     ) -> Result<DocChange, DocumentError> {
         info!(target: "kernel::op", op = "transform_def_members", nodes = nodes.len());
         self.check_def_members(component, nodes)?;
+        // Moving members edits the shape (OW-1), and moves everything
+        // inside a member group too.
+        self.refuse_def_frozen(component)?;
+        self.refuse_frozen(nodes)?;
         t.inverse().map_err(DocumentError::Transform)?;
 
         let (objects, instances, groups) = self.flatten_def_members(nodes);
+        let moving: Vec<NodeId> = objects
+            .iter()
+            .map(|&o| NodeId::Object(o))
+            .chain(instances.iter().map(|&i| NodeId::Instance(i)))
+            .chain(groups.iter().map(|&g| NodeId::Group(g)))
+            .collect();
+        self.refuse_frozen(&moving)?;
         let mut sketches: Vec<SketchId> = self.owned_sketches_of(&objects);
         merge_unique(&mut sketches, self.group_held_sketches_of(&groups));
         if objects.is_empty() && instances.is_empty() && sketches.is_empty() {
@@ -303,6 +314,8 @@ impl Document {
         );
         self.refuse_during_any_session()?;
         self.check_def_members(component, nodes)?;
+        // Copies inside a definition add members to the shape (OW-1).
+        self.refuse_def_frozen(component)?;
         if placements.is_empty() {
             return Err(DocumentError::EmptySelection);
         }
@@ -560,6 +573,11 @@ impl Document {
         let op = BooleanOp::Subtract;
         self.refuse_during_any_session()?;
         let (component, pose) = self.placement_target(path)?;
+        self.refuse_path_edit(path, component)?;
+        if let PlacementTool::Record(tool) = tool {
+            // The tool Object is consumed.
+            self.refuse_frozen_object(tool)?;
+        }
         let rec_host = self
             .objects
             .get(host)
@@ -614,6 +632,7 @@ impl Document {
             name,
             tags,
             imported,
+            locked: false,
         });
         self.copy_identity_attrs(&EntityRef::Object(host), EntityRef::Object(id));
         self.drop_copied_smooth_level(id);
@@ -689,6 +708,7 @@ impl Document {
         info!(target: "kernel::op", op = "boolean_members_through_placement", boolean_op = ?op, depth = path.len());
         self.refuse_during_any_session()?;
         let (component, pose) = self.placement_target(path)?;
+        self.refuse_path_edit(path, component)?;
         let grouped = |o: ObjectId| {
             self.objects.get(o).is_some_and(|r| {
                 !r.hidden
@@ -732,6 +752,7 @@ impl Document {
         info!(target: "kernel::op", op = "slice_through_placement", depth = path.len());
         self.refuse_during_any_session()?;
         let (component, pose) = self.placement_target(path)?;
+        self.refuse_path_edit(path, component)?;
         let grouped = self.objects.get(object).is_some_and(|r| {
             !r.hidden
                 && matches!(r.owner, ObjectOwner::Definition { def, parent: Some(_) } if def == component)

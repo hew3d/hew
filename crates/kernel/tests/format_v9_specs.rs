@@ -646,7 +646,7 @@ fn v22_document_saves_byte_identical_sketch_entries() {
     let doc = Document::load(&v8_file).unwrap();
     let before = manifest_of(&v8_file);
     let after = manifest_of(&doc.save());
-    assert_eq!(after["format_version"], 32);
+    assert_eq!(after["format_version"], 33);
     assert_eq!(after["sketches"], before["sketches"]);
 }
 

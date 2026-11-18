@@ -887,6 +887,7 @@ impl Connection {
                 } else {
                     detail
                 },
+                locked_cause: None,
             }),
             ForwardReply::Failed(ForwardFailure::Timeout) => Response::err_with(
                 id,
@@ -966,9 +967,12 @@ impl Connection {
         match handler(&mut ctx, params) {
             Ok(result) => Response::ok(id, result),
             Err(CmdError::Params(msg)) => Response::err(id, codes::INVALID_PARAMS, &msg),
-            Err(CmdError::Refusal(refusal)) => {
-                Response::err_with(id, codes::REFUSED, "refused", refusal.into_data(0, name))
-            }
+            Err(CmdError::Refusal(refusal)) => Response::err_with(
+                id,
+                codes::REFUSED,
+                "refused",
+                refusal.with_document(ctx.doc).into_data(0, name),
+            ),
             Err(CmdError::Internal(msg)) => Response::err(id, codes::INTERNAL_FAULT, &msg),
         }
     }

@@ -844,14 +844,20 @@ export function dropTargetFor(
   view: {
     getGroupMembers: (groupId: bigint) => NodeRef[]
     sessionOpen: boolean
+    /** Whether a node is frozen (locked, or inside something locked): a
+     *  frozen row cannot be dragged, and nothing drops into a frozen group
+     *  (the kernel refuses both). Omitted: nothing is frozen. */
+    isFrozen?: (node: NodeRef) => boolean
   },
 ): { group: bigint | undefined } | null {
   if (dragged.length === 0) return null
   if (view.sessionOpen) return null
   if (dragged.some((n) => nodeKindToNumber(n.kind) < 0)) return null
+  if (view.isFrozen !== undefined && dragged.some(view.isFrozen)) return null
 
   if (target === 'root') return { group: undefined }
   if (target.kind !== 'group') return null
+  if (view.isFrozen?.(target) === true) return null
 
   // A group cannot end up inside itself or inside one of its own
   // descendants — mirrors the kernel's subtree walk (GroupCycle).

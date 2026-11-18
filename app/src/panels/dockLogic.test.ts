@@ -233,3 +233,49 @@ describe('dock verbs for a linked copy', () => {
     expect(dockChipLabel('object', true)).toBe('OBJECT')
   })
 })
+
+describe('dock verbs for a locked selection (OW-1)', () => {
+  const gates = { canGroup: false, canMakeComponent: true, canSaveToLibrary: true }
+
+  it('offers Lock ahead of Erase while something is unlocked, and never without its gate', () => {
+    const ids = dockVerbsFor('object', { ...gates, canLock: true }).map((v) => v.id)
+    expect(ids.indexOf('edit-lock')).toBe(ids.indexOf('edit-delete') - 1)
+    expect(dockVerbsFor('object', gates).map((v) => v.id)).not.toContain('edit-lock')
+    expect(dockVerbsFor('object').map((v) => v.id)).not.toContain('edit-lock')
+  })
+
+  it('an instance row has no Erase: Lock goes at the end', () => {
+    const ids = dockVerbsFor('instance', { ...gates, canLock: true }).map((v) => v.id)
+    expect(ids[ids.length - 1]).toBe('edit-lock')
+  })
+
+  it('a mixed selection (something to lock, something locked) offers Lock', () => {
+    const ids = dockVerbsFor('multi', { canGroup: true, canMakeComponent: false, canLock: true, canUnlock: true }).map((v) => v.id)
+    expect(ids).toContain('edit-lock')
+    expect(ids).not.toContain('edit-unlock-selected')
+  })
+
+  it('a fully locked selection offers Unlock first and only what a lock leaves open', () => {
+    for (const ctx of ['object', 'group'] as const) {
+      const ids = dockVerbsFor(ctx, { ...gates, canUnlock: true }).map((v) => v.id)
+      expect(ids[0]).toBe('edit-unlock-selected')
+      for (const refused of ['tool-pushpull', 'tool-move', 'tool-paint', 'edit-delete', 'edit-make-component', 'ungroup', 'enter-context']) {
+        expect(ids).not.toContain(refused)
+      }
+      expect(ids).toContain('save-to-library')
+    }
+  })
+
+  it('a locked copy keeps Make Unique and Unlink (they work on a locked copy)', () => {
+    const plain = dockVerbsFor('instance', { ...gates, canUnlock: true }).map((v) => v.id)
+    expect(plain).toEqual(['edit-unlock-selected', 'make-unique', 'save-to-library'])
+    const linked = dockVerbsFor('instance', { ...gates, canUnlock: true, canUnlink: true, canUnlinkAll: true }).map((v) => v.id)
+    expect(linked).toEqual(['edit-unlock-selected', 'edit-unlink', 'save-to-library'])
+  })
+
+  it('sketch and empty rows never take a lock verb', () => {
+    expect(dockVerbsFor('sketch', { ...gates, canLock: true }).map((v) => v.id)).not.toContain('edit-lock')
+    expect(dockVerbsFor('empty', { ...gates, canLock: true }).map((v) => v.id)).not.toContain('edit-lock')
+  })
+})
+

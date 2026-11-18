@@ -223,7 +223,18 @@ export interface DockGates {
   canUnlink?: boolean
   /** More than one placement shares the set (Unlink all makes sense). */
   canUnlinkAll?: boolean
+  /** Something unlocked is selected: the dock offers Lock. Optional like the
+   * gates above; omitted is treated as false (hidden). */
+  canLock?: boolean
+  /** Something locked is selected: the dock offers Unlock. When it is ALL
+   * that is selected (nothing left to lock), the row shrinks to Unlock and
+   * the verbs a lock leaves open, since the rest would only be refused. */
+  canUnlock?: boolean
 }
+
+/** The verbs a fully locked selection can still use: copying it out and the
+ * way off a shared shape (Make Unique works on a locked copy). */
+const OPEN_ON_LOCKED: ReadonlySet<string> = new Set(['make-unique', 'edit-unlink', 'save-to-library'])
 
 /** The curated, ordered verb list for a context — first item is primary.
  * `gates` (when given) filters out the structural verbs that don't apply to
@@ -243,7 +254,15 @@ export function dockVerbsFor(context: DockContext, gates?: DockGates): DockVerb[
   // not offered, gates or no gates.
   const offered = verbs.filter((v) => chipAllowed(v.id) && actionAllowed(v.id))
   if (gates === undefined) return offered
-  return offered.filter((v) => {
+  // One lock slot: Lock while anything selected can still be locked, else
+  // Unlock. A selection that is all locked keeps only what a lock leaves open.
+  const allLocked = gates.canUnlock === true && gates.canLock !== true
+  const lockVerb: DockVerb | null = gates.canLock === true
+    ? { id: 'edit-lock', label: msg`Lock` }
+    : gates.canUnlock === true
+      ? { id: 'edit-unlock-selected', label: msg`Unlock` }
+      : null
+  const gated = offered.filter((v) => {
     if (v.id === 'edit-group') return gates.canGroup
     if (v.id === 'edit-make-component') return gates.canMakeComponent
     if (v.id === 'edit-union' || v.id === 'edit-subtract' || v.id === 'edit-intersect') return gates.canBoolean ?? false
@@ -251,6 +270,11 @@ export function dockVerbsFor(context: DockContext, gates?: DockGates): DockVerb[
     if (v.id === 'edit-unlink-all') return gates.canUnlinkAll ?? false
     return true
   })
+  if (lockVerb === null || context === 'empty' || context === 'sketch') return gated
+  if (allLocked) return [lockVerb, ...gated.filter((v) => OPEN_ON_LOCKED.has(v.id))]
+  // Ahead of Erase (destructive-verb-last), else at the end of the row.
+  const at = gated.findIndex((v) => v.id === 'edit-delete')
+  return at < 0 ? [...gated, lockVerb] : [...gated.slice(0, at), lockVerb, ...gated.slice(at)]
 }
 
 /** Display label for the context chip (`FACE`/`EDGE`/`COMPNT` in the spec's
