@@ -1,7 +1,9 @@
 /* oxlint-disable lingui/no-unlocalized-strings -- True Curves strings are not yet wrapped for translation: this file is English-only until they are */
-import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import './ToolOptionsCard.css'
 import { isComposingKey } from '../input/keyboard'
+
+export const ToolOptionsExpandedContext = createContext(true)
 
 // A card unmounts when its tool ends; only its collapsed state survives.
 const collapsedTools = new Map<string, boolean>()
@@ -11,9 +13,17 @@ const iconStyle: CSSProperties = {
   font: 'inherit', cursor: 'pointer', padding: '2px 5px',
 }
 
+/** Native button activation/focus keys belong to the card, not the viewport.
+ * Other CAD shortcuts, including undo/redo and Alt, continue to bubble. */
+function containButtonKey(ev: ReactKeyboardEvent<HTMLDivElement>): void {
+  if (ev.target instanceof Element && ev.target.closest('button') && ['Enter', ' ', 'Spacebar', 'Tab'].includes(ev.key)) ev.stopPropagation()
+}
+
 /** Text-only help shared by the title and the option rows. */
 export function ToolOptionsInfo({ label, children }: { label: string; children: ReactNode }) {
   const [open, setOpen] = useState(false)
+  const expanded = useContext(ToolOptionsExpandedContext)
+  useEffect(() => { if (!expanded) setOpen(false) }, [expanded])
   const root = useRef<HTMLSpanElement>(null)
   const id = useId()
   useEffect(() => {
@@ -56,12 +66,11 @@ export interface ToolOptionsCardProps {
   tool: string
   info: string
   children: ReactNode
-  collapsible?: boolean
 }
 
 /** Shared viewport chrome; it has no knowledge of a tool's settings. */
-export function ToolOptionsCard({ tool, info, children, collapsible = true }: ToolOptionsCardProps) {
-  const [collapsed, setCollapsed] = useState(() => collapsible && (collapsedTools.get(tool) ?? false))
+export function ToolOptionsCard({ tool, info, children }: ToolOptionsCardProps) {
+  const [collapsed, setCollapsed] = useState(() => collapsedTools.get(tool) ?? false)
   const root = useRef<HTMLDivElement>(null)
   const rowsId = useId()
   useLayoutEffect(() => {
@@ -78,6 +87,7 @@ export function ToolOptionsCard({ tool, info, children, collapsible = true }: To
   }, [])
   return (
     <div ref={root} role="region" aria-label={`${tool} options`} data-testid="tool-options-card" className="tool-options-card"
+      onKeyDown={containButtonKey} onKeyUp={containButtonKey}
       onPointerDown={(ev) => {
         // A pointer click on a choice must not steal typed-size input.
         if (!(ev.target as HTMLElement).closest('input, textarea, [contenteditable="true"]')) {
@@ -98,14 +108,20 @@ export function ToolOptionsCard({ tool, info, children, collapsible = true }: To
           fontWeight: 600, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text-section)',
         }}>{tool}</span>
         <ToolOptionsInfo label={tool}>{info}</ToolOptionsInfo>
-        {collapsible && <button type="button" aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${tool} options`}
+        <button type="button" aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${tool} options`}
           aria-expanded={!collapsed} aria-controls={rowsId} style={iconStyle}
           onClick={() => {
             collapsedTools.set(tool, !collapsed)
             setCollapsed(!collapsed)
-          }}>{collapsed ? '▸' : '▾'}</button>}
+          }}>{collapsed ? '▸' : '▾'}</button>
       </div>
-      {(!collapsible || !collapsed) && <div id={rowsId} className="tool-options-body" style={{ padding: '0 12px 12px' }}>{children}</div>}
+      <div className="tool-options-content" data-collapsed={collapsed} aria-hidden={collapsed} inert={collapsed}>
+        <div className="tool-options-scroll">
+          <ToolOptionsExpandedContext.Provider value={!collapsed}>
+            <div id={rowsId} style={{ padding: '0 12px 12px' }}>{children}</div>
+          </ToolOptionsExpandedContext.Provider>
+        </div>
+      </div>
     </div>
   )
 }

@@ -263,7 +263,6 @@ export class SizeStage {
     }
     this.c.gripsView.setMarkers(markers)
     this.c.labels.set(labels)
-    this.c.publishDimension()
   }
 
   currentRadiusGuess(s: ArmedStage): number {
@@ -342,36 +341,32 @@ export class SizeStage {
     return 'error' in r ? null : r.headline
   }
 
-  /** The active field in world meters, shared by readouts and external inputs. */
-  gripValue(s: ArmedStage): number | null {
-    const g = s.active
-    if (g.kind === 'radius') return this.currentHeadline(s)
-    const chain = s.gripChain
-    const t = s.targets[0]
-    if (chain === null || t.kind !== 'solid') return null
-    const scale = t.frame.scale
-    switch (g.kind) {
-      case 'stop': return s.grips.stops[g.end] * scale
-      case 'endRadius': {
-        const at = g.end === 'start' ? 0 : chain.length
-        return (s.grips.handles.find(h => Math.abs(h.at - at) < 1e-9)?.radius ?? this.currentRadiusGuess(s)) * scale
-      }
-      case 'handlePos': return (s.grips.handles[g.index]?.at ?? 0) * scale
-      case 'handleRadius': return (s.grips.handles[g.index]?.radius ?? 0) * scale
-    }
-  }
-
   /** The active grip's own value, for the measurement box. */
   gripReadout(s: ArmedStage): string {
-    if (s.active.kind === 'radius') return this.radiusReadout(s)
-    const value = this.gripValue(s)
-    return value === null ? '' : formatLength(value)
+    const g = s.active
+    const chain = s.gripChain
+    const t = s.targets[0]
+    if (g.kind === 'radius') return this.radiusReadout(s)
+    if (chain === null || t.kind !== 'solid') return ''
+    const scale = t.frame.scale
+    const endR = (at: number): number =>
+      s.grips.handles.find((h) => Math.abs(h.at - at) < 1e-9)?.radius ?? this.currentRadiusGuess(s)
+    switch (g.kind) {
+      case 'stop':
+        return formatLength(s.grips.stops[g.end] * scale)
+      case 'endRadius':
+        return formatLength(endR(g.end === 'start' ? 0 : chain.length) * scale)
+      case 'handlePos':
+        return formatLength((s.grips.handles[g.index]?.at ?? 0) * scale)
+      case 'handleRadius':
+        return formatLength((s.grips.handles[g.index]?.radius ?? 0) * scale)
+    }
   }
 
   /** A length typed while a grip is picked up sets that grip (WP10 §3.8):
    *  how far a stop or a radius point sits from its end, or the radius at a
    *  radius grip. The grip is put down; the next typed size is the blend's. */
-  applyTypedToGrip(s: ArmedStage, meters: number, continuous = false, typedRedraw = false): void {
+  applyTypedToGrip(s: ArmedStage, meters: number): void {
     const g = s.active
     const chain = s.gripChain
     const t = s.targets[0]
@@ -388,7 +383,7 @@ export class SizeStage {
     switch (g.kind) {
       case 'stop': {
         const other = g.end === 'start' ? s.grips.stops.end : s.grips.stops.start
-        if ((continuous ? d < 0 : !(d > 0)) || d >= length - other) {
+        if (!(d > 0) || d >= length - other) {
           outOfRange()
           return
         }
@@ -412,7 +407,6 @@ export class SizeStage {
           return
         }
         s.grips = movedHandle(s.grips, g.index, d, length)
-        if (continuous) s.active = { kind: 'handlePos', index: s.grips.handles.findIndex(h => h.at === d) }
         note = `Radius point placed ${formatLength(meters)} along the edge.`
         break
       case 'handleRadius': {
@@ -430,13 +424,6 @@ export class SizeStage {
       }
     }
     // A typed grip value: the redraw answers typing.
-    if (continuous) {
-      s.gripTyped = ''
-      this.c.preview.drawArmedPreview(typedRedraw)
-      this.refreshGripMarkers()
-      this.c.measure(this.gripReadout(s))
-      return
-    }
     this.putGripDown(s, true, true)
     // The confirmation outranks a limit sentence until the pointer moves.
     this.c.statusLine = null

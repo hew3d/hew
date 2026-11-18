@@ -18,11 +18,11 @@ it('mounts without taking focus and pointer choices leave typed sizes in the vie
 it('keeps only the title when collapsed, remembers per tool, and expands again', () => {
   const { unmount } = render(<ToolOptionsCard tool="Collapse test" info="Help."><span>Rows</span></ToolOptionsCard>)
   fireEvent.click(screen.getByRole('button', { name: 'Collapse Collapse test options' }))
-  expect(screen.queryByText('Rows')).toBeNull()
+  expect(screen.getByText('Rows').closest('.tool-options-content')).toHaveAttribute('aria-hidden', 'true')
   expect(screen.getByText('Collapse test')).toBeVisible()
   unmount()
   const second = render(<ToolOptionsCard tool="Collapse test" info="Help."><span>Rows</span></ToolOptionsCard>)
-  expect(screen.queryByText('Rows')).toBeNull()
+  expect(screen.getByText('Rows').closest('.tool-options-content')).toHaveAttribute('aria-hidden', 'true')
   fireEvent.click(screen.getByRole('button', { name: 'Expand Collapse test options' }))
   expect(screen.getByText('Rows')).toBeVisible()
   second.unmount()
@@ -52,12 +52,13 @@ it('opens text help and dismisses it with Escape or an outside press', () => {
   expect(screen.queryByRole('note')).toBeNull()
 })
 
-
-it('can keep a tool expanded without removing collapse from other tools', () => {
-  render(<ToolOptionsCard tool="Always open" info="Help." collapsible={false}><span>Settings</span></ToolOptionsCard>)
-  expect(screen.queryByRole('button', { name: /(?:Collapse|Expand) Always open options/ })).toBeNull()
-  expect(screen.getByRole('button', { name: 'About Always open' })).toBeVisible()
-  expect(screen.getByText('Settings')).toBeVisible()
-  render(<ToolOptionsCard tool="Other collapsible tool" info="Help.">Other settings</ToolOptionsCard>)
-  expect(screen.getByRole('button', { name: 'Collapse Other collapsible tool options' })).toBeVisible()
+it('contains native button keys but preserves global CAD shortcuts', () => {
+  const key = vi.fn()
+  render(<div onKeyDown={key}><ToolOptionsCard tool="Keyboard test" info="Help."><button>Choice</button></ToolOptionsCard></div>)
+  const choice = screen.getByRole('button', { name: 'Choice' })
+  fireEvent.keyDown(choice, { key: 'Enter' })
+  fireEvent.keyDown(choice, { key: ' ', code: 'Space' })
+  expect(key).not.toHaveBeenCalled()
+  fireEvent.keyDown(choice, { key: 'z', ctrlKey: true })
+  expect(key).toHaveBeenCalledTimes(1)
 })

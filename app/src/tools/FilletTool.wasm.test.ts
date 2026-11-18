@@ -16,7 +16,7 @@ import { BUSY_REFUSED } from '../busyCard'
 import { arcSegments } from './arcMath'
 import { resolveHover } from './filletPick'
 import { clampBlendSegments } from './filletMath'
-import { resetFilletSettingsForTest, getFilletCornerOnly, getFilletMeasurementLabelOverride, getFilletSettings, setFilletProfile } from './filletSettings'
+import { resetFilletSettingsForTest, getFilletCornerOnly, getFilletMeasurementLabelOverride, getFilletSettings, setFilletProfile, setFilletCorners, setFilletSegmentsOverride } from './filletSettings'
 import type { Ray } from '../viewport/math'
 import { setLengthUnit, typedReadout } from '../settings/units'
 
@@ -81,7 +81,7 @@ interface Harness {
   }
 }
 
-function setup(now?: () => number, schedule?: (cb: () => void) => void): Harness {
+function setup(now?: () => number): Harness {
   const scene = new Scene()
   const group = new THREE.Group()
   const hooks = {
@@ -93,7 +93,7 @@ function setup(now?: () => number, schedule?: (cb: () => void) => void): Harness
     setFaceMask: vi.fn(() => true),
     clearFaceMask: vi.fn(),
   }
-  const tool = new FilletTool(scene, group, hooks as unknown as FilletHooks, { schedule: schedule ?? ((cb) => cb()), now })
+  const tool = new FilletTool(scene, group, hooks as unknown as FilletHooks, { schedule: (cb) => cb(), now })
   return { scene, tool, group, hooks }
 }
 
@@ -2125,187 +2125,26 @@ describe('Fillet on a whole loop (F-A9)', () => {
   })
 })
 
-describe('operation-owned Fillet dimension input', () => {
-  function armed(schedule?: (cb: () => void) => void) {
-    const h = setup(undefined, schedule)
-    const box = makeBox(h.scene, 0.6, 0.1, 0.1)
-    click(h, down(0.3, 0.002), [100, 100])
-    for (const k of ['2', '0']) h.tool.onKey(key(k))
-    return { ...h, box }
-  }
-
-  it('updates the preview and Measurements without history, then normal Enter commits once', () => {
-    const h = armed()
-    const snapshot = h.tool.dimension.snapshot()
-    expect(snapshot.value).toBeCloseTo(0.02)
-    const history = h.scene.history_entries_json()
-    const preview = vi.spyOn(h.scene, 'blend_preview')
-    const gesture = h.tool.dimension.begin(snapshot.identity)!
-    gesture.update(0.025)
-    expect(preview).toHaveBeenCalled()
-    expect(h.tool.dimension.snapshot().value).toBeCloseTo(0.025)
-    expect(h.hooks.onMeasurement).toHaveBeenLastCalledWith('25 mm')
-    gesture.finish()
-    expect(h.scene.history_entries_json()).toBe(history)
-    expect(JSON.parse(h.scene.blend_features_json(h.box))).toHaveLength(0)
-    h.tool.onKey(key('Enter'))
-    expect(JSON.parse(h.scene.blend_features_json(h.box))).toHaveLength(1)
-    expect(h.hooks.onCommit).toHaveBeenCalledTimes(1)
-    expect(h.tool.dimension.snapshot().value).toBeNull()
-    h.scene.scene_undo().free()
-    h.tool.onHistoryChanged()
-    expect(JSON.parse(h.scene.blend_features_json(h.box))).toHaveLength(0)
-  })
-
-  it('cancel restores pre-edit size and typed buffer, including when an update is queued', () => {
-    const h = armed()
-    const original = h.tool.dimension.snapshot()
-    const history = h.scene.history_entries_json()
-    const gesture = h.tool.dimension.begin(original.identity)!
-    gesture.update(0.03)
-    gesture.cancel()
-    expect(h.tool.dimension.snapshot().value).toBeCloseTo(original.value!)
-    expect(h.scene.history_entries_json()).toBe(history)
-    expect(h.tool.hasArmedGesture()).toBe(true)
-    h.tool.onKey(key('Backspace'))
-    expect(h.tool.dimension.snapshot().value).toBeCloseTo(0.002)
-    gesture.update(0.04)
-    expect(h.tool.dimension.snapshot().value).toBeCloseTo(0.002)
-  })
-
-  it('preserves the active stop and main radius, and rejects stale events after Escape/history', () => {
-    const h = armed()
-    h.tool.onKey(key('Tab'))
-    const original = h.tool.dimension.snapshot()
-    expect(original.label).toBe('Stop')
-    const gesture = h.tool.dimension.begin(original.identity)!
-    gesture.update(0.05)
-    expect(h.tool.dimension.snapshot().grip).toEqual(original.grip)
-    expect(h.tool.dimension.snapshot().value).toBeCloseTo(0.05)
-    gesture.finish()
-    expect(h.tool.measurementLabel()).toBe('Stop')
-    expect(h.tool.gizmoMarker({ kind: 'radius' })).not.toBeNull()
-    const stale = h.tool.dimension.begin(h.tool.dimension.snapshot().identity)!
-    h.tool.onHistoryChanged()
-    stale.update(0.08)
-    stale.finish()
-    expect(h.tool.dimension.snapshot().value).toBeNull()
-    expect(h.hooks.onCommit).not.toHaveBeenCalled()
-  })
-
-  it('adjusts only the active endpoint radius and preserves its field after release', () => {
-    const h = armed()
-    for (let i = 0; i < 3; i++) h.tool.onKey(key('Tab'))
-    const snapshot = h.tool.dimension.snapshot()
-    expect(snapshot.grip).toEqual({ kind: 'endRadius', end: 'start' })
-    const other = h.tool.gizmoMarker({ kind: 'endRadius', end: 'end' })
-    const gesture = h.tool.dimension.begin(snapshot.identity)!
-    gesture.update(0.015)
-    gesture.finish()
-    expect(h.tool.dimension.snapshot().grip).toEqual(snapshot.grip)
-    expect(h.tool.dimension.snapshot().value).toBeCloseTo(0.015)
-    expect(h.tool.gizmoMarker({ kind: 'endRadius', end: 'end' })).toEqual(other)
-    expect(h.hooks.onCommit).not.toHaveBeenCalled()
-  })
-
-  it('mouse movement cannot overwrite an in-progress card gesture; cancel keeps the pick armed', () => {
-    const h = armed()
-    const gesture = h.tool.dimension.begin(h.tool.dimension.snapshot().identity)!
-    gesture.update(0.025)
-    h.tool.onPointerMove(null, down(0.45, 0.01))
-    h.tool.flushMove()
-    expect(h.tool.dimension.snapshot().value).toBeCloseTo(0.025)
-    gesture.cancel()
-    expect(h.tool.dimension.snapshot().value).toBeCloseTo(0.02)
-    expect(h.tool.hasArmedGesture()).toBe(true)
-  })
-
-  it('omits scalar controls for idle, asymmetric Chamfer, Bullnose and incomplete dimensions', () => {
-    const h = armed()
-    h.tool.onKey(key('Escape'))
-    expect(h.tool.dimension.snapshot().reason).toBeTruthy()
-    click(h, down(0.3, 0.002), [100, 100])
-    setFilletProfile({ kind: 'bullnose' })
-    expect(h.tool.dimension.snapshot().reason).toMatch(/Bullnose/)
-    setFilletProfile({ kind: 'chamfer' })
-    for (const k of ['2', '0', ',', '1', '0']) h.tool.onKey(key(k))
-    expect(h.tool.dimension.snapshot().reason).toMatch(/two distances/)
-    expect(h.tool.dimension.begin(h.tool.dimension.snapshot().identity)).toBeNull()
-  })
-
-  it('coalesces rapid updates and drops queued work on cancellation or document reset', () => {
-    const queue: Array<() => void> = []
-    const h = armed(cb => queue.push(cb))
-    queue.splice(0).forEach(cb => cb())
-    const preview = vi.spyOn(h.scene, 'blend_preview')
-    const gesture = h.tool.dimension.begin(h.tool.dimension.snapshot().identity)!
-    gesture.update(0.021)
-    gesture.update(0.022)
-    gesture.update(0.023)
-    expect(preview).not.toHaveBeenCalled()
-    expect(queue).toHaveLength(1)
-    queue.splice(0).forEach(cb => cb())
-    expect(preview).toHaveBeenCalledTimes(1)
-    expect(h.tool.dimension.snapshot().value).toBeCloseTo(0.023)
-    gesture.update(0.03)
-    gesture.cancel()
-    queue.splice(0).forEach(cb => cb())
-    expect(h.tool.dimension.snapshot().value).toBeCloseTo(0.02)
-    const stale = h.tool.dimension.begin(h.tool.dimension.snapshot().identity)!
-    stale.update(0.04)
-    h.tool.onDocumentReset()
-    queue.splice(0).forEach(cb => cb())
-    stale.finish()
-    expect(h.tool.dimension.snapshot().value).toBeNull()
-    expect(h.hooks.onCommit).not.toHaveBeenCalled()
-  })
-
-  it('keeps the same intermediate point when its position crosses another point', () => {
-    const h = armed()
-    for (const x of [0.2, 0.4]) {
-      h.tool.onPointerScreenMove(x * 1000, 100)
-      h.tool.onPointerMove(null, down(x, 0))
-      h.tool.onPointerDown(null, down(x, 0))
-      h.tool.onPointerUp(null, down(x, 0))
-    }
-    for (let i = 0; i < 5; i++) h.tool.onKey(key('Tab'))
-    expect(h.tool.dimension.snapshot().grip).toEqual({ kind: 'handlePos', index: 0 })
-    const gesture = h.tool.dimension.begin(h.tool.dimension.snapshot().identity)!
-    gesture.update(0.45)
-    expect(h.tool.dimension.snapshot().grip).toEqual({ kind: 'handlePos', index: 1 })
-    expect(h.tool.dimension.snapshot().value).toBeCloseTo(0.45)
-    gesture.update(0.48)
-    gesture.finish()
-    expect(h.tool.dimension.snapshot().value).toBeCloseTo(0.48)
-    h.tool.onKey(key('Tab'))
-    expect(h.tool.dimension.snapshot().grip).toEqual({ kind: 'handleRadius', index: 1 })
-    const preview = vi.spyOn(h.scene, 'blend_preview')
-    const radius = h.tool.dimension.begin(h.tool.dimension.snapshot().identity)!
-    radius.update(0.015)
-    radius.finish()
-    const spec = JSON.parse(preview.mock.calls.at(-1)![1]) as { handles: Array<{ at: number; radius: number }> }
-    expect(spec.handles.find(x => Math.abs(x.at - 0.4) < 1e-9)!.radius).toBeCloseTo(0.02)
-    expect(spec.handles.find(x => Math.abs(x.at - 0.48) < 1e-9)!.radius).toBeCloseTo(0.015)
-    expect(h.hooks.onCommit).not.toHaveBeenCalled()
-  })
-
-
-  it('uses the exact typed preview for precise input and reports known kernel limits', () => {
-    const h = armed()
-    const typed = vi.spyOn(h.scene, 'blend_preview_typed')
-    const gesture = h.tool.dimension.begin(h.tool.dimension.snapshot().identity, 'typed')!
-    gesture.update(0.0254)
-    expect(typed).toHaveBeenCalled()
-    gesture.finish()
-    expect(h.tool.dimension.snapshot().value).toBeCloseTo(0.0254)
-    const over = h.tool.dimension.begin(h.tool.dimension.snapshot().identity)!
-    over.update(0.5)
-    const limited = h.tool.dimension.snapshot()
-    expect(limited.requested).toBe(0.5)
-    expect(limited.limit).not.toBeNull()
-    expect(limited.value!).toBeLessThan(limited.requested!)
-    over.cancel()
-    expect(h.tool.dimension.snapshot().value).toBeCloseTo(0.0254)
-  })
-
+it('card settings redraw the armed kernel preview immediately without a viewport click', () => {
+  const h = setup()
+  makeBox(h.scene, 0.6, 0.1, 0.1)
+  click(h, down(0.3, 0.002), [100, 100])
+  for (const k of ['2', '0']) h.tool.onKey(key(k))
+  const preview = vi.spyOn(h.scene, 'blend_preview_typed')
+  setFilletProfile({ kind: 'chamfer' })
+  expect(preview).toHaveBeenCalled()
+  expect(JSON.parse(preview.mock.calls.at(-1)![1]).profile.kind).toBe('chamfer')
+  preview.mockClear()
+  setFilletProfile({ kind: 'round' })
+  expect(JSON.parse(preview.mock.calls.at(-1)![1]).profile.kind).toBe('round')
+  preview.mockClear()
+  setFilletSegmentsOverride(12)
+  expect(preview).toHaveBeenCalled()
+  expect(JSON.parse(preview.mock.calls.at(-1)![1]).profile.segments).toBe(12)
+  preview.mockClear()
+  setFilletCorners('mitered')
+  expect(preview).toHaveBeenCalled()
+  expect(JSON.parse(preview.mock.calls.at(-1)![1]).corners).toBe('mitered')
+  expect(h.tool.hasArmedGesture()).toBe(true)
+  expect(h.hooks.onCommit).not.toHaveBeenCalled()
 })

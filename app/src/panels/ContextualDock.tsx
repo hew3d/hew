@@ -190,6 +190,10 @@ export function ContextualDock({
         left: 'calc(50% + var(--tool-card-inset, 0px) / 2)',
         transform: 'translateX(-50%)',
         display: 'flex',
+        // Bound the original controls to the viewport space beside the card.
+        flexWrap: 'wrap',
+        maxWidth: 'max(0px, calc(100% - var(--tool-card-inset, 0px) - 32px))',
+        boxSizing: 'border-box',
         alignItems: 'stretch',
         gap: '3px',
         padding: '8px 10px',

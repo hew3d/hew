@@ -143,7 +143,6 @@ export class PreviewStage {
     if (s.active.kind !== 'radius') this.c.measure(s.gripTyped === '' ? this.c.size.gripReadout(s) : typedReadout(s.gripTyped))
     if (this.c.slowSkipped && this.c.statusLine === null) this.c.statusLine = SLOW_PREVIEW_HINT
     setFilletThreeWayCorners(corners)
-    this.c.publishDimension()
   }
 
   /** Starts a preview round: whatever an earlier round still has in flight

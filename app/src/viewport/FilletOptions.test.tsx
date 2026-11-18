@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ToolOptionsCard } from './ToolOptionsCard'
 import { FilletOptions, cornerChoices, profileLabel } from './FilletOptions'
 import {
   getFilletSettings,
@@ -23,10 +24,10 @@ afterEach(() => {
 describe('FilletOptions', () => {
   it('names the current profile and lists the four basic kinds', () => {
     render(<FilletOptions />)
-    expect(screen.getByRole('button', { name: /^More tools/ })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
+    expect(screen.getByRole('button', { name: /^More shapes/ })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
     for (const name of ['Round', 'Chamfer', 'Cove', 'Bullnose']) {
-      expect(screen.getByRole('button', { name })).toBeTruthy()
+      expect(screen.getByRole('menuitemradio', { name })).toBeTruthy()
     }
   })
 
@@ -43,8 +44,8 @@ describe('FilletOptions', () => {
     fireEvent.click(round)
     expect(getFilletSettings().profile.kind).toBe('round')
     // The menu keeps every entry.
-    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
-    expect(screen.getByRole('group', { name: 'Quick edge shape' }).querySelectorAll('button')).toHaveLength(4)
+    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
+    expect(screen.getAllByRole('menuitemradio')).toHaveLength(4)
   })
 
   it('the pills stay enabled over a drawn corner, and neither is pressed for Cove', () => {
@@ -72,30 +73,29 @@ describe('FilletOptions', () => {
       />,
     )
     act(() => setFilletCornerOnly(true))
-    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
     for (const name of ['Cove', 'Bullnose', 'Ogee']) {
-      const row = screen.getByRole('button', { name }) as HTMLButtonElement
+      const row = screen.getByRole('menuitemradio', { name }) as HTMLButtonElement
       expect(row.disabled).toBe(true)
       expect(row.title).toBe('Drawn corners can be rounded or chamfered.')
     }
-    expect((screen.getByRole('button', { name: 'Save profile…' }) as HTMLButtonElement).disabled).toBe(false)
-    fireEvent.click(screen.getByRole('button', { name: 'Cove' }))
+    expect((screen.getByRole('menuitem', { name: 'Save profile…' }) as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Cove' }))
     expect(getFilletSettings().profile.kind).toBe('round')
-    fireEvent.click(screen.getByRole('button', { name: 'Chamfer' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Chamfer' }))
     expect(getFilletSettings().profile.kind).toBe('chamfer')
     act(() => setFilletCornerOnly(false))
-    expect((screen.getByRole('button', { name: 'Cove' }) as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
+    expect((screen.getByRole('menuitemradio', { name: 'Cove' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('picking a kind preserves inline expansion and collapsing preserves selection', () => {
+  it('picking a kind sets the session profile and closes the menu', () => {
     render(<FilletOptions />)
-    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Cove' }))
+    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Cove' }))
     expect(getFilletSettings().profile.kind).toBe('cove')
-    expect(screen.getByRole('button', { name: /^Less tools/ })).toHaveAttribute('aria-expanded', 'true')
-    fireEvent.click(screen.getByRole('button', { name: /^Less tools/ }))
-    expect(getFilletSettings().profile.kind).toBe('cove')
-    expect(screen.getByRole('button', { name: /^More tools/ })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('menu')).toBeNull()
+    expect(screen.getByRole('button', { name: /^More shapes/ })).toBeTruthy()
   })
 
   it('shows extra sections with badges, action rows and disabled rows', () => {
@@ -119,12 +119,14 @@ describe('FilletOptions', () => {
         ]}
       />,
     )
-    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
-    fireEvent.click(screen.getByRole('button', { name: /Ogee/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /Ogee/ }))
     expect(getFilletSettings().profile).toMatchObject({ kind: 'shape', id: 'builtin:ogee' })
-    fireEvent.click(screen.getByRole('button', { name: 'Save profile…' }))
+    fireEvent.click(screen.getByRole('button', { name: /Ogee/ }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Save profile…' }))
     expect(onSave).toHaveBeenCalledTimes(1)
-    expect((screen.getByRole('button', { name: 'Nope' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: /Ogee/ }))
+    expect((screen.getByRole('menuitem', { name: 'Nope' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('a disabled row carries its reason, and an empty section shows its hint', () => {
@@ -140,10 +142,10 @@ describe('FilletOptions', () => {
         ]}
       />,
     )
-    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
     expect(screen.getByText('No saved profiles yet.')).toBeTruthy()
     expect(screen.queryByText('Nothing')).toBeNull()
-    const save = screen.getByRole('button', { name: 'Save profile…' }) as HTMLButtonElement
+    const save = screen.getByRole('menuitem', { name: 'Save profile…' }) as HTMLButtonElement
     expect(save.disabled).toBe(true)
     expect(save.title).toBe('Select a chain first.')
   })
@@ -334,50 +336,55 @@ describe('FilletOptions rows and field editing', () => {
     expect(document.activeElement).toBe(field)
   })
 
-  it('keeps inline shapes open after selection and outside presses', () => {
+  it('offers all four quick shapes and restores menu dismissal on outside press and Escape', () => {
     render(<FilletOptions />)
     for (const name of ['Round', 'Chamfer', 'Cove', 'Bullnose']) {
       fireEvent.click(screen.getByRole('button', { name }))
       expect(screen.getByRole('button', { name })).toHaveAttribute('aria-pressed', 'true')
-      expect(screen.getByRole('button', { name }).querySelector('svg path')).toBeTruthy()
     }
-    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
+    const more = screen.getByRole('button', { name: /^More shapes/ })
+    fireEvent.click(more)
     fireEvent.pointerDown(document.body)
-    expect(screen.getByRole('button', { name: /^Less tools/ })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.queryByRole('menu')).toBeNull()
+    fireEvent.click(more)
+    fireEvent.keyDown(window, { key: 'Escape' })
     expect(screen.queryByRole('menu')).toBeNull()
   })
 
   it('keeps Library thumbnails, selected identity, and one-sentence row help', () => {
-    const profile = { kind: 'shape' as const, id: 'mine', name: 'My curve', shape: { b: 1, segs: [{ kind: 'line', to: [0, 1] }] } }
+    const profile = { kind: 'shape' as const, id: 'mine', name: 'My curve', shape: {} }
     setFilletProfile(profile)
     render(<FilletOptions sections={[{ id: 'library', heading: 'My profiles', items: [
       { id: 'mine', label: 'My curve', profile, thumbnail: 'data:image/png;base64,AA==' },
     ] }]} />)
-    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
-    const row = screen.getByRole('button', { name: 'My curve' })
-    expect(row).toHaveAttribute('aria-pressed', 'true')
-    expect(row.querySelector('svg')).toHaveAttribute('width', '24')
-    expect(row.querySelector('img')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: /^Less tools/ }))
-    expect(screen.getByRole('status')).toHaveTextContent('My curve')
-    expect(getFilletSettings().profile).toEqual(profile)
-    fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
-    expect(screen.getByRole('button', { name: 'My curve' })).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
+    const row = screen.getByRole('menuitemradio', { name: 'My curve' })
+    expect(row).toHaveAttribute('aria-checked', 'true')
+    expect(row.querySelector('img')).toHaveAttribute('width', '32')
     fireEvent.click(screen.getByRole('button', { name: 'About Shape' }))
     expect(screen.getByRole('note')).toHaveTextContent('Choose the shape of the edge.')
   })
 })
 
+it('Facets Escape owns its rollback even if More Shapes was opened from the keyboard', () => {
+  setFilletSegmentsOverride(8)
+  render(<FilletOptions />)
+  fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
+  const field = screen.getByRole('textbox', { name: 'Facets' })
+  act(() => field.focus())
+  fireEvent.change(field, { target: { value: '16' } })
+  fireEvent.keyDown(field, { key: 'Escape' })
+  expect(getFilletSettings().segmentsOverride).toBe(8)
+  expect(field).toHaveValue('8')
+  expect(document.activeElement).not.toBe(field)
+})
 
-it('omits Save Profile from the tool card while retaining saved profile choices', () => {
-  const save = vi.fn()
-  render(<FilletOptions sections={[
-    { id: 'library', heading: 'My profiles', items: [{ id: 'mine', label: 'Saved curve', profile: { kind: 'shape', id: 'mine', name: 'Saved curve', shape: { b: 1, segs: [{ kind: 'line', to: [0, 1] }] } } }] },
-    { id: 'actions', items: [{ id: 'save-profile', label: 'Save profile…', onSelect: save }] },
-  ]} />)
-  fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
-  expect(screen.queryByRole('button', { name: 'Save profile…' })).toBeNull()
-  fireEvent.click(screen.getByRole('button', { name: 'Saved curve' }))
-  expect(getFilletSettings().profile).toMatchObject({ id: 'mine' })
-  expect(save).not.toHaveBeenCalled()
+
+it('closing the card also closes its menu, including keyboard-only collapse', () => {
+  render(<ToolOptionsCard tool="Menu collapse" info="Help."><FilletOptions /></ToolOptionsCard>)
+  fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
+  expect(screen.getByRole('menu')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Collapse Menu collapse options' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Expand Menu collapse options' }))
+  expect(screen.queryByRole('menu')).toBeNull()
 })

@@ -53,8 +53,6 @@ import { PickStage } from './fillet/pick'
 import { SizeStage } from './fillet/size'
 import { PreviewStage } from './fillet/preview'
 import { CommitStage } from './fillet/commit'
-import { FilletDimension } from './fillet/dimension'
-import { connectFilletDimension, disconnectFilletDimension } from './fillet/dimensionStore'
 import { EditStageOps } from './fillet/edit'
 
 export type { FilletHooks, FilletOptions } from './fillet/types'
@@ -64,7 +62,6 @@ export { seamHint } from './fillet/hints'
 export class FilletTool implements Tool {
   readonly name = 'Fillet'
   private readonly c: FilletContext
-  readonly dimension: FilletDimension
   private altHeld = false
   private pointerDuringAlt = false
 
@@ -93,13 +90,9 @@ export class FilletTool implements Tool {
     c.preview = new PreviewStage(c)
     c.commit = new CommitStage(c)
     c.edit = new EditStageOps(c)
-    this.dimension = new FilletDimension(c)
-    c.publishDimension = () => this.dimension.publish()
     c.dispatchPointerDown = (snap, ray) => this.onPointerDown(snap, ray)
     setFilletThreeWayCorners(0)
   }
-
-  activateDimension(): void { connectFilletDimension(this.dimension) }
 
   statusHint(): string {
     const chamfer = getFilletSettings().profile.kind === 'chamfer'
@@ -337,7 +330,6 @@ export class FilletTool implements Tool {
   }
 
   private handleMove(ray: Ray): void {
-    if (this.c.dimensionEditing) return
     this.attach()
     this.c.lastRay = ray
     const s = this.c.stage
@@ -578,7 +570,6 @@ export class FilletTool implements Tool {
   }
 
   cancel(): void {
-    disconnectFilletDimension(this.dimension)
     setFilletMeasurementLabelOverride(null)
     this.c.note = null
     // A move still queued would hover again on a tool that is gone.
@@ -599,7 +590,6 @@ export class FilletTool implements Tool {
   private resetStage(): void {
     this.c.unsubSettings?.()
     this.c.unsubSettings = null
-    this.c.dimensionEditing = false
     this.c.stage = { kind: 'idle' }
     this.c.preview.clearPreviewDrawing()
     this.c.gripsView.clear()

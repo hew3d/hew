@@ -22,8 +22,6 @@ import type { EditStageOps } from './edit'
 
 export class FilletContext {
   stage: Stage = { kind: 'idle' }
-  dimensionEditing = false
-  publishDimension: () => void = () => {}
 
   hover: Hover = { kind: 'none' }
 
@@ -136,7 +134,6 @@ export class FilletContext {
   measure(text: string): void {
     setFilletMeasurementLabelOverride(this.heldGripLabel())
     this.hooks.onMeasurement(text)
-    this.publishDimension()
   }
 
   heldGripLabel(): string | null {

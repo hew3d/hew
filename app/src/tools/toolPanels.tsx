@@ -26,7 +26,7 @@ const ALL_TOOL_PANELS: readonly ToolPanel[] = [
   {
     tool: 'Fillet',
     render: ({ profileSections }) => (
-      <ToolOptionsCard collapsible={false} tool="Fillet" info="Round or chamfer an edge, or give it another shape.">
+      <ToolOptionsCard tool="Fillet" info="Round or chamfer an edge, or give it another shape.">
         <FilletOptions sections={profileSections} />
       </ToolOptionsCard>
     ),
