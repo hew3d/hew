@@ -67,3 +67,12 @@
 .fillet-dimension-indicator { position: relative; width: 24px; height: 24px; flex-shrink: 0; border-left: 1px solid var(--border-strong); border-bottom: 1px solid var(--border-strong); }
 .fillet-dimension-control input[type="text"] { width: 100%; box-sizing: border-box; padding: 5px 8px; background: var(--surface-input); color: var(--text-primary); border: 1px solid var(--border-strong); border-radius: var(--radius-control, 7px); font: inherit; }
 .fillet-dimension-control small, .fillet-dimension-unavailable { font-size: 11px; color: var(--text-secondary); margin: 0; }
+
+/* One icon box and a shared two-line label rhythm for basic and saved profiles. */
+.fillet-profile-grid button { min-height: 44px; padding: 5px 6px; }
+.fillet-profile-label { flex: 1; min-width: 0; line-height: 1.2; text-wrap: pretty; overflow-wrap: break-word; hyphens: manual; }
+.fillet-profile-icon-unavailable { width: 24px; height: 24px; flex-shrink: 0; }
+.fillet-sensitivity { display: flex; gap: 2px; }
+.fillet-sensitivity button { flex: 1; min-width: 0; min-height: 26px; padding: 3px; font: inherit; color: var(--text-primary); background: transparent; border: 1px solid var(--border-strong); border-radius: var(--radius-control, 7px); cursor: pointer; }
+.fillet-sensitivity button[aria-pressed="true"] { background: var(--accent-base); color: var(--text-on-accent, #fff); }
+.fillet-sensitivity button:focus-visible { outline: 2px solid var(--accent-base); outline-offset: 1px; }

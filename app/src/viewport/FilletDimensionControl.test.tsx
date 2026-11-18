@@ -16,7 +16,7 @@ afterEach(() => { setLengthUnit('mm'); vi.restoreAllMocks() })
 it('shows actual numeric state, parses precise units, and releases without committing', () => {
   setLengthUnit('mm')
   const h = connect()
-  const { unmount } = render(<FilletDimensionControl sections={[]} />)
+  const { unmount } = render(<FilletDimensionControl  />)
   const field = screen.getByRole('textbox', { name: 'Radius value' })
   expect(field).toHaveValue('20 mm')
   act(() => field.focus())
@@ -34,7 +34,7 @@ it('shows actual numeric state, parses precise units, and releases without commi
 
 it('Escape cancels only the input gesture and invalid input also rolls back', () => {
   const h = connect()
-  const { unmount } = render(<FilletDimensionControl sections={[]} />)
+  const { unmount } = render(<FilletDimensionControl  />)
   const field = screen.getByRole('textbox', { name: 'Radius value' })
   act(() => field.focus())
   fireEvent.change(field, { target: { value: '40 mm' } })
@@ -51,7 +51,7 @@ it('Escape cancels only the input gesture and invalid input also rolls back', ()
 
 it('recentered travel can repeatedly grow the value without a geometry maximum', () => {
   const h = connect()
-  const { unmount } = render(<FilletDimensionControl sections={[]} />)
+  const { unmount } = render(<FilletDimensionControl  />)
   const slider = screen.getByRole('slider')
   fireEvent.change(slider, { target: { value: '1' } })
   expect(h.gesture.update).toHaveBeenLastCalledWith(0.04)
@@ -67,12 +67,17 @@ it('recentered travel can repeatedly grow the value without a geometry maximum',
   disconnectFilletDimension(h.source)
 })
 
-it('uses the selected decorative thumbnail and identifies active grip adjustments', () => {
-  const profile = { kind: 'shape' as const, id: 'ogee', name: 'Ogee', shape: {} }
+it('uses the selected decorative outline and identifies active grip adjustments', () => {
+  const profile = { kind: 'shape' as const, id: 'ogee', name: 'Ogee', shape: { b: 1, segs: [
+    { kind: 'arc', to: [0.5, 0.5], center: [1, 0.5], ccw: false },
+    { kind: 'arc', to: [0, 1], center: [0, 0.5], ccw: true },
+  ] } }
   const h = connect({ profile, label: 'Radius', grip: { kind: 'handleRadius', index: 1 } })
-  const { unmount } = render(<FilletDimensionControl sections={[{ id: 'built-in', items: [{ id: 'ogee', label: 'Ogee', profile, thumbnail: 'data:image/png;base64,AA==' }] }]} />)
+  const { unmount } = render(<FilletDimensionControl />)
   const smaller = screen.getByRole('img', { name: 'Smaller radius at active grip' })
-  expect(smaller.querySelector('img')).toHaveAttribute('src', 'data:image/png;base64,AA==')
+  expect(smaller.querySelector('svg')).toHaveAttribute('data-profile-kind', 'shape')
+  expect(smaller.querySelector('path')).toHaveAttribute('fill', 'none')
+  expect(smaller.querySelector('img')).toBeNull()
   expect(screen.getByRole('slider')).toHaveAccessibleName('Adjust radius at active grip')
   unmount()
   disconnectFilletDimension(h.source)
@@ -80,7 +85,7 @@ it('uses the selected decorative thumbnail and identifies active grip adjustment
 
 it('omits the slider and both indicators together when unavailable', () => {
   const h = connect({ reason: 'Bullnose fits automatically.', value: null })
-  const { unmount } = render(<FilletDimensionControl sections={[]} />)
+  const { unmount } = render(<FilletDimensionControl  />)
   expect(screen.queryByRole('slider')).toBeNull()
   expect(screen.queryByRole('img')).toBeNull()
   expect(screen.getByText('Bullnose fits automatically.')).toBeVisible()
@@ -91,7 +96,7 @@ it('omits the slider and both indicators together when unavailable', () => {
 
 it('represents stop length and point position rather than a change to every radius', () => {
   const h = connect({ label: 'Stop', value: 0, grip: { kind: 'stop', end: 'start' } })
-  const { unmount } = render(<FilletDimensionControl sections={[]} />)
+  const { unmount } = render(<FilletDimensionControl  />)
   expect(screen.getByRole('img', { name: 'Shorter stop at active grip' })).toBeVisible()
   expect(screen.getByRole('img', { name: 'Longer stop at active grip' })).toBeVisible()
   act(() => h.set({ label: 'Position', grip: { kind: 'handlePos', index: 0 } }))
@@ -104,7 +109,7 @@ it('represents stop length and point position rather than a change to every radi
 
 it('cancels a gesture when the operation identity changes, and on unmount', () => {
   const h = connect()
-  const { unmount } = render(<FilletDimensionControl sections={[]} />)
+  const { unmount } = render(<FilletDimensionControl  />)
   const field = screen.getByRole('textbox', { name: 'Radius value' })
   act(() => field.focus())
   fireEvent.change(field, { target: { value: '35 mm' } })
@@ -115,5 +120,58 @@ it('cancels a gesture when the operation identity changes, and on unmount', () =
   act(() => field.focus())
   unmount()
   expect(h.gesture.cancel).toHaveBeenCalledTimes(2)
+  disconnectFilletDimension(h.source)
+})
+
+
+it.each([['Fine', 0.25], ['Normal', 1], ['Coarse', 2]] as const)('%s changes travel gain without changing the dimension on selection', (mode, gain) => {
+  const h = connect({ grip: { kind: 'handleRadius', index: 1 } })
+  const { unmount } = render(<FilletDimensionControl />)
+  fireEvent.click(screen.getByRole('button', { name: `${mode} slider sensitivity` }))
+  expect(h.gesture.update).not.toHaveBeenCalled()
+  expect(h.source.begin).not.toHaveBeenCalled()
+  expect(screen.getByRole('textbox')).toHaveValue('20 mm')
+  const slider = screen.getByRole('slider')
+  fireEvent.change(slider, { target: { value: '0.5' } })
+  expect(h.gesture.update).toHaveBeenLastCalledWith(0.02 * Math.pow(2, 0.5 * gain))
+  expect(h.source.begin).toHaveBeenCalledWith('operation:radius', 'slider')
+  fireEvent.keyDown(slider, { key: 'Escape' })
+  expect(h.gesture.cancel).toHaveBeenCalledTimes(1)
+  expect(h.gesture.finish).not.toHaveBeenCalled()
+  unmount()
+  disconnectFilletDimension(h.source)
+})
+
+it('retains sensitivity across operation changes, leaves precise entry independent, and resets on a fresh session', () => {
+  const h = connect()
+  const first = render(<FilletDimensionControl />)
+  fireEvent.click(screen.getByRole('button', { name: 'Fine slider sensitivity' }))
+  act(() => h.set({ identity: 'new-operation', value: 0.01 }))
+  expect(screen.getByRole('button', { name: 'Fine slider sensitivity' })).toHaveAttribute('aria-pressed', 'true')
+  act(() => setLengthUnit('dec_in'))
+  const field = screen.getByRole('textbox')
+  act(() => field.focus())
+  fireEvent.change(field, { target: { value: '0.1234 m' } })
+  expect(h.gesture.update).toHaveBeenLastCalledWith(0.1234, '0.1234 m')
+  fireEvent.keyDown(field, { key: 'Enter' })
+  first.unmount()
+  const second = render(<FilletDimensionControl />)
+  expect(screen.getByRole('button', { name: 'Normal slider sensitivity' })).toHaveAttribute('aria-pressed', 'true')
+  second.unmount()
+  disconnectFilletDimension(h.source)
+})
+
+it('relative adjustment of a nonzero dimension is unit independent', () => {
+  const h = connect()
+  const { unmount } = render(<FilletDimensionControl />)
+  const slider = screen.getByRole('slider')
+  fireEvent.click(screen.getByRole('button', { name: 'Coarse slider sensitivity' }))
+  fireEvent.change(slider, { target: { value: '0.25' } })
+  const metric = h.gesture.update.mock.calls.at(-1)![0]
+  fireEvent.keyUp(slider, { key: 'ArrowRight' })
+  act(() => setLengthUnit('dec_in'))
+  fireEvent.change(slider, { target: { value: '0.25' } })
+  expect(h.gesture.update).toHaveBeenLastCalledWith(metric)
+  unmount()
   disconnectFilletDimension(h.source)
 })

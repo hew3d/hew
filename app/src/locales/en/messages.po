@@ -7987,6 +7987,10 @@ msgstr "Profile"
 msgid "Profile (built-in)"
 msgstr "Profile (built-in)"
 
+#: src/viewport/ProfileIcon.tsx
+msgid "Profile outline unavailable"
+msgstr "Profile outline unavailable"
+
 #: src/panels/LibraryDialog.tsx
 msgid "Profiles"
 msgstr "Profiles"

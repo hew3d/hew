@@ -4,19 +4,16 @@ import { beginFilletDimension, getFilletDimension, subscribeFilletDimension, typ
 import { parseCurveInput } from '../tools/curveInput'
 import { formatLength, getLengthUnit, subscribe as subscribeUnits } from '../settings/units'
 import { isComposingKey } from '../input/keyboard'
-import { ProfileIcon } from './ProfileIcon'
-import type { ProfileOptionSection } from './FilletOptions'
+import { ProfileIcon, profileOutline } from './ProfileIcon'
 import type { FilletProfile } from '../tools/filletSettings'
 
 /** Non-interactive indicators: the workpiece frame stays fixed as the cut grows. */
-function TreatmentIndicator({ profile, thumbnail, larger, label, alongEdge }: {
-  profile: FilletProfile; thumbnail?: string; larger: boolean; label: string; alongEdge: boolean
+function TreatmentIndicator({ profile, larger, label, alongEdge }: {
+  profile: FilletProfile; larger: boolean; label: string; alongEdge: boolean
 }) {
   return <span role="img" aria-label={label} className="fillet-dimension-indicator">
     <span aria-hidden="true" style={{ display: 'inline-flex', transform: `scale(${alongEdge || larger ? 1 : 0.65})`, transformOrigin: 'bottom left' }}>
-      {profile.kind === 'shape'
-        ? <img src={thumbnail} alt="" width={24} height={24} />
-        : <ProfileIcon kind={profile.kind} />}
+      <ProfileIcon kind={profile.kind} shape={profile.kind === 'shape' ? profile.shape : undefined} />
     </span>
     {alongEdge && <svg aria-hidden="true" viewBox="0 0 24 8" width="24" height="8" style={{ position: 'absolute', bottom: 0, left: 0 }}>
       <path d="M1 6H23" stroke="currentColor" />
@@ -25,13 +22,16 @@ function TreatmentIndicator({ profile, thumbnail, larger, label, alongEdge }: {
   </span>
 }
 
-export function FilletDimensionControl({ sections }: { sections: ProfileOptionSection[] }) {
+export function FilletDimensionControl() {
   const snapshot = useSyncExternalStore(subscribeFilletDimension, getFilletDimension, getFilletDimension)
   // Reformat the numeric input if document units change; meters never round-trip through display text.
   const unit = useSyncExternalStore(subscribeUnits, getLengthUnit, getLengthUnit)
   const id = useId()
   const [draft, setDraft] = useState<string | null>(null)
   const [travel, setTravel] = useState(0)
+  const [sensitivity, setSensitivity] = useState<'Fine' | 'Normal' | 'Coarse'>('Normal')
+  const gain = { Fine: 0.25, Normal: 1, Coarse: 2 }[sensitivity]
+  const gestureGain = useRef(1)
   const gesture = useRef<DimensionGesture | null>(null)
   const baseline = useRef(0)
   const invalid = useRef(false)
@@ -45,6 +45,7 @@ export function FilletDimensionControl({ sections }: { sections: ProfileOptionSe
   const start = (input: 'slider' | 'typed' = 'slider'): boolean => {
     if (gesture.current !== null) return true
     baseline.current = snapshot.value ?? 0
+    gestureGain.current = gain
     gesture.current = beginFilletDimension(identity, input)
     return gesture.current !== null
   }
@@ -58,8 +59,7 @@ export function FilletDimensionControl({ sections }: { sections: ProfileOptionSe
     setTravel(0)
   }
   const profile = snapshot.profile
-  const thumbnail = sections.flatMap(s => s.items).find(it => it.profile?.kind === 'shape' && profile?.kind === 'shape' && it.profile.id === profile.id)?.thumbnail
-  const reason = snapshot.reason ?? (profile?.kind === 'shape' && thumbnail === undefined ? 'Profile preview is loading; use Measurements for now.' : null)
+  const reason = snapshot.reason ?? (profile?.kind === 'shape' && profileOutline(profile.shape) === null ? 'Profile outline unavailable; use Measurements for now.' : null)
   if (reason !== null || snapshot.value === null || profile === null) {
     return <p className="fillet-dimension-unavailable">{reason}</p>
   }
@@ -72,7 +72,7 @@ export function FilletDimensionControl({ sections }: { sections: ProfileOptionSe
   return <div className="fillet-dimension-control">
     <label htmlFor={id}>{snapshot.label}{local ? ' · active grip' : ''}</label>
     <div className="fillet-dimension-slider">
-      <TreatmentIndicator profile={profile} thumbnail={thumbnail} larger={false} label={smaller + context} alongEdge={alongEdge} />
+      <TreatmentIndicator profile={profile} larger={false} label={smaller + context} alongEdge={alongEdge} />
       <input type="range" aria-label={`Adjust ${noun}${context}`} min={-1} max={1} step={0.01} value={travel}
         aria-valuetext={formatLength(snapshot.value)}
         onPointerDown={(ev) => { if (start()) ev.currentTarget.setPointerCapture(ev.pointerId) }}
@@ -84,7 +84,7 @@ export function FilletDimensionControl({ sections }: { sections: ProfileOptionSe
           // release: successive strokes extend the available travel indefinitely.
           const zeroStep = parseCurveInput('1', unit)
           const scale = baseline.current > 0 ? baseline.current : 'kind' in zeroStep && zeroStep.kind === 'length' ? zeroStep.meters : 0
-          const value = baseline.current > 0 ? baseline.current * Math.pow(2, position) : Math.max(0, position * scale)
+          const value = baseline.current > 0 ? baseline.current * Math.pow(2, position * gestureGain.current) : Math.max(0, position * scale * gestureGain.current)
           gesture.current?.update(value)
         }}
         onPointerUp={() => finish()} onPointerCancel={() => finish(true)}
@@ -96,7 +96,12 @@ export function FilletDimensionControl({ sections }: { sections: ProfileOptionSe
         }}
         onKeyUp={(ev) => { ev.stopPropagation(); if (ev.key.startsWith('Arrow') || ['Home', 'End', 'PageUp', 'PageDown'].includes(ev.key)) finish() }}
         onBlur={() => finish()} />
-      <TreatmentIndicator profile={profile} thumbnail={thumbnail} larger label={larger + context} alongEdge={alongEdge} />
+      <TreatmentIndicator profile={profile} larger label={larger + context} alongEdge={alongEdge} />
+    </div>
+    <div role="group" aria-label="Slider sensitivity" className="fillet-sensitivity" onKeyDown={ev => ev.stopPropagation()} onKeyUp={ev => ev.stopPropagation()}>
+      {(['Fine', 'Normal', 'Coarse'] as const).map(mode => <button key={mode} type="button"
+        aria-label={`${mode} slider sensitivity`} aria-pressed={sensitivity === mode}
+        onClick={() => setSensitivity(mode)}>{mode}</button>)}
     </div>
     <input id={id} type="text" inputMode="decimal" aria-label={`${snapshot.label} value`} aria-invalid={invalid.current || undefined}
       value={draft ?? snapshot.draft ?? formatLength(snapshot.value)}
