@@ -12940,7 +12940,7 @@ export default function Viewport({
     if (activeTool !== undefined && 'setGuideTarget' in activeTool) {
       (activeTool as { setGuideTarget(guide: bigint | null): void }).setGuideTarget(selectedGuide)
     }
-    sceneRendererRef.current?.setSelectedGuide(selectedGuide)
+    sceneRendererRef.current?.setSelectedGuides(selectedGuide === null ? [] : [selectedGuide])
     refreshAcquireHoverRef.current?.()
     scheduleRenderRef.current()
   }, [selectedGuide])
@@ -12948,7 +12948,7 @@ export default function Viewport({
   // Reflect the selected annotation into the renderer highlight
   // (docs/design/dimensions-text.md).
   useEffect(() => {
-    sceneRendererRef.current?.setSelectedAnnotation(selectedAnnotation)
+    sceneRendererRef.current?.setSelectedAnnotations(selectedAnnotation === null ? [] : [selectedAnnotation])
     scheduleRenderRef.current()
   }, [selectedAnnotation])
 
