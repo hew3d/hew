@@ -452,13 +452,38 @@ msgstr "{n, plural, one {Close an opening} other {Close # openings}}"
 msgid "{n, plural, one {Copy guide} other {Copy guide ×#}}"
 msgstr "{n, plural, one {Copy guide} other {Copy guide ×#}}"
 
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # annotation} other {Delete # annotations}}"
+msgstr "{n, plural, one {Delete # annotation} other {Delete # annotations}}"
+
 #: src/i18n/historyLabels.ts
 msgid "{n, plural, one {Delete # face} other {Delete # faces}}"
 msgstr "{n, plural, one {Delete # face} other {Delete # faces}}"
 
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # group} other {Delete # groups}}"
+msgstr "{n, plural, one {Delete # group} other {Delete # groups}}"
+
 #: src/i18n/historyLabels.ts
+#: src/viewport/deleteLabel.ts
 msgid "{n, plural, one {Delete # guide} other {Delete # guides}}"
 msgstr "{n, plural, one {Delete # guide} other {Delete # guides}}"
+
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # instance} other {Delete # instances}}"
+msgstr "{n, plural, one {Delete # instance} other {Delete # instances}}"
+
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # item} other {Delete # items}}"
+msgstr "{n, plural, one {Delete # item} other {Delete # items}}"
+
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # object} other {Delete # objects}}"
+msgstr "{n, plural, one {Delete # object} other {Delete # objects}}"
+
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # sketch} other {Delete # sketches}}"
+msgstr "{n, plural, one {Delete # sketch} other {Delete # sketches}}"
 
 #: src/i18n/historyLabels.ts
 msgid "{n, plural, one {Delete # tag} other {Delete # tags}}"
@@ -2995,6 +3020,7 @@ msgstr "Delay (s)"
 #: src/panels/LibraryDialog.tsx
 #: src/panels/MenuBar.tsx
 #: src/panels/ScenesPanel.tsx
+#: src/viewport/deleteLabel.ts
 #: src/viewport/Viewport.tsx
 msgid "Delete"
 msgstr "Delete"

@@ -452,12 +452,37 @@ msgstr ""
 msgid "{n, plural, one {Copy guide} other {Copy guide ×#}}"
 msgstr ""
 
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # annotation} other {Delete # annotations}}"
+msgstr ""
+
 #: src/i18n/historyLabels.ts
 msgid "{n, plural, one {Delete # face} other {Delete # faces}}"
 msgstr ""
 
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # group} other {Delete # groups}}"
+msgstr ""
+
 #: src/i18n/historyLabels.ts
+#: src/viewport/deleteLabel.ts
 msgid "{n, plural, one {Delete # guide} other {Delete # guides}}"
+msgstr ""
+
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # instance} other {Delete # instances}}"
+msgstr ""
+
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # item} other {Delete # items}}"
+msgstr ""
+
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # object} other {Delete # objects}}"
+msgstr ""
+
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # sketch} other {Delete # sketches}}"
 msgstr ""
 
 #: src/i18n/historyLabels.ts
@@ -2991,6 +3016,7 @@ msgstr ""
 #: src/panels/LibraryDialog.tsx
 #: src/panels/MenuBar.tsx
 #: src/panels/ScenesPanel.tsx
+#: src/viewport/deleteLabel.ts
 #: src/viewport/Viewport.tsx
 msgid "Delete"
 msgstr ""

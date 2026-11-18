@@ -1021,9 +1021,9 @@ export interface HewTestHarness {
    */
   getComponentMemberSketches(component: string): string[]
 
-  /** Replace the selection with arbitrary nodes (kind + handle string; an
-   *  imprint ref carries its owning `object`, a sketch sub-entity its
-   *  `sketch`). */
+  /** Replace the selection with arbitrary entries, in this order (kind +
+   *  handle string; `guide` and `annotation` are kinds too; an imprint ref
+   *  carries its owning `object`, a sketch sub-entity its `sketch`). */
   selectNodes(nodes: { kind: string; id: string; ctx?: string; key?: string }[]): void
   /** The drawing on a plane (`plane_units_json`) — units, their edges with
    *  stores, and regions; keys are 16-hex strings. */
@@ -2862,7 +2862,7 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     selectNodes: (nodes) =>
       deps.setSelection(
         nodes.map((n) => ({
-          kind: n.kind as NodeKind,
+          kind: n.kind as NodeKind | 'guide' | 'annotation',
           id: n.key !== undefined ? BigInt('0x' + n.key) : BigInt(n.id),
           ...(n.ctx !== undefined ? { ctx: n.ctx } : {}),
           ...(n.key !== undefined ? { key: n.key } : {}),
