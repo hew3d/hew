@@ -200,7 +200,7 @@ test('explode session: open, edit two member faces, close folds both instances, 
   // changed" proof component-edit.spec.ts's circle-imprint check uses.
   const afterOpenShot = await page.locator('canvas').first().screenshot()
   expect(afterOpenShot.equals(beforeShot)).toBe(false)
-  const hashAfterOpen = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashAfterOpen = await page.evaluate(() => window.__hew_test!.getModelStateHash())
 
   // ---- 2. Push/Pull a member face outward — a REAL drag, reliable here
   // (unlike component-edit.spec.ts's K1/K2 case) because the member is a
@@ -210,7 +210,7 @@ test('explode session: open, edit two member faces, close folds both instances, 
   await dragWorld(page, ctx, [1, 0.5, 1], [1, 0.5, 2])
   const boundsAfterPush = await page.evaluate((id) => window.__hew_test!.getObjectBounds(id), memberId)
   expect(boundsAfterPush[5]).toBeGreaterThan(1.1) // maxZ grew past the original 1
-  const hashAfterTopPush = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashAfterTopPush = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   expect(hashAfterTopPush).not.toBe(hashAfterOpen)
 
   // ---- 3. Draw a rectangle on the FRONT member face and Push/Pull the new
@@ -221,7 +221,7 @@ test('explode session: open, edit two member faces, close folds both instances, 
   await clickWorld(page, ctx, 1.1, 0, 0.6)
   // Fail fast, with a clear signal, if the rectangle imprint didn't commit —
   // rather than a confusing mismatch several steps later at the undo walk.
-  const hashAfterRectangle = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashAfterRectangle = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   expect(hashAfterRectangle).not.toBe(hashAfterTopPush)
   await page.keyboard.press('p')
   await dragWorld(page, ctx, [1.0, 0, 0.5], [1.0, -2, 0.5])
@@ -353,7 +353,7 @@ test('explode session: deleting every member closes and deletes the component; u
     return h.makeComponent([box])
   })
   const { component } = setup
-  const hashBefore = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashBefore = await page.evaluate(() => window.__hew_test!.getModelStateHash())
 
   await dblClickWorld(page, ctx, 1, 0.5, 1)
   await page.waitForTimeout(200)
@@ -394,7 +394,7 @@ test('explode session: deleting every member closes and deletes the component; u
   await page.waitForTimeout(150)
   await page.evaluate(() => window.__hew_test!.undo()) // undoes the open
   await page.waitForTimeout(150)
-  const hashAfter = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashAfter = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   expect(hashAfter).toBe(hashBefore)
   const membersRestored = await page.evaluate((c) => window.__hew_test!.getComponentMemberObjects(c), component)
   expect(membersRestored).toHaveLength(1)

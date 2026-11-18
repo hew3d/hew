@@ -270,9 +270,11 @@ export async function logLines(page: Page): Promise<LogLine[]> {
 
 // ------------------------------------------------------ document and Hew
 
-/** The kernel's hash of the whole document state. */
+/** The kernel hash of the document model, with the saved view pinned: the
+ *  autosave tick writes the live camera into the document, so a raw hash
+ *  is not stable across an idle gap. */
 export const stateHash = (page: Page): Promise<string> =>
-  page.evaluate(() => (window as unknown as { __hew_test: { getStateHash(): string } }).__hew_test.getStateHash())
+  page.evaluate(() => (window as unknown as { __hew_test: { getModelStateHash(): string } }).__hew_test.getModelStateHash())
 
 export const objectCount = (page: Page): Promise<number> =>
   page.evaluate(() => (window as unknown as { __hew_test: { getObjectCount(): number } }).__hew_test.getObjectCount())

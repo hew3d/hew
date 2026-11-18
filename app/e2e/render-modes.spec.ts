@@ -202,7 +202,7 @@ test('X-ray and Wireframe are one mode, and picking follows it', async ({ page }
   // the top face snaps, and a line drawn from it to the hidden ceiling
   // corner lands exactly on both.
   expect(await hoverChip(page, HIDDEN_MID_TOP, 'Line')).toContain('Midpoint')
-  const before = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const before = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   await page.getByRole('radio', { name: 'Line' }).click()
   await hover(page, HIDDEN_MID_TOP)
   expect(await chip(page)).toContain('Midpoint')
@@ -216,7 +216,7 @@ test('X-ray and Wireframe are one mode, and picking follows it', async ({ page }
   await page.waitForTimeout(150)
   await page.keyboard.press('Escape')
   expect(await page.evaluate(() => window.__hew_test!.getLastError())).toBeNull()
-  expect(await page.evaluate(() => window.__hew_test!.getStateHash())).not.toBe(before)
+  expect(await page.evaluate(() => window.__hew_test!.getModelStateHash())).not.toBe(before)
   const drawn = await page.evaluate(() => {
     const t = window.__hew_test!
     const sketched = t.getSketchIds().flatMap((id) => t.getSketchSegmentsExact(id))

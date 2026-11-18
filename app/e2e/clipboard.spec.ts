@@ -196,7 +196,7 @@ test('a sketch-only selection copies as a shape, and Paste In Place over it reco
   const state = (): Promise<{ hash: string; units: number }> =>
     page.evaluate(() => {
       const h = window.__hew_test!
-      return { hash: String(h.getStateHash()), units: h.getPlaneUnits(h.ctxGround()).units.length }
+      return { hash: String(h.getModelStateHash()), units: h.getPlaneUnits(h.ctxGround()).units.length }
     })
   const before = await state()
   expect(before.units).toBe(1)
@@ -313,13 +313,13 @@ test('Cut, enter a group, Paste In Place inside the session: the part folds in a
   await page.keyboard.press('Control+x')
   await expect(page.getByText('Copied 1 object', { exact: false })).toBeVisible()
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
-  const hashAfterCut = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashAfterCut = await page.evaluate(() => window.__hew_test!.getModelStateHash())
 
   // ---- 2. Double-click into the group to edit it — a real double-click,
   // not the harness.
   await dblClickWorld(page, ctx, 1, 0.5, 1)
   await page.waitForTimeout(200)
-  const hashAfterOpen = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashAfterOpen = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   expect(hashAfterOpen).not.toBe(hashAfterCut)
 
   // ---- 3. Paste In Place (⇧⌘V) WHILE the session is open — `insert_item`
@@ -339,7 +339,7 @@ test('Cut, enter a group, Paste In Place inside the session: the part folds in a
   for (let i = 0; i < 6; i++) {
     expect(pastedBoundsInSession[i]).toBeCloseTo(originalPartBounds[i], 5)
   }
-  const hashAfterPaste = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashAfterPaste = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   expect(hashAfterPaste).not.toBe(hashAfterOpen)
 
   // ---- 4. Exit the edit (Escape) — every node surfaced since the session
@@ -360,7 +360,7 @@ test('Cut, enter a group, Paste In Place inside the session: the part folds in a
   for (let i = 0; i < 6; i++) {
     expect(pastedBoundsAfterClose[i]).toBeCloseTo(originalPartBounds[i], 5)
   }
-  const hashAfterClose = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashAfterClose = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   expect(hashAfterClose).not.toBe(hashAfterPaste)
 
   // ---- 5. One undo per step restores each in turn: close → paste → open
@@ -369,14 +369,14 @@ test('Cut, enter a group, Paste In Place inside the session: the part folds in a
   // it).
   await page.keyboard.press('Control+z') // undoes the close/fold
   await page.waitForFunction(
-    (h) => window.__hew_test!.getStateHash() === h,
+    (h) => window.__hew_test!.getModelStateHash() === h,
     hashAfterPaste,
   )
   await page.keyboard.press('Control+z') // undoes the paste
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
   await page.keyboard.press('Control+z') // undoes opening the session
   await page.waitForFunction(
-    (h) => window.__hew_test!.getStateHash() === h,
+    (h) => window.__hew_test!.getModelStateHash() === h,
     hashAfterCut,
   )
   await page.keyboard.press('Control+z') // undoes the cut

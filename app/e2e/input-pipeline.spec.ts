@@ -155,7 +155,7 @@ test('journey: Rectangle (typed 2,2) then Push/Pull (typed 1) builds a real soli
 
 test('Arc: two chord clicks + typed bulge ⏎ commits through the live VCB', async ({ page }) => {
   const ctx = await setup(page)
-  const hash0 = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hash0 = await page.evaluate(() => window.__hew_test!.getModelStateHash())
 
   await page.keyboard.press('a')
   await expect(
@@ -179,7 +179,7 @@ test('Arc: two chord clicks + typed bulge ⏎ commits through the live VCB', asy
   await page.keyboard.press('Enter')
 
   const after = await page.evaluate(() => ({
-    hash: window.__hew_test!.getStateHash(),
+    hash: window.__hew_test!.getModelStateHash(),
     err: window.__hew_test!.getLastError(),
     count: window.__hew_test!.getObjectCount(),
   }))
@@ -196,7 +196,7 @@ test('Arc: two chord clicks + typed bulge ⏎ commits through the live VCB', asy
 
 test('Escape mid-gesture: no document mutation is committed', async ({ page }) => {
   const ctx = await setup(page)
-  const hash0 = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hash0 = await page.evaluate(() => window.__hew_test!.getModelStateHash())
 
   await page.keyboard.press('r')
   await clickWorld(page, ctx, 0, 0, 0) // anchor only — nothing kernel-side yet
@@ -204,7 +204,7 @@ test('Escape mid-gesture: no document mutation is committed', async ({ page }) =
   await page.keyboard.press('Escape')
 
   const after = await page.evaluate(() => ({
-    hash: window.__hew_test!.getStateHash(),
+    hash: window.__hew_test!.getModelStateHash(),
     canUndo: window.__hew_test!.canUndo(),
   }))
   expect(after.hash).toBe(hash0)
@@ -428,7 +428,7 @@ test('Ctrl+G with a single object selected is a no-op — the keyboard path hono
     h.selectObjects(h.getObjectIds())
   })
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
-  const hashBefore = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashBefore = await page.evaluate(() => window.__hew_test!.getModelStateHash())
 
   // The Edit menu disables Group for a 1-node selection; the accelerator must
   // agree — before the handler-side gate, this silently made a 1-member group.
@@ -438,7 +438,7 @@ test('Ctrl+G with a single object selected is a no-op — the keyboard path hono
   // a no-op, then verify the document hash and selection never changed.
   await page.keyboard.press('Control+Shift+G')
   await expect
-    .poll(async () => page.evaluate(() => window.__hew_test!.getStateHash()))
+    .poll(async () => page.evaluate(() => window.__hew_test!.getModelStateHash()))
     .toBe(hashBefore)
   const sel = await page.evaluate(() => window.__hew_test!.getSelection())
   expect(sel).toHaveLength(1)

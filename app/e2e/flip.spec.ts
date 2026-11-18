@@ -77,7 +77,7 @@ test.describe('flip', () => {
     await page.evaluate((ids) => window.__hew_test!.selectObjects(ids), [short, tall])
     await page.waitForFunction(() => window.__hew_test!.getSelection().length === 2)
     await pickFlip(page)
-    const hash = await page.evaluate(() => window.__hew_test!.getStateHash())
+    const hash = await page.evaluate(() => window.__hew_test!.getModelStateHash())
     await page.screenshot({ path: info.outputPath('before.png') })
 
     // The blue square at z = 1, on the camera's side of the other two.
@@ -95,7 +95,7 @@ test.describe('flip', () => {
     // One undo restores the document exactly.
     await page.evaluate(() => window.__hew_test!.undo())
     await page.waitForTimeout(100)
-    expect(await page.evaluate(() => window.__hew_test!.getStateHash())).toBe(hash)
+    expect(await page.evaluate(() => window.__hew_test!.getModelStateHash())).toBe(hash)
     const back = await boundsOf(page, short)
     expect([back[2], back[5]]).toEqual([0, 1])
   })
@@ -193,7 +193,7 @@ test.describe('flip', () => {
     await page.evaluate((i) => window.__hew_test!.selectObjects([i]), id)
     await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
     await pickFlip(page)
-    const hash = await page.evaluate(() => window.__hew_test!.getStateHash())
+    const hash = await page.evaluate(() => window.__hew_test!.getModelStateHash())
     await page.screenshot({ path: info.outputPath('face-before.png') })
 
     await hoverAndClick(page, FACE_POINT)
@@ -209,7 +209,7 @@ test.describe('flip', () => {
 
     await page.evaluate(() => window.__hew_test!.undo())
     await page.waitForTimeout(100)
-    expect(await page.evaluate(() => window.__hew_test!.getStateHash())).toBe(hash)
+    expect(await page.evaluate(() => window.__hew_test!.getModelStateHash())).toBe(hash)
   })
 
   test('clicking_the_selections_own_face_with_copy_on_adds_the_mirrored_twin', async ({ page }, info) => {
