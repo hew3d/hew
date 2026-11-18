@@ -6120,29 +6120,25 @@ export default function App() {
   // re-running a []-deps effect — so a switch captured inside that effect would
   // be frozen at its first-mount version and silently drop any case added later
   // (e.g. a newly-added pane toggle). Routing through this ref keeps it current.
-  // Whole-node delete: deletes every currently-selected node
-  // (Object/Group/Instance) and clears the selection. Shared by the Edit ▸
+  // Delete: deletes everything selected (nodes, guides, annotations) as one
+  // Undo step and clears the selection. Shared by the Edit ▸
   // Delete menu item and the Delete/Backspace key handler below — both
   // dispatch through `menuActionRef.current('edit-delete')` so this always
   // sees the current `selectedIds` (the ref is reassigned fresh every render;
   // see the Fast-Refresh note above `menuActionRef`).
   const deleteSelection = () => {
-    // A lone guide or annotation deletes through its own call.
+    // A lone guide or annotation deletes through its own call, whose Undo
+    // step is named by its kind.
     if (loneGuide !== null) {
       viewportApi.current?.runDeleteGuide(loneGuide)
-      setSelection([])
-      setDocRev((r) => r + 1)
-      return
-    }
-    if (loneAnnotation !== null) {
+    } else if (loneAnnotation !== null) {
       viewportApi.current?.runDeleteAnnotation(loneAnnotation)
-      setSelection([])
-      setDocRev((r) => r + 1)
+    } else if (selection.length > 0) {
+      viewportApi.current?.runDelete(selectedIds, selectedGuides, selectedAnnotations)
+    } else {
       return
     }
-    if (selectedIds.length === 0) return
-    viewportApi.current?.runDelete(selectedIds)
-    setSelection((cur) => withNodes(cur, []))
+    setSelection([])
     setDocRev((r) => r + 1)
   }
 

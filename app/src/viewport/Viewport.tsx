@@ -137,6 +137,7 @@ import { rayPlaneIntersect, subV3, addV3, perpComponentV3, type V3 } from './geo
 import { readAnnotation, commitAnnotationText, initialEditorText, type AnnotationSnapshot } from './annotationEdit'
 import { collectLeafIds, isDraftKind, nodeEq, nodeKey, nodeRefFromJs, placementLabel, resolveLabel, structuralSelection, treeIndexOf, type NodeRef, type SelectMode } from '../panels/treeModel'
 import { selectModeFor, isModifiedSelectPress } from './selectModifiers'
+import { deleteStepLabel } from './deleteLabel'
 import { baseBindingFor, desiredDragState, switchDragTo, orbitDragState, setPreciseOrbit, forceBaseAfterPress, type SwitchableDrag } from './orbitDragSwitch'
 import { MarqueeProjector, WINDOW_COVERAGE_MIN, boundsCoverage, emptyScreenBounds, normalizedRect, type MarqueeMode, type MarqueeRect, type ScreenBounds } from './marquee'
 import { applyAffineToPoint, composeAffine, type Affine } from '../tools/transformMath'
@@ -748,8 +749,10 @@ export interface ViewportApi {
    * already toasted and left the document untouched.
    */
   runReparent: (nodes: NodeRef[], group: bigint | undefined) => boolean
-  /** Delete whole tree nodes (Object/Group/Instance), undoably. */
-  runDelete: (nodes: NodeRef[]) => void
+  /** Delete whole tree nodes (Object/Group/Instance), undoably, together
+   *  with any construction guides and annotations listed beside them: one
+   *  Undo step for the whole selection. */
+  runDelete: (nodes: NodeRef[], guides?: readonly bigint[], annotations?: readonly bigint[]) => void
   /** Fold a sibling selection into a component + identity instance. Returns the instance handle. */
   runMakeComponent: (nodes: NodeRef[]) => bigint | null
   /** Place a second instance of the given instance's definition, offset slightly. */
@@ -5935,17 +5938,26 @@ export default function Viewport({
       }
     }
 
-    function runDelete(nodes: NodeRef[]): void {
-      if (nodes.length === 0) return
+    function runDelete(nodes: NodeRef[], guides: readonly bigint[] = [], annotations: readonly bigint[] = []): void {
+      if (nodes.length === 0 && guides.length === 0 && annotations.length === 0) return
       // A delete that touches more than one store (drafts per plane context,
       // an emptied sketch husk, the world node delete) records several
       // history entries; one bracket makes the whole delete — and so a Cut —
-      // ONE Undo step. A lone node delete is already one atomic entry.
-      const single = nodes.length === 1 && !isDraftKind(nodes[0].kind) && nodes[0].kind !== 'sketch'
-      inHistoryBracket(wasmScene, t`Delete`, () => runDeleteSteps(nodes), !single)
+      // ONE Undo step. A lone node delete is already one atomic entry. Any
+      // guide or annotation in the delete keeps the bracket, so the step is
+      // always named here, in the user's language, never by the kernel's
+      // English compound label.
+      const single = nodes.length === 1 && guides.length === 0 && annotations.length === 0 &&
+        !isDraftKind(nodes[0].kind) && nodes[0].kind !== 'sketch'
+      const label = deleteStepLabel([
+        ...nodes,
+        ...guides.map((id) => ({ kind: 'guide' as const, id })),
+        ...annotations.map((id) => ({ kind: 'annotation' as const, id })),
+      ])
+      inHistoryBracket(wasmScene, label, () => runDeleteSteps(nodes, guides, annotations), !single)
     }
 
-    function runDeleteSteps(nodes: NodeRef[]): void {
+    function runDeleteSteps(nodes: NodeRef[], guides: readonly bigint[] = [], annotations: readonly bigint[] = []): void {
       // An explicit delete is deliberate and executes — but first disarm the
       // array window so no hot state points at the deleted copies.
       disarmActivePostCommitWindow()
@@ -6037,12 +6049,29 @@ export default function Viewport({
           handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
         }
       }
-      if (worldDeleteKinds.length > 0) {
+      // The selection's guides and annotations go in the same call as its
+      // world nodes: nodes first, so an annotation anchored to a deleted
+      // node detaches before it goes and comes back attached on Undo.
+      if (worldDeleteKinds.length > 0 || guides.length > 0 || annotations.length > 0) {
         try {
-          wasmScene.delete_selection(
-            new Uint8Array(worldDeleteKinds),
-            new BigUint64Array(worldDeleteIds),
-          )
+          if (worldDeleteKinds.length === 1 && guides.length === 0 && annotations.length === 0) {
+            // A lone node goes through its own call, whose Undo step the
+            // app names by its kind and name ("Delete object", "Delete
+            // 'Roof'"); the batch call's label is the kernel's English.
+            wasmScene.delete_node(worldDeleteKinds[0], worldDeleteIds[0])
+          } else if (guides.length === 0 && annotations.length === 0) {
+            wasmScene.delete_selection(
+              new Uint8Array(worldDeleteKinds),
+              new BigUint64Array(worldDeleteIds),
+            )
+          } else {
+            wasmScene.delete_mixed_selection(
+              new Uint8Array(worldDeleteKinds),
+              new BigUint64Array(worldDeleteIds),
+              new BigUint64Array(guides),
+              new BigUint64Array(annotations),
+            )
+          }
         } catch (err) {
           const code = parseKernelErrorCode(err)
           const rawMsg = err instanceof Error ? err.message : String(err)
