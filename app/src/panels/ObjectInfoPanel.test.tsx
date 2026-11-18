@@ -394,7 +394,7 @@ describe('ObjectInfoPanel — annotation selection', () => {
       annotation_text: () => 'Check clearance',
       annotation_tags: () => ['Notes/Review'],
     })
-    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedAnnotation={7n} />)
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedAnnotations={[7n]} />)
     expect(screen.getByText('Check clearance')).toBeTruthy()
     expect(screen.getByText('Text')).toBeTruthy()
     expect(screen.getByText('Notes / Review')).toBeTruthy()
@@ -405,7 +405,7 @@ describe('ObjectInfoPanel — annotation selection', () => {
 describe('ObjectInfoPanel — guide selection', () => {
   it('shows a selected guide point read-only', () => {
     const scene = makeScene({ guide_kind: () => 'point', guide_tags: () => [] })
-    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuide={7n} />)
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuides={[7n]} />)
     expect(screen.getByText('Guide point')).toBeTruthy()
     expect(screen.getByText('Guide')).toBeTruthy()
     expect(screen.queryByLabelText('Add tag')).toBeNull()
@@ -415,13 +415,20 @@ describe('ObjectInfoPanel — guide selection', () => {
 
   it('names a selected guide line', () => {
     const scene = makeScene({ guide_kind: () => 'line', guide_tags: () => [] })
-    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuide={7n} />)
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuides={[7n]} />)
     expect(screen.getByText('Guide line')).toBeTruthy()
+  })
+
+  it('counts several guides and annotations per kind instead of showing one', () => {
+    const scene = makeScene({ guide_kind: () => 'point', guide_tags: () => [], annotation_kind: () => 'linear' })
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuides={[7n, 8n]} selectedAnnotations={[9n]} />)
+    expect(screen.getByText('2 guides · 1 annotation')).toBeTruthy()
+    expect(screen.queryByText('Guide point')).toBeNull()
   })
 
   it('shows the tags of a tagged guide read-only', () => {
     const scene = makeScene({ guide_kind: () => 'line', guide_tags: () => ['Rig', 'Cameras/Wide'] })
-    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuide={7n} />)
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuides={[7n]} />)
     expect(screen.getByText('Tags')).toBeTruthy()
     expect(screen.getByText('Rig')).toBeTruthy()
     expect(screen.getByText('Cameras / Wide')).toBeTruthy()

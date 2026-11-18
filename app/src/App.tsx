@@ -8816,7 +8816,7 @@ export default function App() {
           <div style={{ display: 'contents' }} onPointerOver={() => setInferenceInfo(null)}>
             <ContextualDock
               selectedIds={selectedIds}
-              selectedGuide={selectedIds.length === 0 && selectedGuides.length > 0 ? selectedGuides[0] : null}
+              others={selectedGuides.length + selectedAnnotations.length}
               hidden={cameraDragging}
               activeToolId={toolActionId(activeTool)}
               hoveringSketchRegion={hoveringSketchRegion}
@@ -9029,8 +9029,8 @@ export default function App() {
               scene={state.scene}
               docRev={docRev}
               selectedIds={selectedIds}
-              selectedAnnotation={loneAnnotation}
-              selectedGuide={loneGuide}
+              selectedAnnotations={selectedAnnotations}
+              selectedGuides={selectedGuides}
               // Segments rebuilds a circle's chords, so it needs the repaint
               // path like every other tray panel that edits geometry; names
               // change nothing drawn and skip the re-tessellation.
