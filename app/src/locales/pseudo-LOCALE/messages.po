@@ -7570,6 +7570,10 @@ msgstr ""
 msgid "Profile (built-in)"
 msgstr ""
 
+#: src/viewport/ProfileIcon.tsx
+msgid "Profile outline unavailable"
+msgstr ""
+
 #: src/panels/LibraryDialog.tsx
 msgid "Profiles"
 msgstr ""

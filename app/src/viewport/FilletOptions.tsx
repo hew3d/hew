@@ -112,8 +112,8 @@ function ShapeOptions({ sections = [] }: FilletOptionsProps) {
   const isCurrent = (p: FilletProfile): boolean =>
     p.kind === current.kind && (p.kind !== 'shape' || (current.kind === 'shape' && current.id === p.id))
   const buttonStyle = (active: boolean): React.CSSProperties => ({
-    ...pillStyle(active), display: 'flex', alignItems: 'center', gap: 6,
-    minHeight: 36, minWidth: 0, textAlign: 'left', overflowWrap: 'anywhere',
+    ...pillStyle(active), display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, padding: '5px',
+    minWidth: 0, textAlign: 'left', overflowWrap: 'normal',
   })
   return (
     <div className="fillet-shapes" data-testid="fillet-shape-options">
@@ -123,13 +123,14 @@ function ShapeOptions({ sections = [] }: FilletOptionsProps) {
           return <button key={b.label} type="button" aria-pressed={isCurrent(b.profile)}
             disabled={off} title={off ? CORNER_ONLY_TITLE : undefined}
             onClick={() => setFilletProfile(b.profile)} style={buttonStyle(isCurrent(b.profile))}>
-            <ProfileIcon kind={b.profile.kind} />{b.label}
+            <ProfileIcon kind={b.profile.kind} /><span className="fillet-profile-label">{b.label}</span>
           </button>
         })}
       </div>
       <div className="fillet-profile-expansion" data-open={open} aria-hidden={!open} inert={!open}>
         <div id={gridId} className="fillet-profile-scroll" role="group" aria-label="Additional edge shapes">
-          {sections.filter((s) => s.items.length > 0 || s.emptyHint !== undefined).map((s) => (
+          {sections.map(s => ({ ...s, items: s.items.filter(it => it.id !== 'save-profile') }))
+            .filter((s) => s.items.length > 0 || s.emptyHint !== undefined).map((s) => (
             <div key={s.id} role="group" aria-label={s.heading}>
               {s.heading !== undefined && <div className="fillet-profile-heading">{s.heading}</div>}
               {s.items.length === 0 && <div className="fillet-profile-heading">{s.emptyHint}</div>}
@@ -143,8 +144,8 @@ function ShapeOptions({ sections = [] }: FilletOptionsProps) {
                     title={cornerOff ? CORNER_ONLY_TITLE : it.title}
                     onClick={() => { if (it.profile !== undefined) setFilletProfile(it.profile); else it.onSelect?.() }}
                     style={buttonStyle(active)}>
-                    {it.thumbnail !== undefined && <img src={it.thumbnail} width={32} height={32} alt="" style={{ flexShrink: 0, borderRadius: 4 }} />}
-                    <span>{it.label}{it.badge !== undefined && <small className="fillet-profile-badge">{it.badge}</small>}</span>
+                    {it.profile !== undefined && <ProfileIcon kind={it.profile.kind} shape={it.profile.kind === 'shape' ? it.profile.shape : undefined} />}
+                    <span className="fillet-profile-label">{it.label}{it.badge !== undefined && it.badge !== s.heading && <small className="fillet-profile-badge">{it.badge}</small>}</span>
                   </button>
                 })}
               </div>
@@ -236,7 +237,7 @@ export function FilletOptions({ sections = [] }: FilletOptionsProps) {
       <OptionHeading label="Shape" info="Choose the shape of the edge." />
       <ShapeOptions sections={sections} />
     </div>
-    <FilletDimensionControl sections={sections} />
+    <FilletDimensionControl />
     {!chamfer && <div>
       <OptionHeading label="Facets" info="Choose how many flat faces make the curve, or leave it on Auto and Hew picks." />
       <FacetsField cornerOnly={cornerOnly} value={settings.segmentsOverride} />

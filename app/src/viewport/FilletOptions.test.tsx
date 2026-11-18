@@ -348,7 +348,7 @@ describe('FilletOptions rows and field editing', () => {
   })
 
   it('keeps Library thumbnails, selected identity, and one-sentence row help', () => {
-    const profile = { kind: 'shape' as const, id: 'mine', name: 'My curve', shape: {} }
+    const profile = { kind: 'shape' as const, id: 'mine', name: 'My curve', shape: { b: 1, segs: [{ kind: 'line', to: [0, 1] }] } }
     setFilletProfile(profile)
     render(<FilletOptions sections={[{ id: 'library', heading: 'My profiles', items: [
       { id: 'mine', label: 'My curve', profile, thumbnail: 'data:image/png;base64,AA==' },
@@ -356,7 +356,8 @@ describe('FilletOptions rows and field editing', () => {
     fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
     const row = screen.getByRole('button', { name: 'My curve' })
     expect(row).toHaveAttribute('aria-pressed', 'true')
-    expect(row.querySelector('img')).toHaveAttribute('width', '32')
+    expect(row.querySelector('svg')).toHaveAttribute('width', '24')
+    expect(row.querySelector('img')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: /^Less tools/ }))
     expect(screen.getByRole('status')).toHaveTextContent('My curve')
     expect(getFilletSettings().profile).toEqual(profile)
@@ -365,4 +366,18 @@ describe('FilletOptions rows and field editing', () => {
     fireEvent.click(screen.getByRole('button', { name: 'About Shape' }))
     expect(screen.getByRole('note')).toHaveTextContent('Choose the shape of the edge.')
   })
+})
+
+
+it('omits Save Profile from the tool card while retaining saved profile choices', () => {
+  const save = vi.fn()
+  render(<FilletOptions sections={[
+    { id: 'library', heading: 'My profiles', items: [{ id: 'mine', label: 'Saved curve', profile: { kind: 'shape', id: 'mine', name: 'Saved curve', shape: { b: 1, segs: [{ kind: 'line', to: [0, 1] }] } } }] },
+    { id: 'actions', items: [{ id: 'save-profile', label: 'Save profile…', onSelect: save }] },
+  ]} />)
+  fireEvent.click(screen.getByRole('button', { name: /^More tools/ }))
+  expect(screen.queryByRole('button', { name: 'Save profile…' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Saved curve' }))
+  expect(getFilletSettings().profile).toMatchObject({ id: 'mine' })
+  expect(save).not.toHaveBeenCalled()
 })

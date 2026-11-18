@@ -940,8 +940,73 @@ test('Fillet dimension endpoint indicators follow the selected geometric profile
   expect(cove).not.toBe(round)
   await card.getByRole('button', { name: /^More tools/ }).click()
   await card.getByRole('button', { name: /^Ogee/ }).click()
-  await expect(card.getByRole('img', { name: 'Smaller width' }).locator('img')).toHaveAttribute('src', /^blob:/)
+  await expect(card.getByRole('img', { name: 'Smaller width' }).locator('svg')).toHaveAttribute('data-profile-kind', 'shape')
+  await expect(card.getByRole('img', { name: 'Smaller width' }).locator('path')).toHaveAttribute('fill', 'none')
   await card.getByRole('button', { name: 'Bullnose', exact: true }).click()
   await expect(card.getByRole('slider')).toHaveCount(0)
   await expect(card.getByText('Bullnose fits the edge automatically; it has no size input.')).toBeVisible()
+})
+
+test.describe('Fillet polish at fractional display scaling', () => {
+  test.use({ deviceScaleFactor: 1.8 })
+test('Fillet polish: sensitivity is non-mutating, keyboard accessible, and bounded with outline profiles', async ({ page }, info) => {
+  await page.setViewportSize({ width: 1600, height: 1000 })
+  await setup(page)
+  expect(await page.evaluate(() => window.devicePixelRatio)).toBeCloseTo(1.8, 5)
+  const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+  await page.evaluate((id) => window.__hew_test!.selectObjects([id]), id)
+  await expect(page.getByText('1 object')).toBeVisible()
+  await page.keyboard.press('Shift+F')
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  const field = card.getByRole('textbox', { name: 'Radius value' })
+  const before = await field.inputValue()
+  const fine = card.getByRole('button', { name: 'Fine slider sensitivity' })
+  await fine.focus()
+  await page.keyboard.press('Enter')
+  await expect(fine).toHaveAttribute('aria-pressed', 'true')
+  await expect(field).toHaveValue(before)
+  expect(await features(page, id)).toHaveLength(0)
+  await card.getByRole('button', { name: /^More tools/ }).click()
+  await expect(card.getByRole('button', { name: 'Save profile…' })).toHaveCount(0)
+  const builtins = card.getByRole('group', { name: 'Built-in', exact: true })
+  const names = ['Ogee', 'Roman ogee', 'Bead', 'Thumbnail', 'Cove and bead', 'Chamfer and bead', 'Cavetto']
+  for (const name of names) {
+    const button = builtins.getByRole('button', { name, exact: true })
+    await expect(button.locator('svg')).toHaveAttribute('width', '24')
+    await expect(button.locator('path')).toHaveAttribute('stroke-width', '1.5')
+    await expect(button.locator('path')).toHaveAttribute('fill', 'none')
+    await expect(button.locator('img, small')).toHaveCount(0)
+    const fits = await button.evaluate(el => {
+      const label = el.querySelector('.fillet-profile-label')!
+      return label.scrollWidth <= label.clientWidth + 1 && el.getBoundingClientRect().height >= 44
+    })
+    expect(fits).toBe(true)
+    if (name === 'Thumbnail') {
+      const lines = await button.locator('.fillet-profile-label').evaluate(el => {
+        const range = document.createRange()
+        range.selectNodeContents(el)
+        return range.getClientRects().length
+      })
+      expect(lines).toBe(1)
+    }
+  }
+  await builtins.getByRole('button', { name: 'Ogee', exact: true }).click()
+  await expect(fine).toHaveAttribute('aria-pressed', 'true')
+  for (const width of [1600, 1280]) {
+    await page.setViewportSize({ width, height: width === 1280 ? 720 : 1000 })
+    await expect(fine).toBeVisible()
+    await fine.click()
+    const bounds = await card.boundingBox()
+    const sensitivity = await card.getByRole('group', { name: 'Slider sensitivity' }).boundingBox()
+    expect(sensitivity!.y).toBeGreaterThanOrEqual(bounds!.y)
+    expect(sensitivity!.y + sensitivity!.height).toBeLessThanOrEqual(bounds!.y + bounds!.height)
+  }
+  await page.screenshot({ path: info.outputPath('fillet-polish-180.png') })
+  await page.getByRole('radio', { name: 'Line', exact: true }).click()
+  await page.evaluate((id) => window.__hew_test!.selectObjects([id]), id)
+  await expect(page.getByText('1 object')).toBeVisible()
+  await page.keyboard.press('Shift+F')
+  await expect(card.getByRole('button', { name: 'Normal slider sensitivity' })).toHaveAttribute('aria-pressed', 'true')
+})
+
 })
