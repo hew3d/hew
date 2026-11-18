@@ -61,6 +61,13 @@ pub enum InstallError {
     /// A storage write would make the plugin's `storage.json` larger than
     /// [`MAX_STORAGE_BYTES`].
     StorageQuota,
+    /// A write would take everything the plugin keeps beside its package
+    /// (`plugin-data/<id>/`) past [`MAX_PLUGIN_DATA_BYTES`].
+    /// Named `storage_quota`, like [`InstallError::StorageQuota`].
+    DataQuota,
+    /// A document id is not the 36-character lowercase hyphenated UUID
+    /// form. Nothing is built from it.
+    DocumentIdInvalid,
     /// A storage key is empty or longer than
     /// [`MAX_STORAGE_KEY_BYTES`].
     StorageKeyInvalid,
@@ -109,7 +116,8 @@ impl InstallError {
             InstallError::PendingStale => "pending_stale",
             InstallError::TooManyPermissions(_) => "too_many_permissions",
             InstallError::InstalledUnreadable { .. } => "installed_unreadable",
-            InstallError::StorageQuota => "storage_quota",
+            InstallError::StorageQuota | InstallError::DataQuota => "storage_quota",
+            InstallError::DocumentIdInvalid => "document_id_invalid",
             InstallError::StorageKeyInvalid => "storage_key_invalid",
             InstallError::StorageUnreadable => "storage_unreadable",
             InstallError::FolderMissing(_) => "folder_missing",
@@ -204,6 +212,13 @@ impl InstallError {
                 "This plugin's saved data would pass {} MB, the most a plugin may keep.",
                 MAX_STORAGE_BYTES >> 20
             ),
+            InstallError::DataQuota => format!(
+                "This plugin's saved data would pass {} MB in all, the most a plugin may keep.",
+                MAX_PLUGIN_DATA_BYTES >> 20
+            ),
+            InstallError::DocumentIdInvalid => {
+                "That is not a document id Hew uses.".to_string()
+            }
             InstallError::StorageKeyInvalid => format!(
                 "A storage key must be 1 to {} bytes long.",
                 MAX_STORAGE_KEY_BYTES
@@ -256,3 +271,6 @@ impl std::error::Error for InstallError {}
 pub const MAX_STORAGE_BYTES: usize = 5 * 1024 * 1024;
 /// The longest storage key, in bytes.
 pub const MAX_STORAGE_KEY_BYTES: usize = 256;
+/// The most a plugin may keep beside its package (`plugin-data/<id>/`:
+/// per-document storage, its console log and its activity), in bytes.
+pub const MAX_PLUGIN_DATA_BYTES: u64 = 50 * 1024 * 1024;

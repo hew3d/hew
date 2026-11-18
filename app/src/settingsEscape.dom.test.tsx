@@ -17,4 +17,9 @@ describe('childPopupOpen', () => {
       expect(childPopupOpen(document.getElementById('s'))).toBe(true)
     }
   })
+
+  it('is true while a part of Settings is marked as owning Escape', () => {
+    document.body.innerHTML = '<div role="dialog" id="s"><div data-settings-escape-child=""></div></div>'
+    expect(childPopupOpen(document.getElementById('s'))).toBe(true)
+  })
 })

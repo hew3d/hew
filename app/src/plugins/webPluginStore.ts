@@ -39,6 +39,14 @@
  * A swap that finds the folder healthy first removes the id's older copies,
  * which can only be leftovers. Staging a package never touches a `.old`.
  *
+ * What a plugin keeps that is not its package lives beside `plugins/`, in
+ * `plugin-data/<id>/` (per-document storage under `documents/`), as the
+ * desktop keeps it: no install, update or rollback touches it, every write
+ * refuses `not_installed` for a plugin with no record, one quota covers the
+ * tree, and an uninstall removes it before anything else, so an uninstall
+ * cut short leaves the plugin installed rather than data kept for a plugin
+ * that is gone (and a recovery restores only `plugins/`, never the data).
+ *
  * Every change runs under the Web Lock `hew-plugins`, so two tabs cannot
  * interleave; with no Web Locks a change is refused.
  *
@@ -48,9 +56,9 @@
 import { appVersionString } from '../buildInfo'
 import { readFileIn, subdir, writeFileIn } from '../io/opfs'
 import { PluginError, toPluginError } from './pluginError'
-import { cleanText } from './pluginText'
+import { cleanText, compareCodePoints } from './pluginText'
 import { storedZip, storedZipSize } from './storedZip'
-import type { ConsentPayload, InstallSource, Installed, Listed, PendingView, PluginManifest } from './types'
+import type { ConsentPayload, InstallSource, Installed, Listed, PendingView, PermissionLine, PluginManifest } from './types'
 
 /** The kernel's plugin exports, as the page calls them. */
 export interface PluginWasm {
@@ -65,6 +73,9 @@ export interface PluginWasm {
   plugin_manifest_parse(text: string): string
   plugin_hew_version_ok(manifestJson: string, running: string): boolean
   plugin_install_check(manifestJson: string, sourceJson: string, running: string, installedJson: string): void
+  /** What changing a plugin's grant would add and warn of: `{ added:
+   *  [{ name, text }], warnings: [text] }`. Absent from a kernel without it. */
+  plugin_grant_lines?(manifestJson: string, installedJson: string, grantJson: string, optionalJson: string): string
 }
 
 export interface WebPluginDeps {
@@ -97,6 +108,12 @@ export interface WebPluginStorage {
   storageDelete(id: string, key: string): Promise<void>
   /** Every saved key, sorted. */
   storageList(id: string): Promise<string[]>
+  /** Per-document storage: the same calls for one document, named by its
+   *  `document_id` (the 36-character lowercase UUID form). */
+  docStorageGet(id: string, docId: string, key: string): Promise<string | null>
+  docStorageSet(id: string, docId: string, key: string, value: string): Promise<void>
+  docStorageDelete(id: string, docId: string, key: string): Promise<void>
+  docStorageList(id: string, docId: string): Promise<string[]>
 }
 
 export interface WebPluginStore {
@@ -118,6 +135,19 @@ export interface WebPluginStore {
   rollback(id: string, shown?: string): Promise<Installed>
   /** The record and manifest `rollback` would restore. */
   previous(id: string): Promise<{ installed: Installed; manifest: PluginManifest }>
+  /**
+   * Replaces plugin `id`'s grant: `grant` from its manifest's `permissions`,
+   * `optional` from its `optionalPermissions`; a name the manifest does not
+   * declare is refused `unknown_permission`. It only writes: whoever widens a
+   * grant asks the person first (`grantLines` has the lines to show). Runs
+   * under the plugin lock, resolves with the record as stored afterwards and
+   * tells every window the store changed.
+   */
+  setGrant(id: string, grant: string[], optional: string[]): Promise<Installed>
+  /** What changing the grant of plugin `id` to `grant` and `optional` would
+   *  add, in the kernel's own words (`plugin_grant_lines`): nothing for a
+   *  change that only takes away. */
+  grantLines(id: string, grant: string[], optional: string[]): Promise<{ added: PermissionLine[]; warnings: string[] }>
   /** One package file by served path. */
   readFile(id: string, rel: string): Promise<Uint8Array>
   onChanged(fn: () => void): () => void
@@ -131,6 +161,17 @@ const STORAGE_FILE = 'storage.json'
 const MAX_STORAGE_BYTES = 5 * 1024 * 1024
 const MAX_STORAGE_KEY_BYTES = 256
 const PLUGINS_DIR = 'plugins'
+/** What a plugin keeps beside its package, at the OPFS root. */
+const DATA_DIR = 'plugin-data'
+const DOCUMENTS_DIR = 'documents'
+/** The running total of a plugin's data tree, for its quota. */
+const USAGE_FILE = 'usage.json'
+/** The most a plugin may keep in `plugin-data/<id>/`. */
+const MAX_PLUGIN_DATA_BYTES = 50 * 1024 * 1024
+/** What a file counts toward that quota at the least, whatever its size. */
+const MIN_FILE_COST = 4096
+/** More entries than this and the tree is over its quota whatever they hold. */
+const MAX_TREE_ENTRIES = MAX_PLUGIN_DATA_BYTES / MIN_FILE_COST + 64
 const STAGING = '.staging'
 const MANIFEST_FILE = 'hew-plugin.json'
 const INSTALLED_FILE = 'installed.json'
@@ -189,6 +230,13 @@ export function validPluginId(id: string): boolean {
     labels[0] !== RESERVED_FIRST_LABEL &&
     labels.every((l) => /^[a-z0-9][a-z0-9-]{0,62}$/.test(l))
   )
+}
+
+/** Whether `doc` is a document id in the form the `.hew` manifest's
+ *  `document_id` takes: lowercase hexadecimal in groups of 8, 4, 4, 4 and
+ *  12, joined by hyphens. */
+export function validDocumentId(doc: string): boolean {
+  return typeof doc === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(doc)
 }
 
 function checkedId(id: string): string {
@@ -412,22 +460,6 @@ export function rollbackFingerprint(current: Installed, previous: Installed): st
 
 function pluginChanged(): PluginError {
   return new PluginError('plugin_changed', 'The plugin changed while Hew was asking. Try again.')
-}
-
-/** Orders by code point, as the desktop store's sorted map orders its keys
- *  (UTF-8 byte order); `<` on strings compares UTF-16 code units, which puts
- *  a character outside the Basic Multilingual Plane before U+E000..U+FFFF. */
-export function compareCodePoints(a: string, b: string): number {
-  let i = 0
-  let j = 0
-  while (i < a.length && j < b.length) {
-    const x = a.codePointAt(i) as number
-    const y = b.codePointAt(j) as number
-    if (x !== y) return x < y ? -1 : 1
-    i += x > 0xffff ? 2 : 1
-    j += y > 0xffff ? 2 : 1
-  }
-  return Number(i < a.length) - Number(j < b.length)
 }
 
 function recordBytes(record: Installed): Uint8Array {
@@ -869,6 +901,12 @@ export function makeWebPluginStore(deps: WebPluginDeps): WebPluginStore {
    *  entries and its small settings. The one removal path uninstall takes;
    *  stores added later join it here. */
   async function purge(id: string): Promise<void> {
+    checkedId(id)
+    // The data first: an uninstall cut short after this leaves the plugin
+    // installed and removable again, never data kept for a plugin that is
+    // gone. `recover` restores only `plugins/`, so nothing brings it back.
+    const data = await subdir(await opfsRoot(), DATA_DIR, false)
+    if (data !== null) await removeIn(data, id)
     const plugins = await pluginsDir(false)
     if (plugins !== null) {
       // The `.old` copies first: with them gone, an uninstall cut short
@@ -1193,6 +1231,56 @@ export function makeWebPluginStore(deps: WebPluginDeps): WebPluginStore {
         return (await installedNow(id)).installed
       }),
 
+    setGrant: (id, grant, optional) =>
+      serial(async () => {
+        const plugins = (await pluginsDir(false)) as FileSystemDirectoryHandle | null
+        const { installed, manifest } = await installedNow(id)
+        const names = (list: unknown, declared: readonly string[] | undefined): string[] => {
+          if (!Array.isArray(list) || list.some((n) => typeof n !== 'string')) {
+            throw new PluginError('unknown_permission', 'A permission must be named as the plugin declares it.')
+          }
+          const out = [...new Set(list as string[])]
+          const bad = out.find((n) => !(declared ?? []).includes(n))
+          if (bad !== undefined) {
+            throw new PluginError('unknown_permission', 'This plugin does not declare one of the permissions asked for.')
+          }
+          return out
+        }
+        const nextGrant = names(grant, manifest.permissions)
+        const nextOptional = names(optional, manifest.optionalPermissions)
+        const folder = await subdir(plugins as FileSystemDirectoryHandle, id, false)
+        if (folder === null) throw notInstalled(id)
+        installed.grant = nextGrant
+        installed.optional_granted = nextOptional
+        await writeFileIn(folder, INSTALLED_FILE, recordBytes(installed))
+        const stored = (await installedNow(id)).installed
+        notify()
+        return stored
+      }),
+
+    grantLines: (id, grant, optional) =>
+      reading(async () => {
+        const { installed, manifest } = await installedNow(id)
+        const wasm = await deps.wasm()
+        if (typeof wasm.plugin_grant_lines !== 'function') {
+          throw new PluginError('unsupported', 'This build of Hew cannot say what a permission would allow.')
+        }
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(wasm.plugin_grant_lines(JSON.stringify(manifest), JSON.stringify(installed), JSON.stringify(grant), JSON.stringify(optional)))
+        } catch (e) {
+          throw toPluginError(e)
+        }
+        const r = (typeof parsed === 'object' && parsed !== null ? parsed : {}) as { added?: unknown; warnings?: unknown }
+        const lines = (Array.isArray(r.added) ? r.added : []).flatMap((l): PermissionLine[] =>
+          typeof l === 'object' && l !== null && typeof (l as PermissionLine).name === 'string' && typeof (l as PermissionLine).text === 'string'
+            ? [{ name: (l as PermissionLine).name, text: cleanText((l as PermissionLine).text, 200) }]
+            : [],
+        )
+        const warnings = (Array.isArray(r.warnings) ? r.warnings : []).flatMap((w) => (typeof w === 'string' ? [cleanText(w, 300)] : []))
+        return { added: lines, warnings }
+      }),
+
     readFile: (id, rel) =>
       reading(async () => {
         const segments = checkedRel(rel)
@@ -1224,7 +1312,11 @@ export function makeWebPluginStore(deps: WebPluginDeps): WebPluginStore {
 
 interface StorageCtx {
   root: () => Promise<FileSystemDirectoryHandle>
-  post: (message: { kind: 'storage'; id: string; keys: string[] }) => void
+  /** Plugin storage posts `{kind:'storage', id, keys}`; per-document storage
+   *  adds `scope: 'document'` and `document_id`. */
+  post: (
+    message: { kind: 'storage'; id: string; keys: string[] } | { kind: 'storage'; id: string; scope: 'document'; document_id: string; keys: string[] },
+  ) => void
   /** Runs a change under the plugin lock. */
   write: <T>(fn: () => Promise<T>) => Promise<T>
   /** Runs a read, under the lock where there is one. */
@@ -1238,14 +1330,40 @@ const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnPropert
 function makeStorage(ctx: StorageCtx): WebPluginStorage {
   const encode = new TextEncoder()
 
+  const loneSurrogate = (text: string): boolean =>
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text)
+
   const checkedKey = (key: string): void => {
+    // Text with a lone surrogate has no UTF-8 form: the desktop never
+    // receives such a key, so neither store keeps one.
+    if (typeof key !== 'string' || loneSurrogate(key)) {
+      throw new PluginError('storage_key_invalid', `A storage key must be text, 1 to ${MAX_STORAGE_KEY_BYTES} bytes long.`)
+    }
     const n = encode.encode(key).length
     if (n === 0 || n > MAX_STORAGE_KEY_BYTES) {
       throw new PluginError('storage_key_invalid', `A storage key must be 1 to ${MAX_STORAGE_KEY_BYTES} bytes long.`)
     }
   }
+  /** A value is held to the same rule as a key: the desktop cannot take one
+   *  with a lone surrogate (its JSON read of the call fails), and one saved
+   *  here could never be read back there. */
+  const checkedValue = (value: string): void => {
+    if (typeof value !== 'string' || loneSurrogate(value)) {
+      throw new PluginError('storage_value_invalid', 'A saved value must be text Hew can store: no unpaired surrogate characters.')
+    }
+  }
+  const checkedDoc = (doc: string): void => {
+    if (!validDocumentId(doc)) throw new PluginError('document_id_invalid', 'That is not a document id Hew uses.')
+  }
+  const treeQuota = (): PluginError =>
+    new PluginError(
+      'storage_quota',
+      `This plugin's saved data would pass ${MAX_PLUGIN_DATA_BYTES >> 20} MB in all, the most a plugin may keep.`,
+    )
   const quota = (): PluginError =>
     new PluginError('storage_quota', `This plugin's saved data would pass ${MAX_STORAGE_BYTES >> 20} MB, the most a plugin may keep.`)
+  const ioFailed = (): PluginError =>
+    new PluginError('io', "Hew could not write this plugin's saved data. The disk or browser storage may be full or unavailable.")
   const unreadable = (): PluginError =>
     new PluginError('storage_unreadable', "Hew cannot read this plugin's saved data; it is left as it is.")
 
@@ -1258,8 +1376,8 @@ function makeStorage(ctx: StorageCtx): WebPluginStorage {
     return folder
   }
 
-  async function load(folder: FileSystemDirectoryHandle): Promise<SavedData> {
-    const bytes = await readOptional(folder, STORAGE_FILE)
+  async function load(folder: FileSystemDirectoryHandle, name = STORAGE_FILE): Promise<SavedData> {
+    const bytes = await readOptional(folder, name)
     if (bytes === null) return {}
     if (bytes.length > MAX_STORAGE_BYTES) throw unreadable()
     let value: unknown
@@ -1277,6 +1395,98 @@ function makeStorage(ctx: StorageCtx): WebPluginStorage {
   /** Compact JSON with sorted keys, as the desktop file is written. */
   const dump = (data: SavedData): Uint8Array =>
     encode.encode(JSON.stringify(Object.fromEntries(Object.entries(data).sort(([a], [b]) => compareCodePoints(a, b)))))
+
+  /** `plugin-data/<id>/` (made when `create`), or null when it is not there. */
+  async function treeOf(id: string, create: boolean): Promise<FileSystemDirectoryHandle | null> {
+    const data = await subdir(await ctx.root(), DATA_DIR, create)
+    return data === null ? null : subdir(data, id, create)
+  }
+
+  /** The size of file `name` in `dir`, or null when there is none. */
+  async function sizeOf(dir: FileSystemDirectoryHandle, name: string): Promise<number | null> {
+    let handle: FileSystemFileHandle
+    try {
+      handle = await dir.getFileHandle(name)
+    } catch (e) {
+      if (isNotFound(e)) return null
+      throw unreadable()
+    }
+    return (await handle.getFile()).size
+  }
+
+  const cost = (size: number | null): number => (size === null ? 0 : Math.max(size, MIN_FILE_COST))
+
+  /** What the tree holds, by walking it: every file at `cost`, the running
+   *  total's own file left out. Infinity past the most entries it could hold. */
+  async function measure(tree: FileSystemDirectoryHandle): Promise<number> {
+    let total = 0
+    let seen = 0
+    const walk = async (dir: FileSystemDirectoryHandle, top: boolean): Promise<boolean> => {
+      for await (const [name, handle] of dir.entries()) {
+        if (++seen > MAX_TREE_ENTRIES) return false
+        if (top && name === USAGE_FILE) continue
+        if (handle.kind === 'directory') {
+          if (!(await walk(handle as FileSystemDirectoryHandle, false))) return false
+        } else {
+          total += cost((await (handle as FileSystemFileHandle).getFile()).size)
+        }
+      }
+      return true
+    }
+    return (await walk(tree, true)) ? total : Infinity
+  }
+
+  async function readTally(tree: FileSystemDirectoryHandle): Promise<number | null> {
+    try {
+      const bytes = await readOptional(tree, USAGE_FILE)
+      if (bytes === null || bytes.length > 256) return null
+      const value = (JSON.parse(decoder.decode(bytes)) as { bytes?: unknown } | null)?.bytes
+      return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
+    } catch {
+      return null
+    }
+  }
+
+  const writeTally = (tree: FileSystemDirectoryHandle, total: number): Promise<void> =>
+    writeFileIn(tree, USAGE_FILE, encode.encode(JSON.stringify({ bytes: total })))
+
+  /** Runs `write`, which turns files counting `before` toward the tree's
+   *  quota into files counting `after`, as the desktop store does: the total
+   *  in `usage.json` is raised before the write to cover both and lowered
+   *  after it, so a write cut short leaves it too high, never too low; a
+   *  missing total is measured; a growing write the total refuses is checked
+   *  again against a walk before it is refused. A write that does not grow
+   *  the tree is never refused. */
+  async function charge(tree: FileSystemDirectoryHandle, before: number, after: number, write: () => Promise<void>): Promise<void> {
+    const total = (await readTally(tree)) ?? (await measure(tree))
+    let rest = Math.max(0, total - before)
+    if (after > before && rest + after > MAX_PLUGIN_DATA_BYTES) {
+      const exact = await measure(tree)
+      rest = Math.max(0, exact - before)
+      if (rest + after > MAX_PLUGIN_DATA_BYTES) {
+        if (Number.isFinite(exact)) await writeTally(tree, exact).catch(() => undefined)
+        throw treeQuota()
+      }
+    }
+    await writeTally(tree, rest + before + after)
+    await write()
+    await writeTally(tree, rest + after).catch(() => undefined)
+  }
+
+  /** `plugin-data/<id>/documents/`, or null when it is not there. */
+  async function documentsOf(id: string): Promise<FileSystemDirectoryHandle | null> {
+    const tree = await treeOf(id, false)
+    return tree === null ? null : subdir(tree, DOCUMENTS_DIR, false)
+  }
+
+  /** The checks every per-document call makes, in the desktop's order: the
+   *  plugin id, the document id, the key, then that the plugin is installed. */
+  async function docChecks(id: string, doc: string, key?: string): Promise<void> {
+    checkedId(id)
+    checkedDoc(doc)
+    if (key !== undefined) checkedKey(key)
+    await folderOf(id)
+  }
 
   const wrap = <T>(fn: () => Promise<T>): Promise<T> =>
     fn().catch((e) => {
@@ -1302,6 +1512,7 @@ function makeStorage(ctx: StorageCtx): WebPluginStorage {
       wrap(() =>
         ctx.write(async () => {
           checkedKey(key)
+          checkedValue(value)
           // Too large on its own: refused before the file is read.
           if (encode.encode(key).length + encode.encode(value).length > MAX_STORAGE_BYTES) throw quota()
           const folder = await folderOf(id)
@@ -1325,6 +1536,74 @@ function makeStorage(ctx: StorageCtx): WebPluginStorage {
           if (Object.keys(data).length === 0) await removeIn(folder, STORAGE_FILE)
           else await writeFileIn(folder, STORAGE_FILE, dump(data))
           ctx.post({ kind: 'storage', id, keys: [key] })
+        }),
+      ),
+
+    docStorageGet: (id, doc, key) =>
+      wrap(() =>
+        ctx.read(async () => {
+          await docChecks(id, doc, key)
+          const docs = await documentsOf(id)
+          if (docs === null) return null
+          const data = await load(docs, `${doc}.json`)
+          return hasOwn(data, key) ? data[key] : null
+        }),
+      ),
+
+    docStorageList: (id, doc) =>
+      wrap(() =>
+        ctx.read(async () => {
+          await docChecks(id, doc)
+          const docs = await documentsOf(id)
+          return docs === null ? [] : Object.keys(await load(docs, `${doc}.json`)).sort(compareCodePoints)
+        }),
+      ),
+
+    docStorageSet: (id, doc, key, value) =>
+      wrap(() =>
+        ctx.write(async () => {
+          checkedId(id)
+          checkedDoc(doc)
+          checkedKey(key)
+          checkedValue(value)
+          // Too large on its own: refused before anything is read or made.
+          if (encode.encode(key).length + encode.encode(value).length > MAX_STORAGE_BYTES) throw quota()
+          await folderOf(id)
+          // `subdir` answers null for any failure (quota, I/O, a file where
+          // a folder belongs): the desktop reports `io` for those, so does this.
+          const tree = await treeOf(id, true)
+          const docs = tree === null ? null : await subdir(tree, DOCUMENTS_DIR, true)
+          if (tree === null || docs === null) throw ioFailed()
+          const name = `${doc}.json`
+          const before = await sizeOf(docs, name)
+          const data = await load(docs, name)
+          data[key] = value
+          const bytes = dump(data)
+          if (bytes.length > MAX_STORAGE_BYTES) throw quota()
+          await charge(tree, cost(before), cost(bytes.length), () => writeFileIn(docs, name, bytes))
+          ctx.post({ kind: 'storage', id, scope: 'document', document_id: doc, keys: [key] })
+        }),
+      ),
+
+    docStorageDelete: (id, doc, key) =>
+      wrap(() =>
+        ctx.write(async () => {
+          await docChecks(id, doc, key)
+          const tree = await treeOf(id, false)
+          const docs = tree === null ? null : await subdir(tree, DOCUMENTS_DIR, false)
+          if (tree === null || docs === null) return
+          const name = `${doc}.json`
+          const before = await sizeOf(docs, name)
+          const data = await load(docs, name)
+          if (!hasOwn(data, key)) return
+          delete data[key]
+          if (Object.keys(data).length === 0) {
+            await charge(tree, cost(before), 0, () => removeIn(docs, name))
+          } else {
+            const bytes = dump(data)
+            await charge(tree, cost(before), cost(bytes.length), () => writeFileIn(docs, name, bytes))
+          }
+          ctx.post({ kind: 'storage', id, scope: 'document', document_id: doc, keys: [key] })
         }),
       ),
   }
@@ -1352,3 +1631,20 @@ export const storageSet = (id: string, key: string, value: string): Promise<void
 export const storageDelete = (id: string, key: string): Promise<void> => defaultPluginStore().storage.storageDelete(id, key)
 /** Every saved key, sorted. */
 export const storageList = (id: string): Promise<string[]> => defaultPluginStore().storage.storageList(id)
+/** The value saved under `key` for one document, or null. */
+export const docStorageGet = (id: string, docId: string, key: string): Promise<string | null> =>
+  defaultPluginStore().storage.docStorageGet(id, docId, key)
+/** Saves `value` under `key` for one document; other windows hear
+ *  `{kind:'storage', id, scope:'document', document_id, keys}`. */
+export const docStorageSet = (id: string, docId: string, key: string, value: string): Promise<void> =>
+  defaultPluginStore().storage.docStorageSet(id, docId, key, value)
+/** Removes `key` from one document's saved data; the file goes with its last key. */
+export const docStorageDelete = (id: string, docId: string, key: string): Promise<void> =>
+  defaultPluginStore().storage.docStorageDelete(id, docId, key)
+/** Every key saved for one document, sorted. */
+export const docStorageList = (id: string, docId: string): Promise<string[]> => defaultPluginStore().storage.docStorageList(id, docId)
+
+/** Replaces a plugin's grant (`WebPluginStore.setGrant`) on this tab's
+ *  store; for `storeAccess`'s `setGrant`. It does not ask: the caller does. */
+export const setGrant = (id: string, grant: string[], optional: string[]): Promise<Installed> =>
+  defaultPluginStore().setGrant(id, grant, optional)

@@ -6,7 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { requiresPreview } from '../test/requiresPreview'
 import { createRuntime, HewRefusal } from '../../../sdk/plugin/src/core'
-import type { HostToRealm, RealmToHost } from '../../../sdk/plugin/src/protocol'
+import { RUNTIME_LIMITS, type HostToRealm, type RealmToHost } from '../../../sdk/plugin/src/protocol'
 import { checkRealmMessage } from './realm/validate'
 import { readForwardReply } from './hostCore'
 
@@ -16,6 +16,8 @@ const HELLO: HostToRealm = {
   version: '0.1.0',
   realm: 'background',
   document: 'doc_1',
+  document_id: null,
+  document_epoch: 0,
   locale: 'en',
   theme: 'dark',
   grant: '{"plugin":"com.example.hello"}',
@@ -213,7 +215,7 @@ describe('the SDK runtime', () => {
     rt.receive(HELLO)
     const set = rt.hew.storage.set('count', { n: 2 })
     const s = last('storage')
-    expect(s).toEqual({ t: 'storage', id: s.id, op: 'set', key: 'count', value: '{"n":2}' })
+    expect(s).toEqual({ t: 'storage', id: s.id, op: 'set', scope: 'plugin', key: 'count', value: '{"n":2}' })
     rt.receive({ t: 'storage_reply', id: s.id, ok: true })
     await set
     const get = rt.hew.storage.get('count')
@@ -231,6 +233,98 @@ describe('the SDK runtime', () => {
     rt.hew.storage.onChange(changed)
     rt.receive({ t: 'storage_changed', scope: 'plugin', keys: ['count'] })
     expect(changed).toHaveBeenCalledWith(['count'])
+  })
+
+  it('keeps document storage apart: its own scope on the wire, its own listeners, the document id and its changes', async () => {
+    const { rt, last } = setup()
+    rt.receive({ ...HELLO, document_id: null })
+    expect(rt.hew.plugin?.documentId).toBeNull()
+    const set = rt.hew.storage.document.set('k', [1])
+    const s = last('storage')
+    expect(s).toEqual({ t: 'storage', id: s.id, op: 'set', scope: 'document', key: 'k', value: '[1]', epoch: 0 })
+    rt.receive({ t: 'storage_reply', id: s.id, scope: 'document', ok: true })
+    await set
+    await expect(rt.hew.storage.document.set('k'.repeat(257), 1)).rejects.toMatchObject({ name: 'storage_key_invalid' })
+    const pluginChanged = vi.fn()
+    const docChanged = vi.fn()
+    rt.hew.storage.onChange(pluginChanged)
+    rt.hew.storage.document.onChange(docChanged)
+    rt.receive({ t: 'storage_changed', scope: 'document', keys: ['k'] })
+    expect(docChanged).toHaveBeenCalledWith(['k'])
+    expect(pluginChanged).not.toHaveBeenCalled()
+    const seen: (string | null)[] = []
+    rt.hew.lifecycle.on('document', (id) => seen.push(id))
+    rt.receive({ t: 'document', document_id: '11111111-1111-4111-8111-111111111111', epoch: 1 })
+    expect(rt.hew.plugin?.documentId).toBe('11111111-1111-4111-8111-111111111111')
+    expect(seen).toEqual(['11111111-1111-4111-8111-111111111111'])
+  })
+
+  it('stamps document storage with the epoch it last heard, when the plugin made the call, and surfaces document_changed as a storage error', async () => {
+    const { rt, sent, last, flush } = setup()
+    // Made before hello: stamped with the epoch hello names.
+    void rt.hew.storage.document.get('early')
+    rt.receive({ ...HELLO, document_epoch: 4 })
+    const early = sent.find((m) => m.t === 'storage') as Extract<RealmToHost, { t: 'storage' }>
+    expect(early).toMatchObject({ key: 'early', scope: 'document', epoch: 4 })
+    rt.receive({ t: 'storage_reply', id: early.id, scope: 'document', ok: true, value: null })
+    // The plugin's own storage carries none.
+    void rt.hew.storage.get('own')
+    expect(last('storage')).not.toHaveProperty('epoch')
+    rt.receive({ t: 'storage_reply', id: last('storage').id, scope: 'plugin', ok: true, value: null })
+    await flush()
+    // Calls past the open limit wait in the runtime; one made before the
+    // document changed keeps the old epoch even when it is sent after.
+    const keys = Array.from({ length: RUNTIME_LIMITS.storageOpen + 1 }, (_, i) => `k${i}`)
+    const writes = keys.map((k) => rt.hew.storage.document.set(k, 1))
+    const settled = Promise.allSettled(writes)
+    rt.receive({ t: 'document', document_id: null, epoch: 5 })
+    const after = rt.hew.storage.document.set('after', 1)
+    const firstBatch = sent.filter((m) => m.t === 'storage' && m.key?.startsWith('k')) as Extract<RealmToHost, { t: 'storage' }>[]
+    expect(firstBatch).toHaveLength(RUNTIME_LIMITS.storageOpen)
+    expect(firstBatch.every((m) => m.epoch === 4)).toBe(true)
+    for (const m of firstBatch) rt.receive({ t: 'storage_reply', id: m.id, scope: 'document', ok: false, error: 'document_changed' })
+    let waited: Extract<RealmToHost, { t: 'storage' }> | undefined
+    await vi.waitFor(() => {
+      waited = sent.find((m) => m.t === 'storage' && m.key === `k${RUNTIME_LIMITS.storageOpen}`) as typeof waited
+      expect(waited).toBeDefined()
+    })
+    expect(waited!.epoch).toBe(4)
+    rt.receive({ t: 'storage_reply', id: waited!.id, scope: 'document', ok: false, error: 'document_changed' })
+    await settled
+    expect((sent.find((m) => m.t === 'storage' && m.key === 'after') as Extract<RealmToHost, { t: 'storage' }>).epoch).toBe(5)
+    const refusal = await writes[0].catch((e: unknown) => e)
+    expect(refusal).toBeInstanceOf(HewRefusal)
+    expect(refusal).toMatchObject({ name: 'document_changed' })
+    expect((refusal as HewRefusal).explanation).toMatch(/document changed/)
+    void after
+  })
+
+  it('a document call made before hello that waits for a slot past a later document change keeps the epoch hello named', async () => {
+    const { rt, sent } = setup()
+    const keys = Array.from({ length: RUNTIME_LIMITS.storageOpen + 1 }, (_, i) => `k${i}`)
+    const writes = Promise.allSettled(keys.map((k) => rt.hew.storage.document.set(k, 1)))
+    rt.receive({ ...HELLO, document_epoch: 1 })
+    rt.receive({ t: 'document', document_id: null, epoch: 2 })
+    const firstBatch = sent.filter((m) => m.t === 'storage') as Extract<RealmToHost, { t: 'storage' }>[]
+    expect(firstBatch).toHaveLength(RUNTIME_LIMITS.storageOpen)
+    expect(firstBatch.every((m) => m.epoch === 1)).toBe(true)
+    for (const m of firstBatch) rt.receive({ t: 'storage_reply', id: m.id, scope: 'document', ok: false, error: 'document_changed' })
+    let waited: Extract<RealmToHost, { t: 'storage' }> | undefined
+    await vi.waitFor(() => {
+      waited = sent.find((m) => m.t === 'storage' && m.key === `k${RUNTIME_LIMITS.storageOpen}`) as typeof waited
+      expect(waited).toBeDefined()
+    })
+    expect(waited!.epoch).toBe(1)
+    rt.receive({ t: 'storage_reply', id: waited!.id, scope: 'document', ok: false, error: 'document_changed' })
+    await writes
+  })
+
+  it('names a stored value with a lone surrogate storage_value_invalid', async () => {
+    const { rt, last } = setup()
+    rt.receive(HELLO)
+    const set = rt.hew.storage.set('k', 'x')
+    rt.receive({ t: 'storage_reply', id: last('storage').id, scope: 'plugin', ok: false, error: 'storage_value_invalid' })
+    await expect(set).rejects.toMatchObject({ name: 'storage_value_invalid', explanation: expect.stringMatching(/surrogate/) })
   })
 
   it('mirrors the console, cut to size and rate-limited', () => {
@@ -263,6 +357,74 @@ describe('the SDK runtime', () => {
     rt.receive({ t: 'unload', reason: 'disable' })
     expect(fn).toHaveBeenCalledWith('disable')
     expect(sent.at(-1)).toEqual({ t: 'unloaded' })
+  })
+
+  it('gives unload listeners the reason, and says unloaded only after the storage writes they made and the promise they returned', async () => {
+    const { rt, sent, flush } = setup()
+    rt.receive(HELLO)
+    let finish: () => void = () => {}
+    rt.hew.lifecycle.on('unload', (reason) => {
+      void rt.hew.storage.set('bye', reason)
+      return new Promise<void>((r) => (finish = r))
+    })
+    rt.receive({ t: 'unload', reason: 'idle' })
+    const set = sent.find((m) => m.t === 'storage') as Extract<RealmToHost, { t: 'storage' }>
+    expect(set).toMatchObject({ op: 'set', key: 'bye', value: '"idle"' })
+    await flush()
+    expect(sent.some((m) => m.t === 'unloaded')).toBe(false)
+    finish()
+    await flush()
+    // The listener is done; the write is not answered yet.
+    expect(sent.some((m) => m.t === 'unloaded')).toBe(false)
+    rt.receive({ t: 'storage_reply', id: set.id, ok: true })
+    await flush()
+    await flush()
+    expect(sent.at(-1)).toEqual({ t: 'unloaded' })
+    // A second unload says nothing more.
+    rt.receive({ t: 'unload', reason: 'idle' })
+    expect(sent.filter((m) => m.t === 'unloaded')).toHaveLength(1)
+  })
+
+  it('says unloaded within its wait limit when a listener never finishes', async () => {
+    vi.useFakeTimers()
+    try {
+      const { rt, sent } = setup()
+      rt.receive(HELLO)
+      rt.hew.lifecycle.on('unload', () => new Promise(() => {}))
+      rt.receive({ t: 'unload', reason: 'idle' })
+      await vi.advanceTimersByTimeAsync(1_499)
+      expect(sent.some((m) => m.t === 'unloaded')).toBe(false)
+      await vi.advanceTimersByTimeAsync(2)
+      expect(sent.at(-1)).toEqual({ t: 'unloaded' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('takes a wider grant: hew.plugin.grant changes, grant listeners run, and refused events are asked for again', async () => {
+    const { rt, sent, flush, last, answerBus } = setup()
+    rt.receive(HELLO)
+    const grants: unknown[] = []
+    rt.hew.lifecycle.on('grant', (g) => grants.push(g))
+    const heard: unknown[] = []
+    rt.hew.events.on('selection_changed', (p) => heard.push(p))
+    expect(JSON.parse(last('bus').frame)).toMatchObject({ method: 'hew.event.subscribe', params: { events: ['selection_changed'] } })
+    answerBus({ subscribed: [], denied: ['selection_changed'] })
+    await flush()
+    const before = sent.filter((m) => m.t === 'bus').length
+    rt.receive({ t: 'grant', grant: '{"plugin":"com.example.hello","permissions":["model.read","view"]}' })
+    expect(rt.hew.plugin?.grant).toEqual({ plugin: 'com.example.hello', permissions: ['model.read', 'view'] })
+    expect(grants).toEqual([{ plugin: 'com.example.hello', permissions: ['model.read', 'view'] }])
+    const again = sent.filter((m) => m.t === 'bus')
+    expect(again).toHaveLength(before + 1)
+    expect(JSON.parse(last('bus').frame)).toMatchObject({ method: 'hew.event.subscribe', params: { events: ['selection_changed'] } })
+    answerBus({ subscribed: ['selection_changed'], denied: [] })
+    await flush()
+    // Granted now: another widening asks for nothing more.
+    rt.receive({ t: 'grant', grant: '{"plugin":"com.example.hello","permissions":["model.read","view","model.write"]}' })
+    expect(sent.filter((m) => m.t === 'bus')).toHaveLength(before + 1)
+    rt.receive({ t: 'bus', frame: '{"jsonrpc":"2.0","method":"hew.event.selection_changed","params":{"n":1}}' })
+    expect(heard).toEqual([{ n: 1 }])
   })
 
   describe('what a well-behaved plugin can ask for never trips a host limit', () => {

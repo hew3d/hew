@@ -33,6 +33,13 @@ export const PluginsPane: Root = __HEW_PREVIEW__
 export interface PluginHostStart {
   bridge: LiveBridgeDeps
   toast(message: string): void
+  /** Which kind of window the host is for; absent in the editor window.
+   *  Shop Mode passes `'shop'`. */
+  platform?: 'shop'
+  /** Where the host attaches its test hooks (`plugins`) when the window's
+   *  own harness object is not `__hew_test` (Shop Mode's is
+   *  `__hew_shop_test`). Read when the host starts. */
+  harness?: Record<string, unknown> | null
 }
 
 /** Loads the plugin host; its export starts one for this window and returns

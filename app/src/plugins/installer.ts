@@ -15,8 +15,17 @@
 import { isTauri } from '../io/fileHost'
 import { toPluginError } from './pluginError'
 import { devChangeNotice, devRequestNotice } from './storeAccess'
-import type { DevChange, DevRequest, Installed, Listed, PendingView, PluginInstaller } from './types'
+import type { DevChange, DevRequest, Installed, Listed, PendingView, PermissionLine, PluginInstaller } from './types'
 import { makeWebPluginStore, type WebPluginDeps } from './webPluginStore'
+
+/** An installer that can change a plugin's grant (`PluginInstaller`'s
+ *  `setGrant`, present). */
+export type GrantCapable = Required<Pick<PluginInstaller, 'setGrant'>> & Pick<PluginInstaller, 'grantLines'>
+
+/** `inst` as a `GrantCapable`, or null for an installer without the calls. */
+export function grantCapable(inst: PluginInstaller): (PluginInstaller & GrantCapable) | null {
+  return typeof inst.setGrant === 'function' ? (inst as PluginInstaller & GrantCapable) : null
+}
 
 type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>
 type Listen = (event: string, handler: (event: { payload: unknown }) => void) => Promise<() => void>
@@ -43,7 +52,7 @@ function iconBlobUrl(rel: string, bytes: Uint8Array): string | null {
 }
 
 /** The desktop installer, over the shell's commands. */
-export function makeDesktopInstaller(deps: DesktopDeps = {}): PluginInstaller {
+export function makeDesktopInstaller(deps: DesktopDeps = {}): PluginInstaller & GrantCapable {
   const invoke: Invoke =
     deps.invoke ??
     (async (command, args) => {
@@ -84,6 +93,7 @@ export function makeDesktopInstaller(deps: DesktopDeps = {}): PluginInstaller {
     setEnabled: (id, enabled) => call<string[]>('plugin_set_enabled', { id, enabled }),
     uninstall: (id) => call<void>('plugin_uninstall', { id }),
     rollback: (id) => call<Installed>('plugin_rollback', { id }),
+    setGrant: (id, grant, optional) => call<Installed>('plugin_set_grant', { id, grant, optional }),
     devMode: async () => (await call<unknown>('plugin_dev_mode')) === true,
     setDevMode: async (on) => (await call<unknown>('plugin_set_dev_mode', { on })) === true,
     review: (id) => call<PendingView>('plugin_dev_review', { id }),
@@ -134,7 +144,7 @@ function subscribe(listen: Listen, event: string, fn: (event: { payload: unknown
 }
 
 /** The browser installer, over the OPFS store. */
-export function makeWebInstaller(deps: WebPluginDeps): PluginInstaller {
+export function makeWebInstaller(deps: WebPluginDeps): PluginInstaller & GrantCapable {
   const store = makeWebPluginStore(deps)
   return {
     tier: 'web',
@@ -149,6 +159,8 @@ export function makeWebInstaller(deps: WebPluginDeps): PluginInstaller {
     uninstall: (id) => store.uninstall(id),
     rollback: (id, shown) => store.rollback(id, shown),
     previous: (id) => store.previous(id),
+    setGrant: (id, grant, optional) => store.setGrant(id, grant, optional),
+    grantLines: (id, grant, optional) => store.grantLines(id, grant, optional),
     async iconUrl(id, rel) {
       try {
         return iconBlobUrl(rel, await store.readFile(id, rel))

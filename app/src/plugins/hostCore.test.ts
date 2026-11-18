@@ -12,17 +12,18 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { requiresPreview } from '../test/requiresPreview'
 import { createRuntime, HewRefusal, type Hew } from '../../../sdk/plugin/src/core'
-import type { HostToRealm } from '../../../sdk/plugin/src/protocol'
+import { RUNTIME_LIMITS, type HostToRealm } from '../../../sdk/plugin/src/protocol'
 import { getBusy, setBusy } from '../api/busyState'
 import { pumpEvents, setPumpDocumentId } from '../api/eventPump'
 import type { LiveBridgeDeps } from '../api/liveBridge'
 import type { ForwardRequestJson } from '../api/dispatchResult'
 import type { Scene } from '../wasm/loader'
-import { createPluginHost, MAX_FORWARD_TIMEOUT_MS, MAX_PENDING_BUS, type HostScheduler, forwardTimeoutMs, packagePath, readForwardReply, type HostEnv, type PluginHost, type PortLike, type RealmChannel } from './hostCore'
+import { createPluginHost, DEFAULT_TIMINGS, MAX_FORWARD_TIMEOUT_MS, MAX_PENDING_BUS, type HostScheduler, type HostTimings, forwardTimeoutMs, packagePath, readForwardReply, type HostEnv, type PluginHost, type PortLike, type RealmChannel } from './hostCore'
 import type { PluginStorageBackend } from './storageBackend'
 import type { PluginStoreAccess } from './storeAccess'
 import type { DevChange, Installed, Listed, PluginManifest } from './types'
 import { PluginError } from './pluginError'
+import { compareCodePoints } from './pluginText'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
 const ID = 'com.example.hello'
@@ -41,13 +42,34 @@ function fakeScene() {
   let nextConn = 1
   let nextToken = 1
   let nextKernel = 0
-  const conns = new Map<number, { plugin: string | null; permissions?: string[] }>()
+  const conns = new Map<number, { plugin: string | null; permissions?: string[]; subscriptions: Set<string> }>()
+  /** Events emitted and not yet drained: they go, at the drain, to every
+   *  connection subscribed then, as the kernel's do. */
+  const emitted: { name: string; params: unknown }[] = []
+  /** What a connection's grant receives, as the kernel's `may_receive`. */
+  const mayReceive = (conn: number, name: string): boolean => {
+    const c = conns.get(conn)
+    if (c === undefined) return false
+    if (c.plugin === null) return true
+    const held = c.permissions ?? []
+    if (name === 'selection_changed' || name === 'tool_changed') return held.includes('view')
+    if (name === 'plugin_state') return true
+    return held.includes('model.read')
+  }
   const registered = new Map<string, Decl[]>()
   const pending = new Map<string, { requestId: unknown; mutating: boolean; plugin: string; method: string }>()
   const compounds: { kernel: bigint; forward: number }[] = []
   const events: { conn: number; frame: string }[] = []
   let generation = 1
+  const lifecycle: string[] = []
   const s = {
+    docId: undefined as string | undefined,
+    document_id: vi.fn((): string | undefined => s.docId),
+    /** A lifecycle step, as the app notes one: drained to the host's
+     *  broadcast sink. */
+    lifecycle(kind: 'opened' | 'saved' | 'closed', documentId: string | null) {
+      lifecycle.push(JSON.stringify({ jsonrpc: '2.0', method: `hew.event.document_${kind}`, params: { document: 'doc_1', title: 'Untitled', document_id: documentId } }))
+    },
     conns,
     registered,
     compounds,
@@ -59,20 +81,43 @@ function fakeScene() {
     set_host_document_id: vi.fn(),
     api_method_mutates: vi.fn((m: string) => m === 'hew.tag.create'),
     take_pending_view_directives: vi.fn(() => '[]'),
+    emitted,
+    /** Queues an event the next drain sends to every connection
+     *  subscribed to it then. */
+    emit(name: string, params: unknown = {}) {
+      emitted.push({ name, params })
+    },
     drain_events: vi.fn(() => {
-      const out = events.splice(0).map((e) => ({ conn: e.conn, frames: [e.frame] }))
+      const out: { conn: number | null; frames: string[] }[] = events.splice(0).map((e) => ({ conn: e.conn, frames: [e.frame] }))
+      if (lifecycle.length > 0) out.push({ conn: null, frames: lifecycle.splice(0) })
+      for (const e of emitted.splice(0)) {
+        for (const [conn, c] of conns) {
+          if (c.subscriptions.has(e.name) && mayReceive(conn, e.name)) {
+            out.push({ conn, frames: [JSON.stringify({ jsonrpc: '2.0', method: `hew.event.${e.name}`, params: e.params })] })
+          }
+        }
+      }
       return JSON.stringify(out)
     }),
     api_connection_open: vi.fn(() => {
       const id = nextConn++
-      conns.set(id, { plugin: null })
+      conns.set(id, { plugin: null, subscriptions: new Set() })
       return id
     }),
     api_plugin_connection_open: vi.fn((grant: string) => {
       const id = nextConn++
       const g = JSON.parse(grant) as { plugin: string; permissions: string[] }
-      conns.set(id, { plugin: g.plugin, permissions: g.permissions })
+      conns.set(id, { plugin: g.plugin, permissions: g.permissions, subscriptions: new Set() })
       return id
+    }),
+    // The kernel's in-place grant change: the same plugin only; what the
+    // new grant cannot receive is unsubscribed.
+    api_connection_set_grant: vi.fn((id: number, grant: string) => {
+      const c = conns.get(id)
+      const g = JSON.parse(grant) as { plugin: string; permissions: string[] }
+      if (c === undefined || c.plugin === null || c.plugin !== g.plugin) throw new Error('GRANT: refused')
+      c.permissions = g.permissions
+      for (const name of [...c.subscriptions]) if (!mayReceive(id, name)) c.subscriptions.delete(name)
     }),
     api_connection_close: vi.fn((id: number) => {
       conns.delete(id)
@@ -105,7 +150,21 @@ function fakeScene() {
         return reply({ result: { format: 'hew' } })
       }
       if (req.method === 'hew.view.enter') return reply({ result: {} })
-      if (req.method === 'hew.event.subscribe') return reply({ result: { subscribed: (req.params as { events: string[] }).events, denied: [] } })
+      if (req.method === 'hew.event.subscribe' || req.method === 'hew.event.unsubscribe') {
+        const c = conns.get(conn)!
+        const denied: string[] = []
+        for (const name of (req.params as { events: string[] }).events) {
+          if (req.method === 'hew.event.unsubscribe') c.subscriptions.delete(name)
+          else if (mayReceive(conn, name)) c.subscriptions.add(name)
+          else denied.push(name)
+        }
+        return reply({ result: { subscribed: [...c.subscriptions].sort(), denied } })
+      }
+      // Served by the page's host for a plugin's own realm; anyone else
+      // reaching the kernel is refused, as the kernel's handler does.
+      if (req.method === 'hew.permissions.request') {
+        return reply({ error: { code: -32000, message: 'refused', data: { refusal: 'host_capability_missing' } } })
+      }
       if (req.method === 'hew.query.scene') return reply({ result: { tree: [{ kind: 'object' }, { kind: 'object' }], generation } })
       if (req.method === 'hew.tag.create') {
         generation++
@@ -227,7 +286,9 @@ interface Harness {
   realms: { channel: RealmChannel; toRealm: HostToRealm[]; send(data: unknown, ports?: MessagePort[]): void; silent: boolean }[]
   list: Listed[]
   changed(): void
-  storageChanged(id: string, keys: string[]): void
+  storageChanged(id: string, keys: string[], scope?: 'plugin' | 'document', documentId?: string | null): void
+  /** Document storage, by `<plugin id>/<document id>`. */
+  docs: Map<string, Map<string, string>>
   /** Sends `plugins-dev-changed`, as the store access passes it on. */
   devChanged(change: DevChange): void
   stored: Map<string, string>
@@ -236,6 +297,8 @@ interface Harness {
   logs: string[]
   setMain(main: Main): void
   grantCalls: [string, string, string][]
+  /** The `viewer` flag of each grant built, in order. */
+  viewerCalls: boolean[]
   bridge: LiveBridgeDeps
 }
 
@@ -243,32 +306,65 @@ const flush = async (n = 20): Promise<void> => {
   for (let i = 0; i < n; i++) await Promise.resolve()
 }
 
+/** A scheduler whose later tasks can be held: while held, the host checks
+ *  and queues what a realm sends but handles none of it. */
+function holdingSched(): { sched: HostScheduler; hold(): void; release(): void } {
+  const queued: (() => void)[] = []
+  let holding = false
+  return {
+    sched: {
+      now: () => Date.now(),
+      later(fn) {
+        if (holding) queued.push(fn)
+        else queueMicrotask(fn)
+      },
+    },
+    hold: () => (holding = true),
+    release() {
+      holding = false
+      for (const fn of queued.splice(0)) fn()
+    },
+  }
+}
+
 interface HarnessOpts {
   list?: Listed[]
   main?: Main
   /** Each plugin's own background, by id; `main` for the rest. */
   mains?: Record<string, Main>
-  timings?: Partial<Parameters<typeof createPluginHost>[1]>
+  timings?: Partial<HostTimings>
   sched?: HostScheduler
-  platform?: 'desktop' | 'web'
+  platform?: 'desktop' | 'web' | 'shop'
   /** Stands in for the store's read of a package file. */
   readFile?: (id: string, path: string) => Promise<ArrayBuffer>
   /** Runs before a realm frame answers. */
   beforeOpen?: () => Promise<void>
   /** The shell's developer mode; none (as on the web) when absent. */
   devMode?: () => Promise<boolean>
+  /** The person's answers to permission requests. */
+  grants?: HostEnv['grants']
+  /** Document storage shared with another harness (two windows). */
+  docs?: Map<string, Map<string, string>>
+  /** Makes the store's document writes fail while it answers true. */
+  docSetFails?: () => boolean
+  /** The document's persistent id when the host starts. */
+  documentId?: string | null
+  report?: HostEnv['report']
+  console?: HostEnv['console']
 }
 
 function harness(opts: HarnessOpts = {}): Harness {
   const scene = fakeScene()
+  if (opts.documentId !== undefined && opts.documentId !== null) scene.docId = opts.documentId
   let main: Main = opts.main ?? ((hew) => hew.commands.handle('greet', (p) => ({ greeting: `Hello, ${(p as { name?: string }).name ?? 'Hew'}!` })))
   let onChanged: (() => void) | null = null
-  let onStorage: ((id: string, keys: string[]) => void) | null = null
+  let onStorage: ((id: string, keys: string[], scope: 'plugin' | 'document', documentId: string | null) => void) | null = null
   let onDev: ((change: DevChange) => void) | null = null
   const stored = new Map<string, string>()
   const toasts: string[] = []
   const logs: string[] = []
   const grantCalls: [string, string, string][] = []
+  const viewerCalls: boolean[] = []
   const realms: Harness['realms'] = []
   const h = {} as Harness
   const store: PluginStoreAccess = {
@@ -289,7 +385,28 @@ function harness(opts: HarnessOpts = {}): Harness {
       return () => (onDev = null)
     },
   }
+  const docs = opts.docs ?? new Map<string, Map<string, string>>()
+  const docMap = (id: string, doc: string): Map<string, string> => {
+    const k = `${id}/${doc}`
+    let m = docs.get(k)
+    if (m === undefined) {
+      m = new Map()
+      docs.set(k, m)
+    }
+    return m
+  }
   const storage: PluginStorageBackend = {
+    docGet: vi.fn(async (id: string, doc: string, key: string) => docMap(id, doc).get(key) ?? null),
+    docSet: vi.fn(async (id: string, doc: string, key: string, value: string) => {
+      if (opts.docSetFails?.() === true) throw new PluginError('io', 'the disk is busy')
+      if (value.length > 100) throw new PluginError('storage_quota', 'full')
+      docMap(id, doc).set(key, value)
+    }),
+    docDelete: vi.fn(async (id: string, doc: string, key: string) => {
+      docMap(id, doc).delete(key)
+    }),
+    // Code-point order, as both real stores list (a sorted map on the desktop).
+    docList: vi.fn(async (id: string, doc: string) => [...docMap(id, doc).keys()].sort(compareCodePoints)),
     get: vi.fn(async (_id: string, key: string) => stored.get(key) ?? null),
     set: vi.fn(async (_id: string, key: string, value: string) => {
       if (value.length > 100) throw new PluginError('storage_quota', 'full')
@@ -313,10 +430,16 @@ function harness(opts: HarnessOpts = {}): Harness {
     platform: opts.platform ?? 'web',
     store,
     storage,
-    grantJson: (id, doc, names) => {
+    grantJson: (id, doc, names, viewer) => {
       grantCalls.push([id, doc, names])
-      return JSON.stringify({ ceiling: 'core', permissions: JSON.parse(names), plugin: id, app: null, document: doc })
+      viewerCalls.push(viewer)
+      const all = JSON.parse(names) as string[]
+      const permissions = viewer ? all.filter((n) => n === 'model.read' || n === 'view') : all
+      return JSON.stringify({ ceiling: 'core', permissions, plugin: id, app: null, document: doc })
     },
+    ...(opts.grants === undefined ? {} : { grants: opts.grants }),
+    ...(opts.report === undefined ? {} : { report: opts.report }),
+    ...(opts.console === undefined ? {} : { console: opts.console }),
     async openRealm(code) {
       await opts.beforeOpen?.()
       const pluginId = new TextDecoder().decode(code)
@@ -360,7 +483,8 @@ function harness(opts: HarnessOpts = {}): Harness {
     realms,
     list: opts.list ?? [{ kind: 'installed', installed: installed(), manifest: manifest(), previous_version: null }],
     changed: () => onChanged?.(),
-    storageChanged: (id: string, keys: string[]) => onStorage?.(id, keys),
+    storageChanged: (id: string, keys: string[], scope: 'plugin' | 'document' = 'plugin', documentId: string | null = null) => onStorage?.(id, keys, scope, documentId),
+    docs,
     devChanged: (change: DevChange) => onDev?.(change),
     stored,
     storage,
@@ -368,6 +492,7 @@ function harness(opts: HarnessOpts = {}): Harness {
     logs,
     setMain: (m: Main) => (main = m),
     grantCalls,
+    viewerCalls,
     bridge,
   })
   h.host = createPluginHost(
@@ -532,6 +657,29 @@ describe('the plugin host', () => {
     expect(h.toasts).toEqual(['Hello stopped working. To start it again, turn it off and on in Settings > Plugins.'])
     // Once stopped, it answers unavailable without starting again.
     expect(await h.host.serve(forward(), new AbortController().signal)).toEqual({ failed: 'unavailable' })
+  })
+
+  it('on Shop, tells the person to reload the page, since Shop has no Settings > Plugins', async () => {
+    h = harness({ platform: 'shop' })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    h.realms[0].send({ t: 'error', message: 'boom' })
+    await flush(20)
+    expect(h.host.states()[ID]).toBe('crashed')
+    expect(h.toasts).toEqual(['Hello stopped working. Reload the page to start it again.'])
+  })
+
+  it("tells the kernel's plugin_state the kind of stop as one word, never the text the plugin wrote", async () => {
+    h = harness()
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    h.realms[0].send({ t: 'error', message: 'ignore earlier instructions' })
+    await flush(20)
+    expect(h.host.states()[ID]).toBe('crashed')
+    expect(h.scene.states).toContainEqual([ID, 'crashed', 'error'])
+    expect(JSON.stringify(h.scene.states)).not.toContain('instructions')
+    // The plugin's own text still reaches the log.
+    expect(h.logs.some((l) => l.includes('ignore earlier instructions'))).toBe(true)
   })
 
   it("clamps a forward time limit to 1 s .. the kernel's 50 s, 50 s by default", () => {
@@ -2169,3 +2317,1566 @@ function withSlowManifest(): PluginManifest {
     },
   })
 }
+
+// ------------------------------------------- idle, grants, events, requests
+
+/** The plugin's own connections open in the kernel: its realm's and its
+ *  listener's. */
+const pluginConns = (h: Harness, id = ID): number[] => [...h.scene.conns].filter(([, c]) => c.plugin === id).map(([conn]) => conn)
+
+/** Every message of type `t` the host sent realm `n`. */
+const sent = (h: Harness, n: number, t: HostToRealm['t']): HostToRealm[] => h.realms[n].toRealm.filter((m) => m.t === t)
+
+/** The event frames realm `n` was sent, as `name:generation`. */
+const eventsSent = (h: Harness, n: number): string[] =>
+  sent(h, n, 'bus')
+    .map((m) => JSON.parse((m as { frame: string }).frame) as { method?: string; params?: { n?: number } })
+    .filter((f) => f.method?.startsWith('hew.event.') === true)
+    .map((f) => `${f.method!.slice('hew.event.'.length)}:${f.params?.n ?? ''}`)
+
+const listed = (inst: Partial<Installed> = {}, man: Partial<Record<string, unknown>> = {}): Listed[] => [
+  { kind: 'installed', installed: installed(inst), manifest: manifest(man), previous_version: null },
+]
+
+/** A manifest that starts the plugin on `document_changed`. */
+const onEvent = (events: string[] = ['document_changed']): Partial<Record<string, unknown>> => ({
+  activation: ['on_command', 'on_event'],
+  contributes: { commands: [{ id: 'greet', class: 'read_only', summary: 'Greets.' }], events },
+})
+
+/** Emits `name` with a number, and drains. */
+function emitAndPump(h: Harness, name: string, n: number): void {
+  h.scene.emit(name, { n })
+  pumpEvents(h.scene as unknown as Scene)
+}
+
+describe('the plugin host, idle unload', () => {
+  let h: Harness
+  beforeEach((ctx) => {
+    requiresPreview(ctx, 'plugins')
+    setBusy(null)
+  })
+  afterEach(() => {
+    h?.host.dispose()
+    vi.useRealTimers()
+  })
+
+  const quick = { pingMs: 10, idleMs: 60, drainMs: 200 }
+
+  it('unloads a realm quiet for the idle time, keeps its commands, and starts it again on the next command', async () => {
+    h = harness({ timings: quick })
+    await h.host.sync()
+    expect((await call(h, `${ID}.greet`)).result).toEqual({ greeting: 'Hello, Hew!' })
+    expect(pluginConns(h)).toHaveLength(1)
+    await vi.waitFor(() => expect(h.host.states()[ID]).toBe('enabled'))
+    expect(sent(h, 0, 'unload')).toEqual([{ t: 'unload', reason: 'idle' }])
+    expect(h.realms[0].channel.remove).toHaveBeenCalled()
+    expect(h.scene.registered.has(ID)).toBe(true)
+    expect(h.scene.states).toContainEqual([ID, 'unloaded', 'idle'])
+    expect(pluginConns(h)).toEqual([])
+    expect(h.toasts).toEqual([])
+    expect((await call(h, `${ID}.greet`, { name: 'again' })).result).toEqual({ greeting: 'Hello, again!' })
+    expect(h.realms).toHaveLength(2)
+    expect((h.realms[1].toRealm[0] as { activation: string }).activation).toBe('command')
+  })
+
+  it('keeps a realm with a forward open', async () => {
+    h = harness({ timings: quick, main: (hew) => hew.commands.handle('greet', () => new Promise(() => {})) })
+    await h.host.sync()
+    void call(h, `${ID}.greet`)
+    await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+    await new Promise((r) => setTimeout(r, 250))
+    expect(h.host.states()[ID]).toBe('activated')
+    expect(sent(h, 0, 'unload')).toEqual([])
+  })
+
+  it('keeps a realm that keeps talking after its command answered, and unloads it once it stops', async () => {
+    let timer: ReturnType<typeof setInterval> | undefined
+    h = harness({
+      timings: quick,
+      main: (hew) => {
+        hew.commands.handle('greet', () => {
+          let n = 0
+          timer = setInterval(() => {
+            if (++n > 12) clearInterval(timer)
+            else void hew.storage.get('k')
+          }, 20)
+          return 'started'
+        })
+      },
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    await new Promise((r) => setTimeout(r, 180))
+    expect(h.host.states()[ID]).toBe('activated')
+    await vi.waitFor(() => expect(h.host.states()[ID]).toBe('enabled'), { timeout: 2_000 })
+    clearInterval(timer)
+  })
+
+  it('never unloads a plugin that starts with Hew', async () => {
+    h = harness({ timings: quick, list: listed({ startup_allowed: true }, { activation: ['on_startup', 'on_command'] }) })
+    await h.host.sync()
+    await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+    await new Promise((r) => setTimeout(r, 250))
+    expect(h.host.states()[ID]).toBe('activated')
+    expect(sent(h, 0, 'unload')).toEqual([])
+  })
+
+  it('takes the storage writes an unload listener makes, drops anything else it sends then, and stops nothing', async () => {
+    h = harness({
+      timings: quick,
+      main: (hew) => {
+        hew.commands.handle('greet', () => 'hi')
+        hew.lifecycle.on('unload', (reason) => {
+          void hew.api.query.scene({}).catch(() => {})
+          return hew.storage.set('bye', reason)
+        })
+      },
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    await vi.waitFor(() => expect(h.host.states()[ID]).toBe('enabled'))
+    await vi.waitFor(() => expect(h.stored.get('bye')).toBe('"idle"'))
+    // The bus call made during the drain never reached the kernel.
+    const realmConnCalls = h.scene.api_dispatch.mock.calls.filter(([, f]) => (JSON.parse(f) as { method: string }).method === 'hew.query.scene')
+    expect(realmConnCalls).toEqual([])
+    expect(h.scene.states.filter(([, s]) => s === 'crashed')).toEqual([])
+    expect(h.toasts).toEqual([])
+    expect(pluginConns(h)).toEqual([])
+  })
+
+  it('tears down a realm that does not say unloaded within the drain time', async () => {
+    h = harness({
+      timings: quick,
+      main: (hew) => {
+        hew.commands.handle('greet', () => 'hi')
+        hew.lifecycle.on('unload', () => new Promise(() => {}))
+      },
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    await vi.waitFor(() => expect(sent(h, 0, 'unload')).toHaveLength(1))
+    const at = Date.now()
+    await vi.waitFor(() => expect(h.host.states()[ID]).toBe('enabled'))
+    expect(Date.now() - at).toBeGreaterThanOrEqual(150)
+    expect(h.realms[0].channel.remove).toHaveBeenCalled()
+    expect(pluginConns(h)).toEqual([])
+  })
+
+  it('lands the storage writes still waiting in the inbox when the drain time ends', async () => {
+    const s = holdingSched()
+    h = harness({
+      timings: quick,
+      sched: s.sched,
+      main: (hew) => {
+        hew.commands.handle('greet', () => 'hi')
+        hew.lifecycle.on('unload', () => {
+          void hew.storage.set('bye', 1)
+          void hew.storage.set('last', 2)
+          return new Promise(() => {})
+        })
+      },
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    // From here the host takes the realm's messages but its drain does not
+    // get to them before the drain time ends.
+    s.hold()
+    await vi.waitFor(() => expect(sent(h, 0, 'unload')).toHaveLength(1))
+    await vi.waitFor(() => expect(h.host.states()[ID]).toBe('enabled'))
+    await vi.waitFor(() => expect([h.stored.get('bye'), h.stored.get('last')]).toEqual(['1', '2']))
+    expect(h.toasts).toEqual([])
+    s.release()
+  })
+
+  it("gives a realm longer to unload than the SDK waits for its listeners, so a realm that keeps to its limit is heard out", () => {
+    expect(DEFAULT_TIMINGS.drainMs).toBeGreaterThan(RUNTIME_LIMITS.unloadWaitMs)
+  })
+
+  it('makes commands that come while it unloads wait, then starts the plugin once for all of them', async () => {
+    const release = gate()
+    h = harness({
+      timings: { ...quick, drainMs: 2_000 },
+      main: (hew) => {
+        hew.commands.handle('greet', (p) => ({ greeting: `Hello, ${(p as { name?: string }).name ?? 'Hew'}!` }))
+        hew.lifecycle.on('unload', () => release.promise)
+      },
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    await vi.waitFor(() => expect(sent(h, 0, 'unload')).toHaveLength(1))
+    const a = call(h, `${ID}.greet`, { name: 'a' })
+    const b = call(h, `${ID}.greet`, { name: 'b' })
+    await flush(60)
+    expect(h.realms).toHaveLength(1)
+    release.open()
+    expect((await a).result).toEqual({ greeting: 'Hello, a!' })
+    expect((await b).result).toEqual({ greeting: 'Hello, b!' })
+    expect(h.realms).toHaveLength(2)
+    expect(sent(h, 0, 'forward')).toHaveLength(1)
+    expect(pluginConns(h)).toHaveLength(1)
+  })
+
+  it('a realm turned off while it unloads is gone, and the waiting command hears unavailable', async () => {
+    h = harness({
+      timings: { ...quick, drainMs: 2_000 },
+      main: (hew) => {
+        hew.commands.handle('greet', () => 'hi')
+        hew.lifecycle.on('unload', () => new Promise(() => {}))
+      },
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    await vi.waitFor(() => expect(sent(h, 0, 'unload')).toHaveLength(1))
+    const waiting = call(h, `${ID}.greet`)
+    await flush(20)
+    h.list = listed({ enabled: false })
+    await h.host.sync()
+    expect((await waiting).error?.data?.refusal).toBe('plugin_unavailable')
+    expect(h.realms).toHaveLength(1)
+    expect(pluginConns(h)).toEqual([])
+  })
+})
+
+describe('the plugin host, a grant widened while the plugin runs', () => {
+  let h: Harness
+  beforeEach((ctx) => {
+    requiresPreview(ctx, 'plugins')
+    setBusy(null)
+  })
+  afterEach(() => h?.host.dispose())
+
+  it('applies a grant that only adds optional permissions in place: same realm, same connection, the realm told', async () => {
+    let hew!: Hew
+    const grants: unknown[] = []
+    h = harness({
+      list: listed({ optional_granted: [] }, { optionalPermissions: ['model.write', 'view'] }),
+      main: (api) => {
+        hew = api
+        api.commands.handle('greet', () => 'hi')
+        api.lifecycle.on('grant', (g) => grants.push(g))
+      },
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    const conn = pluginConns(h)[0]
+    h.list = listed({ optional_granted: ['view'] }, { optionalPermissions: ['model.write', 'view'] })
+    await h.host.sync()
+    await flush(20)
+    expect(h.realms).toHaveLength(1)
+    expect(sent(h, 0, 'unload')).toEqual([])
+    expect(h.scene.api_connection_set_grant).toHaveBeenCalledTimes(1)
+    expect(h.scene.api_connection_set_grant.mock.calls[0][0]).toBe(conn)
+    expect(h.scene.conns.get(conn)?.permissions).toEqual(['model.read', 'view'])
+    const message = sent(h, 0, 'grant')
+    expect(message).toHaveLength(1)
+    expect(JSON.parse((message[0] as { grant: string }).grant)).toMatchObject({ permissions: ['model.read', 'view'], plugin: ID })
+    expect(h.scene.states).toContainEqual([ID, 'grant_changed', undefined])
+    expect(hew.plugin?.grant).toMatchObject({ permissions: ['model.read', 'view'] })
+    expect(grants).toHaveLength(1)
+    expect(h.host.states()[ID]).toBe('activated')
+  })
+
+  it('reloads for anything else: a taken-back permission, a required one, a new version', async () => {
+    for (const next of [{ optional_granted: [] }, { grant: ['model.read', 'view'] }, { version: '0.2.0' }] as Partial<Installed>[]) {
+      h = harness({ list: listed({ optional_granted: ['model.write'] }) })
+      await h.host.sync()
+      await call(h, `${ID}.greet`)
+      h.list = listed({ optional_granted: ['model.write'], ...next })
+      await h.host.sync()
+      expect(sent(h, 0, 'unload'), JSON.stringify(next)).toEqual([{ t: 'unload', reason: 'reload' }])
+      expect(sent(h, 0, 'grant')).toEqual([])
+      expect(h.scene.api_connection_set_grant).not.toHaveBeenCalled()
+      h.host.dispose()
+    }
+  })
+
+  it('applies a widening that comes while the plugin starts once it is ready', async () => {
+    h = harness({
+      list: listed({ optional_granted: [] }),
+      // The grant was built; the realm is not ready yet.
+      beforeOpen: async () => {
+        h.list = listed({ optional_granted: ['view'] })
+        await h.host.sync()
+      },
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    expect(h.grantCalls[0][2]).toBe('["model.read"]')
+    // Started with what the record held when the start read it, then told.
+    await vi.waitFor(() => expect(sent(h, 0, 'grant')).toHaveLength(1))
+    expect(h.scene.conns.get(pluginConns(h)[0])?.permissions).toEqual(['model.read', 'view'])
+    expect(h.realms).toHaveLength(1)
+  })
+
+  it('the runtime asks again for events its old grant refused, and they arrive', async () => {
+    const seen: unknown[] = []
+    h = harness({
+      list: listed({ optional_granted: [] }),
+      main: (api) => {
+        api.commands.handle('greet', () => 'hi')
+        api.events.on('selection_changed', (p) => seen.push(p))
+      },
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    await flush(40)
+    const conn = pluginConns(h)[0]
+    expect(h.scene.conns.get(conn)?.subscriptions.has('selection_changed')).toBe(false)
+    h.list = listed({ optional_granted: ['view'] })
+    await h.host.sync()
+    await vi.waitFor(() => expect(h.scene.conns.get(conn)?.subscriptions.has('selection_changed')).toBe(true))
+    emitAndPump(h, 'selection_changed', 7)
+    await vi.waitFor(() => expect(seen).toEqual([{ n: 7 }]))
+  })
+})
+
+describe('the plugin host, a plugin asking for permissions', () => {
+  let h: Harness
+  beforeEach((ctx) => {
+    requiresPreview(ctx, 'plugins')
+    setBusy(null)
+  })
+  afterEach(() => {
+    h?.host.dispose()
+    vi.useRealTimers()
+  })
+
+  type Asked = { result?: { granted: string[] }; error?: { code: number; data?: { refusal?: string; detail?: { permissions?: string[] } } } }
+  /** The plugin's own request, from its realm, as the runtime sends it. */
+  let ask: (params: unknown) => Promise<Asked>
+
+  /** A decider that answers what `answer` says, after `wait`, and grants
+   *  in the store when it says yes. */
+  function decider(answer: () => 'granted' | 'declined', wait: Promise<void> = Promise.resolve()) {
+    const asked: [string, string[]][] = []
+    return {
+      asked,
+      grants: {
+        async decide(id: string, add: string[]) {
+          asked.push([id, add])
+          await wait
+          const outcome = answer()
+          if (outcome === 'granted') {
+            const row = h.list[0] as Extract<Listed, { kind: 'installed' }>
+            h.list = [{ ...row, installed: { ...row.installed, optional_granted: [...row.installed.optional_granted, ...add] } }]
+          }
+          return outcome
+        },
+      },
+    }
+  }
+
+  async function start(opts: Partial<HarnessOpts> & { optional_granted?: string[] } = {}): Promise<void> {
+    h = harness({
+      list: listed({ optional_granted: opts.optional_granted ?? [] }, { optionalPermissions: ['model.write', 'view', 'network:api.example.com'] }),
+      main: (hew) => {
+        hew.commands.handle('greet', () => 'hi')
+        ask = async (params) => {
+          try {
+            return { result: (await hew.api.permissions.request(params as never)) as { granted: string[] } }
+          } catch (e) {
+            const err = e as { code: number; data?: NonNullable<Asked['error']>['data'] }
+            return { error: { code: err.code, data: err.data } }
+          }
+        }
+      },
+      ...opts,
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+  }
+
+  it('refuses in order: not on Shop, bad params, not requestable, no act by the person', async () => {
+    const d = decider(() => 'granted')
+    await start({ platform: 'shop', grants: d.grants })
+    h.host.noteUserActivation(ID)
+    expect((await ask({ nonsense: true })).error?.data?.refusal).toBe('not_available_in_shop')
+    h.host.dispose()
+    await start({ grants: d.grants })
+    expect((await ask({ permissions: [] })).error?.code).toBe(-32602)
+    expect((await ask({ permissions: ['view'], extra: 1 })).error?.code).toBe(-32602)
+    const notRequestable = await ask({ permissions: ['view', 'files'] })
+    expect(notRequestable.error?.data?.refusal).toBe('permission_not_requestable')
+    expect(notRequestable.error?.data?.detail?.permissions).toEqual(['files'])
+    expect((await ask({ permissions: ['view'] })).error?.data?.refusal).toBe('no_user_activation')
+    expect(d.asked).toEqual([])
+  })
+
+  it('a person granting answers with the names now held, applied to the running realm first', async () => {
+    const d = decider(() => 'granted')
+    await start({ grants: d.grants })
+    h.host.noteUserActivation(ID)
+    const answer = await ask({ permissions: ['view'], reason: 'To follow your selection.' })
+    expect(answer.result).toEqual({ granted: ['view'] })
+    expect(d.asked).toEqual([[ID, ['view']]])
+    expect(sent(h, 0, 'grant')).toHaveLength(1)
+    expect(h.scene.conns.get(pluginConns(h)[0])?.permissions).toEqual(['model.read', 'view'])
+    expect(h.realms).toHaveLength(1)
+  })
+
+  it('a grant whose store read fails once reads the store again, answers the names granted, and closes the request', async () => {
+    const d = decider(() => 'granted')
+    let failNext = false
+    const grants: NonNullable<HostEnv['grants']> = {
+      async decide(id, add) {
+        const outcome = await d.grants.decide(id, add)
+        failNext = true
+        return outcome
+      },
+    }
+    await start({ grants })
+    const read = h.env.store.list
+    h.env.store.list = async () => {
+      if (failNext) {
+        failNext = false
+        throw new PluginError('io', 'the disk is busy')
+      }
+      return read()
+    }
+    h.host.noteUserActivation(ID)
+    expect((await ask({ permissions: ['view'] })).result).toEqual({ granted: ['view'] })
+    expect(h.logs.some((l) => l.includes('could not be read'))).toBe(true)
+    expect(sent(h, 0, 'grant')).toHaveLength(1)
+    // The request closed: another may be made.
+    h.host.noteUserActivation(ID)
+    expect((await ask({ permissions: ['model.write'] })).result).toEqual({ granted: ['model.write'] })
+  })
+
+  it('the act by the person is spent by one request and lasts only a few seconds', async () => {
+    const d = decider(() => 'granted')
+    await start({ grants: d.grants, timings: { activationMs: 50 } })
+    h.host.noteUserActivation(ID)
+    await new Promise((r) => setTimeout(r, 80))
+    expect((await ask({ permissions: ['view'] })).error?.data?.refusal).toBe('no_user_activation')
+    h.host.noteUserActivation(ID)
+    expect((await ask({ permissions: ['view'] })).result).toEqual({ granted: ['view'] })
+    expect((await ask({ permissions: ['model.write'] })).error?.data?.refusal).toBe('no_user_activation')
+    // An act for another plugin does not count.
+    h.host.noteUserActivation('com.example.other')
+    expect((await ask({ permissions: ['model.write'] })).error?.data?.refusal).toBe('no_user_activation')
+  })
+
+  it('names already held are granted without asking, and need no act', async () => {
+    const d = decider(() => 'declined')
+    await start({ grants: d.grants, optional_granted: ['view'] })
+    expect((await ask({ permissions: ['view'] })).result).toEqual({ granted: ['view'] })
+    expect(d.asked).toEqual([])
+  })
+
+  it('a no is refused request_declined, and so is every request for a minute after', async () => {
+    const d = decider(() => 'declined')
+    await start({ grants: d.grants, timings: { declineMs: 100 } })
+    h.host.noteUserActivation(ID)
+    expect((await ask({ permissions: ['view'] })).error?.data?.refusal).toBe('request_declined')
+    h.host.noteUserActivation(ID)
+    expect((await ask({ permissions: ['view'] })).error?.data?.refusal).toBe('request_declined')
+    expect(d.asked).toHaveLength(1)
+    await new Promise((r) => setTimeout(r, 120))
+    h.host.noteUserActivation(ID)
+    expect((await ask({ permissions: ['view'] })).error?.data?.refusal).toBe('request_declined')
+    expect(d.asked).toHaveLength(2)
+  })
+
+  it('one request at a time: a second while the first waits is request_pending', async () => {
+    const wait = gate()
+    const d = decider(() => 'granted', wait.promise)
+    await start({ grants: d.grants })
+    h.host.noteUserActivation(ID)
+    const first = ask({ permissions: ['view'] })
+    await vi.waitFor(() => expect(d.asked).toHaveLength(1))
+    h.host.noteUserActivation(ID)
+    expect((await ask({ permissions: ['model.write'] })).error?.data?.refusal).toBe('request_pending')
+    wait.open()
+    expect((await first).result).toEqual({ granted: ['view'] })
+  })
+
+  it("is not answered for anyone but the plugin's own realm", async () => {
+    const d = decider(() => 'granted')
+    await start({ grants: d.grants })
+    h.host.noteUserActivation(ID)
+    const reply = await call(h, 'hew.permissions.request', { permissions: ['view'] })
+    expect(reply.error?.data?.refusal).toBe('host_capability_missing')
+    expect(d.asked).toEqual([])
+  })
+
+  it('stops the clock of the command it was asked in while the person decides', async () => {
+    const wait = gate()
+    const d = decider(() => 'granted', wait.promise)
+    let hewApi!: Hew
+    h = harness({
+      list: listed({ optional_granted: [] }, { optionalPermissions: ['view'], contributes: { commands: [{ id: 'greet', class: 'read_only', summary: 'Greets.', timeout_ms: 1_000 }] } }),
+      grants: d.grants,
+      main: (hew) => {
+        hewApi = hew
+        hew.commands.handle('greet', async (p) => {
+          if ((p as { ask?: boolean }).ask !== true) return 'running'
+          return (await hew.api.permissions.request({ permissions: ['view'] })) as { granted: string[] }
+        })
+      },
+    })
+    await h.host.sync()
+    // Started first: the person's act counts only for a running plugin.
+    await call(h, `${ID}.greet`)
+    h.host.noteUserActivation(ID)
+    const reply = call(h, `${ID}.greet`, { ask: true })
+    await vi.waitFor(() => expect(d.asked).toHaveLength(1))
+    await new Promise((r) => setTimeout(r, 1_300))
+    expect(h.host.states()[ID]).toBe('activated')
+    wait.open()
+    expect((await reply).result).toEqual({ granted: ['view'] })
+    expect(hewApi.plugin).not.toBeNull()
+  })
+
+  it('refuses a request nobody answers in time, and the clock runs again', async () => {
+    const d = decider(() => 'granted', new Promise(() => {}))
+    h = harness({
+      list: listed({ optional_granted: [] }, { optionalPermissions: ['view'], contributes: { commands: [{ id: 'greet', class: 'read_only', summary: 'Greets.', timeout_ms: 1_000 }] } }),
+      grants: d.grants,
+      timings: { decisionMs: 100 },
+      main: (hew) => {
+        hew.commands.handle('greet', async (p) => {
+          if ((p as { ask?: boolean }).ask !== true) return 'running'
+          try {
+            await hew.api.permissions.request({ permissions: ['view'] })
+            return 'granted'
+          } catch (e) {
+            return (e as { refusal?: { refusal?: string } }).refusal?.refusal ?? 'refused'
+          }
+        })
+      },
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    h.host.noteUserActivation(ID)
+    expect((await call(h, `${ID}.greet`, { ask: true })).result).toBe('request_declined')
+  })
+
+  it('a decision that comes after the plugin stopped answers nobody and leaves nothing open', async () => {
+    const wait = gate()
+    const d = decider(() => 'granted', wait.promise)
+    await start({ grants: d.grants })
+    h.host.noteUserActivation(ID)
+    void ask({ permissions: ['view'] })
+    await vi.waitFor(() => expect(d.asked).toHaveLength(1))
+    h.realms[0].send({ t: 'error', message: 'boom' })
+    await flush(20)
+    expect(h.host.states()[ID]).toBe('crashed')
+    const before = h.realms[0].toRealm.length
+    wait.open()
+    await flush(60)
+    expect(h.realms[0].toRealm.length).toBe(before)
+    expect(pluginConns(h)).toEqual([])
+  })
+})
+
+describe('the plugin host, starting a plugin on an event', () => {
+  let h: Harness
+  beforeEach((ctx) => {
+    requiresPreview(ctx, 'plugins')
+    setBusy(null)
+  })
+  afterEach(() => h?.host.dispose())
+
+  /** A plugin that records the events it hears. */
+  const recording = (seen: string[]): Main => (hew) => {
+    hew.commands.handle('greet', () => 'hi')
+    hew.events.on('document_changed', (p) => seen.push(`document_changed:${(p as { n: number }).n}`))
+  }
+
+  it('keeps a listener for a plugin that lists events, and none for one that does not', async () => {
+    h = harness({ list: listed({}, onEvent()) })
+    await h.host.sync()
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    const [conn] = pluginConns(h)
+    const methods = h.scene.api_dispatch.mock.calls.filter(([c]) => c === conn).map(([, f]) => (JSON.parse(f) as { method: string }).method)
+    expect(methods).toEqual(['hew.meta.hello', 'hew.doc.attach', 'hew.event.subscribe'])
+    expect(h.realms).toHaveLength(0)
+    h.host.dispose()
+    h = harness()
+    await h.host.sync()
+    await flush(20)
+    expect(h.host.listening()).toEqual([])
+    expect(pluginConns(h)).toEqual([])
+  })
+
+  it('starts the plugin on the first event, hands it the event, and closes the listener', async () => {
+    const seen: string[] = []
+    h = harness({ list: listed({}, onEvent()), main: recording(seen) })
+    await h.host.sync()
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    emitAndPump(h, 'document_changed', 1)
+    await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+    expect((h.realms[0].toRealm[0] as { activation: string }).activation).toBe('event')
+    await vi.waitFor(() => expect(seen).toEqual(['document_changed:1']))
+    expect(h.host.listening()).toEqual([])
+    expect(pluginConns(h)).toHaveLength(1)
+  })
+
+  it('loses no event and delivers none twice across the handover', async () => {
+    const seen: string[] = []
+    let duringOpen = (): void => {}
+    h = harness({ list: listed({}, onEvent()), main: recording(seen), beforeOpen: async () => duringOpen() })
+    await h.host.sync()
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    // 1 starts it; 2 comes before the handover (to the listener); 3 after
+    // the handover and before the realm is ready (on its own connection);
+    // 4 once it runs.
+    duringOpen = () => emitAndPump(h, 'document_changed', 3)
+    emitAndPump(h, 'document_changed', 1)
+    emitAndPump(h, 'document_changed', 2)
+    await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+    emitAndPump(h, 'document_changed', 4)
+    await vi.waitFor(() => expect(seen).toHaveLength(4))
+    await flush(40)
+    expect(seen).toEqual(['document_changed:1', 'document_changed:2', 'document_changed:3', 'document_changed:4'])
+    expect(eventsSent(h, 0)).toEqual(['document_changed:1', 'document_changed:2', 'document_changed:3', 'document_changed:4'])
+    expect(pluginConns(h)).toHaveLength(1)
+  })
+
+  it('holds at most 64 events while the plugin starts, the newest, and logs the rest once', async () => {
+    const seen: string[] = []
+    let duringOpen = (): void => {}
+    h = harness({ list: listed({}, onEvent()), main: recording(seen), beforeOpen: async () => duringOpen() })
+    await h.host.sync()
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    duringOpen = () => {
+      for (let n = 2; n <= 70; n++) emitAndPump(h, 'document_changed', n)
+    }
+    emitAndPump(h, 'document_changed', 1)
+    await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+    await vi.waitFor(() => expect(seen).toHaveLength(64))
+    expect(seen[0]).toBe('document_changed:7')
+    expect(seen.at(-1)).toBe('document_changed:70')
+    expect(h.logs.filter((l) => l.includes('were dropped'))).toEqual([expect.stringContaining('6 events')])
+  })
+
+  it('does not listen for events its grant cannot receive', async () => {
+    h = harness({ list: listed({}, onEvent(['selection_changed'])) })
+    await h.host.sync()
+    await flush(40)
+    expect(h.host.listening()).toEqual([])
+    expect(pluginConns(h)).toEqual([])
+  })
+
+  it('one start for an event and a command that come together', async () => {
+    h = harness({ list: listed({}, onEvent()) })
+    await h.host.sync()
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    emitAndPump(h, 'document_changed', 1)
+    const reply = call(h, `${ID}.greet`)
+    expect((await reply).result).toEqual({ greeting: 'Hello, Hew!' })
+    expect(h.realms).toHaveLength(1)
+    expect(pluginConns(h)).toHaveLength(1)
+  })
+
+  it('a command start also closes the listener, subscribing the realm to its events', async () => {
+    const seen: string[] = []
+    h = harness({ list: listed({}, onEvent()), main: recording(seen) })
+    await h.host.sync()
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    await call(h, `${ID}.greet`)
+    expect(h.host.listening()).toEqual([])
+    expect(pluginConns(h)).toHaveLength(1)
+    emitAndPump(h, 'document_changed', 5)
+    await vi.waitFor(() => expect(seen).toEqual(['document_changed:5']))
+  })
+
+  it('listens again after an idle unload, and leaves at least the least time between two event starts', async () => {
+    const seen: string[] = []
+    h = harness({ list: listed({}, onEvent()), main: recording(seen), timings: { pingMs: 10, idleMs: 40, drainMs: 100, eventStartMs: 400 } })
+    await h.host.sync()
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    const first = Date.now()
+    emitAndPump(h, 'document_changed', 1)
+    // It starts, and (quiet) unloads again within a few pings.
+    await vi.waitFor(() => expect(sent(h, 0, 'unload')).toEqual([{ t: 'unload', reason: 'idle' }]))
+    await vi.waitFor(() => expect(h.host.states()[ID]).toBe('enabled'))
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    expect(pluginConns(h)).toHaveLength(1)
+    emitAndPump(h, 'document_changed', 2)
+    await flush(20)
+    expect(h.realms).toHaveLength(1)
+    await vi.waitFor(() => expect(h.realms).toHaveLength(2), { timeout: 2_000 })
+    expect(Date.now() - first).toBeGreaterThanOrEqual(390)
+    expect((h.realms[1].toRealm[0] as { activation: string }).activation).toBe('event')
+    await vi.waitFor(() => expect(eventsSent(h, 1)).toEqual(['document_changed:2']))
+  })
+
+  it('waits twice as long after a start that failed', async () => {
+    const reads: number[] = []
+    let fail = true
+    h = harness({
+      list: listed({}, onEvent()),
+      timings: { eventStartMs: 100, eventStartMaxMs: 1_000, startMs: 30 },
+      readFile: async (id) => {
+        reads.push(Date.now())
+        // The document is held by a command that is not this plugin's, for
+        // longer than the start may wait: the start fails, not as a crash.
+        if (fail) h.scene.compounds.push({ kernel: 1n, forward: 999 })
+        return new TextEncoder().encode(id).buffer as ArrayBuffer
+      },
+    })
+    await h.host.sync()
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    emitAndPump(h, 'document_changed', 1)
+    await vi.waitFor(() => expect(h.logs.some((l) => l.includes('did not start'))).toBe(true))
+    expect(h.host.states()[ID]).toBe('enabled')
+    fail = false
+    h.scene.compounds.splice(0)
+    setBusy(null)
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]), { timeout: 2_000 })
+    emitAndPump(h, 'document_changed', 2)
+    await vi.waitFor(() => expect(reads).toHaveLength(2), { timeout: 2_000 })
+    expect(reads[1] - reads[0]).toBeGreaterThanOrEqual(190)
+    await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+  })
+
+  it('closes the listener when the plugin is turned off, stopped, blocked, uninstalled, or the window closes', async () => {
+    const cases: [string, (h: Harness) => Promise<void>][] = [
+      ['off', async (x) => { x.list = listed({ enabled: false }, onEvent()); await x.host.sync() }],
+      ['uninstalled', async (x) => { x.list = []; await x.host.sync() }],
+      ['blocked', async (x) => { x.list = listed({ needs_consent: true }, onEvent()); await x.host.sync() }],
+      ['window closed', async (x) => x.host.dispose()],
+    ]
+    for (const [name, end] of cases) {
+      h = harness({ list: listed({}, onEvent()) })
+      await h.host.sync()
+      await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+      await end(h)
+      await flush(40)
+      expect(pluginConns(h), name).toEqual([])
+      expect(h.host.listening(), name).toEqual([])
+      h.host.dispose()
+    }
+    // Stopped: the plugin crashed, and no listener comes back for it.
+    h = harness({ list: listed({}, onEvent()) })
+    await h.host.sync()
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    emitAndPump(h, 'document_changed', 1)
+    await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+    h.realms[0].send({ t: 'error', message: 'boom' })
+    await flush(40)
+    expect(h.host.states()[ID]).toBe('crashed')
+    expect(pluginConns(h)).toEqual([])
+    expect(h.host.listening()).toEqual([])
+  })
+
+  it('a grant widened while the listener opens applies once it is ready: it listens for what the wider grant receives', async () => {
+    const events = onEvent(['document_changed', 'selection_changed'])
+    h = harness({ list: listed({ optional_granted: [] }, events), timings: { startMs: 30 } })
+    // The document is held: the listener's opening calls wait.
+    h.scene.compounds.push({ kernel: 1n, forward: 999 })
+    await h.host.sync()
+    await flush(20)
+    expect(h.host.listening()).toEqual([])
+    h.list = listed({ optional_granted: ['view'] }, events)
+    await h.host.sync()
+    h.scene.compounds.splice(0)
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    const [conn] = pluginConns(h)
+    await vi.waitFor(() => expect(h.scene.conns.get(conn)?.subscriptions.has('selection_changed')).toBe(true))
+    expect(h.scene.conns.get(conn)?.permissions).toEqual(['model.read', 'view'])
+    emitAndPump(h, 'selection_changed', 1)
+    await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+  })
+
+  it('a listener whose opening grant receives none of its events, widened while it opened, listens instead of closing', async () => {
+    const events = onEvent(['selection_changed'])
+    h = harness({ list: listed({ optional_granted: [] }, events), timings: { startMs: 30 } })
+    h.scene.compounds.push({ kernel: 1n, forward: 999 })
+    await h.host.sync()
+    await flush(20)
+    h.list = listed({ optional_granted: ['view'] }, events)
+    await h.host.sync()
+    h.scene.compounds.splice(0)
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    expect(h.scene.conns.get(pluginConns(h)[0])?.subscriptions.has('selection_changed')).toBe(true)
+  })
+
+  it('a start that takes over from a listener whose widened subscribe is still waiting subscribes the realm to what the wider grant receives', async () => {
+    const events = onEvent(['document_changed', 'selection_changed'])
+    h = harness({ list: listed({ optional_granted: [] }, events), timings: { startMs: 30 } })
+    await h.host.sync()
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    const [listenerConn] = pluginConns(h)
+    // The listener's widened subscribe is answered busy until let go.
+    let holdWiden = true
+    const real = h.scene.api_dispatch.getMockImplementation()!
+    h.scene.api_dispatch.mockImplementation((conn: number, frame: string) => {
+      const m = JSON.parse(frame) as { id?: unknown; method?: string }
+      if (holdWiden && conn === listenerConn && m.method === 'hew.event.subscribe')
+        return JSON.stringify({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: 'busy', data: { refusal: 'document_busy' } } })
+      return real(conn, frame)
+    })
+    h.list = listed({ optional_granted: ['view'] }, events)
+    await h.host.sync()
+    await flush(20)
+    expect(h.scene.conns.get(listenerConn)?.subscriptions.has('selection_changed')).toBe(false)
+    emitAndPump(h, 'document_changed', 1)
+    await vi.waitFor(() => expect(h.host.states()[ID]).toBe('activated'))
+    holdWiden = false
+    await new Promise((r) => setTimeout(r, 80))
+    const [realmConn] = pluginConns(h)
+    expect(realmConn).not.toBe(listenerConn)
+    expect(h.scene.conns.get(realmConn)?.subscriptions.has('selection_changed')).toBe(true)
+  })
+
+  /** Answers `document_busy` to the listener's calls of `method` while
+   *  `hold()` says so. The listener's connection is the plugin's only one
+   *  when the first call is made. */
+  function holdListener(method: string, hold: () => boolean): { conn: () => number | null } {
+    let listenerConn: number | null = null
+    const real = h.scene.api_dispatch.getMockImplementation()!
+    h.scene.api_dispatch.mockImplementation((conn: number, frame: string) => {
+      const m = JSON.parse(frame) as { id?: unknown; method?: string }
+      if (listenerConn === null) listenerConn = pluginConns(h)[0] ?? null
+      if (hold() && conn === listenerConn && m.method === method)
+        return JSON.stringify({ jsonrpc: '2.0', id: m.id, error: { code: -32000, message: 'busy', data: { refusal: 'document_busy' } } })
+      return real(conn, frame)
+    })
+    return { conn: () => listenerConn }
+  }
+
+  /** The `hew.event.subscribe` calls made on `conn`, by their events. */
+  const subscribes = (conn: number): string[][] =>
+    h.scene.api_dispatch.mock.calls
+      .filter(([c, f]) => c === conn && (JSON.parse(f) as { method: string }).method === 'hew.event.subscribe')
+      .map(([, f]) => (JSON.parse(f) as { params: { events: string[] } }).params.events)
+
+  it('a start that takes over from a listener still opening subscribes the realm to its starting events, and each event comes once', async () => {
+    h = harness({ list: listed({}, onEvent()), timings: { startMs: 30 } })
+    let holding = true
+    const held = holdListener('hew.meta.hello', () => holding)
+    await h.host.sync()
+    await flush(20)
+    const listenerConn = held.conn()
+    expect(listenerConn).not.toBeNull()
+    expect(h.host.listening()).toEqual([])
+    await call(h, `${ID}.greet`)
+    holding = false
+    await new Promise((r) => setTimeout(r, 80))
+    const conns = pluginConns(h)
+    expect(conns).toHaveLength(1)
+    const [realmConn] = conns
+    expect(realmConn).not.toBe(listenerConn)
+    expect(subscribes(realmConn)).toEqual([['document_changed']])
+    expect(h.scene.conns.get(realmConn)?.subscriptions.has('document_changed')).toBe(true)
+    expect(h.host.listening()).toEqual([])
+    emitAndPump(h, 'document_changed', 7)
+    await vi.waitFor(() => expect(eventsSent(h, 0)).toEqual(['document_changed:7']))
+    await flush(40)
+    expect(eventsSent(h, 0)).toEqual(['document_changed:7'])
+  })
+
+  it('a start that takes over from a listener that receives none yet, its widened subscribe waiting, subscribes the realm to every starting event', async () => {
+    const events = onEvent(['selection_changed'])
+    h = harness({ list: listed({ optional_granted: [] }, events), timings: { startMs: 30 } })
+    // The opening grant receives none: the listener is ready with no names
+    // once the widened grant arrives while it opens, and its widened
+    // subscribe is answered busy until let go.
+    h.scene.compounds.push({ kernel: 1n, forward: 999 })
+    let holding = false
+    const held = holdListener('hew.event.subscribe', () => holding)
+    await h.host.sync()
+    await flush(20)
+    h.list = listed({ optional_granted: ['view'] }, events)
+    holding = true
+    await h.host.sync()
+    h.scene.compounds.splice(0)
+    await flush(40)
+    const listenerConn = held.conn()!
+    expect(h.scene.conns.get(listenerConn)?.subscriptions.has('selection_changed') ?? false).toBe(false)
+    await call(h, `${ID}.greet`)
+    holding = false
+    await new Promise((r) => setTimeout(r, 80))
+    const [realmConn] = pluginConns(h)
+    expect(pluginConns(h)).toHaveLength(1)
+    expect(realmConn).not.toBe(listenerConn)
+    expect(subscribes(realmConn)).toEqual([['selection_changed']])
+    expect(h.scene.conns.get(realmConn)?.subscriptions.has('selection_changed')).toBe(true)
+    emitAndPump(h, 'selection_changed', 3)
+    await vi.waitFor(() => expect(eventsSent(h, 0)).toEqual(['selection_changed:3']))
+    await flush(40)
+    expect(eventsSent(h, 0)).toEqual(['selection_changed:3'])
+  })
+
+  it('drops the events held for a start that never came when the listener closes: a later start does not get them', async () => {
+    const seen: string[] = []
+    h = harness({ list: listed({}, onEvent()), main: recording(seen), timings: { pingMs: 10, idleMs: 40, drainMs: 100, eventStartMs: 60_000 } })
+    await h.host.sync()
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    emitAndPump(h, 'document_changed', 1)
+    await vi.waitFor(() => expect(sent(h, 0, 'unload')).toHaveLength(1))
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    // Within the least time between two event starts: held, the start waits.
+    emitAndPump(h, 'document_changed', 2)
+    await flush(20)
+    expect(h.realms).toHaveLength(1)
+    // Blocked, then let run again: the waiting start is gone, and so is
+    // what it held.
+    h.list = listed({ needs_consent: true }, onEvent())
+    await h.host.sync()
+    h.list = listed({}, onEvent())
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    await flush(40)
+    expect(h.realms).toHaveLength(2)
+    expect(eventsSent(h, 1)).toEqual([])
+  })
+
+  it('on the desktop, waits for the document id with one wait per plugin however often it syncs, and a teardown ends it', async () => {
+    vi.useFakeTimers()
+    setPumpDocumentId(null)
+    try {
+      h = harness({ platform: 'desktop', list: listed({}, onEvent()) })
+      for (let i = 0; i < 5; i++) await h.host.sync()
+      expect(vi.getTimerCount()).toBe(1)
+      await vi.advanceTimersByTimeAsync(1_000)
+      for (let i = 0; i < 3; i++) await h.host.sync()
+      expect(vi.getTimerCount()).toBe(1)
+      // Turned off: the wait ends at its next tick, and opens nothing.
+      h.list = listed({ enabled: false }, onEvent())
+      await h.host.sync()
+      setPumpDocumentId('doc_7')
+      await vi.advanceTimersByTimeAsync(300)
+      expect(vi.getTimerCount()).toBe(0)
+      expect(pluginConns(h)).toEqual([])
+      // On again, with an id: one listener.
+      h.list = listed({}, onEvent())
+      await h.host.sync()
+      await vi.advanceTimersByTimeAsync(10)
+      expect(h.host.listening()).toEqual([ID])
+      expect(pluginConns(h)).toHaveLength(1)
+    } finally {
+      setPumpDocumentId(null)
+      vi.useRealTimers()
+    }
+  })
+
+  it('on Shop, builds every grant as a viewer one', async () => {
+    h = harness({ platform: 'shop', list: listed({}, onEvent()) })
+    await h.host.sync()
+    await vi.waitFor(() => expect(h.host.listening()).toEqual([ID]))
+    await call(h, `${ID}.greet`)
+    expect(h.viewerCalls.length).toBeGreaterThanOrEqual(2)
+    expect(h.viewerCalls.every((v) => v)).toBe(true)
+    expect(h.scene.conns.get(pluginConns(h)[0])?.permissions).toEqual(['model.read'])
+  })
+})
+
+// ------------------------------------------------- per-document storage
+
+const D1 = '11111111-1111-4111-8111-111111111111'
+const D2 = '22222222-2222-4222-8222-222222222222'
+
+describe('the plugin host, storage for the document', () => {
+  let h: Harness
+  beforeEach((ctx) => {
+    requiresPreview(ctx, 'plugins')
+    setBusy(null)
+  })
+  afterEach(() => h?.host.dispose())
+
+  /** A harness whose plugin hands its `hew` out, started. */
+  async function started(opts: Partial<HarnessOpts> = {}): Promise<{ hew: Hew; docEvents: (string | null)[] }> {
+    let hew!: Hew
+    const docEvents: (string | null)[] = []
+    h = harness({
+      main: (api) => {
+        hew = api
+        api.commands.handle('greet', () => 'hi')
+        api.lifecycle.on('document', (id) => docEvents.push(id))
+      },
+      ...opts,
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    return { hew, docEvents }
+  }
+  const lifecycle = async (kind: 'opened' | 'saved' | 'closed', id: string | null): Promise<void> => {
+    if (kind !== 'closed') h.scene.docId = id ?? undefined
+    h.scene.lifecycle(kind, id)
+    pumpEvents(h.scene as unknown as Scene)
+    await flush(60)
+  }
+
+  it('keeps an unsaved document in memory and writes it under the id the first save gives, before the plugin is told', async () => {
+    const { hew, docEvents } = await started()
+    expect(hew.plugin?.documentId).toBeNull()
+    expect((h.realms[0].toRealm[0] as { document_id: unknown }).document_id).toBeNull()
+    await hew.storage.document.set('a', 1)
+    await hew.storage.document.set('b', { x: 2 })
+    await expect(hew.storage.document.get('a')).resolves.toBe(1)
+    await expect(hew.storage.document.list()).resolves.toEqual(['a', 'b'])
+    expect(h.storage.docSet).not.toHaveBeenCalled()
+    // What a key under the new id already had is overwritten.
+    h.docs.set(`${ID}/${D1}`, new Map([['a', '"old"'], ['c', '3']]))
+    let atTold: string[] = []
+    hew.lifecycle.on('document', () => (atTold = [...(h.docs.get(`${ID}/${D1}`)?.keys() ?? [])].sort()))
+    await lifecycle('saved', D1)
+    await vi.waitFor(() => expect(docEvents).toEqual([D1]))
+    expect(atTold).toEqual(['a', 'b', 'c'])
+    expect(h.docs.get(`${ID}/${D1}`)).toEqual(new Map([['a', '1'], ['b', '{"x":2}'], ['c', '3']]))
+    expect(hew.plugin?.documentId).toBe(D1)
+    await expect(hew.storage.document.list()).resolves.toEqual(['a', 'b', 'c'])
+    // The plugin's own storage never saw any of it.
+    expect(h.stored.size).toBe(0)
+  })
+
+  it("follows the document: another document's data is not visible, and comes back when it is reopened", async () => {
+    const { hew } = await started({ documentId: D1 })
+    expect(hew.plugin?.documentId).toBe(D1)
+    await hew.storage.document.set('k', 'one')
+    await lifecycle('opened', D2)
+    expect(hew.plugin?.documentId).toBe(D2)
+    await expect(hew.storage.document.get('k')).resolves.toBeUndefined()
+    await hew.storage.document.set('k', 'two')
+    await lifecycle('opened', D1)
+    await expect(hew.storage.document.get('k')).resolves.toBe('one')
+    await lifecycle('opened', D2)
+    await expect(hew.storage.document.get('k')).resolves.toBe('two')
+  })
+
+  it('lands a write that is on its way when the document changes under the old id', async () => {
+    const { hew } = await started({ documentId: D1, timings: { storageDebounceMs: 200 } })
+    const write = hew.storage.document.set('k', 'mine')
+    await flush(20)
+    await lifecycle('opened', D2)
+    await write
+    expect(h.docs.get(`${ID}/${D1}`)?.get('k')).toBe('"mine"')
+    expect(h.docs.get(`${ID}/${D2}`)?.get('k')).toBeUndefined()
+  })
+
+  it('refuses document_changed, and does nothing with, a call made before another document opened and handled after', async () => {
+    const s = holdingSched()
+    const { hew } = await started({ documentId: D1, sched: s.sched })
+    expect((h.realms[0].toRealm[0] as { document_epoch: unknown }).document_epoch).toBe(0)
+    s.hold()
+    const write = hew.storage.document.set('k', 'for D1')
+    const read = hew.storage.document.get('k')
+    const listing = hew.storage.document.list()
+    await flush(20)
+    await lifecycle('opened', D2)
+    expect(sent(h, 0, 'document').at(-1)).toEqual({ t: 'document', document_id: D2, epoch: 1 })
+    s.release()
+    await expect(write).rejects.toMatchObject({ name: 'document_changed' })
+    await expect(read).rejects.toMatchObject({ name: 'document_changed' })
+    await expect(listing).rejects.toMatchObject({ name: 'document_changed' })
+    await flush(40)
+    expect(h.docs.get(`${ID}/${D2}`)?.get('k')).toBeUndefined()
+    expect(h.docs.get(`${ID}/${D1}`)?.get('k')).toBeUndefined()
+    expect(h.host.states()[ID]).toBe('activated')
+    // A call made now is for the new document, and lands there.
+    await hew.storage.document.set('k', 'for D2')
+    expect(h.docs.get(`${ID}/${D2}`)?.get('k')).toBe('"for D2"')
+    // The plugin's own storage knows no documents: never refused so.
+    await hew.storage.set('mine', 1)
+    expect(h.stored.get('mine')).toBe('1')
+  })
+
+  it('keeps the epoch at the first save: a call made before the save gave the document its id lands under that id', async () => {
+    const s = holdingSched()
+    const { hew } = await started({ sched: s.sched })
+    s.hold()
+    const write = hew.storage.document.set('k', 'mine')
+    await flush(20)
+    await lifecycle('saved', D1)
+    s.release()
+    await write
+    await vi.waitFor(() => expect(h.docs.get(`${ID}/${D1}`)?.get('k')).toBe('"mine"'))
+    expect(sent(h, 0, 'document').at(-1)).toEqual({ t: 'document', document_id: D1, epoch: 0 })
+    // A later save under another id is another document for storage.
+    await lifecycle('saved', D2)
+    expect(sent(h, 0, 'document').at(-1)).toEqual({ t: 'document', document_id: D2, epoch: 1 })
+  })
+
+  it('a document closed with none opened yet (a .skp import) binds storage to no document: writes on their way land under the old id, later calls never reach it', async () => {
+    const s = holdingSched()
+    const { hew, docEvents } = await started({ documentId: D1, sched: s.sched, timings: { storageDebounceMs: 200 } })
+    await hew.storage.document.set('k', 'one')
+    const write = hew.storage.document.set('w', 'on its way')
+    await flush(20)
+    s.hold()
+    const stale = hew.storage.document.get('k')
+    await flush(20)
+    await lifecycle('closed', null)
+    await write
+    expect(h.docs.get(`${ID}/${D1}`)?.get('w')).toBe('"on its way"')
+    expect(sent(h, 0, 'document').at(-1)).toEqual({ t: 'document', document_id: null, epoch: 1 })
+    s.release()
+    // Made before the close, handled after: refused, nothing read.
+    await expect(stale).rejects.toMatchObject({ name: 'document_changed' })
+    await vi.waitFor(() => expect(docEvents).toEqual([null]))
+    expect(hew.plugin?.documentId).toBeNull()
+    // Made after: the closed document's data is not seen and not written.
+    await expect(hew.storage.document.get('k')).resolves.toBeUndefined()
+    await hew.storage.document.set('k', 'importing')
+    await flush(40)
+    expect(h.docs.get(`${ID}/${D1}`)?.get('k')).toBe('"one"')
+    // The import ends: the throwaway session is gone with it.
+    await lifecycle('opened', D2)
+    expect(sent(h, 0, 'document').at(-1)).toEqual({ t: 'document', document_id: D2, epoch: 2 })
+    await expect(hew.storage.document.get('k')).resolves.toBeUndefined()
+    expect(h.docs.get(`${ID}/${D2}`)?.get('k')).toBeUndefined()
+  })
+
+  it('a save after a close with none opened never carries what the throwaway session held to the saved id', async () => {
+    const { hew, docEvents } = await started({ documentId: D1 })
+    await hew.storage.document.set('k', 'one')
+    await lifecycle('closed', null)
+    await vi.waitFor(() => expect(docEvents).toEqual([null]))
+    // Written in the gap: held by the throwaway session only.
+    await hew.storage.document.set('gap', 'importing')
+    await expect(hew.storage.document.get('gap')).resolves.toBe('importing')
+    await lifecycle('saved', D2)
+    await vi.waitFor(() => expect(docEvents).toEqual([null, D2]))
+    // Another document for storage: the epoch moves on.
+    expect(sent(h, 0, 'document').at(-1)).toEqual({ t: 'document', document_id: D2, epoch: 2 })
+    await flush(40)
+    expect(h.docs.get(`${ID}/${D2}`)?.has('gap') ?? false).toBe(false)
+    await expect(hew.storage.document.list()).resolves.toEqual([])
+    expect(h.docs.get(`${ID}/${D1}`)?.has('gap') ?? false).toBe(false)
+    expect(h.docs.get(`${ID}/${D1}`)?.get('k')).toBe('"one"')
+  })
+
+  it('the first save of a new document opened after a close still carries its data to the id the save gives', async () => {
+    const { hew } = await started({ documentId: D1 })
+    await lifecycle('closed', null)
+    await hew.storage.document.set('gap', 'dropped')
+    // A new, never-saved document: not the throwaway session.
+    await lifecycle('opened', null)
+    await hew.storage.document.set('k', 'new')
+    await lifecycle('saved', D2)
+    await vi.waitFor(() => expect(h.docs.get(`${ID}/${D2}`)?.get('k')).toBe('"new"'))
+    expect(h.docs.get(`${ID}/${D2}`)?.has('gap')).toBe(false)
+    // The first save keeps the epoch the open set.
+    expect(sent(h, 0, 'document').at(-1)).toEqual({ t: 'document', document_id: D2, epoch: 2 })
+  })
+
+  it('an ordinary open (closed, then opened, in one drain) tells the realm once, of the new document', async () => {
+    const { hew, docEvents } = await started({ documentId: D1 })
+    await hew.storage.document.set('k', 'one')
+    const told = sent(h, 0, 'document').length
+    h.scene.docId = D2
+    h.scene.lifecycle('closed', null)
+    h.scene.lifecycle('opened', D2)
+    pumpEvents(h.scene as unknown as Scene)
+    await flush(60)
+    expect(sent(h, 0, 'document').slice(told)).toEqual([{ t: 'document', document_id: D2, epoch: 2 }])
+    expect(docEvents).toEqual([D2])
+    await expect(hew.storage.document.get('k')).resolves.toBeUndefined()
+    await hew.storage.document.set('k', 'two')
+    expect(h.docs.get(`${ID}/${D2}`)?.get('k')).toBe('"two"')
+    expect(h.docs.get(`${ID}/${D1}`)?.get('k')).toBe('"one"')
+  })
+
+  it('a document opened with no id (a format with no place for one) starts empty', async () => {
+    const { hew } = await started()
+    await hew.storage.document.set('k', 1)
+    await lifecycle('opened', null)
+    await expect(hew.storage.document.list()).resolves.toEqual([])
+    await expect(hew.storage.document.get('k')).resolves.toBeUndefined()
+  })
+
+  it('refuses an unsaved document past 5 MiB storage_quota', async () => {
+    const { hew } = await started()
+    const big = 'x'.repeat(999_000)
+    for (let i = 0; i < 5; i++) await hew.storage.document.set(`k${i}`, big)
+    await expect(hew.storage.document.set('k5', big)).rejects.toMatchObject({ name: 'storage_quota' })
+    await hew.storage.document.delete('k0')
+    await expect(hew.storage.document.set('k5', big)).resolves.toBeUndefined()
+  })
+
+  it('keeps carried data that could not be written, reads it, and writes it with the next write', async () => {
+    let failing = true
+    const { hew } = await started({ docSetFails: () => failing })
+    await hew.storage.document.set('carried', 1)
+    await lifecycle('saved', D1)
+    await vi.waitFor(() => expect(h.logs.some((l) => l.includes('tried again'))).toBe(true))
+    expect(h.docs.get(`${ID}/${D1}`)?.get('carried')).toBeUndefined()
+    await expect(hew.storage.document.get('carried')).resolves.toBe(1)
+    await expect(hew.storage.document.list()).resolves.toEqual(['carried'])
+    failing = false
+    await hew.storage.document.set('next', 2)
+    expect(h.docs.get(`${ID}/${D1}`)).toEqual(new Map([['carried', '1'], ['next', '2']]))
+  })
+
+  it('lists document keys in code-point order before the first save, after it, and while carried data waits', async () => {
+    // U+FF01 sorts before U+1F600 by code point; UTF-16 order puts the
+    // emoji's surrogates (U+D83D) first.
+    const order = ['\uFF01', '\u{1F600}']
+    let failing = true
+    const { hew } = await started({ docSetFails: () => failing })
+    await hew.storage.document.set('\u{1F600}', 1)
+    await hew.storage.document.set('\uFF01', 2)
+    await expect(hew.storage.document.list()).resolves.toEqual(order)
+    await lifecycle('saved', D1)
+    await vi.waitFor(() => expect(h.logs.some((l) => l.includes('tried again'))).toBe(true))
+    // Carried, not yet written: the list merges it in, in the same order.
+    await expect(hew.storage.document.list()).resolves.toEqual(order)
+    failing = false
+    await hew.storage.document.set('\uFF01', 3)
+    expect(h.docs.get(`${ID}/${D1}`)?.size).toBe(2)
+    await expect(hew.storage.document.list()).resolves.toEqual(order)
+  })
+
+  it('keeps two windows of one plugin in two documents apart, and hands a notice only to the window with that document', async () => {
+    const docs = new Map<string, Map<string, string>>()
+    const a = await started({ documentId: D1, docs })
+    const first = h
+    const b = await started({ documentId: D2, docs })
+    const second = h
+    try {
+      await a.hew.storage.document.set('k', 'a')
+      await b.hew.storage.document.set('k', 'b')
+      await expect(a.hew.storage.document.get('k')).resolves.toBe('a')
+      await expect(b.hew.storage.document.get('k')).resolves.toBe('b')
+      const seenA: string[][] = []
+      const seenB: string[][] = []
+      const pluginA: string[][] = []
+      a.hew.storage.document.onChange((k) => seenA.push(k))
+      b.hew.storage.document.onChange((k) => seenB.push(k))
+      a.hew.storage.onChange((k) => pluginA.push(k))
+      for (const x of [first, second]) x.storageChanged(ID, ['k'], 'document', D1)
+      await flush(20)
+      expect(seenA).toEqual([['k']])
+      expect(seenB).toEqual([])
+      // A document notice is never taken for the plugin's own storage.
+      expect(pluginA).toEqual([])
+    } finally {
+      first.host.dispose()
+    }
+  })
+
+  it('refuses a value with a lone surrogate storage_value_invalid in either scope, before any store sees it, and stops nothing', async () => {
+    const { hew } = await started({ documentId: D1 })
+    void hew
+    const reply = (id: number): unknown => h.realms[0].toRealm.find((m) => m.t === 'storage_reply' && m.id === id)
+    h.realms[0].send({ t: 'storage', id: 901, op: 'set', scope: 'plugin', key: 'p', value: '"\uD800"' })
+    h.realms[0].send({ t: 'storage', id: 902, op: 'set', scope: 'document', epoch: 0, key: 'd', value: '"\uDC00x"' })
+    await vi.waitFor(() => expect(reply(902)).toBeDefined())
+    expect(reply(901)).toEqual({ t: 'storage_reply', id: 901, scope: 'plugin', ok: false, error: 'storage_value_invalid' })
+    expect(reply(902)).toEqual({ t: 'storage_reply', id: 902, scope: 'document', ok: false, error: 'storage_value_invalid' })
+    await flush(40)
+    expect(h.storage.set).not.toHaveBeenCalled()
+    expect(h.storage.docSet).not.toHaveBeenCalled()
+    expect(h.stored.has('p')).toBe(false)
+    expect(h.docs.get(`${ID}/${D1}`)?.has('d') ?? false).toBe(false)
+    expect(h.host.states()[ID]).toBe('activated')
+    // A well-formed pair is a value like any other.
+    await hew.storage.set('pair', '\uD83D\uDE00')
+    expect(h.stored.get('pair')).toBe('"\uD83D\uDE00"')
+  })
+
+  it('the validator takes a storage message with no scope as the plugin\'s own', async () => {
+    const { hew } = await started({ documentId: D1 })
+    void hew
+    h.realms[0].send({ t: 'storage', id: 999, op: 'set', key: 'raw', value: '1' })
+    await vi.waitFor(() => expect(h.stored.get('raw')).toBe('1'))
+    expect(h.docs.get(`${ID}/${D1}`)?.get('raw')).toBeUndefined()
+    h.realms[0].send({ t: 'storage', id: 1000, op: 'get', scope: 'elsewhere', key: 'raw' })
+    await flush(20)
+    expect(h.host.states()[ID]).toBe('crashed')
+  })
+})
+
+// ------------------------------------------------- what the host reports
+
+describe('the plugin host, reporting states and console', () => {
+  let h: Harness
+  beforeEach((ctx) => {
+    requiresPreview(ctx, 'plugins')
+    setBusy(null)
+  })
+  afterEach(() => h?.host.dispose())
+
+  it('reports each state change once, with why', async () => {
+    const reports: [string, string, string | null][] = []
+    h = harness({ report: (id, state, reason) => reports.push([id, state, reason]), timings: { pingMs: 10, idleMs: 40, drainMs: 100 } })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    await vi.waitFor(() => expect(reports.map(([, s]) => s)).toContain('idle'))
+    await call(h, `${ID}.greet`)
+    h.realms[1].send({ t: 'error', message: 'boom' })
+    await flush(20)
+    const states = reports.map(([, s]) => s)
+    expect(states.slice(0, 4)).toEqual(['enabled', 'activating', 'activated', 'idle'])
+    expect(states).toContain('crashed')
+    expect(reports.find(([, s]) => s === 'idle')![2]).toBe('idle')
+    // The report carries the kind of stop as one word. What the plugin said
+    // stays in the log and never rides along.
+    expect(reports.find(([, s]) => s === 'crashed')![2]).toBe('error')
+    // No two reports in a row are the same.
+    for (let i = 1; i < reports.length; i++) expect(reports[i]).not.toEqual(reports[i - 1])
+  })
+
+  it('reports blocked with its reason', async () => {
+    const reports: [string, string, string | null][] = []
+    h = harness({ report: (id, state, reason) => reports.push([id, state, reason]), list: listed({ needs_consent: true }) })
+    await h.host.sync()
+    expect(reports.at(-1)).toEqual([ID, 'blocked', 'needs_review'])
+  })
+
+  it('hands console lines on in one batch a second, and the rest when the realm stops', async () => {
+    const batches: { level: string; text: string }[][] = []
+    h = harness({ console: (_id, lines) => batches.push(lines.map(({ level, text }) => ({ level, text }))) })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    for (let i = 0; i < 3; i++) h.realms[0].send({ t: 'console', level: 'info', args: [`line ${i}`], at: 0 })
+    await flush(20)
+    expect(batches).toEqual([])
+    await vi.waitFor(() => expect(batches).toHaveLength(1), { timeout: 2_000 })
+    expect(batches[0]).toEqual([0, 1, 2].map((i) => ({ level: 'info', text: `line ${i}` })))
+    h.realms[0].send({ t: 'console', level: 'warn', args: ['last'], at: 0 })
+    await flush(20)
+    h.host.dispose()
+    expect(batches.at(-1)).toEqual([{ level: 'warn', text: 'last' }])
+  })
+
+  it('a refused report of a stop is not taken as reported: it is tried once more after a while, and not again', async () => {
+    const reports: string[] = []
+    h = harness({
+      timings: { reportRetryMs: 50 },
+      report: (_id, state) => {
+        reports.push(state)
+        return state === 'crashed' ? Promise.reject(new PluginError('report_too_often', 'too often')) : Promise.resolve()
+      },
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    h.realms[0].send({ t: 'error', message: 'boom' })
+    await flush(20)
+    const crashed = (): number => reports.filter((s) => s === 'crashed').length
+    expect(crashed()).toBe(1)
+    await vi.waitFor(() => expect(crashed()).toBe(2))
+    await new Promise((r) => setTimeout(r, 200))
+    expect(crashed()).toBe(2)
+  })
+
+  it('a report of a stop that the shell refuses and that is followed by another state is not tried again', async () => {
+    const reports: string[] = []
+    let refuse = true
+    h = harness({
+      timings: { reportRetryMs: 50 },
+      list: listed({ needs_consent: true }),
+      report: (_id, state) => {
+        reports.push(state)
+        return refuse && state === 'blocked' ? Promise.reject(new PluginError('report_too_often', 'too often')) : Promise.resolve()
+      },
+    })
+    await h.host.sync()
+    await flush(20)
+    refuse = false
+    h.list = listed()
+    await h.host.sync()
+    await new Promise((r) => setTimeout(r, 150))
+    expect(reports.slice(-2)).toEqual(['blocked', 'enabled'])
+    expect(reports.filter((s) => s === 'blocked')).toHaveLength(1)
+  })
+
+  it('a late refusal of an earlier report leaves the mark of a later accepted report of the same state', async () => {
+    const reports: string[] = []
+    let rejectFirst!: (e: unknown) => void
+    h = harness({
+      timings: { reportRetryMs: 30 },
+      list: listed({ needs_consent: true }),
+      report: (_id, state) => {
+        reports.push(state)
+        if (state === 'blocked' && rejectFirst === undefined) return new Promise((_r, reject) => (rejectFirst = reject))
+        return Promise.resolve()
+      },
+    })
+    await h.host.sync()
+    h.list = listed()
+    await h.host.sync()
+    h.list = listed({ needs_consent: true })
+    await h.host.sync()
+    await flush(20)
+    expect(reports).toEqual(['enabled', 'blocked', 'enabled', 'blocked'])
+    rejectFirst(new PluginError('report_too_often', 'too often'))
+    await new Promise((r) => setTimeout(r, 120))
+    await h.host.sync()
+    await flush(20)
+    expect(reports).toEqual(['enabled', 'blocked', 'enabled', 'blocked'])
+  })
+
+  it('a report or a console hand-on that throws stops nothing', async () => {
+    h = harness({
+      report: () => {
+        throw new Error('the shell is gone')
+      },
+      console: () => {
+        throw new Error('the shell is gone')
+      },
+    })
+    await h.host.sync()
+    expect((await call(h, `${ID}.greet`)).result).toEqual({ greeting: 'Hello, Hew!' })
+    h.realms[0].send({ t: 'console', level: 'info', args: ['x'], at: 0 })
+    await new Promise((r) => setTimeout(r, 1_100))
+    expect(h.host.states()[ID]).toBe('activated')
+    expect((await call(h, `${ID}.greet`)).result).toEqual({ greeting: 'Hello, Hew!' })
+  })
+})
+
+describe('the plugin host, a permission request and the realm that made it', () => {
+  let h: Harness
+  beforeEach((ctx) => {
+    requiresPreview(ctx, 'plugins')
+    setBusy(null)
+  })
+  afterEach(() => h?.host.dispose())
+
+  it('a request left open by a realm that was reloaded does not keep the next realm waiting', async () => {
+    let ask!: () => Promise<string>
+    const decide = vi.fn(() => new Promise<'granted' | 'declined'>(() => {}))
+    h = harness({
+      list: listed({ optional_granted: [] }, { optionalPermissions: ['view'] }),
+      grants: { decide },
+      main: (hew) => {
+        hew.commands.handle('greet', () => 'hi')
+        ask = () =>
+          hew.api.permissions.request({ permissions: ['view'] }).then(
+            () => 'granted',
+            (e: { refusal?: { refusal?: string } }) => e.refusal?.refusal ?? 'refused',
+          )
+      },
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    h.host.noteUserActivation(ID)
+    void ask()
+    await vi.waitFor(() => expect(decide).toHaveBeenCalledTimes(1))
+    await h.host.reload(ID)
+    await call(h, `${ID}.greet`)
+    expect(h.realms).toHaveLength(2)
+    h.host.noteUserActivation(ID)
+    void ask()
+    await vi.waitFor(() => expect(decide).toHaveBeenCalledTimes(2))
+  })
+
+  it('an act noted while the plugin does not run counts for nothing', async () => {
+    let ask!: () => Promise<string>
+    const decide = vi.fn(async () => 'granted' as const)
+    h = harness({
+      list: listed({ optional_granted: [] }, { optionalPermissions: ['view'] }),
+      grants: { decide },
+      main: (hew) => {
+        hew.commands.handle('greet', () => 'hi')
+        ask = () =>
+          hew.api.permissions.request({ permissions: ['view'] }).then(
+            () => 'granted',
+            (e: { refusal?: { refusal?: string } }) => e.refusal?.refusal ?? 'refused',
+          )
+      },
+    })
+    await h.host.sync()
+    h.host.noteUserActivation(ID)
+    await call(h, `${ID}.greet`)
+    await expect(ask()).resolves.toBe('no_user_activation')
+    expect(decide).not.toHaveBeenCalled()
+  })
+})
+
+describe('the plugin host, when the person cannot be asked', () => {
+  let h: Harness
+  beforeEach((ctx) => {
+    requiresPreview(ctx, 'plugins')
+    setBusy(null)
+  })
+  afterEach(() => h?.host.dispose())
+
+  it('answers request_pending while another question is open, and request_declined, with no minute of refusals, when the asking fails otherwise', async () => {
+    let refusal = 'confirmation_open'
+    const decide = vi.fn(async () => {
+      throw new PluginError(refusal, 'no')
+    })
+    let ask!: () => Promise<string>
+    h = harness({
+      list: listed({ optional_granted: [] }, { optionalPermissions: ['view'] }),
+      grants: { decide },
+      main: (hew) => {
+        hew.commands.handle('greet', () => 'hi')
+        ask = () =>
+          hew.api.permissions.request({ permissions: ['view'] }).then(
+            () => 'granted',
+            (e: { refusal?: { refusal?: string } }) => e.refusal?.refusal ?? 'refused',
+          )
+      },
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    h.host.noteUserActivation(ID)
+    await expect(ask()).resolves.toBe('request_pending')
+    for (const name of ['plugin_changed', 'not_installed', 'unknown_permission', 'unsupported']) {
+      refusal = name
+      h.host.noteUserActivation(ID)
+      await expect(ask(), name).resolves.toBe('request_declined')
+    }
+    // None of those was a no from the person: the decider was asked each time.
+    expect(decide).toHaveBeenCalledTimes(5)
+  })
+})
+
+describe("the plugin host, Shop's document sequence", () => {
+  let h: Harness
+  beforeEach((ctx) => {
+    requiresPreview(ctx, 'plugins')
+    setBusy(null)
+  })
+  afterEach(() => h?.host.dispose())
+
+  it('takes an opened for another document, with no closed before it, as the end of the first: its writes land under the old id', async () => {
+    let hew!: Hew
+    h = harness({
+      platform: 'shop',
+      documentId: D1,
+      timings: { storageDebounceMs: 200 },
+      main: (api) => {
+        hew = api
+        api.commands.handle('greet', () => 'hi')
+      },
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    const write = hew.storage.document.set('k', 'first')
+    await flush(20)
+    // What Shop notes when it loads the next file into the same Scene.
+    h.scene.docId = D2
+    h.scene.lifecycle('opened', D2)
+    pumpEvents(h.scene as unknown as Scene)
+    await write
+    expect(h.docs.get(`${ID}/${D1}`)?.get('k')).toBe('"first"')
+    expect(h.docs.get(`${ID}/${D2}`)?.get('k')).toBeUndefined()
+    await vi.waitFor(() => expect(hew.plugin?.documentId).toBe(D2))
+    await expect(hew.storage.document.get('k')).resolves.toBeUndefined()
+  })
+
+  it('a second file opened in place (closed and opened, each pumped on its own, in one task) tells the realm once, and lands what was on its way under the old id', async () => {
+    let hew!: Hew
+    h = harness({
+      platform: 'shop',
+      documentId: D1,
+      timings: { storageDebounceMs: 200 },
+      main: (api) => {
+        hew = api
+        api.commands.handle('greet', () => 'hi')
+      },
+    })
+    await h.host.sync()
+    await call(h, `${ID}.greet`)
+    const write = hew.storage.document.set('k', 'first')
+    await flush(20)
+    const told = h.realms[0].toRealm.filter((m) => m.t === 'document').length
+    // What Shop's noteOpened does when a model is already open.
+    h.scene.lifecycle('closed', null)
+    pumpEvents(h.scene as unknown as Scene)
+    h.scene.docId = D2
+    h.scene.lifecycle('opened', D2)
+    pumpEvents(h.scene as unknown as Scene)
+    await write
+    await flush(40)
+    expect(h.docs.get(`${ID}/${D1}`)?.get('k')).toBe('"first"')
+    expect(h.realms[0].toRealm.filter((m) => m.t === 'document').slice(told)).toEqual([{ t: 'document', document_id: D2, epoch: 2 }])
+  })
+})

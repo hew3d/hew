@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::commands::{self, CmdError, Ctx, FaceTokens};
 use crate::envelope::{Request, RequestId, Response, codes};
-use crate::grant::Grant;
+use crate::grant::{Grant, Permission};
 use crate::host::Host;
 use crate::refusal::Refusal;
 use crate::registry::{CommandClass, CommandDecl, Provider, Registry};
@@ -260,6 +260,37 @@ pub struct Connection {
     subscriptions: BTreeSet<String>,
     /// One `hew.compute.*` call at a time ([`ComputeGate`]).
     compute_gate: ComputeGate,
+    /// Opened for a plugin ([`Connection::for_plugin`]): the only kind
+    /// whose grant may be replaced while it is open
+    /// ([`Connection::set_grant`]).
+    plugin_connection: bool,
+}
+
+/// Why [`Connection::set_grant`] refused a grant. Nothing changes on a
+/// refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetGrantError {
+    /// The connection was not opened as a plugin's
+    /// ([`Connection::for_plugin`]).
+    NotAPluginConnection,
+    /// The new grant is not a plugin's, or holds `all`.
+    NotAPluginGrant,
+    /// The new grant names another plugin.
+    OtherPlugin,
+    /// The new grant is bound to another document.
+    OtherDocument,
+}
+
+impl SetGrantError {
+    /// The snake_case name a host reports.
+    pub fn name(self) -> &'static str {
+        match self {
+            SetGrantError::NotAPluginConnection => "not_a_plugin_connection",
+            SetGrantError::NotAPluginGrant => "not_a_plugin_grant",
+            SetGrantError::OtherPlugin => "other_plugin",
+            SetGrantError::OtherDocument => "other_document",
+        }
+    }
 }
 
 impl Connection {
@@ -276,7 +307,45 @@ impl Connection {
             active_forward: None,
             subscriptions: BTreeSet::new(),
             compute_gate: ComputeGate::default(),
+            plugin_connection: false,
         }
+    }
+
+    /// A plugin's connection: [`Connection::new`], and the one kind of
+    /// connection whose grant [`Connection::set_grant`] may replace. The
+    /// grant must be a plugin's (it names a plugin and does not hold
+    /// `all`); a host checks that before opening one.
+    pub fn for_plugin(grant: Grant, identity: &str) -> Connection {
+        Connection {
+            plugin_connection: true,
+            ..Connection::new(grant, identity)
+        }
+    }
+
+    /// Replaces this plugin connection's grant while it stays open (a
+    /// person granted the plugin more while it runs). Only a connection
+    /// opened with [`Connection::for_plugin`] takes one, and only a grant
+    /// for the same plugin and the same document that is not first-party
+    /// (`all` is never held by a plugin). Subscriptions the new grant
+    /// cannot receive are dropped; the rest stay, so events keep coming
+    /// without a reconnect. Forwards, read scopes and the handshake are
+    /// untouched. Nothing changes on a refusal.
+    pub fn set_grant(&mut self, grant: Grant) -> Result<(), SetGrantError> {
+        if !self.plugin_connection || self.grant.plugin.is_none() {
+            return Err(SetGrantError::NotAPluginConnection);
+        }
+        if grant.plugin.is_none() || grant.app.is_some() || grant.holds(&Permission::All) {
+            return Err(SetGrantError::NotAPluginGrant);
+        }
+        if grant.plugin != self.grant.plugin {
+            return Err(SetGrantError::OtherPlugin);
+        }
+        if grant.document != self.grant.document {
+            return Err(SetGrantError::OtherDocument);
+        }
+        self.subscriptions.retain(|name| grant.may_receive(name));
+        self.grant = grant;
+        Ok(())
     }
 
     /// This connection's compute gate: a host that serves a `hew.compute.*`
@@ -2250,6 +2319,298 @@ mod tests {
         let roaming = subscribed(Grant::plugin("com.example.p", Some("doc_1"), other));
         assert!(roaming.wants_for("document_changed", "doc_2"));
         assert!(subscribed(Grant::app()).wants_for("document_changed", "doc_9"));
+    }
+
+    fn perms(list: &[crate::Permission]) -> std::collections::BTreeSet<crate::Permission> {
+        list.iter().cloned().collect()
+    }
+
+    fn subscribe(conn: &mut Connection, doc: &mut kernel::Document, events: &[&str]) -> Response {
+        replied(conn.dispatch(
+            &Registry::protocol_1(),
+            doc,
+            &mut crate::NoHost,
+            req(
+                7,
+                "hew.event.subscribe",
+                serde_json::json!({ "events": events }),
+            ),
+        ))
+    }
+
+    /// A plugin connection's grant is replaced in place: a command it was
+    /// refused runs after a widening on the same connection, and a
+    /// subscription the grant could not receive becomes possible.
+    #[test]
+    fn set_grant_widens_a_plugin_connection_in_place() {
+        use crate::Permission::{ModelRead, ModelWrite, View};
+        let registry = Registry::protocol_1();
+        let mut doc = kernel::Document::new();
+        let read = Grant::plugin("com.example.p", Some("doc_1"), perms(&[ModelRead]));
+        let mut conn = Connection::for_plugin(read, "plugin:com.example.p");
+        hello(&mut conn, &mut doc);
+        let attach = replied(conn.dispatch(
+            &registry,
+            &mut doc,
+            &mut crate::NoHost,
+            req(1, "hew.doc.attach", serde_json::json!({})),
+        ));
+        assert!(attach.error.is_none(), "{:?}", attach.error);
+        let create = |conn: &mut Connection, doc: &mut kernel::Document, id: i64| {
+            replied(conn.dispatch(
+                &registry,
+                doc,
+                &mut crate::NoHost,
+                req(
+                    id,
+                    "hew.tag.create",
+                    serde_json::json!({ "path": [format!("T{id}")] }),
+                ),
+            ))
+        };
+        let refused = create(&mut conn, &mut doc, 2)
+            .error
+            .expect("refused before");
+        assert_eq!(refused.code, codes::NOT_PERMITTED, "{refused:?}");
+        let r = subscribe(&mut conn, &mut doc, &["selection_changed"]);
+        assert_eq!(
+            r.result.unwrap()["denied"],
+            serde_json::json!(["selection_changed"])
+        );
+
+        let wide = Grant::plugin(
+            "com.example.p",
+            Some("doc_1"),
+            perms(&[ModelRead, ModelWrite, View]),
+        );
+        conn.set_grant(wide.clone()).unwrap();
+        assert_eq!(conn.grant(), &wide);
+        let ok = create(&mut conn, &mut doc, 3);
+        assert!(ok.error.is_none(), "{:?}", ok.error);
+        let r = subscribe(&mut conn, &mut doc, &["selection_changed"]);
+        assert_eq!(r.result.unwrap()["denied"], serde_json::json!([]));
+        assert!(conn.wants("selection_changed"));
+    }
+
+    /// A narrower grant drops the subscriptions it cannot receive and keeps
+    /// the rest.
+    #[test]
+    fn set_grant_prunes_subscriptions_the_new_grant_cannot_receive() {
+        use crate::Permission::{ModelRead, View};
+        let mut doc = kernel::Document::new();
+        let both = Grant::plugin("com.example.p", Some("doc_1"), perms(&[ModelRead, View]));
+        let mut conn = Connection::for_plugin(both, "plugin:com.example.p");
+        hello(&mut conn, &mut doc);
+        let r = subscribe(
+            &mut conn,
+            &mut doc,
+            &["document_changed", "selection_changed", "plugin_state"],
+        );
+        assert_eq!(r.result.unwrap()["denied"], serde_json::json!([]));
+        conn.set_grant(Grant::plugin(
+            "com.example.p",
+            Some("doc_1"),
+            perms(&[ModelRead]),
+        ))
+        .unwrap();
+        assert_eq!(
+            conn.subscriptions().collect::<Vec<_>>(),
+            ["document_changed", "plugin_state"]
+        );
+        // A widening does not bring a dropped subscription back by itself.
+        conn.set_grant(Grant::plugin(
+            "com.example.p",
+            Some("doc_1"),
+            perms(&[ModelRead, View]),
+        ))
+        .unwrap();
+        assert!(!conn.wants("selection_changed"));
+    }
+
+    /// Only a plugin connection takes a new grant, and only one for the same
+    /// plugin and document that is not first-party; a refusal changes
+    /// nothing.
+    #[test]
+    fn set_grant_refuses_anything_but_the_same_plugin_and_document() {
+        use crate::Permission::{All, ModelRead, ModelWrite};
+        let read = Grant::plugin("com.example.p", Some("doc_1"), perms(&[ModelRead]));
+        let wider = Grant::plugin(
+            "com.example.p",
+            Some("doc_1"),
+            perms(&[ModelRead, ModelWrite]),
+        );
+
+        let mut first_party = Connection::new(Grant::app(), "live:1");
+        assert_eq!(
+            first_party.set_grant(wider.clone()),
+            Err(SetGrantError::NotAPluginConnection)
+        );
+        assert_eq!(first_party.grant(), &Grant::app());
+        // Opened with a plugin's grant but not as a plugin connection.
+        let mut plain = Connection::new(read.clone(), "plugin:com.example.p");
+        assert_eq!(
+            plain.set_grant(wider.clone()),
+            Err(SetGrantError::NotAPluginConnection)
+        );
+        let mut app = Connection::for_plugin(
+            Grant::connected_app("pair_1", perms(&[ModelRead])),
+            "app:pair_1",
+        );
+        assert_eq!(
+            app.set_grant(wider.clone()),
+            Err(SetGrantError::NotAPluginConnection)
+        );
+
+        let mut conn = Connection::for_plugin(read.clone(), "plugin:com.example.p");
+        let mut all = wider.clone();
+        all.permissions.insert(All);
+        let mut with_app = wider.clone();
+        with_app.app = Some("pair_1".into());
+        for (grant, expected) in [
+            (Grant::app(), SetGrantError::NotAPluginGrant),
+            (Grant::core(), SetGrantError::NotAPluginGrant),
+            (all, SetGrantError::NotAPluginGrant),
+            (with_app, SetGrantError::NotAPluginGrant),
+            (
+                Grant::connected_app("pair_1", perms(&[ModelRead, ModelWrite])),
+                SetGrantError::NotAPluginGrant,
+            ),
+            (
+                Grant::plugin("com.example.other", Some("doc_1"), perms(&[ModelWrite])),
+                SetGrantError::OtherPlugin,
+            ),
+            (
+                Grant::plugin("com.example.p", Some("doc_2"), perms(&[ModelWrite])),
+                SetGrantError::OtherDocument,
+            ),
+            (
+                Grant::plugin("com.example.p", None, perms(&[ModelWrite])),
+                SetGrantError::OtherDocument,
+            ),
+        ] {
+            assert_eq!(conn.set_grant(grant.clone()), Err(expected), "{grant:?}");
+            assert_eq!(conn.grant(), &read, "unchanged after {expected:?}");
+        }
+        assert_eq!(conn.set_grant(wider.clone()), Ok(()));
+        assert_eq!(conn.grant(), &wider);
+    }
+
+    /// `hew.permissions.request` reaches every grant, and the kernel answers
+    /// it only with a refusal: the page's plugin host answers a running
+    /// plugin's own request before the kernel sees it. A production build
+    /// does not list it and refuses it `preview_only`.
+    #[test]
+    fn a_permission_request_that_reaches_the_kernel_is_refused() {
+        use crate::Permission::ModelRead;
+        let registry = Registry::protocol_1();
+        let mut doc = kernel::Document::new();
+        let grant = Grant::plugin("com.example.p", Some("doc_1"), perms(&[ModelRead]));
+        let mut conn = Connection::for_plugin(grant, "plugin:com.example.p");
+        hello(&mut conn, &mut doc);
+        conn.dispatch(
+            &registry,
+            &mut doc,
+            &mut crate::NoHost,
+            req(1, "hew.doc.attach", serde_json::json!({})),
+        );
+        let ask = |conn: &mut Connection, doc: &mut kernel::Document, params| {
+            replied(conn.dispatch(
+                &registry,
+                doc,
+                &mut crate::NoHost,
+                req(3, "hew.permissions.request", params),
+            ))
+        };
+        let r = ask(
+            &mut conn,
+            &mut doc,
+            serde_json::json!({ "permissions": ["view"], "reason": "x" }),
+        );
+        let e = r.error.expect("refused");
+        let refusal = e
+            .data
+            .as_ref()
+            .and_then(|d| d.get("refusal"))
+            .and_then(|v| v.as_str());
+        if crate::preview::PREVIEW_BUILD {
+            assert_eq!(e.code, codes::REFUSED, "{e:?}");
+            assert_eq!(refusal, Some("host_capability_missing"), "{e:?}");
+            for bad in [
+                serde_json::json!({}),
+                serde_json::json!({ "permissions": [] }),
+                serde_json::json!({ "permissions": ["view"], "extra": 1 }),
+                serde_json::json!({ "permissions": [1] }),
+                serde_json::json!({ "permissions": ["view"], "reason": "x".repeat(201) }),
+            ] {
+                let e = ask(&mut conn, &mut doc, bad.clone())
+                    .error
+                    .expect("refused");
+                assert_eq!(e.code, codes::INVALID_PARAMS, "{bad}: {e:?}");
+            }
+            assert!(registry.get("hew.permissions.request").is_some());
+        } else {
+            assert_eq!(refusal, Some(crate::preview::PREVIEW_ONLY), "{e:?}");
+            assert!(registry.get("hew.permissions.request").is_none());
+        }
+    }
+
+    /// `hew.plugin.activity` and `hew.plugin.reload` are the desktop app's
+    /// to answer: a frame that reaches the kernel is refused after its
+    /// params are checked, a plugin is refused them outright, and a
+    /// production build refuses them `preview_only`.
+    #[test]
+    fn plugin_activity_and_reload_reach_the_kernel_only_to_be_refused() {
+        use crate::Permission::ModelRead;
+        let registry = Registry::protocol_1();
+        let mut doc = kernel::Document::new();
+        let call = |conn: &mut Connection, doc: &mut kernel::Document, method, params| {
+            replied(conn.dispatch(&registry, doc, &mut crate::NoHost, req(4, method, params)))
+                .error
+                .expect("refused")
+        };
+        let mut first = ready(&registry, &mut doc);
+        let plugin_grant = Grant::plugin("com.example.p", Some("doc_1"), perms(&[ModelRead]));
+        let mut plugin = Connection::for_plugin(plugin_grant, "plugin:com.example.p");
+        hello(&mut plugin, &mut doc);
+        for method in ["hew.plugin.activity", "hew.plugin.reload"] {
+            let e = call(
+                &mut first,
+                &mut doc,
+                method,
+                serde_json::json!({ "id": "com.example.p" }),
+            );
+            let refusal = e
+                .data
+                .as_ref()
+                .and_then(|d| d.get("refusal"))
+                .and_then(|v| v.as_str());
+            if crate::preview::PREVIEW_BUILD {
+                assert_eq!(refusal, Some("host_capability_missing"), "{method}: {e:?}");
+                for bad in [
+                    serde_json::json!({}),
+                    serde_json::json!({ "id": "" }),
+                    serde_json::json!({ "id": 1 }),
+                    serde_json::json!({ "id": "com.example.p", "more": 1 }),
+                ] {
+                    let e = call(&mut first, &mut doc, method, bad.clone());
+                    assert_eq!(e.code, codes::INVALID_PARAMS, "{method} {bad}: {e:?}");
+                }
+                let e = call(
+                    &mut plugin,
+                    &mut doc,
+                    method,
+                    serde_json::json!({ "id": "com.example.p" }),
+                );
+                assert_eq!(e.code, codes::NOT_PERMITTED, "{method}: {e:?}");
+            } else {
+                assert_eq!(
+                    refusal,
+                    Some(crate::preview::PREVIEW_ONLY),
+                    "{method}: {e:?}"
+                );
+                assert!(registry.get(method).is_none());
+            }
+        }
     }
 
     #[test]

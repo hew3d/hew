@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { requiresPreview } from '../test/requiresPreview'
 import { FakeDir } from '../test/opfsFake'
-import { makeDesktopInstaller, makeWebInstaller } from './installer'
+import { grantCapable, makeDesktopInstaller, makeWebInstaller } from './installer'
 import { fakeWasm, pluginFile } from './testKit'
 
 beforeEach((ctx) => requiresPreview(ctx, 'plugins'))
@@ -47,6 +47,19 @@ describe('desktop installer', () => {
       ['plugin_rollback', { id: 'a' }],
     ])
     expect(installer.tier).toBe('desktop')
+  })
+
+  it('sets a grant through the shell\'s own command with the names alone, and passes its refusals on', async () => {
+    const { calls, answers, installer } = setup()
+    answers.set('plugin_set_grant', { id: 'a', grant: ['model.read'], optional_granted: ['files'] })
+    const cap = grantCapable(installer)
+    expect(cap).not.toBeNull()
+    expect(await cap!.setGrant('a', ['model.read'], ['files'])).toMatchObject({ optional_granted: ['files'] })
+    expect(calls).toEqual([['plugin_set_grant', { id: 'a', grant: ['model.read'], optional: ['files'] }]])
+    answers.set('plugin_set_grant', new Error('confirmation_open: Another confirmation is already open.'))
+    await expect(cap!.setGrant('a', [], [])).rejects.toMatchObject({ refusal: 'confirmation_open' })
+    // The shell asks natively: the page has no lines of its own on the desktop.
+    expect(cap!.grantLines).toBeUndefined()
   })
 
   it('picks, then stages only what was picked; a cancelled pick stages nothing', async () => {
@@ -205,5 +218,23 @@ describe('web installer', () => {
     expect(await installer.iconUrl('com.example.one', 'dist/background.js')).toBeNull()
     expect(await installer.iconUrl('com.example.one', '../installed.json')).toBeNull()
     make.mockRestore()
+  })
+
+  it('sets a grant on the store and has the kernel\'s lines for what a change would add', async () => {
+    const root = new FakeDir('opfs-root')
+    const lines = JSON.stringify({ added: [{ name: 'files', text: 'Files.' }], warnings: [] })
+    const installer = makeWebInstaller({
+      wasm: async () => ({ ...fakeWasm(), plugin_grant_lines: () => lines }),
+      opfsRoot: async () => root as unknown as FileSystemDirectoryHandle,
+      channel: null,
+      storage: null,
+    })
+    const staged = await installer.stageFile(pluginFile({ optionalPermissions: ['files'] }))
+    await installer.commit(staged.token, true)
+    const cap = grantCapable(installer)!
+    expect(await cap.grantLines!('com.example.one', ['model.read'], ['files'])).toEqual({ added: [{ name: 'files', text: 'Files.' }], warnings: [] })
+    expect((await cap.setGrant('com.example.one', ['model.read'], ['files'])).optional_granted).toEqual(['files'])
+    const row = (await installer.list())[0]
+    expect(row.kind === 'installed' && row.installed.optional_granted).toEqual(['files'])
   })
 })

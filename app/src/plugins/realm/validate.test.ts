@@ -66,9 +66,28 @@ describe('checkRealmMessage', () => {
     expect(refused({ t: 'console', level: 'log', args: [], at: Infinity })).toMatch(/time/)
   })
 
+  it('requires a document epoch on document storage, an integer in range, and refuses one on the plugin\'s own', () => {
+    expect(ok({ t: 'storage', id: 1, op: 'set', scope: 'document', key: 'k', value: '1', epoch: 7 }).msg).toMatchObject({ scope: 'document', epoch: 7 })
+    expect(ok({ t: 'storage', id: 1, op: 'get', scope: 'document', key: 'k', epoch: Number.MAX_SAFE_INTEGER }).msg).toMatchObject({ epoch: Number.MAX_SAFE_INTEGER })
+    expect(refused({ t: 'storage', id: 1, op: 'list', scope: 'document' })).toMatch(/needs epoch/)
+    for (const epoch of [-1, 1.5, '1', null, Number.NaN, Number.MAX_SAFE_INTEGER + 2, [1]]) {
+      expect(refused({ t: 'storage', id: 1, op: 'list', scope: 'document', epoch }), String(epoch)).toMatch(/epoch is not a non-negative integer/)
+    }
+    expect(refused({ t: 'storage', id: 1, op: 'list', scope: 'plugin', epoch: 0 })).toMatch(/takes no epoch/)
+    expect(refused({ t: 'storage', id: 1, op: 'list', epoch: 0 })).toMatch(/takes no epoch/)
+    // Seven fields at most: the epoch is counted among them.
+    expect(ok({ t: 'storage', id: 1, op: 'set', scope: 'document', key: 'k', value: 'v', epoch: 0 }).size).toBe(2)
+  })
+
   it('holds each storage operation to its own fields', () => {
-    expect(ok({ t: 'storage', id: 1, op: 'get', key: 'k' }).msg).toEqual({ t: 'storage', id: 1, op: 'get', key: 'k' })
-    expect(ok({ t: 'storage', id: 1, op: 'list' }).msg).toEqual({ t: 'storage', id: 1, op: 'list' })
+    expect(ok({ t: 'storage', id: 1, op: 'get', key: 'k' }).msg).toEqual({ t: 'storage', id: 1, op: 'get', scope: 'plugin', key: 'k' })
+    expect(ok({ t: 'storage', id: 1, op: 'list' }).msg).toEqual({ t: 'storage', id: 1, op: 'list', scope: 'plugin' })
+    // A scope, when given, is one of the two; absent is the plugin's own.
+    expect(ok({ t: 'storage', id: 1, op: 'list', scope: 'document', epoch: 0 }).msg).toEqual({ t: 'storage', id: 1, op: 'list', scope: 'document', epoch: 0 })
+    expect(ok({ t: 'storage', id: 1, op: 'list', scope: 'plugin' }).msg).toEqual({ t: 'storage', id: 1, op: 'list', scope: 'plugin' })
+    for (const scope of ['window', '', 1, null, ['document']]) {
+      expect(refused({ t: 'storage', id: 1, op: 'list', scope })).toMatch(/unknown storage scope/)
+    }
     expect(refused({ t: 'storage', id: 1, op: 'get' })).toMatch(/needs key/)
     expect(refused({ t: 'storage', id: 1, op: 'set', key: 'k' })).toMatch(/needs value/)
     expect(refused({ t: 'storage', id: 1, op: 'get', key: 'k', value: 'v' })).toMatch(/takes no value/)

@@ -149,7 +149,11 @@ pub struct PluginState {
     dev_request: Mutex<RequestSlot>,
     /// The windows whose plugin host is running (the Plugins switch is on
     /// there), by label.
-    hosts: Mutex<BTreeSet<String>>,
+    pub(crate) hosts: Mutex<BTreeSet<String>>,
+    /// What the hosts reported about running plugins, the activity and
+    /// console writers' state, and the live API's reload clock
+    /// ([`super::plugin_data`]).
+    pub(crate) activity: super::plugin_data::Activity,
     /// The ids watched as of the last sync. Its lock is held while the
     /// watched set is decided and handed to the watcher, so a sync that saw
     /// developer mode on cannot hand its set over after one that saw it off.
@@ -227,6 +231,7 @@ impl PluginState {
             dev_epoch: AtomicU64::new(0),
             dev_request: Mutex::new(RequestSlot::default()),
             hosts: Mutex::new(BTreeSet::new()),
+            activity: super::plugin_data::Activity::default(),
             watched: Mutex::new(BTreeSet::new()),
             checked: Mutex::new(BTreeSet::new()),
             refused_unchecked: Mutex::new(BTreeSet::new()),
@@ -277,7 +282,7 @@ impl PluginState {
         state
     }
 
-    fn dir(&self) -> Result<&PluginDir, String> {
+    pub(crate) fn dir(&self) -> Result<&PluginDir, String> {
         if let Some(why) = self.disabled {
             return Err(refusal("plugins_disabled", why));
         }
@@ -289,7 +294,7 @@ impl PluginState {
         })
     }
 
-    fn store_lock(&self) -> MutexGuard<'_, ()> {
+    pub(crate) fn store_lock(&self) -> MutexGuard<'_, ()> {
         lock(&self.store)
     }
 }
@@ -310,7 +315,7 @@ pub fn policy_allows_boot(csp: Option<&str>, boot_hash: &str) -> bool {
 /// A lock that a panic elsewhere does not turn into a refusal forever. The
 /// data behind these locks stays consistent across a panic: each is
 /// changed by a single insert or remove.
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
@@ -372,13 +377,19 @@ pub trait Ui {
     /// Tells every window the live API's waiting request: a new one, or
     /// `None` when it was taken, dismissed or dropped.
     fn dev_request(&self, _request: Option<DevRequested>) {}
+    /// Tells every window a plugin's per-document saved data changed.
+    fn doc_storage_changed(&self, _change: super::plugin_data::DocStorageChanged) {}
+    /// Tells every window what the hosts reported about a plugin changed.
+    fn state_changed(&self, _id: &str) {}
+    /// Tells every window a plugin's console has new lines.
+    fn console_changed(&self, _id: &str) {}
 }
 
-fn refusal(name: &str, text: &str) -> String {
+pub(crate) fn refusal(name: &str, text: &str) -> String {
     format!("{name}: {text}")
 }
 
-fn install_error(e: InstallError) -> String {
+pub(crate) fn install_error(e: InstallError) -> String {
     format!("{}: {}", e.name(), e.explanation())
 }
 
@@ -417,7 +428,7 @@ pub fn window_allowed(label: &str) -> bool {
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
-fn check_window(label: &str) -> Result<(), String> {
+pub(crate) fn check_window(label: &str) -> Result<(), String> {
     if window_allowed(label) {
         Ok(())
     } else {
@@ -428,7 +439,7 @@ fn check_window(label: &str) -> Result<(), String> {
     }
 }
 
-fn check_id(id: &str) -> Result<(), String> {
+pub(crate) fn check_id(id: &str) -> Result<(), String> {
     plugin_manifest::validate_plugin_id(id).map_err(|e| install_error(InstallError::Manifest(e)))
 }
 
@@ -1087,7 +1098,9 @@ pub const MAIN_MISSING: &str = "main_missing";
 /// folder, else [`FOLDER_NOT_CHECKED`] while it is enabled, developer mode is on and
 /// its folder has not been compared yet, else `null`, so a window that
 /// opens after the watcher reported it still shows it. Read from the
-/// watcher's state without waiting for a walk.
+/// watcher's state without waiting for a walk. Every row also carries what
+/// the windows' hosts reported ([`super::plugin_data::Aggregate`]):
+/// `running_in`, `stopped_in`, `blocked_in`, `idle_in` and `last_stop`.
 pub fn list_rows(
     label: &str,
     state: &PluginState,
@@ -1125,6 +1138,13 @@ pub fn list_rows(
             };
             let mut value = serde_json::to_value(&row)
                 .map_err(|e| install_error(InstallError::Io(e.to_string())))?;
+            let row_id = match &row {
+                Listed::Installed { installed, .. } => installed.id.as_str(),
+                Listed::Unreadable { id, .. } => id.as_str(),
+            };
+            if let Some(object) = value.as_object_mut() {
+                super::plugin_data::aggregate(state, row_id, &|_| true).insert_into(object);
+            }
             if let (Some((id, enabled, main_missing)), Some(object)) =
                 (folder, value.as_object_mut())
             {
@@ -1545,7 +1565,7 @@ pub struct BusRefusal {
 }
 
 impl BusRefusal {
-    fn new(name: &'static str, explanation: &str) -> BusRefusal {
+    pub(crate) fn new(name: &'static str, explanation: &str) -> BusRefusal {
         BusRefusal {
             name,
             explanation: explanation.to_string(),
@@ -1554,7 +1574,7 @@ impl BusRefusal {
 }
 
 /// The refusal a command string carries, for the live API.
-fn bus_refusal(e: String) -> BusRefusal {
+pub(crate) fn bus_refusal(e: String) -> BusRefusal {
     let name = match e.split(':').next().unwrap_or("") {
         "plugins_disabled" => "plugins_disabled",
         "no_plugin_dir" => "no_plugin_dir",
@@ -1671,6 +1691,10 @@ pub fn host_present(
 ) -> Result<(), String> {
     check_window(label)?;
     state.dir()?;
+    if present {
+        // A page that starts counts its report numbers from the start.
+        super::plugin_data::window_registered(state, label);
+    }
     host_set(state, label, present, ui);
     Ok(())
 }
@@ -1679,7 +1703,18 @@ pub fn host_present(
 /// said ([`host_present`] with `present: false`).
 pub fn window_gone(app: &tauri::AppHandle, label: &str) {
     if let Some(state) = app.try_state::<PluginState>() {
-        host_set(&state, label, false, &AppEvents { app: app.clone() });
+        let ui = AppEvents { app: app.clone() };
+        host_set(&state, label, false, &ui);
+        // The rest waits on the store lock, which a plugin write can hold
+        // for a while: not on the thread that handles the close.
+        let app = app.clone();
+        let label = label.to_string();
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Some(state) = app.try_state::<PluginState>() {
+                let ui = AppEvents { app: app.clone() };
+                super::plugin_data::window_closed(&state, &label, &ui);
+            }
+        });
     }
 }
 
@@ -2132,6 +2167,13 @@ pub fn set_grant(
     let (current, manifest, added) = {
         let _store = state.store_lock();
         let (current, manifest) = store::installed(dir, id).map_err(install_error)?;
+        // A record held back for the person's review is changed only by the
+        // review: no grant, no dialog, for a manifest nobody has approved.
+        if store::needs_consent(&current) {
+            return Err(install_error(InstallError::DevConsentPending(
+                id.to_string(),
+            )));
+        }
         let added = grant_added(&current, &manifest, &grant, &optional)?;
         if added.is_empty() {
             let installed = store::set_grant(dir, id, grant, optional).map_err(install_error)?;
@@ -2322,6 +2364,9 @@ pub fn uninstall(label: &str, state: &PluginState, id: &str, ui: &dyn Ui) -> Res
     {
         let _store = state.store_lock();
         store::uninstall(dir, id).map_err(install_error)?;
+        // Under the same hold, so no report about the plugin that is gone
+        // lands after it is forgotten.
+        super::plugin_data::forget(state, id);
     }
     after_change(state, ui);
     Ok(())
@@ -2520,7 +2565,7 @@ pub fn storage_delete(
 
 /// The app's [`Ui`]: Hew's native confirmation over the calling window,
 /// and global events.
-struct WindowUi {
+pub(crate) struct WindowUi {
     window: tauri::WebviewWindow,
 }
 
@@ -2543,6 +2588,24 @@ impl Ui for WindowUi {
 
     fn dev_request(&self, request: Option<DevRequested>) {
         let _ = self.window.app_handle().emit(DEV_REQUEST_EVENT, request);
+    }
+
+    fn doc_storage_changed(&self, change: super::plugin_data::DocStorageChanged) {
+        let _ = self.window.app_handle().emit(STORAGE_CHANGED_EVENT, change);
+    }
+
+    fn state_changed(&self, id: &str) {
+        let _ = self.window.app_handle().emit(
+            super::plugin_data::STATE_EVENT,
+            super::plugin_data::PluginEvent { id: id.to_string() },
+        );
+    }
+
+    fn console_changed(&self, id: &str) {
+        let _ = self.window.app_handle().emit(
+            super::plugin_data::CONSOLE_EVENT,
+            super::plugin_data::PluginEvent { id: id.to_string() },
+        );
     }
 }
 
@@ -2571,6 +2634,24 @@ impl Ui for AppEvents {
 
     fn dev_request(&self, request: Option<DevRequested>) {
         let _ = self.app.emit(DEV_REQUEST_EVENT, request);
+    }
+
+    fn doc_storage_changed(&self, change: super::plugin_data::DocStorageChanged) {
+        let _ = self.app.emit(STORAGE_CHANGED_EVENT, change);
+    }
+
+    fn state_changed(&self, id: &str) {
+        let _ = self.app.emit(
+            super::plugin_data::STATE_EVENT,
+            super::plugin_data::PluginEvent { id: id.to_string() },
+        );
+    }
+
+    fn console_changed(&self, id: &str) {
+        let _ = self.app.emit(
+            super::plugin_data::CONSOLE_EVENT,
+            super::plugin_data::PluginEvent { id: id.to_string() },
+        );
     }
 }
 
@@ -2610,7 +2691,7 @@ pub fn stop_watching(app: &tauri::AppHandle) {
 }
 
 /// Runs `f` on a blocking thread with the window's label and state.
-async fn off_main<T, F>(window: tauri::WebviewWindow, f: F) -> Result<T, String>
+pub(crate) async fn off_main<T, F>(window: tauri::WebviewWindow, f: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&str, &PluginState, &WindowUi) -> Result<T, String> + Send + 'static,
@@ -2916,6 +2997,9 @@ mod tests {
         stored: RefCell<Vec<StorageChanged>>,
         dev: RefCell<Vec<DevChanged>>,
         requests: RefCell<Vec<Option<DevRequested>>>,
+        doc_stored: RefCell<Vec<super::super::plugin_data::DocStorageChanged>>,
+        states: RefCell<Vec<String>>,
+        consoles: RefCell<Vec<String>>,
     }
 
     impl Stub {
@@ -2927,6 +3011,9 @@ mod tests {
                 stored: RefCell::new(Vec::new()),
                 dev: RefCell::new(Vec::new()),
                 requests: RefCell::new(Vec::new()),
+                doc_stored: RefCell::new(Vec::new()),
+                states: RefCell::new(Vec::new()),
+                consoles: RefCell::new(Vec::new()),
             }
         }
         fn asked(&self) -> usize {
@@ -2952,6 +3039,15 @@ mod tests {
         }
         fn dev_request(&self, request: Option<DevRequested>) {
             self.requests.borrow_mut().push(request);
+        }
+        fn doc_storage_changed(&self, change: super::super::plugin_data::DocStorageChanged) {
+            self.doc_stored.borrow_mut().push(change);
+        }
+        fn state_changed(&self, id: &str) {
+            self.states.borrow_mut().push(id.to_string());
+        }
+        fn console_changed(&self, id: &str) {
+            self.consoles.borrow_mut().push(id.to_string());
         }
     }
 
@@ -6497,5 +6593,960 @@ mod tests {
             "command_name_taken"
         );
         assert_eq!(ui.asked(), 0, "refused before asking");
+    }
+
+    // -----------------------------------------------------------------------
+    // Plugin data: per-document storage, state reports, activity, console,
+    // and the two live API commands (`super::super::plugin_data`).
+    // -----------------------------------------------------------------------
+
+    use super::super::plugin_data as pd;
+
+    const DOC: &str = "3f2c9107-5ed4-40a8-806b-1ec297405d83";
+
+    /// Installs `id` from a `.hewplugin` package (not a folder).
+    fn install_package(state: &PluginState, root: &Path, id: &str) {
+        let pkg = package(
+            root,
+            &format!("{id}.hewplugin"),
+            &manifest(id, "1.0.0", &[], &[]),
+        );
+        let picked = record_pick(state, &pkg, PickKind::Package).unwrap();
+        let view = stage_file("main", state, &picked, NOW).unwrap();
+        commit(
+            "main",
+            state,
+            &view.token,
+            true,
+            &Stub::answering(true),
+            NOW,
+        )
+        .unwrap();
+    }
+
+    fn row(state: &PluginState, id: &str) -> serde_json::Value {
+        list_rows("main", state, &Stub::answering(true))
+            .unwrap()
+            .into_iter()
+            .find(|r| r["installed"]["id"] == id || r["id"] == id)
+            .expect("listed")
+    }
+
+    #[test]
+    fn document_storage_round_trips_and_tells_every_window_which_document() {
+        let (temp, state) = setup("doc-storage");
+        let id = "com.example.d";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(false);
+        assert_eq!(pd::doc_storage_get("main", &state, id, DOC, "a"), Ok(None));
+        pd::doc_storage_set("main", &state, id, DOC, "a", "1", &ui).unwrap();
+        pd::doc_storage_set("main-2", &state, id, DOC, "b", "2", &ui).unwrap();
+        assert_eq!(
+            pd::doc_storage_get("settings", &state, id, DOC, "a")
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            pd::doc_storage_list("main", &state, id, DOC).unwrap(),
+            ["a".to_string(), "b".to_string()]
+        );
+        pd::doc_storage_delete("main", &state, id, DOC, "a", &ui).unwrap();
+        // Deleting what is not there tells no one.
+        pd::doc_storage_delete("main", &state, id, DOC, "a", &ui).unwrap();
+        assert_eq!(ui.doc_stored.borrow().len(), 3);
+        assert_eq!(
+            serde_json::to_value(&ui.doc_stored.borrow()[0]).unwrap(),
+            serde_json::json!({ "id": id, "scope": "document", "document_id": DOC, "keys": ["a"] })
+        );
+        // Plugin storage's own payload is unchanged.
+        assert!(ui.stored.borrow().is_empty());
+        assert_eq!(ui.changed.get(), 0);
+        assert_eq!(ui.asked(), 0);
+        assert!(temp
+            .0
+            .join("store.plugin-data")
+            .join(id)
+            .join("documents")
+            .join(format!("{DOC}.json"))
+            .is_file());
+    }
+
+    #[test]
+    fn document_storage_refuses_in_order_and_writes_nothing() {
+        let (temp, state) = setup("doc-storage-refused");
+        let id = "com.example.d";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        // The window first, whatever else is wrong.
+        let e = pd::doc_storage_set("library", &state, "../x", "../x", "", "v", &ui).unwrap_err();
+        assert_eq!(refusal_name(&e), "window_not_allowed");
+        // Then the plugin id, then the document id, before any path.
+        let e = pd::doc_storage_set("main", &state, "../x", "../x", "a", "v", &ui).unwrap_err();
+        assert_ne!(refusal_name(&e), "document_id_invalid");
+        for bad in [
+            "",
+            "../../plugins",
+            "3F2C9107-5ED4-40A8-806B-1EC297405D83",
+            "x",
+        ] {
+            for e in [
+                pd::doc_storage_set("main", &state, id, bad, "a", "v", &ui).unwrap_err(),
+                pd::doc_storage_get("main", &state, id, bad, "a").unwrap_err(),
+                pd::doc_storage_list("main", &state, id, bad).unwrap_err(),
+                pd::doc_storage_delete("main", &state, id, bad, "a", &ui).unwrap_err(),
+            ] {
+                assert_eq!(refusal_name(&e), "document_id_invalid", "{bad:?}");
+            }
+        }
+        let e = pd::doc_storage_set("main", &state, id, DOC, "", "v", &ui).unwrap_err();
+        assert_eq!(refusal_name(&e), "storage_key_invalid");
+        let big = "x".repeat(plugin_host::MAX_STORAGE_BYTES);
+        let e = pd::doc_storage_set("main", &state, id, DOC, "a", &big, &ui).unwrap_err();
+        assert_eq!(refusal_name(&e), "storage_quota");
+        let none = "com.example.none";
+        let e = pd::doc_storage_set("main", &state, none, DOC, "a", "v", &ui).unwrap_err();
+        assert_eq!(refusal_name(&e), "not_installed");
+        assert!(!temp.0.join("store.plugin-data").join(none).exists());
+        assert!(!temp
+            .0
+            .join("store.plugin-data")
+            .join(id)
+            .join("documents")
+            .join(format!("{DOC}.json"))
+            .exists());
+        assert!(ui.doc_stored.borrow().is_empty());
+    }
+
+    #[test]
+    fn state_reports_are_kept_per_window_and_summed_on_the_list() {
+        let (temp, state) = setup("states");
+        let id = "com.example.r";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        let fresh = row(&state, id);
+        assert_eq!(fresh["running_in"], 0);
+        assert_eq!(fresh["stopped_in"], 0);
+        assert_eq!(fresh["blocked_in"], 0);
+        assert_eq!(fresh["idle_in"], 0);
+        assert_eq!(fresh["last_stop"], serde_json::Value::Null);
+
+        pd::report_state("main", &state, id, "activated", None, 1_000, &ui).unwrap();
+        pd::report_state(
+            "main-2",
+            &state,
+            id,
+            "crashed",
+            Some(" out of\nmemory "),
+            2_000,
+            &ui,
+        )
+        .unwrap();
+        // The same report again changes nothing and tells no one.
+        pd::report_state(
+            "main-2",
+            &state,
+            id,
+            "crashed",
+            Some("out of memory"),
+            2_500,
+            &ui,
+        )
+        .unwrap();
+        assert_eq!(*ui.states.borrow(), [id, id]);
+        let r = row(&state, id);
+        assert_eq!(r["running_in"], 1);
+        assert_eq!(r["stopped_in"], 1);
+        assert_eq!(
+            r["last_stop"],
+            serde_json::json!({ "reason": "out of memory", "at": 2_000 })
+        );
+        // The activity carries the window that called, as Tauri named it.
+        let entries = pd::activity_read("settings", &state, id).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            (entries[0].window.as_str(), entries[0].state.as_str()),
+            ("main-2", "crashed")
+        );
+        assert_eq!(
+            (entries[1].window.as_str(), entries[1].state.as_str()),
+            ("main", "activated")
+        );
+
+        // A window that closes takes its reports with it.
+        pd::window_closed(&state, "main-2", &ui);
+        assert_eq!(ui.states.borrow().len(), 3);
+        let r = row(&state, id);
+        assert_eq!(r["stopped_in"], 0);
+        assert_eq!(r["last_stop"], serde_json::Value::Null);
+        pd::report_state(
+            "main",
+            &state,
+            id,
+            "blocked",
+            Some("needs_review"),
+            3_000,
+            &ui,
+        )
+        .unwrap();
+        assert_eq!(row(&state, id)["blocked_in"], 1);
+        assert_eq!(row(&state, id)["running_in"], 0);
+        assert_eq!(row(&state, id)["idle_in"], 0);
+        // A plugin unloaded for sitting idle is counted apart: it starts
+        // again when it is needed.
+        pd::report_state("main", &state, id, "idle", Some("idle"), 4_000, &ui).unwrap();
+        let r = row(&state, id);
+        assert_eq!(r["idle_in"], 1);
+        assert_eq!(r["blocked_in"], 0);
+        assert_eq!(r["running_in"], 0);
+    }
+
+    #[test]
+    fn state_reports_refuse_in_order_and_are_rate_bounded() {
+        let (temp, state) = setup("states-refused");
+        let id = "com.example.r";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        let name = |r: Result<(), String>| refusal_name(&r.unwrap_err()).to_string();
+        assert_eq!(
+            name(pd::report_state(
+                "library", &state, "../x", "nope", None, 1, &ui
+            )),
+            "window_not_allowed"
+        );
+        assert_ne!(
+            name(pd::report_state(
+                "main", &state, "../x", "nope", None, 1, &ui
+            )),
+            "invalid_state"
+        );
+        assert_eq!(
+            name(pd::report_state(
+                "main", &state, id, "running", None, 1, &ui
+            )),
+            "invalid_state"
+        );
+        assert_eq!(
+            name(pd::report_state(
+                "main",
+                &state,
+                "com.example.none",
+                "crashed",
+                None,
+                1,
+                &ui
+            )),
+            "not_installed"
+        );
+        assert!(!temp
+            .0
+            .join("store.plugin-data")
+            .join("com.example.none")
+            .exists());
+        // A window may report about a plugin so many times in a while.
+        let states = ["activating", "activated"];
+        for n in 0..pd::MAX_REPORTS_PER_WINDOW {
+            pd::report_state(
+                "main",
+                &state,
+                id,
+                states[n as usize % 2],
+                None,
+                10_000 + u64::from(n),
+                &ui,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            name(pd::report_state(
+                "main", &state, id, "idle", None, 10_100, &ui
+            )),
+            "report_too_often"
+        );
+        // A stop is never refused for the budget.
+        pd::report_state("main", &state, id, "crashed", None, 10_100, &ui).unwrap();
+        assert_eq!(row(&state, id)["stopped_in"], 1);
+        // Another window has its own count; the count starts again later.
+        pd::report_state("main-2", &state, id, "crashed", None, 10_100, &ui).unwrap();
+        pd::report_state(
+            "main",
+            &state,
+            id,
+            "crashed",
+            None,
+            10_000 + pd::REPORT_WINDOW_MS,
+            &ui,
+        )
+        .unwrap();
+        // A long reason is cut before it is cleaned, and kept short.
+        let long = "why ".repeat(10_000);
+        pd::report_state("main", &state, id, "idle", Some(&long), 30_000, &ui).unwrap();
+        let entries = pd::activity_read("main", &state, id).unwrap();
+        assert!(
+            entries[0].reason.as_ref().unwrap().chars().count()
+                <= plugin_host::data::MAX_STATE_REASON_CHARS
+        );
+    }
+
+    #[test]
+    fn a_stop_gets_through_a_spent_budget_and_an_unchanged_report_spends_none() {
+        let (temp, state) = setup("states-budget");
+        let id = "com.example.r";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        // The same report again, far past the budget, is never refused.
+        for n in 0..(3 * pd::MAX_REPORTS_PER_WINDOW) {
+            pd::report_state(
+                "main",
+                &state,
+                id,
+                "activated",
+                None,
+                10_000 + u64::from(n),
+                &ui,
+            )
+            .unwrap();
+        }
+        // So the budget is untouched: a full set of changes still fits.
+        let states = ["activating", "activated"];
+        for n in 0..pd::MAX_REPORTS_PER_WINDOW - 1 {
+            pd::report_state(
+                "main",
+                &state,
+                id,
+                states[n as usize % 2],
+                None,
+                10_200,
+                &ui,
+            )
+            .unwrap();
+        }
+        // Spent now: a change is refused, a stop and a block are not.
+        let err = pd::report_state("main", &state, id, "idle", None, 10_300, &ui).unwrap_err();
+        assert_eq!(refusal_name(&err), "report_too_often");
+        pd::report_state("main", &state, id, "blocked", None, 10_300, &ui).unwrap();
+        assert_eq!(row(&state, id)["blocked_in"], 1);
+        // Stop to stop is budgeted like any change.
+        let err =
+            pd::report_state("main", &state, id, "crashed", Some("boom"), 10_400, &ui).unwrap_err();
+        assert_eq!(refusal_name(&err), "report_too_often");
+        assert_eq!(row(&state, id)["blocked_in"], 1);
+    }
+
+    #[test]
+    fn one_window_cannot_alternate_stops_through_a_spent_budget() {
+        let (temp, state) = setup("states-alternate");
+        let id = "com.example.r";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        let states = ["activating", "activated"];
+        for n in 0..pd::MAX_REPORTS_PER_WINDOW {
+            pd::report_state(
+                "main",
+                &state,
+                id,
+                states[n as usize % 2],
+                None,
+                10_000,
+                &ui,
+            )
+            .unwrap();
+        }
+        pd::report_state("main", &state, id, "crashed", None, 10_001, &ui).unwrap();
+        let logged = pd::activity_read("main", &state, id).unwrap().len();
+        // The held stop never changes, so each try to flip it is refused
+        // (before the fix each one was let through and logged).
+        for _ in 0..20 {
+            let err =
+                pd::report_state("main", &state, id, "blocked", None, 10_002, &ui).unwrap_err();
+            assert_eq!(refusal_name(&err), "report_too_often");
+        }
+        assert_eq!(pd::activity_read("main", &state, id).unwrap().len(), logged);
+        assert_eq!(row(&state, id)["stopped_in"], 1);
+    }
+
+    #[test]
+    fn a_page_start_clears_the_held_sequence_and_a_huge_one_is_not_believed() {
+        let (temp, state) = setup("states-seq-reset");
+        let id = "com.example.r";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        host_present("main", &state, true, &ui).unwrap();
+        let open = |_: &str| true;
+        let send = |name: &str, seq: Option<u64>, now: u64| {
+            pd::report_state_from("main", &state, id, name, None, seq, now, &open, &ui)
+        };
+        // A huge number is as if there were none: it pins nothing.
+        send("activated", Some(u64::MAX), 1_000).unwrap();
+        send("idle", Some(1), 1_001).unwrap();
+        assert_eq!(row(&state, id)["idle_in"], 1);
+        // A number the clock could have made is kept and orders reports.
+        send("activated", Some(500), 1_002).unwrap();
+        send("crashed", Some(400), 1_003).unwrap();
+        assert_eq!(row(&state, id)["stopped_in"], 0);
+        // The page reloads and counts from the start again.
+        host_present("main", &state, true, &ui).unwrap();
+        send("crashed", Some(1), 1_004).unwrap();
+        assert_eq!(row(&state, id)["stopped_in"], 1);
+    }
+
+    #[test]
+    fn an_older_report_by_sequence_number_is_ignored() {
+        let (temp, state) = setup("states-seq");
+        let id = "com.example.r";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        let open = |_: &str| true;
+        let send = |state_name: &str, seq: Option<u64>, now: u64| {
+            pd::report_state_from("main", &state, id, state_name, None, seq, now, &open, &ui)
+        };
+        // The stop arrives first, then the activation sent before it.
+        send("crashed", Some(200), 1_000).unwrap();
+        send("activated", Some(100), 1_001).unwrap();
+        assert_eq!(row(&state, id)["stopped_in"], 1);
+        assert_eq!(row(&state, id)["running_in"], 0);
+        assert_eq!(pd::activity_read("main", &state, id).unwrap().len(), 1);
+        // An unchanged report with a higher number raises the held one.
+        send("crashed", Some(300), 1_002).unwrap();
+        send("idle", Some(250), 1_003).unwrap();
+        assert_eq!(row(&state, id)["idle_in"], 0);
+        // Equal is not older; none at all behaves as before.
+        send("idle", Some(300), 1_004).unwrap();
+        assert_eq!(row(&state, id)["idle_in"], 1);
+        send("activated", None, 1_005).unwrap();
+        assert_eq!(row(&state, id)["running_in"], 1);
+        // The held number survives a report without one.
+        send("crashed", Some(299), 1_006).unwrap();
+        assert_eq!(row(&state, id)["running_in"], 1);
+        // Each window has its own.
+        pd::report_state_from(
+            "main-2",
+            &state,
+            id,
+            "crashed",
+            None,
+            Some(1),
+            1_007,
+            &open,
+            &ui,
+        )
+        .unwrap();
+        assert_eq!(row(&state, id)["stopped_in"], 1);
+    }
+
+    #[test]
+    fn a_report_from_a_window_that_is_gone_leaves_nothing_behind() {
+        let (temp, state) = setup("states-gone");
+        let id = "com.example.r";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        pd::window_closed(&state, "main-2", &ui);
+        pd::report_state_from(
+            "main-2",
+            &state,
+            id,
+            "crashed",
+            None,
+            None,
+            1_000,
+            &|l: &str| l != "main-2",
+            &ui,
+        )
+        .unwrap();
+        assert_eq!(row(&state, id)["stopped_in"], 0);
+        assert!(pd::activity_read("main", &state, id).unwrap().is_empty());
+        assert!(ui.states.borrow().is_empty());
+        // An open window's report is kept, and closing the window clears it.
+        pd::report_state("main-2", &state, id, "crashed", None, 1_100, &ui).unwrap();
+        assert_eq!(row(&state, id)["stopped_in"], 1);
+        pd::window_closed(&state, "main-2", &ui);
+        assert_eq!(row(&state, id)["stopped_in"], 0);
+    }
+
+    #[test]
+    fn a_flush_leaves_no_moment_when_a_read_misses_the_entries() {
+        let (temp, state) = setup("flush-lock");
+        let id = "com.example.r";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        pd::report_state("main", &state, id, "activated", None, 1_000, &ui).unwrap();
+        pd::report_state("main", &state, id, "idle", None, 1_100, &ui).unwrap();
+        // The idle entry is queued (written at most once a second). Holding
+        // the store lock, as a read does, a flush must wait for it, so it
+        // cannot have drained the queue before the read.
+        let guard = state.store_lock();
+        let queued = std::thread::scope(|s| {
+            let flusher = s.spawn(|| pd::flush_activity(&state, 5_000, true));
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let seen = pd::queued_len(&state, id);
+            drop(guard);
+            flusher.join().unwrap();
+            seen
+        });
+        assert_eq!(
+            queued, 1,
+            "the flush drained the queue before taking the store lock"
+        );
+        assert_eq!(pd::activity_read("main", &state, id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn activity_is_written_at_most_once_a_second_and_forgotten_on_uninstall() {
+        let (temp, state) = setup("activity");
+        let id = "com.example.r";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        let dir = state.dir().unwrap().clone();
+        let on_disk = || plugin_host::data::activity_read(&dir, id).unwrap().len();
+        pd::report_state("main", &state, id, "activating", None, 100_000, &ui).unwrap();
+        assert_eq!(on_disk(), 1, "the first report is written at once");
+        pd::report_state("main", &state, id, "activated", None, 100_200, &ui).unwrap();
+        pd::report_state("main", &state, id, "idle", None, 100_400, &ui).unwrap();
+        assert_eq!(on_disk(), 1, "within the second, queued");
+        assert_eq!(
+            pd::activity_read("main", &state, id).unwrap().len(),
+            3,
+            "read with the queue"
+        );
+        pd::flush_activity(&state, 100_900, false);
+        assert_eq!(on_disk(), 1);
+        pd::flush_activity(&state, 101_000, false);
+        assert_eq!(on_disk(), 3, "one write for both");
+        pd::report_state("main", &state, id, "crashed", None, 101_100, &ui).unwrap();
+        pd::flush_activity(&state, 101_200, true);
+        assert_eq!(on_disk(), 4, "the exit writes what waits");
+        assert!(temp
+            .0
+            .join("store.plugin-data")
+            .join(id)
+            .join("activity.json")
+            .is_file());
+        // Uninstalling removes the log and forgets what was reported.
+        pd::report_state("main", &state, id, "activated", None, 101_300, &ui).unwrap();
+        uninstall("main", &state, id, &Stub::answering(true)).unwrap();
+        assert!(!temp.0.join("store.plugin-data").join(id).exists());
+        pd::flush_activity(&state, 200_000, true);
+        assert!(
+            !temp.0.join("store.plugin-data").join(id).exists(),
+            "nothing written for a plugin that is gone"
+        );
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let r = row(&state, id);
+        assert_eq!(
+            (r["running_in"].clone(), r["stopped_in"].clone()),
+            (0.into(), 0.into())
+        );
+        assert_eq!(pd::activity_read("main", &state, id).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn console_lines_are_cleaned_bounded_and_refused_past_the_budget() {
+        let (temp, state) = setup("console");
+        let id = "com.example.c";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        let now = 10_000_000;
+        let line = |level: &str, text: &str, at: f64| pd::ConsoleLineIn {
+            level: level.into(),
+            text: text.into(),
+            at,
+        };
+        let done = pd::console_append(
+            "main",
+            &state,
+            id,
+            &[
+                line("log", "one", (now - 5) as f64),
+                line("error", "two\u{202e}\nlines", 1e300),
+            ],
+            now,
+            &ui,
+        )
+        .unwrap();
+        assert_eq!(
+            done,
+            pd::ConsoleAppended {
+                accepted: 2,
+                dropped: 0
+            }
+        );
+        assert_eq!(*ui.consoles.borrow(), [id]);
+        let read = pd::console_read("main", &state, id, None).unwrap();
+        assert_eq!(read.len(), 2);
+        assert_eq!(
+            (read[0].text.as_str(), read[0].at),
+            ("two lines", now),
+            "a time from the page is clamped"
+        );
+        assert_eq!(read[1].at, now - 5);
+        let name =
+            |r: Result<pd::ConsoleAppended, String>| refusal_name(&r.unwrap_err()).to_string();
+        assert_eq!(
+            name(pd::console_append("library", &state, id, &[], now, &ui)),
+            "window_not_allowed"
+        );
+        let many: Vec<pd::ConsoleLineIn> = (0..=pd::MAX_CONSOLE_LINES_PER_CALL)
+            .map(|_| line("log", "x", 0.0))
+            .collect();
+        assert_eq!(
+            name(pd::console_append("main", &state, id, &many, now, &ui)),
+            "too_many_lines"
+        );
+        assert_eq!(
+            name(pd::console_append(
+                "main",
+                &state,
+                id,
+                &[line("trace", "x", 0.0)],
+                now,
+                &ui
+            )),
+            "invalid_level"
+        );
+        assert_eq!(
+            name(pd::console_append(
+                "main",
+                &state,
+                "com.example.none",
+                &[line("log", "x", 0.0)],
+                now,
+                &ui
+            )),
+            "not_installed"
+        );
+        // Past the budget, lines are refused and counted, not queued.
+        let text = "y".repeat(2_000);
+        // Batches that do not divide the budget evenly, so one is cut short.
+        let batch: Vec<pd::ConsoleLineIn> = (0..50).map(|_| line("info", &text, 0.0)).collect();
+        let mut accepted = 0;
+        let mut dropped = 0;
+        loop {
+            match pd::console_append("main-2", &state, id, &batch, now + 1, &ui) {
+                Ok(done) => {
+                    accepted += done.accepted;
+                    dropped += done.dropped;
+                }
+                Err(e) => {
+                    assert_eq!(refusal_name(&e), "console_rate_limited");
+                    break;
+                }
+            }
+        }
+        assert!(dropped > 0);
+        assert!((accepted as u64) * 2_000 <= pd::CONSOLE_BYTES_PER_WINDOW);
+        // The budget comes back after its window.
+        pd::console_append(
+            "main",
+            &state,
+            id,
+            &[line("log", "later", 0.0)],
+            now + pd::CONSOLE_BUDGET_WINDOW_MS + 1,
+            &ui,
+        )
+        .unwrap();
+        assert_eq!(
+            pd::console_read("main", &state, id, Some(1)).unwrap()[0].text,
+            "later"
+        );
+    }
+
+    #[test]
+    fn an_empty_console_batch_still_needs_the_plugin_installed() {
+        let (temp, state) = setup("console-empty");
+        let id = "com.example.c";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        let e =
+            pd::console_append("main", &state, "com.example.none", &[], 1_000, &ui).unwrap_err();
+        assert_eq!(refusal_name(&e), "not_installed");
+        assert_eq!(
+            pd::console_append("main", &state, id, &[], 1_000, &ui).unwrap(),
+            pd::ConsoleAppended {
+                accepted: 0,
+                dropped: 0
+            }
+        );
+    }
+
+    #[test]
+    fn the_console_budget_counts_each_line_as_the_log_stores_it() {
+        let (temp, state) = setup("console-escaped");
+        let id = "com.example.c";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        let now = 10_000_000;
+        // A quote takes two bytes in the log's JSON.
+        let text = "\"".repeat(2_000);
+        let stored = serde_json::to_vec(&plugin_host::data::ConsoleLine {
+            at: now,
+            level: "info".into(),
+            text: text.clone(),
+        })
+        .unwrap()
+        .len() as u64
+            + 1;
+        assert!(stored > 4_000);
+        let batch: Vec<pd::ConsoleLineIn> = (0..64)
+            .map(|_| pd::ConsoleLineIn {
+                level: "info".into(),
+                text: text.clone(),
+                at: 0.0,
+            })
+            .collect();
+        let mut accepted = 0u64;
+        loop {
+            match pd::console_append("main", &state, id, &batch, now, &ui) {
+                Ok(done) => accepted += done.accepted as u64,
+                Err(e) => {
+                    assert_eq!(refusal_name(&e), "console_rate_limited");
+                    break;
+                }
+            }
+        }
+        assert!(accepted * stored <= pd::CONSOLE_BYTES_PER_WINDOW);
+        assert!(
+            (accepted + 1) * stored > pd::CONSOLE_BYTES_PER_WINDOW,
+            "refused only once one more line would pass the budget"
+        );
+    }
+
+    #[test]
+    fn reloading_a_plugin_whose_record_cannot_be_read_gives_out_no_path() {
+        let (temp, state) = setup("bus-reload-unreadable");
+        let id = "com.example.folder";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        host_present("main", &state, true, &ui).unwrap();
+        let record = temp.0.join("store").join(id).join("installed.json");
+        std::fs::remove_file(&record).unwrap();
+        std::fs::create_dir(&record).unwrap();
+        let e = pd::bus_reload(&state, &serde_json::json!({ "id": id }), 10_000, &|_| true)
+            .unwrap_err();
+        assert_eq!(e.name, "installed_unreadable");
+        let root = temp.0.to_string_lossy().into_owned();
+        assert!(!e.explanation.contains(&root), "{}", e.explanation);
+        assert!(
+            !e.explanation.contains('/') && !e.explanation.contains('\\'),
+            "{}",
+            e.explanation
+        );
+    }
+
+    #[test]
+    fn reloading_a_turned_off_folder_is_refused_and_spends_no_slot() {
+        let (temp, state) = setup("bus-reload-off");
+        let id = "com.example.folder";
+        install(&state, &temp.0, id, "1.0.0", &[], &[]);
+        let ui = Stub::answering(true);
+        host_present("main", &state, true, &ui).unwrap();
+        let params = serde_json::json!({ "id": id });
+        set_enabled("main", &state, id, false, &ui).unwrap();
+        let e = pd::bus_reload(&state, &params, 10_000, &|_| true).unwrap_err();
+        assert_eq!(e.name, "plugin_turned_off");
+        // Turned on again, the same moment's reload is not "too soon".
+        set_enabled("main", &state, id, true, &ui).unwrap();
+        assert!(pd::bus_reload(&state, &params, 10_000, &|_| true).is_ok());
+    }
+
+    #[test]
+    fn a_grant_for_a_record_waiting_for_review_is_refused_before_any_dialog() {
+        let (temp, state) = setup("grant-review");
+        let src = dev_install(&state, &temp.0);
+        list("main", &state, &Stub::answering(true)).unwrap();
+        write_manifest(&src, &wider());
+        folder_changed(&state, DEV, &Stub::answering(true));
+        assert_eq!(marked_reason(&state), Some("permissions_changed"));
+        let ui = Stub::answering(true);
+        let e = set_grant("main", &state, DEV, &["model.read".into()], &[], &ui).unwrap_err();
+        assert_eq!(refusal_name(&e), "dev_consent_pending");
+        assert_eq!(ui.asked(), 0);
+        state.watch.shutdown();
+    }
+
+    #[test]
+    fn the_live_api_reads_activity_and_reloads_only_a_running_developer_folder() {
+        let (temp, state) = setup("bus-reload");
+        let folder_id = "com.example.folder";
+        let package_id = "com.example.package";
+        install(&state, &temp.0, folder_id, "1.0.0", &[], &[]);
+        install_package(&state, &temp.0, package_id);
+        let ui = Stub::answering(true);
+        let all_open = |_: &str| true;
+        let params = |id: &str| serde_json::json!({ "id": id });
+        let name = |r: Result<DevChanged, BusRefusal>| r.unwrap_err().name;
+
+        // hew.plugin.activity
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({ "id": 1 }),
+            params("../x"),
+        ] {
+            assert_eq!(
+                pd::bus_activity(&state, &bad).unwrap_err().name,
+                "invalid_params"
+            );
+        }
+        assert_eq!(
+            pd::bus_activity(&state, &params("com.example.none"))
+                .unwrap_err()
+                .name,
+            "not_installed"
+        );
+        pd::report_state("main", &state, folder_id, "activated", None, 1_000, &ui).unwrap();
+        let answer = pd::bus_activity(&state, &params(folder_id)).unwrap();
+        assert_eq!(answer["entries"][0]["state"], "activated");
+        assert_eq!(answer["entries"][0]["window"], "main");
+
+        // hew.plugin.reload
+        assert_eq!(
+            name(pd::bus_reload(
+                &state,
+                &serde_json::json!({}),
+                10_000,
+                &all_open
+            )),
+            "invalid_params"
+        );
+        assert_eq!(
+            name(pd::bus_reload(
+                &state,
+                &params(folder_id),
+                10_000,
+                &all_open
+            )),
+            "plugins_off"
+        );
+        host_present("main", &state, true, &ui).unwrap();
+        // A host in a window that is gone counts for nothing.
+        assert_eq!(
+            name(pd::bus_reload(&state, &params(folder_id), 10_000, &|_| {
+                false
+            })),
+            "plugins_off"
+        );
+        host_present("main", &state, true, &ui).unwrap();
+        state.dev_mode.store(false, Ordering::Release);
+        assert_eq!(
+            name(pd::bus_reload(
+                &state,
+                &params(folder_id),
+                10_000,
+                &all_open
+            )),
+            "developer_mode_off"
+        );
+        state.dev_mode.store(true, Ordering::Release);
+        assert_eq!(
+            name(pd::bus_reload(
+                &state,
+                &params("com.example.none"),
+                10_000,
+                &all_open
+            )),
+            "not_installed"
+        );
+        assert_eq!(
+            name(pd::bus_reload(
+                &state,
+                &params(package_id),
+                10_000,
+                &all_open
+            )),
+            "not_a_developer_folder"
+        );
+        // A plugin that stopped stays stopped; one that is blocked stays so.
+        pd::report_state(
+            "main-2",
+            &state,
+            folder_id,
+            "crashed",
+            Some("timeout"),
+            2_000,
+            &ui,
+        )
+        .unwrap();
+        assert_eq!(
+            name(pd::bus_reload(
+                &state,
+                &params(folder_id),
+                10_000,
+                &all_open
+            )),
+            "plugin_stopped"
+        );
+        // Only open windows count.
+        assert!(
+            pd::bus_reload(&state, &params(folder_id), 10_000, &|l: &str| l != "main-2").is_ok()
+        );
+        pd::window_closed(&state, "main-2", &ui);
+        pd::report_state("main", &state, folder_id, "blocked", None, 3_000, &ui).unwrap();
+        assert_eq!(
+            name(pd::bus_reload(
+                &state,
+                &params(folder_id),
+                20_000,
+                &all_open
+            )),
+            "plugin_blocked"
+        );
+        pd::report_state("main", &state, folder_id, "activated", None, 4_000, &ui).unwrap();
+        let changed = pd::bus_reload(&state, &params(folder_id), 20_000, &all_open).unwrap();
+        assert_eq!(
+            serde_json::to_value(&changed).unwrap(),
+            serde_json::json!({ "id": folder_id, "manifest_changed": false, "reason": null, "problem": null })
+        );
+        assert_eq!(
+            name(pd::bus_reload(
+                &state,
+                &params(folder_id),
+                20_000 + pd::RELOAD_INTERVAL_MS - 1,
+                &all_open
+            )),
+            "reload_too_soon"
+        );
+        assert!(pd::bus_reload(
+            &state,
+            &params(folder_id),
+            20_000 + pd::RELOAD_INTERVAL_MS,
+            &all_open
+        )
+        .is_ok());
+        // A folder change waiting for review blocks it too.
+        let src = temp.0.join(format!("{folder_id}-1.0.0"));
+        std::fs::write(
+            src.join("hew-plugin.json"),
+            manifest(folder_id, "1.0.0", &["model.write"], &[]),
+        )
+        .unwrap();
+        let bytes = std::fs::read(src.join("hew-plugin.json")).unwrap();
+        let outcome = store::apply_folder_manifest(
+            state.dir().unwrap(),
+            folder_id,
+            Ok(bytes),
+            running_version(),
+        )
+        .unwrap();
+        assert!(matches!(outcome, FolderOutcome::Marked(_)));
+        assert_eq!(
+            name(pd::bus_reload(
+                &state,
+                &params(folder_id),
+                60_000,
+                &all_open
+            )),
+            "plugin_blocked"
+        );
+        // Turned off as well as blocked: blocked is named first; turned off
+        // alone is plugin_turned_off, and neither spends the reload slot.
+        set_enabled("main", &state, folder_id, false, &ui).unwrap();
+        assert_eq!(
+            name(pd::bus_reload(
+                &state,
+                &params(folder_id),
+                70_000,
+                &all_open
+            )),
+            "plugin_blocked"
+        );
     }
 }

@@ -1229,6 +1229,23 @@ describe('installLiveBridge', () => {
       expect(viewportApi.isolate).not.toHaveBeenCalled()
     })
 
+    it('a window that wires isolate and clearIsolation owns them: the viewport is left alone, zoom_to still acts', async () => {
+      const isolate = vi.fn()
+      const clearIsolation = vi.fn()
+      deps.isolate = isolate
+      deps.clearIsolation = clearIsolation
+      await dispatchWith(
+        [
+          { kind: 'clear_isolation' },
+          { kind: 'zoom_to', min: [-1, -2, -3], max: [4, 5, 6], padding: 0.5 },
+        ],
+        'hew.doc.transact',
+      )
+      expect(clearIsolation).toHaveBeenCalledTimes(1)
+      expect(viewportApi.clearIsolation).not.toHaveBeenCalled()
+      expect(viewportApi.zoomToWorldBounds).toHaveBeenCalledWith([-1, -2, -3], [4, 5, 6])
+    })
+
     it('clear_isolation and zoom_to reach the viewport', async () => {
       await dispatchWith(
         [

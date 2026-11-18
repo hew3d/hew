@@ -195,8 +195,18 @@ const MAX_DOCUMENT_ID_BYTES: usize = 64;
 /// letters, digits, `_` or `-`, names that are not an array of strings, or
 /// more than 128 of them, are `PLUGIN_BAD_INPUT`. Repeated names count
 /// once.
+///
+/// `viewer` (Shop Mode, a viewer of the model) keeps only what a viewer may
+/// do: the permissions are cut to `model.read` and `view` after every name
+/// was checked, whatever the record holds, and the ceiling is derived from
+/// what is left. The cut is made here and nowhere else.
 #[wasm_bindgen]
-pub fn plugin_grant_json(id: &str, document: &str, names_json: &str) -> Result<String, ApiError> {
+pub fn plugin_grant_json(
+    id: &str,
+    document: &str,
+    names_json: &str,
+    viewer: bool,
+) -> Result<String, ApiError> {
     plugin_manifest::validate_plugin_id(id)
         .map_err(|e| install_error(&InstallError::Manifest(e)))?;
     let document_ok = !document.is_empty()
@@ -230,8 +240,95 @@ pub fn plugin_grant_json(id: &str, document: &str, names_json: &str) -> Result<S
             plugin_manifest::ManifestError::UnknownPermission(dropped.as_str().to_string()),
         )));
     }
+    let permissions = if viewer {
+        viewer_permissions(permissions)
+    } else {
+        permissions
+    };
     let grant = api::Grant::plugin(id, Some(document), permissions);
     Ok(to_json(&grant))
+}
+
+/// What a viewer's grant keeps of `permissions`: reading the model and the
+/// view, nothing that writes, saves, reaches files, the clipboard, the
+/// Library or the network.
+fn viewer_permissions(
+    permissions: std::collections::BTreeSet<api::Permission>,
+) -> std::collections::BTreeSet<api::Permission> {
+    permissions
+        .into_iter()
+        .filter(|p| matches!(p, api::Permission::ModelRead | api::Permission::View))
+        .collect()
+}
+
+/// What a grant change would ask the person, for the web's sheet (the
+/// desktop asks in its own confirmation, with the same lines): plugin
+/// `manifest_json`'s stored record `installed_json` changed to `grant_json`
+/// (permission names from the manifest's `permissions`) and
+/// `optional_json` (from its `optionalPermissions`). Answers `{ "added":
+/// [{ "name", "text" }, ...], "warnings": [text, ...] }`: a line for each
+/// permission the change adds (none when it only takes away, which asks
+/// nothing), and the warnings the resulting grant triggers. A name the
+/// manifest does not declare where it is given is refused
+/// `MANIFEST_UNKNOWN_PERMISSION`, as the desktop refuses it; names that
+/// are not lists of permission names are `PLUGIN_BAD_INPUT` or the
+/// manifest refusal of the name.
+#[wasm_bindgen]
+pub fn plugin_grant_lines(
+    manifest_json: &str,
+    installed_json: &str,
+    grant_json: &str,
+    optional_json: &str,
+) -> Result<String, ApiError> {
+    let manifest = manifest(manifest_json)?;
+    let current = Installed::from_json(&manifest.id, installed_json.as_bytes())
+        .map_err(|e| install_error(&e))?;
+    let names =
+        |what: &str, text: &str| -> Result<Vec<plugin_manifest::PermissionName>, ApiError> {
+            let raw: Vec<String> = serde_json::from_str(text).map_err(|e| bad_input(what, e))?;
+            if raw.len() > MAX_GRANT_NAMES {
+                return Err(bad_input(what, format!("more than {MAX_GRANT_NAMES}")));
+            }
+            raw.iter()
+                .map(|n| {
+                    plugin_manifest::PermissionName::parse(n)
+                        .map_err(|e| install_error(&InstallError::Manifest(e)))
+                })
+                .collect()
+        };
+    let grant = names("grant", grant_json)?;
+    let optional = names("optional", optional_json)?;
+    let undeclared = grant
+        .iter()
+        .find(|p| !manifest.permissions.contains(p))
+        .or_else(|| {
+            optional
+                .iter()
+                .find(|p| !manifest.optional_permissions.contains(p))
+        });
+    if let Some(p) = undeclared {
+        return Err(install_error(&InstallError::Manifest(
+            plugin_manifest::ManifestError::UnknownPermission(p.as_str().to_string()),
+        )));
+    }
+    let mut added: Vec<plugin_manifest::PermissionName> = Vec::new();
+    for p in grant.iter().filter(|p| !current.grant.contains(p)).chain(
+        optional
+            .iter()
+            .filter(|p| !current.optional_granted.contains(p)),
+    ) {
+        if !added.contains(p) {
+            added.push(p.clone());
+        }
+    }
+    let resulting: Vec<plugin_manifest::PermissionName> =
+        grant.iter().chain(&optional).cloned().collect();
+    let lines: Vec<plugin_host::PermissionLine> =
+        added.iter().map(plugin_host::permission_line).collect();
+    Ok(to_json(&serde_json::json!({
+        "added": lines,
+        "warnings": plugin_host::permission_warnings(&resulting),
+    })))
 }
 
 /// The states a plugin reports through `plugin_state`.
@@ -241,6 +338,45 @@ const MAX_STATE_DETAIL_CHARS: usize = 200;
 
 #[wasm_bindgen]
 impl Scene {
+    /// Replaces the grant of a running plugin's connection in place
+    /// (`api::Connection::set_grant`): a person granted the plugin more
+    /// while it runs, and its calls and events follow the new grant from
+    /// the next frame on, without a reconnect. `grant_json` is what
+    /// [`plugin_grant_json`] answers: a plugin's grant at the ceiling its
+    /// permissions derive, never one holding `all`. Refuses `GRANT` for
+    /// malformed JSON, any other grant shape, an unknown connection, a
+    /// connection not opened for a plugin, or a grant for another plugin or
+    /// another document; nothing changes on a refusal. Runs while a plugin
+    /// command holds the document (it touches only the connection), so a
+    /// grant given during a command applies to that command's later calls.
+    pub fn api_connection_set_grant(
+        &mut self,
+        conn_id: u32,
+        grant_json: &str,
+    ) -> Result<(), ApiError> {
+        let grant: api::Grant = serde_json::from_str(grant_json)
+            .map_err(|e| ApiError::new("GRANT", &format!("malformed grant: {e}")))?;
+        let Some(plugin) = grant.plugin.clone() else {
+            return Err(ApiError::new("GRANT", "the grant is not a plugin's"));
+        };
+        let rebuilt = api::Grant::plugin(
+            &plugin,
+            grant.document.as_deref(),
+            grant.permissions.clone(),
+        );
+        if grant.holds(&api::Permission::All) || rebuilt != grant {
+            return Err(ApiError::new(
+                "GRANT",
+                "the grant is not one plugin_grant_json builds",
+            ));
+        }
+        let Some(conn) = self.api_connections.get_mut(&conn_id) else {
+            return Err(ApiError::new("GRANT", "unknown API connection"));
+        };
+        conn.set_grant(grant)
+            .map_err(|e| ApiError::new("GRANT", e.name()))
+    }
+
     /// The host reports a plugin's state; the next [`Scene::drain_events`]
     /// sends `plugin_state` `{plugin, state, detail?}` to every connection
     /// subscribed to it. `id` must follow the plugin id grammar
@@ -562,7 +698,7 @@ mod tests {
             "attributes.write:com.example.web",
             "model.read",
         ];
-        let json = plugin_grant_json("com.example.web", "doc_3", &names(&list)).unwrap();
+        let json = plugin_grant_json("com.example.web", "doc_3", &names(&list), false).unwrap();
         let parsed: Vec<plugin_manifest::PermissionName> = list
             .iter()
             .map(|n| plugin_manifest::PermissionName::parse(n).unwrap())
@@ -585,7 +721,8 @@ mod tests {
         assert_eq!(scene.api_connections[&conn].grant(), &expected);
 
         // Without a live permission the ceiling is Core, decided by `api`.
-        let json = plugin_grant_json("com.example.web", "doc_1", &names(&["model.read"])).unwrap();
+        let json =
+            plugin_grant_json("com.example.web", "doc_1", &names(&["model.read"]), false).unwrap();
         let grant: api::Grant = serde_json::from_str(&json).unwrap();
         assert_eq!(grant.ceiling, api::Ceiling::Core);
         assert_eq!(grant.plugin.as_deref(), Some("com.example.web"));
@@ -594,7 +731,7 @@ mod tests {
         assert_eq!(scene.api_connections[&conn].grant(), &grant);
 
         // No names: a grant that holds nothing, still a plugin's.
-        let json = plugin_grant_json("com.example.web", "doc_1", "[]").unwrap();
+        let json = plugin_grant_json("com.example.web", "doc_1", "[]", false).unwrap();
         let grant: api::Grant = serde_json::from_str(&json).unwrap();
         assert!(grant.permissions.is_empty());
         scene.api_plugin_connection_open(&json).unwrap();
@@ -618,10 +755,11 @@ mod tests {
             (vec!["Model.Read"], "MANIFEST_UNKNOWN_PERMISSION"),
             (vec![""], "MANIFEST_UNKNOWN_PERMISSION"),
         ] {
-            let e = plugin_grant_json("com.example.web", "doc_1", &names(&list)).unwrap_err();
+            let e =
+                plugin_grant_json("com.example.web", "doc_1", &names(&list), false).unwrap_err();
             assert_eq!(code(e), expected, "{list:?}");
         }
-        let e = plugin_grant_json("com.example.web", "doc_1", &names(&["all"])).unwrap_err();
+        let e = plugin_grant_json("com.example.web", "doc_1", &names(&["all"]), false).unwrap_err();
         assert!(e.to_string().contains("\"all\""), "{e}");
         for (id, expected) in [
             ("../x", "MANIFEST_INVALID_PLUGIN_ID"),
@@ -630,7 +768,7 @@ mod tests {
             ("hew.core", "MANIFEST_RESERVED_PLUGIN_ID"),
         ] {
             assert_eq!(
-                code(plugin_grant_json(id, "doc_1", &ok).unwrap_err()),
+                code(plugin_grant_json(id, "doc_1", &ok, false).unwrap_err()),
                 expected,
                 "{id:?}"
             );
@@ -638,7 +776,7 @@ mod tests {
         let long = "d".repeat(MAX_DOCUMENT_ID_BYTES + 1);
         for document in ["", "doc 1", "doc_1\n", "doc/1", long.as_str()] {
             assert_eq!(
-                code(plugin_grant_json("com.example.web", document, &ok).unwrap_err()),
+                code(plugin_grant_json("com.example.web", document, &ok, false).unwrap_err()),
                 "PLUGIN_BAD_INPUT",
                 "{document:?}"
             );
@@ -649,11 +787,303 @@ mod tests {
         let many = serde_json::to_string(&many).unwrap();
         for bad in ["{}", "[1]", "\"model.read\"", "", many.as_str()] {
             assert_eq!(
-                code(plugin_grant_json("com.example.web", "doc_1", bad).unwrap_err()),
+                code(plugin_grant_json("com.example.web", "doc_1", bad, false).unwrap_err()),
                 "PLUGIN_BAD_INPUT",
                 "{bad}"
             );
         }
+    }
+
+    /// The viewer cut leaves `model.read` and `view` at most, whatever the
+    /// names, and still refuses a name no plugin may hold.
+    #[test]
+    fn a_viewer_grant_keeps_nothing_that_writes() {
+        let every = [
+            "model.read",
+            "model.write",
+            "attributes.write",
+            "attributes.write:com.other.app",
+            "view",
+            "documents.save",
+            "documents.discard",
+            "documents.other",
+            "files",
+            "clipboard",
+            "library",
+            "network:api.example.com",
+        ];
+        assert_eq!(every.len(), plugin_manifest::PERMISSION_NAMES.len() + 2);
+        let grant = |list: &[&str]| -> api::Grant {
+            serde_json::from_str(
+                &plugin_grant_json("com.example.web", "doc_1", &names(list), true).unwrap(),
+            )
+            .unwrap()
+        };
+        let all = grant(&every);
+        let kept: Vec<String> = all.permissions.iter().map(|p| p.to_wire()).collect();
+        assert_eq!(kept, ["model.read", "view"]);
+        assert_eq!(all.ceiling, api::Ceiling::App, "view is a live permission");
+        assert_eq!(all.plugin.as_deref(), Some("com.example.web"));
+        assert_eq!(all.document.as_deref(), Some("doc_1"));
+        // Every subset: nothing outside the two survives, and each of the
+        // two survives exactly when it was named.
+        for (i, name) in every.iter().enumerate() {
+            let rest: Vec<&str> = every
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, n)| *n)
+                .collect();
+            for list in [vec![*name], rest] {
+                let g = grant(&list);
+                for p in &g.permissions {
+                    assert!(
+                        matches!(p, api::Permission::ModelRead | api::Permission::View),
+                        "{list:?} kept {p:?}"
+                    );
+                }
+                assert_eq!(
+                    g.permissions.contains(&api::Permission::ModelRead),
+                    list.contains(&"model.read")
+                );
+                assert_eq!(
+                    g.permissions.contains(&api::Permission::View),
+                    list.contains(&"view")
+                );
+            }
+        }
+        let write_only = grant(&["model.write", "documents.save"]);
+        assert!(write_only.permissions.is_empty());
+        assert_eq!(write_only.ceiling, api::Ceiling::Core);
+        // The names are checked before the cut.
+        for list in [vec!["all"], vec!["network:*.example.com"], vec!["nope"]] {
+            assert!(plugin_grant_json("com.example.web", "doc_1", &names(&list), true).is_err());
+        }
+        // A viewer connection is refused a write the kernel would otherwise allow.
+        let mut scene = Scene::new();
+        let json = plugin_grant_json("com.example.web", "doc_1", &names(&every), true).unwrap();
+        let conn = scene.api_plugin_connection_open(&json).unwrap();
+        hello_attach(&mut scene, conn);
+        let r = reply(&mut scene, conn, write_frame(5));
+        assert_eq!(r["error"]["code"], -32001, "{r}");
+    }
+
+    fn hello_attach(scene: &mut Scene, conn: u32) {
+        for frame in [
+            json!({"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}),
+            json!({"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}),
+        ] {
+            let r = reply(scene, conn, frame);
+            assert!(r.get("error").is_none(), "{r}");
+        }
+    }
+
+    /// A write that records an undo entry: a rectangle on the ground.
+    fn write_frame(id: u32) -> Value {
+        let x = f64::from(id) * 3.0;
+        json!({"jsonrpc":"2.0","id":id,"method":"hew.sketch.draw_rect","params":{"plane":{"ground":true},"corner_a":[x,0.0,0.0],"corner_b":[x + 1.0,1.0,0.0]}})
+    }
+
+    /// The reply inside a tagged `api_dispatch_in_forward` answer.
+    fn in_forward(scene: &mut Scene, conn: u32, token: u64, frame: Value) -> Value {
+        let tagged = scene
+            .api_dispatch_in_forward(conn, token, &frame.to_string())
+            .unwrap();
+        let v: Value = serde_json::from_str(&tagged).unwrap();
+        serde_json::from_str(v["reply"].as_str().expect("a reply")).unwrap()
+    }
+
+    /// A write the plugin's grant refused inside its own open command runs
+    /// after the grant is widened, on the same connection, while the
+    /// compound still holds the document; the change lands in that one
+    /// undo entry.
+    #[test]
+    fn a_widened_grant_admits_a_call_refused_before_inside_an_open_compound() {
+        let mut scene = Scene::new();
+        scene
+            .register_plugin_commands(
+                "com.example.web",
+                r#"[{"id":"cut","class":"mutating","summary":"Cuts.","label":"Cut"}]"#,
+            )
+            .unwrap();
+        let caller = scene.api_connection_open();
+        hello_attach(&mut scene, caller);
+        let read =
+            plugin_grant_json("com.example.web", "doc_1", &names(&["model.read"]), false).unwrap();
+        let plugin = scene.api_plugin_connection_open(&read).unwrap();
+        hello_attach(&mut scene, plugin);
+        let subscribed = reply(
+            &mut scene,
+            plugin,
+            json!({"jsonrpc":"2.0","id":2,"method":"hew.event.subscribe","params":{"events":["document_changed","selection_changed"]}}),
+        );
+        assert_eq!(subscribed["result"]["denied"], json!(["selection_changed"]));
+
+        let tagged = scene
+            .api_dispatch(
+                caller,
+                r#"{"jsonrpc":"2.0","id":9,"method":"com.example.web.cut","params":{}}"#,
+            )
+            .unwrap();
+        let token = serde_json::from_str::<Value>(&tagged).unwrap()["pending"]["token"]
+            .as_u64()
+            .unwrap();
+        let before = scene.doc.undo_depth();
+        let kt = scene.compound_begin(caller, token).unwrap();
+        assert!(scene.busy());
+
+        let refused = in_forward(&mut scene, plugin, token, write_frame(10));
+        assert_eq!(refused["error"]["code"], -32001, "{refused}");
+
+        let wide = plugin_grant_json(
+            "com.example.web",
+            "doc_1",
+            &names(&["model.read", "model.write", "view"]),
+            false,
+        )
+        .unwrap();
+        scene.api_connection_set_grant(plugin, &wide).unwrap();
+        assert!(scene.busy(), "still inside the command");
+
+        let ok = in_forward(&mut scene, plugin, token, write_frame(11));
+        assert!(ok.get("error").is_none(), "{ok}");
+        let again = in_forward(
+            &mut scene,
+            plugin,
+            token,
+            json!({"jsonrpc":"2.0","id":12,"method":"hew.event.subscribe","params":{"events":["selection_changed"]}}),
+        );
+        assert_eq!(again["result"]["denied"], json!([]), "{again}");
+        assert!(
+            scene.api_connections[&plugin].wants("document_changed"),
+            "a subscription the grant still receives stays"
+        );
+
+        let ended: Value = serde_json::from_str(&scene.compound_end(kt).unwrap()).unwrap();
+        assert_eq!(ended["committed"], true);
+        assert_eq!(scene.doc.undo_depth(), before + 1, "one entry");
+        let done = scene
+            .api_complete_forward(caller, token, r#"{"ok":{}}"#)
+            .unwrap();
+        assert!(!done.contains("\"error\""), "{done}");
+    }
+
+    /// Only a plugin's own connection takes a grant, only for that plugin
+    /// and document, and only one `plugin_grant_json` would build.
+    #[test]
+    fn set_grant_refuses_other_connections_plugins_documents_and_shapes() {
+        let mut scene = Scene::new();
+        let read =
+            plugin_grant_json("com.example.web", "doc_1", &names(&["model.read"]), false).unwrap();
+        let wide = plugin_grant_json(
+            "com.example.web",
+            "doc_1",
+            &names(&["model.read", "model.write"]),
+            false,
+        )
+        .unwrap();
+        let plugin = scene.api_plugin_connection_open(&read).unwrap();
+        let first_party = scene.api_connection_open();
+        let app = scene
+            .api_plugin_connection_open(
+                &json!({"ceiling":"core","permissions":["model.read"],"plugin":null,"app":"pair_1","document":null}).to_string(),
+            )
+            .unwrap();
+        let other_plugin = plugin_grant_json(
+            "com.example.other",
+            "doc_1",
+            &names(&["model.write"]),
+            false,
+        )
+        .unwrap();
+        let other_doc =
+            plugin_grant_json("com.example.web", "doc_2", &names(&["model.write"]), false).unwrap();
+        let mut forged: Value = serde_json::from_str(&wide).unwrap();
+        forged["ceiling"] = json!("app");
+        let mut all: Value = serde_json::from_str(&wide).unwrap();
+        all["permissions"] = json!(["model.read", "all"]);
+        let first_party_grant =
+            json!({"ceiling":"app","permissions":["all"],"plugin":null,"app":null,"document":null});
+        for (conn, grant) in [
+            (first_party, wide.clone()),
+            (app, wide.clone()),
+            (999, wide.clone()),
+            (plugin, other_plugin),
+            (plugin, other_doc),
+            (plugin, forged.to_string()),
+            (plugin, all.to_string()),
+            (plugin, first_party_grant.to_string()),
+            (plugin, "{".to_string()),
+        ] {
+            let e = scene.api_connection_set_grant(conn, &grant).unwrap_err();
+            assert_eq!(code(e), "GRANT", "{conn} {grant}");
+        }
+        assert_eq!(
+            serde_json::to_value(scene.api_connections[&plugin].grant()).unwrap(),
+            serde_json::from_str::<Value>(&read).unwrap(),
+            "unchanged"
+        );
+        assert!(scene.api_connections[&first_party].grant() == &api::Grant::app());
+        scene.api_connection_set_grant(plugin, &wide).unwrap();
+        assert_eq!(
+            serde_json::to_value(scene.api_connections[&plugin].grant()).unwrap(),
+            serde_json::from_str::<Value>(&wide).unwrap()
+        );
+    }
+
+    /// The web sheet's lines: one per permission a change adds, with the
+    /// warnings of the grant that results; nothing to show for a change
+    /// that only takes away; a name the manifest does not declare where it
+    /// is given is refused.
+    #[test]
+    fn grant_lines_name_what_a_change_adds() {
+        let manifest = MANIFEST.replace(
+            r#""permissions":["model.read","network:api.example.com"]"#,
+            r#""permissions":["model.read"],"optionalPermissions":["view","network:api.example.com"]"#,
+        );
+        let installed = json!({
+            "schema": 1, "id": "com.example.web", "version": "1.2.0",
+            "source": { "kind": "file", "name": "web.hewplugin" }, "installed_at_ms": 1,
+            "grant": ["model.read"], "optional_granted": ["view"], "enabled": true, "data_version": 1
+        })
+        .to_string();
+        let lines = |grant: &[&str], optional: &[&str]| -> Result<Value, String> {
+            plugin_grant_lines(&manifest, &installed, &names(grant), &names(optional))
+                .map(|t| serde_json::from_str(&t).unwrap())
+                .map_err(code)
+        };
+        let v = lines(&["model.read"], &["view", "network:api.example.com"]).unwrap();
+        assert_eq!(v["added"].as_array().unwrap().len(), 1);
+        assert_eq!(v["added"][0]["name"], "network:api.example.com");
+        assert_eq!(
+            v["added"][0]["text"],
+            plugin_host::permission_line(
+                &plugin_manifest::PermissionName::parse("network:api.example.com").unwrap()
+            )
+            .text
+        );
+        assert_eq!(
+            v["warnings"],
+            json!(["Can send what it reads from your model to api.example.com."])
+        );
+        // Taking one back adds nothing.
+        let v = lines(&["model.read"], &[]).unwrap();
+        assert_eq!(v["added"], json!([]));
+        // Undeclared where given: refused by name.
+        assert_eq!(
+            lines(&["model.read", "view"], &[]).unwrap_err(),
+            "MANIFEST_UNKNOWN_PERMISSION"
+        );
+        assert_eq!(
+            lines(&["model.read"], &["files"]).unwrap_err(),
+            "MANIFEST_UNKNOWN_PERMISSION"
+        );
+        assert_eq!(
+            plugin_grant_lines(&manifest, &installed, "{}", "[]")
+                .map_err(code)
+                .unwrap_err(),
+            "PLUGIN_BAD_INPUT"
+        );
     }
 
     fn reply(scene: &mut Scene, conn: u32, frame: Value) -> Value {
@@ -683,7 +1113,7 @@ mod tests {
     fn a_plugin_state_reaches_every_subscriber_once() {
         let mut scene = Scene::new();
         let first = scene.api_connection_open();
-        let grant = plugin_grant_json("com.example.other", "doc_1", "[]").unwrap();
+        let grant = plugin_grant_json("com.example.other", "doc_1", "[]", false).unwrap();
         let plugin = scene.api_plugin_connection_open(&grant).unwrap();
         let quiet = scene.api_connection_open();
         for conn in [first, plugin] {

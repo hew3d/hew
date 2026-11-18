@@ -1,0 +1,42 @@
+{
+  "manifest": 1,
+  "id": "com.example.optional-view",
+  "name": "Optional View",
+  "version": "0.1.0",
+  "description": "Reads which parts of the model are hidden, which it may do only when the person allows the view permission.",
+  "api": 1,
+  "main": "dist/background.js",
+  "permissions": ["model.read"],
+  "optionalPermissions": ["view"],
+  "activation": ["on_command"],
+  "contributes": {
+    "commands": [
+      {
+        "id": "hidden",
+        "class": "read_only",
+        "summary": "Reads what is hidden, and says whether the model allowed it.",
+        "result": {
+          "type": "object",
+          "properties": { "ok": {}, "refusal": {}, "calls": {}, "grants": {}, "boot": {} },
+          "additionalProperties": false
+        }
+      },
+      {
+        "id": "ask",
+        "class": "read_only",
+        "summary": "Asks the person for the view permission, then reads what is hidden in the same command.",
+        "result": {
+          "type": "object",
+          "properties": { "asked": {}, "refusal": {}, "ok": {}, "after": {}, "calls": {}, "grants": {}, "boot": {} },
+          "additionalProperties": false
+        }
+      },
+      {
+        "id": "state",
+        "class": "read_only",
+        "summary": "Says how many calls this run has answered and how often it was told of a wider grant.",
+        "result": { "type": "object", "properties": { "calls": {}, "grants": {}, "boot": {}, "grant": {} }, "additionalProperties": false }
+      }
+    ]
+  }
+}

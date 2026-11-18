@@ -421,8 +421,9 @@ both). On the desktop a first-party socket connection hears these events
 for every window, not only the one it is attached to: the app offers each
 window's lifecycle frame to every connection subscribed to it that holds
 no session in that window (a window nobody is attached to still reports
-`document_opened`). `document_closed` is sent as the page goes away and
-can be lost when the window is destroyed before the frame is written.
+`document_opened`). `document_closed` is sent as the page goes away (not
+when the browser only keeps it for going back to) and can be lost when
+the window is destroyed before the frame is written.
 Every event names its `document`: the window's id on the desktop
 (`doc_N`), `doc_1` elsewhere. `document_will_save` waits for nobody.
 
@@ -2899,19 +2900,32 @@ older ones behind the pointer.
 
 ### 7.7 Plugin commands (a Preview feature)
 
-Two commands tell a program what the app's plugins are doing. They belong
+Four commands tell a program what the app's plugins are doing. They belong
 to the Plugins preview feature (`preview-features.json`): a production
 build leaves them out of the registry and refuses them `preview_only`, and
 a production `hew-cli --live` refuses them before sending anything. The
-desktop app answers them itself. Both are first-party only: the `all`
-profile may call them, a plugin may not, and neither installs, enables,
-loads or changes a plugin. Nothing that manages a plugin completes over
+desktop app answers them itself. All are first-party only: the `all`
+profile may call them, a plugin may not, and none installs, enables or
+changes a plugin (`hew.plugin.reload` only asks running hosts to load a
+developer folder's files again). Nothing that manages a plugin completes over
 the socket; the person does that in the app.
 
 | Command | Served | Params | Result | Refusals |
 |---|---|---|---|---|
 | `hew.plugin.list` | host, solitary | `{}` | `{plugins: [{id, name, version, source, enabled, state}], developer_mode, request_waiting}` | `plugins_disabled`, `no_plugin_dir`, `host_capability_missing` |
 | `hew.plugin.dev` | host, solitary | `{path}`: the plugin's folder | `{status: "awaiting_user"}` | `developer_mode_off`, `confirmation_open`, `plugins_off`, `request_waiting`, `request_dismissed`, `dry_run_host_command`, `plugins_disabled`, `no_plugin_dir`, `io`, `host_capability_missing`; `-32602` for a missing or empty `path` |
+| `hew.plugin.activity` | host, solitary, reads only | `{id}` | `{entries: [{at, window, state, reason}]}`, newest first, at most 500 | `invalid_params` (no id, or not a plugin id), `not_installed`, `installed_unreadable`, `storage_unreadable`, `io`, `plugins_disabled`, `no_plugin_dir`, `host_capability_missing` |
+| `hew.plugin.reload` | host, solitary | `{id}` | `{status: "reloading"}` | in order: `plugins_disabled`, `no_plugin_dir`, `invalid_params`, `plugins_off`, `developer_mode_off`, `not_installed` / `installed_unreadable`, `not_a_developer_folder`, `plugin_blocked`, `plugin_stopped`, `plugin_turned_off`, `reload_too_soon`; `dry_run_host_command` inside a rehearsal; `host_capability_missing` |
+
+`hew.plugin.activity` lists the states windows reported for a plugin
+(`enabled`, `activating`, `activated`, `crashed`, `blocked`, `idle`,
+`unloaded`): `at` in milliseconds since the Unix epoch, `window` the
+reporting window's label, `reason` cleaned and at most 160 characters
+or `null`. `hew.plugin.reload` asks every window that runs plugins to
+reload a plugin loaded from a developer folder, as a change to its
+files does; it never starts a plugin that stopped (the person turns it
+off and on), one turned off (`plugin_turned_off`) or one waiting for a
+review, and comes at most once every two seconds per plugin. Neither installs, enables or grants anything.
 
 `source` is `file`, `dir`, `index`, `git` or `url`. `state` is
 `installed`, `needs_developer_mode` (a folder plugin while developer mode
@@ -2944,6 +2958,31 @@ The MCP server of `hew-cli` refuses every `hew.plugin.*` command but
 in every build. That is a courtesy and not a boundary, because anything
 that can reach the socket can send the frames itself; the boundary is
 that neither command completes anything.
+
+**`hew.permissions.request`** is a plugin's own question to the person
+(docs/agents/PLUGINS.md, "Optional permissions"). It is in the Plugins
+preview feature too: a production build leaves it out of the registry and
+of the capability listing and refuses it `preview_only`. Every grant
+reaches it (`always`), but only a running plugin's own connection is
+answered, by the window's plugin host, before the frame reaches a
+dispatcher; every other caller reaches the kernel, which checks the
+params and refuses `host_capability_missing`. Nothing about it completes
+over the socket.
+
+| Command | Served | Params | Result | Refusals |
+|---|---|---|---|---|
+| `hew.permissions.request` | host, solitary | `{permissions: [name, ...], reason?}`: 1 to 64 names from the manifest's `optionalPermissions`; `reason` is at most 200 characters, shown to the person as plain text | `{granted: [name, ...]}`: the names asked for that the plugin holds now | `not_available_in_shop` (first, whatever the params), `permission_not_requestable` (`detail.permissions` lists the names that are not optional permissions of the plugin), `request_pending`, `request_declined`, `no_user_activation`, `host_capability_missing`; `-32602` for malformed params |
+
+In order: Shop Mode refuses; the params are checked; every name must be
+one of the plugin's optional permissions; one request per plugin waits
+at a time; for a minute after the person says no every request is
+`request_declined`; names already held are granted without asking; the
+person must have acted in the plugin's own window or panel in the last
+5 seconds (each act allows one request); then the person decides. A yes
+is applied to the running plugin (its connection's grant changes in
+place) before the answer. While the person decides, the clock of the
+plugin command the request was made in is stopped, for at most
+5 minutes, after which the request is `request_declined`.
 
 ## 8. Attribute dictionaries
 
@@ -3228,7 +3267,7 @@ registry (the `Permission` line of each entry in `API_REFERENCE.gen.md`):
 
 | Permission | What it reaches |
 |---|---|
-| `always` | `hew.meta.hello`, `hew.meta.capabilities`, `hew.doc.attach` (to the connection's own document), `hew.doc.transact` (declaration only; every grant has it) |
+| `always` | `hew.meta.hello`, `hew.meta.capabilities`, `hew.doc.attach` (to the connection's own document), `hew.doc.transact` (declaration only; every grant has it), `hew.event.subscribe`, `hew.event.unsubscribe`, and in a preview build `hew.permissions.request` (§7.7) |
 | `model.read` | the read surface: `hew.query.*`, `hew.compute.*` (§7.6), `hew.attr.get`, `hew.meta.documents`, `hew.history.status`, scene and library listings, `hew.doc.health`, `hew.solid.imprints`, `hew.sketch.units`, `hew.view.snapshot`, `hew.view.line_drawing`, `hew.print.pdf` |
 | `model.write` | every modeling command, `hew.scenes.add`/`update`/`rename`/`remove`/`reorder`/`apply`, `hew.history.undo`/`redo`, `hew.doc.purge_unused` |
 | `attributes.write` | `hew.attr.set`, `hew.attr.delete` (under the namespace rule below) |

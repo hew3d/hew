@@ -6,10 +6,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { requiresPreview } from '../test/requiresPreview'
 import { FakeDir, linkedChannels } from '../test/opfsFake'
+import { compareCodePoints } from './pluginText'
 import { storedZipOf as storedZip } from './storedZip'
 import { fakeWasm, indexStoredZip, manifestJson, pluginFile, textAt, treeOf, type ListedFile } from './testKit'
 import {
-  compareCodePoints,
+  docStorageDelete,
+  docStorageGet,
+  docStorageList,
+  docStorageSet,
   folderNameOk,
   makeWebPluginStore,
   packFolder,
@@ -22,6 +26,7 @@ import {
   type LockProvider,
   type PluginWasm,
   type WebPluginStore,
+  validDocumentId,
 } from './webPluginStore'
 import { PluginError } from './pluginError'
 import type { Installed } from './types'
@@ -1532,5 +1537,340 @@ describe('installing a copy of a folder (the web)', () => {
     Object.defineProperty(dir, 'name', { value: '\u202Emy\u0000 plugin\n' })
     const staged = await store.stageFolder(asHandle(dir))
     expect(staged.consent.source).toEqual({ kind: 'file', name: 'my plugin', origin: 'folder' })
+  })
+})
+
+describe('per-document storage', () => {
+  const ID = 'com.example.one'
+  const DOC = '3f2c9107-5ed4-40a8-806b-1ec297405d83'
+  const DOC2 = '00000000-0000-4000-8000-000000000002'
+  const MiB = 1024 * 1024
+
+  it('keeps one object of strings per document in plugin-data/<id>/documents/, and says which document changed', async () => {
+    const posts: unknown[] = []
+    const channel = { addEventListener: () => {}, postMessage: (m: unknown) => void posts.push(m) } as unknown as BroadcastChannel
+    const { root, store } = setup({ channel })
+    await install(store)
+    const s = store.storage
+    expect(await s.docStorageGet(ID, DOC, 'a')).toBeNull()
+    expect(await s.docStorageList(ID, DOC)).toEqual([])
+    // Reading makes nothing.
+    expect(root.dirs.has('plugin-data')).toBe(false)
+    posts.length = 0
+    await s.docStorageSet(ID, DOC, 'b', '2')
+    await s.docStorageSet(ID, DOC, 'a', '1')
+    await s.docStorageSet(ID, DOC2, 'a', 'other')
+    expect(await s.docStorageGet(ID, DOC, 'a')).toBe('1')
+    expect(await s.docStorageList(ID, DOC)).toEqual(['a', 'b'])
+    expect(await s.docStorageList(ID, DOC2)).toEqual(['a'])
+    expect(JSON.parse((await textAt(root, `plugin-data/${ID}/documents/${DOC}.json`)) as string)).toEqual({ a: '1', b: '2' })
+    // Plugin storage is a separate thing.
+    expect(await s.storageList(ID)).toEqual([])
+    expect(posts[0]).toEqual({ kind: 'storage', id: ID, scope: 'document', document_id: DOC, keys: ['b'] })
+    posts.length = 0
+    await s.docStorageDelete(ID, DOC, 'nothing')
+    expect(posts).toEqual([])
+    await s.docStorageDelete(ID, DOC, 'a')
+    await s.docStorageDelete(ID, DOC, 'b')
+    expect(posts).toHaveLength(2)
+    // The file goes with its last key.
+    expect(treeOf(root).filter((p) => p.startsWith('plugin-data/'))).toEqual([
+      `plugin-data/${ID}/documents/${DOC2}.json`,
+      `plugin-data/${ID}/usage.json`,
+    ])
+    // A pane in another tab is not woken by it.
+    let hits = 0
+    store.onChanged(() => hits++)
+    await s.docStorageSet(ID, DOC, 'c', '3')
+    expect(hits).toBe(0)
+  })
+
+  it('checks the plugin id, the document id and the key before any path, and needs an installed plugin', async () => {
+    const { root, store } = setup()
+    const s = store.storage
+    expect(await refusal(s.docStorageSet(ID, DOC, 'k', 'v'))).toBe('not_installed')
+    expect(await refusal(s.docStorageGet(ID, DOC, 'k'))).toBe('not_installed')
+    expect(await refusal(s.docStorageList(ID, DOC))).toBe('not_installed')
+    expect(await refusal(s.docStorageDelete(ID, DOC, 'k'))).toBe('not_installed')
+    expect(root.dirs.size).toBe(0)
+    await install(store)
+    for (const bad of ['', '..', DOC.toUpperCase(), `${DOC}/../x`, '../../plugins/com.example.one/installed', DOC.slice(1)]) {
+      expect(validDocumentId(bad), bad).toBe(false)
+      expect(await refusal(s.docStorageSet(ID, bad, 'k', 'v')), bad).toBe('document_id_invalid')
+      expect(await refusal(s.docStorageGet(ID, bad, 'k')), bad).toBe('document_id_invalid')
+      expect(await refusal(s.docStorageList(ID, bad)), bad).toBe('document_id_invalid')
+      expect(await refusal(s.docStorageDelete(ID, bad, 'k')), bad).toBe('document_id_invalid')
+    }
+    // The plugin id first, then the document id.
+    expect(await refusal(s.docStorageSet('..', '..', 'k', 'v'))).toBe('invalid_id')
+    expect(await refusal(s.docStorageSet(ID, DOC, '', 'v'))).toBe('storage_key_invalid')
+    expect(await refusal(s.docStorageSet(ID, DOC, 'x'.repeat(257), 'v'))).toBe('storage_key_invalid')
+    // A key with a lone surrogate has no UTF-8 form; refused in both scopes.
+    expect(await refusal(s.docStorageSet(ID, DOC, 'a\uD800', 'v'))).toBe('storage_key_invalid')
+    expect(await refusal(s.storageSet(ID, '\uDC00b', 'v'))).toBe('storage_key_invalid')
+    // So is a value: the desktop cannot take one, and could not read it back.
+    expect(await refusal(s.docStorageSet(ID, DOC, 'k', 'a\uD800'))).toBe('storage_value_invalid')
+    expect(await refusal(s.storageSet(ID, 'k', '\uDC00b'))).toBe('storage_value_invalid')
+    await s.storageSet(ID, 'k', 'ok \u{1F600}')
+    await s.docStorageSet(ID, DOC, 'emoji \u{1F600}', 'v')
+    expect(root.dirs.get('plugin-data')?.dirs.get(ID)?.dirs.get('documents')?.files.size).toBe(1)
+  })
+
+  it('reports a failure to make the data folder as io, not storage_unreadable', async () => {
+    const { store } = setup()
+    await install(store)
+    const real = FakeDir.prototype.getDirectoryHandle
+    const spy = vi.spyOn(FakeDir.prototype, 'getDirectoryHandle').mockImplementation(async function (this: FakeDir, name, opts) {
+      if (name === 'plugin-data' && opts?.create) throw new DOMException('full', 'QuotaExceededError')
+      return real.call(this, name, opts)
+    })
+    try {
+      expect(await refusal(store.storage.docStorageSet(ID, DOC, 'k', 'v'))).toBe('io')
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('refuses one document past 5 MiB and the whole tree past 50 MiB, and writes nothing', async () => {
+    const { root, store } = setup()
+    await install(store)
+    const s = store.storage
+    expect(await refusal(s.docStorageSet(ID, DOC, 'a', 'x'.repeat(5 * MiB)))).toBe('storage_quota')
+    const big = 'x'.repeat(5 * MiB - 100)
+    const doc = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+    for (let n = 0; n < 10; n++) await s.docStorageSet(ID, doc(n), 'a', big)
+    await expect(s.docStorageSet(ID, doc(10), 'a', big)).rejects.toMatchObject({
+      refusal: 'storage_quota',
+      message: "This plugin's saved data would pass 50 MB in all, the most a plugin may keep.",
+    })
+    expect(await textAt(root, `plugin-data/${ID}/documents/${doc(10)}.json`)).toBeNull()
+    // A missing or damaged total is measured again, and still refuses.
+    const tree = root.dirs.get('plugin-data')!.dirs.get(ID)!
+    tree.files.delete('usage.json')
+    expect(await refusal(s.docStorageSet(ID, doc(10), 'a', big))).toBe('storage_quota')
+    tree.files.set('usage.json', { bytes: new TextEncoder().encode('{"bytes":-5}'), mtime: 1 })
+    expect(await refusal(s.docStorageSet(ID, doc(10), 'a', big))).toBe('storage_quota')
+    // Shrinking makes room; a total left too high refuses nothing that fits.
+    await s.docStorageDelete(ID, doc(0), 'a')
+    tree.files.set('usage.json', { bytes: new TextEncoder().encode('{"bytes":999999999999}'), mtime: 1 })
+    await s.docStorageSet(ID, doc(10), 'a', big)
+    const total = JSON.parse((await textAt(root, `plugin-data/${ID}/usage.json`)) as string).bytes as number
+    expect(total).toBeGreaterThanOrEqual(10 * (5 * MiB - 100))
+    expect(total).toBeLessThanOrEqual(50 * MiB)
+  })
+
+  it('is untouched by an update and a rollback, removed on uninstall, and a new install starts empty', async () => {
+    const { root, store } = setup()
+    await install(store, { version: '1.0.0' })
+    await install(store, { id: 'com.example.two' })
+    await store.storage.docStorageSet(ID, DOC, 'k', 'v')
+    await store.storage.docStorageSet('com.example.two', DOC, 'k', 'v')
+    const before = treeOf(root).filter((p) => p.startsWith('plugin-data/'))
+    const bytes = await textAt(root, `plugin-data/${ID}/documents/${DOC}.json`)
+    await install(store, { version: '2.0.0' })
+    await store.rollback(ID)
+    expect(treeOf(root).filter((p) => p.startsWith('plugin-data/'))).toEqual(before)
+    expect(await textAt(root, `plugin-data/${ID}/documents/${DOC}.json`)).toBe(bytes)
+    await store.uninstall(ID)
+    expect(root.dirs.get('plugin-data')?.dirs.has(ID)).toBe(false)
+    expect(await store.storage.docStorageList('com.example.two', DOC)).toEqual(['k'])
+    await install(store, { version: '1.0.0' })
+    expect(await store.storage.docStorageList(ID, DOC)).toEqual([])
+  })
+
+  it('an uninstall cut short at any step never leaves data for a plugin that is gone, and nothing brings it back', async () => {
+    const prepare = async () => {
+      const env = setup()
+      await install(env.store, { version: '1.0.0' })
+      await install(env.store, { version: '2.0.0' })
+      await env.store.storage.docStorageSet(ID, DOC, 'k', 'v')
+      await env.store.storage.storageSet(ID, 'k', 'v')
+      return env
+    }
+    const probe = injector()
+    let total: number
+    try {
+      const env = await prepare()
+      probe.arm(Infinity)
+      await env.store.uninstall(ID)
+      total = probe.count
+    } finally {
+      probe.restore()
+    }
+    expect(total).toBeGreaterThan(1)
+    let gone = 0
+    let kept = 0
+    for (const sticky of [false, true]) {
+      for (let at = 1; at <= total + 1; at++) {
+        const inj = injector()
+        const label = `${sticky ? 'every step from' : 'only'} step ${at}`
+        try {
+          const env = await prepare()
+          inj.arm(at, sticky)
+          let failed = false
+          try {
+            await env.store.uninstall(ID)
+          } catch {
+            failed = true
+          }
+          inj.disarm()
+          const dataNow = () => env.root.dirs.get('plugin-data')?.dirs.has(ID) ?? false
+          let dataGone = !dataNow()
+          for (let again = 0; again < 3; again++) {
+            const listed = await env.store.list()
+            if (listed.length === 0) {
+              expect(dataNow(), `${label}: data kept for a plugin that is gone`).toBe(false)
+              if (again === 0) gone++
+            } else if (again === 0) {
+              kept++
+              expect(failed, label).toBe(true)
+            }
+            // Once gone, never back.
+            if (dataGone) expect(dataNow(), `${label}: the data came back`).toBe(false)
+            dataGone = !dataNow()
+            // A plugin still installed can still be uninstalled, data and all.
+            if (again === 1 && listed.length > 0) {
+              await env.store.uninstall(ID)
+              expect(dataNow(), label).toBe(false)
+            }
+          }
+          if (!failed) expect(dataNow(), label).toBe(false)
+        } finally {
+          inj.restore()
+        }
+      }
+    }
+    expect(gone).toBeGreaterThan(0)
+    expect(kept).toBeGreaterThan(0)
+  })
+
+  it('writes under the lock and is exported as module functions', async () => {
+    const root = new FakeDir('opfs-root')
+    const locks = memoryLocks()
+    const storageDesc = Object.getOwnPropertyDescriptor(navigator, 'storage')
+    const locksDesc = Object.getOwnPropertyDescriptor(navigator, 'locks')
+    Object.defineProperty(navigator, 'storage', { configurable: true, value: { getDirectory: async () => root } })
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: locks })
+    try {
+      const { store } = setup({ root })
+      await install(store)
+      locks.log.length = 0
+      await docStorageSet(ID, DOC, 'b', '2')
+      expect(locks.log).toEqual(['take hew-plugins', 'release hew-plugins'])
+      await docStorageSet(ID, DOC, 'a', '1')
+      expect(await docStorageGet(ID, DOC, 'a')).toBe('1')
+      expect(await docStorageList(ID, DOC)).toEqual(['a', 'b'])
+      await docStorageDelete(ID, DOC, 'a')
+      expect(await docStorageList(ID, DOC)).toEqual(['b'])
+      expect(await refusal(docStorageGet('com.example.none', DOC, 'k'))).toBe('not_installed')
+    } finally {
+      for (const [k, d] of [['storage', storageDesc], ['locks', locksDesc]] as const) {
+        if (d) Object.defineProperty(navigator, k, d)
+        else delete (navigator as unknown as Record<string, unknown>)[k]
+      }
+    }
+  })
+})
+
+describe('setGrant', () => {
+  it('writes the wider grant under the lock, answers with the record as stored and tells listeners', async () => {
+    const { root, store, locks: lockProvider } = setup()
+    const locks = lockProvider as ReturnType<typeof memoryLocks>
+    await install(store, { permissions: ['model.read'], optionalPermissions: ['files', 'view'] })
+    const changed = vi.fn()
+    store.onChanged(changed)
+    locks.log.length = 0
+    const after = await store.setGrant('com.example.one', ['model.read'], ['files'])
+    expect(after.grant).toEqual(['model.read'])
+    expect(after.optional_granted).toEqual(['files'])
+    expect(locks.log).toEqual(['take hew-plugins', 'release hew-plugins'])
+    expect(changed).toHaveBeenCalledTimes(1)
+    const stored = JSON.parse((await textAt(root, 'plugins/com.example.one/installed.json')) as string)
+    expect(stored.optional_granted).toEqual(['files'])
+    const listed = (await store.list())[0]
+    expect(listed.kind === 'installed' && listed.installed.optional_granted).toEqual(['files'])
+  })
+
+  it('takes a permission back without asking anything, and keeps what else the record holds', async () => {
+    const { root, store } = setup()
+    await install(store, { optionalPermissions: ['files', 'view'] })
+    await store.setGrant('com.example.one', ['model.read'], ['files', 'view'])
+    const after = await store.setGrant('com.example.one', ['model.read'], ['view'])
+    expect(after.optional_granted).toEqual(['view'])
+    const stored = JSON.parse((await textAt(root, 'plugins/com.example.one/installed.json')) as string)
+    expect(stored).toMatchObject({ enabled: true, version: '1.0.0', optional_granted: ['view'] })
+  })
+
+  it('refuses a name the manifest does not declare, and leaves the record as it was', async () => {
+    const { root, store } = setup()
+    await install(store, { permissions: ['model.read'], optionalPermissions: ['files'] })
+    const before = await textAt(root, 'plugins/com.example.one/installed.json')
+    expect(await refusal(store.setGrant('com.example.one', ['model.read'], ['view']))).toBe('unknown_permission')
+    // A required name is not an optional one, and the other way round.
+    expect(await refusal(store.setGrant('com.example.one', ['model.read'], ['model.read']))).toBe('unknown_permission')
+    expect(await refusal(store.setGrant('com.example.one', ['files'], []))).toBe('unknown_permission')
+    expect(await refusal(store.setGrant('com.example.one', ['model.read'], [{ x: 1 }] as unknown as string[]))).toBe('unknown_permission')
+    expect(await textAt(root, 'plugins/com.example.one/installed.json')).toBe(before)
+  })
+
+  it('refuses a plugin that is not installed, and an id that is not one', async () => {
+    const { store } = setup()
+    expect(await refusal(store.setGrant('com.example.none', [], []))).toBe('not_installed')
+    expect(await refusal(store.setGrant('../x', [], []))).toBe('invalid_id')
+  })
+
+  it('refuses where two tabs cannot be kept apart, as every change does', async () => {
+    const { store } = setup({ locks: null })
+    expect(await refusal(store.setGrant('com.example.one', [], []))).toBe('locks_unavailable')
+  })
+
+  it('does not run two changes at once: a second grant waits for the first', async () => {
+    const { store, locks: lockProvider } = setup()
+    const locks = lockProvider as ReturnType<typeof memoryLocks>
+    await install(store, { optionalPermissions: ['files', 'view'] })
+    locks.log.length = 0
+    await Promise.all([store.setGrant('com.example.one', ['model.read'], ['files']), store.setGrant('com.example.one', ['model.read'], ['files', 'view'])])
+    expect(locks.log).toEqual(['take hew-plugins', 'release hew-plugins', 'take hew-plugins', 'release hew-plugins'])
+    const listed = (await store.list())[0]
+    expect(listed.kind === 'installed' && listed.installed.optional_granted).toEqual(['files', 'view'])
+  })
+})
+
+describe('grantLines', () => {
+  const lines = JSON.stringify({ added: [{ name: 'files', text: 'Ask you to pick files,   and save files you choose' }], warnings: ['Careful.'] })
+
+  it('asks the kernel with the stored manifest, the stored record and the names, and cleans what comes back', async () => {
+    const wasm: PluginWasm = { ...fakeWasm(), plugin_grant_lines: vi.fn(() => lines) }
+    const { store } = setup({ wasm })
+    await install(store, { optionalPermissions: ['files'] })
+    const got = await store.grantLines('com.example.one', ['model.read'], ['files'])
+    expect(got).toEqual({ added: [{ name: 'files', text: 'Ask you to pick files, and save files you choose' }], warnings: ['Careful.'] })
+    const call = vi.mocked(wasm.plugin_grant_lines as NonNullable<PluginWasm['plugin_grant_lines']>).mock.calls[0]
+    expect(JSON.parse(call[0]).id).toBe('com.example.one')
+    expect(JSON.parse(call[1]).optional_granted).toEqual([])
+    expect(JSON.parse(call[2])).toEqual(['model.read'])
+    expect(JSON.parse(call[3])).toEqual(['files'])
+  })
+
+  it('drops what is not a line, and says so plainly when the kernel cannot say', async () => {
+    const wasm: PluginWasm = { ...fakeWasm(), plugin_grant_lines: () => JSON.stringify({ added: [{ name: 1 }, 'x', { name: 'files', text: 'ok' }], warnings: [3, 'w'] }) }
+    const { store } = setup({ wasm })
+    await install(store, { optionalPermissions: ['files'] })
+    expect(await store.grantLines('com.example.one', [], ['files'])).toEqual({ added: [{ name: 'files', text: 'ok' }], warnings: ['w'] })
+    const plain = setup()
+    await install(plain.store, { optionalPermissions: ['files'] })
+    expect(await refusal(plain.store.grantLines('com.example.one', [], ['files']))).toBe('unsupported')
+  })
+
+  it('passes the kernel\'s refusal of a name on', async () => {
+    const wasm: PluginWasm = {
+      ...fakeWasm(),
+      plugin_grant_lines: () => {
+        throw 'MANIFEST_UNKNOWN_PERMISSION: not declared'
+      },
+    }
+    const { store } = setup({ wasm })
+    await install(store)
+    expect(await refusal(store.grantLines('com.example.one', [], ['view']))).toBe('unknown_permission')
   })
 })

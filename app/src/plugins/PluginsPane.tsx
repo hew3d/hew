@@ -18,18 +18,20 @@
  * browser has a folder picker, "From folder…" installs a copy of a folder.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { ConsentSheet } from './ConsentSheet'
 import { DevRequestNotice } from './DevRequestNotice'
 import { devProblems, pruneDevProblems, seedDevProblems, watchDevProblems } from './devProblems'
 import { PathText } from './pathText'
+import { paneDataFor, runLines, runView, type PaneData } from './paneData'
+import { PluginDetail, sourceLine } from './PluginDetail'
 import { pluginInstaller } from './installer'
 import { errorText, toPluginError } from './pluginError'
 import { permissionText } from './permissionCopy'
 import { cleanText, displayName } from './pluginText'
 import { buttonStyle } from './styles'
-import { needsConsent, type Installed, type InstallSource, type Listed, type PendingView, type PluginInstaller } from './types'
+import { needsConsent, type Installed, type Listed, type PendingView, type PluginInstaller } from './types'
 import { recordFingerprint, rollbackFingerprint } from './webPluginStore'
 
 /** The desktop shell's refusals for a "no" in its own confirmation. */
@@ -83,29 +85,6 @@ function pluginSig(items: Listed[] | null, problems: Record<string, string>, id:
   return JSON.stringify([i.version, i.enabled, needsConsent(i), i.needs_consent_reason ?? null, problems[id] ?? null, l.dev_problem ?? null])
 }
 
-function sourceLine(source: InstallSource): ReactNode {
-  if (source.kind === 'file') {
-    // A folder copied on the web is stored as a file with an `origin` the
-    // kernel does not read.
-    if ((source as { origin?: unknown }).origin !== 'folder') return 'From file'
-    return (
-      <>
-        <div>Copied from a folder</div>
-        <PathText label="Folder name" value={source.name} />
-      </>
-    )
-  }
-  if (source.kind === 'dir') {
-    return (
-      <>
-        <div>Developer folder</div>
-        <PathText label="Folder" value={source.path} />
-      </>
-    )
-  }
-  return `From ${source.kind}`
-}
-
 /** Why a folder plugin waits for a review, in plain words, beyond the line
  *  that says it does. */
 const REVIEW_REASONS: Readonly<Record<string, string>> = {
@@ -156,13 +135,28 @@ function folderState(
   return null
 }
 
+/** Why a plugin's optional-permission switches are locked, or null. */
+function optionalLock(l: Extract<Listed, { kind: 'installed' }>, devMode: boolean | null, host: Parameters<typeof runView>[1]): string | null {
+  if (l.installed.source.kind === 'dir' && devMode === false) return 'Turn on developer mode to change what this plugin may ask for.'
+  if (needsConsent(l.installed)) return "This plugin's folder changed. Review the change in the plugin list before changing what it may ask for."
+  if (runView(l, host)?.kind === 'held_back') return 'Hew is holding this plugin back, so what it may ask for cannot change right now.'
+  return null
+}
+
 /** Whether this browser can hand the page a folder. */
 function hasFolderPicker(): boolean {
   return typeof window !== 'undefined' && typeof (window as { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function'
 }
 
-export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
+export function PluginsPane({ installer, data: dataProp }: { installer?: PluginInstaller; data?: PaneData }) {
   const inst = useMemo(() => installer ?? pluginInstaller(), [installer])
+  const data = useMemo(() => dataProp ?? paneDataFor(inst.tier), [dataProp, inst.tier])
+  // The plugin whose detail page is open, and the row to give focus back to.
+  const [detailId, setDetailId] = useState<string | null>(null)
+  const returnFocus = useRef<string | null>(null)
+  // A host's change of state does not change the list the web store holds:
+  // this makes the rows read it again.
+  const [, setStateTick] = useState(0)
   const [items, setItems] = useState<Listed[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNoticeText] = useState<string | null>(null)
@@ -232,6 +226,31 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
       void readDevMode()
     })
   }, [inst, refresh, readDevMode])
+
+  // What a plugin is doing: on the desktop the shell says the list changed
+  // (`plugins-state`); on the web the host's own state is read again.
+  useEffect(
+    () =>
+      data.onState(() => {
+        if (data.tier === 'desktop') void refresh()
+        else setStateTick((n) => n + 1)
+      }),
+    [data, refresh],
+  )
+
+  // The plugin whose page is open was removed (here or in another window).
+  useEffect(() => {
+    if (detailId === null || items === null) return
+    if (!items.some((x) => x.kind === 'installed' && x.installed.id === detailId)) setDetailId(null)
+  }, [detailId, items])
+
+  // Closing a detail page puts focus back on the row that opened it.
+  useEffect(() => {
+    if (detailId !== null || returnFocus.current === null) return
+    const id = returnFocus.current
+    returnFocus.current = null
+    document.querySelector<HTMLElement>(`[data-plugin-details="${CSS.escape(id)}"]`)?.focus()
+  }, [detailId])
 
   // A folder that cannot be watched is said once; a later notice for the
   // same plugin without a problem clears it.
@@ -447,6 +466,23 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
       await inst.uninstall(id)
     })
 
+  const detailRow = detailId === null ? undefined : items?.find((x) => x.kind === 'installed' && x.installed.id === detailId)
+  if (detailRow !== undefined && detailRow.kind === 'installed') {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxWidth: '44em' }}>
+        <PluginDetail
+          row={detailRow}
+          installer={inst}
+          data={data}
+          run={folderState(detailRow, devMode, problems[detailRow.installed.id]) === null ? runView(detailRow, data.hostStates()?.[detailRow.installed.id]) : null}
+          lockReason={optionalLock(detailRow, devMode, data.hostStates()?.[detailRow.installed.id])}
+          onClose={() => setDetailId(null)}
+          onChanged={refresh}
+        />
+      </div>
+    )
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxWidth: '44em' }}>
       <div style={noteStyle}>
@@ -598,6 +634,20 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
                       </div>
                     )
                   })()}
+                  {(() => {
+                    // The folder lines above already say why a folder plugin
+                    // is not running.
+                    if (folderState(l, devMode, problems[l.installed.id]) !== null) return null
+                    const view = runView(l, data.hostStates()?.[l.installed.id])
+                    if (view === null) return null
+                    return (
+                      <div data-plugin-run="" style={{ marginTop: '4px', color: 'var(--text-primary, #eee)' }}>
+                        {runLines(view).map((line) => (
+                          <div key={line}>{line}</div>
+                        ))}
+                      </div>
+                    )
+                  })()}
                   <details style={{ marginTop: '6px' }}>
                     <summary style={{ cursor: 'pointer' }}>What it can do</summary>
                     <ul style={{ margin: '4px 0 0', paddingLeft: '18px', lineHeight: 1.5 }}>
@@ -630,6 +680,18 @@ export function PluginsPane({ installer }: { installer?: PluginInstaller }) {
                     />
                   )}
                   <div style={{ display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      data-plugin-details={l.installed.id}
+                      aria-label={`Details of ${displayName(l.manifest)}`}
+                      style={buttonStyle()}
+                      onClick={() => {
+                        returnFocus.current = l.installed.id
+                        setDetailId(l.installed.id)
+                      }}
+                    >
+                      Details
+                    </button>
                     {l.previous_version !== null && (
                       <button
                         type="button"
@@ -704,6 +766,10 @@ function useConfirmKeys(
   useEffect(() => {
     const before = document.activeElement
     safe.current?.focus()
+    // Escape is this confirmation's while it is open: Settings' own
+    // handler, which runs first, leaves it alone (`settingsEscape.ts`).
+    const marked = box.current
+    marked?.setAttribute('data-settings-escape-child', '')
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
         e.preventDefault()
@@ -730,6 +796,7 @@ function useConfirmKeys(
     document.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('keydown', onKey, true)
+      marked?.removeAttribute('data-settings-escape-child')
       const kept = before instanceof HTMLElement && before.isConnected && before !== document.body ? before : null
       const back = kept ?? restoreRef.current?.() ?? null
       back?.focus()

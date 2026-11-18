@@ -8845,7 +8845,177 @@ Set an object's Smooth level (0 = Off, 1–3): its faces become the cage of a su
 - `unknown_entity`
 - `locked_node` — Locked. Unlock it to change it.
 
+## hew.permissions
+
+### `hew.permissions.request`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** always
+
+Ask the person using Hew to grant this plugin some of the optional permissions its manifest declares (optionalPermissions). Only a plugin can ask, from its own connection, and only right after the person acted in that plugin's own window or panel; Hew shows what the plugin would be able to do and the person decides. Names the plugin already holds are granted without asking. The grant applies at once to the running plugin, which receives a grant message and keeps running. After a no, the same plugin is refused for a minute. Not available in Shop Mode. Any other caller is refused host_capability_missing.
+
+> **Preview.** Part of the preview feature Plugins (`plugins`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "permissions": {
+      "description": "names from the manifest's optionalPermissions",
+      "items": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "type": "array"
+    },
+    "reason": {
+      "description": "shown to the person; plain text",
+      "maxLength": 200,
+      "type": "string"
+    }
+  },
+  "required": [
+    "permissions"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "granted": {
+      "description": "the names asked for that the plugin now holds",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "granted"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `permission_not_requestable`
+- `no_user_activation`
+- `request_pending`
+- `request_declined`
+- `not_available_in_shop`
+
 ## hew.plugin
+
+### `hew.plugin.activity`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** first_party
+
+What a plugin did in the app, newest first, at most 500 entries: each state a window reported for it (enabled, activating, activated, crashed, blocked, idle, unloaded), when, in which window, and why. Reads only; the log is kept by the app and goes with the plugin when it is uninstalled.
+
+> **Preview.** Part of the preview feature Plugins (`plugins`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "an installed plugin's id",
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "entries": {
+      "items": {
+        "properties": {
+          "at": {
+            "description": "milliseconds since the Unix epoch",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "cleaned, at most 160 characters",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "enum": [
+              "enabled",
+              "activating",
+              "activated",
+              "crashed",
+              "blocked",
+              "idle",
+              "unloaded"
+            ],
+            "type": "string"
+          },
+          "window": {
+            "description": "the label of the window that reported it",
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "window",
+          "state",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "entries"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `plugins_disabled`
+- `no_plugin_dir`
+- `invalid_params`
+- `not_installed`
+- `installed_unreadable`
+- `storage_unreadable`
+- `io`
 
 ### `hew.plugin.dev`
 
@@ -9017,6 +9187,76 @@ List the plugins installed in the app: id, display name, version, where each cam
 - `host_capability_missing`
 - `plugins_disabled`
 - `no_plugin_dir`
+
+### `hew.plugin.reload`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** first_party
+
+Ask every window running plugins to reload a plugin loaded from a developer folder, as when its files change: its running copy stops and starts again from the folder. Only while developer mode is on, never for a plugin installed from a package, one waiting for the person to review a change, or one that stopped (that one starts again only when the person turns it off and on). At most once every two seconds per plugin. The answer only says the reload was asked for.
+
+> **Preview.** Part of the preview feature Plugins (`plugins`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "an installed plugin's id",
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "status": {
+      "enum": [
+        "reloading"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `plugins_disabled`
+- `no_plugin_dir`
+- `invalid_params`
+- `plugins_off`
+- `developer_mode_off`
+- `not_installed`
+- `installed_unreadable`
+- `not_a_developer_folder`
+- `plugin_blocked`
+- `plugin_stopped`
+- `plugin_turned_off`
+- `reload_too_soon`
+- `dry_run_host_command`
+- `storage_unreadable`
+- `io`
 
 ## hew.print
 

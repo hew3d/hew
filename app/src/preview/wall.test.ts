@@ -33,6 +33,19 @@ const ROOT = resolve(HERE, '../../..')
 const FEATURES = (JSON.parse(readFileSync(join(ROOT, 'preview-features.json'), 'utf8')) as { features: PreviewFeature[] })
   .features
 
+/**
+ * What `loadApp` may take in a `beforeAll`. It waits for nothing but the
+ * dynamic imports of the app's surfaces (the tool registry, the menus, the
+ * keymap, the palette and what they pull in), which the first call in a file
+ * has to transform and evaluate cold: about 1.5 s on an idle 16-core machine,
+ * 3.6 to 4.7 s with twice as many busy processes as cores, and a fraction of
+ * that for a call after it (the transforms are cached). Vitest's default hook
+ * limit is 10 s, which a machine running a build or a browser suite beside
+ * this one exceeded; there is no race in it, only a cold import under load.
+ * The limit is large, not tight: a hung import still fails, just not a slow one.
+ */
+const COLD_IMPORT_MS = 60_000
+
 /** The app's surfaces, loaded in a fresh module graph for one configuration. */
 async function loadApp(build: boolean) {
   vi.resetModules()
@@ -327,7 +340,7 @@ describe('flag OFF: a production build', () => {
   let app: App
   beforeAll(async () => {
     app = await loadApp(false)
-  })
+  }, COLD_IMPORT_MS)
   afterAll(() => {
     vi.doUnmock('./build')
     vi.resetModules()
@@ -490,7 +503,7 @@ describe('flag ON: a preview build', () => {
   let app: App
   beforeAll(async () => {
     app = await loadApp(true)
-  })
+  }, COLD_IMPORT_MS)
   afterAll(() => {
     vi.doUnmock('./build')
     vi.resetModules()
@@ -639,6 +652,25 @@ describe('the wall at its entry points', () => {
     expect(roots).toMatch(/export const loadPluginHost:[^\n]*= __HEW_PREVIEW__\n\s*\? \(\) => import\('\.\.\/plugins\/host\.ts'\)/)
     // The test harness reaches the host only through what the host attaches.
     expect(readFileSync(join(SRC, 'test/harness.ts'), 'utf8')).not.toMatch(/from\s+['"][./]+\/plugins\//)
+  })
+  it('starts the Shop Mode plugin host only through loaderRoots, in a preview build, while the Plugins switch is on', () => {
+    // Shop reaches plugin code through the one loader root and nothing else:
+    // no file of `shop/` names a plugin module or the host's entry.
+    const shop = sourceFiles(join(SRC, 'shop'))
+    expect(shop.length).toBeGreaterThan(0)
+    for (const f of shop) {
+      const text = readFileSync(f, 'utf8')
+      expect(text, f).not.toMatch(/(from|import\()\s*['"`][./]+\/plugins(\/|['"`])/)
+      expect(text, f).not.toMatch(/startPluginHost|plugins\/host/)
+    }
+    const hook = readFileSync(join(SRC, 'shop/usePluginHost.ts'), 'utf8')
+    expect(hook).toContain("import { loadPluginHost } from '../preview/loaderRoots'")
+    expect(hook).toContain("loadPluginHost === null || !loaderEnabled('plugins')")
+    expect(hook).toContain("platform: 'shop'")
+    // The Shop window asks the hook; nothing else in Shop starts a host.
+    const users = shop.filter((f) => /loadPluginHost/.test(readFileSync(f, 'utf8'))).map((f) => f.slice(SRC.length + 1))
+    expect(users).toEqual(['shop/usePluginHost.ts'])
+    expect(readFileSync(join(SRC, 'shop/ShopApp.tsx'), 'utf8')).toContain('useShopPluginHost({')
   })
   it('has no plugin host to load in a production build', async () => {
     const roots = await import('./loaderRoots')

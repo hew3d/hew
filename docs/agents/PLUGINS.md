@@ -81,8 +81,8 @@ JSON, UTF-8, no comments. Every host reads it through the same function,
 `plugin_manifest::parse`, in `crates/plugin-manifest` (pure: `serde` and
 `semver`, no I/O). Unknown keys are refused anywhere in the typed parts
 of the manifest, so a typo cannot silently drop a field; the
-`contributes` members other than `commands` and `presave` are read as
-opaque JSON until the parts that use them land.
+`contributes` members other than `commands`, `presave` and `events` are
+read as opaque JSON until the parts that use them land.
 
 ```json
 {
@@ -131,7 +131,8 @@ opaque JSON until the parts that use them land.
 | `data` | optional `{ version, migrate? }`: `version` (default 1) stamps the documents the plugin writes into; `migrate` names the command that upgrades older data |
 | `locales` | optional `{ default, catalogs }`; `catalogs` is a package path to a directory (it may end in `/`) |
 | `agent` | optional `{ notes }`: a package path to a markdown file of at most 4 KiB, shown to agents as untrusted plugin text |
-| `contributes` | optional; `commands` and `presave` are validated now, every other member is opaque for now |
+| `contributes` | optional; `commands`, `presave` and `events` are validated now, every other member is opaque for now |
+| `contributes.events` | optional; 1 to 32 distinct event names from the table in "Events" (`document_changed`, `selection_changed`, ...): the events that start the plugin when `activation` includes `on_event` (see "How a plugin runs"). An unknown, repeated or surplus name makes the file `manifest_malformed`, as an unknown activation value does |
 
 A contributed command is `{ id, class, summary, label?, permission?,
 timeout_ms?, concurrency?, params?, result?, refusals? }`: `class` is
@@ -353,6 +354,15 @@ the events without a reconnect.
 
 Every event names its `document`. A plugin bound to one document hears
 only about that one.
+
+**Starting on an event.** A plugin that lists events in
+`contributes.events` and has `on_event` in `activation` is started by
+the first of them, and is handed that event (and any that came while it
+started) as soon as it has started. Its connection is already subscribed
+to those of its events its grant receives, so `hew.events.on` for one of
+them hears every one from the first; subscribing again is harmless. An
+event its grant cannot receive does not start it. See "How a plugin
+runs".
 
 **Change sets.** `changes` lists public ids: `added` (created or
 placed), `removed` (deleted, consumed by a boolean, exploded), and
@@ -1066,7 +1076,8 @@ command outside its ceiling, whatever it holds.
 one permission it needs; the full list is the `Permission` line of each
 entry in [API_REFERENCE.gen.md](../API_REFERENCE.gen.md), and HEW_API.md
 §10 summarizes it. `always` marks the handshake, attaching to the bound
-document, `hew.meta.capabilities`, and the transaction container, which
+document, `hew.meta.capabilities`, the transaction container, the event
+subscriptions, and (a Preview command) `hew.permissions.request`, which
 every grant reaches.
 
 **Also enforced for every plugin:** the plugin's grant is bound to one
@@ -1076,6 +1087,70 @@ document (the envelope `document` member, attaching elsewhere, and the
 (`path_not_granted`); attribute writes outside the plugin's namespaces
 are refused (`attr_namespace_not_granted`). HEW_API.md §10 and §8 have
 the exact shapes.
+
+### Optional permissions
+
+A Preview feature. `optionalPermissions` are granted later, at the
+person's say, two ways:
+
+- **In Settings > Plugins.** The person grants one, or takes one back,
+  with a switch for each optional permission on the plugin's detail page
+  (Overview). Granting asks first (the desktop app's own confirmation
+  through `plugin_set_grant`, where a no leaves the switch off quietly and
+  `confirmation_open` is a plain notice; on the web a sheet, the consent
+  sheet in its grant mode, titled "Allow more for this plugin?", whose
+  lines come from the kernel's `plugin_grant_lines` and never from
+  TypeScript, with Cancel focused, Enter accepting nothing and "Allow" the
+  yes); taking back asks nothing. The switch shows the stored record, not
+  the click. The web store's `setGrant(id, grant, optional)` only writes,
+  under the store lock, refusing names the manifest does not declare
+  (`unknown_permission`), and answers with the record as stored. The same
+  sheet, `decideGrant(id, add)` in `app/src/plugins/grantSheet.tsx`, is what
+  a running plugin's `hew.permissions.request` shows on the web, over the
+  document window; it refuses `plugin_changed` when the record moved while
+  the person decided.
+- **When the plugin asks.** `hew.permissions.request {permissions,
+  reason?}` (HEW_API.md §7) from the plugin's own connection. Every name
+  must be one of the manifest's `optionalPermissions`
+  (`permission_not_requestable` names the others). The plugin must ask
+  right after the person acted in the plugin's own window or panel
+  (`no_user_activation` otherwise; the act counts for 5 seconds and for
+  one request). No plugin has a window or panel yet, so for now every
+  request a plugin makes is refused `no_user_activation`; the test
+  harness stands in for the act (`__hew_test.plugins.activate(id)`, which
+  counts only while the plugin runs). A request still waiting when the
+  plugin stops or reloads is dropped with it: the next run is not told
+  `request_pending`, and its answer goes nowhere.
+  One request at a time (`request_pending`); after the person says no,
+  a minute of `request_declined` in that window (each window's host keeps
+  its own minute, so the same plugin in another document window may ask
+  at once; a reload of the plugin in the same window does not reset it);
+  names the plugin already holds are answered at once, without asking. Shop Mode refuses every request
+  `not_available_in_shop`, before anything else. While the person
+  decides, the clock of the command the request was made in is stopped,
+  for at most 5 minutes; past that the request is refused
+  `request_declined` and the clock runs again. The question stays on the
+  screen, though: if the person then says yes to it, the permission is
+  granted after all, and the plugin learns of it the way it learns of a
+  grant made in Settings (`{t: 'grant'}`, `hew.plugin.grant`,
+  `hew.lifecycle.on('grant', fn)`), not from the request it was already
+  told no to. No minute of refusals follows a request that ran out of
+  time. Only a running plugin's
+  own connection is answered: any other caller (a socket client, an
+  agent, a connected app) gets `host_capability_missing`.
+
+**What a plugin can rely on.** A grant that only adds optional
+permissions reaches the running plugin in place: its connection holds
+the new grant from the next call on (inside the command it is serving
+too), the realm receives `{t: 'grant'}` and `hew.plugin.grant` changes,
+`hew.lifecycle.on('grant', fn)` handlers run with the new grant, and
+events the old grant refused at `hew.events.on` are asked for again. A
+yes to `hew.permissions.request` is applied before the answer arrives,
+and the answer, `{granted}`, lists the names asked for that the plugin
+now holds. Anything else that changes the grant (a permission taken
+back, a required permission, a new version) reloads the plugin
+(`unload` `reload`); after a permission is taken back, calls that need
+it are refused `-32001` as for any permission not held.
 
 ## Installing
 
@@ -1088,10 +1163,12 @@ document window ("How a plugin runs" below).
 
 **An agent cannot install or manage plugins.** No bus command, `hew-cli`
 subcommand or MCP tool installs, changes or removes one. In a preview
-desktop build the shell answers two bus commands itself, and neither
-completes anything: `hew.plugin.list` reads, and `hew.plugin.dev` only
-asks the app to show a request ("Developer mode and folder plugins"
-below). A plugin package is never opened by File ▸ Open or by dropping
+desktop build the shell answers four bus commands itself, and none
+completes anything that manages a plugin: `hew.plugin.list` and
+`hew.plugin.activity` read, `hew.plugin.dev` only asks the app to show a
+request ("Developer mode and folder plugins" below), and
+`hew.plugin.reload` only asks the windows to reload a developer-folder
+plugin that is already running ("Plugin data" below). A plugin package is never opened by File ▸ Open or by dropping
 it on the window, and Hew registers no `.hewplugin` file type or link
 handler. The one door is the Settings pane
 (`app/src/plugins/installer.ts`).
@@ -1466,6 +1543,37 @@ review mode; a refusal of the review (`no_review_pending`,
 `folder_id_changed`, a manifest refusal) is a plain notice; Cancel
 leaves the marker.
 
+**What a row says, and the detail page.** Under its name an enabled
+plugin's row says what it is doing: "Running", "Not running yet" (on, and
+nothing has started it), or, for a plugin that stopped itself, "Stopped:
+<plain reason>. Turn it off and on to start it again." The reason is one
+of the host's machine words (`unresponsive`, `timeout`, `violation`,
+`error`, `start`), each mapped to a sentence; a word the pane does not know
+gets "Stopped." alone, and no reason, no console line and no plugin text is
+ever shown inside one of Hew's sentences. On the desktop with several
+windows open it reads "Stopped in 1 of 2 windows". The words come from the
+shell's `plugin_list` rows (`running_in`, `stopped_in`, `blocked_in`,
+`last_stop`, listed again on each `plugins-state` hint) and, on the web,
+from the host in the page (`app/src/plugins/hostState.ts`); a folder
+plugin's own blocked lines above replace the line. The On/Off switch is
+still the person's choice and does not move when a plugin stops.
+
+A "Details" button on each row opens a page with three tabs, reached by
+keyboard; Escape closes it and focus goes back to the row's button.
+Overview shows the name, version and source, what the plugin is doing, what
+it can do, the optional permissions as switches (required ones are listed,
+never switchable) and, in plain words, where its saved data is kept ("stays
+on this device, does not travel with a model file, is not part of Undo";
+what is saved per model is kept under the model's id, so two copies of one
+file share it and a SketchUp file does not bring it back). Console lists
+the plugin's lines newest first (`plugin_console_read` and the
+`plugins-console` hint on the desktop; the host's last 500 on the web),
+each cleaned, cut to 1,000 characters and shown as wrapped text in its own
+block, with "Clear view", which only empties what the page shows. Activity
+lists the plugin's changes of state newest first in plain words
+(`plugin_activity_read`; on the web the changes the page saw while the
+pane was open). The pane's data is read through `app/src/plugins/paneData.ts`.
+
 ### Where it is kept
 
 Desktop: `plugins/` in the app's data folder (`com.hew3d.Hew`), which a
@@ -1499,7 +1607,135 @@ that object, never part of a path. On the desktop the four commands
 `plugin_storage_get`, `plugin_storage_set`, `plugin_storage_delete` and
 `plugin_storage_list` read and write it, each write through a temporary
 file and a rename, and a change is announced to every window with the
-event `plugins-storage-changed` (`{id, keys}`).
+event `plugins-storage-changed` (`{id, keys}`, no `scope`).
+
+### Plugin data
+
+Everything else a plugin keeps lives beside the store, not in it:
+`plugin-data/` next to `plugins/` (in the app's data folder on the
+desktop; with `HEW_PLUGIN_DIR` set to a folder of another name, beside it
+as `<name>.plugin-data`; at the top of the origin-private file system on
+the web).
+
+```text
+plugin-data/
+  <id>/
+    documents/<document-id>.json   per-document storage
+    console.log, console.log.1     the plugin's console (desktop)
+    activity.json                  what the windows reported (desktop)
+    usage.json                     the running total for the quota
+```
+
+No install, update, rollback or developer-folder path looks at this
+tree, so no version swap can lose or carry it. Uninstalling removes it
+first, before the plugin's record, so an uninstall cut short leaves the
+plugin installed (and removable again), never data kept for a plugin
+that is gone; the web store's recovery of an interrupted change restores
+only `plugins/`, never this tree. A different package installed later
+under the same id starts with nothing. Every write is refused
+`not_installed` for an id with no record, so nothing is ever made for a
+plugin that is not there; the plugin id and any document id are checked
+before a path is built from them. On the desktop a link, or anything
+that is not a regular file or folder, where the tree expects one is
+refused `storage_unreadable` and is never followed or rewritten.
+
+**One quota.** Everything under `plugin-data/<id>/` counts toward 50 MiB
+per plugin, each file at least 4 KiB; past it a write that would grow the
+tree is refused `storage_quota` and writes nothing, while one that does
+not grow it never is. The total is kept in `usage.json` rather than
+measured on every write: it is raised before a write to cover both the
+old and the new copy and lowered after, so an interruption leaves it too
+high, never too low. A missing or damaged total is measured again by
+walking the tree (names and sizes only), and a total that refuses a
+write is measured again before the refusal stands, so one left too high
+corrects itself.
+
+**Per-document storage.** One JSON object of string keys to string
+values per (plugin, document), `documents/<document-id>.json`, at most 5
+MiB as written, with the same key rules as plugin storage (1 to 256
+UTF-8 bytes, well-formed text). The document is named by the `.hew`
+manifest's `document_id` ("The document id" above), checked as exactly
+the 36-character lowercase UUID form (`document_id_invalid` otherwise).
+Deleting the last key removes the file. On the desktop the commands are
+`plugin_doc_storage_get`, `plugin_doc_storage_set`,
+`plugin_doc_storage_delete` and `plugin_doc_storage_list`, taking `{id,
+docId, key?, value?}` with the refusals of the plugin-storage commands
+plus `document_id_invalid` right after the plugin id; a change is
+announced with `plugins-storage-changed` as `{id, scope: "document",
+document_id, keys}`. The web store has the same four calls and posts the
+same fields on its channel.
+
+What per-document storage is not, plainly:
+
+- It stays on this device. It does not travel with the file: a copy of
+  the `.hew` sent to someone else arrives without it.
+- It is not part of Undo. Undoing a change in the model leaves the data
+  as the plugin last wrote it.
+- A `.skp` file has no place for the document id, so data kept for a
+  document opened from a `.skp` does not survive closing and reopening
+  it.
+- Two copies of one `.hew` (a file duplicated in the Finder, say) carry
+  the same document id, so they share the data.
+
+**What the windows report.** Each window's plugin host tells the desktop
+shell what a plugin is doing there with `plugin_report_state {id, state,
+reason?, seq}`. The window is the one the shell saw call, never one the
+page names. `seq` grows with every report a page sends (the clock in
+milliseconds, or one more than the last report's when the clock is not
+past it), so it also grows across a reload of the page; two reports can
+reach the shell out of order, and the shell ignores one older than the
+one it holds for that window. `state` is one of `enabled`, `activating`, `activated`, `crashed`,
+`blocked`, `idle` or `unloaded` (`invalid_state` otherwise); `reason` is
+cleaned and cut to 160 characters. One window may report about one
+plugin 30 times in 10 seconds (`report_too_often` past that). A report
+that changes the window's latest state or reason is kept in memory,
+announced with the event `plugins-state` (`{id}`, a hint to list again),
+and added to `activity.json`, which keeps the last 500 entries (`{at,
+window, state, reason}`) and is written at most once a second per
+plugin, in batches, by the shell alone. A window that closes takes its
+reports with it. `plugin_list` rows carry the sum over open windows:
+`running_in` (activating or activated), `stopped_in` (crashed),
+`blocked_in`, `idle_in` (unloaded for sitting idle; it starts again when
+needed), and `last_stop` (`{reason, at}` of the newest crash still
+reported, or `null`), so Settings can show a crashed plugin as stopped.
+`plugin_activity_read {id}` answers the entries, newest first. On the
+web the pane reads the host's state directly.
+
+**Console.** Each window's host sends a plugin's console lines to the
+shell about once a second with `plugin_console_append {id, lines:
+[{level, text, at}]}`: at most 64 lines a call (`too_many_lines`),
+levels `log`, `info`, `warn` or `error` (`invalid_level`), each text
+cleaned and cut to 2,000 characters again by the shell, each time
+clamped to the shell's clock. One plugin may write about 256 KiB a
+minute across windows, each line counted as the log stores it (its JSON
+and the newline); lines past that are refused, not queued (the
+answer `{accepted, dropped}` counts them; a call none of whose lines fits
+is refused `console_rate_limited`). The shell alone writes
+`console.log`, one JSON line each, and renames it to `console.log.1`
+once it would pass 1 MiB, replacing the one before. The event
+`plugins-console` (`{id}`) says there is more to read; it carries no
+line. `plugin_console_read {id, limit?}` answers the newest lines,
+newest first (200 by default, at most 1,000). On the web the console
+stays in memory only.
+
+**The live API.** `hew.plugin.activity {id}` (read-only) answers
+`{entries}`, as `plugin_activity_read` does; refused `invalid_params`,
+`not_installed`, `plugins_disabled`, `no_plugin_dir`.
+`hew.plugin.reload {id}` asks every window to reload a developer-folder
+plugin, through the same `plugins-dev-changed` event (with
+`manifest_changed: false`) a change in its folder sends, and answers
+`{status: "reloading"}`. It is refused, changing nothing, unless the
+plugin was installed from a folder (`not_a_developer_folder`), developer
+mode is on (`developer_mode_off`), a window runs a plugin host
+(`plugins_off`) and it is installed (`not_installed`). It is refused for a
+plugin a window reports crashed (`plugin_stopped`), or blocked or waiting
+for a review (`plugin_blocked`), and for one the person has turned off
+(`plugin_turned_off`): a plugin that stopped stays stopped until a person
+turns it off and on, and a reload is not a way around that or around a
+review. At most one reload per plugin every 2 seconds
+(`reload_too_soon`); inside a rehearsal (`dry_run`) it is refused
+`dry_run_host_command`. Nothing else about plugins is reachable from the
+socket.
 
 `installed.json`:
 
@@ -1537,9 +1773,9 @@ before the person is asked): its `hew` range (`hew_version_unsupported`),
 what it requires (`dependency_missing`, `dependency_cycle`), and no
 command name another installed plugin has (`command_name_taken`). Turning a plugin off also turns off every enabled plugin that
 requires it, and the pane names them. Uninstall asks first, is refused
-while an enabled plugin requires the one being removed, and removes the
-folder (its saved data included), any staging entry, and the plugin's
-`hew.plugin.<id>.` settings keys.
+while an enabled plugin requires the one being removed, and removes
+`plugin-data/<id>/` first, then the folder (its saved data included), any
+staging entry, and the plugin's `hew.plugin.<id>.` settings keys.
 
 On the desktop each of these that widens what a plugin may do, or
 removes it, is confirmed in a native dialog the shell builds from what
@@ -1626,18 +1862,100 @@ test fails if the two tables differ.
 A Preview feature, started only in a preview build with the Plugins
 switch on, by `App.tsx` through `app/src/preview/loaderRoots.ts`
 (`loadPluginHost`). Each document window has its own host
-(`app/src/plugins/host.ts`, `hostCore.ts`); Shop Mode has none.
+(`app/src/plugins/host.ts`, `hostCore.ts`). Shop Mode has one too, with
+`platform: 'shop'` (below); it has no plugin management.
+
+**Shop Mode.** `ShopApp` starts the host through the same loader root
+(`useShopPluginHost` in `app/src/shop/usePluginHost.ts`) once its Scene
+exists, only in a preview build with the Plugins switch on; Shop names no
+plugin module and has no words of its own about plugins. Its bridge is
+small: the Scene, the viewport, `reconcile` (the renderer's hidden set
+pushed again), `reseedViewState` and `reconcileVisibility` (the hidden
+nodes and tags read again from the document's registries and pushed, as an
+open does). It has no selection, isolate, entering or Scenes target, so
+those view directives do nothing there. Plugins get at most `model.read`
+and `view` (the kernel narrows the grant). Shop loads each document into the
+same Scene in place and never pumped the Scene's events, so the hook notes
+`document_opened` after every open and `document_closed` when the page goes
+away, and pumps; with no host running it makes no kernel call. Shop's
+harness is `window.__hew_shop_test`, and the host attaches its `plugins`
+test hooks there.
 
 **Registration and start.** For every enabled plugin the host registers
 the commands of the manifest the store holds (never a folder's live
 copy). A plugin starts the first time one of its commands is called, or
 with Hew when its manifest declares `on_startup` and the user turned it
-on by hand at least once (`startup_allowed`). On start the host opens
+on by hand at least once (`startup_allowed`), or with the first event
+its manifest lists (below). On start the host opens
 the plugin's own bus connection with the grant the kernel builds from
 the stored record (`plugin_grant_json` from `grant` and
 `optional_granted`), sends `hew.meta.hello` and `hew.doc.attach` on it,
-and creates the realm. A realm lives until the plugin is turned off,
-crashes, changes (an update or a new grant), or the window closes.
+and creates the realm. `hello.activation` says why: `command`,
+`startup` or `event`. A realm lives until the plugin is turned off,
+crashes, changes (an update, or a grant other than an optional
+permission added: see "Optional permissions"), sits idle, or the window
+closes.
+
+**Idle.** A realm that has no command open, nothing queued either way,
+no storage, file or permission request open, and has exchanged no
+message with the host (pings and their answers aside) for 10 minutes is
+unloaded: `unload` with reason `idle`. Every message counts, events
+delivered to it included, so a plugin that answered its command and
+keeps reporting, logging or calling stays; one silent for 10 minutes
+does not. For up to 2 seconds after `unload` the host still takes the
+realm's storage writes and its `unloaded`, and drops anything else it
+sends then (not a reason to stop it); the SDK runs the
+`hew.lifecycle.on('unload', fn)` handlers with the reason, waits for a
+promise one returns and for the storage writes they made (at most
+1.5 seconds), then says `unloaded`. Then the realm is stopped as on any
+unload: pending writes land, the connection closes and its event
+subscriptions go with it, `plugin_state` `unloaded` (detail `idle`) is
+reported, and the plugin is `enabled` again with its commands still
+registered. Storage writes that reached the host before the stop are
+made before it, not dropped, even those it had not handled yet: when the
+realm says `unloaded`, that is every write it sent before (messages
+arrive in order). When the 2 seconds run out first, a write still on its
+way to the host then is lost with the realm. The SDK's
+1.5 seconds are inside the host's 2 on purpose: a realm that keeps to
+its limit is heard out. The next call to one of them starts it again; a
+call that comes during those 2 seconds waits for them and then starts it
+(one start for every call that waited). An event the plugin listens for
+that fires during those 2 seconds, or after the realm is gone and
+before its listener is subscribed again, can be missed: the leaving
+realm may get it but can no longer act on it, and nothing else is
+listening yet. A plugin that starts with Hew is never unloaded for
+idleness.
+
+**Starting on an event.** For an enabled plugin that is not running,
+not stopped and not blocked, whose stored manifest has `on_event` and
+at least one name in `contributes.events`, the host keeps a listener: a
+connection of the plugin's own, with the grant from the stored record,
+that says hello, attaches and subscribes to those names. A name the
+grant cannot receive is denied and not listened for (no listener at all
+when none is left). The first event starts the plugin (`activation`
+`event`). The handover is one step: when the starting plugin's
+connection has said hello and attached, the host subscribes it to the
+listener's names and closes the listener before any event is drained
+again, so every event drained before went to the listener and every one
+after comes on the plugin's connection. Both kinds are held while the
+plugin starts, at most 64 (the oldest go first; how many were dropped is
+logged once), and handed to the realm, in the order they came, right
+after it says hello: none is lost and none arrives twice. A command
+that starts the plugin does the same handover. At least 10 seconds pass
+between two starts of one plugin by an event (events that come sooner
+wait, held, and start it when the time is up); after a start that
+failed the wait doubles, up to 5 minutes, and a start that works brings
+it back to 10 seconds. The listener closes when the plugin starts, is
+turned off, stops, is blocked or removed, and when the window closes;
+it opens again when the plugin is idle-unloaded or a start fails
+without stopping it. Events it held for a start that then never comes
+(the plugin blocked, turned off or stopped while it waited out the 10
+seconds) are dropped with it, never handed to a later start. A grant
+widened while the listener is still opening applies once it is open: it
+takes the wider grant and subscribes to the names the old one refused.
+On the desktop, while the document has no id yet, the host waits for
+one with a single wait per plugin, which a stop ends. On Shop the
+listener's grant is the viewer one.
 
 **The realm.** A sandboxed `srcdoc` frame (`allow-scripts` only, so an
 opaque origin) whose one inline script is the boot script
@@ -1756,9 +2074,21 @@ keeps gigabytes of them while answering its pings keeps running.
 Stopping a plugin (a crash) removes the frame, which ends
 the Worker, closes its connection, unregisters its commands, answers
 every open call `failed: crashed`, reports `plugin_state` `crashed`,
-logs an error line, and shows a notice. It stays stopped in that window
-until it is turned off and on again (or, for a folder plugin, its folder
-changes: see "Reloading" below).
+logs an error line, and shows a notice. The `plugin_state` detail is the
+kind of stop as one word (such as `error`, `unresponsive` or
+`violation`), the same word the shell's report carries:
+every subscriber gets that event, other plugins and socket clients
+included, so what the plugin wrote never rides along. Its own text goes
+to its console and the log only. It stays stopped in that window until
+it is turned off and on again (or, for a folder plugin, its folder
+changes: see "Reloading" below). The notice says so: "<name> stopped
+working. To start it again, turn it off and on in Settings > Plugins."
+Shop Mode has no Settings > Plugins, so there it says "<name> stopped
+working. Reload the page to start it again.": a reload starts a new host,
+where the plugin is no longer stopped. Granting or taking back one of its
+optional permissions in Settings > Plugins also ends the stop: the plugin
+is built again, and it starts with Hew if it starts with Hew, otherwise
+with its next command.
 
 **Not startable.** A plugin that the store says may not run now is
 `blocked`, never stopped: no crash record, no notice, no `crashed`
@@ -1794,7 +2124,12 @@ brings back a folder plugin that crashed, since the person saved its
 folder. A marked change (`manifest_changed: true`) blocks it
 (`needs_review`) through the store; a `problem` changes nothing in the
 host (a running realm has its code already; the next start reads the
-folder again).
+folder again). So a running folder plugin whose folder disappears keeps
+running. A reload asked for meanwhile (`hew.plugin.reload`, which still
+answers `{status: "reloading"}`) stops it, and its start is then refused
+`folder_missing`: it is blocked with that reason (its commands answer
+`plugin_unavailable`) until the folder is back and a call to one of its
+commands starts it.
 
 **Who owns a call.** A call from a socket client is the live bridge's: it
 opens the compound for a mutating command, shows the busy notice,
@@ -1814,11 +2149,75 @@ a value always fit one 1 MiB message. A key that is not well-formed
 text (a surrogate without its pair) is refused too: the SDK refuses it
 `storage_key_invalid` before sending, and a raw message carrying one
 stops the plugin, as one with an over-long key does (the host's message
-check refuses both).
+check refuses both). A value that is not well-formed text cannot come
+from the SDK (its JSON escapes a lone surrogate), but a raw message can
+carry one: the host refuses it `storage_value_invalid`, in either scope,
+before any store sees it, and the plugin runs on.
 Writes are gathered for a quarter second and then made together, each
 batch after the one before, so writes land in the order the plugin made
 them; a read sees every earlier write, made or not, and a write that
 fails rejects its own `set` or `delete`.
+
+**Storage for the document.** `hew.storage.document` has the same calls
+(`get`, `set`, `delete`, `list`, `onChange`), key and value rules and
+refusal names as `hew.storage`, kept per document (see "Per-document
+storage" for where and what it is not). The host follows the document,
+not the window: `hew.plugin.documentId` is the document's own id, or
+`null` while it has none, and `hew.lifecycle.on('document', fn)` runs
+with the new id when it changes. Opening or making another document
+switches every running plugin to it: writes on their way land under the
+document they were made for, then the plugin is told. A document never
+saved has no id: its storage is kept by the window's host, in memory, at
+most 5 MiB per plugin (`storage_quota` past that); the first save that
+gives it an id writes all of it under that id, key by key (overwriting
+keys already there), and only then tells the plugin the id. A write that
+fails there is kept, read as written, and tried again with the plugin's
+next write. A document opened from a file with no place for an id (a
+`.skp`) starts empty every time. A document closed with none open yet
+(a `.skp` import closes the old document and opens the new one only
+when the import ends) is the same kind of change: writes on their way
+land under the closed document, the plugin is told `null`, and until
+the next document opens its document storage is a throwaway in memory,
+never the closed document's; the next open drops it. A close followed
+by an open in the same moment (an ordinary open) tells the plugin once,
+of the new document. A call the plugin made for one
+document that reaches the host after another document was opened is
+refused `document_changed`, with nothing read or written, and the SDK
+rejects it as any storage refusal: the host never puts it in the new
+document. The first save of a document is not such a change (its data
+moves to the id the save gives), so a call made just before it lands
+under the new id. A change another window makes reaches only a plugin
+whose document it is (`storage_changed` with `scope: 'document'`), and
+never the plugin's own storage listeners. On the wire a `storage`
+message carries `scope` (`plugin` when absent), and `storage_reply` and
+`storage_changed` carry it too; `hello` has `document_id` beside
+`document` (the window's name for the document), and `{t: 'document',
+document_id}` says it changed. The host counts document changes, the
+document epoch: it goes up when a document is closed, when another is
+opened or made, or when a saved document is saved under another id, and
+stays at a first save. `hello` carries it as `document_epoch` and
+`{t: 'document'}` as `epoch`. Every document `storage` message carries `epoch`, the one the
+SDK had last heard when the plugin made the call (a non-negative
+integer; a message without one, or a plugin-scope message with one,
+breaks the protocol and stops the plugin), and the host refuses one
+that is not its current epoch `document_changed`.
+
+**What the host reports.** Each window's host reports every state change
+of a plugin once (`enabled`, `activating`, `activated`, `crashed` with
+its reason, `blocked` with its reason, `idle` after an idle unload,
+`unloaded` with the reason for any other stop), and hands on its console
+lines (those that reached the log) in one batch a second, at most 64 a
+call, and the rest when the realm stops. On the desktop they go to
+`plugin_report_state` and `plugin_console_append` (see "What the windows
+report" and "Console"), fire and forget: a refusal is logged once and
+never reaches the plugin. A refused state report does not count as
+sent: the next report of that state goes out again, and a refused
+`crashed` or `blocked` is tried once more by itself after 10 seconds
+(once, not in a loop) if nothing was reported since. In every window they also go to
+`app/src/plugins/hostState.ts`, which the Plugins pane reads on the web
+(`hostStates()`, `subscribeHostStates`, `activity(id)`, the state
+changes the host saw, oldest first, the last 500, `consoleLines(id)`, the
+last 500, and `subscribeConsole`).
 
 **Package files.** `hew.assets` reads files of the plugin's own package.
 The host serves one file request of a plugin at a time, reads a path

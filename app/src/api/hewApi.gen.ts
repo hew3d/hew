@@ -1416,6 +1416,39 @@ export interface ObjectSmoothParams {
 export type ObjectSmoothResult = UnspecifiedShape
 
 /**
+ * `hew.permissions.request` (v1) — Ask the person using Hew to grant this plugin some of the optional permissions its manifest declares (optionalPermissions). Only a plugin can ask, from its own connection, and only right after the person acted in that plugin's own window or panel; Hew shows what the plugin would be able to do and the person decides. Names the plugin already holds are granted without asking. The grant applies at once to the running plugin, which receives a grant message and keeps running. After a no, the same plugin is refused for a minute. Not available in Shop Mode. Any other caller is refused host_capability_missing.
+ * Tier: Standard · Class: solitary · Served: host
+ * Refusals: host_capability_missing, permission_not_requestable, no_user_activation, request_pending, request_declined, not_available_in_shop
+ * Preview: Plugins (`plugins`). A production build leaves this command out and refuses it `preview_only`.
+ */
+export interface PermissionsRequestParams {
+  /** names from the manifest's optionalPermissions */
+  permissions: string[]
+  /** shown to the person; plain text */
+  reason?: string
+}
+
+export interface PermissionsRequestResult {
+  /** the names asked for that the plugin now holds */
+  granted: string[]
+}
+
+/**
+ * `hew.plugin.activity` (v1) — What a plugin did in the app, newest first, at most 500 entries: each state a window reported for it (enabled, activating, activated, crashed, blocked, idle, unloaded), when, in which window, and why. Reads only; the log is kept by the app and goes with the plugin when it is uninstalled.
+ * Tier: Standard · Class: solitary · Served: host
+ * Refusals: host_capability_missing, plugins_disabled, no_plugin_dir, invalid_params, not_installed, installed_unreadable, storage_unreadable, io
+ * Preview: Plugins (`plugins`). A production build leaves this command out and refuses it `preview_only`.
+ */
+export interface PluginActivityParams {
+  /** an installed plugin's id */
+  id: string
+}
+
+export interface PluginActivityResult {
+  entries: ({ at: number; reason: string | null; state: "enabled" | "activating" | "activated" | "crashed" | "blocked" | "idle" | "unloaded"; window: string })[]
+}
+
+/**
  * `hew.plugin.dev` (v1) — Ask the app to show the person a request to load a plugin from a folder. Nothing is loaded, staged or read: the person picks the folder in the app's own folder picker, which opens at `path`, and reads what the plugin asks for before anything runs. The answer only says the request is waiting. Refused while developer mode is off, while another request waits, and for a while after the person dismisses one.
  * Tier: Standard · Class: solitary · Served: host
  * Refusals: host_capability_missing, plugins_disabled, no_plugin_dir, plugins_off, developer_mode_off, confirmation_open, request_waiting, request_dismissed, dry_run_host_command, io
@@ -1443,6 +1476,21 @@ export interface PluginListResult {
   plugins: ({ enabled: boolean; id: string; name: string; source: "file" | "dir" | "index" | "git" | "url" | null; state: "installed" | "needs_developer_mode" | "needs_review" | "checking" | "plugins_off" | "unreadable"; version: string | null })[]
   /** true while a request to load a plugin is waiting for the person, including while they are reading what the plugin asks for; no path, no id */
   request_waiting: boolean
+}
+
+/**
+ * `hew.plugin.reload` (v1) — Ask every window running plugins to reload a plugin loaded from a developer folder, as when its files change: its running copy stops and starts again from the folder. Only while developer mode is on, never for a plugin installed from a package, one waiting for the person to review a change, or one that stopped (that one starts again only when the person turns it off and on). At most once every two seconds per plugin. The answer only says the reload was asked for.
+ * Tier: Standard · Class: solitary · Served: host
+ * Refusals: host_capability_missing, plugins_disabled, no_plugin_dir, invalid_params, plugins_off, developer_mode_off, not_installed, installed_unreadable, not_a_developer_folder, plugin_blocked, plugin_stopped, plugin_turned_off, reload_too_soon, dry_run_host_command, storage_unreadable, io
+ * Preview: Plugins (`plugins`). A production build leaves this command out and refuses it `preview_only`.
+ */
+export interface PluginReloadParams {
+  /** an installed plugin's id */
+  id: string
+}
+
+export interface PluginReloadResult {
+  status: "reloading"
 }
 
 /**
@@ -3335,9 +3383,15 @@ export class HewApiClient {
     smooth: (params: ObjectSmoothParams): Promise<ObjectSmoothResult> => this.mutate('hew.object.smooth', params),
   }
 
+  readonly permissions = {
+    request: (params: PermissionsRequestParams): Promise<PermissionsRequestResult> => this.call('hew.permissions.request', params),
+  }
+
   readonly plugin = {
+    activity: (params: PluginActivityParams): Promise<PluginActivityResult> => this.call('hew.plugin.activity', params),
     dev: (params: PluginDevParams): Promise<PluginDevResult> => this.call('hew.plugin.dev', params),
     list: (params: PluginListParams): Promise<PluginListResult> => this.call('hew.plugin.list', params),
+    reload: (params: PluginReloadParams): Promise<PluginReloadResult> => this.call('hew.plugin.reload', params),
   }
 
   readonly print = {

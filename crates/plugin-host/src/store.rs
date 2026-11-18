@@ -10,6 +10,10 @@
 //!     files/…              the package's files (not for a folder install)
 //!     previous/            the version before, with the same layout
 //!   .staging/<id>-<token>/ an install being written; ignored by `list`
+//! plugin-data/
+//!   <id>/                  what a plugin keeps that is not its package
+//!                          (`crate::data`): never touched by an install,
+//!                          an update or a rollback
 //! ```
 //!
 //! Every path the store touches is built from a validated plugin id and,
@@ -31,7 +35,9 @@
 //! A plugin's saved data belongs to the plugin, not to one version of it:
 //! an update and a rollback carry the installed version's `storage.json`
 //! to the version that takes its place, and uninstalling removes it with
-//! the rest of the folder.
+//! the rest of the folder. Everything else a plugin keeps lives in the
+//! sibling `plugin-data/<id>/` ([`crate::data`]), which no version swap
+//! looks at and uninstalling removes first.
 
 use crate::installed::{INSTALLED_SCHEMA, InstallSource, Installed};
 use crate::package::{MANIFEST_FILE, MAX_ENTRY_BYTES, Package};
@@ -149,6 +155,21 @@ impl PluginDir {
     fn staging(&self) -> PathBuf {
         self.root.join(STAGING)
     }
+
+    /// The folder beside the store that holds what plugins keep that is
+    /// not their package ([`crate::data`]): `plugin-data` beside a store
+    /// folder named `plugins`, else `<name>.plugin-data` beside it, so two
+    /// stores in one folder never share one. `None` when the store's root
+    /// has no parent or no name that is text.
+    pub fn data_root(&self) -> Option<PathBuf> {
+        let name = self.root.file_name()?.to_str()?;
+        let parent = self.root.parent()?;
+        Some(if name == STORE_FOLDER {
+            parent.join(crate::data::DATA_FOLDER)
+        } else {
+            parent.join(format!("{name}.{}", crate::data::DATA_FOLDER))
+        })
+    }
 }
 
 /// Tauri's `app_data_dir()` for `com.hew3d.Hew`, without a Tauri
@@ -213,11 +234,11 @@ pub trait Fetcher {
     fn fetch_url(&self, url: &str) -> Result<Vec<u8>, String>;
 }
 
-fn io(e: std::io::Error) -> InstallError {
+pub(crate) fn io(e: std::io::Error) -> InstallError {
     InstallError::Io(e.to_string())
 }
 
-fn checked_id(id: &str) -> Result<(), InstallError> {
+pub(crate) fn checked_id(id: &str) -> Result<(), InstallError> {
     plugin_manifest::validate_plugin_id(id).map_err(InstallError::Manifest)
 }
 
@@ -281,7 +302,7 @@ fn clear_staging(dir: &PluginDir, id: &str, keep_stranded: bool) -> Result<(), I
 }
 
 /// Removes a file, a folder tree, or a link (never following it).
-fn remove_any(path: &Path) -> Result<(), InstallError> {
+pub(crate) fn remove_any(path: &Path) -> Result<(), InstallError> {
     match std::fs::symlink_metadata(path) {
         Ok(m) if m.is_dir() => std::fs::remove_dir_all(path).map_err(io),
         Ok(_) => std::fs::remove_file(path).map_err(io),
@@ -300,7 +321,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), InstallError> {
 
 /// Reads a regular file of at most `cap` bytes, measured on the bytes
 /// read; a link or anything else is refused.
-fn read_capped(path: &Path, cap: usize) -> Result<Vec<u8>, InstallError> {
+pub(crate) fn read_capped(path: &Path, cap: usize) -> Result<Vec<u8>, InstallError> {
     let meta = std::fs::symlink_metadata(path).map_err(io)?;
     if !meta.file_type().is_file() {
         return Err(InstallError::PackagePathInvalid(path.display().to_string()));
@@ -1524,11 +1545,15 @@ pub fn set_grant(
     Ok(installed)
 }
 
-/// Removes everything the store holds for `id`: `plugins/<id>/`
-/// (`previous/` included) and any staging entry. The one removal path
-/// uninstall takes; stores added later join it here.
+/// Removes everything the store holds for `id`: `plugin-data/<id>/`
+/// first ([`crate::data::remove`]), then `plugins/<id>/` (`previous/`
+/// included) and any staging entry. The one removal path uninstall takes;
+/// stores added later join it here. The data goes before the record, so a
+/// removal cut short leaves the plugin installed (and removable again),
+/// never data kept for a plugin that is gone.
 pub fn purge(dir: &PluginDir, id: &str) -> Result<(), InstallError> {
     let folder = dir.plugin(id)?;
+    crate::data::remove(dir, id)?;
     remove_any(&folder)?;
     clear_staging(dir, id, false)
 }
@@ -1635,7 +1660,7 @@ fn carry_storage(from: &Path, to: &Path) -> Result<(), InstallError> {
 /// A plugin's saved data, by key.
 type Storage = BTreeMap<String, String>;
 
-fn checked_key(key: &str) -> Result<(), InstallError> {
+pub(crate) fn checked_key(key: &str) -> Result<(), InstallError> {
     if key.is_empty() || key.len() > crate::MAX_STORAGE_KEY_BYTES {
         return Err(InstallError::StorageKeyInvalid);
     }
@@ -1646,6 +1671,14 @@ fn checked_key(key: &str) -> Result<(), InstallError> {
 /// unless `plugins/<id>/` is a folder holding a record, so no call ever
 /// creates a plugin's folder.
 fn storage_path(dir: &PluginDir, id: &str) -> Result<PathBuf, InstallError> {
+    require_record(dir, id)?;
+    Ok(dir.plugin(id)?.join(STORAGE_FILE))
+}
+
+/// Refuses `not_installed` unless `plugins/<id>/` is a folder (not a link)
+/// holding a record that is a regular file. Nothing is read or created.
+/// The id passes the plugin id grammar first.
+pub fn require_record(dir: &PluginDir, id: &str) -> Result<(), InstallError> {
     let folder = dir.plugin(id)?;
     let installed = std::fs::symlink_metadata(&folder).is_ok_and(|m| m.is_dir())
         && std::fs::symlink_metadata(folder.join(INSTALLED_FILE))
@@ -1653,13 +1686,13 @@ fn storage_path(dir: &PluginDir, id: &str) -> Result<PathBuf, InstallError> {
     if !installed {
         return Err(InstallError::NotInstalled(id.to_string()));
     }
-    Ok(folder.join(STORAGE_FILE))
+    Ok(())
 }
 
 /// Reads a `storage.json`: empty when there is none; `storage_unreadable`
 /// when it is not a regular file, is over the cap, or is not an object of
 /// strings.
-fn read_storage(path: &Path) -> Result<Storage, InstallError> {
+pub(crate) fn read_storage(path: &Path) -> Result<Storage, InstallError> {
     match std::fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Storage::new()),
         Err(e) => return Err(io(e)),

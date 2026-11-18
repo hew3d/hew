@@ -1535,6 +1535,30 @@ impl Registry {
             Std,
             "Ask the app to show a request to load a plugin from a folder.",
         );
+        add(
+            "hew.plugin.activity",
+            S,
+            Host,
+            Std,
+            "What a plugin did in the app: when it started, stopped or was unloaded, and why.",
+        );
+        add(
+            "hew.plugin.reload",
+            S,
+            Host,
+            Std,
+            "Ask the app to reload a plugin loaded from a developer folder.",
+        );
+        // A plugin asking, from its own connection, for optional permissions
+        // its manifest declares: a Preview command the page's plugin host
+        // answers before a request reaches a dispatcher.
+        add(
+            "hew.permissions.request",
+            S,
+            Host,
+            Std,
+            "Ask the person to grant this plugin optional permissions its manifest declares.",
+        );
         // Printing (docs/design/printing.md §9b): headless-renderable like
         // hew.view.snapshot (the same core-profile carve-out below).
         add(
@@ -4101,6 +4125,132 @@ impl Registry {
                 "request_dismissed",
                 "dry_run_host_command",
                 "io",
+            ];
+        }
+
+        {
+            let cmd = commands
+                .get_mut("hew.plugin.activity")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "What a plugin did in the app, newest first, at most 500 entries: each state a window reported for it (enabled, activating, activated, crashed, blocked, idle, unloaded), when, in which window, and why. Reads only; the log is kept by the app and goes with the plugin when it is uninstalled.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "minLength": 1, "maxLength": 128, "description": "an installed plugin's id" }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "entries": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "at": { "type": "integer", "description": "milliseconds since the Unix epoch" },
+                                "window": { "type": "string", "description": "the label of the window that reported it" },
+                                "state": { "type": "string", "enum": ["enabled", "activating", "activated", "crashed", "blocked", "idle", "unloaded"] },
+                                "reason": { "type": ["string", "null"], "description": "cleaned, at most 160 characters" }
+                            },
+                            "required": ["at", "window", "state", "reason"]
+                        }
+                    }
+                },
+                "required": ["entries"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "plugins_disabled",
+                "no_plugin_dir",
+                "invalid_params",
+                "not_installed",
+                "installed_unreadable",
+                "storage_unreadable",
+                "io",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.plugin.reload")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Ask every window running plugins to reload a plugin loaded from a developer folder, as when its files change: its running copy stops and starts again from the folder. Only while developer mode is on, never for a plugin installed from a package, one waiting for the person to review a change, or one that stopped (that one starts again only when the person turns it off and on). At most once every two seconds per plugin. The answer only says the reload was asked for.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "minLength": 1, "maxLength": 128, "description": "an installed plugin's id" }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string", "enum": ["reloading"] }
+                },
+                "required": ["status"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "plugins_disabled",
+                "no_plugin_dir",
+                "invalid_params",
+                "plugins_off",
+                "developer_mode_off",
+                "not_installed",
+                "installed_unreadable",
+                "not_a_developer_folder",
+                "plugin_blocked",
+                "plugin_stopped",
+                "plugin_turned_off",
+                "reload_too_soon",
+                "dry_run_host_command",
+                "storage_unreadable",
+                "io",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.permissions.request")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Ask the person using Hew to grant this plugin some of the optional permissions its manifest declares (optionalPermissions). Only a plugin can ask, from its own connection, and only right after the person acted in that plugin's own window or panel; Hew shows what the plugin would be able to do and the person decides. Names the plugin already holds are granted without asking. The grant applies at once to the running plugin, which receives a grant message and keeps running. After a no, the same plugin is refused for a minute. Not available in Shop Mode. Any other caller is refused host_capability_missing.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "permissions": {
+                        "type": "array",
+                        "items": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "minItems": 1,
+                        "maxItems": 64,
+                        "description": "names from the manifest's optionalPermissions"
+                    },
+                    "reason": { "type": "string", "maxLength": 200, "description": "shown to the person; plain text" }
+                },
+                "required": ["permissions"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "granted": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "the names asked for that the plugin now holds"
+                    }
+                },
+                "required": ["granted"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "permission_not_requestable",
+                "no_user_activation",
+                "request_pending",
+                "request_declined",
+                "not_available_in_shop",
             ];
         }
 
@@ -8190,6 +8340,7 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.doc.transact",
                 "hew.event.subscribe",
                 "hew.event.unsubscribe",
+                "hew.permissions.request",
             ],
         ),
         (
@@ -8375,7 +8526,15 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
         // Declaration-only: held by no profile a plugin or an app grant
         // can name, so only a first-party (`all`) connection may call
         // these. They manage plugins, which a plugin may not.
-        (FirstParty, &["hew.plugin.list", "hew.plugin.dev"]),
+        (
+            FirstParty,
+            &[
+                "hew.plugin.list",
+                "hew.plugin.dev",
+                "hew.plugin.activity",
+                "hew.plugin.reload",
+            ],
+        ),
     ];
     rows.into_iter()
         .flat_map(|(p, names)| names.iter().map(move |n| (*n, p.clone())))
@@ -8729,8 +8888,11 @@ mod tests {
 
     /// Every table row names a registered command, every registered
     /// command appears exactly once, and the always-granted set is exactly
-    /// the handshake, introspection, attaching to the bound document, and
-    /// the transaction container.
+    /// the handshake, introspection, attaching to the bound document, the
+    /// transaction container, the event subscriptions, and a plugin's
+    /// request for optional permissions (a Preview command). The set this
+    /// build serves leaves the Preview one out of a production build, so a
+    /// production capability listing is what it was before it existed.
     #[test]
     fn every_command_has_a_permission() {
         // The table covers the whole inventory, Preview commands included,
@@ -8767,9 +8929,30 @@ mod tests {
                 "hew.doc.transact",
                 "hew.event.subscribe",
                 "hew.event.unsubscribe",
+                "hew.permissions.request",
             ]
             .into_iter()
             .collect()
         );
+        let served: std::collections::BTreeSet<String> = Registry::protocol_1()
+            .commands()
+            .filter(|c| c.permission == Permission::Always)
+            .map(|c| c.name.clone())
+            .collect();
+        let mut expected: std::collections::BTreeSet<String> = [
+            "hew.meta.hello",
+            "hew.meta.capabilities",
+            "hew.doc.attach",
+            "hew.doc.transact",
+            "hew.event.subscribe",
+            "hew.event.unsubscribe",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        if crate::preview::PREVIEW_BUILD {
+            expected.insert("hew.permissions.request".into());
+        }
+        assert_eq!(served, expected);
     }
 }

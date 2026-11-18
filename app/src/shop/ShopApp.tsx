@@ -64,6 +64,8 @@ import { isolateHiddenFor } from './isolate'
 import { uiContextJson } from '../api/viewMirror'
 import { writeShellModeOverride, parseRecvParams, type RecvParams } from './shellMode'
 import { installShopTestHarness } from './testHarness'
+import { useShopPluginHost } from './usePluginHost'
+import type { LiveBridgeDeps } from '../api/liveBridge'
 import { HintEngine, largestVisiblePart, testHintsSuppressed, type ActiveHint } from './hints'
 import { HintOverlay } from './HintOverlay'
 import { isArQuickLookCandidate, launchArQuickLook } from './arQuickLook'
@@ -465,6 +467,62 @@ export function ShopApp() {
       return next
     })
   }, [pushHidden, hiddenTagPaths, isolatedNode])
+
+  // ---------------------------------------------------------------- plugin host bridge (Preview)
+  // What a plugin host in this window may drive: the scene, the viewport and
+  // the hidden-state hooks. They are written from the same seeds and pushes
+  // this file already uses when hidden state changes (`applyOpenedBytes`,
+  // `pushHidden`), and read the latest sets through refs so a re-seed and a
+  // reconcile in one tick agree. Nothing here is a kernel transaction.
+  // There is no selection or entering target: those view directives are
+  // no-ops in Shop. Isolate and clear_isolation are too, by targets that do
+  // nothing: Shop's own isolate and hidden state (`isolatedNode`, the Parts
+  // sheet's hides) must not be undone or contradicted by a plugin acting on
+  // the viewport behind its back. zoom_to still frames the viewport.
+  const hiddenKeysRef = useRef(hiddenKeys)
+  hiddenKeysRef.current = hiddenKeys
+  const hiddenTagPathsRef = useRef(hiddenTagPaths)
+  hiddenTagPathsRef.current = hiddenTagPaths
+  const isolatedNodeRef = useRef(isolatedNode)
+  isolatedNodeRef.current = isolatedNode
+  const pluginBridge = useMemo<LiveBridgeDeps>(
+    () => ({
+      getScene: () => sceneRef.current,
+      getViewportApi: () => viewportApi.current,
+      isolate: () => undefined,
+      clearIsolation: () => undefined,
+      // With the viewport mounted the bridge refreshes it itself; this is
+      // the renderer's hidden set, pushed again.
+      reconcile: () => pushHidden(hiddenKeysRef.current, hiddenTagPathsRef.current, isolatedNodeRef.current),
+      // A load's re-seed: hidden nodes and tags from the document's own
+      // registries, then pushed.
+      reseedViewState: () => {
+        const scn = sceneRef.current
+        if (scn === null) return
+        const keys = seedHiddenKeysFromRegistry(scn)
+        const tagPaths = seedHiddenTagPathsFromRegistry(scn)
+        hiddenKeysRef.current = keys
+        hiddenTagPathsRef.current = tagPaths
+        setHiddenKeys(keys)
+        setHiddenTagPaths(tagPaths)
+        pushHidden(keys, tagPaths, isolatedNodeRef.current)
+      },
+      // Tag visibility again from the registry, pushed only when it moved.
+      reconcileVisibility: () => {
+        const scn = sceneRef.current
+        if (scn === null) return
+        const keys = hiddenKeysRef.current
+        const current = hiddenTagPathsRef.current
+        const seeded = seedHiddenTagPathsFromRegistry(scn)
+        if (seeded.size === 0 && current.size === 0 && keys.size === 0) return
+        if (seeded.size === current.size && [...seeded].every((p) => current.has(p))) return
+        hiddenTagPathsRef.current = seeded
+        setHiddenTagPaths(seeded)
+        pushHidden(keys, seeded, isolatedNodeRef.current)
+      },
+    }),
+    [pushHidden],
+  )
 
   /** Parts sheet: toggle a tag section's master eye. */
   const toggleHiddenTagPath = useCallback((path: string[]) => {
@@ -910,6 +968,9 @@ export function ShopApp() {
     // above), so hidden-by-default tags/nodes take effect on first render
     // instead of waiting for the user to touch an eye toggle.
     pushHidden(seededHiddenKeys, seededHiddenTagPaths, null)
+    // A plugin host, when one runs, follows the document: this open is its
+    // `document_opened` (Shop never pumps the Scene's events otherwise).
+    pluginHostRef.current.noteOpened(liveScene, name)
     // Shop Mode is web-only (shellMode.ts — the desktop shell never enters
     // it), so unlike App.tsx's equivalent this needs no isTauri check.
     // Fire-and-forget: a lost write must never interrupt the open itself.
@@ -1201,6 +1262,21 @@ export function ShopApp() {
       loadBytes: loadBytesViaHarness,
     })
   }, [loadBytesViaHarness])
+
+  // The plugin host, while the plugin loader is on (a Preview feature; the
+  // hook holds nothing of plugins in a production build). Opens are told to
+  // it from `applyOpenedBytes` through `pluginHost.noteOpened`.
+  const docNameRef = useRef<string | null>(null)
+  docNameRef.current = docName
+  const pluginHost = useShopPluginHost({
+    scene,
+    bridge: pluginBridge,
+    toast: showToast,
+    title: () => docNameRef.current ?? '',
+    harness: () => (window as unknown as { __hew_shop_test?: Record<string, unknown> }).__hew_shop_test ?? null,
+  })
+  const pluginHostRef = useRef(pluginHost)
+  pluginHostRef.current = pluginHost
 
   // Open a `.skp` read-only: load the blank document, `open_skp` into it,
   // then hand the standard post-open steps the document's own `.hew`

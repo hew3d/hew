@@ -14,6 +14,8 @@ const NAMES = [
   'plugin_manifest_parse',
   'plugin_hew_version_ok',
   'plugin_install_check',
+  // What a widened grant would add, for the web's grant sheet.
+  'plugin_grant_lines',
 ] as const
 
 export async function pluginWasm(): Promise<PluginWasm> {

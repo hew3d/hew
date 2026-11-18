@@ -414,6 +414,25 @@ describe('App — the bus view mirrors', () => {
   })
 })
 
+describe('App — the page going away', () => {
+  const pagehide = (persisted: boolean): void => {
+    const e = new Event('pagehide') as Event & { persisted: boolean }
+    Object.defineProperty(e, 'persisted', { value: persisted })
+    window.dispatchEvent(e)
+  }
+  const closes = (): number =>
+    vi.mocked(mockScene.note_document_event).mock.calls.filter(([kind]) => kind === 'closed').length
+
+  it('closes the document on pagehide only when the page is not kept for the back/forward cache', async () => {
+    await renderAndLoad()
+    vi.mocked(mockScene.note_document_event).mockClear()
+    pagehide(true)
+    expect(closes()).toBe(0)
+    pagehide(false)
+    expect(closes()).toBe(1)
+  })
+})
+
 describe('App — a bus hide re-reads the hidden state', () => {
   afterEach(() => {
     vi.mocked(Viewport).mockImplementation((() => null) as never)

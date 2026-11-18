@@ -529,6 +529,10 @@ pub const BUSY_EXEMPT: &[&str] = &[
     // (a preview build's method, `plugins_api.rs`; named here in every
     // build because the guard test reads the sources, not the build);
     "note_plugin_state",
+    // a running plugin's connection takes a wider grant while its command
+    // holds the document (the connection only, never the document; also a
+    // preview build's method in `plugins_api.rs`);
+    "api_connection_set_grant",
     // Scene caches only, no document mutator:
     // the inference scope of the instance being edited;
     "set_active_inference_instance",
@@ -3778,8 +3782,12 @@ impl Scene {
         let id = self.next_api_conn_id;
         self.next_api_conn_id = self.next_api_conn_id.wrapping_add(1);
         let identity = grant.identity_or(&format!("live:{id}"));
-        self.api_connections
-            .insert(id, api::Connection::new(grant, &identity));
+        let connection = if grant.plugin.is_some() {
+            api::Connection::for_plugin(grant, &identity)
+        } else {
+            api::Connection::new(grant, &identity)
+        };
+        self.api_connections.insert(id, connection);
         Ok(id)
     }
 

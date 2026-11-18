@@ -164,6 +164,14 @@ export interface LiveBridgeDeps {
    */
   isolate?: (targets: IsolationTarget[], opts: { frame: boolean }) => void
   /**
+   * Clears the isolation through the app's own handler (`clear_isolation`
+   * directives). Optional; without it the bridge calls
+   * `ViewportApi.clearIsolation` directly. A window that owns its isolation
+   * state itself (Shop) wires this and `isolate` to what it wants done,
+   * which may be nothing.
+   */
+  clearIsolation?: () => void
+  /**
    * The Outliner's own entry convergence (`enterNode`): opens group and
    * component sessions level by level toward a node, falls back to the
    * in-context entry for an instance a session cannot take, and selects it.
@@ -421,6 +429,7 @@ export type DirectiveTargets = Pick<
   | 'selectMany'
   | 'selectNone'
   | 'isolate'
+  | 'clearIsolation'
   | 'enterNode'
   | 'snapshotEntry'
   | 'setPathDepth'
@@ -527,7 +536,8 @@ function applyViewDirective(directive: ViewDirective, targets: DirectiveTargets)
       }
       return
     case 'clear_isolation':
-      viewportApi?.clearIsolation()
+      if (targets.clearIsolation !== undefined) targets.clearIsolation()
+      else viewportApi?.clearIsolation()
       return
     case 'zoom_to':
       viewportApi?.zoomToWorldBounds(directive.min, directive.max)
@@ -666,6 +676,7 @@ export function directiveTargets(deps: LiveBridgeDeps): DirectiveTargets {
     selectMany: deps.selectMany,
     selectNone: deps.selectNone,
     isolate: deps.isolate,
+    clearIsolation: deps.clearIsolation,
     enterNode: deps.enterNode,
     snapshotEntry: deps.snapshotEntry,
     setPathDepth: deps.setPathDepth,

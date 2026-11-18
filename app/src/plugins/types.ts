@@ -116,6 +116,16 @@ export type Listed =
        *  folder now (`folder_missing`, `package_path_invalid`,
        *  `package_too_large`), or null. Absent elsewhere. */
       dev_problem?: string | null
+      /** Desktop: what the open windows' hosts reported about it (the
+       *  shell's sum): in how many it runs (activating or activated), is
+       *  stopped (crashed), is blocked, or was unloaded for sitting idle,
+       *  and the newest stop still standing. Absent on the web, where the
+       *  pane reads the host in the page. */
+      running_in?: number
+      stopped_in?: number
+      blocked_in?: number
+      idle_in?: number
+      last_stop?: { reason: string | null; at: number } | null
     }
   | { kind: 'unreadable'; id: string; reason: string }
 
@@ -192,4 +202,12 @@ export interface PluginInstaller {
   iconUrl(id: string, rel: string): Promise<string | null>
   /** Calls `fn` when the store changed, here or in another window. */
   onChanged(fn: () => void): () => void
+  /** Replaces `id`'s grant (`grant` from the manifest's permissions,
+   *  `optional` from its optional ones). Desktop: a widening is put to the
+   *  person in the shell's native confirmation, and a no leaves the record
+   *  as it was. Web: it only writes; the caller has asked. Resolves with
+   *  the record as stored afterwards. */
+  setGrant?(id: string, grant: string[], optional: string[]): Promise<Installed>
+  /** Web: the kernel's lines for what a grant change would add. */
+  grantLines?(id: string, grant: string[], optional: string[]): Promise<{ added: PermissionLine[]; warnings: string[] }>
 }

@@ -18,6 +18,8 @@ import {
   type HostToRealm,
   type RealmToHost,
   type StorageOp,
+  type StorageScope,
+  type UnloadReason,
 } from './protocol'
 
 /** A refusal a command handler answers with: `throw new HewRefusal(name,
@@ -57,7 +59,18 @@ export interface PluginInfo {
   grant: unknown
   api: 1
   document: string
+  /** The document's own persistent id, or null while it has none. */
+  documentId: string | null
   features: string[]
+}
+
+/** One storage scope's calls. */
+export interface StorageArea {
+  get(key: string): Promise<unknown>
+  set(key: string, value: unknown): Promise<void>
+  delete(key: string): Promise<void>
+  list(): Promise<string[]>
+  onChange(fn: (keys: string[]) => void): () => void
 }
 
 /** The `hew` global a plugin sees. */
@@ -73,15 +86,26 @@ export interface Hew {
   commit(fn: (doc: unknown) => unknown[] | Promise<unknown[]>, opts?: { label?: string }): Promise<unknown>
   readonly commands: { handle(local: string, handler: CommandHandler): void }
   readonly events: { on(name: string, fn: (params: unknown) => void): void; off(name: string, fn: (params: unknown) => void): void }
-  readonly storage: {
-    get(key: string): Promise<unknown>
-    set(key: string, value: unknown): Promise<void>
-    delete(key: string): Promise<void>
-    list(): Promise<string[]>
-    onChange(fn: (keys: string[]) => void): () => void
-  }
+  /** The plugin's own storage, and (`document`) its storage for the
+   *  document it has now: kept on this device under the document's id,
+   *  not in the file, not part of Undo. A `document` call made before the
+   *  document changed and reaching Hew after is refused
+   *  `document_changed`, with nothing read or written. */
+  readonly storage: StorageArea & { readonly document: StorageArea }
   readonly assets: { bytes(path: string): Promise<ArrayBuffer>; url(path: string): Promise<string> }
-  readonly lifecycle: { on(event: 'unload', fn: (reason: string) => void): void }
+  readonly lifecycle: {
+    /** `unload`: the realm is stopping, with the reason (`disable`,
+     *  `reload`, `window_closed`, `idle`). A handler may return a promise;
+     *  storage writes it makes are kept, and the realm waits for it up to
+     *  `RUNTIME_LIMITS.unloadWaitMs`. `grant`: the person granted the plugin
+     *  more while it runs; the handler gets the new grant (also in
+     *  `hew.plugin.grant`), and events it was refused are asked for again. */
+    on(event: 'unload', fn: (reason: UnloadReason) => unknown): void
+    on(event: 'grant', fn: (grant: unknown) => void): void
+    /** `document`: the realm's document changed (another opened, or the
+     *  first save gave it an id); the handler gets the new id or null. */
+    on(event: 'document', fn: (documentId: string | null) => void): void
+  }
   supports(name: string): boolean
 }
 
@@ -122,8 +146,10 @@ function consoleText(value: unknown): string {
 const STORAGE_TEXT: Record<string, string> = {
   storage_quota: "This plugin's storage is full.",
   storage_key_invalid: 'A storage key must be text of 1 to 256 bytes.',
+  storage_value_invalid: 'A stored value must be well-formed text: no lone surrogate.',
   storage_value_too_large: `A stored value must be at most ${RUNTIME_LIMITS.storageValueChars} characters of JSON.`,
   storage_unavailable: "This plugin's storage cannot be reached.",
+  document_changed: 'The document changed before this call reached Hew, so nothing was read or written. Try again for the document open now.',
 }
 
 /** Whether `text` is well-formed UTF-16: no surrogate without its pair. */
@@ -268,6 +294,19 @@ export function createRuntime(env: RuntimeEnv): Runtime {
   }
 
   const eventListeners = new Map<string, Set<(params: unknown) => void>>()
+  /** Event names the connection's grant refused at subscribe time, asked
+   *  for again when a wider grant arrives. */
+  const deniedEvents = new Set<string>()
+  const subscribeEvent = (name: string): void => {
+    api.event
+      .subscribe({ events: [name as never] })
+      .then((result) => {
+        const denied = (result as { denied?: unknown } | null)?.denied
+        if (Array.isArray(denied) && denied.includes(name) && eventListeners.has(name)) deniedEvents.add(name)
+        else deniedEvents.delete(name)
+      })
+      .catch((e: unknown) => mirror('warn', [`could not subscribe to ${name}`, e]))
+  }
   const onBusFrame = (frame: string): void => {
     let parsed: unknown
     try {
@@ -299,21 +338,49 @@ export function createRuntime(env: RuntimeEnv): Runtime {
   }
 
   // ------------------------------------------------------------ storage
+  /** The host's count of document changes, as last heard (`hello`, then
+   *  each `document`); unknown before hello. */
+  let documentEpoch: number | undefined
+  /** The epoch hello named: what a call made before hello is for, even
+   *  when it waits for a slot past a later document change. */
+  let helloEpoch: number | undefined
+  const readEpoch = (value: unknown): number | undefined => (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined)
   let nextRequest = 0
   const pendingStorage = new Map<number, { resolve(m: Extract<HostToRealm, { t: 'storage_reply' }>): void }>()
   const storageSlot = limiter(RUNTIME_LIMITS.storageOpen)
-  const storage = (op: StorageOp, key?: string, value?: string): Promise<Extract<HostToRealm, { t: 'storage_reply' }>> =>
-    storageSlot(
+  /** Storage requests made and not yet answered, and who waits for none. */
+  let storageOpen = 0
+  let storageIdle: (() => void)[] = []
+  const storageSettled = (): void => {
+    if (--storageOpen > 0) return
+    const waiting = storageIdle
+    storageIdle = []
+    for (const fn of waiting) fn()
+  }
+  const storage = (scope: StorageScope, op: StorageOp, key?: string, value?: string): Promise<Extract<HostToRealm, { t: 'storage_reply' }>> => {
+    storageOpen++
+    // A document call is for the document the plugin had when it made the
+    // call, even when it waits for a slot past a document change: the host
+    // then refuses it `document_changed`. Made before hello, it is for the
+    // document hello names (filled in when the outbox is sent, or, for one
+    // that waits for a slot, taken from the epoch hello named).
+    const epochAtCall = documentEpoch
+    const request = storageSlot(
       () =>
-        new Promise((resolve) => {
+        new Promise<Extract<HostToRealm, { t: 'storage_reply' }>>((resolve) => {
           const id = ++nextRequest
           pendingStorage.set(id, { resolve })
-          const msg: RealmToHost = { t: 'storage', id, op }
+          const msg: RealmToHost = { t: 'storage', id, op, scope }
           if (key !== undefined) msg.key = key
           if (value !== undefined) msg.value = value
+          const epoch = epochAtCall ?? helloEpoch
+          if (scope === 'document' && epoch !== undefined) msg.epoch = epoch
           send(msg)
         }),
     )
+    void request.finally(storageSettled)
+    return request
+  }
   const storageFailed = (reply: Extract<HostToRealm, { t: 'storage_reply' }>): HewRefusal | null => {
     if (reply.ok) return null
     const name = /^[a-z][a-z0-9_]{0,63}$/.test(reply.error) ? reply.error : 'storage_unavailable'
@@ -326,7 +393,48 @@ export function createRuntime(env: RuntimeEnv): Runtime {
     }
     return key
   }
-  const storageListeners = new Set<(keys: string[]) => void>()
+  const storageListeners: Record<StorageScope, Set<(keys: string[]) => void>> = { plugin: new Set(), document: new Set() }
+  const documentListeners: ((documentId: string | null) => void)[] = []
+
+  /** The calls of one storage scope. The same key and value checks and
+   *  refusal names in both. */
+  function area(scope: StorageScope): StorageArea {
+    return {
+      async get(key) {
+        const reply = await storage(scope, 'get', checkKey(key))
+        const failed = storageFailed(reply)
+        if (failed !== null) throw failed
+        const value = reply.ok ? reply.value : null
+        return typeof value === 'string' ? JSON.parse(value) : undefined
+      },
+      async set(key, value) {
+        const k = checkKey(key)
+        const text = JSON.stringify(value)
+        if (typeof text !== 'string') throw new TypeError('a stored value must be JSON (not undefined or a function)')
+        if (text.length > RUNTIME_LIMITS.storageValueChars) {
+          throw new HewRefusal('storage_value_too_large', STORAGE_TEXT.storage_value_too_large)
+        }
+        const failed = storageFailed(await storage(scope, 'set', k, text))
+        if (failed !== null) throw failed
+      },
+      async delete(key) {
+        const failed = storageFailed(await storage(scope, 'delete', checkKey(key)))
+        if (failed !== null) throw failed
+      },
+      async list() {
+        const reply = await storage(scope, 'list')
+        const failed = storageFailed(reply)
+        if (failed !== null) throw failed
+        return reply.ok ? [...(reply.keys ?? [])] : []
+      },
+      onChange(fn) {
+        storageListeners[scope].add(fn)
+        return () => {
+          storageListeners[scope].delete(fn)
+        }
+      },
+    }
+  }
 
   // -------------------------------------------------------------- files
   const pendingFiles = new Map<number, { path: string; resolve(b: ArrayBuffer): void; reject(e: unknown): void }>()
@@ -334,7 +442,8 @@ export function createRuntime(env: RuntimeEnv): Runtime {
 
   // ---------------------------------------------------------- commands
   const handlers = new Map<string, CommandHandler>()
-  const unloadListeners: ((reason: string) => void)[] = []
+  const unloadListeners: ((reason: UnloadReason) => unknown)[] = []
+  const grantListeners: ((grant: unknown) => void)[] = []
 
   const replyForward = (id: number, reply: ForwardReplyJson): void => {
     const entry = openForwards.get(id)
@@ -417,6 +526,7 @@ export function createRuntime(env: RuntimeEnv): Runtime {
   }
 
   // ------------------------------------------------------------ receive
+  let unloading = false
   const receive = (message: unknown): void => {
     if (typeof message !== 'object' || message === null) return
     const m = message as HostToRealm
@@ -430,15 +540,28 @@ export function createRuntime(env: RuntimeEnv): Runtime {
           /* the host sends valid JSON; null if not */
         }
         info = {
-          plugin: { id: m.plugin, version: m.version, grant, api: 1, document: m.document, features: [...m.features] },
+          plugin: {
+            id: m.plugin,
+            version: m.version,
+            grant,
+            api: 1,
+            document: m.document,
+            documentId: typeof m.document_id === 'string' ? m.document_id : null,
+            features: [...m.features],
+          },
           locale: m.locale,
           theme: m.theme,
           activation: m.activation,
         }
+        documentEpoch = readEpoch(m.document_epoch) ?? 0
+        helloEpoch = documentEpoch
         env.post({ t: 'hello_ack' })
         const queued = outbox ?? []
         outbox = null
-        for (const q of queued) env.post(q)
+        for (const q of queued) {
+          if (q.t === 'storage' && q.scope === 'document' && q.epoch === undefined) q.epoch = documentEpoch
+          env.post(q)
+        }
         markReady()
         return
       }
@@ -464,7 +587,7 @@ export function createRuntime(env: RuntimeEnv): Runtime {
         return
       }
       case 'storage_changed':
-        for (const fn of [...storageListeners]) {
+        for (const fn of [...storageListeners[m.scope === 'document' ? 'document' : 'plugin']]) {
           try {
             fn([...m.keys])
           } catch (e) {
@@ -481,17 +604,77 @@ export function createRuntime(env: RuntimeEnv): Runtime {
         else waiter.reject(new HewRefusal('file_missing', `The plugin has no file "${cut(waiter.path, 200)}".`))
         return
       }
-      case 'unload':
+      case 'unload': {
+        if (unloading) return
+        unloading = true
         for (const [, entry] of openForwards) entry.controller.abort()
+        const waits: Promise<unknown>[] = []
         for (const fn of unloadListeners) {
           try {
-            fn(m.reason)
+            const result = fn(m.reason)
+            if (typeof (result as { then?: unknown } | null)?.then === 'function') {
+              waits.push(Promise.resolve(result).catch((e: unknown) => mirror('error', ['an unload listener failed', e])))
+            }
           } catch (e) {
             mirror('error', ['an unload listener threw', e])
           }
         }
-        env.post({ t: 'unloaded' })
+        // `unloaded` goes after the storage writes the listeners made, so
+        // the host keeps them; it waits for them and for the listeners'
+        // promises, at most `unloadWaitMs`.
+        const storageDone = (): Promise<void> => (storageOpen === 0 ? Promise.resolve() : new Promise<void>((resolve) => storageIdle.push(resolve)))
+        if (waits.length === 0 && storageOpen === 0) {
+          env.post({ t: 'unloaded' })
+          return
+        }
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const limit = new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, RUNTIME_LIMITS.unloadWaitMs)
+        })
+        void Promise.race([Promise.allSettled(waits).then(storageDone), limit]).then(() => {
+          clearTimeout(timer)
+          env.post({ t: 'unloaded' })
+        })
         return
+      }
+      case 'document': {
+        if (info === null) return
+        const documentId = typeof m.document_id === 'string' ? m.document_id : null
+        info.plugin.documentId = documentId
+        documentEpoch = readEpoch(m.epoch) ?? documentEpoch
+        for (const fn of [...documentListeners]) {
+          try {
+            fn(documentId)
+          } catch (e) {
+            mirror('error', ['a document listener threw', e])
+          }
+        }
+        return
+      }
+      case 'grant': {
+        if (info === null || typeof m.grant !== 'string') return
+        let grant: unknown = null
+        try {
+          grant = JSON.parse(m.grant)
+        } catch {
+          return
+        }
+        info.plugin.grant = grant
+        // Events the old grant refused are asked for again; one the new
+        // grant still refuses comes back denied and waits for the next.
+        for (const name of [...deniedEvents]) {
+          if (eventListeners.has(name)) subscribeEvent(name)
+          else deniedEvents.delete(name)
+        }
+        for (const fn of [...grantListeners]) {
+          try {
+            fn(grant)
+          } catch (e) {
+            mirror('error', ['a grant listener threw', e])
+          }
+        }
+        return
+      }
       case 'ping':
         // Answered at once, even before hello: it is how the host knows the
         // Worker is alive.
@@ -546,7 +729,7 @@ export function createRuntime(env: RuntimeEnv): Runtime {
         if (set === undefined) {
           set = new Set()
           eventListeners.set(name, set)
-          api.event.subscribe({ events: [name as never] }).catch((e: unknown) => mirror('warn', [`could not subscribe to ${name}`, e]))
+          subscribeEvent(name)
         }
         set.add(fn)
       },
@@ -556,45 +739,12 @@ export function createRuntime(env: RuntimeEnv): Runtime {
         set.delete(fn)
         if (set.size === 0) {
           eventListeners.delete(name)
+          deniedEvents.delete(name)
           api.event.unsubscribe({ events: [name as never] }).catch(() => {})
         }
       },
     },
-    storage: {
-      async get(key) {
-        const reply = await storage('get', checkKey(key))
-        const failed = storageFailed(reply)
-        if (failed !== null) throw failed
-        const value = reply.ok ? reply.value : null
-        return typeof value === 'string' ? JSON.parse(value) : undefined
-      },
-      async set(key, value) {
-        const k = checkKey(key)
-        const text = JSON.stringify(value)
-        if (typeof text !== 'string') throw new TypeError('a stored value must be JSON (not undefined or a function)')
-        if (text.length > RUNTIME_LIMITS.storageValueChars) {
-          throw new HewRefusal('storage_value_too_large', STORAGE_TEXT.storage_value_too_large)
-        }
-        const failed = storageFailed(await storage('set', k, text))
-        if (failed !== null) throw failed
-      },
-      async delete(key) {
-        const failed = storageFailed(await storage('delete', checkKey(key)))
-        if (failed !== null) throw failed
-      },
-      async list() {
-        const reply = await storage('list')
-        const failed = storageFailed(reply)
-        if (failed !== null) throw failed
-        return reply.ok ? [...(reply.keys ?? [])] : []
-      },
-      onChange(fn) {
-        storageListeners.add(fn)
-        return () => {
-          storageListeners.delete(fn)
-        }
-      },
-    },
+    storage: Object.assign(area('plugin'), { document: area('document') }),
     assets: {
       bytes(path) {
         if (typeof path !== 'string' || path === '') return Promise.reject(new TypeError('a path is a non-empty string'))
@@ -616,8 +766,11 @@ export function createRuntime(env: RuntimeEnv): Runtime {
       },
     },
     lifecycle: {
-      on(event, fn) {
-        if (event === 'unload' && typeof fn === 'function') unloadListeners.push(fn)
+      on(event: 'unload' | 'grant' | 'document', fn: (arg: never) => unknown) {
+        if (typeof fn !== 'function') return
+        if (event === 'unload') unloadListeners.push(fn as (reason: UnloadReason) => unknown)
+        else if (event === 'grant') grantListeners.push(fn as (grant: unknown) => void)
+        else if (event === 'document') documentListeners.push(fn as (documentId: string | null) => void)
       },
     },
     supports(name) {

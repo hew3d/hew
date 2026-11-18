@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { requiresPreview } from '../test/requiresPreview'
 import { PluginsPane } from './PluginsPane'
+import type { ActivityEntry, ConsoleLine, HostEntry, PaneData } from './paneData'
 import { PluginError } from './pluginError'
+import { requestGrant } from './grantSheet'
 import type { ConsentPayload, Installed, Listed, PendingView, PluginInstaller } from './types'
 import { recordFingerprint, rollbackFingerprint } from './webPluginStore'
 
@@ -879,5 +881,434 @@ describe('PluginsPane on the web, a folder', () => {
     ;(window as { showDirectoryPicker?: unknown }).showDirectoryPicker = vi.fn(async () => ({ kind: 'directory', name: 'big' }))
     fireEvent.click(screen.getByRole('button', { name: 'From folder…' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('This folder is too large to install as a plugin.')
+  })
+})
+
+/** A stand-in for the data behind the run state, the console and the
+ *  activity; `push*` plays what the shell or the host would announce. */
+function fakeData(tier: 'desktop' | 'web' = 'web') {
+  let states: Record<string, HostEntry> | null = tier === 'web' ? {} : null
+  let lines: ConsoleLine[] = []
+  let entries: ActivityEntry[] = []
+  const stateFns = new Set<() => void>()
+  const consoleFns = new Set<() => void>()
+  const data: PaneData = {
+    tier,
+    hostStates: () => states,
+    onState: vi.fn((fn: () => void) => {
+      stateFns.add(fn)
+      return () => void stateFns.delete(fn)
+    }),
+    console: vi.fn(async () => [...lines]),
+    onConsole: vi.fn((_id: string, fn: () => void) => {
+      consoleFns.add(fn)
+      return () => void consoleFns.delete(fn)
+    }),
+    activity: vi.fn(async () => [...entries]),
+    onActivity: vi.fn((_id: string, fn: () => void) => {
+      stateFns.add(fn)
+      return () => void stateFns.delete(fn)
+    }),
+  }
+  return {
+    data: data as PaneData & { console: ReturnType<typeof vi.fn> },
+    setStates: (s: Record<string, HostEntry>) => {
+      states = s
+      act(() => stateFns.forEach((f) => f()))
+    },
+    setLines: (l: ConsoleLine[]) => {
+      lines = l
+      act(() => consoleFns.forEach((f) => f()))
+    },
+    setEntries: (e: ActivityEntry[]) => {
+      entries = e
+    },
+    announceState: () => act(() => stateFns.forEach((f) => f())),
+  }
+}
+
+const counts = (running: number, stopped: number, blocked: number, reason: string | null = null) =>
+  ({ running_in: running, stopped_in: stopped, blocked_in: blocked, last_stop: reason === null ? null : { reason, at: 5 } }) as unknown as Partial<Extract<Listed, { kind: 'installed' }>>
+
+describe('PluginsPane: what each plugin is doing', () => {
+  it('says Running, Not running yet, and a plain stop line from the shell\'s counts on the desktop', async () => {
+    const { inst } = fake(
+      [
+        row('com.example.one', 'One', {}, counts(1, 0, 0)),
+        row('com.example.two', 'Two', {}, counts(0, 0, 0)),
+        row('com.example.three', 'Three', {}, counts(0, 1, 0, 'unresponsive')),
+      ],
+      'desktop',
+    )
+    render(<PluginsPane installer={inst} data={fakeData('desktop').data} />)
+    const one = (await screen.findByText('One')).closest('li') as HTMLElement
+    expect(within(one).getByText('Running')).toBeInTheDocument()
+    expect(within(screen.getByText('Two').closest('li') as HTMLElement).getByText('Not running yet')).toBeInTheDocument()
+    const three = screen.getByText('Three').closest('li') as HTMLElement
+    expect(within(three).getByText('Stopped: it stopped answering. Turn it off and on to start it again.')).toBeInTheDocument()
+  })
+
+  it('says how many windows stopped it when several are open', async () => {
+    const { inst } = fake([row('com.example.one', 'One', {}, counts(1, 1, 0, 'timeout'))], 'desktop')
+    render(<PluginsPane installer={inst} data={fakeData('desktop').data} />)
+    expect(await screen.findByText('Stopped in 1 of 2 windows: it took too long to answer. Turn it off and on to start it again.')).toBeInTheDocument()
+  })
+
+  it('never shows a reason it does not know, or a plugin\'s text', async () => {
+    const { inst } = fake([row('com.example.one', 'One', {}, counts(0, 1, 0, 'Visit evil.example now'))], 'desktop')
+    const { container } = render(<PluginsPane installer={inst} data={fakeData('desktop').data} />)
+    expect(await screen.findByText('Stopped. Turn it off and on to start it again.')).toBeInTheDocument()
+    expect(container.textContent).not.toMatch(/evil\.example/)
+  })
+
+  it('shows nothing about running for a plugin that is off, and keeps the switch as the person\'s choice', async () => {
+    const { inst } = fake([row('com.example.one', 'One', { enabled: false }, counts(0, 1, 0, 'error'))], 'desktop')
+    render(<PluginsPane installer={inst} data={fakeData('desktop').data} />)
+    const one = (await screen.findByText('One')).closest('li') as HTMLElement
+    expect(within(one).queryByText(/Stopped/)).toBeNull()
+    expect(within(one).getByRole('switch', { name: 'Turn One on or off' })).not.toBeChecked()
+  })
+
+  it('leaves a folder plugin\'s own blocked lines as they are, with no second line beside them', async () => {
+    const { inst } = fake([row('com.example.two', 'Two', { source: { kind: 'dir', path: '/home/me/two' } }, counts(0, 0, 1))], 'desktop')
+    ;(inst as unknown as { devMode: () => Promise<boolean> }).devMode = async () => false
+    render(<PluginsPane installer={inst} data={fakeData('desktop').data} />)
+    const two = (await screen.findByText('Two')).closest('li') as HTMLElement
+    await waitFor(() => expect(within(two).getByText('Needs developer mode')).toBeInTheDocument())
+    expect(two.querySelector('[data-plugin-run]')).toBeNull()
+  })
+
+  it('reads the list again when the shell says a plugin\'s state changed', async () => {
+    const { inst, set } = fake([row('com.example.one', 'One', {}, counts(0, 0, 0))], 'desktop')
+    const fd = fakeData('desktop')
+    render(<PluginsPane installer={inst} data={fd.data} />)
+    await screen.findByText('Not running yet')
+    const before = inst.list.mock.calls.length
+    // The shell's notice is a hint; the list is what is true.
+    set([row('com.example.one', 'One', {}, counts(1, 0, 0))])
+    expect(await screen.findByText('Running')).toBeInTheDocument()
+    fd.announceState()
+    await waitFor(() => expect(inst.list.mock.calls.length).toBeGreaterThan(before + 1))
+  })
+
+  it('on the web reads the host\'s state, and follows it as it changes', async () => {
+    const { inst } = fake([row('com.example.one', 'One')])
+    const fd = fakeData('web')
+    render(<PluginsPane installer={inst} data={fd.data} />)
+    expect(await screen.findByText('Not running yet')).toBeInTheDocument()
+    fd.setStates({ 'com.example.one': { state: 'activated', reason: null, at: 1 } })
+    expect(await screen.findByText('Running')).toBeInTheDocument()
+    fd.setStates({ 'com.example.one': { state: 'crashed', reason: 'violation', at: 2 } })
+    expect(await screen.findByText('Stopped: it tried to do something it was not allowed to. Turn it off and on to start it again.')).toBeInTheDocument()
+  })
+})
+
+describe('PluginsPane: the detail page', () => {
+  const open = async (rows: Listed[], tier: 'desktop' | 'web' = 'web', fd = fakeData(tier)) => {
+    const f = fake(rows, tier)
+    render(<PluginsPane installer={f.inst} data={fd.data} />)
+    const button = await screen.findByRole('button', { name: 'Details of One' })
+    fireEvent.click(button)
+    return { ...f, fd, button }
+  }
+
+  it('opens from the row with three tabs, and Escape closes it and puts focus back on the row\'s button', async () => {
+    const { fd } = await open([row('com.example.one', 'One')])
+    expect(screen.getByRole('region', { name: 'Details of One' })).toBeInTheDocument()
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Overview', 'Console', 'Activity'])
+    expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute('aria-selected', 'true')
+    expect(fd.data).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Details of One' })).toBeNull())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Details of One' })).toHaveFocus())
+  })
+
+  it('moves between the tabs with the arrow keys', async () => {
+    await open([row('com.example.one', 'One')])
+    fireEvent.keyDown(screen.getByRole('tab', { name: 'Overview' }), { key: 'ArrowRight' })
+    expect(screen.getByRole('tab', { name: 'Console' })).toHaveAttribute('aria-selected', 'true')
+    fireEvent.keyDown(screen.getByRole('tab', { name: 'Console' }), { key: 'ArrowLeft' })
+    expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('closes when the plugin is removed while it is open', async () => {
+    const { set } = await open([row('com.example.one', 'One')])
+    set([])
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Details of One' })).toBeNull())
+  })
+
+  it('shows the overview: what it is doing, what it can do, the optional ones as switches, and where its data is kept', async () => {
+    await open([row('com.example.one', 'One', { optional_granted: ['files'] }, counts(1, 0, 0))])
+    const panel = screen.getByRole('tabpanel')
+    expect(within(panel).getByText('Running')).toBeInTheDocument()
+    expect(within(panel).getByText('Read the model: every object, component, material, tag, and attribute')).toBeInTheDocument()
+    // A required permission is shown, never a switch.
+    expect(within(panel).queryByRole('switch', { name: /Read the model/ })).toBeNull()
+    expect(within(panel).getByRole('switch', { name: 'Allow: Ask you to pick files, and save files you choose' })).toBeChecked()
+    expect(within(panel).getByText(/stays on this device/)).toBeInTheDocument()
+    expect(within(panel).getByText(/not part of Undo/)).toBeInTheDocument()
+  })
+
+  it('shows plugin-written names set apart as text, never as markup', async () => {
+    const f = fake([row('com.example.one', 'Evil<img src=x onerror=alert(1)>')])
+    const { container } = render(<PluginsPane installer={f.inst} data={fakeData().data} />)
+    fireEvent.click(await screen.findByRole('button', { name: /^Details of / }))
+    expect(container.querySelector('img')).toBeNull()
+    expect(screen.getAllByText('Evil<img src=x onerror=alert(1)>').length).toBeGreaterThan(0)
+  })
+
+  describe('optional permissions on the desktop', () => {
+    const rows = () => [row('com.example.one', 'One', { grant: ['model.read'], optional_granted: [] })]
+
+    it('asks nothing itself: it calls the shell\'s set-grant with the widened list, and the switch follows the stored record', async () => {
+      const { inst, set } = await open(rows(), 'desktop')
+      const setGrant = vi.fn(async (id: string, grant: string[], optional: string[]) => {
+        set([row(id, 'One', { grant, optional_granted: optional })])
+        return installed(id, { grant, optional_granted: optional })
+      })
+      ;(inst as unknown as { setGrant: unknown }).setGrant = setGrant
+      const sw = screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ })
+      fireEvent.click(sw)
+      await waitFor(() => expect(setGrant).toHaveBeenCalledWith('com.example.one', ['model.read'], ['files']))
+      await waitFor(() => expect(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ })).toBeChecked())
+    })
+
+    it('leaves the switch off, quietly, when the person says no in the shell\'s confirmation', async () => {
+      const { inst } = await open(rows(), 'desktop')
+      const setGrant = vi.fn(async (id: string) => installed(id, { grant: ['model.read'], optional_granted: [] }))
+      ;(inst as unknown as { setGrant: unknown }).setGrant = setGrant
+      fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
+      await waitFor(() => expect(setGrant).toHaveBeenCalled())
+      await waitFor(() => expect(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ })).not.toBeDisabled())
+      expect(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ })).not.toBeChecked()
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(screen.queryByRole('status')).toBeNull()
+    })
+
+    it('says plainly that another confirmation is open', async () => {
+      const { inst } = await open(rows(), 'desktop')
+      ;(inst as unknown as { setGrant: unknown }).setGrant = vi.fn(async () => {
+        throw new PluginError('confirmation_open', 'x')
+      })
+      fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
+      expect(await screen.findByRole('status')).toHaveTextContent('Another confirmation is already open. Answer it first, then try again.')
+      expect(screen.queryByRole('alert')).toBeNull()
+    })
+
+    it('takes one back without asking, and keeps the rest of the grant', async () => {
+      const { inst } = await open([row('com.example.one', 'One', { grant: ['model.read'], optional_granted: ['files', 'view'] })], 'desktop')
+      const setGrant = vi.fn(async (id: string) => installed(id))
+      ;(inst as unknown as { setGrant: unknown }).setGrant = setGrant
+      fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
+      await waitFor(() => expect(setGrant).toHaveBeenCalledWith('com.example.one', ['model.read'], ['view']))
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+
+    it('takes one back from the record as it stands now: a name granted since the page read it is kept', async () => {
+      const { inst } = await open([row('com.example.one', 'One', { grant: ['model.read'], optional_granted: ['files'] })], 'desktop')
+      const setGrant = vi.fn(async (id: string) => installed(id))
+      ;(inst as unknown as { setGrant: unknown }).setGrant = setGrant
+      // Granted in another window; this page has not heard yet.
+      inst.list.mockResolvedValue([row('com.example.one', 'One', { grant: ['model.read'], optional_granted: ['files', 'view'] })])
+      fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
+      await waitFor(() => expect(setGrant).toHaveBeenCalledWith('com.example.one', ['model.read'], ['view']))
+    })
+
+    it('shows a refusal as an alert, with the shell\'s words', async () => {
+      const { inst } = await open(rows(), 'desktop')
+      ;(inst as unknown as { setGrant: unknown }).setGrant = vi.fn(async () => {
+        throw new PluginError('unknown_permission', 'This plugin does not declare one of the permissions asked for.')
+      })
+      fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
+      expect(await screen.findByRole('alert')).toHaveTextContent('does not declare')
+    })
+  })
+
+  describe('optional permissions on the web', () => {
+    const rows = () => [row('com.example.one', 'One', { grant: ['model.read'], optional_granted: [] })]
+    const lines = { added: [{ name: 'files', text: 'Ask you to pick files, and save files you choose' }], warnings: ['Check what it does with files.'] }
+
+    async function openWeb() {
+      const o = await open(rows(), 'web')
+      const setGrant = vi.fn(async (id: string, grant: string[], optional: string[]) => {
+        o.set([row(id, 'One', { grant, optional_granted: optional })])
+        return installed(id, { grant, optional_granted: optional })
+      })
+      const grantLines = vi.fn(async () => lines)
+      Object.assign(o.inst, { setGrant, grantLines })
+      return { ...o, setGrant, grantLines }
+    }
+
+    it('shows the sheet with the kernel\'s lines before anything is written; Cancel has focus and Enter does not accept', async () => {
+      const { setGrant, grantLines } = await openWeb()
+      fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
+      const dialog = await screen.findByRole('dialog', { name: 'Allow more for this plugin?' })
+      expect(grantLines).toHaveBeenCalledWith('com.example.one', ['model.read'], ['files'])
+      expect(within(dialog).getByText('Ask you to pick files, and save files you choose')).toBeInTheDocument()
+      expect(within(dialog).getByRole('group', { name: 'Warnings from Hew' })).toHaveTextContent('Check what it does with files.')
+      expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus()
+      fireEvent.keyDown(document.activeElement as Element, { key: 'Enter' })
+      expect(setGrant).not.toHaveBeenCalled()
+      expect(screen.getByRole('dialog')).toBeInTheDocument()
+    })
+
+    it('leaves the switch off and writes nothing on Cancel or Escape', async () => {
+      const { setGrant } = await openWeb()
+      fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+      fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
+      await screen.findByRole('dialog')
+      fireEvent.keyDown(document, { key: 'Escape' })
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+      expect(setGrant).not.toHaveBeenCalled()
+      expect(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ })).not.toBeChecked()
+      // Escape on the sheet did not close the page behind it.
+      expect(screen.getByRole('region', { name: 'Details of One' })).toBeInTheDocument()
+    })
+
+    it("a plugin's own request sheet takes Escape first: the detail page stays open behind it", async () => {
+      const { inst, setGrant } = await openWeb()
+      // Not asked through the page's own switch, as a running plugin would.
+      const asked = requestGrant(inst, 'com.example.one', ['files'])
+      await screen.findByRole('dialog')
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+      await expect(asked).resolves.toBe('declined')
+      expect(setGrant).not.toHaveBeenCalled()
+      expect(screen.getByRole('region', { name: 'Details of One' })).toBeInTheDocument()
+      // With no sheet open the next Escape closes the page.
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+      await waitFor(() => expect(screen.queryByRole('region', { name: 'Details of One' })).toBeNull())
+    })
+
+    it('writes the wider grant on Allow, and the switch shows what is stored', async () => {
+      const { setGrant } = await openWeb()
+      fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Allow' }))
+      await waitFor(() => expect(setGrant).toHaveBeenCalledWith('com.example.one', ['model.read'], ['files']))
+      await waitFor(() => expect(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ })).toBeChecked())
+    })
+
+    it('locks the switches, with the reason, for a plugin that waits for review or is held back', async () => {
+      for (const [over, host, words] of [
+        [{ needs_consent: true, needs_consent_reason: 'permissions_changed' }, undefined, /Review the change/],
+        [{}, { state: 'blocked', reason: null }, /holding this plugin back/],
+      ] as const) {
+        const f = fake([row('com.example.one', 'One', over)], 'web')
+        Object.assign(f.inst, { setGrant: vi.fn(), grantLines: vi.fn() })
+        const fd = fakeData('web')
+        if (host !== undefined) fd.setStates({ 'com.example.one': host as HostEntry })
+        const { unmount } = render(<PluginsPane installer={f.inst} data={fd.data} />)
+        fireEvent.click(await screen.findByRole('button', { name: 'Details of One' }))
+        expect(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ })).toBeDisabled()
+        expect(document.querySelector('[data-optional-locked]')?.textContent).toMatch(words)
+        unmount()
+      }
+    })
+
+    it('narrows without a sheet', async () => {
+      const f = fake([row('com.example.one', 'One', { grant: ['model.read'], optional_granted: ['files'] })], 'web')
+      const setGrant = vi.fn(async (id: string) => installed(id))
+      Object.assign(f.inst, { setGrant, grantLines: vi.fn() })
+      render(<PluginsPane installer={f.inst} data={fakeData().data} />)
+      fireEvent.click(await screen.findByRole('button', { name: 'Details of One' }))
+      fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
+      await waitFor(() => expect(setGrant).toHaveBeenCalledWith('com.example.one', ['model.read'], []))
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+
+    it('refuses when the plugin changed while the sheet was open, and writes nothing', async () => {
+      const { setGrant, set } = await openWeb()
+      fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
+      const allow = await screen.findByRole('button', { name: 'Allow' })
+      set([row('com.example.one', 'One', { version: '2.0.0', grant: ['model.read'], optional_granted: [] })])
+      fireEvent.click(allow)
+      expect(await screen.findByRole('status')).toHaveTextContent('This plugin changed while you were deciding.')
+      expect(setGrant).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('the console and the activity', () => {
+    it('shows lines newest first as text only, wrapped, and Clear view clears only the view', async () => {
+      const fd = fakeData('web')
+      fd.setLines([
+        { at: 3000, level: 'error', text: '<img src=x onerror=alert(1)> boom' },
+        { at: 2000, level: 'warn', text: 'careful' },
+        { at: 1000, level: 'log', text: 'hello' },
+      ])
+      const { container } = render(<PluginsPane installer={fake([row('com.example.one', 'One')]).inst} data={fd.data} />)
+      fireEvent.click(await screen.findByRole('button', { name: 'Details of One' }))
+      fireEvent.click(screen.getByRole('tab', { name: 'Console' }))
+      const list = await screen.findByLabelText('Console lines, newest first')
+      expect(within(list).getAllByRole('listitem').map((li) => li.textContent?.replace(/^\S*\s?/, ''))[0]).toContain('boom')
+      expect(within(list).getByText('<img src=x onerror=alert(1)> boom')).toBeInTheDocument()
+      expect(container.querySelector('img')).toBeNull()
+      expect(within(list).getAllByRole('listitem')).toHaveLength(3)
+      fireEvent.click(screen.getByRole('button', { name: 'Clear view' }))
+      await waitFor(() => expect(screen.getByText('Nothing printed yet.')).toBeInTheDocument())
+      // Only the view: the data was not touched and a later line shows.
+      expect(fd.data.console).toHaveBeenCalled()
+      fd.setLines([{ at: 4000, level: 'log', text: 'later' }, { at: 3000, level: 'error', text: 'old' }])
+      expect(await screen.findByText('later')).toBeInTheDocument()
+      expect(screen.queryByText('old')).toBeNull()
+    })
+
+    it('keeps Clear view across a tab switch and hides only what was showing, even a line with the same time', async () => {
+      const fd = fakeData('web')
+      fd.setLines([
+        { at: 3000, level: 'log', text: 'b' },
+        { at: 3000, level: 'log', text: 'a' },
+      ])
+      render(<PluginsPane installer={fake([row('com.example.one', 'One')]).inst} data={fd.data} />)
+      fireEvent.click(await screen.findByRole('button', { name: 'Details of One' }))
+      fireEvent.click(screen.getByRole('tab', { name: 'Console' }))
+      await screen.findByLabelText('Console lines, newest first')
+      fireEvent.click(screen.getByRole('button', { name: 'Clear view' }))
+      await waitFor(() => expect(screen.getByText('Nothing printed yet.')).toBeInTheDocument())
+      // Another tab and back: still cleared.
+      fireEvent.click(screen.getByRole('tab', { name: 'Activity' }))
+      fireEvent.click(screen.getByRole('tab', { name: 'Console' }))
+      expect(await screen.findByText('Nothing printed yet.')).toBeInTheDocument()
+      // A new line in the same millisecond as the newest one shows.
+      fd.setLines([
+        { at: 3000, level: 'log', text: 'same ms' },
+        { at: 3000, level: 'log', text: 'b' },
+        { at: 3000, level: 'log', text: 'a' },
+      ])
+      expect(await screen.findByText('same ms')).toBeInTheDocument()
+      expect(screen.queryByText('b')).toBeNull()
+      expect(screen.queryByText('a')).toBeNull()
+    })
+
+    it('says when nothing was printed, and when the console could not be read', async () => {
+      const fd = fakeData('web')
+      render(<PluginsPane installer={fake([row('com.example.one', 'One')]).inst} data={fd.data} />)
+      fireEvent.click(await screen.findByRole('button', { name: 'Details of One' }))
+      fireEvent.click(screen.getByRole('tab', { name: 'Console' }))
+      expect(await screen.findByText('Nothing printed yet.')).toBeInTheDocument()
+      fd.data.console.mockRejectedValueOnce(new Error('boom'))
+      fd.setLines([])
+      expect(await screen.findByRole('alert')).toHaveTextContent("Hew could not read this plugin's console.")
+    })
+
+    it('shows the activity newest first in plain words, never a reason word itself', async () => {
+      const fd = fakeData('desktop')
+      fd.setEntries([
+        { at: 3000, state: 'crashed', reason: 'unresponsive' },
+        { at: 2000, state: 'activated', reason: null },
+        { at: 1000, state: 'idle', reason: null },
+      ])
+      render(<PluginsPane installer={fake([row('com.example.one', 'One')], 'desktop').inst} data={fd.data} />)
+      fireEvent.click(await screen.findByRole('button', { name: 'Details of One' }))
+      fireEvent.click(screen.getByRole('tab', { name: 'Activity' }))
+      const list = await screen.findByLabelText('Activity, newest first')
+      expect(within(list).getAllByRole('listitem').map((li) => li.textContent?.replace(/^[^A-Za-z]*(AM|PM)?\s*/, ''))).toEqual([
+        'Stopped: it stopped answering',
+        'Running',
+        'Went to sleep after sitting idle',
+      ])
+      expect(list.textContent).not.toMatch(/unresponsive/)
+    })
   })
 })

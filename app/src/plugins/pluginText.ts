@@ -73,3 +73,19 @@ export function displayName(manifest: Pick<PluginManifest, 'id' | 'name'>): stri
   const name = cleanText(english(manifest.name) ?? '', MAX_NAME_CHARS)
   return name === '' ? manifest.id : name
 }
+
+/** Orders by code point, as the desktop store's sorted map orders its keys
+ *  (UTF-8 byte order); `<` on strings compares UTF-16 code units, which puts
+ *  a character outside the Basic Multilingual Plane before U+E000..U+FFFF. */
+export function compareCodePoints(a: string, b: string): number {
+  let i = 0
+  let j = 0
+  while (i < a.length && j < b.length) {
+    const x = a.codePointAt(i) as number
+    const y = b.codePointAt(j) as number
+    if (x !== y) return x < y ? -1 : 1
+    i += x > 0xffff ? 2 : 1
+    j += y > 0xffff ? 2 : 1
+  }
+  return Number(i < a.length) - Number(j < b.length)
+}

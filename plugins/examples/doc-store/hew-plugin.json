@@ -1,0 +1,53 @@
+{
+  "manifest": 1,
+  "id": "com.example.doc-store",
+  "name": "Doc Store",
+  "version": "0.1.0",
+  "description": "Keeps a value for the model that is open, and one for itself.",
+  "api": 1,
+  "main": "dist/background.js",
+  "permissions": ["model.read"],
+  "activation": ["on_command"],
+  "contributes": {
+    "commands": [
+      {
+        "id": "docset",
+        "class": "read_only",
+        "summary": "Keeps a value under a key for the open model.",
+        "params": { "type": "object", "properties": { "key": {}, "value": {} }, "additionalProperties": false },
+        "result": { "type": "object", "properties": { "done": {} }, "additionalProperties": false }
+      },
+      {
+        "id": "docget",
+        "class": "read_only",
+        "summary": "Reads the value kept under a key for the open model.",
+        "params": { "type": "object", "properties": { "key": {} }, "additionalProperties": false },
+        "result": { "type": "object", "properties": { "value": {} }, "additionalProperties": false }
+      },
+      {
+        "id": "globalset",
+        "class": "read_only",
+        "summary": "Keeps a value under a key for the plugin itself.",
+        "params": { "type": "object", "properties": { "key": {}, "value": {} }, "additionalProperties": false },
+        "result": { "type": "object", "properties": { "done": {} }, "additionalProperties": false }
+      },
+      {
+        "id": "globalget",
+        "class": "read_only",
+        "summary": "Reads the value the plugin kept for itself.",
+        "params": { "type": "object", "properties": { "key": {} }, "additionalProperties": false },
+        "result": { "type": "object", "properties": { "value": {} }, "additionalProperties": false }
+      },
+      {
+        "id": "info",
+        "class": "read_only",
+        "summary": "Says which model the plugin is bound to and every id it has been told of.",
+        "result": {
+          "type": "object",
+          "properties": { "documentId": {}, "document": {}, "seen": {}, "keys": {}, "boot": {} },
+          "additionalProperties": false
+        }
+      }
+    ]
+  }
+}

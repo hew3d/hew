@@ -279,6 +279,13 @@ mod tests {
     use super::*;
     use kernel::{AttrValue, Document, EntityRef, Plane, Point3};
 
+    /// A manifest's `contributes.events` is checked against the same list
+    /// the bus subscribes to.
+    #[test]
+    fn manifest_event_names_are_the_bus_event_names() {
+        assert_eq!(EVENT_NAMES, plugin_manifest::EVENT_NAMES);
+    }
+
     fn ground() -> Plane {
         Plane::from_polygon(&[
             Point3::ORIGIN,

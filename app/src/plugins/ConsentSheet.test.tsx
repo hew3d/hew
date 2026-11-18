@@ -307,3 +307,50 @@ describe('ConsentSheet', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('more than 64 permissions')
   })
 })
+
+describe('ConsentSheet in grant mode', () => {
+  const grant = {
+    added: [{ name: 'files', text: 'Ask you to pick files, and save files you choose' }],
+    warnings: ['Can write files you choose.'],
+  }
+  const openGrant = (over: Partial<ConsentPayload> = {}, g = grant) => open(over, { grant: g })
+
+  it('asks "Allow more for this plugin?" and shows only the name, the version, what it adds and Hew\'s warnings', () => {
+    const { dialog } = openGrant()
+    expect(within(dialog).getByText('Allow more for this plugin?')).toBeInTheDocument()
+    expect(within(dialog).getByText('Version 1.2.0')).toBeInTheDocument()
+    expect(within(dialog).getByText('Parts Lister')).toBeInTheDocument()
+    expect(within(dialog).getByText('It would also be able to')).toBeInTheDocument()
+    expect(within(dialog).getByText('Ask you to pick files, and save files you choose')).toBeInTheDocument()
+    expect(within(within(dialog).getByRole('group', { name: 'Warnings from Hew' })).getByText('Can write files you choose.')).toBeInTheDocument()
+    // Nothing of an install: not the source, the unsigned line, the full list or the plugin's own words.
+    expect(within(dialog).queryByText('From file')).toBeNull()
+    expect(within(dialog).queryByText(UNSIGNED_LINE)).toBeNull()
+    expect(within(dialog).queryByText('Read the model: every object, component, material, tag, and attribute')).toBeNull()
+    expect(within(dialog).queryByText('The plugin says')).toBeNull()
+    expect(within(dialog).queryByText(/Install/)).toBeNull()
+  })
+
+  it('accepts with "Allow"; Cancel has focus, Enter accepts nothing, Escape cancels', () => {
+    const { dialog, onInstall, onCancel } = openGrant()
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus()
+    fireEvent.keyDown(document.activeElement as Element, { key: 'Enter' })
+    expect(onInstall).not.toHaveBeenCalled()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Allow' }))
+    expect(onInstall).toHaveBeenCalledTimes(1)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('sets the plugin\'s name apart as text, never as markup', () => {
+    const { dialog } = openGrant({ name: 'Evil<img src=x onerror=alert(1)>' })
+    expect(dialog.querySelector('img')).toBeNull()
+    expect(within(dialog).getByText('Evil<img src=x onerror=alert(1)>')).toBeInTheDocument()
+  })
+
+  it('says so when the change adds nothing', () => {
+    const { dialog } = openGrant({}, { added: [], warnings: [] })
+    expect(within(dialog).getByText('Nothing new.')).toBeInTheDocument()
+    expect(within(dialog).queryByRole('group', { name: 'Warnings from Hew' })).toBeNull()
+  })
+})

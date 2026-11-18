@@ -23,6 +23,9 @@ import type { Scene } from '../wasm/loader'
 import { createPluginHost, type HostEnv, type PluginHost, type PortLike } from './hostCore'
 import type { PluginStorageBackend } from './storageBackend'
 import type { Installed, PluginManifest } from './types'
+import { FakeDir } from '../test/opfsFake'
+import { pluginFile } from './testKit'
+import { makeWebPluginStore, type PluginWasm } from './webPluginStore'
 
 const ROOT = join(process.cwd(), '..')
 const HELLO = join(ROOT, 'plugins/examples/hello')
@@ -73,6 +76,10 @@ describe('the hello plugin, through the real kernel', () => {
       set: async (_id, key, value) => void stored.set(key, value),
       delete: async (_id, key) => void stored.delete(key),
       list: async () => [...stored.keys()],
+      docGet: async () => null,
+      docSet: async () => {},
+      docDelete: async () => {},
+      docList: async () => [],
     }
     const bridge: LiveBridgeDeps = { getScene: () => scene, getViewportApi: () => null, reconcile: vi.fn() }
     const env: HostEnv = {
@@ -86,7 +93,7 @@ describe('the hello plugin, through the real kernel', () => {
         onStorageChanged: () => () => {},
       },
       storage,
-      grantJson: (id, doc, names) => (kernel as unknown as { plugin_grant_json(a: string, b: string, c: string): string }).plugin_grant_json(id, doc, names),
+      grantJson: (id, doc, names) => (kernel as unknown as { plugin_grant_json(a: string, b: string, c: string, d: boolean): string }).plugin_grant_json(id, doc, names, false),
       async openRealm(code) {
         let hostPort: PortLike
         const rt = createRuntime({
@@ -140,10 +147,11 @@ describe('the hello plugin, through the real kernel', () => {
 
   it("refuses a write the plugin's grant does not hold", async () => {
     const scene = new kernel.Scene() as unknown as Scene
-    const grant = (kernel as unknown as { plugin_grant_json(a: string, b: string, c: string): string }).plugin_grant_json(
+    const grant = (kernel as unknown as { plugin_grant_json(a: string, b: string, c: string, d: boolean): string }).plugin_grant_json(
       'com.example.hello',
       'doc_1',
       '["model.read"]',
+      false,
     )
     const conn = scene.api_plugin_connection_open(grant)
     scene.api_dispatch(conn, '{"jsonrpc":"2.0","id":1,"method":"hew.meta.hello","params":{"protocol":1}}')
@@ -160,10 +168,11 @@ describe('the hello plugin, through the real kernel', () => {
     // only frames from the live API socket. So `hew.plugin.*` from a plugin
     // meets the kernel's permission check and stops there.
     const scene = new kernel.Scene() as unknown as Scene
-    const grant = (kernel as unknown as { plugin_grant_json(a: string, b: string, c: string): string }).plugin_grant_json(
+    const grant = (kernel as unknown as { plugin_grant_json(a: string, b: string, c: string, d: boolean): string }).plugin_grant_json(
       'com.example.hello',
       'doc_1',
       '["model.read","model.write"]',
+      false,
     )
     const conn = scene.api_plugin_connection_open(grant)
     scene.api_dispatch(conn, '{"jsonrpc":"2.0","id":1,"method":"hew.meta.hello","params":{"protocol":1}}')
@@ -234,8 +243,17 @@ describe('the hello plugin, through the real kernel', () => {
           onChanged: () => () => {},
           onStorageChanged: () => () => {},
         },
-        storage: { get: async () => null, set: async () => {}, delete: async () => {}, list: async () => [] },
-        grantJson: (i, doc, names) => (kernel as unknown as { plugin_grant_json(a: string, b: string, c: string): string }).plugin_grant_json(i, doc, names),
+        storage: {
+          get: async () => null,
+          set: async () => {},
+          delete: async () => {},
+          list: async () => [],
+          docGet: async () => null,
+          docSet: async () => {},
+          docDelete: async () => {},
+          docList: async () => [],
+        },
+        grantJson: (i, doc, names) => (kernel as unknown as { plugin_grant_json(a: string, b: string, c: string, d: boolean): string }).plugin_grant_json(i, doc, names, false),
         async openRealm(code) {
           let hostPort: PortLike
           const rt = createRuntime({
@@ -305,5 +323,170 @@ describe('the hello plugin, through the real kernel', () => {
       })
       expect(w.scene.busy()).toBe(false)
     })
+  })
+
+  describe('a grant widened while the plugin runs, and a start on an event', () => {
+    let host: PluginHost | null = null
+    afterEach(() => {
+      host?.dispose()
+      host = null
+      setBusy(null)
+    })
+
+    /** A host over a real Scene for one plugin, whose record `list` reads
+     *  each time. */
+    function realHost(man: Record<string, unknown>, main: string, record: { installed: Installed }, grants?: HostEnv['grants']) {
+      const manifest = JSON.parse(
+        (kernel as unknown as { plugin_manifest_parse(t: string): string }).plugin_manifest_parse(
+          JSON.stringify({ manifest: 1, name: 'Real', version: '0.1.0', api: 1, main: 'dist/background.js', ...man }),
+        ),
+      ) as PluginManifest
+      const scene = new kernel.Scene() as unknown as Scene
+      const env: HostEnv = {
+        scene: () => scene,
+        bridge: { getScene: () => scene, getViewportApi: () => null, reconcile: vi.fn() },
+        platform: 'web',
+        store: {
+          list: async () => [{ kind: 'installed', installed: record.installed, manifest, previous_version: null }],
+          readFile: async () => new TextEncoder().encode(main).buffer as ArrayBuffer,
+          onChanged: () => () => {},
+          onStorageChanged: () => () => {},
+        },
+        storage: {
+          get: async () => null,
+          set: async () => {},
+          delete: async () => {},
+          list: async () => [],
+          docGet: async () => null,
+          docSet: async () => {},
+          docDelete: async () => {},
+          docList: async () => [],
+        },
+        grantJson: (i, doc, names, viewer) =>
+          (kernel as unknown as { plugin_grant_json(a: string, b: string, c: string, d: boolean): string }).plugin_grant_json(i, doc, names, viewer),
+        ...(grants === undefined ? {} : { grants }),
+        async openRealm(code) {
+          let hostPort: PortLike
+          const rt = createRuntime({
+            post: (m) => queueMicrotask(() => hostPort.onmessage?.({ data: structuredClone(m), ports: [] } as unknown as MessageEvent)),
+            console: { log: () => {}, info: () => {}, warn: () => {}, error: () => {} },
+            now: () => Date.now(),
+          })
+          new Function('hew', 'HewRefusal', new TextDecoder().decode(code))(rt.hew, HewRefusal)
+          hostPort = {
+            onmessage: null,
+            postMessage: (m: unknown) => {
+              const copy = structuredClone(m)
+              queueMicrotask(() => rt.receive(copy))
+            },
+            close: () => {},
+          }
+          return { control: { onmessage: null, postMessage: () => {}, close: () => {} }, port: hostPort, remove: () => {} }
+        },
+        toast: () => {},
+        log: () => {},
+        locale: () => 'en',
+        theme: () => 'dark',
+      }
+      host = createPluginHost(env, { pingMs: 60_000, startMs: 10_000, storageDebounceMs: 5, sliceMs: 8 })
+      return { scene, host }
+    }
+
+    const record = (id: string, grant: string[]): { installed: Installed } => ({
+      installed: {
+        schema: 1,
+        id,
+        version: '0.1.0',
+        source: { kind: 'file', name: 'real.hewplugin' },
+        installed_at_ms: 0,
+        grant,
+        optional_granted: [],
+        enabled: true,
+        startup_allowed: false,
+        data_version: 0,
+      },
+    })
+
+    it('a write refused inside a command runs after the person grants it, on the same connection, in the same command', async () => {
+      const id = 'com.example.widen'
+      const rec = record(id, ['model.read'])
+      const main = `hew.commands.handle('tag', async (p) => {
+        if (!p.ask) return { first: 'running', granted: [], grant: [] }
+        let first = 'ok'
+        const rect = (x) => hew.api.sketch.drawRect({ plane: { ground: true }, corner_a: [x, 0, 0], corner_b: [x + 1, 1, 0] })
+        try { await rect(0) } catch (e) { first = e.code }
+        const asked = await hew.api.permissions.request({ permissions: ['model.write'] })
+        await rect(3)
+        return { first, granted: asked.granted, grant: hew.plugin.grant.permissions }
+      })`
+      const { scene, host: h } = realHost(
+        { id, permissions: ['model.read'], optionalPermissions: ['model.write'], activation: ['on_command'], contributes: { commands: [{ id: 'tag', class: 'mutating', summary: 'Tags.', params: { type: 'object', properties: { ask: { type: 'boolean' } }, additionalProperties: false }, result: { type: 'object', properties: { first: {}, granted: {}, grant: {} }, additionalProperties: false } }] } },
+        main,
+        rec,
+        {
+          async decide(_id, add) {
+            rec.installed = { ...rec.installed, optional_granted: [...rec.installed.optional_granted, ...add] }
+            return 'granted'
+          },
+        },
+      )
+      await h.sync()
+      const conn = scene.api_connection_open()
+      await h.dispatch(conn, '{"jsonrpc":"2.0","id":1,"method":"hew.meta.hello","params":{"protocol":1}}')
+      await h.dispatch(conn, '{"jsonrpc":"2.0","id":2,"method":"hew.doc.attach","params":{}}')
+      const undoBefore = (JSON.parse((await h.dispatch(conn, '{"jsonrpc":"2.0","id":3,"method":"hew.history.status","params":{}}'))!) as { result: { undo_depth?: number } }).result
+      // Started first: the person's act counts only for a running plugin.
+      await h.dispatch(conn, `{"jsonrpc":"2.0","id":6,"method":"${id}.tag","params":{}}`)
+      h.noteUserActivation(id)
+      const reply = JSON.parse((await h.dispatch(conn, `{"jsonrpc":"2.0","id":4,"method":"${id}.tag","params":{"ask":true}}`))!) as { result?: unknown; error?: unknown }
+      expect(reply.error).toBeUndefined()
+      expect(reply.result).toEqual({ first: -32001, granted: ['model.write'], grant: ['model.read', 'model.write'] })
+      expect(scene.busy()).toBe(false)
+      const undoAfter = (JSON.parse((await h.dispatch(conn, '{"jsonrpc":"2.0","id":5,"method":"hew.history.status","params":{}}'))!) as { result: { undo_depth?: number } }).result
+      expect(undoAfter).not.toEqual(undoBefore)
+      expect(h.states()[id]).toBe('activated')
+    })
+
+    it('a listener on the real kernel starts the plugin on its event and hands it over', async () => {
+      const id = 'com.example.listens'
+      const rec = record(id, ['model.read'])
+      const main = `globalThis.__heard = []
+        hew.events.on('document_changed', (p) => globalThis.__heard.push(p.kind))
+        hew.commands.handle('noop', () => null)`
+      const { scene, host: h } = realHost(
+        { id, permissions: ['model.read'], activation: ['on_command', 'on_event'], contributes: { commands: [{ id: 'noop', class: 'read_only', summary: 'Nothing.' }], events: ['document_changed'] } },
+        main,
+        rec,
+      )
+      await h.sync()
+      await vi.waitFor(() => expect(h.listening()).toEqual([id]))
+      const conn = scene.api_connection_open()
+      await h.dispatch(conn, '{"jsonrpc":"2.0","id":1,"method":"hew.meta.hello","params":{"protocol":1}}')
+      await h.dispatch(conn, '{"jsonrpc":"2.0","id":2,"method":"hew.doc.attach","params":{}}')
+      await h.dispatch(conn, '{"jsonrpc":"2.0","id":3,"method":"hew.sketch.draw_rect","params":{"plane":{"ground":true},"corner_a":[0,0,0],"corner_b":[1,1,0]}}')
+      await vi.waitFor(() => expect(h.states()[id]).toBe('activated'))
+      await vi.waitFor(() => expect((globalThis as { __heard?: unknown[] }).__heard).toEqual(['commit']))
+      expect(h.listening()).toEqual([])
+    })
+  })
+
+  it("the web store's grant lines come from the real kernel", async () => {
+    const root = new FakeDir('opfs-root')
+    const store = makeWebPluginStore({
+      wasm: async () => kernel as unknown as PluginWasm,
+      opfsRoot: async () => root as unknown as FileSystemDirectoryHandle,
+      channel: null,
+      storage: null,
+      // One holder at a time is all one test needs.
+      locks: { request: (_name, callback) => callback() },
+      hewVersion: () => '1.5.0',
+    })
+    const staged = await store.stageFile(pluginFile({ permissions: ['model.read'], optionalPermissions: ['network:api.example.com', 'view'] }))
+    expect(await store.commit(staged.token, true)).not.toBeNull()
+    const lines = await store.grantLines('com.example.one', ['model.read'], ['network:api.example.com'])
+    expect(lines.added.map((l) => l.name)).toEqual(['network:api.example.com'])
+    expect(lines.added[0].text.length).toBeGreaterThan(0)
+    expect(lines.warnings).toEqual(['Can send what it reads from your model to api.example.com.'])
+    await expect(store.grantLines('com.example.one', ['model.read'], ['files'])).rejects.toMatchObject({ refusal: 'unknown_permission' })
   })
 })

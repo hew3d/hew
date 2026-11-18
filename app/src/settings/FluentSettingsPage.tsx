@@ -19,7 +19,7 @@
  * sync across windows; no OK/Cancel.
  */
 
-import { Suspense, useEffect, useState, type CSSProperties, type ReactNode } from 'react'
+import { Suspense, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { paneAllowed, previewBuild } from '../preview'
 import { PluginsPane } from '../preview/loaderRoots'
 import {
@@ -59,6 +59,7 @@ import { CLOUD_ORIGIN } from './server'
 import { isComposingKey } from '../input/keyboard'
 import { ControlsPane } from './ControlsPane'
 import { isRecordingChord } from '../keymap/keymap'
+import { childPopupOpen } from '../settingsEscape'
 
 // Windows 11 app type ramp (Segoe UI Variable falls back to Segoe UI in
 // webviews that don't expose the variable face).
@@ -447,6 +448,7 @@ function ServerSection() {
 
 export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
   const { t, i18n } = useLingui()
+  const pageRef = useRef<HTMLDivElement>(null)
   const [format, setFormat] = useState<LengthFormat>(() => getLengthUnit())
   const [theme, setTheme] = useState<ThemeSetting>(() => getThemeSetting())
   const [debug, setDebug] = useState<boolean>(() => getDebugMode())
@@ -503,6 +505,9 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
       // Controls is recording a shortcut: its Escape cancels the recording.
       if (isRecordingChord()) return
       if (e.key === 'Escape') {
+        // A sheet, menu or page open inside Settings takes this Escape
+        // first (it is answered by its own handler, after this one).
+        if (childPopupOpen(pageRef.current)) return
         e.preventDefault()
         e.stopPropagation()
         onBack()
@@ -522,7 +527,7 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
   }
 
   return (
-    <div style={pageStyle} role="dialog" aria-modal="true" aria-label={t`Settings`}>
+    <div ref={pageRef} style={pageStyle} role="dialog" aria-modal="true" aria-label={t`Settings`}>
       <div style={headerStyle}>
         <button
           style={backBtnStyle}

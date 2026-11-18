@@ -18,7 +18,7 @@
  * function here throws.
  */
 
-import type { BootToHost, ConsoleLevel, RealmToHost, StorageOp } from '../../../../sdk/plugin/src/protocol'
+import type { BootToHost, ConsoleLevel, RealmToHost, StorageOp, StorageScope } from '../../../../sdk/plugin/src/protocol'
 
 export const LIMITS = {
   /** Text in one message, in UTF-16 code units (1 MiB). */
@@ -44,6 +44,7 @@ export type Checked<T> = { ok: true; msg: T; size: number } | { ok: false; reaso
 
 const CONSOLE_LEVELS: readonly ConsoleLevel[] = ['log', 'info', 'warn', 'error']
 const STORAGE_OPS: readonly StorageOp[] = ['get', 'set', 'delete', 'list']
+const STORAGE_SCOPES: readonly StorageScope[] = ['plugin', 'document']
 
 /** The keys each type allows; the first is always `t`. */
 const KEYS: Record<RealmToHost['t'], readonly string[]> = {
@@ -51,7 +52,7 @@ const KEYS: Record<RealmToHost['t'], readonly string[]> = {
   bus: ['t', 'forward', 'frame'],
   forward_reply: ['t', 'id', 'reply'],
   forward_progress: ['t', 'id', 'fraction', 'label'],
-  storage: ['t', 'id', 'op', 'key', 'value'],
+  storage: ['t', 'id', 'op', 'scope', 'key', 'value', 'epoch'],
   files: ['t', 'id', 'paths'],
   console: ['t', 'level', 'args', 'at'],
   pong: ['t', 'n'],
@@ -85,7 +86,7 @@ function utf8Bytes(s: string): number {
  *  store cannot keep such a key (the desktop's JSON refuses it), and the
  *  SDK refuses it `storage_key_invalid` before sending, as it does a key
  *  that is too long. */
-function wellFormed(s: string): boolean {
+export function wellFormed(s: string): boolean {
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i)
     if (c < 0xd800 || c > 0xdfff) continue
@@ -174,7 +175,21 @@ function checkRealm(data: unknown): { msg: RealmToHost; size: number } {
       const needsValue = op === 'set'
       if (has(m, 'key') !== needsKey) bad(`a storage ${op as string} ${needsKey ? 'needs' : 'takes no'} key`)
       if (has(m, 'value') !== needsValue) bad(`a storage ${op as string} ${needsValue ? 'needs' : 'takes no'} value`)
-      const msg: RealmToHost = { t: 'storage', id: id(m, 'id'), op: op as StorageOp }
+      // `scope` absent is the plugin's own storage, as before there was
+      // a document scope; present, it must be one of the two.
+      let scope: StorageScope = 'plugin'
+      if (has(m, 'scope')) {
+        if (typeof m.scope !== 'string' || !STORAGE_SCOPES.includes(m.scope as StorageScope)) bad('unknown storage scope')
+        scope = m.scope as StorageScope
+      }
+      const msg: RealmToHost = { t: 'storage', id: id(m, 'id'), op: op as StorageOp, scope }
+      // The document epoch the call was made under: required for the
+      // document's storage (the host refuses a stale one), refused for the
+      // plugin's own, which no document change touches.
+      if (scope === 'document') {
+        if (!has(m, 'epoch')) bad('a document storage message needs epoch')
+        msg.epoch = id(m, 'epoch')
+      } else if (has(m, 'epoch')) bad('a plugin storage message takes no epoch')
       if (needsKey) {
         // A key of 256 bytes is at most 256 characters; the bytes are
         // counted only for a key that short.

@@ -195,12 +195,20 @@ const HOST_METHODS: &[&str] = &[
 ];
 
 /// The plugin commands the shell answers itself, in a preview build only.
-/// Neither completes anything: `hew.plugin.list` reads, and
-/// `hew.plugin.dev` only asks the page to show a request
-/// (`preview_only::plugins::bus_dev`). A production build has no such
-/// entry, so these are forwarded and answered as any unknown method is.
+/// None completes anything that manages a plugin: `hew.plugin.list` and
+/// `hew.plugin.activity` read, `hew.plugin.dev` only asks the page to show
+/// a request (`preview_only::plugins::bus_dev`), and `hew.plugin.reload`
+/// only asks the hosts to reload a developer-folder plugin that is running
+/// (`preview_only::plugin_data::bus_reload`). A production build has no
+/// such entry, so these are forwarded and answered as any unknown method
+/// is.
 #[cfg(hew_preview)]
-const PREVIEW_HOST_METHODS: &[&str] = &["hew.plugin.list", "hew.plugin.dev"];
+const PREVIEW_HOST_METHODS: &[&str] = &[
+    "hew.plugin.list",
+    "hew.plugin.dev",
+    "hew.plugin.activity",
+    "hew.plugin.reload",
+];
 #[cfg(not(hew_preview))]
 const PREVIEW_HOST_METHODS: &[&str] = &[];
 
@@ -1538,6 +1546,10 @@ fn run_host_command(
         "hew.plugin.list" => cmd_plugin_list(app),
         #[cfg(hew_preview)]
         "hew.plugin.dev" => cmd_plugin_dev(app, params),
+        #[cfg(hew_preview)]
+        "hew.plugin.activity" => cmd_plugin_activity(app, params),
+        #[cfg(hew_preview)]
+        "hew.plugin.reload" => cmd_plugin_reload(app, params),
         _ => Err(Refused::new("unimplemented", method.to_string())),
     }
 }
@@ -1579,6 +1591,28 @@ fn cmd_plugin_dev(app: &AppHandle, params: &Value) -> Result<Value, Refused> {
     Ok(json!({ "status": "awaiting_user" }))
 }
 
+/// `hew.plugin.activity {id}`: read-only.
+#[cfg(hew_preview)]
+fn cmd_plugin_activity(app: &AppHandle, params: &Value) -> Result<Value, Refused> {
+    let state = plugin_state(app)?;
+    crate::preview_only::plugin_data::bus_activity(&state, params).map_err(bus_refused)
+}
+
+/// `hew.plugin.reload {id}`: asks every window's host to reload a
+/// developer-folder plugin through the change event they already reload
+/// on. Only windows still open count.
+#[cfg(hew_preview)]
+fn cmd_plugin_reload(app: &AppHandle, params: &Value) -> Result<Value, Refused> {
+    use crate::preview_only::plugins::{self, Ui};
+    let state = plugin_state(app)?;
+    let open = |label: &str| app.get_webview_window(label).is_some();
+    let change =
+        crate::preview_only::plugin_data::bus_reload(&state, params, plugins::now_ms(), &open)
+            .map_err(bus_refused)?;
+    plugins::app_events(app).dev_changed(change);
+    Ok(json!({ "status": "reloading" }))
+}
+
 /// An unsubscribe answered by window `label`'s session applies to the
 /// connection, not to that one session: pass it to the connection's other
 /// attached sessions, so an old window stops sending what was unsubscribed.
@@ -1615,6 +1649,24 @@ fn unsubscribe_elsewhere(app: &AppHandle, conn: &ConnRoute, label: &str, line: &
 }
 
 // ------------------------------------------------------------------ entry point
+
+/// Why a shell-answered command that shows or does something cannot run
+/// inside a rehearsal (`dry_run`), or `None` for one that may: a rehearsal
+/// changes nothing and shows nothing.
+fn rehearsal_refused(dry_run: bool, method: &str) -> Option<&'static str> {
+    if !dry_run {
+        return None;
+    }
+    match method {
+        "hew.plugin.dev" => {
+            Some("hew.plugin.dev asks the person in Hew, so it cannot be rehearsed.")
+        }
+        "hew.plugin.reload" => {
+            Some("hew.plugin.reload restarts a running plugin, so it cannot be rehearsed.")
+        }
+        _ => None,
+    }
+}
 
 /// Handles one sanitized client frame for `conn` and says what the
 /// transport should do next. This is the single place a frame is routed;
@@ -1658,12 +1710,12 @@ pub(crate) fn handle_frame(app: &AppHandle, conn: &mut ConnRoute, line: &str) ->
             // typed refusal — mirror the dispatcher's own classes.
             // Asking the person is never rehearsed: a rehearsal changes
             // nothing and shows nothing.
-            if dry_run && method == "hew.plugin.dev" {
+            if let Some(why) = rehearsal_refused(dry_run, method) {
                 return Outcome::Reply(refusal_reply(
                     &id,
                     method,
                     "dry_run_host_command",
-                    "hew.plugin.dev asks the person in Hew, so it cannot be rehearsed.",
+                    why,
                     json!({ "method": method }),
                 ));
             }
@@ -1982,6 +2034,28 @@ mod tests {
             matches!(real, Routed::Host { dry_run: false, .. }),
             "{real:?}"
         );
+    }
+
+    #[test]
+    fn the_activity_and_reload_commands_are_the_shells_only_in_a_preview_build() {
+        for method in ["hew.plugin.activity", "hew.plugin.reload"] {
+            let bare = classify(&format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":{{"id":"com.example.a"}}}}"#
+            ));
+            if cfg!(hew_preview) {
+                assert!(
+                    matches!(bare, Routed::Host { method: m, .. } if m == method),
+                    "{method}: {bare:?}"
+                );
+            } else {
+                assert!(matches!(bare, Routed::Forward { .. }), "{method}");
+            }
+        }
+        // A reload is never rehearsed; reading the activity may be.
+        assert!(rehearsal_refused(true, "hew.plugin.reload").is_some());
+        assert!(rehearsal_refused(true, "hew.plugin.dev").is_some());
+        assert!(rehearsal_refused(true, "hew.plugin.activity").is_none());
+        assert!(rehearsal_refused(false, "hew.plugin.reload").is_none());
     }
 
     #[test]

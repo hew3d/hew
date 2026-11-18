@@ -28,7 +28,7 @@ pub use semver;
 #[cfg(hew_preview)]
 mod error;
 #[cfg(hew_preview)]
-pub use error::{InstallError, MAX_STORAGE_BYTES, MAX_STORAGE_KEY_BYTES};
+pub use error::{InstallError, MAX_PLUGIN_DATA_BYTES, MAX_STORAGE_BYTES, MAX_STORAGE_KEY_BYTES};
 
 #[cfg(hew_preview)]
 pub mod package;
@@ -61,3 +61,6 @@ pub use installed::{
 
 #[cfg(all(hew_preview, feature = "fs"))]
 pub mod store;
+
+#[cfg(all(hew_preview, feature = "fs"))]
+pub mod data;

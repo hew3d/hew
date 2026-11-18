@@ -22,6 +22,31 @@ pub const MAX_COMMANDS: usize = 256;
 pub const MAX_AGENT_NOTES_BYTES: usize = 4096;
 /// The bus protocol major plugins may declare in `api`.
 pub const SUPPORTED_API: u32 = 1;
+/// Most event names `contributes.events` may list (as many as one
+/// `hew.event.subscribe` takes).
+pub const MAX_EVENTS: usize = 32;
+
+/// The events a plugin may list in `contributes.events`: the bus's whole
+/// event inventory (`api::events::EVENT_NAMES`, which a test in `crates/api`
+/// holds equal to this list; this crate cannot depend on that one).
+pub const EVENT_NAMES: &[&str] = &[
+    "document_changed",
+    "selection_changed",
+    "context_changed",
+    "document_will_save",
+    "document_saved",
+    "document_opened",
+    "document_closed",
+    "units_changed",
+    "scenes_changed",
+    "tool_changed",
+    "plugin_state",
+    "slot_changed",
+    "settings_changed",
+    "ui_cancel",
+    "window_closed",
+    "surface_closed",
+];
 
 /// A parsed, validated `hew-plugin.json`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -258,8 +283,13 @@ pub struct Contributes {
     pub viewport_surfaces: Option<serde_json::Value>,
     #[serde(default)]
     pub sheets: Option<serde_json::Value>,
-    #[serde(default)]
-    pub events: Option<serde_json::Value>,
+    /// The events whose arrival starts the plugin (with `on_event` in
+    /// `activation`): 1 to [`MAX_EVENTS`] distinct names from
+    /// [`EVENT_NAMES`]. Read while the manifest is read (step 1), so an
+    /// unknown, repeated or surplus name makes the file
+    /// `manifest_malformed`, as an unknown activation value does.
+    #[serde(default, deserialize_with = "event_names")]
+    pub events: Option<Vec<String>>,
     #[serde(default, rename = "dialogSlots")]
     pub dialog_slots: Option<serde_json::Value>,
     #[serde(default)]
@@ -292,6 +322,34 @@ pub struct CommandContribution {
     pub result: serde_json::Value,
     #[serde(default)]
     pub refusals: Vec<String>,
+}
+
+/// `contributes.events`, checked as it is read.
+fn event_names<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
+    use serde::de::Error;
+    let Some(names) = <Option<Vec<String>> as serde::Deserialize>::deserialize(d)? else {
+        return Ok(None);
+    };
+    if names.is_empty() || names.len() > MAX_EVENTS {
+        return Err(D::Error::custom(format!(
+            "contributes.events must list 1 to {MAX_EVENTS} event names"
+        )));
+    }
+    let mut seen = BTreeSet::new();
+    for name in &names {
+        if !EVENT_NAMES.contains(&name.as_str()) {
+            let shown: String = name.chars().take(64).collect();
+            return Err(D::Error::custom(format!(
+                "\"{shown}\" in contributes.events is not an event Hew sends"
+            )));
+        }
+        if !seen.insert(name.as_str()) {
+            return Err(D::Error::custom(format!(
+                "\"{name}\" is listed more than once in contributes.events"
+            )));
+        }
+    }
+    Ok(Some(names))
 }
 
 fn default_timeout_ms() -> u32 {
@@ -996,6 +1054,69 @@ mod tests {
         assert_eq!(names.len(), all.len());
         for e in &all {
             assert!(!e.explanation().is_empty());
+        }
+    }
+
+    fn with_events(events: serde_json::Value) -> String {
+        serde_json::json!({
+            "manifest": 1, "id": "com.example.ev", "name": "Ev", "version": "1.0.0",
+            "api": 1, "main": "main.js", "activation": ["on_event"],
+            "contributes": { "events": events }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn contributes_events_is_a_checked_list_of_event_names() {
+        let ok = parse(&with_events(serde_json::json!([
+            "document_changed",
+            "plugin_state"
+        ])))
+        .unwrap();
+        assert_eq!(
+            ok.contributes.events,
+            Some(vec![
+                "document_changed".to_string(),
+                "plugin_state".to_string()
+            ])
+        );
+        let every: Vec<&str> = EVENT_NAMES.to_vec();
+        assert_eq!(
+            parse(&with_events(serde_json::json!(every)))
+                .unwrap()
+                .contributes
+                .events
+                .unwrap()
+                .len(),
+            EVENT_NAMES.len()
+        );
+        // Absent or null: valid, no events.
+        let absent = r#"{"manifest":1,"id":"com.example.ev","name":"Ev","version":"1.0.0","api":1,"main":"main.js"}"#;
+        assert_eq!(parse(absent).unwrap().contributes.events, None);
+        assert_eq!(
+            parse(&with_events(serde_json::Value::Null))
+                .unwrap()
+                .contributes
+                .events,
+            None
+        );
+        let too_many: Vec<String> = (0..=MAX_EVENTS)
+            .map(|i| EVENT_NAMES[i % EVENT_NAMES.len()].to_string())
+            .collect();
+        for bad in [
+            serde_json::json!(["document_changed", "made_up"]),
+            serde_json::json!(["Document_Changed"]),
+            serde_json::json!(["hew.event.document_changed"]),
+            serde_json::json!(["unknown field `x`"]),
+            serde_json::json!(["document_changed", "document_changed"]),
+            serde_json::json!([]),
+            serde_json::json!(too_many),
+            serde_json::json!("document_changed"),
+            serde_json::json!([1]),
+            serde_json::json!({ "document_changed": true }),
+        ] {
+            let e = parse(&with_events(bad.clone())).unwrap_err();
+            assert_eq!(e.name(), "manifest_malformed", "{bad}: {e:?}");
         }
     }
 }

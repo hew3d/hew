@@ -3453,6 +3453,22 @@ fn main() {
             preview_only::plugins::plugin_dev_request_dismiss,
             #[cfg(hew_preview)]
             preview_only::plugins::plugin_host_present,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_doc_storage_get,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_doc_storage_set,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_doc_storage_delete,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_doc_storage_list,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_report_state,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_activity_read,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_console_append,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_console_read,
         ])
         // Build and attach the native menu bar; wire menu-item clicks to
         // `menu-action` events emitted to the webview.
@@ -5119,6 +5135,9 @@ fn main() {
             // The developer-folder watcher, once the state is there.
             #[cfg(hew_preview)]
             preview_only::plugins::start_watching(handle);
+            // The writer of each plugin's activity log, once a second at most.
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::start_activity_writer(handle);
             // "Open on Phone" server setting + HTTP client — loaded once from
             // server.json; only `set_server_setting` ever changes it.
             app.manage(relay_client::RelayState::new(relay_client::load_setting(
@@ -5494,6 +5513,9 @@ fn main() {
                 // joined, so nothing is left polling.
                 #[cfg(hew_preview)]
                 preview_only::plugins::stop_watching(app);
+                // What the plugin activity writer still holds is written.
+                #[cfg(hew_preview)]
+                preview_only::plugin_data::stop_activity_writer(app);
             }
             // macOS: intercept "open document" Apple events (warm + cold
             // start). deliver_open emits to the active document window once

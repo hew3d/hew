@@ -12,6 +12,12 @@
  * Enter does nothing at all, so a stray keypress never installs; focus
  * starts on Cancel. The plugin's cleaned name and version are always shown.
  *
+ * In grant mode (`grant`, the lines the kernel gave for a change to a
+ * plugin's optional permissions) it asks "Allow more for this plugin?" and
+ * shows only the plugin's cleaned name and version, what the change would
+ * add and Hew's warnings; it accepts with "Allow". Cancel has focus and
+ * Enter accepts nothing, as everywhere here.
+ *
  * In review mode (`consent.review`, a folder plugin whose manifest now asks
  * for something different) it asks "Allow this plugin's changes?", says so
  * in place of what it replaces, lists what it now asks for and what it no
@@ -42,6 +48,10 @@ export interface ConsentSheetProps {
   busy?: boolean
   /** A refusal to show above the buttons (the sheet stays open). */
   error?: string | null
+  /** Grant mode: what a change to the plugin's permissions would add, and
+   *  the warnings its result triggers, as the kernel wrote them. Only
+   *  `consent.name` and `consent.version` are used besides. */
+  grant?: { added: PermissionLine[]; warnings: string[] }
 }
 
 const sectionTitle: CSSProperties = {
@@ -91,7 +101,7 @@ function Section({ heading, children }: { heading: string; children: ReactNode }
   )
 }
 
-export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error = null }: ConsentSheetProps) {
+export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error = null, grant }: ConsentSheetProps) {
   const sheet = useRef<HTMLDivElement>(null)
   const cancel = useRef<HTMLButtonElement>(null)
   const onCancelRef = useRef(onCancel)
@@ -180,14 +190,17 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
   // A folder copied in on the web is a file the store marks as a folder.
   const copied = source.kind === 'file' && source.origin === 'folder'
   const sourceText = copied ? 'Copied from a folder' : source.kind === 'file' ? 'From file' : source.kind === 'dir' ? 'Developer folder' : `From ${source.kind}`
-  const title = review
+  const granting = grant !== undefined
+  const title = granting
+    ? 'Allow more for this plugin?'
+    : review
     ? "Allow this plugin's changes?"
     : again
       ? `Install ${consent.name} again?`
       : updating
         ? `Update ${consent.name}?`
         : `Install ${consent.name}?`
-  const accept = review ? 'Allow' : updating && !again ? 'Update' : 'Install'
+  const accept = review || granting ? 'Allow' : updating && !again ? 'Update' : 'Install'
 
   return createPortal(
     <div
@@ -204,6 +217,7 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
     >
       <div
         ref={sheet}
+        data-plugin-sheet=""
         role="dialog"
         aria-modal="true"
         aria-labelledby="plugin-consent-title"
@@ -229,6 +243,40 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
           <div style={{ color: 'var(--text-faint, #888)', marginTop: '2px', overflowWrap: 'anywhere' }}>
             {review ? `${consent.name}, version ${consent.version}` : `Version ${consent.version}`}
           </div>
+          {granting && (
+            <>
+              <div data-consent="grant-plugin" style={{ marginTop: '8px' }}>
+                <PathText label="Plugin" value={consent.name} max={MAX_NAME_CHARS} />
+              </div>
+              <Section heading="It would also be able to">
+                {grant.added.length > 0 ? (
+                  <Lines lines={grant.added} highlight />
+                ) : (
+                  <div style={{ color: 'var(--text-faint, #888)' }}>Nothing new.</div>
+                )}
+              </Section>
+              {grant.warnings.length > 0 && (
+                <div
+                  role="group"
+                  aria-label="Warnings from Hew"
+                  data-consent="warnings"
+                  style={{
+                    marginTop: '12px',
+                    padding: '8px 10px',
+                    border: '1px solid var(--status-warning, #e8c84a)',
+                    borderRadius: '6px',
+                    background: 'color-mix(in srgb, var(--status-warning, #e8c84a) 14%, transparent)',
+                    color: 'var(--text-primary, #eee)',
+                  }}
+                >
+                  {grant.warnings.map((w) => (
+                    <div key={w}>{w}</div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+          {!granting && (<>
           <div style={{ marginTop: '10px' }}>
             <div data-consent="source">{sourceText}</div>
             {copied && source.name !== '' && <PathText label="Folder name" value={source.name} />}
@@ -349,6 +397,7 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
               <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{consent.activation_reason}</div>
             </section>
           )}
+          </>)}
         </div>
 
         <div style={{ padding: '10px 18px 14px', flexShrink: 0 }}>

@@ -3295,7 +3295,10 @@ export default function App() {
 
   // The page going away closes its document, for anyone still listening.
   useEffect(() => {
-    const onPageHide = (): void => {
+    const onPageHide = (event: PageTransitionEvent): void => {
+      // A page kept for the back/forward cache comes back as it was: nothing
+      // closed. Only a page that is really going away closes its document.
+      if (event.persisted) return
       const scene = sceneRef.current
       if (scene === null) return
       noteDocumentEvent('closed', documentName(docSessionRef.current), docSessionRef.current.currentRef)

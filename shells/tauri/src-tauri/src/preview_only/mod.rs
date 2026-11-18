@@ -8,4 +8,5 @@
 
 pub mod confirm;
 pub mod dev_watch;
+pub mod plugin_data;
 pub mod plugins;

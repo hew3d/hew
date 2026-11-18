@@ -45,7 +45,7 @@ pub mod transact;
 
 pub use dispatch::{
     ComputeGate, ComputeGuard, Connection, DispatchOutcome, ForwardCaller, ForwardFailure,
-    ForwardReply, ForwardRequest, is_dry_run,
+    ForwardReply, ForwardRequest, SetGrantError, is_dry_run,
 };
 pub use envelope::{ErrorObject, Request, RequestId, Response, codes};
 pub use grant::{Ceiling, Grant, Permission, within_ceiling};

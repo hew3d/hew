@@ -49,6 +49,12 @@ export const UNAMBIGUOUS: RegExp[] = [
   /zero-area/,
   /Bake Smooth/,
   /Export cages/,
+  // The plugin commands and the plugin pane's names: the bus commands, a
+  // plugin asking for more, its console and activity.
+  /\bhew\.plugin\.[a-z_]+/,
+  /\bhew\.permissions\.request\b/,
+  /\b[Oo]ptional permissions?\b/,
+  /Allow more for this plugin/,
 ]
 
 /** Everyday words that are also a tool name: matched only in the shapes the
