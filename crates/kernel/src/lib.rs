@@ -93,6 +93,11 @@ pub use document::{
     RenderRoot, WRAPPED_DEF_SID,
 };
 pub use document::{
+    CONTENT_PRINT_SCHEME, LibraryLink, LibraryLinkState, LibraryPrints, LibraryStamp,
+    LibraryUpdate, LibraryUpdateReport, PrintDigest, content_print_text, is_current_print,
+    library_link_state,
+};
+pub use document::{
     DEFAULT_HISTORY_BUDGET_BYTES, DEFAULT_HISTORY_MIN_STEPS, HistoryBudget, HistoryMemory,
     HistoryTrim,
 };

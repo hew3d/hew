@@ -27,6 +27,7 @@ fn prov(hash: &str) -> LibraryProvenance {
     LibraryProvenance {
         source_id: format!("import:{hash}"),
         content_hash: hash.to_string(),
+        ..Default::default()
     }
 }
 

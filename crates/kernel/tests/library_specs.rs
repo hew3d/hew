@@ -91,6 +91,7 @@ fn provenance(id: &str, hash: &str) -> Option<LibraryProvenance> {
     Some(LibraryProvenance {
         source_id: id.to_string(),
         content_hash: hash.to_string(),
+        ..Default::default()
     })
 }
 
@@ -466,19 +467,26 @@ fn insert_same_provenance_twice_reuses_the_definition() {
     );
 }
 
-/// An EDITED item (same source id, new content hash) does NOT reuse the
-/// stale definition.
+/// An EDITED item (same source id, new content) does NOT reuse the stale
+/// definition. Reuse compares the definition's content, not the file's
+/// hash (OW-2: a renamed item, whose hash changes and content does not, is
+/// reused — `library_update_specs`), so the edit here is a real one.
 #[test]
 fn insert_edited_item_gets_a_fresh_definition() {
     let mut src = Document::new();
     let oid = extrude_box(&mut src, 0.0, 0.0, 1.0, 1.0, 1.0);
     let item = src.extract_item(&[NodeId::Object(oid)], true).unwrap();
+    let mut edited_src = Document::new();
+    let taller = extrude_box(&mut edited_src, 0.0, 0.0, 1.0, 1.0, 2.0);
+    let edited = edited_src
+        .extract_item(&[NodeId::Object(taller)], true)
+        .unwrap();
 
     let mut dst = Document::new();
     dst.insert_document(&item, &insert_at_identity(provenance("lib-1", "hash-1")))
         .unwrap();
     let (second, _) = dst
-        .insert_document(&item, &insert_at_identity(provenance("lib-1", "hash-2")))
+        .insert_document(&edited, &insert_at_identity(provenance("lib-1", "hash-2")))
         .unwrap();
 
     assert_eq!(second.definitions_reused, 0);
@@ -1007,6 +1015,7 @@ fn stamp_library_source_makes_reinsert_reuse_the_source_definition() {
     let prov = LibraryProvenance {
         source_id: "lib-src".into(),
         content_hash: "hash-src".into(),
+        ..Default::default()
     };
     doc.stamp_library_source(&[NodeId::Instance(iid)], &prov, Some(def_sid));
 
@@ -1044,6 +1053,7 @@ fn stamp_library_source_is_not_undoable() {
     let prov = LibraryProvenance {
         source_id: "lib-src".into(),
         content_hash: "h".into(),
+        ..Default::default()
     };
     doc.stamp_library_source(&[NodeId::Object(oid)], &prov, None);
 
@@ -1094,6 +1104,7 @@ fn stamp_survives_source_document_save_and_load() {
     let prov = LibraryProvenance {
         source_id: "lib-rt".into(),
         content_hash: "h-rt".into(),
+        ..Default::default()
     };
     doc.stamp_library_source(&[NodeId::Instance(iid)], &prov, Some(7));
 

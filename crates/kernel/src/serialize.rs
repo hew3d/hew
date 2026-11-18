@@ -7760,9 +7760,9 @@ pub struct ItemSummary {
     /// name of a component item, and the fallback title for a file whose
     /// `hew.library` metadata has none.
     pub first_component_name: Option<String>,
-    /// The first component definition's STABLE id, as a decimal string —
-    /// what `Document::stamp_library_source` needs as `def_sid` to mark a
-    /// saved item's source definition for later idempotent re-insert.
+    /// The first component definition's STABLE id, as a decimal string.
+    /// It names one definition only: a save links each of its definitions
+    /// to its own id through `Document::library_save_def_sids`.
     pub first_component_sid: Option<String>,
     /// The first root node's display name, if any — the title fallback for
     /// group- and model-shaped items.

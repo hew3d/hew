@@ -223,6 +223,21 @@ import * as inputRecorder from './recording/inputRecorder'
 import { ReportBugDialog } from './panels/ReportBugDialog'
 import { SentReportsDialog } from './panels/SentReportsDialog'
 import { FollowNoticeBar, useFollowedReports } from './panels/FollowNoticeBar'
+import { LibraryUpdateBar } from './panels/LibraryUpdateBar'
+import { LibraryUpdateReview } from './panels/LibraryUpdateReview'
+import { useLibraryLinks } from './library/useLibraryLinks'
+import {
+  canUpdateLibraryFrom,
+  needsLibraryConfirm,
+  libraryConfirmKind,
+  isItemRoot,
+  outcomeToast,
+  parseUpdateOutcome,
+  updateCount,
+  type LibraryLink,
+  type UpdateOutcome,
+} from './library/libraryUpdates'
+import { useCheckLibraryUpdates } from './settings/libraryUpdates'
 import { UpdateReadyBar } from './updater/UpdateReadyBar'
 import { getFollowHost, totalUnread } from './io/followHost'
 import { startWebLaunchCheck } from './io/webFollowHost'
@@ -5195,9 +5210,14 @@ export default function App() {
   // desktop shell this opens/focuses the REAL native Library window (the
   // Settings-window pattern, resizable); the web build keeps its in-app
   // modal.
+  const libraryRefreshRef = useRef<() => void>(() => {})
   const openLibraryEntry = useCallback(() => {
     if (isTauri) {
       void import('@tauri-apps/api/core').then(({ invoke }) => invoke('open_library_window'))
+      // The Library is its own window there, so this document's panel
+      // state never changes: ask for the check an opening panel gets, which
+      // is when a change made to the folder by hand is noticed.
+      libraryRefreshRef.current()
     } else {
       setShowLibrary((v) => !v)
     }
@@ -5215,6 +5235,128 @@ export default function App() {
     // scene identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state, docRev])
+
+  // Library updates (v1.5 OW-2): where every part that came from the Library
+  // stands against the item in the Library now. Checked after a document
+  // opens, when the Library changes, and when the Library or the Components
+  // panel opens (see useLibraryLinks); Settings ▸ Folders turns the automatic
+  // checks and the bar off (a panel or the Save popover still checks).
+  const checkLibraryUpdates = useCheckLibraryUpdates()
+  const libLinks = useLibraryLinks({
+    scene: state?.scene ?? null,
+    docRev,
+    docGeneration,
+    enabled: checkLibraryUpdates,
+    sessionOpen: sessionStack.length > 0,
+    openedKey: (showLibrary ? 1 : 0) + (showComponents ? 2 : 0),
+    hasLinks: Object.keys(libraryPlacements).length > 0,
+  })
+  libraryRefreshRef.current = () => void libLinks.refreshNow()
+  const [libraryReviewOpen, setLibraryReviewOpen] = useState(false)
+  const [libraryOutcome, setLibraryOutcome] = useState<{ outcome: UpdateOutcome; links: LibraryLink[] } | null>(null)
+  const libraryReviewOpenRef = useRef(false)
+  libraryReviewOpenRef.current = libraryReviewOpen
+  /** Open Review fresh: no outcome from an earlier update is shown in it. */
+  const openLibraryReview = useCallback(() => {
+    setLibraryOutcome(null)
+    setLibraryReviewOpen(true)
+  }, [])
+  const [libraryUpdateBusy, setLibraryUpdateBusy] = useState(false)
+  const librarySessionOpenRef = useRef(false)
+  librarySessionOpenRef.current = sessionStack.length > 0
+
+  /** Update parts from the Library: the named definitions, or every part the
+   *  Library has newer. One kernel step ("Update from Library"); a part the
+   *  kernel refuses is skipped and named, the rest go through. */
+  const handleLibraryUpdate = useCallback(
+    async (request: { definitions: string[] } | { all: true }): Promise<void> => {
+      const scene = sceneRef.current
+      if (scene === null || libraryUpdateBusy) return
+      setLibraryUpdateBusy(true)
+      try {
+        const before = libLinks.links
+        const wanted =
+          'all' in request
+            ? before.filter((l) => l.state === 'library_newer')
+            : before.filter((l) => request.definitions.includes(l.definition))
+        const items = await libLinks.readItems(wanted.map((l) => l.item))
+        // The document changed while the files were read: do nothing rather than guess.
+        if (sceneRef.current !== scene) return
+        let outcome: UpdateOutcome | null
+        try {
+          // While a group or component is open the kernel's own "all" sees
+          // only what the session shows (nothing): name the parts instead, so
+          // it refuses each one it cannot touch and Review says which.
+          const asked =
+            'all' in request && librarySessionOpenRef.current
+              ? { definitions: wanted.map((l) => l.definition) }
+              : request
+          outcome = parseUpdateOutcome(scene.update_definitions_from_items({ ...asked, items }))
+        } catch (err) {
+          const code = parseKernelErrorCode(err)
+          handleToast(kernelErrorMessage(code ?? 'Unknown', err instanceof Error ? err.message : String(err)), code ?? undefined)
+          return
+        }
+        viewportApi.current?.refreshScene()
+        setDocRev((r) => r + 1)
+        if (outcome === null) return
+        // The Review list shows what the last update did; one that left
+        // nothing behind and was not run from the list leaves no old
+        // outcome to show later.
+        const showOutcome = outcome.skipped.length > 0 || libraryReviewOpenRef.current
+        setLibraryOutcome(showOutcome ? { outcome, links: before } : null)
+        // Skipped parts are named in the Review list, which opens to say so.
+        if (outcome.skipped.length > 0) setLibraryReviewOpen(true)
+        handleToast(outcomeToast(outcome, before))
+        void libLinks.refreshNow()
+      } finally {
+        setLibraryUpdateBusy(false)
+      }
+    },
+    // libLinks is rebuilt each render; its members read refs, so the latest links are what matter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [libLinks.links, libLinks.readItems, libLinks.refreshNow, libraryUpdateBusy, handleToast],
+  )
+
+  /** Update in Library: the Save popover's lead action, offered when the one
+   *  selected part came from a Library item this model has changed. */
+  const libraryUpdateOffer = useMemo(() => {
+    const scene = state?.scene
+    const target = saveToLibraryTarget
+    if (scene == null || target === null || target.kind !== 'selection') return null
+    if (target.nodeIds.length !== 1 || target.nodeKinds[0] !== 2) return null
+    const def = scene.instance_def(target.nodeIds[0]!)
+    if (def === undefined) return null
+    const link = libLinks.byDefinition.get(def.toString())
+    if (link === undefined || !canUpdateLibraryFrom(link.state)) return null
+    const ref = libLinks.itemRef(link.item)
+    if (ref === undefined) return null
+    // Only the item's root part can stand for the item: a part nested in it
+    // (the Leg of a Table that was exploded) carries the Table's id, and
+    // saving it over the item would replace the whole Table with one leg.
+    if (!isItemRoot(link, ref.rootSid)) return null
+    // A linked copy cannot stand for an item: the extract would carry its
+    // "linked" mark into the Library file, and saving it the usual way makes
+    // it a component first (renaming and unlinking it). The popover says so.
+    if (scene.is_linked(target.nodeIds[0]!)) return { linkedCopy: true as const, itemName: ref.name }
+    return {
+      linkedCopy: false as const,
+      itemId: link.item,
+      itemName: ref.name,
+      fileName: ref.fileName,
+      meta: ref.meta,
+      confirm: needsLibraryConfirm(link.state),
+      confirmKind: libraryConfirmKind(link.state),
+    }
+  }, [state, saveToLibraryTarget, libLinks])
+
+  // The Save to Library popover opening always asks (even with the setting off),
+  // so "Update in Library" is offered from an answer that is current.
+  const saveToLibraryOpen = saveToLibraryTarget !== null
+  const refreshLibraryLinks = libLinks.refreshNow
+  useEffect(() => {
+    if (saveToLibraryOpen) void refreshLibraryLinks()
+  }, [saveToLibraryOpen, refreshLibraryLinks])
 
   const paletteLibraryEntries = useMemo((): PaletteEntry[] => {
     return libraryIndex.map((entry): PaletteEntry => {
@@ -5262,7 +5404,7 @@ export default function App() {
    * "Rendering…" spinner to a "Saved" checkmark either way — a thumbnail
    * that fails to render is an honest no-thumbnail item (see
    * `renderItemThumbnail`'s doc comment), not a failed save. */
-  const renderAndWriteThumbnail = useCallback((toastId: number, name: string, bytes: Uint8Array) => {
+  const renderAndWriteThumbnail = useCallback((toastId: number, name: string, bytes: Uint8Array, updated = false) => {
     void (async () => {
       try {
         const hash = await sha256Hex(bytes)
@@ -5271,7 +5413,11 @@ export default function App() {
       } catch {
         // Best effort — the item itself already saved successfully.
       } finally {
-        updateToast(toastId, { message: t`Saved "${name}" to library`, state: 'done', sticky: false })
+        updateToast(toastId, {
+          message: updated ? t`Updated "${name}" in the Library` : t`Saved "${name}" to library`,
+          state: 'done',
+          sticky: false,
+        })
       }
     })()
   }, [updateToast])
@@ -5283,7 +5429,15 @@ export default function App() {
    * toast. Kernel refusals (an open component session, …) route through
    * kernelErrors.ts like every other call site. */
   const handleSaveToLibraryCommit = useCallback(
-    (name: string, opts?: { replace?: boolean }) => {
+    (
+      name: string,
+      opts?: {
+        replace?: boolean
+        /** Update in Library: write over this item, keeping its id and the
+         *  name, keywords, collection and category the Library has now. */
+        update?: { id: string; fileName: string; meta: Record<string, unknown> }
+      },
+    ) => {
       const target = saveToLibraryTarget
       setSaveToLibraryTarget(null)
       const scene = sceneRef.current
@@ -5350,11 +5504,13 @@ export default function App() {
         })()
         return
       }
-      const id = crypto.randomUUID()
+      const updating = opts?.update
+      const id = updating?.id ?? crypto.randomUUID()
       const meta = {
+        ...(updating?.meta ?? {}),
         id,
         name,
-        category: target.kind === 'document' ? 'model' : 'component',
+        category: updating?.meta.category ?? (target.kind === 'document' ? 'model' : 'component'),
         savedAt: new Date().toISOString(),
         sourceDoc: documentName(docSessionRef.current),
       }
@@ -5372,6 +5528,13 @@ export default function App() {
           target.kind === 'selection' && target.nodeIds.length === 1 && target.nodeKinds[0] === 2
             ? linkedPlacementOf(scene, [{ kind: 'instance', id: target.nodeIds[0] }])
             : null
+        if (linked !== null && updating !== undefined) {
+          // Never reached from the popover (it does not offer the update for a
+          // linked copy): an extract would carry the "linked" mark into the
+          // item, and promoting would silently rename and unlink the set.
+          handleToast(t`This part is a linked copy. Make it a component, or unlink it, before updating “${name}” in the Library.`)
+          return
+        }
         if (linked !== null) {
           try {
             const saved = promoteForSave(scene, linked.instance, name, extract)
@@ -5390,7 +5553,7 @@ export default function App() {
         handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
         return
       }
-      const fileName = itemFileName(name, id, target.kind === 'document' ? 'model' : 'component')
+      const fileName = updating?.fileName ?? itemFileName(name, id, target.kind === 'document' ? 'model' : 'component')
       // The stamp below runs after an await — if the user replaced the
       // document meanwhile (File ▸ New/Open), the captured node handles
       // could resolve against RECYCLED slots in the new document and stamp
@@ -5510,11 +5673,20 @@ export default function App() {
           }
         }
         const toastId = pushStickyToast(t`Rendering thumbnail for "${name}"…`)
-        renderAndWriteThumbnail(toastId, name, bytes)
+        renderAndWriteThumbnail(toastId, name, bytes, updating !== undefined)
       })()
     },
     [saveToLibraryTarget, handleToast, pushStickyToast, renderAndWriteThumbnail, pushCameraStateToScene],
   )
+
+  /** Update in Library: write the selected part over the item it came from,
+   *  keeping the item's id, name, keywords, collection and category as the
+   *  Library has them now. Not an undo step, like any Save to Library. */
+  const handleUpdateInLibrary = (offer: Extract<NonNullable<typeof libraryUpdateOffer>, { linkedCopy: false }>): void => {
+    handleSaveToLibraryCommit(offer.itemName, {
+      update: { id: offer.itemId, fileName: offer.fileName, meta: { ...offer.meta } },
+    })
+  }
 
   /** MaterialPalette's "Save to Library" button — no thumbnail render (a
    * pure-material item has nothing to render; `renderItemThumbnail` would
@@ -6266,11 +6438,11 @@ export default function App() {
    *  deletes exactly what was captured) or `null` on refusal/error — Cut
    *  must NOT delete anything when this fails, or the geometry is lost with
    *  no backup on the clipboard. */
-  const doCopy = (): NodeRef[] | null => {
+  const doCopy = (source: readonly NodeRef[] = selectedIds): NodeRef[] | null => {
     const scene = sceneRef.current
     if (scene === null) return null
-    const structural = selectedIds.filter(isStructuralNode)
-    const drawing = selectedIds.filter(isCopyableDrawing)
+    const structural = source.filter(isStructuralNode)
+    const drawing = source.filter(isCopyableDrawing)
     let named: { json: string; shapes: number }
     try {
       named = clipboardDrawing(scene, [...structural, ...drawing])
@@ -6278,7 +6450,7 @@ export default function App() {
       named = { json: '[]', shapes: 0 }
     }
     if (structural.length === 0 && named.shapes === 0) {
-      if (selectedIds.length > 0) handleToast(nothingToCopyToast())
+      if (source.length > 0) handleToast(nothingToCopyToast())
       return null
     }
     const sel = structuralSelection(structural) ?? { kinds: new Uint8Array(0), ids: new BigUint64Array(0) }
@@ -6345,15 +6517,16 @@ export default function App() {
   }
 
   const handleCut = () => {
-    const copied = doCopy()
-    if (copied === null) return
     const scene = sceneRef.current
-    // Delete exactly what the copy carried (a picked edge's whole shape).
     // Copying a locked thing is allowed; deleting it is not, so Cut leaves
-    // locked items in place (OW-1).
-    const targets = scene === null ? copied : cutTargets(scene, copied)
-    const go = scene === null ? targets : leaveBehind(scene, targets, handleToast, { descendants: true })
-    if (go === null) return
+    // locked items in place (OW-1) and puts only what it removes on the
+    // clipboard: a paste must never bring back a copy of what stayed.
+    const kept = scene === null ? selectedIds : leaveBehind(scene, selectedIds, handleToast, { descendants: true })
+    if (kept === null) return
+    const copied = doCopy(kept)
+    if (copied === null) return
+    // Delete exactly what the copy carried (a picked edge's whole shape).
+    const go = scene === null ? copied : cutTargets(scene, copied)
     viewportApi.current?.runDelete(go)
     // Only nodes were copied: guides and annotations stay, still selected.
     setSelection((cur) => cur.filter((n) => !isNodeItem(n) || !go.some((c) => nodeEq(c, n))))
@@ -8407,9 +8580,27 @@ export default function App() {
 
   /** Edit ▸ Lock: lock the selection. Only what is not already locked is
    *  sent, so a selection that is entirely locked records no step. */
+  const selectionHasUnlocked = (() => {
+    const scene = sceneRef.current
+    if (scene === null) return false
+    try {
+      return unlockedAmong(scene, selectedIds).length > 0
+    } catch {
+      return false
+    }
+  })()
+
   const handleLock = () => {
     const scene = sceneRef.current
     if (scene === null) return
+    // Locking restructures nothing, but the kernel refuses it while a
+    // component is open for editing: say so (the menu item is dimmed, but the
+    // palette and shortcuts reach here).
+    if (componentFrameOpen) {
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code identifier
+      handleToast(kernelErrorMessage('ExplodeSessionScope', ''), 'ExplodeSessionScope')
+      return
+    }
     applyLock(unlockedAmong(scene, selectedIds), true)
   }
 
@@ -8660,6 +8851,13 @@ export default function App() {
 
       {/* Reply notice for followed bug reports (follow-a-report §2.3). */}
       <FollowNoticeBar onView={handleSentReports} />
+      <LibraryUpdateBar
+        count={updateCount(libLinks.pending)}
+        busy={libraryUpdateBusy}
+        onUpdateAll={() => void handleLibraryUpdate({ all: true })}
+        onReview={openLibraryReview}
+        onLater={libLinks.dismiss}
+      />
       {isTauri && <UpdateReadyBar />}
 
       {/* Kernel panic sticky banner */}
@@ -9281,6 +9479,8 @@ export default function App() {
               onUnlock={(node) => void applyLock([node], false)}
               onDropRefused={(reason) => handleToast(reason)}
               linkedActions={linkedRowActions}
+              libraryLinks={libLinks.byDefinition}
+              onReviewLibraryUpdates={openLibraryReview}
             />
           </TraySection>
           <TraySection title={trayTitle.materials} collapsed={!showMaterials} onToggle={() => setShowMaterials((v) => !v)}>
@@ -9312,6 +9512,8 @@ export default function App() {
               onSelectNodes={handleReplaceSelection}
               onRenameComponent={handleRenameComponent}
               onDeleteComponent={handleDeleteComponent}
+              libraryLinks={libLinks.byDefinition}
+              onReviewLibraryUpdates={openLibraryReview}
             />
           </TraySection>
           <TraySection title={trayTitle.tags} collapsed={!showTags} onToggle={() => setShowTags((v) => !v)}>
@@ -9925,7 +10127,9 @@ export default function App() {
           canLinkSimilar: canLinkSimilarNow,
           canPromote: menuGates?.canPromote ?? false,
           canFlip: menuGates?.canFlip ?? false,
-          canLock: menuGates?.canLock ?? false,
+          // Listed as runnable while a component is open for editing, so
+          // running it says why it cannot (handleLock's toast).
+          canLock: (menuGates?.canLock ?? false) || (componentFrameOpen && selectionHasUnlocked),
           canUnlock: menuGates?.canUnlock ?? false,
           canUnlockAll: menuGates?.canUnlockAll ?? false,
           canPasteLinked: (menuGates?.clipboardHasContent ?? false) && !copiesLinked,
@@ -10059,8 +10263,31 @@ export default function App() {
           rows={saveToLibraryTarget.kind === 'profile' ? saveToLibraryTarget.rows : undefined}
           hideOriginHint={saveToLibraryTarget.kind === 'profile'}
           replace={saveToLibraryTarget.kind === 'profile' ? saveToLibraryTarget.replace : undefined}
+          updateInLibrary={
+            libraryUpdateOffer === null || libraryUpdateOffer.linkedCopy
+              ? undefined
+              : { name: libraryUpdateOffer.itemName, confirm: libraryUpdateOffer.confirm, cannotCompare: libraryUpdateOffer.confirmKind === 'different' }
+          }
+          updateInLibraryBlocked={libraryUpdateOffer?.linkedCopy === true ? { name: libraryUpdateOffer.itemName } : undefined}
+          onUpdateInLibrary={libraryUpdateOffer === null || libraryUpdateOffer.linkedCopy ? undefined : () => handleUpdateInLibrary(libraryUpdateOffer)}
           onSave={handleSaveToLibraryCommit}
           onClose={() => setSaveToLibraryTarget(null)}
+        />
+      )}
+
+      {libraryReviewOpen && (
+        <LibraryUpdateReview
+          links={libLinks.links}
+          itemName={(item) => libLinks.itemRef(item)?.name}
+          outcome={libraryOutcome?.outcome ?? null}
+          outcomeLinks={libraryOutcome?.links ?? []}
+          busy={libraryUpdateBusy}
+          onUpdateSelected={(definitions) => void handleLibraryUpdate({ definitions })}
+          onUpdateAllNewer={() => void handleLibraryUpdate({ all: true })}
+          onClose={() => {
+            setLibraryReviewOpen(false)
+            setLibraryOutcome(null)
+          }}
         />
       )}
     </main>

@@ -51,6 +51,8 @@ import { entityLabel } from './treeModel'
 import type { NodeRef } from './treeModel'
 import { isComposingKey } from '../input/keyboard'
 import { compareNames } from './nameSort'
+import type { LibraryLink } from '../library/libraryUpdates'
+import { LibraryMark } from './LibraryMark'
 
 interface Props {
   scene: WasmScene
@@ -70,6 +72,12 @@ interface Props {
   /** Request a definition delete. The caller decides whether to confirm
    *  first (checking `scene.definition_usage`) before actually deleting. */
   onDeleteComponent: (id: bigint) => void
+  /** Where each definition stands against its Library item (definition
+   *  handle → link); a row shows a marker when it is newer there or changed
+   *  here. Absent: no markers. */
+  libraryLinks?: ReadonlyMap<string, LibraryLink>
+  /** A marker on a part with a newer Library version was clicked. */
+  onReviewLibraryUpdates?: () => void
 }
 
 const ROW_STYLE: React.CSSProperties = {
@@ -114,6 +122,8 @@ export function ComponentsPanel({
   onSelectNodes,
   onRenameComponent,
   onDeleteComponent,
+  libraryLinks,
+  onReviewLibraryUpdates,
 }: Props) {
   const { t } = useLingui()
   // Suppress the docRev-triggers-re-render lint — intentionally re-queries
@@ -398,6 +408,7 @@ export function ComponentsPanel({
                   {name}
                 </span>
               )}
+              {!isEditing && <LibraryMark link={libraryLinks?.get(id.toString())} onReview={onReviewLibraryUpdates} />}
               {!isEditing && (
                 <span
                   data-testid="components-row-usage"

@@ -7,7 +7,7 @@
 //! boundary) refuses `host_capability_missing`. `insert` and `save` DO
 //! touch the document, through the same kernel entry points
 //! (`Document::insert_document`, `Document::extract_item`,
-//! `Document::stamp_library_source`) `crates/wasm-api`'s own
+//! `Document::stamp_library_save`) `crates/wasm-api`'s own
 //! `Scene::insert_item`/`extract_item`/`stamp_library_source` wrap for the
 //! UI — an API insert or save is indistinguishable from a UI one.
 //!
@@ -22,10 +22,12 @@ use super::{CmdError, Ctx, Handler};
 use crate::host::{LibraryItemEntry, LibraryWriteTarget};
 use crate::refusal::Refusal;
 use kernel::{
-    AttrTarget, AttrValue, Document, EntityRef, InsertOptions, LibraryProvenance, NodeId, Transform,
+    AttrTarget, AttrValue, ComponentId, Document, EntityRef, InsertOptions, LibraryProvenance,
+    NodeId, Transform,
 };
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// This namespace's slice of the handler table.
 pub(crate) fn handler(name: &str) -> Option<Handler> {
@@ -36,6 +38,8 @@ pub(crate) fn handler(name: &str) -> Option<Handler> {
         "hew.library.save" => save_item,
         "hew.library.remove" => remove_item,
         "hew.library.update_meta" => update_meta,
+        "hew.library.status" => library_status,
+        "hew.library.update" => update_from_library,
         _ => return None,
     })
 }
@@ -301,6 +305,10 @@ fn update_meta(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             AttrValue::Text(collection.clone()),
         )?;
     }
+    // Every save to the Library writes the item's content prints (OW-2);
+    // a rename leaves them as they were, and an item saved before they
+    // existed gains them here.
+    crate::library_print::stamp_item_prints(&mut item_doc)?;
 
     let bytes = item_doc.save();
     ctx.host
@@ -457,11 +465,14 @@ fn insert_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         return insert_material_item(ctx, &item_doc);
     }
     let source_id = library_meta_text(&item_doc, "id");
+    // The prints come from the item itself, so the stamped base is what
+    // the copy really holds (OW-2).
     let provenance = match (source_id, content_hash) {
-        (Some(source_id), Some(content_hash)) => Some(LibraryProvenance {
+        (Some(source_id), Some(content_hash)) => Some(crate::library_print::provenance(
+            &item_doc,
             source_id,
             content_hash,
-        }),
+        )),
         _ => None,
     };
 
@@ -687,6 +698,18 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         set("sourceDoc", AttrValue::Text(source_doc))?;
     }
     set("savedAt", AttrValue::Text(iso_now(ctx.host.unix_time_ms())))?;
+    // Every save to the Library writes the item's content prints (OW-2): a
+    // replace writes the new ones, so models using the item can tell it
+    // changed.
+    let prints = crate::library_print::stamp_item_prints(&mut item_doc)?;
+    // Each saved definition's stable id in the item, worked out before
+    // anything is written (the extraction above succeeded on the same
+    // selection, so this does too).
+    let def_sids = if source_nodes.is_empty() {
+        BTreeMap::new()
+    } else {
+        ctx.doc.library_save_def_sids(&source_nodes)?
+    };
 
     let bytes = item_doc.save();
     let target = match &replaced {
@@ -703,25 +726,17 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         .map_err(CmdError::Refusal)?;
 
     if !source_nodes.is_empty() {
-        // The definition's stable id (`def_sid`), for an instance
-        // selection wrapped as a component — mirrors
-        // `Scene::stamp_library_source`'s use of
-        // `summary.first_component_sid`, read the same way: round-trip
-        // through the saved bytes rather than walking `item_doc`'s
-        // in-memory ids (sids are only guaranteed stable post-save).
-        let summary = kernel::read_item_summary(&bytes).map_err(|e| {
-            CmdError::Internal(format!("just-saved item failed to re-parse: {e:?}"))
-        })?;
-        let def_sid = summary
-            .first_component_sid
-            .as_deref()
-            .and_then(|s| s.parse::<u64>().ok());
+        // Each selected instance's definition links to its own copy in
+        // the item (its stable id there, `def_sid`), with the item's print
+        // of it as the base, so the source reads "in step" with the item
+        // it just wrote, however many parts the selection holds.
         let provenance = LibraryProvenance {
             source_id: id.clone(),
             content_hash: write.content_hash.clone(),
+            prints,
         };
         ctx.doc
-            .stamp_library_source(&source_nodes, &provenance, def_sid);
+            .stamp_library_save(&source_nodes, &provenance, &def_sids);
     }
 
     let mut result = serde_json::json!({ "path": write.path, "id": id });
@@ -735,6 +750,293 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             );
     }
     Ok(result)
+}
+
+// ----------------------------------------------------- hew.library.status
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StatusParams {}
+
+/// What the Library says about the items `wanted` names (OW-2): each item
+/// the Library holds, by id, with its content prints: the ones its
+/// metadata carries, or, for an item saved before prints existed (or under
+/// another print scheme), computed from the item file. An item the Library
+/// does not hold, or whose file cannot be read, is left out (its links
+/// read "item missing").
+fn library_prints(
+    ctx: &Ctx,
+    listing: &crate::host::LibraryListing,
+    wanted: &BTreeSet<String>,
+) -> BTreeMap<String, BTreeMap<u64, String>> {
+    let mut out = BTreeMap::new();
+    for id in wanted {
+        let Some(entry) = listing
+            .items
+            .iter()
+            .find(|e| e.id.as_deref() == Some(id.as_str()))
+        else {
+            continue;
+        };
+        let stored = entry
+            .summary
+            .as_ref()
+            .and_then(|s| crate::library_print::stored_prints_from_json(&s.doc_attrs));
+        let prints = match stored {
+            Some(p) => p,
+            None => {
+                let Ok(read) = ctx.host.library_read(&entry.path) else {
+                    continue;
+                };
+                let Ok(doc) = Document::load(&read.bytes) else {
+                    continue;
+                };
+                crate::library_print::item_prints(&doc)
+            }
+        };
+        out.insert(id.clone(), prints);
+    }
+    out
+}
+
+/// The item ids the document's linked definitions name.
+fn linked_item_ids(doc: &Document) -> BTreeSet<String> {
+    doc.linked_definitions()
+        .into_iter()
+        .filter_map(|d| doc.library_stamp(d).map(|s| s.source_id))
+        .collect()
+}
+
+fn library_status(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let _: StatusParams = parse(params)?;
+    let listing = ctx.host.library_list().map_err(CmdError::Refusal)?;
+    let prints = library_prints(ctx, &listing, &linked_item_ids(ctx.doc));
+    let links = ctx
+        .doc
+        .library_links(&prints, crate::library_print::sha256_digest);
+    let resolver = ctx.resolver();
+    let rows: Vec<Value> = links
+        .iter()
+        .map(|l| {
+            let mut row = serde_json::json!({
+                "definition": resolver
+                    .public_of(ctx.doc, &EntityRef::Component(l.definition))
+                    .expect("a live definition"),
+                "item": l.source_id,
+                "state": l.state.as_str(),
+                "copies": l.copies,
+                "locked": l.frozen,
+                "mine": l.mine,
+            });
+            let obj = row.as_object_mut().expect("built as an object above");
+            if let Some(name) = ctx.doc.component_name(l.definition) {
+                obj.insert("name".to_string(), Value::String(name.to_string()));
+            }
+            if let Some(base) = &l.base {
+                obj.insert("base".to_string(), Value::String(base.clone()));
+            }
+            if let Some(theirs) = &l.theirs {
+                obj.insert("theirs".to_string(), Value::String(theirs.clone()));
+            }
+            row
+        })
+        .collect();
+    Ok(serde_json::json!({ "links": rows }))
+}
+
+// ----------------------------------------------------- hew.library.update
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateParams {
+    #[serde(default)]
+    definitions: Option<Vec<String>>,
+    #[serde(default)]
+    all: Option<bool>,
+}
+
+/// One part an update left as it was, for the result's `skipped`.
+fn skipped_row(ctx: &Ctx, def: ComponentId, refusal: Refusal) -> Value {
+    let resolver = ctx.resolver();
+    let mut row = serde_json::json!({
+        "definition": resolver
+            .public_of(ctx.doc, &EntityRef::Component(def))
+            .unwrap_or_default(),
+        "refusal": refusal.name,
+        "explanation": refusal.explanation,
+        "detail": refusal.detail,
+    });
+    if let Some(name) = ctx.doc.component_name(def) {
+        row.as_object_mut()
+            .expect("built as an object above")
+            .insert("name".to_string(), Value::String(name.to_string()));
+    }
+    row
+}
+
+/// The refusal a part gets when the Library does not hold its item, or
+/// the item no longer holds its definition, or it has no link at all.
+fn part_item_missing(name: Option<&str>) -> Refusal {
+    let what = name.map_or_else(
+        || "This part".to_string(),
+        |n| format!("\u{201c}{n}\u{201d}"),
+    );
+    Refusal::api(
+        "unknown_library_item",
+        &format!("{what} is not linked to an item the Library holds."),
+    )
+}
+
+/// An item read for an update: loaded with its file fingerprint, or the
+/// refusal every part using it gets (`None`: the Library does not hold
+/// it, said per part).
+type LoadedItem = Result<(Document, String), Option<Refusal>>;
+
+fn update_from_library(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let p: UpdateParams = parse(params)?;
+    let all = p.all.unwrap_or(false);
+    if all == p.definitions.is_some() {
+        return Err(CmdError::Params(
+            "library.update takes \"definitions\" or \"all\": true".into(),
+        ));
+    }
+    // The named definitions resolve before anything is read.
+    let mut named: Vec<ComponentId> = Vec::new();
+    if let Some(ids) = &p.definitions {
+        let resolver = ctx.resolver();
+        for id in ids {
+            match resolver.resolve(id) {
+                Some(EntityRef::Component(c)) if ctx.doc.def_member_nodes(c).is_some() => {
+                    if !named.contains(&c) {
+                        named.push(c);
+                    }
+                }
+                _ => return Err(super::entity::unknown_entity(id)),
+            }
+        }
+    }
+    let listing = ctx.host.library_list().map_err(CmdError::Refusal)?;
+    let targets: Vec<ComponentId> = if all {
+        // Every part the Library has a newer version of. A part changed
+        // here as well is updated only when it is named.
+        let prints = library_prints(ctx, &listing, &linked_item_ids(ctx.doc));
+        ctx.doc
+            .library_links(&prints, crate::library_print::sha256_digest)
+            .into_iter()
+            .filter(|l| l.state == kernel::LibraryLinkState::LibraryNewer)
+            .map(|l| l.definition)
+            .collect()
+    } else {
+        named
+    };
+
+    // Each item read and loaded once, however many parts use it.
+    let mut items: Vec<(String, LoadedItem)> = Vec::new();
+    let mut skipped: Vec<(ComponentId, Refusal)> = Vec::new();
+    let mut parts: Vec<(ComponentId, usize)> = Vec::new();
+    for &def in &targets {
+        let name = ctx.doc.component_name(def).map(str::to_string);
+        let Some(stamp) = ctx.doc.library_stamp(def) else {
+            skipped.push((def, part_item_missing(name.as_deref())));
+            continue;
+        };
+        let at = match items.iter().position(|(id, _)| *id == stamp.source_id) {
+            Some(at) => at,
+            None => {
+                let entry = listing
+                    .items
+                    .iter()
+                    .find(|e| e.id.as_deref() == Some(stamp.source_id.as_str()));
+                let loaded: LoadedItem = match entry {
+                    None => Err(None),
+                    Some(entry) => {
+                        ctx.host
+                            .library_read(&entry.path)
+                            .map_err(Some)
+                            .and_then(|read| {
+                                Document::load(&read.bytes)
+                            .map(|doc| (doc, read.content_hash))
+                            .map_err(|e| {
+                                Some(Refusal::api(
+                                    "load_failed",
+                                    &format!(
+                                        "this item's bytes are not a valid .hew document: {e:?}"
+                                    ),
+                                ))
+                            })
+                            })
+                    }
+                };
+                items.push((stamp.source_id.clone(), loaded));
+                items.len() - 1
+            }
+        };
+        match &items[at].1 {
+            Err(Some(r)) => skipped.push((def, r.clone())),
+            Err(None) => skipped.push((def, part_item_missing(name.as_deref()))),
+            Ok((doc, _)) => {
+                let holds = stamp.def_sid.is_some_and(|sid| {
+                    doc.component_ids()
+                        .iter()
+                        .any(|&c| doc.sid_of(&EntityRef::Component(c)) == Some(sid))
+                });
+                if holds {
+                    parts.push((def, at));
+                } else {
+                    skipped.push((def, part_item_missing(name.as_deref())));
+                }
+            }
+        }
+    }
+
+    let updates: Vec<kernel::LibraryUpdate<'_>> = parts
+        .iter()
+        .filter_map(|&(def, at)| {
+            let (id, loaded) = &items[at];
+            let (doc, hash) = loaded.as_ref().ok()?;
+            Some(kernel::LibraryUpdate {
+                definition: def,
+                item: doc,
+                provenance: crate::library_print::provenance(doc, id.clone(), hash.clone()),
+            })
+        })
+        .collect();
+    let (report, _change) = ctx
+        .doc
+        .update_definitions_from_items(&updates, crate::library_print::sha256_digest)?;
+    for &(def, e) in &report.skipped {
+        skipped.push((def, Refusal::from_document_error(&e).with_document(ctx.doc)));
+    }
+
+    // A call that named its parts and changed or confirmed none of them
+    // refuses with the first part's reason, so a one-part update reads as
+    // one typed refusal; a batch that did anything lists what it skipped.
+    if !all
+        && report.updated.is_empty()
+        && report.unchanged.is_empty()
+        && let Some((_, r)) = skipped.first()
+    {
+        return Err(CmdError::Refusal(r.clone()));
+    }
+    let resolver = ctx.resolver();
+    let ids = |defs: &[ComponentId]| -> Vec<String> {
+        defs.iter()
+            .filter_map(|&d| resolver.public_of(ctx.doc, &EntityRef::Component(d)))
+            .collect()
+    };
+    let skipped_rows: Vec<Value> = skipped
+        .into_iter()
+        .map(|(def, r)| skipped_row(ctx, def, r))
+        .collect();
+    Ok(serde_json::json!({
+        "updated": ids(&report.updated),
+        "also_updated": ids(&report.also_updated),
+        "unchanged": ids(&report.unchanged),
+        "kept": ids(&report.kept),
+        "skipped": skipped_rows,
+        "definitions_added": report.definitions_added,
+        "materials_added": report.materials_added,
+    }))
 }
 
 // ---------------------------------------------------------------- helpers

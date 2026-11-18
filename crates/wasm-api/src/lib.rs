@@ -916,7 +916,128 @@ fn apply_library_meta(item: &mut Document, meta_json: Option<&str>) -> Result<()
         )
         .map_err(doc_err)?;
     }
+    // Every save to the Library writes the item's content prints (OW-2),
+    // computed from the item itself, whatever the metadata said.
+    api::library_print::stamp_item_prints(item).map_err(doc_err)?;
     Ok(())
+}
+
+/// One Library item as the app describes it to
+/// [`Scene::library_status_json`] / [`Scene::update_definitions_from_items`]
+/// (OW-2): its stored prints, its file bytes, and the file's content hash.
+#[derive(Debug, Clone, Default)]
+struct LibraryItemInput {
+    prints: Option<std::collections::BTreeMap<u64, String>>,
+    bytes: Option<Vec<u8>>,
+    content_hash: Option<String>,
+}
+
+/// Parses `{ "<item id>": { prints?, bytes?, contentHash? } }`.
+fn library_items_from_js(
+    value: &JsValue,
+) -> Result<std::collections::BTreeMap<String, LibraryItemInput>, ApiError> {
+    let mut out = std::collections::BTreeMap::new();
+    if value.is_undefined() || value.is_null() {
+        return Ok(out);
+    }
+    if !value.is_object() {
+        return Err(ApiError::new(
+            "BadLibrary",
+            "the library must be an object keyed by item id",
+        ));
+    }
+    let obj = JsObject::from(value.clone());
+    let keys = JsObject::keys(&obj);
+    for i in 0..keys.length() {
+        let key = keys.get(i);
+        let id = key.as_string().unwrap_or_default();
+        let entry = Reflect::get(&obj, &key).unwrap_or(JsValue::UNDEFINED);
+        if !entry.is_object() {
+            continue;
+        }
+        let field =
+            |k: &str| Reflect::get(&entry, &JsValue::from_str(k)).unwrap_or(JsValue::UNDEFINED);
+        let mut input = LibraryItemInput::default();
+        let prints = field("prints");
+        if prints.is_object() {
+            let text = js_sys::JSON::stringify(&prints)
+                .ok()
+                .and_then(|s| s.as_string())
+                .unwrap_or_default();
+            input.prints = Some(parse_prints_json(&text)?);
+        }
+        let bytes = field("bytes");
+        if bytes.is_object() {
+            input.bytes = Some(Uint8Array::from(bytes).to_vec());
+        }
+        input.content_hash = field("contentHash").as_string();
+        out.insert(id, input);
+    }
+    Ok(out)
+}
+
+/// `{ "<def sid>": "p1:<hex>" }` as a prints map.
+fn parse_prints_json(text: &str) -> Result<std::collections::BTreeMap<u64, String>, ApiError> {
+    let raw: std::collections::BTreeMap<String, String> = serde_json::from_str(text)
+        .map_err(|e| ApiError::new("BadLibrary", &format!("prints: {e}")))?;
+    raw.into_iter()
+        .map(|(sid, p)| {
+            sid.parse::<u64>().map(|sid| (sid, p)).map_err(|_| {
+                ApiError::new(
+                    "BadLibrary",
+                    &format!("prints: {sid:?} is not a definition sid"),
+                )
+            })
+        })
+        .collect()
+}
+
+/// A prints map as JSON, keyed by decimal sid.
+fn prints_json(prints: &std::collections::BTreeMap<u64, String>) -> serde_json::Value {
+    serde_json::Value::Object(
+        prints
+            .iter()
+            .map(|(sid, p)| (sid.to_string(), serde_json::Value::String(p.clone())))
+            .collect(),
+    )
+}
+
+/// What the Library says, from the app's description of each item: its
+/// stored prints when they are under this build's scheme, else the prints
+/// computed from its bytes (also returned, for the app to cache). An item
+/// with neither is left out (its links read `item_missing`).
+#[allow(clippy::type_complexity)]
+fn library_item_prints(
+    items: &std::collections::BTreeMap<String, LibraryItemInput>,
+) -> Result<
+    (
+        std::collections::BTreeMap<String, std::collections::BTreeMap<u64, String>>,
+        std::collections::BTreeMap<String, std::collections::BTreeMap<u64, String>>,
+    ),
+    ApiError,
+> {
+    let mut prints = std::collections::BTreeMap::new();
+    let mut computed = std::collections::BTreeMap::new();
+    for (id, input) in items {
+        let stored = input
+            .prints
+            .as_ref()
+            .filter(|p| p.values().all(|v| kernel::is_current_print(v)));
+        if let Some(p) = stored {
+            prints.insert(id.clone(), p.clone());
+            continue;
+        }
+        // An unreadable file says nothing: its links read `item_missing`
+        // (an update of one refuses `LoadFailed`).
+        if let Some(bytes) = &input.bytes
+            && let Ok(doc) = Document::load(bytes)
+        {
+            let p = api::library_print::item_prints(&doc);
+            computed.insert(id.clone(), p.clone());
+            prints.insert(id.clone(), p);
+        }
+    }
+    Ok((prints, computed))
 }
 
 /// Converts a `u64` handle to a [`MaterialId`], or `None` if the sentinel
@@ -13830,11 +13951,10 @@ impl Scene {
     ) -> Result<kernel::InsertReport, ApiError> {
         let item = Document::load(bytes).map_err(|e: LoadError| api_err(&e, &e))?;
         let pose = affine_transform(affine)?;
+        // The prints come from the item itself, so the stamped base is what
+        // the copy really holds (OW-2).
         let provenance = match (&source_id, &content_hash) {
-            (Some(s), Some(h)) => Some(kernel::LibraryProvenance {
-                source_id: s.clone(),
-                content_hash: h.clone(),
-            }),
+            (Some(s), Some(h)) => Some(api::library_print::provenance(&item, s.clone(), h.clone())),
             _ => None,
         };
         let (report, change) = self
@@ -13911,11 +14031,21 @@ impl Scene {
     }
 
     /// Marks the SOURCE of a just-saved library item
-    /// ([`kernel::Document::stamp_library_source`]): the saved selection —
-    /// and, for an instance, its definition (`def_sid` = the definition's
-    /// stable id in the item file, decimal) — gets the item's `hew.library`
-    /// provenance, so "in this model" counts it immediately and a later
-    /// insert of the item reuses the definition it was saved from. Not an
+    /// ([`kernel::Document::stamp_library_save`]): the saved selection —
+    /// and, for each instance, its definition — gets the item's
+    /// `hew.library` provenance, so "in this model" counts it immediately
+    /// and a later insert of the item reuses the definition it was saved
+    /// from. Each definition links to its OWN copy in the item: its stable
+    /// id there is worked out from the selection as it is now
+    /// ([`kernel::Document::library_save_def_sids`], the same extraction
+    /// `extract_item` made), with its print now as the base (OW-2), so
+    /// every part of a several-part save reads "in step".
+    ///
+    /// `def_sid` (decimal, the item's first definition id as callers pass
+    /// `summary.first_component_sid`) is validated and recorded but no
+    /// longer decides anything: one id cannot name every definition of a
+    /// several-part save. Call this right after writing the item, before
+    /// the model changes, so the ids worked out are the item's. Not an
     /// undo step (bookkeeping, not a model edit), but it IS a recorded,
     /// serialized mutation.
     pub fn stamp_library_source(
@@ -13950,18 +14080,28 @@ impl Scene {
             .zip(ids)
             .map(|(&k, &i)| node_id(k, i))
             .collect::<Result<Vec<_>, _>>()?;
+        if let Some(raw) = def_sid.as_deref() {
+            raw.parse::<u64>()
+                .map_err(|_| ApiError(format!("BadLibraryMeta: def_sid is not a u64: {raw:?}")))?;
+        }
+        // Each saved definition's own id in the item, and its base (OW-2):
+        // its print now, which is the print the item just written holds of
+        // its copy (the copy prints alike). A selection the extraction
+        // refuses (gone stale since) still stamps its live nodes, with no
+        // definition linked.
+        let def_sids = self.doc.library_save_def_sids(&nodes).unwrap_or_default();
+        let mut prints = std::collections::BTreeMap::new();
+        for (&def, &sid) in &def_sids {
+            if let Ok(print) = api::library_print::content_print(&self.doc, def) {
+                prints.insert(sid, print);
+            }
+        }
         let prov = kernel::LibraryProvenance {
             source_id: source_id.to_string(),
             content_hash: content_hash.to_string(),
+            prints,
         };
-        let def_sid_num =
-            match def_sid.as_deref() {
-                None => None,
-                Some(raw) => Some(raw.parse::<u64>().map_err(|_| {
-                    ApiError(format!("BadLibraryMeta: def_sid is not a u64: {raw:?}"))
-                })?),
-            };
-        self.doc.stamp_library_source(&nodes, &prov, def_sid_num);
+        self.doc.stamp_library_save(&nodes, &prov, &def_sids);
         recording::record(recording::RecordedCall::StampLibrarySource {
             kinds: kinds.to_vec(),
             ids: ids.to_vec(),
@@ -13969,6 +14109,350 @@ impl Scene {
             content_hash: content_hash.to_string(),
             def_sid,
         });
+        Ok(())
+    }
+
+    /// Where every definition linked to a Library item stands against the
+    /// item (OW-2, [`kernel::Document::library_links`]), as JSON. Read-only,
+    /// not recorded.
+    ///
+    /// `library` is what the Library says: a JS object keyed by item id,
+    /// one entry per item the Library holds now, each `{ prints?: { "<def
+    /// sid>": "p1:<hex>" }, bytes?: Uint8Array }`. Pass the `prints` an
+    /// item's metadata carries (`hew.library` / `prints` in its manifest
+    /// summary); for an item saved before prints existed (no `prints`, or
+    /// one under another scheme) pass its file `bytes` instead and the
+    /// prints are computed from it. An item missing from `library` is gone
+    /// from the Library: its links read `item_missing`.
+    ///
+    /// Returns `{ links: [{ definition: string (decimal handle), name?,
+    /// item, defSid?: string, state, copies, locked, mine, base?, theirs?
+    /// }], itemPrints: { "<item id>": { "<def sid>": "p1:<hex>" } } }`.
+    /// `state` is `in_step` | `library_newer` | `edited_here` |
+    /// `both_changed` | `different` | `item_missing`; `locked` is true when
+    /// a lock would make an update skip the part (the definition, or
+    /// something its contents hold, is locked: the update's own check,
+    /// [`kernel::Document::library_update_lock`]); `itemPrints`
+    /// holds the prints computed from `bytes`, for the caller to cache by
+    /// file hash.
+    ///
+    /// # Errors
+    /// `BadLibrary` for a malformed `library` object. Bytes that are not a
+    /// `.hew` file count as an item the Library does not hold.
+    pub fn library_status_json(&self, library: JsValue) -> Result<String, JsError> {
+        let items = library_items_from_js(&library).map_err(|e| JsError::new(&e.0))?;
+        let out = self
+            .library_status_core(&items)
+            .map_err(|e| JsError::new(&e.0))?;
+        Ok(out.to_string())
+    }
+
+    /// [`Scene::library_status_json`] minus the JS-value plumbing.
+    fn library_status_core(
+        &self,
+        items: &std::collections::BTreeMap<String, LibraryItemInput>,
+    ) -> Result<serde_json::Value, ApiError> {
+        let (prints, computed) = library_item_prints(items)?;
+        let links = self
+            .doc
+            .library_links(&prints, api::library_print::sha256_digest);
+        let rows: Vec<serde_json::Value> = links
+            .iter()
+            .map(|l| {
+                let mut row = serde_json::json!({
+                    "definition": l.definition.data().as_ffi().to_string(),
+                    "item": l.source_id,
+                    "state": l.state.as_str(),
+                    "copies": l.copies,
+                    "locked": l.frozen,
+                    "mine": l.mine,
+                });
+                let obj = row.as_object_mut().expect("built as an object above");
+                if let Some(name) = self.doc.component_name(l.definition) {
+                    obj.insert("name".into(), name.into());
+                }
+                if let Some(sid) = l.def_sid {
+                    obj.insert("defSid".into(), sid.to_string().into());
+                }
+                if let Some(base) = &l.base {
+                    obj.insert("base".into(), base.clone().into());
+                }
+                if let Some(theirs) = &l.theirs {
+                    obj.insert("theirs".into(), theirs.clone().into());
+                }
+                row
+            })
+            .collect();
+        let item_prints: serde_json::Map<String, serde_json::Value> = computed
+            .into_iter()
+            .map(|(id, p)| (id, prints_json(&p)))
+            .collect();
+        Ok(serde_json::json!({ "links": rows, "itemPrints": item_prints }))
+    }
+
+    /// "Update from Library" (OW-2,
+    /// [`kernel::Document::update_definitions_from_items`]): replaces each
+    /// linked definition's contents with its Library item's, as ONE undo
+    /// step labeled "Update from Library"; every placement keeps its pose.
+    ///
+    /// `request` is `{ definitions?: string[] (decimal definition
+    /// handles), all?: boolean, items: { "<item id>": { bytes: Uint8Array,
+    /// contentHash: string } } }`, exactly one of `definitions` / `all:
+    /// true`. `items` holds the file of every item the update reads (each
+    /// linked definition names its item by id: `library_status_json`'s
+    /// `item`) and its content hash (the same fingerprint an insert
+    /// passes). `all` updates every linked definition whose state is
+    /// `library_newer` against those files; a part also changed here is
+    /// updated only when named.
+    ///
+    /// Returns `{ updated, alsoUpdated, unchanged, kept: string[] (decimal
+    /// handles), skipped: [{ definition, name?, code, message, lockedBy?:
+    /// { kind, id } }], definitionsAdded, materialsAdded }`. `alsoUpdated`
+    /// are nested parts from the same item replaced in the same step;
+    /// `kept` are definitions from the same item as a nested part that
+    /// were left exactly as they were (changed here, or held by a lock),
+    /// the updated part getting a fresh copy of the item's instead.
+    /// `skipped` names each part left exactly as it was and why: `code` is
+    /// `LockedNode` (or `LockedNodeViaSharedShape`, with `lockedBy` the
+    /// locked node), `ExplodeSessionScope`, `ComponentCycle`,
+    /// `ComponentDepthExceeded`, `ComponentExpansionExceeded`,
+    /// `UnknownLibraryItem` (no link, an item missing from `items`, or an
+    /// item that no longer holds the definition), `LoadFailed`, or
+    /// `UnknownComponent`. A call that changes nothing records no step.
+    ///
+    /// # Errors
+    /// `BadLibrary` for a malformed request; `UnknownComponent` for a
+    /// named handle that is not a live definition. A part's own refusal is
+    /// never thrown: it is in `skipped`.
+    pub fn update_definitions_from_items(&mut self, request: JsValue) -> Result<String, JsError> {
+        self.ensure_not_busy()?;
+        let get = |key: &str| {
+            Reflect::get(&request, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED)
+        };
+        let all = get("all").as_bool().unwrap_or(false);
+        let defs_val = get("definitions");
+        let definitions: Option<Vec<u64>> = if defs_val.is_undefined() || defs_val.is_null() {
+            None
+        } else {
+            let arr = js_sys::Array::from(&defs_val);
+            let mut out = Vec::with_capacity(arr.length() as usize);
+            for v in arr.iter() {
+                let text = v.as_string().ok_or_else(|| {
+                    JsError::new("BadLibrary: definitions must be decimal handle strings")
+                })?;
+                out.push(text.parse::<u64>().map_err(|_| {
+                    JsError::new(&format!("BadLibrary: {text:?} is not a definition handle"))
+                })?);
+            }
+            Some(out)
+        };
+        let items = library_items_from_js(&get("items")).map_err(|e| JsError::new(&e.0))?;
+        let out = self
+            .update_definitions_core(definitions, all, &items)
+            .map_err(|e| JsError::new(&e.0))?;
+        Ok(out.to_string())
+    }
+
+    /// [`Scene::update_definitions_from_items`] minus the JS-value
+    /// plumbing: resolve the parts, load each item once, update, reconcile
+    /// and record. The replay arm re-issues the resolved parts through
+    /// [`Scene::update_definitions_replay`].
+    fn update_definitions_core(
+        &mut self,
+        definitions: Option<Vec<u64>>,
+        all: bool,
+        items: &std::collections::BTreeMap<String, LibraryItemInput>,
+    ) -> Result<serde_json::Value, ApiError> {
+        if all == definitions.is_some() {
+            return Err(ApiError::new("BadLibrary", "give definitions or all: true"));
+        }
+        let targets: Vec<ComponentId> = match definitions {
+            Some(handles) => {
+                let mut out: Vec<ComponentId> = Vec::new();
+                for h in handles {
+                    let c = component_id(h);
+                    if self.doc.def_member_nodes(c).is_none() {
+                        return Err(ApiError::new(
+                            "UnknownComponent",
+                            &format!("{h} is not a live definition"),
+                        ));
+                    }
+                    if !out.contains(&c) {
+                        out.push(c);
+                    }
+                }
+                out
+            }
+            None => {
+                let (prints, _) = library_item_prints(items)?;
+                self.doc
+                    .library_links(&prints, api::library_print::sha256_digest)
+                    .into_iter()
+                    .filter(|l| l.state == kernel::LibraryLinkState::LibraryNewer)
+                    .map(|l| l.definition)
+                    .collect()
+            }
+        };
+
+        let mut skipped: Vec<(ComponentId, ApiError, Option<NodeId>)> = Vec::new();
+        let mut loaded: std::collections::BTreeMap<String, Result<Document, ApiError>> =
+            std::collections::BTreeMap::new();
+        let mut parts: Vec<(ComponentId, String)> = Vec::new();
+        for def in targets {
+            let missing = || {
+                ApiError::new(
+                    "UnknownLibraryItem",
+                    "the part is not linked to an item given, or the item no longer holds it",
+                )
+            };
+            let Some(stamp) = self.doc.library_stamp(def) else {
+                skipped.push((def, missing(), None));
+                continue;
+            };
+            let Some(input) = items.get(&stamp.source_id).filter(|i| i.bytes.is_some()) else {
+                skipped.push((def, missing(), None));
+                continue;
+            };
+            let item = loaded.entry(stamp.source_id.clone()).or_insert_with(|| {
+                Document::load(input.bytes.as_deref().expect("filtered above"))
+                    .map_err(|e: LoadError| ApiError::new("LoadFailed", &format!("{e:?}")))
+            });
+            match item {
+                Err(e) => skipped.push((def, ApiError(e.0.clone()), None)),
+                Ok(doc) => {
+                    let holds = stamp.def_sid.is_some_and(|sid| {
+                        doc.component_ids()
+                            .iter()
+                            .any(|&c| doc.sid_of(&kernel::EntityRef::Component(c)) == Some(sid))
+                    });
+                    if holds {
+                        parts.push((def, stamp.source_id.clone()));
+                    } else {
+                        skipped.push((def, missing(), None));
+                    }
+                }
+            }
+        }
+
+        // Each part by handle and item id; each item's file once, however
+        // many parts it updates.
+        let recorded_parts: Vec<recording::RecordedLibraryPart> = parts
+            .iter()
+            .map(|(def, id)| recording::RecordedLibraryPart {
+                definition: def.data().as_ffi(),
+                source_id: id.clone(),
+            })
+            .collect();
+        let mut recorded_ids: Vec<&String> = parts.iter().map(|(_, id)| id).collect();
+        recorded_ids.sort();
+        recorded_ids.dedup();
+        let item_len = |id: &String| items[id].bytes.as_ref().map_or(0, Vec::len);
+        let report = {
+            let updates: Vec<kernel::LibraryUpdate<'_>> = parts
+                .iter()
+                .filter_map(|(def, id)| {
+                    let doc = loaded.get(id)?.as_ref().ok()?;
+                    let hash = items[id].content_hash.clone().unwrap_or_default();
+                    Some(kernel::LibraryUpdate {
+                        definition: *def,
+                        item: doc,
+                        provenance: api::library_print::provenance(doc, id.clone(), hash),
+                    })
+                })
+                .collect();
+            let (report, change) = self
+                .doc
+                .update_definitions_from_items(&updates, api::library_print::sha256_digest)
+                .map_err(doc_err)?;
+            self.reconcile(&change);
+            report
+        };
+        if !report.updated.is_empty() {
+            let total = recorded_ids.iter().map(|id| item_len(id)).sum::<usize>();
+            recording::record_import_sized("update_definitions_from_items", total, || {
+                recording::RecordedCall::UpdateDefinitionsFromItems {
+                    parts: recorded_parts,
+                    items: recorded_ids
+                        .iter()
+                        .map(|&id| recording::RecordedLibraryItem {
+                            source_id: id.clone(),
+                            content_hash: items[id].content_hash.clone().unwrap_or_default(),
+                            bytes: items[id].bytes.clone().unwrap_or_default(),
+                        })
+                        .collect(),
+                }
+            });
+        }
+        for &(def, e) in &report.skipped {
+            let locked = match e {
+                DocumentError::LockedNode { node, .. } => Some(node),
+                _ => None,
+            };
+            skipped.push((def, doc_err(e), locked));
+        }
+
+        let handles = |defs: &[ComponentId]| -> Vec<String> {
+            defs.iter().map(|d| d.data().as_ffi().to_string()).collect()
+        };
+        let skipped_rows: Vec<serde_json::Value> = skipped
+            .iter()
+            .map(|(def, e, locked)| {
+                let (code, message) = e.0.split_once(": ").unwrap_or((e.0.as_str(), ""));
+                let mut row = serde_json::json!({
+                    "definition": def.data().as_ffi().to_string(),
+                    "code": code,
+                    "message": message,
+                });
+                let obj = row.as_object_mut().expect("built as an object above");
+                if let Some(name) = self.doc.component_name(*def) {
+                    obj.insert("name".into(), name.into());
+                }
+                if let Some(node) = locked {
+                    let n = node_js(*node);
+                    obj.insert(
+                        "lockedBy".into(),
+                        serde_json::json!({ "kind": n.kind, "id": n.id.to_string() }),
+                    );
+                }
+                row
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "updated": handles(&report.updated),
+            "alsoUpdated": handles(&report.also_updated),
+            "unchanged": handles(&report.unchanged),
+            "kept": handles(&report.kept),
+            "skipped": skipped_rows,
+            "definitionsAdded": report.definitions_added,
+            "materialsAdded": report.materials_added,
+        }))
+    }
+
+    /// Replays a recorded [`Scene::update_definitions_from_items`]: the
+    /// parts exactly as the live call resolved them.
+    fn update_definitions_replay(
+        &mut self,
+        parts: &[recording::RecordedLibraryPart],
+        recorded: &[recording::RecordedLibraryItem],
+    ) -> Result<(), ApiError> {
+        let items: std::collections::BTreeMap<String, LibraryItemInput> = recorded
+            .iter()
+            .map(|i| {
+                (
+                    i.source_id.clone(),
+                    LibraryItemInput {
+                        prints: None,
+                        bytes: Some(i.bytes.clone()),
+                        content_hash: Some(i.content_hash.clone()),
+                    },
+                )
+            })
+            .collect();
+        self.update_definitions_core(
+            Some(parts.iter().map(|p| p.definition).collect()),
+            false,
+            &items,
+        )?;
         Ok(())
     }
 
@@ -15012,6 +15496,9 @@ impl Scene {
                 }
                 InsertItemPalette { bytes } => {
                     self.insert_item_palette_core(&bytes)?;
+                }
+                UpdateDefinitionsFromItems { parts, items } => {
+                    self.update_definitions_replay(&parts, &items)?;
                 }
                 StampLibrarySource {
                     kinds,
@@ -17829,6 +18316,264 @@ mod tests {
         let final_hash = replayed.replay(&json).unwrap();
         assert_eq!(final_hash, golden, "insert+undo replays to the golden hash");
         assert_eq!(replayed.save(), scene.save());
+    }
+
+    /// Library updates (OW-2) through the wasm layer: a saved item carries
+    /// its prints; an inserted copy reads `in_step`, then `library_newer`
+    /// against an edited item (given as prints, or as bytes for an item
+    /// without prints); the update brings it in step as one undo step that
+    /// records and replays exactly; a locked part is skipped and named.
+    #[test]
+    fn library_status_and_update_from_items_replay() {
+        recording::reset();
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(s, r, 1.0).unwrap();
+        let instance = scene.make_component(&[0u8], &[obj]).unwrap();
+        let v1 = scene
+            .extract_item(
+                &[2u8],
+                &[instance],
+                true,
+                Some("Leg".into()),
+                Some(r#"{"id":"leg-1","category":"component"}"#.into()),
+                None,
+            )
+            .unwrap();
+        let summary = kernel::read_item_summary(&v1).unwrap();
+        let sid: u64 = summary
+            .first_component_sid
+            .clone()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let prints = summary.doc_attrs["hew.library"]["prints"]
+            .as_object()
+            .expect("a saved item carries its prints")
+            .clone();
+        assert!(
+            prints[&sid.to_string()]
+                .as_str()
+                .unwrap()
+                .starts_with("p1:")
+        );
+
+        // A model with the item placed twice.
+        let mut model = Scene::new();
+        model.start_recording();
+        for x in [0.0, 3.0] {
+            let at = [1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+            model
+                .insert_item_composed(&v1, &at, Some("leg-1".into()), Some("h1".into()), None)
+                .unwrap();
+        }
+        let def = model.component_ids()[0];
+
+        // v2: the item's leg made taller.
+        let mut v2_doc = Document::load(&v1).unwrap();
+        let c = v2_doc.component_ids()[0];
+        let o = v2_doc.def_members(c).unwrap()[0];
+        let top = v2_doc
+            .object(o)
+            .unwrap()
+            .faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .unwrap();
+        v2_doc
+            .apply_def_op(
+                c,
+                o,
+                kernel::KernelOp::PushPull {
+                    face: top,
+                    distance: 0.5,
+                },
+            )
+            .unwrap();
+        let v2 = v2_doc.save();
+
+        let by_prints = |bytes: &[u8]| {
+            let mut items = std::collections::BTreeMap::new();
+            let doc = Document::load(bytes).unwrap();
+            items.insert(
+                "leg-1".to_string(),
+                LibraryItemInput {
+                    prints: Some(api::library_print::item_prints(&doc)),
+                    ..Default::default()
+                },
+            );
+            items
+        };
+        let status = model.library_status_core(&by_prints(&v1)).unwrap();
+        assert_eq!(status["links"][0]["state"], "in_step");
+        assert_eq!(status["links"][0]["definition"], def.to_string());
+        assert_eq!(status["links"][0]["copies"], 2);
+        let status = model.library_status_core(&by_prints(&v2)).unwrap();
+        assert_eq!(status["links"][0]["state"], "library_newer");
+        // An item without prints: its bytes are printed here.
+        let mut by_bytes = std::collections::BTreeMap::new();
+        by_bytes.insert(
+            "leg-1".to_string(),
+            LibraryItemInput {
+                bytes: Some(v2.clone()),
+                content_hash: Some("h2".into()),
+                ..Default::default()
+            },
+        );
+        let status = model.library_status_core(&by_bytes).unwrap();
+        assert_eq!(status["links"][0]["state"], "library_newer");
+        assert!(status["itemPrints"]["leg-1"].is_object());
+        // Nothing is said about an item the Library no longer holds.
+        let status = model
+            .library_status_core(&std::collections::BTreeMap::new())
+            .unwrap();
+        assert_eq!(status["links"][0]["state"], "item_missing");
+
+        let before = model.state_hash();
+        let out = model
+            .update_definitions_core(None, true, &by_bytes)
+            .unwrap();
+        assert_eq!(out["updated"], serde_json::json!([def.to_string()]));
+        assert_eq!(out["skipped"], serde_json::json!([]));
+        let status = model.library_status_core(&by_bytes).unwrap();
+        assert_eq!(status["links"][0]["state"], "in_step");
+        model.scene_undo().unwrap();
+        assert_eq!(model.state_hash(), before, "one undo step, exactly");
+        model.scene_redo().unwrap();
+
+        // A locked part is skipped and named, and nothing is recorded.
+        model.scene_undo().unwrap();
+        let inst = model.instance_ids()[0];
+        model.set_nodes_locked(&[2u8], &[inst], true).unwrap();
+        let locked_hash = model.state_hash();
+        let out = model
+            .update_definitions_core(Some(vec![def]), false, &by_bytes)
+            .unwrap();
+        assert_eq!(out["updated"], serde_json::json!([]));
+        assert_eq!(out["skipped"][0]["code"], "LockedNode");
+        assert_eq!(out["skipped"][0]["lockedBy"]["kind"], "instance");
+        assert_eq!(model.state_hash(), locked_hash);
+        model.scene_undo().unwrap();
+        model.stop_recording();
+
+        let json = model.take_recording();
+        assert!(
+            json.contains("update_definitions_from_items"),
+            "the update is recorded"
+        );
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(final_hash, model.state_hash());
+        assert_eq!(replayed.save(), model.save());
+    }
+
+    /// A two-part Library item through the wasm layer: saving both parts
+    /// links each definition to its own copy (both read `in_step`), and an
+    /// update of both parts from the same item records that item's file
+    /// once, and replays exactly.
+    #[test]
+    fn a_two_part_item_stamps_each_part_and_records_its_file_once() {
+        recording::reset();
+        let raise_all = |bytes: &[u8]| -> Vec<u8> {
+            let mut doc = Document::load(bytes).unwrap();
+            for c in doc.component_ids() {
+                let o = doc.def_members(c).unwrap()[0];
+                let top = doc
+                    .object(o)
+                    .unwrap()
+                    .faces()
+                    .iter()
+                    .find(|(_, f)| f.plane.normal().z > 0.9)
+                    .map(|(id, _)| id)
+                    .unwrap();
+                doc.apply_def_op(
+                    c,
+                    o,
+                    kernel::KernelOp::PushPull {
+                        face: top,
+                        distance: 0.5,
+                    },
+                )
+                .unwrap();
+            }
+            doc.save()
+        };
+        let one_item = |bytes: &[u8]| {
+            let mut items = std::collections::BTreeMap::new();
+            items.insert(
+                "pair-1".to_string(),
+                LibraryItemInput {
+                    bytes: Some(bytes.to_vec()),
+                    content_hash: Some(format!("h{}", bytes.len())),
+                    ..Default::default()
+                },
+            );
+            items
+        };
+
+        // The source model: a unit box and a box twice as tall, saved
+        // together.
+        let mut src = Scene::new();
+        let (s, r) = ground_unit_square(&mut src);
+        let a = src.extrude_region(s, r, 1.0).unwrap();
+        let (s, r) = ground_unit_square_at(&mut src, 3.0, 0.0);
+        let b = src.extrude_region(s, r, 2.0).unwrap();
+        let ai = src.make_component(&[0u8], &[a]).unwrap();
+        let bi = src.make_component(&[0u8], &[b]).unwrap();
+        let v1 = src
+            .extract_item(
+                &[2u8, 2u8],
+                &[ai, bi],
+                true,
+                Some("Pair".into()),
+                Some(r#"{"id":"pair-1","category":"component"}"#.into()),
+                None,
+            )
+            .unwrap();
+        let first = kernel::read_item_summary(&v1).unwrap().first_component_sid;
+        src.stamp_library_source(&[2u8, 2u8], &[ai, bi], "pair-1", "h1", first)
+            .unwrap();
+        let status = src.library_status_core(&one_item(&v1)).unwrap();
+        let states: Vec<&str> = status["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["state"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            states,
+            ["in_step", "in_step"],
+            "each part links to its own copy"
+        );
+
+        // A model with the item placed; the Library raises both parts.
+        let mut model = Scene::new();
+        model.start_recording();
+        let at = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        model
+            .insert_item_composed(&v1, &at, Some("pair-1".into()), Some("h1".into()), None)
+            .unwrap();
+        let v2 = raise_all(&v1);
+        let out = model
+            .update_definitions_core(None, true, &one_item(&v2))
+            .unwrap();
+        assert_eq!(out["updated"].as_array().unwrap().len(), 2);
+        assert_eq!(out["kept"], serde_json::json!([]));
+        model.stop_recording();
+        let json = model.take_recording();
+        let rec: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let call = rec["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["method"] == "update_definitions_from_items")
+            .expect("the update is recorded");
+        assert_eq!(call["parts"].as_array().unwrap().len(), 2);
+        assert_eq!(call["items"].as_array().unwrap().len(), 1, "the file once");
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), model.state_hash());
+        assert_eq!(replayed.save(), model.save());
     }
 
     /// Copy/paste of a component instance within one document: the copy

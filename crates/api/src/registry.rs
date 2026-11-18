@@ -1599,6 +1599,20 @@ impl Registry {
             Std,
             "Edit a library item's name, keywords, or collection in place.",
         );
+        add(
+            "hew.library.status",
+            R,
+            Kernel,
+            Std,
+            "Every definition linked to a Library item, and where it stands against the item: in step, newer in the Library, changed here, changed on both sides, different, or the item missing.",
+        );
+        add(
+            "hew.library.update",
+            M,
+            Kernel,
+            Std,
+            "Replace linked definitions' contents with their Library items' (Update from Library): named ones, or every one the Library has newer, as one undo entry; placements keep their poses, refused parts are skipped and named.",
+        );
 
         // ==== true-curves: blend ====
         add(
@@ -3573,6 +3587,97 @@ impl Registry {
                 "host_capability_missing",
                 "unknown_library_item",
                 "save_failed",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.library.status")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Every definition linked to a Library item, and where it stands against the item: in step, newer in the Library, changed here, changed on both sides, different, or the item missing.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "links": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "definition": { "type": "string", "description": "the linked definition's id" },
+                                "name": { "type": "string", "description": "the definition's name, when it has one" },
+                                "item": { "type": "string", "description": "the Library item's id" },
+                                "state": { "type": "string", "enum": ["in_step", "library_newer", "edited_here", "both_changed", "different", "item_missing"], "description": "in_step: the definition holds what the item holds; library_newer: unchanged here, changed in the Library; edited_here: changed here, unchanged in the Library; both_changed: changed on both sides; different: the two differ and nothing says which side moved (a link made before 1.5, or another print scheme); item_missing: the Library no longer holds the item or the item no longer holds this definition (the part keeps working)" },
+                                "copies": { "type": "integer", "description": "how many live placements the definition has" },
+                                "locked": { "type": "boolean", "description": "a lock would make an update skip it: the definition or something its contents hold is locked (the same check hew.library.update makes)" },
+                                "mine": { "type": "string", "description": "the definition's content print now (p1:<hex>)" },
+                                "base": { "type": "string", "description": "the content print it had when last in step with the item; absent for a link made before 1.5" },
+                                "theirs": { "type": "string", "description": "the item's content print of the definition now; absent when the item is missing" }
+                            },
+                            "required": ["definition", "item", "state", "copies", "locked", "mine"]
+                        }
+                    }
+                },
+                "required": ["links"]
+            });
+            cmd.refusals = vec!["host_capability_missing"];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.library.update")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Replace linked definitions' contents with their Library items' (Update from Library): named ones, or every one the Library has newer, as one undo entry; placements keep their poses, refused parts are skipped and named.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "definitions": { "type": "array", "items": { "type": "string" }, "description": "linked definition ids to update, whatever their state — exactly one of definitions/all" },
+                    "all": { "type": "boolean", "description": "true updates every linked definition whose state is library_newer (a part also changed here is updated only when named) — exactly one of definitions/all" }
+                },
+                "additionalProperties": false
+            });
+            let ids = serde_json::json!({ "type": "array", "items": { "type": "string" } });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "updated": { "type": "array", "items": { "type": "string" }, "description": "requested definitions whose contents were replaced" },
+                    "also_updated": { "type": "array", "items": { "type": "string" }, "description": "nested definitions from the same item replaced in the same step" },
+                    "unchanged": ids,
+                    "kept": { "type": "array", "items": { "type": "string" }, "description": "definitions from the same item as a nested part of an updated one, left exactly as they were because they were changed here or a lock holds them; the updated part got a fresh copy of the item's definition instead" },
+                    "skipped": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "definition": { "type": "string" },
+                                "name": { "type": "string" },
+                                "refusal": { "type": "string", "description": "why it was left as it was, a refusal name: locked_node, explode_session_scope, component_cycle, component_depth_exceeded, component_expansion_exceeded, unknown_library_item, load_failed, unknown_component" },
+                                "explanation": { "type": "string" },
+                                "detail": { "type": "object", "description": "the refusal's detail; for locked_node, node is the locked node (inside the part, or the copy that locks it)" }
+                            },
+                            "required": ["definition", "refusal", "explanation", "detail"]
+                        }
+                    },
+                    "definitions_added": { "type": "integer", "description": "definitions the items carried that the model did not hold, copied in" },
+                    "materials_added": { "type": "integer" }
+                },
+                "required": ["updated", "also_updated", "unchanged", "kept", "skipped", "definitions_added", "materials_added"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "unknown_entity",
+                "unknown_library_item",
+                "load_failed",
+                "locked_node",
+                "explode_session_scope",
+                "component_cycle",
+                "component_depth_exceeded",
+                "component_expansion_exceeded",
+                "unknown_component",
             ];
         }
         {
@@ -8111,6 +8216,7 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.scenes.describe",
                 "hew.library.list",
                 "hew.library.describe",
+                "hew.library.status",
                 "hew.doc.health",
                 "hew.solid.imprints",
                 "hew.sketch.units",
@@ -8263,6 +8369,7 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.library.save",
                 "hew.library.remove",
                 "hew.library.update_meta",
+                "hew.library.update",
             ],
         ),
         // Declaration-only: held by no profile a plugin or an app grant

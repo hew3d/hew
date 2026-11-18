@@ -829,6 +829,40 @@ impl Document {
                 b.reanchored(reanchored);
             }
             DocAction::Imported { .. } => b.set.full = true,
+            // Each replaced definition is modified (its member list, and
+            // its `hew.library` stamp re-made); its old rows are removed
+            // and the new ones added, with the definitions copied in; a
+            // linked set only the old rows placed is removed with them.
+            DocAction::UpdatedFromLibrary {
+                swaps,
+                objects,
+                groups,
+                instances,
+                components,
+                sketches,
+                hidden_defs,
+                ..
+            } => {
+                for swap in swaps {
+                    b.component(Modified, swap.def);
+                    b.set.attrs.push(AttrChange::entity(
+                        crate::document::AttrTarget::Entity(EntityRef::Component(swap.def)),
+                        super::LIBRARY_ATTR_NS.to_string(),
+                    ));
+                    b.nodes(Removed, swap.retired.iter().copied());
+                    b.sketches(Removed, swap.retired_sketches.iter().copied());
+                }
+                b.objects(Added, objects.iter().copied());
+                b.groups(Added, groups.iter().copied());
+                b.instances(Added, instances.iter().copied());
+                for &c in components {
+                    b.component(Added, c);
+                }
+                b.sketches(Added, sketches.iter().copied());
+                for (d, nodes) in hidden_defs {
+                    b.hidden_def(*d, nodes);
+                }
+            }
             DocAction::DeletedDefMember {
                 component,
                 object,

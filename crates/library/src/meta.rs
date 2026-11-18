@@ -64,6 +64,12 @@ pub struct ItemMeta {
     pub saved_at: Option<String>,
     /// The document the item was saved out of (display only).
     pub source_doc: Option<String>,
+    /// The content print of each definition the item holds, by its stable
+    /// id in the item file (`prints`, written by every save since Library
+    /// updates, OW-2): what a model using the item compares its own
+    /// definitions against. `None` for an item saved before prints existed
+    /// (or a malformed map): its prints are computed from the file.
+    pub prints: Option<std::collections::BTreeMap<u64, String>>,
 }
 
 /// Parses a `hew.library` attribute-dictionary value (as JSON — e.g.
@@ -109,6 +115,14 @@ pub fn parse_item_meta(raw: &serde_json::Value) -> ItemMeta {
     }
     if let Some(source_doc) = obj.get("sourceDoc").and_then(|v| v.as_str()) {
         meta.source_doc = Some(source_doc.to_string());
+    }
+    // All-or-nothing, like keywords: one malformed entry and the item
+    // reads as having no prints (they are then computed from the file).
+    if let Some(prints) = obj.get("prints").and_then(|v| v.as_object()) {
+        meta.prints = prints
+            .iter()
+            .map(|(sid, p)| Some((sid.parse::<u64>().ok()?, p.as_str()?.to_string())))
+            .collect();
     }
     meta
 }
@@ -218,6 +232,22 @@ mod tests {
         assert_eq!(meta.collection.as_deref(), Some("Furniture/Seating"));
         assert_eq!(meta.saved_at.as_deref(), Some("2026-01-01T00:00:00.000Z"));
         assert_eq!(meta.source_doc.as_deref(), Some("house.hew"));
+        // Saved before Library updates: no prints.
+        assert_eq!(meta.prints, None);
+    }
+
+    #[test]
+    fn parse_item_meta_reads_the_prints_map_whole_or_not_at_all() {
+        let raw = serde_json::json!({ "prints": { "3": "p1:aa", "9": "p1:bb" } });
+        let prints = parse_item_meta(&raw).prints.expect("well formed");
+        assert_eq!(prints.get(&3).map(String::as_str), Some("p1:aa"));
+        assert_eq!(prints.get(&9).map(String::as_str), Some("p1:bb"));
+        let bad_key = serde_json::json!({ "prints": { "x": "p1:aa" } });
+        assert_eq!(parse_item_meta(&bad_key).prints, None);
+        let bad_value = serde_json::json!({ "prints": { "3": 5 } });
+        assert_eq!(parse_item_meta(&bad_value).prints, None);
+        let empty = serde_json::json!({ "prints": {} });
+        assert_eq!(parse_item_meta(&empty).prints, Some(Default::default()));
     }
 
     #[test]

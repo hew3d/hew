@@ -52,6 +52,7 @@ import {
 } from '../i18n/language'
 import { languageOptions } from '../i18n/languageOptions'
 import { libraryStore } from '../io/libraryStore'
+import { setCheckLibraryUpdates, useCheckLibraryUpdates } from './libraryUpdates'
 import { describeIdentity, useServerSettingForm } from './serverForm'
 import { useAutoUpdateSetting } from './autoUpdate'
 import { CLOUD_ORIGIN } from './server'
@@ -449,6 +450,7 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
   const [format, setFormat] = useState<LengthFormat>(() => getLengthUnit())
   const [theme, setTheme] = useState<ThemeSetting>(() => getThemeSetting())
   const [debug, setDebug] = useState<boolean>(() => getDebugMode())
+  const checkLibraryUpdates = useCheckLibraryUpdates()
   const [language, setLanguage] = useState<LanguageSetting>(() => getLanguageSetting())
   const libStore = libraryStore()
   const libraryAvailable = libStore.available()
@@ -649,6 +651,13 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
               {t`Change…`}
             </button>
           </div>
+
+          <SettingsCard
+            title={t`Check the Library for newer parts`}
+            description={t`When a part you inserted from the Library has a newer version there, Hew says so under the menu bar. It never changes anything until you choose to update. With this off, Hew stops checking by itself and never shows that note, but it still checks when you open the Components panel or the Library, or save a part to the Library.`}
+          >
+            <ToggleSwitch checked={checkLibraryUpdates} onChange={setCheckLibraryUpdates} ariaLabel={t`Check the Library for newer parts`} />
+          </SettingsCard>
 
           <ServerSection />
 

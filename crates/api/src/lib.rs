@@ -27,6 +27,7 @@ pub mod grant;
 pub mod health;
 pub mod host;
 pub mod ids;
+pub mod library_print;
 pub mod locate;
 pub mod part_frame;
 pub mod paths;

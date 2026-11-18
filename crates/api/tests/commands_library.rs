@@ -1379,3 +1379,664 @@ fn a_preview_build_serves_profile_items() {
     assert_eq!(d["refusal"], "profile_not_insertable");
     assert_eq!(d["explanation"], api::preview::GATED_API_COPY[0].2);
 }
+
+// ============================================ Library updates (OW-2)
+
+/// The public id of `entity` in `doc`.
+fn public(doc: &Document, entity: EntityRef) -> String {
+    api::IdResolver::new(doc)
+        .public_of(doc, &entity)
+        .expect("a live entity")
+}
+
+/// A library with one component item ("box-id"), saved the way
+/// `hew.library.save` saves one: through the command, from a box.
+fn library_with_a_box() -> FakeHost {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let root = build_box(&mut conn, &mut doc);
+    let id = public(&doc, EntityRef::Object(root));
+    let saved = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.save",
+        json!({ "selection": [id], "name": "Box" }),
+    );
+    // Rename the item's id to a fixed one for the tests (a replace keeps
+    // whatever id the item has).
+    let path = saved["path"].as_str().unwrap().to_string();
+    let mut item = Document::load(&host.items[&path]).unwrap();
+    item.attr_set(
+        AttrTarget::Document,
+        "hew.library",
+        "id",
+        kernel::AttrValue::Text("box-id".into()),
+    )
+    .unwrap();
+    host.items.insert(path, item.save());
+    host
+}
+
+/// A document holding two inserted copies of "box-id": the connection,
+/// the document, and the linked definition's public id.
+fn model_with_two_boxes(host: &mut FakeHost) -> (Connection, Document, String) {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc, host);
+    for (n, x) in [(2, 0.0), (3, 3.0)] {
+        call_ok(
+            &mut conn,
+            &mut doc,
+            host,
+            n,
+            "hew.library.insert",
+            json!({ "item": "box-id", "at": [x, 0.0, 0.0] }),
+        );
+    }
+    assert_eq!(doc.component_ids().len(), 1);
+    let def = public(&doc, EntityRef::Component(doc.component_ids()[0]));
+    (conn, doc, def)
+}
+
+/// Edits "box-id" in the Library from a second document: insert it, raise
+/// the box, and save it back over the item with `replace`.
+fn edit_the_box_in_the_library(host: &mut FakeHost, rise: f64) {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc, host);
+    call_ok(
+        &mut conn,
+        &mut doc,
+        host,
+        2,
+        "hew.library.insert",
+        json!({ "item": "box-id" }),
+    );
+    let c = doc.component_ids()[0];
+    let o = doc.def_members(c).unwrap()[0];
+    let top = doc
+        .object(o)
+        .unwrap()
+        .faces()
+        .iter()
+        .find(|(_, f)| f.plane.normal().z > 0.9)
+        .map(|(id, _)| id)
+        .unwrap();
+    doc.apply_def_op(
+        c,
+        o,
+        kernel::KernelOp::PushPull {
+            face: top,
+            distance: rise,
+        },
+    )
+    .unwrap();
+    let inst = public(&doc, EntityRef::Instance(doc.instance_ids()[0]));
+    call_ok(
+        &mut conn,
+        &mut doc,
+        host,
+        3,
+        "hew.library.save",
+        json!({ "selection": [inst], "name": "Box", "replace": "box-id" }),
+    );
+}
+
+fn states(status: &Value) -> Vec<String> {
+    status["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["state"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn every_save_writes_prints_and_the_source_is_in_step_with_its_item() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let root = build_box(&mut conn, &mut doc);
+    // An instance selection, so the source definition is stamped.
+    let (_, inst, _) = doc.make_component(&[NodeId::Object(root)]).unwrap();
+    let inst_id = public(&doc, EntityRef::Instance(inst));
+    let saved = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        4,
+        "hew.library.save",
+        json!({ "selection": [inst_id], "name": "Box" }),
+    );
+    let bytes = &host.items[saved["path"].as_str().unwrap()];
+    let summary = item_summary(bytes);
+    let prints = summary.doc_attrs["hew.library"]["prints"]
+        .as_object()
+        .expect("the item carries its prints");
+    assert_eq!(prints.len(), 1);
+    let sid = summary.first_component_sid.clone().unwrap();
+    let print = prints[&sid].as_str().unwrap();
+    assert!(print.starts_with("p1:"), "{print}");
+    // The source definition's base is that print.
+    let c = doc.component_ids()[0];
+    let stamp = doc.library_stamp(c).unwrap();
+    assert_eq!(stamp.print.as_deref(), Some(print));
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        5,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["in_step"]);
+    assert_eq!(status["links"][0]["copies"], 1);
+    assert_eq!(status["links"][0]["locked"], false);
+    assert_eq!(status["links"][0]["item"], saved["id"]);
+}
+
+#[test]
+fn saving_two_parts_links_each_to_its_own_definition_and_both_read_in_step() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    // Two different parts: a 1 m box and a box twice as wide.
+    let a = build_box(&mut conn, &mut doc);
+    let wide = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.doc.transact",
+        json!({
+            "commands": [
+                { "method": "hew.sketch.draw_rect", "as": "profile", "params": ground_rect([4.0, 0.0, 0.0], [6.0, 1.0, 0.0]) },
+                { "method": "hew.solid.extrude", "params": {
+                    "region": { "$ref": "profile#/region_id" }, "distance": 1.0
+                }}
+            ]
+        }),
+    );
+    let Some(EntityRef::Object(b)) =
+        api::IdResolver::new(&doc).resolve(wide["results"][1]["object_id"].as_str().unwrap())
+    else {
+        panic!("expected an object");
+    };
+    let (_, ai, _) = doc.make_component(&[NodeId::Object(a)]).unwrap();
+    let (_, bi, _) = doc.make_component(&[NodeId::Object(b)]).unwrap();
+    let sel = [
+        public(&doc, EntityRef::Instance(ai)),
+        public(&doc, EntityRef::Instance(bi)),
+    ];
+    let saved = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        4,
+        "hew.library.save",
+        json!({ "selection": sel, "name": "Pair" }),
+    );
+    let bytes = &host.items[saved["path"].as_str().unwrap()];
+    let prints = item_summary(bytes).doc_attrs["hew.library"]["prints"].clone();
+    // Each definition's base is the item's print of its own copy.
+    let mut sids = Vec::new();
+    for c in doc.component_ids() {
+        let stamp = doc.library_stamp(c).unwrap();
+        let sid = stamp.def_sid.unwrap().to_string();
+        assert_eq!(stamp.print.as_deref(), prints[&sid].as_str());
+        sids.push(sid);
+    }
+    assert_ne!(sids[0], sids[1], "two definitions, two ids");
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        5,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["in_step", "in_step"]);
+}
+
+#[test]
+fn a_newer_item_reads_library_newer_and_update_all_brings_it_in_step() {
+    let mut host = library_with_a_box();
+    let (mut conn, mut doc, def) = model_with_two_boxes(&mut host);
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        10,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["in_step"]);
+    assert_eq!(status["links"][0]["definition"], def);
+    assert_eq!(status["links"][0]["copies"], 2);
+
+    edit_the_box_in_the_library(&mut host, 0.5);
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        11,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["library_newer"]);
+
+    let poses: Vec<_> = doc
+        .instance_ids()
+        .iter()
+        .map(|&i| doc.instance_pose(i).unwrap().to_affine())
+        .collect();
+    let before = doc.state_hash();
+    let out = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        12,
+        "hew.library.update",
+        json!({ "all": true }),
+    );
+    let out = &out["results"][0];
+    assert_eq!(out["updated"], json!([def]));
+    assert_eq!(out["skipped"], json!([]));
+    assert_eq!(out["kept"], json!([]));
+    let after_poses: Vec<_> = doc
+        .instance_ids()
+        .iter()
+        .map(|&i| doc.instance_pose(i).unwrap().to_affine())
+        .collect();
+    assert_eq!(poses, after_poses, "nothing moves");
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        13,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["in_step"]);
+
+    // One undo entry takes it all back.
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        14,
+        "hew.history.undo",
+        json!({}),
+    );
+    assert_eq!(doc.state_hash(), before);
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        15,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["library_newer"]);
+}
+
+#[test]
+fn renaming_an_item_announces_nothing() {
+    let mut host = library_with_a_box();
+    let (mut conn, mut doc, _) = model_with_two_boxes(&mut host);
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        10,
+        "hew.library.update_meta",
+        json!({ "item": "box-id", "name": "Oak box" }),
+    );
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        11,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["in_step"]);
+    // And a third insert still reuses the definition.
+    let third = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        12,
+        "hew.library.insert",
+        json!({ "item": "box-id", "at": [9.0, 0.0, 0.0] }),
+    );
+    assert_eq!(third["results"][0]["definitions_reused"], 1);
+}
+
+#[test]
+fn an_item_saved_before_prints_is_printed_from_its_file() {
+    let mut host = library_with_a_box();
+    // Strip the prints, as an item saved by 1.4 has none.
+    let path = host.items.keys().next().unwrap().clone();
+    let mut item = Document::load(&host.items[&path]).unwrap();
+    item.attr_delete(AttrTarget::Document, "hew.library", Some("prints"))
+        .unwrap();
+    host.items.insert(path, item.save());
+    let (mut conn, mut doc, _) = model_with_two_boxes(&mut host);
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        10,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["in_step"]);
+}
+
+#[test]
+fn a_part_changed_here_reads_edited_here_and_update_all_leaves_it() {
+    let mut host = library_with_a_box();
+    let (mut conn, mut doc, _) = model_with_two_boxes(&mut host);
+    let c = doc.component_ids()[0];
+    let o = doc.def_members(c).unwrap()[0];
+    let top = doc
+        .object(o)
+        .unwrap()
+        .faces()
+        .iter()
+        .find(|(_, f)| f.plane.normal().z > 0.9)
+        .map(|(id, _)| id)
+        .unwrap();
+    doc.apply_def_op(
+        c,
+        o,
+        kernel::KernelOp::PushPull {
+            face: top,
+            distance: 0.3,
+        },
+    )
+    .unwrap();
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        10,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["edited_here"]);
+    let out = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        11,
+        "hew.library.update",
+        json!({ "all": true }),
+    );
+    assert_eq!(out["results"][0]["updated"], json!([]));
+    edit_the_box_in_the_library(&mut host, 0.5);
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        12,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["both_changed"]);
+}
+
+#[test]
+fn update_refusals_are_typed_and_change_nothing() {
+    let mut host = library_with_a_box();
+    let (mut conn, mut doc, def) = model_with_two_boxes(&mut host);
+    edit_the_box_in_the_library(&mut host, 0.5);
+
+    // Neither or both of definitions/all.
+    for (n, params) in [
+        (10, json!({})),
+        (11, json!({ "all": true, "definitions": [def] })),
+    ] {
+        let r = call(
+            &mut conn,
+            &mut doc,
+            &mut host,
+            n,
+            "hew.library.update",
+            params,
+        );
+        assert_eq!(r.error.unwrap().code, codes::INVALID_PARAMS);
+    }
+    // An id that is not a definition.
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        12,
+        "hew.library.update",
+        json!({ "definitions": ["obj_999999"] }),
+    );
+    assert_eq!(d["refusal"], "unknown_entity");
+
+    // A locked part, named alone: a typed refusal naming the lock.
+    let inst = public(&doc, EntityRef::Instance(doc.instance_ids()[0]));
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        13,
+        "hew.entity.lock",
+        json!({ "targets": [inst] }),
+    );
+    let hash_locked = doc.state_hash();
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        14,
+        "hew.library.update",
+        json!({ "definitions": [def] }),
+    );
+    assert_eq!(d["refusal"], "locked_node");
+    assert!(d["detail"]["node"].is_string(), "{d}");
+    assert_eq!(doc.state_hash(), hash_locked);
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        15,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(status["links"][0]["locked"], true);
+    // With all: true the locked part is skipped and named.
+    let out = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        16,
+        "hew.library.update",
+        json!({ "all": true }),
+    );
+    let out = &out["results"][0];
+    assert_eq!(out["updated"], json!([]));
+    assert_eq!(out["skipped"][0]["definition"], def);
+    assert_eq!(out["skipped"][0]["refusal"], "locked_node");
+    assert_eq!(doc.state_hash(), hash_locked);
+
+    // A definition with no Library link.
+    let root = build_box(&mut conn, &mut doc);
+    let (plain, _, _) = doc.make_component(&[NodeId::Object(root)]).unwrap();
+    let plain_id = public(&doc, EntityRef::Component(plain));
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        17,
+        "hew.library.update",
+        json!({ "definitions": [plain_id] }),
+    );
+    assert_eq!(d["refusal"], "unknown_library_item");
+
+    // The item gone from the Library.
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        18,
+        "hew.entity.unlock",
+        json!({ "all": true }),
+    );
+    let path = host.items.keys().next().unwrap().clone();
+    host.items.remove(&path);
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        19,
+        "hew.library.update",
+        json!({ "definitions": [def] }),
+    );
+    assert_eq!(d["refusal"], "unknown_library_item");
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        20,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["item_missing"]);
+}
+
+#[test]
+fn status_and_update_need_a_library_host() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc, &mut NoHost);
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut NoHost,
+        2,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(d["refusal"], "host_capability_missing");
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut NoHost,
+        3,
+        "hew.library.update",
+        json!({ "all": true }),
+    );
+    assert_eq!(d["refusal"], "host_capability_missing");
+}
+
+mod update_fuzz {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[derive(Debug, Clone)]
+    enum Step {
+        Insert(f64),
+        EditInLibrary(f64),
+        EditHere(f64),
+        Lock(usize),
+        UnlockAll,
+        Update(Vec<usize>),
+        UpdateAll,
+        Undo,
+        Redo,
+    }
+
+    fn arb_step() -> impl Strategy<Value = Step> {
+        prop_oneof![
+            (-5.0f64..5.0).prop_map(Step::Insert),
+            (0.05f64..0.6).prop_map(Step::EditInLibrary),
+            (0.05f64..0.6).prop_map(Step::EditHere),
+            any::<usize>().prop_map(Step::Lock),
+            Just(Step::UnlockAll),
+            proptest::collection::vec(any::<usize>(), 0..3).prop_map(Step::Update),
+            Just(Step::UpdateAll),
+            Just(Step::Undo),
+            Just(Step::Redo),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        /// Arbitrary status reads and update calls, among inserts, edits on
+        /// both sides, locks, undo and redo, never corrupt the document: it
+        /// validates after every step (debug builds), reopens, and a refused
+        /// update changes nothing.
+        #[test]
+        fn arbitrary_updates_never_corrupt(steps in proptest::collection::vec(arb_step(), 1..14)) {
+            let mut host = library_with_a_box();
+            let (mut conn, mut doc, _) = model_with_two_boxes(&mut host);
+            for (k, step) in steps.iter().enumerate() {
+                let n = 100 + k as i64;
+                match step {
+                    Step::Insert(x) => {
+                        call(&mut conn, &mut doc, &mut host, n, "hew.library.insert", json!({ "item": "box-id", "at": [x, 0.0, 0.0] }));
+                    }
+                    Step::EditInLibrary(rise) => edit_the_box_in_the_library(&mut host, *rise),
+                    Step::EditHere(rise) => {
+                        if let Some(&c) = doc.component_ids().first()
+                            && let Some(o) = doc.def_members(c).and_then(|m| m.first().copied())
+                            && let Some(top) = doc.object(o).and_then(|obj| obj.faces().iter().find(|(_, f)| f.plane.normal().z > 0.9).map(|(id, _)| id))
+                        {
+                            let _ = doc.apply_def_op(c, o, kernel::KernelOp::PushPull { face: top, distance: *rise });
+                        }
+                    }
+                    Step::Lock(sel) => {
+                        let insts = doc.instance_ids();
+                        if !insts.is_empty() {
+                            let id = public(&doc, EntityRef::Instance(insts[sel % insts.len()]));
+                            call(&mut conn, &mut doc, &mut host, n, "hew.entity.lock", json!({ "targets": [id] }));
+                        }
+                    }
+                    Step::UnlockAll => {
+                        call(&mut conn, &mut doc, &mut host, n, "hew.entity.unlock", json!({ "all": true }));
+                    }
+                    Step::Update(sels) => {
+                        let defs = doc.component_ids();
+                        let ids: Vec<String> = sels
+                            .iter()
+                            .filter(|_| !defs.is_empty())
+                            .map(|s| public(&doc, EntityRef::Component(defs[s % defs.len()])))
+                            .collect();
+                        let before = doc.state_hash();
+                        let r = call(&mut conn, &mut doc, &mut host, n, "hew.library.update", json!({ "definitions": ids }));
+                        if r.error.is_some() {
+                            prop_assert_eq!(doc.state_hash(), before, "a refused update changed the document");
+                        }
+                    }
+                    Step::UpdateAll => {
+                        let r = call(&mut conn, &mut doc, &mut host, n, "hew.library.update", json!({ "all": true }));
+                        prop_assert!(r.error.is_none(), "{:?}", r.error);
+                    }
+                    Step::Undo => {
+                        let _ = doc.undo();
+                    }
+                    Step::Redo => {
+                        let _ = doc.redo();
+                    }
+                }
+                let status = call(&mut conn, &mut doc, &mut host, n + 1000, "hew.library.status", json!({}));
+                prop_assert!(status.error.is_none(), "{:?}", status.error);
+                let back = Document::load(&doc.save());
+                prop_assert!(back.is_ok(), "step {k} ({step:?}): the document does not reopen");
+            }
+        }
+    }
+}

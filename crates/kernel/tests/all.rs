@@ -103,6 +103,7 @@ mod insert_definition;
 mod instance_materials;
 mod kb25_specs;
 mod library_specs;
+mod library_update_specs;
 mod linked_copies_specs;
 mod lock_enforcement_specs;
 mod lock_specs;

@@ -13,6 +13,7 @@ describe('historyLabel (English must match the kernel renderer)', () => {
     expect(historyLabel(k('link-identical-copies'), 'x')).toBe('Link identical copies')
     expect(historyLabel(k('lock'), 'x')).toBe('Lock')
     expect(historyLabel(k('unlock'), 'x')).toBe('Unlock')
+    expect(historyLabel(k('update-from-library'), 'x')).toBe('Update from Library')
   })
 
   it('labeled, repeat and bundle', () => {

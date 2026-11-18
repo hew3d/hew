@@ -39,6 +39,7 @@ mod clipboard;
 mod curves;
 mod draft;
 mod history_budget;
+mod library_link;
 mod member_ops;
 mod occurrences;
 pub use cells::{CellDecline, CellDeclineReason, CellOutcome, CellScope, CellSeed, OpenEdges};
@@ -54,6 +55,12 @@ pub use draft::{
 pub use history_budget::{
     DEFAULT_HISTORY_BUDGET_BYTES, DEFAULT_HISTORY_MIN_STEPS, HistoryBudget, HistoryMemory,
     HistoryTrim,
+};
+use library_link::DefinitionSwap;
+pub use library_link::{
+    CONTENT_PRINT_SCHEME, LibraryLink, LibraryLinkState, LibraryPrints, LibraryStamp,
+    LibraryUpdate, LibraryUpdateReport, PrintDigest, content_print_text, is_current_print,
+    library_link_state,
 };
 pub use occurrences::{MAX_OCCURRENCES, Occurrence, RenderRoot};
 
@@ -1163,6 +1170,7 @@ pub fn render_history_label(kind: &HistoryKind) -> String {
         "unlock" => "Unlock".to_string(),
         "import" => format!("Import {}", count_label(count("count"), "item")),
         "delete-component-member" => "Delete component member".to_string(),
+        "update-from-library" => "Update from Library".to_string(),
         other => other.to_string(),
     }
 }
@@ -1404,6 +1412,9 @@ fn audit_exempt(action: &DocAction) -> Vec<EntityRef> {
         | DocAction::Imported { .. }
         | DocAction::DeletedDefMember { .. }
         | DocAction::ConsumedScaffolding { .. }
+        // Update from Library replaces contents it refused up front to
+        // touch while frozen: nothing is exempt.
+        | DocAction::UpdatedFromLibrary { .. }
         | DocAction::PlaceTextCompound(_) => Vec::new(),
     }
 }
@@ -2850,6 +2861,36 @@ enum DocAction {
         /// tombstoned with any entity, so they must be put back exactly.
         attrs: Vec<ImportedAttr>,
     },
+    /// [`Document::update_definitions_from_items`] replaced the contents of
+    /// one or more definitions with copies of their Library items' (OW-2,
+    /// "Update from Library"). Each definition keeps its id and every
+    /// placement; its old live member subtree and its own sketches are
+    /// hidden (`swaps`), the new rows are created (the lists below), and
+    /// its `hew.library` stamp is re-made. Undo reveals the old rows,
+    /// restores each member list and stamp exactly, hides every created
+    /// row, tombstones the created sketches and unregisters the new tags;
+    /// redo reverses. Palette materials the update added are not undone,
+    /// like every palette addition.
+    UpdatedFromLibrary {
+        /// One entry per replaced definition, in update order.
+        swaps: Vec<DefinitionSwap>,
+        /// Every Object the copy created (new members, the members of
+        /// definitions copied in).
+        objects: Vec<ObjectId>,
+        /// Every group the copy created.
+        groups: Vec<GroupId>,
+        /// Every placement the copy created.
+        instances: Vec<InstanceId>,
+        /// Definitions the item carried that the model did not hold.
+        components: Vec<ComponentId>,
+        /// Every sketch the copy created.
+        sketches: Vec<SketchId>,
+        /// Linked sets only the old contents placed, hidden with them,
+        /// each with the member nodes hidden alongside it.
+        hidden_defs: Vec<HiddenDef>,
+        /// Tag paths the update newly registered, with their hidden flags.
+        tags: Vec<(Vec<String>, bool)>,
+    },
     /// `delete_def_member` hid one object from a component definition —
     /// component-edit-parity.md phase K1. Unlike [`DocAction::Deleted`] on a
     /// world object, `ComponentDef.members` is a flat geometry bag, not a
@@ -3242,6 +3283,17 @@ impl DocAction {
             }
             DocAction::Generated { result, .. } => vec![*result],
             DocAction::Imported { objects, .. } => objects.clone(),
+            // The new members and the retired ones.
+            DocAction::UpdatedFromLibrary { objects, swaps, .. } => {
+                let mut v = objects.clone();
+                for swap in swaps {
+                    v.extend(swap.retired.iter().filter_map(|n| match n {
+                        NodeId::Object(o) => Some(*o),
+                        _ => None,
+                    }));
+                }
+                v
+            }
             DocAction::DeletedDefMember { object, .. } => vec![*object],
             DocAction::ConsumedScaffolding { .. } => Vec::new(),
             DocAction::SessionOpened { .. }
@@ -3353,6 +3405,15 @@ impl DocAction {
             | DocAction::Generated { .. }
             | DocAction::Imported { .. }
             | DocAction::DeletedDefMember { .. } => Vec::new(),
+            DocAction::UpdatedFromLibrary {
+                sketches, swaps, ..
+            } => {
+                let mut v = sketches.clone();
+                for swap in swaps {
+                    v.extend(swap.retired_sketches.iter().copied());
+                }
+                v
+            }
             DocAction::ConsumedScaffolding { sketch, .. } => vec![*sketch],
             DocAction::SessionOpened { .. }
             | DocAction::SessionClosed { .. }
@@ -4558,16 +4619,27 @@ pub enum MaterialScope {
 /// node the insert creates, and the key the idempotent re-insert match reads
 /// back (inserting "Chair" twice reuses the in-document definition instead
 /// of minting a second one). The kernel never mints these — the caller
-/// derives `source_id` from the item's own metadata and `content_hash` from
-/// the item's bytes — so an edited library file (same id, new hash) inserts
-/// as a fresh definition instead of silently reusing stale geometry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// derives `source_id` from the item's own metadata, `content_hash` from
+/// the item's bytes and `prints` from the item's definitions. Reuse asks
+/// for the same item and definition and the same CONTENT (the content
+/// print, compared exactly), never the same file bytes: a renamed or
+/// re-saved item reuses its definition, an edited one inserts fresh.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LibraryProvenance {
     /// The item's stable library identity (its `hew.library` `id`).
     pub source_id: String,
     /// A caller-computed content fingerprint of the item file (any stable
-    /// scheme — the kernel only ever compares it for equality).
+    /// scheme). Stamped so older readers keep working; the kernel no
+    /// longer compares it.
     pub content_hash: String,
+    /// The item's content prints (`p1:<hex>`,
+    /// [`Document::content_print`]) by each definition's stable id in the
+    /// item file: a stamped definition's `print`, its base for the Library
+    /// link state. The caller computes them
+    /// ([`Document::content_prints_by_sid`]) or reads the item's own
+    /// `hew.library` `prints`; a definition missing from the map is
+    /// stamped without a base. The kernel never hashes.
+    pub prints: BTreeMap<u64, String>,
 }
 
 /// Options for [`Document::insert_document`].
@@ -8535,7 +8607,9 @@ impl Document {
     ) -> Result<(ComponentId, bool, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "insert_as_definition");
         self.refuse_during_component_session()?;
-        if let Some(existing) = self.find_library_definition(&provenance, Some(WRAPPED_DEF_SID)) {
+        if let Some(existing) =
+            self.find_library_definition(&provenance, Some(WRAPPED_DEF_SID), None)
+        {
             return Ok((existing, true, DocChange::default()));
         }
         let roots = item.top_level_nodes();
@@ -8703,8 +8777,8 @@ impl Document {
     /// A single INSTANCE selection always produces that shape (its
     /// definition rides along, poses conjugated). The flag is ignored for
     /// groups and multi-node selections, which copy structurally — a group
-    /// item inserts back as a deep-copied group; definitions cannot nest
-    /// yet (ROADMAP: "Nested component definitions").
+    /// item inserts back as a deep-copied group, and every definition the
+    /// selection places (nested ones included) rides along once.
     ///
     /// Node tags carry, with their registry entries (hidden flags included);
     /// per-entity attribute dictionaries carry. World guides, annotations,
@@ -9052,6 +9126,20 @@ impl Document {
         wrap_as_component: bool,
         origin: Option<&str>,
     ) -> Result<Document, DocumentError> {
+        self.extract_item_copy_mapped(roots, wrap_as_component, origin)
+            .map(|(item, _)| item)
+    }
+
+    /// [`Document::extract_item_copy`] with the map from each definition
+    /// of this document the copy carries to its copy in the item: what
+    /// [`Document::library_save_def_sids`] reads. A wrap-minted definition
+    /// has no source and is not in it.
+    pub(super) fn extract_item_copy_mapped(
+        &self,
+        roots: &[NodeId],
+        wrap_as_component: bool,
+        origin: Option<&str>,
+    ) -> Result<(Document, BTreeMap<ComponentId, ComponentId>), DocumentError> {
         info!(target: "kernel::op", op = "extract_item");
         self.refuse_during_component_session()?;
         if roots.is_empty() {
@@ -9245,18 +9333,27 @@ impl Document {
             }
         }
 
-        Ok(item)
+        Ok((item, ctx.def_map))
     }
 
-    /// The live definition whose stamped `hew.library` provenance matches
-    /// (`source_id`, `content_hash`, `def_sid`) — the idempotent re-insert
-    /// lookup. `def_sid` is the definition's stable id IN THE ITEM FILE,
+    /// The live definition that came from the same item and definition
+    /// (`source_id`, `def_sid`) and, when `content` names the item's
+    /// definition, holds exactly its content now (the content print,
+    /// compared exactly: [`Document::content_equal`]) — the idempotent
+    /// re-insert lookup (OW-2). The whole-file `content_hash` is not
+    /// compared then: a renamed or re-saved item still reuses its
+    /// definition, and a definition edited here (or an item edited in the
+    /// Library) does not match. Without `content` (a definition made from
+    /// a whole file, [`Document::insert_as_definition`]) the stamped
+    /// `content_hash` must match instead. `def_sid` is the definition's
+    /// stable id IN THE ITEM FILE,
     /// distinguishing multiple definitions carried by one item. First match
     /// in deterministic slotmap order.
     fn find_library_definition(
         &self,
         prov: &LibraryProvenance,
         def_sid: Option<u64>,
+        content: Option<(&Document, ComponentId)>,
     ) -> Option<ComponentId> {
         use crate::attr::AttrValue;
         let want_sid = def_sid.map(|s| s.to_string());
@@ -9272,10 +9369,18 @@ impl Document {
                 Some(AttrValue::Text(s)) => Some(s.as_str()),
                 _ => None,
             };
-            (text("source_id") == Some(prov.source_id.as_str())
-                && text("content_hash") == Some(prov.content_hash.as_str())
-                && text("def_sid") == want_sid.as_deref())
-            .then_some(cid)
+            if text("source_id") != Some(prov.source_id.as_str())
+                || text("def_sid") != want_sid.as_deref()
+            {
+                return None;
+            }
+            let same = match content {
+                Some((item, item_cid)) => self.content_equal(cid, item, item_cid),
+                // A definition made from a whole file has no item
+                // definition to compare: the file's fingerprint stands in.
+                None => text("content_hash") == Some(prov.content_hash.as_str()),
+            };
+            same.then_some(cid)
         })
     }
 
@@ -9348,6 +9453,19 @@ impl Document {
                 ns.remove("def_sid");
             }
         }
+        // The base print (OW-2): what the item holds of this definition,
+        // when the caller knows it. Never left stale from an earlier stamp.
+        match def_sid.and_then(|sid| prov.prints.get(&sid)) {
+            Some(print) => {
+                ns.insert(
+                    LIBRARY_PRINT_KEY.to_string(),
+                    AttrValue::Text(print.clone()),
+                );
+            }
+            None => {
+                ns.remove(LIBRARY_PRINT_KEY);
+            }
+        }
     }
 
     /// Marks the SOURCE of a just-saved library item: stamps `hew.library`
@@ -9359,6 +9477,12 @@ impl Document {
     /// the user just saved out of this model (playtest finding), and
     /// re-inserting the item would mint a second definition instead of
     /// reusing the one it was saved from.
+    ///
+    /// Every selected instance's definition gets the ONE `def_sid` given,
+    /// which is right only when the selection places one definition. A
+    /// save of any selection stamps through
+    /// [`Document::stamp_library_save`] instead, which gives each
+    /// definition the stable id of its own copy in the item.
     ///
     /// NOT an undo step: like the tag-visibility registry and the palette's
     /// additions, the stamp is bookkeeping the user never authored as a
@@ -9379,6 +9503,19 @@ impl Document {
         def_sid: Option<u64>,
     ) {
         info!(target: "kernel::op", op = "stamp_library_source");
+        self.stamp_library_nodes(nodes, prov, &|_| def_sid);
+    }
+
+    /// [`Document::stamp_library_source`]'s walk, with each selected
+    /// instance's definition stamped with the stable id `def_sid_of` gives
+    /// it in the item file (and the base print `prov.prints` holds for
+    /// that id).
+    pub(super) fn stamp_library_nodes(
+        &mut self,
+        nodes: &[NodeId],
+        prov: &LibraryProvenance,
+        def_sid_of: &dyn Fn(ComponentId) -> Option<u64>,
+    ) {
         for &node in nodes {
             match node {
                 NodeId::Object(id) => {
@@ -9400,7 +9537,7 @@ impl Document {
                     // The definition carries the reuse-matching identity, so
                     // every sibling instance counts and a later insert of
                     // this item resolves to THIS definition.
-                    self.stamp_library_provenance(EntityRef::Component(def), prov, def_sid);
+                    self.stamp_library_provenance(EntityRef::Component(def), prov, def_sid_of(def));
                 }
             }
         }
@@ -27053,6 +27190,7 @@ impl Document {
                 objects, instances, ..
             } => k("import").count("count", objects.len() + instances.len()),
             DocAction::DeletedDefMember { .. } => k("delete-component-member"),
+            DocAction::UpdatedFromLibrary { .. } => k("update-from-library"),
             DocAction::ConsumedScaffolding { .. } => k("draw"),
         }
     }
@@ -29021,6 +29159,7 @@ impl Document {
                 touch_hidden_defs(&mut change, hidden_defs);
                 change
             }
+            DocAction::UpdatedFromLibrary { .. } => self.replay_library_update(&action, false),
             &DocAction::DeletedDefMember {
                 component,
                 object,
@@ -31024,6 +31163,7 @@ impl Document {
                 touch_hidden_defs(&mut change, hidden_defs);
                 change
             }
+            DocAction::UpdatedFromLibrary { .. } => self.replay_library_update(&action, true),
             &DocAction::DeletedDefMember {
                 component,
                 object,
@@ -32792,6 +32932,10 @@ fn ingest_build_node(
 /// while no external client can).
 const LIBRARY_ATTR_NS: &str = "hew.library";
 
+/// The `hew.library` key of a linked definition's base content print
+/// (OW-2): what the definition was when it was last in step with its item.
+const LIBRARY_PRINT_KEY: &str = "print";
+
 /// The definition-sid marker of a definition [`Document::insert_as_definition`]
 /// made from a whole item: no real definition sid is this value, so a
 /// wrapped definition never matches a library insert's per-definition
@@ -33060,14 +33204,48 @@ fn library_copy_def(
     cid: ComponentId,
     ctx: &mut LibraryCopy,
 ) -> ComponentId {
-    let def = &src.components[cid];
     let new_cid = dst.insert_component_record(ComponentDef {
         members: Vec::new(),
         hidden: false,
-        name: def.name.clone(),
+        name: src.components[cid].name.clone(),
         locked: false,
     });
-    let src_members = def.members.clone();
+    let members = library_fill_def(dst, src, cid, new_cid, ctx);
+    dst.components[new_cid].members = members;
+
+    library_copy_entity_attrs(
+        dst,
+        src,
+        &EntityRef::Component(cid),
+        EntityRef::Component(new_cid),
+    );
+    if let Some(prov) = ctx.provenance.clone() {
+        dst.stamp_library_provenance(
+            EntityRef::Component(new_cid),
+            &prov,
+            src.sid_of(&EntityRef::Component(cid))
+                .filter(|&s| s != WRAPPED_DEF_SID),
+        );
+    }
+    ctx.all_components.push(new_cid);
+    new_cid
+}
+
+/// Copies `src` definition `cid`'s live content into `dst` definition
+/// `target`: its member objects (definition-local, never baked), groups and
+/// placements (nested definitions through [`library_resolve_def`]), and
+/// its own live sketches, registered under `target`. Returns the member
+/// list; the caller sets it. Shared by [`library_copy_def`] (a fresh
+/// definition) and Update from Library (an existing one, OW-2).
+fn library_fill_def(
+    dst: &mut Document,
+    src: &Document,
+    cid: ComponentId,
+    target: ComponentId,
+    ctx: &mut LibraryCopy,
+) -> Vec<NodeId> {
+    let new_cid = target;
+    let src_members = src.components[cid].members.clone();
     let mut members: Vec<NodeId> = Vec::with_capacity(src_members.len());
     for m in src_members {
         // A tombstoned member (an undone in-definition birth) is not part
@@ -33111,8 +33289,6 @@ fn library_copy_def(
             }
         }
     }
-    dst.components[new_cid].members = members;
-
     // LIVE definition-owned sketches ride along (deterministic BTreeMap
     // order).
     let def_sketches: Vec<SketchId> = src
@@ -33135,23 +33311,7 @@ fn library_copy_def(
         dst.def_sketches.insert(new_s, new_cid);
         ctx.all_sketches.push(new_s);
     }
-
-    library_copy_entity_attrs(
-        dst,
-        src,
-        &EntityRef::Component(cid),
-        EntityRef::Component(new_cid),
-    );
-    if let Some(prov) = ctx.provenance.clone() {
-        dst.stamp_library_provenance(
-            EntityRef::Component(new_cid),
-            &prov,
-            src.sid_of(&EntityRef::Component(cid))
-                .filter(|&s| s != WRAPPED_DEF_SID),
-        );
-    }
-    ctx.all_components.push(new_cid);
-    new_cid
+    members
 }
 
 /// Resolves a source definition into `dst`: the memoized `def_map` entry,
@@ -33178,8 +33338,11 @@ fn library_resolve_def(
         return existing;
     }
     if let Some(prov) = ctx.provenance.clone()
-        && let Some(existing) =
-            dst.find_library_definition(&prov, src.sid_of(&EntityRef::Component(cid)))
+        && let Some(existing) = dst.find_library_definition(
+            &prov,
+            src.sid_of(&EntityRef::Component(cid)),
+            Some((src, cid)),
+        )
     {
         ctx.def_map.insert(cid, existing);
         ctx.report.definitions_reused += 1;

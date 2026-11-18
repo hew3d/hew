@@ -1174,6 +1174,43 @@ export interface LibrarySaveResult {
 }
 
 /**
+ * `hew.library.status` (v1) — Every definition linked to a Library item, and where it stands against the item: in step, newer in the Library, changed here, changed on both sides, different, or the item missing.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: host_capability_missing
+ */
+export interface LibraryStatusParams {}
+
+export interface LibraryStatusResult {
+  links: ({ base?: string; copies: number; definition: string; item: string; locked: boolean; mine: string; name?: string; state: "in_step" | "library_newer" | "edited_here" | "both_changed" | "different" | "item_missing"; theirs?: string })[]
+}
+
+/**
+ * `hew.library.update` (v1) — Replace linked definitions' contents with their Library items' (Update from Library): named ones, or every one the Library has newer, as one undo entry; placements keep their poses, refused parts are skipped and named.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: host_capability_missing, unknown_entity, unknown_library_item, load_failed, locked_node, explode_session_scope, component_cycle, component_depth_exceeded, component_expansion_exceeded, unknown_component
+ */
+export interface LibraryUpdateParams {
+  /** true updates every linked definition whose state is library_newer (a part also changed here is updated only when named) — exactly one of definitions/all */
+  all?: boolean
+  /** linked definition ids to update, whatever their state — exactly one of definitions/all */
+  definitions?: string[]
+}
+
+export interface LibraryUpdateResult {
+  /** nested definitions from the same item replaced in the same step */
+  also_updated: string[]
+  /** definitions the items carried that the model did not hold, copied in */
+  definitions_added: number
+  /** definitions from the same item as a nested part of an updated one, left exactly as they were because they were changed here or a lock holds them; the updated part got a fresh copy of the item's definition instead */
+  kept: string[]
+  materials_added: number
+  skipped: { definition: string; detail: UnspecifiedShape; explanation: string; name?: string; refusal: string }[]
+  unchanged: string[]
+  /** requested definitions whose contents were replaced */
+  updated: string[]
+}
+
+/**
  * `hew.library.update_meta` (v1) — Edit a library item's name, keywords, or collection in place.
  * Tier: Standard · Class: read-only · Served: host
  * Refusals: host_capability_missing, unknown_library_item, save_failed
@@ -1943,7 +1980,7 @@ export interface SketchDeleteResult {
 }
 
 /**
- * `hew.sketch.draw_arc` (v1) — Draw an arc on a plane spec.
+ * `hew.sketch.draw_arc` (v1) — Draw an arc on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: point_off_plane, degenerate_curve, degenerate_segment, unknown_sketch, endpoint_near_miss, segments_above_cap, unknown_entity, locator_missed, ambiguous_locator, curve_claim_off_loop, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt, locked_node
  */
@@ -1967,7 +2004,7 @@ export interface SketchDrawArcParams {
 export type SketchDrawArcResult = { curve_id?: string; faces_closed?: string[]; region_id?: string; region_ids: string[]; sketch: string; solid?: { grew: boolean; object_id: string } } | { faces_closed?: string[]; object_id: string; solid?: { grew: boolean; object_id: string }; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
- * `hew.sketch.draw_circle` (v1) — Draw a circle on a plane spec.
+ * `hew.sketch.draw_circle` (v1) — Draw a circle on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: point_off_plane, degenerate_curve, degenerate_segment, unknown_sketch, segments_below_floor, segments_above_cap, unknown_entity, locator_missed, ambiguous_locator, curve_claim_off_loop, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt, locked_node
  */
@@ -1985,7 +2022,7 @@ export interface SketchDrawCircleParams {
 export type SketchDrawCircleResult = { curve_id?: string; faces_closed?: string[]; region_id?: string; region_ids: string[]; sketch: string; solid?: { grew: boolean; object_id: string } } | { faces_closed?: string[]; object_id: string; solid?: { grew: boolean; object_id: string }; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
- * `hew.sketch.draw_line` (v1) — Draw a line (chain) on a plane spec.
+ * `hew.sketch.draw_line` (v1) — Draw a line (chain) on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: point_off_plane, degenerate_segment, unknown_sketch, endpoint_near_miss, unknown_entity, locator_missed, ambiguous_locator, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt, locked_node
  */
@@ -2000,7 +2037,7 @@ export interface SketchDrawLineParams {
 export type SketchDrawLineResult = { curve_id?: string; faces_closed?: string[]; region_id?: string; region_ids: string[]; sketch: string; solid?: { grew: boolean; object_id: string } } | { faces_closed?: string[]; object_id: string; solid?: { grew: boolean; object_id: string }; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
- * `hew.sketch.draw_polygon` (v1) — Draw a regular N-gon on a plane spec.
+ * `hew.sketch.draw_polygon` (v1) — Draw a regular N-gon on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: point_off_plane, degenerate_curve, degenerate_segment, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, sides_above_cap, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt, locked_node
  */
@@ -2017,7 +2054,7 @@ export interface SketchDrawPolygonParams {
 export type SketchDrawPolygonResult = { curve_id?: string; faces_closed?: string[]; region_id?: string; region_ids: string[]; sketch: string; solid?: { grew: boolean; object_id: string } } | { faces_closed?: string[]; object_id: string; solid?: { grew: boolean; object_id: string }; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
- * `hew.sketch.draw_rect` (v1) — Draw an axis-aligned rectangle on a plane spec.
+ * `hew.sketch.draw_rect` (v1) — Draw an axis-aligned rectangle on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: point_off_plane, degenerate_segment, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt, locked_node
  */
@@ -3272,6 +3309,8 @@ export class HewApiClient {
     list: (params: LibraryListParams): Promise<LibraryListResult> => this.call('hew.library.list', params),
     remove: (params: LibraryRemoveParams): Promise<LibraryRemoveResult> => this.call('hew.library.remove', params),
     save: (params: LibrarySaveParams): Promise<LibrarySaveResult> => this.call('hew.library.save', params),
+    status: (params: LibraryStatusParams): Promise<LibraryStatusResult> => this.call('hew.library.status', params),
+    update: (params: LibraryUpdateParams): Promise<LibraryUpdateResult> => this.mutate('hew.library.update', params),
     updateMeta: (params: LibraryUpdateMetaParams): Promise<LibraryUpdateMetaResult> => this.call('hew.library.update_meta', params),
   }
 

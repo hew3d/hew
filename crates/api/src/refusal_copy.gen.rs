@@ -531,6 +531,15 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "BadLibraryMeta" => {
             "Hew's own request to the model kernel carried malformed library-item metadata. If this keeps happening, use Report Bug."
         }
+        "BadLibrary" => {
+            "Hew's own request to the model kernel carried a malformed Library listing. If this keeps happening, use Report Bug."
+        }
+        "UnknownLibraryItem" => {
+            "That part's Library item is no longer in the Library, so it can't be updated."
+        }
+        "LoadFailed" => {
+            "The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged."
+        }
         "BadSelection" => {
             "Hew's own request to the model kernel carried a malformed selection. If this keeps happening, use Report Bug."
         }

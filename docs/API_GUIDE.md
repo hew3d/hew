@@ -887,12 +887,45 @@ hew-cli dispatch hew.library.insert \
 
 `hew.library.remove` deletes an item; `hew.library.update_meta` edits
 its name, keywords, or collection without touching the file it was
-saved as. All six commands work identically in `--live` — the
+saved as. Those six commands work identically in `--live` — the
 Library lives on whichever machine runs `hew-cli`, so `list`/
 `describe`/`remove`/`update_meta` never even need a running desktop
 instance, and `insert`/`save` read or write the item on this side
 while the geometry itself lands in the live document (§12.1 of the
 spec has the full mechanics).
+
+When an item changes in the Library, the documents that use it can
+catch up. `hew.library.status` lists every definition that came from
+the Library and where it stands: `in_step`, `library_newer`,
+`edited_here`, `both_changed`, `different` (a part placed before 1.5
+whose two sides differ), or `item_missing`. Renaming an item never
+shows up here; only a change to what the part holds does.
+
+```sh
+hew-cli dispatch hew.library.status '{}' --file room.hew
+# {"result": {"links": [{"definition": "cmp_4", "name": "Side Table", "item": "3f2a9900-…", "state": "library_newer", "copies": 2, "locked": false, …}]}}
+```
+
+`hew.library.update` brings parts up to date, as one undo step: name
+them with `definitions`, or pass `"all": true` for every part the
+Library has newer (a part also changed here is updated only when you
+name it, since its changes would be replaced). Each copy stays where
+it stands. A part that is locked, open for editing, or whose item is
+gone is skipped and listed with the reason; the rest go through. A part
+nested inside an updated one that you changed here, or that a lock
+holds, is never overwritten: it is listed under `kept`, and the updated
+part gets a fresh copy of the Library's version instead.
+
+```sh
+hew-cli dispatch hew.library.update '{"all": true}' --file room.hew
+# {"result": {"results": [{"updated": ["cmp_4"], "also_updated": [], "unchanged": [], "kept": [], "skipped": [], …}]}}
+```
+
+To push a part changed here back to the Library, save it over its item
+with `hew.library.save` and `replace` (the item's id): the item keeps
+its id, and other documents see it as `library_newer`. These two
+commands read the Library on the machine they run on, so in `--live`
+they are not served yet.
 
 Two differences from saving through the app's own Library browser,
 worth knowing: `save` stamps the item's "saved from" bookkeeping

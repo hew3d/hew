@@ -535,6 +535,12 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`Hew's own request to the model kernel carried a malformed selection list. If this keeps happening, use Report Bug.`,
   BadLibraryMeta:
     msg`Hew's own request to the model kernel carried malformed library-item metadata. If this keeps happening, use Report Bug.`,
+  BadLibrary:
+    msg`Hew's own request to the model kernel carried a malformed Library listing. If this keeps happening, use Report Bug.`,
+  UnknownLibraryItem:
+    msg`That part's Library item is no longer in the Library, so it can't be updated.`,
+  LoadFailed:
+    msg`The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.`,
   BadSelection:
     msg`Hew's own request to the model kernel carried a malformed selection. If this keeps happening, use Report Bug.`,
   BadCount:

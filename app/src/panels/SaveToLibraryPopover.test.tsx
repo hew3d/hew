@@ -85,4 +85,97 @@ describe('SaveToLibraryPopover', () => {
     fireEvent.click(screen.getByRole('dialog'))
     expect(onClose).not.toHaveBeenCalled()
   })
+
+  describe('Update in Library', () => {
+    it('leads with the update, keeps Save as a new item beneath, and says other models are offered it', () => {
+      const onUpdate = vi.fn()
+      render(
+        <SaveToLibraryPopover
+          defaultName="Oak leg"
+          updateInLibrary={{ name: 'Oak leg', confirm: false }}
+          onUpdateInLibrary={onUpdate}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      )
+      expect(screen.getByRole('button', { name: 'Update “Oak leg” in the Library' })).toBeInTheDocument()
+      expect(screen.getByText('Other models that use it will be offered the update.')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Save as a new item' })).toBeInTheDocument()
+      fireEvent.click(screen.getByTestId('update-in-library'))
+      expect(onUpdate).toHaveBeenCalledTimes(1)
+    })
+
+    it('Save as a new item still saves under the typed name', () => {
+      const onSave = vi.fn()
+      render(
+        <SaveToLibraryPopover
+          defaultName="Oak leg"
+          updateInLibrary={{ name: 'Oak leg', confirm: false }}
+          onUpdateInLibrary={vi.fn()}
+          onSave={onSave}
+          onClose={vi.fn()}
+        />,
+      )
+      fireEvent.change(screen.getByLabelText('Item name'), { target: { value: 'Oak leg 2' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Save as a new item' }))
+      expect(onSave).toHaveBeenCalledWith('Oak leg 2')
+    })
+
+    it('asks first when the Library has also changed, and only then replaces', () => {
+      const onUpdate = vi.fn()
+      render(
+        <SaveToLibraryPopover
+          defaultName="Oak leg"
+          updateInLibrary={{ name: 'Oak leg', confirm: true }}
+          onUpdateInLibrary={onUpdate}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('update-in-library'))
+      expect(onUpdate).not.toHaveBeenCalled()
+      expect(screen.getByTestId('update-in-library-confirm')).toHaveTextContent(/Library has also changed since you inserted/)
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+      expect(onUpdate).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByTestId('update-in-library'))
+      fireEvent.click(screen.getByTestId('update-in-library-replace'))
+      expect(onUpdate).toHaveBeenCalledTimes(1)
+    })
+
+    it('asks first, in its own words, when Hew cannot tell which side is newer', () => {
+      const onUpdate = vi.fn()
+      render(
+        <SaveToLibraryPopover
+          defaultName="Oak leg"
+          updateInLibrary={{ name: 'Oak leg', confirm: true, cannotCompare: true }}
+          onUpdateInLibrary={onUpdate}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('update-in-library'))
+      expect(onUpdate).not.toHaveBeenCalled()
+      expect(screen.getByTestId('update-in-library-confirm')).toHaveTextContent(
+        'The Library copy and this part have both changed or can’t be compared. Replacing it will lose the Library’s version.',
+      )
+      fireEvent.click(screen.getByTestId('update-in-library-replace'))
+      expect(onUpdate).toHaveBeenCalledTimes(1)
+    })
+
+    it('says why a linked copy cannot update its item, and offers no update', () => {
+      render(
+        <SaveToLibraryPopover defaultName="Oak leg" updateInLibraryBlocked={{ name: 'Oak leg' }} onSave={vi.fn()} onClose={vi.fn()} />,
+      )
+      expect(screen.queryByTestId('update-in-library')).not.toBeInTheDocument()
+      expect(screen.getByTestId('update-in-library-blocked')).toHaveTextContent(
+        'This part is a linked copy, so it can’t update “Oak leg” in the Library. Make it a component or unlink it first.',
+      )
+    })
+
+    it('offers nothing extra for an ordinary save', () => {
+      render(<SaveToLibraryPopover defaultName="Box" onSave={vi.fn()} onClose={vi.fn()} />)
+      expect(screen.queryByTestId('update-in-library')).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
+    })
+  })
 })

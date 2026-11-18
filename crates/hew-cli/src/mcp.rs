@@ -231,6 +231,12 @@ document — re-inserting the same item reuses its existing definition
 instead of duplicating it) and hew.library.save (save a selection, or
 the whole document with no selection, as a new item). Every command
 addresses an item by its id or its library-relative path.
+hew.library.status lists every definition placed from the Library and
+whether the Library holds a newer version (library_newer), it was
+changed here (edited_here), or both; hew.library.update (through
+hew_transact, {"all": true} or {"definitions": [...]}) replaces those
+definitions' contents with the Library's as one undo entry, leaving
+every copy where it stands.
 hew_transact also serves hew.component.import_definition: send a file's
 bytes (bytes_base64) with its format (hew, skp, glb, gltf, stl, dae) and
 get one unplaced component definition back; send the same bytes again and

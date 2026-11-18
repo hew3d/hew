@@ -753,7 +753,7 @@ Turn a file's bytes (hew, skp, glb, gltf, stl, dae) into one unplaced component 
 
 - `host_capability_missing`
 - `units_required`
-- `load_failed`
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
 - `unsupported_format`
 - `unsupported_for_definition`
 - `import_too_large`
@@ -4747,7 +4747,7 @@ Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached
 
 - `host_capability_missing`
 - `units_required`
-- `load_failed`
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
 - `unsupported_format`
 
 ### `hew.doc.new`
@@ -4952,7 +4952,7 @@ Open a .hew or SketchUp .skp document. The desktop app opens it in a new window 
 **Refusals:**
 
 - `host_capability_missing`
-- `load_failed`
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
 - `window_not_ready`
 - `document_busy` — A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window.
 
@@ -5036,7 +5036,7 @@ Revert to Saved: re-read the document's saved file in place, discarding every ch
 **Refusals:**
 
 - `host_capability_missing`
-- `load_failed`
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
 - `nothing_to_revert`
 - `unknown_document`
 - `ambiguous_document`
@@ -7188,7 +7188,7 @@ One library item's full metadata, manifest summary, and document attributes.
 **Refusals:**
 
 - `host_capability_missing`
-- `unknown_library_item`
+- `unknown_library_item` — That part's Library item is no longer in the Library, so it can't be updated.
 
 ### `hew.library.insert`
 
@@ -7303,8 +7303,8 @@ Insert a library item into the attached document, wired for idempotent re-insert
 **Refusals:**
 
 - `host_capability_missing`
-- `unknown_library_item`
-- `load_failed`
+- `unknown_library_item` — That part's Library item is no longer in the Library, so it can't be updated.
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
 - `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
 - `singular` — That transform would scale the object down to nothing, so it was refused.
 - `degenerate_axis` — The rotation axis needs two distinct points. Pick a second point further from the first.
@@ -7480,7 +7480,7 @@ Delete a library item.
 **Refusals:**
 
 - `host_capability_missing`
-- `unknown_library_item`
+- `unknown_library_item` — That part's Library item is no longer in the Library, so it can't be updated.
 
 ### `hew.library.save`
 
@@ -7608,10 +7608,236 @@ Save a selection, one material, or the whole document to the library. Records no
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 - `save_failed`
-- `unknown_library_item`
+- `unknown_library_item` — That part's Library item is no longer in the Library, so it can't be updated.
 - `invalid_profile` — This profile shape isn't valid. Redraw it as one open chain.
 - `locator_missed`
 - `ambiguous_locator`
+
+### `hew.library.status`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Every definition linked to a Library item, and where it stands against the item: in step, newer in the Library, changed here, changed on both sides, different, or the item missing.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "links": {
+      "items": {
+        "properties": {
+          "base": {
+            "description": "the content print it had when last in step with the item; absent for a link made before 1.5",
+            "type": "string"
+          },
+          "copies": {
+            "description": "how many live placements the definition has",
+            "type": "integer"
+          },
+          "definition": {
+            "description": "the linked definition's id",
+            "type": "string"
+          },
+          "item": {
+            "description": "the Library item's id",
+            "type": "string"
+          },
+          "locked": {
+            "description": "a lock would make an update skip it: the definition or something its contents hold is locked (the same check hew.library.update makes)",
+            "type": "boolean"
+          },
+          "mine": {
+            "description": "the definition's content print now (p1:<hex>)",
+            "type": "string"
+          },
+          "name": {
+            "description": "the definition's name, when it has one",
+            "type": "string"
+          },
+          "state": {
+            "description": "in_step: the definition holds what the item holds; library_newer: unchanged here, changed in the Library; edited_here: changed here, unchanged in the Library; both_changed: changed on both sides; different: the two differ and nothing says which side moved (a link made before 1.5, or another print scheme); item_missing: the Library no longer holds the item or the item no longer holds this definition (the part keeps working)",
+            "enum": [
+              "in_step",
+              "library_newer",
+              "edited_here",
+              "both_changed",
+              "different",
+              "item_missing"
+            ],
+            "type": "string"
+          },
+          "theirs": {
+            "description": "the item's content print of the definition now; absent when the item is missing",
+            "type": "string"
+          }
+        },
+        "required": [
+          "definition",
+          "item",
+          "state",
+          "copies",
+          "locked",
+          "mine"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "links"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+
+### `hew.library.update`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** library
+
+Replace linked definitions' contents with their Library items' (Update from Library): named ones, or every one the Library has newer, as one undo entry; placements keep their poses, refused parts are skipped and named.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "all": {
+      "description": "true updates every linked definition whose state is library_newer (a part also changed here is updated only when named) — exactly one of definitions/all",
+      "type": "boolean"
+    },
+    "definitions": {
+      "description": "linked definition ids to update, whatever their state — exactly one of definitions/all",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "also_updated": {
+      "description": "nested definitions from the same item replaced in the same step",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "definitions_added": {
+      "description": "definitions the items carried that the model did not hold, copied in",
+      "type": "integer"
+    },
+    "kept": {
+      "description": "definitions from the same item as a nested part of an updated one, left exactly as they were because they were changed here or a lock holds them; the updated part got a fresh copy of the item's definition instead",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "materials_added": {
+      "type": "integer"
+    },
+    "skipped": {
+      "items": {
+        "properties": {
+          "definition": {
+            "type": "string"
+          },
+          "detail": {
+            "description": "the refusal's detail; for locked_node, node is the locked node (inside the part, or the copy that locks it)",
+            "type": "object"
+          },
+          "explanation": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "refusal": {
+            "description": "why it was left as it was, a refusal name: locked_node, explode_session_scope, component_cycle, component_depth_exceeded, component_expansion_exceeded, unknown_library_item, load_failed, unknown_component",
+            "type": "string"
+          }
+        },
+        "required": [
+          "definition",
+          "refusal",
+          "explanation",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "unchanged": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "updated": {
+      "description": "requested definitions whose contents were replaced",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "updated",
+    "also_updated",
+    "unchanged",
+    "kept",
+    "skipped",
+    "definitions_added",
+    "materials_added"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `unknown_entity`
+- `unknown_library_item` — That part's Library item is no longer in the Library, so it can't be updated.
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
+- `locked_node` — Locked. Unlock it to change it.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `component_cycle` — Placing that instance here would make a component contain itself, directly or through another component. Pick a different definition, or explode/make unique the instance that closes the loop.
+- `component_depth_exceeded` — That would nest components deeper than Hew supports. Flatten one of the levels — explode an instance, or make it unique — before placing this one.
+- `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 
 ### `hew.library.update_meta`
 
@@ -7700,7 +7926,7 @@ Edit a library item's name, keywords, or collection in place.
 **Refusals:**
 
 - `host_capability_missing`
-- `unknown_library_item`
+- `unknown_library_item` — That part's Library item is no longer in the Library, so it can't be updated.
 - `save_failed`
 
 ## hew.material
@@ -7789,7 +8015,7 @@ Add a color or texture material to the palette. Registry-state: records no undo 
 
 **Refusals:**
 
-- `load_failed`
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
 - `host_capability_missing`
 
 ### `hew.material.paint`
@@ -12142,7 +12368,7 @@ Delete drawing units from a plane.
 - **Served:** kernel
 - **Permission:** model.write
 
-Draw an arc on a plane spec.
+Draw an arc on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.
 
 **Params schema:**
 
@@ -12216,7 +12442,7 @@ Draw an arc on a plane spec.
 {
   "oneOf": [
     {
-      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec",
+      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec, and every draw on a face of a locked Object",
       "properties": {
         "curve_id": {
           "description": "present when this command began a curve chain",
@@ -12378,7 +12604,7 @@ Draw an arc on a plane spec.
 - **Served:** kernel
 - **Permission:** model.write
 
-Draw a circle on a plane spec.
+Draw a circle on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.
 
 **Params schema:**
 
@@ -12433,7 +12659,7 @@ Draw a circle on a plane spec.
 {
   "oneOf": [
     {
-      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec",
+      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec, and every draw on a face of a locked Object",
       "properties": {
         "curve_id": {
           "description": "present when this command began a curve chain",
@@ -12595,7 +12821,7 @@ Draw a circle on a plane spec.
 - **Served:** kernel
 - **Permission:** model.write
 
-Draw a line (chain) on a plane spec.
+Draw a line (chain) on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.
 
 **Params schema:**
 
@@ -12645,7 +12871,7 @@ Draw a line (chain) on a plane spec.
 {
   "oneOf": [
     {
-      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec",
+      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec, and every draw on a face of a locked Object",
       "properties": {
         "curve_id": {
           "description": "present when this command began a curve chain",
@@ -12804,7 +13030,7 @@ Draw a line (chain) on a plane spec.
 - **Served:** kernel
 - **Permission:** model.write
 
-Draw a regular N-gon on a plane spec.
+Draw a regular N-gon on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.
 
 **Params schema:**
 
@@ -12861,7 +13087,7 @@ Draw a regular N-gon on a plane spec.
 {
   "oneOf": [
     {
-      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec",
+      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec, and every draw on a face of a locked Object",
       "properties": {
         "curve_id": {
           "description": "present when this command began a curve chain",
@@ -13021,7 +13247,7 @@ Draw a regular N-gon on a plane spec.
 - **Served:** kernel
 - **Permission:** model.write
 
-Draw an axis-aligned rectangle on a plane spec.
+Draw an axis-aligned rectangle on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.
 
 **Params schema:**
 
@@ -13084,7 +13310,7 @@ Draw an axis-aligned rectangle on a plane spec.
 {
   "oneOf": [
     {
-      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec",
+      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec, and every draw on a face of a locked Object",
       "properties": {
         "curve_id": {
           "description": "present when this command began a curve chain",
@@ -14832,7 +15058,7 @@ Round, cove, bullnose or profile the edges of a solid, or round a 2D corner, as 
 - `bullnose_needs_parallel_sides` — A bullnose needs two parallel edges of one face.
 - `invalid_profile` — This profile shape isn't valid. Redraw it as one open chain.
 - `unknown_profile` — That profile isn't built in. Pick one from the profile list.
-- `load_failed`
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
 - `host_capability_missing`
 - `locked_node` — Locked. Unlock it to change it.
 

@@ -52,6 +52,8 @@ import { useViewSetting } from '../settings/useViewSetting'
 import lockSvg from '@material-symbols/svg-400/outlined/lock.svg?raw'
 import { InlineIcon } from './InlineIcon'
 import { frozenCause, isLockableKind, isLocked } from '../lock/lockModel'
+import type { LibraryLink } from '../library/libraryUpdates'
+import { LibraryMark } from './LibraryMark'
 import { copiesRow, unlinkLabel, unlinkAllLabel, makeComponentLabel, selectAllCopiesLabel } from '../linkedCopyCopy'
 
 interface Props {
@@ -148,6 +150,12 @@ interface Props {
   /** Actions on a placement of a linked set (the row's "Copies" menu). When
    *  omitted, linked rows still show their glyph and count but offer no menu. */
   linkedActions?: LinkedCopyActions
+  /** Where each definition stands against its Library item (definition
+   *  handle → link): a placement of one that is newer in the Library, or
+   *  changed here, carries a small marker beside its "×N" badge. */
+  libraryLinks?: ReadonlyMap<string, LibraryLink>
+  /** The marker on a part with a newer Library version was clicked. */
+  onReviewLibraryUpdates?: () => void
 }
 
 /** What the Outliner row's "Copies" menu can do. Each takes the row's node. */
@@ -161,13 +169,15 @@ export interface LinkedCopyActions {
 }
 
 interface LinkedRowContext {
+  libraryLinks: ReadonlyMap<string, LibraryLink> | undefined
+  onReviewLibraryUpdates: (() => void) | undefined
   actions: LinkedCopyActions | undefined
   /** The set whose "×N" badge is hovered; the other placements light up. */
   highlightDef: bigint | null
   setHighlightDef: (def: bigint | null) => void
 }
 
-const LinkedRowCtx = createContext<LinkedRowContext>({ actions: undefined, highlightDef: null, setHighlightDef: () => {} })
+const LinkedRowCtx = createContext<LinkedRowContext>({ libraryLinks: undefined, onReviewLibraryUpdates: undefined, actions: undefined, highlightDef: null, setHighlightDef: () => {} })
 
 /** The padlock on a row (OW-1): what clicking it does. */
 interface LockRowContext {
@@ -268,6 +278,8 @@ export function DocumentTree({
   onDropRefused,
   onUnlock,
   linkedActions,
+  libraryLinks,
+  onReviewLibraryUpdates,
 }: Props) {
   const { t } = useLingui()
   // Frozen rows (locked, or inside something locked) neither drag nor take drops.
@@ -275,8 +287,8 @@ export function DocumentTree({
   const lockCtx = useMemo<LockRowContext>(() => ({ onUnlock }), [onUnlock])
   const [highlightDef, setHighlightDef] = useState<bigint | null>(null)
   const linkedCtx = useMemo<LinkedRowContext>(
-    () => ({ actions: linkedActions, highlightDef, setHighlightDef }),
-    [linkedActions, highlightDef],
+    () => ({ actions: linkedActions, highlightDef, setHighlightDef, libraryLinks, onReviewLibraryUpdates }),
+    [linkedActions, highlightDef, libraryLinks, onReviewLibraryUpdates],
   )
   // Re-query the entity lists whenever the document changes.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1404,6 +1416,11 @@ const NodeRow = memo(function NodeRowInner({
         isDragSource={dragSourceKeys.has(key)}
         isDropTarget={dropHighlightKey === key}
         onRowPointerDown={(e) => onStartDrag(node, e)}
+        libraryMark={
+          def !== undefined ? (
+            <LibraryMark link={copiesCtx.libraryLinks?.get(def.toString())} onReview={copiesCtx.onReviewLibraryUpdates} />
+          ) : undefined
+        }
         copies={
           linked && def !== undefined
             ? {
@@ -1756,6 +1773,7 @@ function Row({
   isDropTarget,
   onRowPointerDown,
   copies,
+  libraryMark,
   lock,
   onUnlock,
 }: {
@@ -1798,6 +1816,9 @@ function Row({
   /** Set on a placement of a linked set: the "×N" count, the hover
    *  highlight of the other placements, and the "Copies" menu. */
   copies?: RowCopies
+  /** The Library marker beside the row's "×N" badge (a part that is newer
+   *  in the Library or changed here). */
+  libraryMark?: React.ReactNode
   /** The row's padlock, when it is locked or inside something locked. */
   lock?: RowLock | null
   onUnlock?: (node: NodeRef) => void
@@ -1913,6 +1934,7 @@ function Row({
           {`×${copies.count}`}
         </span>
       )}
+      {libraryMark}
       {active && <span style={{ fontSize: '10px', color: 'var(--accent-text-on-tint)' }}><Trans>editing</Trans></span>}
       {copies?.actions !== undefined && (
         <div style={{ position: 'relative', flexShrink: 0 }}>

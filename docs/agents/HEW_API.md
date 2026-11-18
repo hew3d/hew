@@ -1067,7 +1067,7 @@ for, not shipped.
 | `hew.geo` | `get`, `set` (the document's geo-reference / coordinate reference system; `set` is one undo step) | Standard |
 | `hew.guide` | `line`, `point`, `angular`, `clear` | Standard |
 | `hew.scenes` | `list`, `add`, `update`, `rename`, `describe`, `remove`, `reorder`, `apply` (§7.1) | Standard |
-| `hew.library` | `list`, `describe`, `insert`, `save`, `remove`, `update_meta` — the Hew Library (§8.1) | Standard |
+| `hew.library` | `list`, `describe`, `insert`, `save`, `remove`, `update_meta`, `status`, `update` — the Hew Library (§8.1) | Standard |
 | `hew.attr` | `get`, `set`, `delete` (§8) | Required |
 | `hew.history` | `undo`, `redo`, `status` (depth; top entry's label and origin; the saved depth; every undo/redo entry's label and origin) | Required |
 | `hew.view` | `snapshot` (render the attached document to PNG, headless or live), `camera` (set the live viewport's camera), `zoom_extents` (frame all visible geometry), `units` (set the app's displayed length-unit format), `line_drawing` (hidden-line SVG or segments, headless or live, §7.2), `hide`, `show`, `show_all`, `hidden`, `isolate`, `clear_isolation`, `zoom_to` (view state, §7.3), `enter`, `exit`, `exit_all` (the person's editing context, §6.3) | Standard (`core` grants six: `snapshot`, `line_drawing`, `hide`, `show`, `show_all`, and `hidden` — none needs a window, and the last four are kernel-served over the document's user-hidden flags; the rest stay `app`-only — live-host-only effects. `hew.view.hidden` reports `isolated: null` on a host with no isolation) |
@@ -2050,6 +2050,43 @@ Semantics notes, normative:
   so an item saved through the API shows a generic/no-thumbnail tile in
   the browser until a UI session opens the library folder and renders one
   itself.
+- `hew.library.status` (query, `{}`) lists every definition linked to a
+  Library item with its state against the item (§8.1's table:
+  `in_step`, `library_newer`, `edited_here`, `both_changed`, `different`,
+  `item_missing`), its item id, name, copy count, whether a lock would
+  make an update skip it (`locked`: the definition is frozen, its contents
+  hold a locked node, or a set of linked copies only its contents place
+  holds one; the very check `hew.library.update` makes), and its prints
+  (`mine`, `base` when the link has one,
+  `theirs` when the item is there). The item's prints come from its
+  `prints` metadata, or are computed from the file for an item saved
+  before 1.5. `hew.library.update` (`ModelMutating`, `{definitions}` or
+  `{all: true}`) replaces linked definitions' contents with their items'
+  through the insert's copy engine, as one undo entry ("Update from
+  Library"): each definition keeps its id and every placement its pose;
+  paint is matched by value or added; the item's new tags are
+  registered. A definition the item nests resolves against the model's
+  definitions from the same item and definition, those the old contents
+  place first, then by stable id: one holding the item's content is
+  placed as it is; else one that is `in_step` or `library_newer` and no
+  lock holds is updated in the same step (`also_updated`); else the
+  item's definition is copied in fresh and the ones changed here or held
+  by a lock are left as they were (`kept`). A step that replaces
+  something also brings up to date the base of each definition it
+  touched that already held the item's content (an update that would
+  only do that records nothing; such a link reads `in_step` either way).
+  `all` takes every definition whose state is `library_newer`; a named
+  one is updated whatever its state. Result `{updated, also_updated,
+  unchanged, kept, skipped: [{definition, name, refusal, explanation,
+  detail}], definitions_added, materials_added}`;
+  a skipped part is left exactly as it was (`locked_node`, with the
+  locked node in `detail.node`,
+  `explode_session_scope`, `component_cycle`, `component_depth_exceeded`,
+  `component_expansion_exceeded`, `unknown_library_item`, `load_failed`).
+  A call that named its parts and changed none of them refuses with the
+  first part's reason. Palette materials the update added stay after
+  undo, like every palette addition. Both read the Library through the
+  host, so `--live` does not serve them yet.
 
 ### 7.1 Scenes
 
@@ -3005,16 +3042,46 @@ writable only by first-party code):
   manage flows: `id` (the item's stable library identity, a UUID string),
   `name`, `category` (`"component"` | `"material"` | `"model"` | `"profile"`),
   `keywords` (list of strings), `collection`, `saved_at` /
-  `sourceDoc`-style bookkeeping keys. The library browser derives
-  everything it lists from this dictionary plus the manifest — there is
-  deliberately no side database.
+  `sourceDoc`-style bookkeeping keys, and `prints` (written by every
+  save since 1.5): an object mapping each definition's stable id in the
+  item file, as a decimal string, to its content print. The library
+  browser derives everything it lists from this dictionary plus the
+  manifest — there is deliberately no side database.
 - **On entities a library insert creates** — provenance stamped by the
   kernel's insert (`Document::insert_document`) on created definitions
-  and root nodes: `source_id` (the item's `id`), `content_hash` (a
-  fingerprint of the item file's bytes), and on definitions `def_sid`
-  (the definition's stable id in the item file). This is what makes
-  re-inserting the same item version reuse the in-document definition
-  instead of copying it again, and what "in this model" queries count.
+  and root nodes, and by `hew.library.save` on the saved selection:
+  `source_id` (the item's `id`), `content_hash` (a fingerprint of the
+  item file's bytes; still written, no longer compared), and on
+  definitions `def_sid` (the definition's stable id in the item file) and
+  `print` (the definition's content print when it was last in step with
+  the item: its base). A save of several parts links each definition to
+  its own definition in the item. A re-insert reuses an in-document
+  definition
+  from the same item and definition whose content is the item's now, so
+  a renamed or re-saved item reuses it and an edited one copies fresh;
+  the same stamps are what "in this model" queries count.
+
+A **content print** (`p1:<64 hex digits>`, SHA-256 over a canonical
+stream the kernel writes) fingerprints what a definition holds: its
+members in order with their geometry rounded to 1 µm, surface claims and
+True Curves marks (a blend's record included, with the paint of the faces
+it consumed), each face's paint by value, nested placements by pose,
+paint and the nested definition's own print, and its sketches. It leaves
+out names, tags, attributes, ids, hidden flags and where the definition
+is placed. HEW_FILE_FORMAT.md §2 (`attrs`) has the full list. Three
+prints per linked definition give its state against the Library
+(`hew.library.status`): `mine` (now), `base` (the stamp) and `theirs`
+(the item's `prints`, or computed from an item saved before 1.5):
+
+| mine vs base | theirs vs base | state |
+|---|---|---|
+| same | same | `in_step` |
+| same | different | `library_newer` |
+| different | same | `edited_here` |
+| different | different (mine ≠ theirs) | `both_changed` |
+| mine = theirs, whatever base says | | `in_step` |
+| no base, or another print scheme, and mine ≠ theirs | | `different` |
+| the Library no longer holds the item or its definition | | `item_missing` |
 
 A second first-party namespace, `hew.clipboard`, lives only inside
 clipboard bytes and never in a document or a library file. The app's Copy

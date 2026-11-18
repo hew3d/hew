@@ -67,8 +67,8 @@
 //! session_fuzz::`.
 
 use kernel::{
-    Anchor, Document, GuideId, InstanceId, LibraryProvenance, NodeId, ObjectId, Plane, Point3,
-    Transform, Vec3,
+    Anchor, Document, EntityRef, GuideId, InstanceId, KernelOp, LibraryProvenance, LibraryUpdate,
+    NodeId, ObjectId, Plane, Point3, Transform, Vec3,
 };
 use proptest::prelude::*;
 
@@ -175,6 +175,14 @@ enum Op {
     InsertAsDefinition {
         sel: usize,
         key: u8,
+    },
+    /// Update from Library (OW-2): a definition with a world placement is
+    /// saved as an item, linked to it, the item edited (a member's face
+    /// pushed), and the definition updated from it: a refusal changes
+    /// nothing, an update undoes and redoes exactly.
+    UpdateFromItem {
+        comp: usize,
+        face: usize,
     },
     CloseSession,
     Undo,
@@ -303,6 +311,7 @@ fn arb_op() -> impl Strategy<Value = Op> {
         1 => sel().prop_map(|sel| Op::DeleteLinkedPlacement { sel }),
         1 => sel().prop_map(|sel| Op::UnlinkPlacement { sel }),
         2 => (sel(), 0u8..3).prop_map(|(sel, key)| Op::InsertAsDefinition { sel, key }),
+        2 => (sel(), sel()).prop_map(|(comp, face)| Op::UpdateFromItem { comp, face }),
         3 => Just(Op::CloseSession),
         2 => Just(Op::Undo),
         2 => Just(Op::Redo),
@@ -491,6 +500,99 @@ fn make_unique_by_path(
 /// placement.
 fn rendered(doc: &Document) -> usize {
     doc.visible_object_ids().len() + doc.expanded_placements().len()
+}
+
+/// A stand-in for the API layer's SHA-256: the kernel's content print
+/// needs some digest, and these specs only compare prints.
+fn fuzz_digest(bytes: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for lane in 0..4u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ lane.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        out[lane as usize * 8..lane as usize * 8 + 8].copy_from_slice(&h.to_le_bytes());
+    }
+    out
+}
+
+/// [`Op::UpdateFromItem`].
+fn update_from_item(doc: &mut Document, comp: usize, face: usize) -> Result<(), String> {
+    let defs = doc.component_ids();
+    let Some(def) = pick(&defs, comp) else {
+        return Ok(());
+    };
+    let Some(inst) = doc
+        .instance_ids()
+        .into_iter()
+        .find(|&i| doc.instance_def(i) == Some(def) && doc.instance_is_world(i))
+    else {
+        return Ok(());
+    };
+    let Ok(mut item) = doc.extract_item(&[NodeId::Instance(inst)], true) else {
+        return Ok(());
+    };
+    let Some(NodeId::Instance(top)) = item.top_level_nodes().first().copied() else {
+        return Ok(());
+    };
+    let Some(item_def) = item.instance_def(top) else {
+        return Ok(());
+    };
+    let Some(sid) = item.sid_of(&EntityRef::Component(item_def)) else {
+        return Ok(());
+    };
+    // Link the definition to the item as saved, then edit the item.
+    let saved = LibraryProvenance {
+        source_id: "fuzz-item".to_string(),
+        content_hash: "v1".to_string(),
+        prints: item.content_prints_by_sid(fuzz_digest),
+    };
+    doc.stamp_library_source(&[NodeId::Instance(inst)], &saved, Some(sid));
+    if let Some(o) = item.def_members(item_def).and_then(|m| m.first().copied()) {
+        let faces: Vec<kernel::FaceId> = item
+            .object(o)
+            .map(|obj| obj.faces().keys().collect())
+            .unwrap_or_default();
+        if let Some(&f) = faces.get(face % faces.len().max(1)) {
+            let _ = item.apply_def_op(
+                item_def,
+                o,
+                KernelOp::PushPull {
+                    face: f,
+                    distance: 0.25,
+                },
+            );
+        }
+    }
+    let edited = LibraryProvenance {
+        source_id: "fuzz-item".to_string(),
+        content_hash: "v2".to_string(),
+        prints: item.content_prints_by_sid(fuzz_digest),
+    };
+    let before = doc.state_hash();
+    let (report, _) = doc
+        .update_definitions_from_items(
+            &[LibraryUpdate {
+                definition: def,
+                item: &item,
+                provenance: edited,
+            }],
+            fuzz_digest,
+        )
+        .map_err(|e| format!("the update refused whole: {e}"))?;
+    if report.updated.is_empty() {
+        if doc.state_hash() != before {
+            return Err(format!(
+                "an update that changed nothing changed the document: {report:?}"
+            ));
+        }
+        return Ok(());
+    }
+    if doc.content_print(def, fuzz_digest) != item.content_print(item_def, fuzz_digest) {
+        return Err("the updated definition does not hold the item's content".to_string());
+    }
+    undo_redo_exact(doc, before, "update from library")
 }
 
 /// Undo then redo of the op just committed must land on `before` and then
@@ -750,6 +852,7 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
             let prov = LibraryProvenance {
                 source_id: "import:fuzz".to_string(),
                 content_hash: key.to_string(),
+                ..Default::default()
             };
             let before = doc.state_hash();
             match doc.insert_as_definition(&item, Some("Wrapped"), prov) {
@@ -764,6 +867,7 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
                 Ok((_, false, _)) => return undo_redo_exact(doc, before, "definition insert"),
             }
         }
+        Op::UpdateFromItem { comp, face } => return update_from_item(doc, comp, face),
         Op::CloseSession => {
             let _ = doc.close_innermost_session();
         }

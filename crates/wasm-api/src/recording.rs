@@ -899,6 +899,16 @@ pub enum RecordedCall {
         content_hash: String,
         def_sid: Option<String>,
     },
+    /// `update_definitions_from_items(request)` — Update from Library
+    /// (OW-2): the parts exactly as the live call resolved them, and each
+    /// item file they read embedded ONCE however many parts it updates
+    /// (the [`EMBED_CAP`] counts each file once), so replay reproduces the
+    /// same step whatever the Library holds then. Additive variant, same
+    /// posture as [`RecordedCall::InsertItem`].
+    UpdateDefinitionsFromItems {
+        parts: Vec<RecordedLibraryPart>,
+        items: Vec<RecordedLibraryItem>,
+    },
     /// `import_dae(bytes, images)` — embeds the COLLADA file and its image
     /// map, so a session with an import replays self-contained.
     ImportDae {
@@ -1597,6 +1607,23 @@ pub fn stop() {
 /// Whether capture is active.
 pub fn is_active() -> bool {
     ENABLED.with(|e| e.get())
+}
+
+/// One part of a recorded [`RecordedCall::UpdateDefinitionsFromItems`]:
+/// the definition's handle and its item's id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordedLibraryPart {
+    pub definition: u64,
+    pub source_id: String,
+}
+
+/// One item file a recorded [`RecordedCall::UpdateDefinitionsFromItems`]
+/// read: its id, its content hash, and the file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordedLibraryItem {
+    pub source_id: String,
+    pub content_hash: String,
+    pub bytes: Vec<u8>,
 }
 
 /// Largest source file an import call embeds in the recording; larger

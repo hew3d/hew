@@ -45,6 +45,17 @@ export interface SaveToLibraryPopoverProps {
   /** An item this document was opened from: offers "Replace '{name}'" to
    *  overwrite it in place instead of saving a new item. */
   replace?: { name: string }
+  /** The selection is a part that came from a Library item this model has
+   *  changed (v1.5 OW-2): leads with "Update “{name}” in the Library", and
+   *  keeps "Save as a new item" beneath it. `confirm` is set when the Library
+   *  has also changed since the part was inserted, which asks first;
+   *  `cannotCompare` is set when Hew cannot tell which side is newer, which
+   *  asks first too, in its own words. */
+  updateInLibrary?: { name: string; confirm: boolean; cannotCompare?: boolean }
+  /** The selection came from a Library item but is a linked copy, which cannot
+   *  update it: no button, one line saying what to do instead. */
+  updateInLibraryBlocked?: { name: string }
+  onUpdateInLibrary?: () => void
 }
 
 /** The placement tool's origin-marker yellow (`LibraryPlaceTool.ts`'s
@@ -53,6 +64,29 @@ export interface SaveToLibraryPopoverProps {
  * themed semantic role. Kept in sync by hand; both sites are small and
  * unlikely to drift. */
 const ORIGIN_DOT_COLOR = '#f5d76a'
+
+const PRIMARY_BUTTON_STYLE: React.CSSProperties = {
+  padding: '7px 12px',
+  background: 'var(--accent-base)',
+  border: 'none',
+  borderRadius: 'var(--radius-control)',
+  color: '#fff',
+  fontFamily: 'var(--font-family-ui)',
+  fontSize: 'var(--font-size-tool-row)',
+  fontWeight: 600,
+  cursor: 'pointer',
+}
+
+const SECONDARY_BUTTON_STYLE: React.CSSProperties = {
+  padding: '7px 12px',
+  background: 'var(--surface-input)',
+  border: '1px solid var(--border-strong)',
+  borderRadius: 'var(--radius-control)',
+  color: 'var(--text-primary)',
+  fontFamily: 'var(--font-family-ui)',
+  fontSize: 'var(--font-size-tool-row)',
+  cursor: 'pointer',
+}
 
 export function SaveToLibraryPopover({
   defaultName,
@@ -66,10 +100,16 @@ export function SaveToLibraryPopover({
   rows = [],
   hideOriginHint = false,
   replace,
+  updateInLibrary,
+  onUpdateInLibrary,
+  updateInLibraryBlocked,
 }: SaveToLibraryPopoverProps) {
   const { t } = useLingui()
   const heading = title ?? t`Save to Library`
   const replaceName = replace?.name ?? ''
+  const updateName = updateInLibrary?.name ?? ''
+  const blockedName = updateInLibraryBlocked?.name ?? ''
+  const [confirming, setConfirming] = useState(false)
   const [name, setName] = useState(defaultName)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -144,6 +184,50 @@ export function SaveToLibraryPopover({
         >
           {title ?? <Trans>Save to Library</Trans>}
         </div>
+        {updateInLibraryBlocked !== undefined && (
+          <div data-testid="update-in-library-blocked" style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.4 }}>
+            <Trans>
+              This part is a linked copy, so it can’t update “{blockedName}” in the Library. Make it a component or unlink it first.
+            </Trans>
+          </div>
+        )}
+        {updateInLibrary !== undefined && onUpdateInLibrary !== undefined && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            {confirming ? (
+              <>
+                <div data-testid="update-in-library-confirm" style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.4 }}>
+                  {updateInLibrary.cannotCompare === true ? (
+                    <Trans>The Library copy and this part have both changed or can’t be compared. Replacing it will lose the Library’s version.</Trans>
+                  ) : (
+                    <Trans>The Library has also changed since you inserted “{updateName}”. Replacing it will lose those changes.</Trans>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button type="button" onClick={() => setConfirming(false)} style={{ ...SECONDARY_BUTTON_STYLE, flex: 1 }}>
+                    <Trans>Cancel</Trans>
+                  </button>
+                  <button type="button" data-testid="update-in-library-replace" onClick={onUpdateInLibrary} style={{ ...PRIMARY_BUTTON_STYLE, flex: 1 }}>
+                    <Trans>Replace it</Trans>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  data-testid="update-in-library"
+                  onClick={() => (updateInLibrary.confirm ? setConfirming(true) : onUpdateInLibrary())}
+                  style={PRIMARY_BUTTON_STYLE}
+                >
+                  <Trans>Update “{updateName}” in the Library</Trans>
+                </button>
+                <div style={{ fontSize: '10px', color: 'var(--text-faint)' }}>
+                  <Trans>Other models that use it will be offered the update.</Trans>
+                </div>
+              </>
+            )}
+          </div>
+        )}
         <input
           ref={inputRef}
           type="text"
@@ -198,22 +282,8 @@ export function SaveToLibraryPopover({
             <Trans>Replace “{replaceName}”</Trans>
           </button>
         )}
-        <button
-          type="button"
-          onClick={commit}
-          style={{
-            padding: '7px 12px',
-            background: 'var(--accent-base)',
-            border: 'none',
-            borderRadius: 'var(--radius-control)',
-            color: '#fff',
-            fontFamily: 'var(--font-family-ui)',
-            fontSize: 'var(--font-size-tool-row)',
-            fontWeight: 600,
-            cursor: 'pointer',
-          }}
-        >
-          {buttonLabel ?? <Trans>Save</Trans>}
+        <button type="button" onClick={commit} style={updateInLibrary !== undefined ? SECONDARY_BUTTON_STYLE : PRIMARY_BUTTON_STYLE}>
+          {buttonLabel ?? (updateInLibrary !== undefined ? <Trans>Save as a new item</Trans> : <Trans>Save</Trans>)}
         </button>
         {hint !== null && !hideOriginHint && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '10px', color: 'var(--text-faint)' }}>

@@ -35,9 +35,79 @@ msgstr ""
 msgid "\"{matDeleteName}\" — used on {matDeleteUsage, plural, one {# face} other {# faces}} — delete and unpaint them?"
 msgstr ""
 
+#: src/library/libraryUpdates.ts
+msgid "“{name}” is locked and was not updated. Unlock it first."
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” is open for editing and was not updated. Close the open group or component first."
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” shares its shape with a locked part and was not updated. Unlock that part first."
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+#~ msgid "“{name}” was changed here, so it was kept; the updated “{parentName}” got its own copy of the new “{name}”."
+#~ msgstr ""
+
+#: src/library/libraryUpdates.ts
+#~ msgid "“{name}” was changed here, so it was kept; the updated part got its own copy of the new “{name}”."
+#~ msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was left as it is because it was changed here or is locked; the updated “{parentName}” got its own copy of the new “{name}”."
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was left as it is because it was changed here or is locked; the updated part got its own copy of the new “{name}”."
+msgstr ""
+
+#. placeholder {0}: part.message
+#: src/library/libraryUpdates.ts
+#~ msgid "“{name}” was not updated: {0}"
+#~ msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated: {reason}"
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated: Hew couldn’t read its Library item."
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated: it is no longer in this model."
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated: its Library item is gone, or no longer has this part."
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated: the new version has parts nested too deeply."
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated: the new version is too large to bring in."
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated: the new version would contain itself."
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated."
+msgstr ""
+
 #. placeholder {0}: r.frameDiffered
 #: src/linkSimilar.ts
 msgid "{0, plural, one {# copy had its own axes; the first copy’s axes now apply} other {# copies had their own axes; the first copy’s axes now apply}}"
+msgstr ""
+
+#. placeholder {0}: row.copies
+#: src/panels/LibraryUpdateReview.tsx
+msgid "{0, plural, one {# copy in this model} other {# copies in this model}}"
 msgstr ""
 
 #. placeholder {0}: item.summary.materials
@@ -151,6 +221,10 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "{count, plural, one {# look-alike object can be linked} other {# look-alike objects can be linked}}"
+msgstr ""
+
+#: src/panels/LibraryUpdateBar.tsx
+msgid "{count, plural, one {# part has a newer version in the Library.} other {# parts have newer versions in the Library.}}"
 msgstr ""
 
 #: src/linkedCopyCopy.ts
@@ -409,6 +483,10 @@ msgstr ""
 msgid "{mendable, plural, one {# shape needs} other {# shapes need}}"
 msgstr ""
 
+#: src/panels/LibraryUpdateReview.tsx
+msgid "{more, plural, one {+ # more part} other {+ # more parts}}"
+msgstr ""
+
 #: src/panels/UnsavedChangesDialog.tsx
 msgid "{more, plural, one {and # more (undone)} other {and # more (undone)}}"
 msgstr ""
@@ -580,6 +658,10 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "{n, plural, one {separated # spot where parts touched at a single point} other {separated # spots where parts touched at a single point}}"
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "{n, plural, one {Updated # part from the Library.} other {Updated # parts from the Library.}}"
 msgstr ""
 
 #: src/log/reportBundle.ts
@@ -923,6 +1005,10 @@ msgstr ""
 msgid "{size} tile"
 msgstr ""
 
+#: src/library/libraryUpdates.ts
+msgid "{skipped, plural, one {# part was not updated.} other {# parts were not updated.}}"
+msgstr ""
+
 #: src/viewport/Viewport.tsx
 msgid "{skipped, plural, one {Inserted without # loose sketch/annotation element — library inserts carry solids, components, and guides.} other {Inserted without # loose sketch/annotation elements — library inserts carry solids, components, and guides.}}"
 msgstr ""
@@ -1207,6 +1293,10 @@ msgstr ""
 
 #: src/updater/UpdateWindow.tsx
 msgid "A new version of Hew is available!"
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "A newer version of this part is in the Library."
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -1831,10 +1921,12 @@ msgstr ""
 #: src/panels/CutScopeStrip.tsx
 #: src/panels/ExportDialog.tsx
 #: src/panels/library/LibraryDetailPane.tsx
+#: src/panels/LibraryUpdateReview.tsx
 #: src/panels/PrintDialog.tsx
 #: src/panels/ReportBugDialog.tsx
 #: src/panels/RescaleConfirmDialog.tsx
 #: src/panels/SaveFormatDialog.tsx
+#: src/panels/SaveToLibraryPopover.tsx
 #: src/panels/ScenesPanel.tsx
 #: src/panels/SentReportsDialog.tsx
 #: src/panels/StlUnitsDialog.tsx
@@ -1907,6 +1999,14 @@ msgstr ""
 msgid "Changed from the default"
 msgstr ""
 
+#: src/library/libraryUpdates.ts
+msgid "Changed here"
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "Changed here and in the Library"
+msgstr ""
+
 #: src/App.tsx
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
@@ -1933,6 +2033,11 @@ msgstr ""
 
 #: src/viewport/gpuCapability.ts
 msgid "Check that your graphics drivers are installed and that hardware acceleration is turned on, then try again."
+msgstr ""
+
+#: src/settings/FluentSettingsPage.tsx
+#: src/settings/FoldersPane.tsx
+msgid "Check the Library for newer parts"
 msgstr ""
 
 #: src/panels/ImportingOverlay.tsx
@@ -3319,6 +3424,10 @@ msgstr ""
 msgid "difference"
 msgstr ""
 
+#: src/library/libraryUpdates.ts
+msgid "Different from the Library"
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "dimension"
 msgstr ""
@@ -3442,6 +3551,7 @@ msgid "Don’t Save"
 msgstr ""
 
 #: src/health/healthCopy.ts
+#: src/panels/LibraryUpdateReview.tsx
 #: src/panels/PrintDialog.tsx
 msgid "Done"
 msgstr ""
@@ -3830,6 +3940,10 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Every object in the model is solid."
+msgstr ""
+
+#: src/panels/LibraryUpdateReview.tsx
+msgid "Every part from the Library matches it."
 msgstr ""
 
 #: src/settings/units.ts
@@ -4662,6 +4776,10 @@ msgstr ""
 msgid "Hew cannot open this kind of file."
 msgstr ""
 
+#: src/library/libraryUpdates.ts
+msgid "Hew can’t tell which one is newer. Updating would replace what is here."
+msgstr ""
+
 #: src/settings/AdvancedPane.tsx
 #: src/settings/FluentSettingsPage.tsx
 msgid "Hew cloud ({cloudHost})"
@@ -4825,6 +4943,10 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "Hew's own request to the model kernel carried a malformed flip plane or copy choice. If this keeps happening, use Report Bug."
+msgstr ""
+
+#: src/kernelErrors.ts
+msgid "Hew's own request to the model kernel carried a malformed Library listing. If this keeps happening, use Report Bug."
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -5442,6 +5564,7 @@ msgid "Last steps:"
 msgstr ""
 
 #: src/panels/FollowNoticeBar.tsx
+#: src/panels/LibraryUpdateBar.tsx
 #: src/updater/UpdateReadyBar.tsx
 #: src/updater/UpdateWindow.tsx
 msgid "Later"
@@ -5578,6 +5701,14 @@ msgstr ""
 
 #: src/io/documentSession.ts
 msgid "Library metadata"
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "Library part"
+msgstr ""
+
+#: src/panels/LibraryUpdateReview.tsx
+msgid "Library updates"
 msgstr ""
 
 #: src/settings/FluentSettingsPage.tsx
@@ -5741,6 +5872,10 @@ msgstr ""
 
 #: src/panels/DocumentTree.tsx
 msgid "Locked. Click to unlock."
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "Locked. Unlock it first to update it."
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -5919,6 +6054,10 @@ msgstr ""
 
 #: src/panels/PrintDialog.tsx
 msgid "Marks"
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "Matches the Library"
 msgstr ""
 
 #: src/App.tsx
@@ -6435,6 +6574,10 @@ msgstr ""
 msgid "New tag for all selected"
 msgstr ""
 
+#: src/library/libraryUpdates.ts
+msgid "Newer in the Library"
+msgstr ""
+
 #: src/health/healthCopy.ts
 msgid "Next opening"
 msgstr ""
@@ -6631,6 +6774,10 @@ msgstr ""
 msgid "Not closed"
 msgstr ""
 
+#: src/library/libraryUpdates.ts
+msgid "Not in the Library any more"
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "note"
 msgstr ""
@@ -6647,12 +6794,20 @@ msgstr ""
 msgid "Nothing here to select. Double-click empty space to leave this context."
 msgstr ""
 
+#: src/palette/CommandPalette.tsx
+msgid "nothing is locked"
+msgstr ""
+
 #: src/panels/PrintDialog.tsx
 msgid "Nothing is selected."
 msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Nothing matches your search."
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "Nothing needed updating."
 msgstr ""
 
 #: src/App.tsx
@@ -7275,6 +7430,10 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "orthographic"
+msgstr ""
+
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "Other models that use it will be offered the update."
 msgstr ""
 
 #: src/App.tsx
@@ -8322,6 +8481,10 @@ msgstr ""
 msgid "Replace “{replaceName}”"
 msgstr ""
 
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "Replace it"
+msgstr ""
+
 #: src/App.tsx
 msgid "Replaced profile \"{name}\"."
 msgstr ""
@@ -8513,6 +8676,10 @@ msgstr ""
 msgid "Review and send a bug report, or save it to a file."
 msgstr ""
 
+#: src/panels/LibraryUpdateBar.tsx
+msgid "Review…"
+msgstr ""
+
 #: src/palette/registry.ts
 #~ msgid "revolve"
 #~ msgstr ""
@@ -8678,6 +8845,10 @@ msgstr ""
 #: src/App.tsx
 #: src/panels/SaveFormatDialog.tsx
 msgid "Save As"
+msgstr ""
+
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "Save as a new item"
 msgstr ""
 
 #: src/App.tsx
@@ -10263,6 +10434,10 @@ msgid "That part is no longer in the model. Pick it again."
 msgstr ""
 
 #: src/kernelErrors.ts
+msgid "That part's Library item is no longer in the Library, so it can't be updated."
+msgstr ""
+
+#: src/kernelErrors.ts
 msgid "That path line is no longer there — the model changed since it was picked. Click it again."
 msgstr ""
 
@@ -10474,8 +10649,16 @@ msgstr ""
 msgid "The intuitive, Open Source, cross-platform, solids-first 3D modeler."
 msgstr ""
 
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "The Library copy and this part have both changed or can’t be compared. Replacing it will lose the Library’s version."
+msgstr ""
+
 #: src/io/webLibraryStore.ts
 msgid "The library folder needs permission again — reconnect it in the Library window."
+msgstr ""
+
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "The Library has also changed since you inserted “{updateName}”. Replacing it will lose those changes."
 msgstr ""
 
 #: src/io/libraryStore.ts
@@ -10489,6 +10672,10 @@ msgstr ""
 
 #: src/panels/LibraryDialog.tsx
 msgid "The library isn’t available in this browser."
+msgstr ""
+
+#: src/kernelErrors.ts
+msgid "The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged."
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -11091,6 +11278,31 @@ msgstr ""
 #: src/tools/LineTool.ts
 #~ msgid "This outline spans two planes, so it can't close into a single face — finish the shape on one plane instead."
 #~ msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "This part"
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "This part changed here and in the Library."
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "This part differs from the Library, and Hew can’t tell which one is newer."
+msgstr ""
+
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "This part is a linked copy, so it can’t update “{blockedName}” in the Library. Make it a component or unlink it first."
+msgstr ""
+
+#. placeholder {0}: updating.meta.name ?? name
+#: src/App.tsx
+#~ msgid "This part is a linked copy. Make it a component, or unlink it, before updating “{0}” in the Library."
+#~ msgstr ""
+
+#: src/App.tsx
+msgid "This part is a linked copy. Make it a component, or unlink it, before updating “{name}” in the Library."
+msgstr ""
 
 #: src/tools/FollowMeTool.ts
 msgid "This path can't be swept in reverse from here — it either only closes going one direction, or bends too tightly to walk backward. Drag forward instead, or start the profile somewhere with more room to reverse."
@@ -11777,9 +11989,29 @@ msgstr ""
 msgid "Update"
 msgstr ""
 
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "Update “{updateName}” in the Library"
+msgstr ""
+
+#: src/panels/LibraryUpdateReview.tsx
+msgid "Update {name}"
+msgstr ""
+
+#: src/panels/LibraryUpdateBar.tsx
+msgid "Update All"
+msgstr ""
+
+#: src/panels/LibraryUpdateReview.tsx
+msgid "Update all that changed in the Library"
+msgstr ""
+
 #: src/i18n/nativeMenu.ts
 #~ msgid "Update available"
 #~ msgstr ""
+
+#: src/i18n/historyLabels.ts
+msgid "Update from Library"
+msgstr ""
 
 #: src/updater/UpdateWindow.tsx
 msgid "Update Help"
@@ -11811,8 +12043,16 @@ msgstr ""
 msgid "Update Scene failed: {reason}"
 msgstr ""
 
+#: src/panels/LibraryUpdateReview.tsx
+msgid "Update Selected"
+msgstr ""
+
 #: src/viewport/gpuCapability.ts
 msgid "Update your graphics drivers first — that fixes most cases. Then check that hardware acceleration is turned on in Firefox's Performance settings, and that webgl.disabled hasn't been switched on in about:config."
+msgstr ""
+
+#: src/App.tsx
+msgid "Updated \"{name}\" in the Library"
 msgstr ""
 
 #: src/settings/FluentSettingsPage.tsx
@@ -12038,6 +12278,16 @@ msgstr ""
 msgid "When a new version is out, Hew downloads it on its own and then asks before restarting. A version you skipped is never installed."
 msgstr ""
 
+#: src/settings/FluentSettingsPage.tsx
+#: src/settings/FoldersPane.tsx
+#~ msgid "When a part you inserted from the Library has a newer version there, Hew says so under the menu bar. It never changes anything until you choose to update."
+#~ msgstr ""
+
+#: src/settings/FluentSettingsPage.tsx
+#: src/settings/FoldersPane.tsx
+msgid "When a part you inserted from the Library has a newer version there, Hew says so under the menu bar. It never changes anything until you choose to update. With this off, Hew stops checking by itself and never shows that note, but it still checks when you open the Components panel or the Library, or save a part to the Library."
+msgstr ""
+
 #: src/settings/ViewPane.tsx
 msgid "Where the box that shows the number you are typing sits. The fly speed readout moves with it."
 msgstr ""
@@ -12137,6 +12387,10 @@ msgstr ""
 msgid "You can download the new version from the Download page instead."
 msgstr ""
 
+#: src/library/libraryUpdates.ts
+msgid "You changed this part here. The Library still has the older version."
+msgstr ""
+
 #: src/panels/ReportBugDialog.tsx
 msgid "You’ll find replies and the report’s status under <0>Help ▸ Sent Reports…</0>"
 msgstr ""
@@ -12160,6 +12414,10 @@ msgstr ""
 
 #: src/panels/FollowNoticeBar.tsx
 msgid "Your bug report {onlyId} has an update from Hew’s developer."
+msgstr ""
+
+#: src/library/libraryUpdates.ts
+msgid "Your changes here would be replaced."
 msgstr ""
 
 #: src/updater/UpdateWindow.tsx

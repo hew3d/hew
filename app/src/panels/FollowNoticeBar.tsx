@@ -16,7 +16,7 @@ export interface FollowNoticeBarProps {
   host?: FollowHost
 }
 
-const BAR_STYLE: React.CSSProperties = {
+export const BAR_STYLE: React.CSSProperties = {
   background: 'var(--surface-overlay, #2a2a2a)',
   borderBottom: '1px solid var(--border-strong, #4a4a4a)',
   color: 'var(--text-primary, #eee)',
@@ -30,7 +30,7 @@ const BAR_STYLE: React.CSSProperties = {
   zIndex: 200,
 }
 
-const BUTTON_STYLE: React.CSSProperties = {
+export const BUTTON_STYLE: React.CSSProperties = {
   padding: '4px 14px',
   background: 'var(--surface-input, #444)',
   color: 'var(--text-primary, #eee)',
@@ -41,7 +41,7 @@ const BUTTON_STYLE: React.CSSProperties = {
   cursor: 'pointer',
 }
 
-const PRIMARY_STYLE: React.CSSProperties = {
+export const PRIMARY_STYLE: React.CSSProperties = {
   ...BUTTON_STYLE,
   background: 'var(--accent-base, #3a5e9e)',
   color: 'var(--accent-text-strong, #fff)',

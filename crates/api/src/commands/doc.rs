@@ -623,6 +623,7 @@ fn import_definition(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let provenance = kernel::LibraryProvenance {
         source_id: format!("import:{hash}"),
         content_hash: hash,
+        ..Default::default()
     };
     let item = if format == "hew" {
         kernel::Document::load(&bytes).map_err(|e| {

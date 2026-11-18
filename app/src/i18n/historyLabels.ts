@@ -100,6 +100,7 @@ const SIMPLE: Record<string, MessageDescriptor> = {
   'delete-component-member': msg`Delete component member`,
   lock: msg`Lock`,
   unlock: msg`Unlock`,
+  'update-from-library': msg`Update from Library`,
 }
 
 /** "{verb} {count} {noun}" — the transform family's verb and noun words. */

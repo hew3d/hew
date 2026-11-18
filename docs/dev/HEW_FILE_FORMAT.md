@@ -278,6 +278,39 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   Object or a Group. It changes no record field. A reader that does not
   know the key shows an ordinary component. A definition without the key
   is a named component.
+
+  Hew also writes the first-party namespace `hew.library` (docs/agents/HEW_API.md
+  §8.1). Like every attribute it changes no record field and needs no
+  manifest version; a reader that does not know a key keeps it verbatim.
+  On a Library item file's document dictionary it holds the item's
+  metadata (`id`, `name`, `category`, `keywords`, `collection`,
+  `savedAt`, `sourceDoc`) and, written by every save to the Library since
+  1.5, `prints`: an object mapping each component definition's `sid` in
+  the item file (a decimal string) to that definition's **content print**.
+  On a component definition placed from (or saved to) the Library it holds
+  the link: `source_id` (the item's `id`), `content_hash` (a fingerprint
+  of the item file's bytes, still written so older readers keep working,
+  compared by nothing), `def_sid` (the definition's `sid` in the item
+  file) and, since 1.5, `print`: the definition's content print when it
+  was last in step with the item (its base). A save of several parts
+  links each definition to its own definition in the item. Placed root
+  nodes carry `source_id` and `content_hash` only.
+
+  A content print is the text `p1:` followed by 64 lowercase hex digits,
+  the SHA-256 of a canonical byte stream of what the definition holds: each
+  live member in order (an Object by its faces as loops of vertices rounded
+  to 1 µm, surface claims, blend tags with what each blend's record asks
+  for and the paint of the faces it consumed, creased and soft edges,
+  circle and polygon claims and Smooth level; a group by its members; a
+  placement by
+  its pose, its own paint and the print of the definition it places), each
+  face's paint by value (color, texture image and tile size, physically
+  based properties, never the palette slot or the material's name), and
+  the definition's own sketches by their edges. Names, tags, attributes,
+  ids, hidden flags and where the definition is placed are left out.
+  Prints under another prefix than `p1` do not compare. Files without
+  these keys are read as before: a link without `print` has no base, and
+  an item without `prints` has its prints computed from the file.
 - **`camera`** (v13+, optional) — the camera's working view at last save.
 - **`view_style`** (v19+, optional) — how the document asks to be shown:
   its backdrop and axes (§4.15). Absent → Hew's own look.
