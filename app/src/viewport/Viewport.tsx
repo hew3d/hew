@@ -214,6 +214,7 @@ import { followsViewPlane, hoversFace, leftCanvasBounds, replaysWithoutSnap, sho
 import { getLengthSystem, getLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit } from '../settings/units'
 import type { EnterOutcome } from '../api/liveBridge'
 import { InfiniteGrid } from './InfiniteGrid'
+import { documentBackdropColors } from './documentBackdrop'
 
 /** The backdrop part of a document's view style (`view_style_json`). */
 export interface ViewStyleColors {
@@ -1326,6 +1327,9 @@ export interface ViewportApi {
    * own theme-driven look.
    */
   setViewStyle: (style: ViewStyleColors | null) => void
+  /** The backdrop as painted now (test accessor): the clear color and the
+   * ground plane's fill color and whether it fills. */
+  getBackdropInfo: () => { clearColor: number; groundColor: number; groundFilled: boolean }
   /** Whole-model Shaded / X-ray / Wireframe (View menu): drawing and
    * picking both follow it. Per window, never saved. */
   setRenderMode: (mode: RenderMode) => void
@@ -8077,11 +8081,17 @@ export default function Viewport({
     }
 
     function setViewStyle(style: ViewStyleColors | null): void {
-      viewStyle = style
+      // Section cut look follows the file; the backdrop goes through the gate.
+      viewStyle = documentBackdropColors(style)
       sceneRenderer.setSectionCutStyle(style?.sectionCutColor ?? null, style?.sectionCutWidth ?? null)
       applyBackdrop()
       applyGridColors()
       scheduleRender()
+    }
+
+    function getBackdropInfo(): { clearColor: number; groundColor: number; groundFilled: boolean } {
+      const g = infiniteGrid.getGroundInfo()
+      return { clearColor: renderer.getClearColor(new THREE.Color()).getHex(), groundColor: g.color, groundFilled: g.filled }
     }
 
     function setRenderMode(mode: RenderMode): void {
@@ -8448,7 +8458,7 @@ export default function Viewport({
       apiRefRef.current.current = { refreshSelectionColors: () => { sceneRenderer.refreshSelectionColors(); scheduleRender() }, runBoolean, operandTriangles, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runFlipAlong, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setViewDirection, orbitDrag, endOrbitDrag, subscribeCameraOrientation, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => {
         const isolation = isolationCtl.state()
         return isolation === null ? null : [...isolation.targets]
-      }, collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getFaceCue: () => faceCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, getHoverHighlight: () => sceneRenderer.getHoverHighlight(), rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setPartAxesVisible, getPartAxesInfo, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, setTangentEdgesVisible, getTangentEdgeInfo: () => sceneRenderer.getTangentEdgeInfo(), deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getInstanceRenderedInherited: (id: bigint) => sceneRenderer.debugInstanceInherited(id), getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
+      }, collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getFaceCue: () => faceCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, getHoverHighlight: () => sceneRenderer.getHoverHighlight(), rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setPartAxesVisible, getPartAxesInfo, setGridVisible, setViewStyle, getBackdropInfo, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, setTangentEdgesVisible, getTangentEdgeInfo: () => sceneRenderer.getTangentEdgeInfo(), deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getInstanceRenderedInherited: (id: bigint) => sceneRenderer.debugInstanceInherited(id), getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
       apiRefRef.current.current.getCageOverlayInfo = () => sceneRenderer.getCageOverlayInfo()
     }
 

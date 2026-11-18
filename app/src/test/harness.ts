@@ -414,6 +414,13 @@ export interface HewTestHarness {
     clipPlane: { normal: Vec3; constant: number } | null
   }
 
+  /** Set (or clear with null) the document's view style JSON (kernel `ViewStyle`). */
+  setViewStyleJson(json: string | null): void
+  /** The document's stored view style JSON, or null. */
+  getViewStyleJson(): string | null
+  /** The viewport backdrop as painted: clear color, ground color, ground fill. */
+  getBackdropInfo(): { clearColor: number; groundColor: number; groundFilled: boolean }
+
   replay(recordingJson: string): string
   // serialization ( — round-trips the live `.hew` container through the
   // app's real save/open path). Bytes cross `page.evaluate` as a plain number[]
@@ -2051,6 +2058,14 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       return api.getSectionRenderInfo(kind, BigInt(id))
+    },
+
+    setViewStyleJson: (json) => act((s) => s.set_view_style_json(json ?? undefined)),
+    getViewStyleJson: () => query((s) => s.view_style_json() ?? null),
+    getBackdropInfo: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.getBackdropInfo()
     },
 
     replay: (json) => act((s) => s.replay(json).toString()),
