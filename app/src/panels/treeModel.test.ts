@@ -29,8 +29,15 @@ import {
   filterTreeKeys,
   dropTargetFor,
   placementLabel,
+  selKey,
+  isNodeItem,
+  selectionNodes,
+  selectionGuides,
+  selectionAnnotations,
+  withNodes,
   type LabelScene,
   type NodeRef,
+  type SelItem,
 } from './treeModel'
 
 // Draft refs (the drawing on a plane) carry the plane's canonical context
@@ -702,6 +709,52 @@ describe('mergeSelection (marquee / Select All / Invert)', () => {
   })
 })
 
+describe('the mixed selection (nodes, guides, annotations in one ordered list)', () => {
+  const box: NodeRef = { kind: 'object', id: 10n }
+  const grp: NodeRef = { kind: 'group', id: 30n }
+  const guide: SelItem = { kind: 'guide', id: 10n }
+  const guide2: SelItem = { kind: 'guide', id: 11n }
+  const dim: SelItem = { kind: 'annotation', id: 10n }
+
+  it('keys each kind apart, even on the same handle value', () => {
+    expect(new Set([box, guide, dim].map(selKey)).size).toBe(3)
+    expect(selKey(box)).toBe(nodeKey(box))
+  })
+
+  it('a modified click mixes kinds and keeps the first pick primary', () => {
+    let sel: SelItem[] = nextSelection<SelItem>([], guide, 'replace')
+    sel = nextSelection(sel, box, 'toggle')
+    sel = nextSelection(sel, dim, 'add')
+    expect(sel).toEqual([guide, box, dim])
+    expect(nextSelection(sel, guide, 'toggle')).toEqual([box, dim])
+    expect(nextSelection(sel, dim, 'subtract')).toEqual([guide, box])
+  })
+
+  it('a plain click on a node replaces guides and annotations too', () => {
+    expect(nextSelection<SelItem>([guide, dim], box, 'replace')).toEqual([box])
+  })
+
+  it('a multi pick merges across kinds', () => {
+    expect(mergeSelection<SelItem>([guide, box], [box, dim], 'toggle')).toEqual([guide, dim])
+    expect(mergeSelection<SelItem>([guide], [guide, guide2], 'add')).toEqual([guide, guide2])
+  })
+
+  it('splits into per-kind views in pick order', () => {
+    const sel: SelItem[] = [guide2, box, dim, guide, grp]
+    expect(selectionNodes(sel)).toEqual([box, grp])
+    expect(selectionGuides(sel)).toEqual([11n, 10n])
+    expect(selectionAnnotations(sel)).toEqual([10n])
+    expect(sel.filter(isNodeItem)).toEqual([box, grp])
+  })
+
+  it('withNodes swaps the nodes for a result and keeps the rest selected', () => {
+    expect(withNodes([box, guide, grp, dim], [grp])).toEqual([grp, guide, dim])
+    expect(withNodes([guide, box], [])).toEqual([guide])
+    const nodesOnly: SelItem[] = [box, grp]
+    expect(withNodes(nodesOnly, [box, grp])).toBe(nodesOnly)
+  })
+})
+
 describe('buildTreeIndexMap', () => {
   const obj = (id: bigint): NodeRef => ({ kind: 'object', id })
   const grp = (id: bigint): NodeRef => ({ kind: 'group', id })
@@ -974,6 +1027,35 @@ describe('pruneDeadSelection — drop handles the document no longer holds', () 
       const sel: NodeRef[] = [dr('draft-island', CTX1, 10)]
       expect(pruneDeadSelection(bare, sel)).toEqual([])
     })
+  })
+})
+
+describe('pruneDeadSelection — guides and annotations', () => {
+  const box: NodeRef = { kind: 'object', id: 1n }
+  const guide = (id: bigint): SelItem => ({ kind: 'guide', id })
+  const dim = (id: bigint): SelItem => ({ kind: 'annotation', id })
+  const view = (guides: bigint[], annotations: bigint[]) => ({
+    object_ids: () => [1n],
+    group_ids: () => [],
+    instance_ids: () => [],
+    sketch_ids: () => [],
+    guide_ids: () => guides,
+    shown_annotation_ids: () => annotations,
+  })
+
+  it('keeps the shown ones and drops the rest, in order', () => {
+    const sel: SelItem[] = [guide(5n), box, dim(7n), guide(6n), dim(8n)]
+    expect(pruneDeadSelection(view([6n], [8n]), sel)).toEqual([box, guide(6n), dim(8n)])
+  })
+
+  it('returns the same array when everything is shown', () => {
+    const sel: SelItem[] = [guide(5n), box, dim(7n)]
+    expect(pruneDeadSelection(view([5n], [7n]), sel)).toBe(sel)
+  })
+
+  it('drops them from a scene that cannot list them', () => {
+    const scene = { object_ids: () => [1n], group_ids: () => [], instance_ids: () => [], sketch_ids: () => [] }
+    expect(pruneDeadSelection(scene, [guide(5n), box, dim(7n)])).toEqual([box])
   })
 })
 

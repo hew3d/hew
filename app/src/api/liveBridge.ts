@@ -62,7 +62,7 @@
 import { isTauri } from '../io/fileHost'
 import type { Scene } from '../wasm/loader'
 import type { StandardView, ViewportApi } from '../viewport/Viewport'
-import type { NodeRef, SelectMode } from '../panels/treeModel'
+import type { NodeRef, SelItem, SelectMode } from '../panels/treeModel'
 import type { IsolationTarget } from '../viewport/isolation'
 import { getLengthUnit, setLengthUnit, type LengthFormat } from '../settings/units'
 import { parseDispatch } from './dispatchResult'
@@ -149,14 +149,13 @@ export interface LiveBridgeDeps {
   reseedViewState?: () => void
   /**
    * The app's own selection handlers, which a bus `hew.selection.set` or
-   * `clear` drives (`ViewDirective::Selection`): nodes and sketches through
-   * `handleSelectMany(nodes, 'replace')`, one guide, one annotation, or
-   * nothing. Optional (a host without a selection omits them; the directive
-   * is then a no-op). App.tsx wires them to its handlers.
+   * `clear` drives (`ViewDirective::Selection`): the merged entries, nodes,
+   * sketches, guides and annotations in any mix and in pick order, through
+   * `handleSelectMany(items, 'replace')`, or nothing. Optional (a host
+   * without a selection omits them; the directive is then a no-op). App.tsx
+   * wires them to its handlers.
    */
-  selectMany?: (nodes: NodeRef[], mode: SelectMode) => void
-  selectGuide?: (id: bigint) => void
-  selectAnnotation?: (id: bigint) => void
+  selectMany?: (items: SelItem[], mode: SelectMode) => void
   selectNone?: () => void
   /**
    * Isolates through the app's own handler (`isolate` directives): the
@@ -420,8 +419,6 @@ export type DirectiveTargets = Pick<
   | 'reseedViewState'
   | 'reconcileVisibility'
   | 'selectMany'
-  | 'selectGuide'
-  | 'selectAnnotation'
   | 'selectNone'
   | 'isolate'
   | 'enterNode'
@@ -431,30 +428,14 @@ export type DirectiveTargets = Pick<
 > & { viewportApi: ViewportApi | null }
 
 /** A `selection` directive's merged entries, applied wholesale through the
- * app's handlers: nodes and sketches replace the selection, a lone guide or
- * annotation selects it, and nothing clears it. */
+ * app's handlers: the entries, in their order, replace the selection, and
+ * nothing clears it. */
 function applySelection(entries: DirectiveSelectionEntry[], targets: DirectiveTargets): void {
   if (entries.length === 0) {
     targets.selectNone?.()
     return
   }
-  const [first] = entries
-  if (entries.length === 1 && first.kind === 'guide') {
-    targets.selectGuide?.(BigInt(first.id))
-    return
-  }
-  if (entries.length === 1 && first.kind === 'annotation') {
-    targets.selectAnnotation?.(BigInt(first.id))
-    return
-  }
-  const nodes: NodeRef[] = []
-  for (const e of entries) {
-    // The kernel never merges a guide or annotation with nodes; skip one
-    // defensively rather than hand the node handler a kind it cannot hold.
-    if (e.kind === 'guide' || e.kind === 'annotation') continue
-    nodes.push({ kind: e.kind, id: BigInt(e.id) })
-  }
-  targets.selectMany?.(nodes, 'replace')
+  targets.selectMany?.(entries.map((e) => ({ kind: e.kind, id: BigInt(e.id) })), 'replace')
 }
 
 function isolationTargets(entries: DirectiveIsolationEntry[]): IsolationTarget[] {
@@ -683,8 +664,6 @@ export function directiveTargets(deps: LiveBridgeDeps): DirectiveTargets {
     reseedViewState: deps.reseedViewState,
     reconcileVisibility: deps.reconcileVisibility,
     selectMany: deps.selectMany,
-    selectGuide: deps.selectGuide,
-    selectAnnotation: deps.selectAnnotation,
     selectNone: deps.selectNone,
     isolate: deps.isolate,
     enterNode: deps.enterNode,

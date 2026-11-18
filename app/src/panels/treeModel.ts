@@ -66,6 +66,66 @@ export interface NodeRef {
   key?: string
 }
 
+/** A selected construction guide (kernel `GuideId`). */
+export interface GuideRef {
+  kind: 'guide'
+  id: bigint
+}
+
+/** A selected dimension or leader text (kernel `AnnotationId`). */
+export interface AnnotationRef {
+  kind: 'annotation'
+  id: bigint
+}
+
+/**
+ * One entry of the app's selection. The selection is a single ordered list
+ * in pick order (index 0 is the primary) that mixes nodes, guides and
+ * annotations in any count; the per-kind views (`selectionNodes`,
+ * `selectionGuides`, `selectionAnnotations`) are derived from it, never
+ * held beside it, so "click a guide, then Shift-click a box" keeps the guide
+ * as the primary.
+ */
+export type SelItem = NodeRef | GuideRef | AnnotationRef
+
+/** Whether a selection entry is a document node (not a guide or annotation). */
+export function isNodeItem(s: SelItem): s is NodeRef {
+  return s.kind !== 'guide' && s.kind !== 'annotation'
+}
+
+/** Stable string key for a selection entry; a node's is its `nodeKey`. */
+export function selKey(s: SelItem): string {
+  return isNodeItem(s) ? nodeKey(s) : `${s.kind}:${s.id}`
+}
+
+/** The selection's nodes, in pick order. */
+export function selectionNodes(sel: readonly SelItem[]): NodeRef[] {
+  return sel.filter(isNodeItem)
+}
+
+/** The selection's guides, in pick order. */
+export function selectionGuides(sel: readonly SelItem[]): bigint[] {
+  return sel.flatMap((s) => (s.kind === 'guide' ? [s.id] : []))
+}
+
+/** The selection's annotations, in pick order. */
+export function selectionAnnotations(sel: readonly SelItem[]): bigint[] {
+  return sel.flatMap((s) => (s.kind === 'annotation' ? [s.id] : []))
+}
+
+/**
+ * Replace the selection's nodes with `nodes`, keeping its guides and
+ * annotations selected after them, in their order. A command that only acts
+ * on nodes (Group, Make Component, a linked copy…) selects its result this
+ * way and leaves the rest of the selection untouched. Returns the ORIGINAL
+ * array when nothing changes.
+ */
+export function withNodes(sel: SelItem[], nodes: NodeRef[]): SelItem[] {
+  const rest = sel.filter((s) => !isNodeItem(s))
+  if (rest.length === 0 && nodes.length === sel.length && nodes.every((n, i) => n === sel[i])) return sel
+  return [...nodes, ...rest]
+}
+
 /** Whether `kind` is one of the draft (drawing-on-a-plane) kinds. */
 export function isDraftKind(kind: NodeKind): kind is 'draft-island' | 'draft-curve' | 'draft-edge' | 'draft-region' {
   return kind === 'draft-island' || kind === 'draft-curve' || kind === 'draft-edge' || kind === 'draft-region'
@@ -838,21 +898,22 @@ export type SelectMode = 'replace' | 'toggle' | 'add' | 'subtract'
  * - `'subtract'` → remove if present, else unchanged.
  * - `'replace'` → `[node]`.
  */
-export function nextSelection(
-  current: NodeRef[],
-  node: NodeRef | null,
+export function nextSelection<T extends SelItem>(
+  current: T[],
+  node: T | null,
   mode: SelectMode,
-): NodeRef[] {
+): T[] {
   if (node === null) {
     return mode === 'replace' ? [] : current
   }
   if (mode === 'replace') {
     return [node]
   }
-  const exists = current.some((n) => nodeEq(n, node))
+  const key = selKey(node)
+  const exists = current.some((n) => selKey(n) === key)
   if (mode === 'add') return exists ? current : [...current, node]
-  if (mode === 'subtract') return exists ? current.filter((n) => !nodeEq(n, node)) : current
-  return exists ? current.filter((n) => !nodeEq(n, node)) : [...current, node]
+  if (mode === 'subtract') return exists ? current.filter((n) => selKey(n) !== key) : current
+  return exists ? current.filter((n) => selKey(n) !== key) : [...current, node]
 }
 
 /**
@@ -869,24 +930,24 @@ export function nextSelection(
  * ORIGINAL array when nothing changes, so a state setter can hand it back
  * without a render churn.
  */
-export function mergeSelection(
-  current: NodeRef[],
-  nodes: NodeRef[],
+export function mergeSelection<T extends SelItem>(
+  current: T[],
+  nodes: T[],
   mode: SelectMode,
-): NodeRef[] {
+): T[] {
   if (mode === 'replace') return nodes
-  const picked = new Set(nodes.map(nodeKey))
-  const have = new Set(current.map(nodeKey))
+  const picked = new Set(nodes.map(selKey))
+  const have = new Set(current.map(selKey))
   if (mode === 'add') {
-    const fresh = nodes.filter((n) => !have.has(nodeKey(n)))
+    const fresh = nodes.filter((n) => !have.has(selKey(n)))
     return fresh.length === 0 ? current : [...current, ...fresh]
   }
   if (mode === 'subtract') {
-    const kept = current.filter((n) => !picked.has(nodeKey(n)))
+    const kept = current.filter((n) => !picked.has(selKey(n)))
     return kept.length === current.length ? current : kept
   }
-  const kept = current.filter((n) => !picked.has(nodeKey(n)))
-  const fresh = nodes.filter((n) => !have.has(nodeKey(n)))
+  const kept = current.filter((n) => !picked.has(selKey(n)))
+  const fresh = nodes.filter((n) => !have.has(selKey(n)))
   if (fresh.length === 0 && kept.length === current.length) return current
   return [...kept, ...fresh]
 }
@@ -900,6 +961,10 @@ export interface SelectionLivenessView {
   group_ids(): ArrayLike<bigint>
   instance_ids(): ArrayLike<bigint>
   sketch_ids(): ArrayLike<bigint>
+  /** The shown guides (a guide on a hidden tag is not listed). */
+  guide_ids?(): ArrayLike<bigint>
+  /** The shown annotations. */
+  shown_annotation_ids?(): ArrayLike<bigint>
   plane_units_json?(ctx: string): string
   pick_plane_unit?(ctx: string, ray: Float64Array, tolerance: number): string
   history_generation?(): bigint
@@ -913,17 +978,21 @@ export interface SelectionLivenessView {
  * contextual dock render from this selection, so a stale entry shows a
  * phantom "N selected" and arms tools with dead handles.
  *
+ * A guide or an annotation is kept while it is shown: one deleted, undone,
+ * or put on a hidden tag leaves the selection, since it can no longer be
+ * selected and a stale handle would refuse the whole of a mixed Delete.
+ *
  * Handles are generational (DEVELOPMENT.md): a dead handle can never alias
  * a live node, so membership tests against the live id lists are exact.
  * Returns the ORIGINAL array when every entry is alive, so a state setter
  * can hand the result straight back without a render churn.
  */
-export function pruneDeadSelection(
+export function pruneDeadSelection<T extends SelItem>(
   scene: SelectionLivenessView,
-  selected: NodeRef[],
+  selected: T[],
   scopedObjects: readonly bigint[] = [],
   scopedSketches: readonly bigint[] = [],
-): NodeRef[] {
+): T[] {
   if (selected.length === 0) return selected
 
   // Lazily built: most selections are structural nodes only.
@@ -931,11 +1000,17 @@ export function pruneDeadSelection(
   let groups: Set<bigint> | null = null
   let instances: Set<bigint> | null = null
   let sketches: Set<bigint> | null = null
+  let guides: Set<bigint> | null = null
+  let annotations: Set<bigint> | null = null
   const sketchSet = (): Set<bigint> =>
     (sketches ??= new Set([...Array.from(scene.sketch_ids()), ...scopedSketches]))
 
-  const alive = (n: NodeRef): boolean => {
+  const alive = (n: SelItem): boolean => {
     switch (n.kind) {
+      case 'guide':
+        return (guides ??= new Set(Array.from(scene.guide_ids?.() ?? []))).has(n.id)
+      case 'annotation':
+        return (annotations ??= new Set(Array.from(scene.shown_annotation_ids?.() ?? []))).has(n.id)
       case 'object':
         return (objects ??= new Set([...Array.from(scene.object_ids()), ...scopedObjects])).has(n.id)
       case 'group':

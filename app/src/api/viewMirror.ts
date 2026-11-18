@@ -11,24 +11,19 @@
  * drafting selection reads as empty on the bus.
  */
 
-import { isDraftKind, type NodeRef } from '../panels/treeModel'
+import { isDraftKind, isNodeItem, type NodeRef, type SelItem } from '../panels/treeModel'
 import type { IsolationTarget } from '../viewport/isolation'
 
-/** The selection mirror: nodes and sketches in pick order, then the
- * selected guide or annotation (the app holds at most one of the three
- * kinds at a time). */
-export function uiSelectionJson(
-  nodes: readonly NodeRef[],
-  guide: bigint | null,
-  annotation: bigint | null,
-): string {
+/** The selection mirror: the app's one ordered selection, in pick order
+ * (the primary first), nodes, sketches, guides and annotations mixed. A
+ * drawn unit on a plane has no kernel handle the bus can name and is left
+ * out. */
+export function uiSelectionJson(selection: readonly SelItem[]): string {
   const entries: { kind: string; id: string }[] = []
-  for (const n of nodes) {
-    if (isDraftKind(n.kind)) continue
-    entries.push({ kind: n.kind, id: n.id.toString() })
+  for (const s of selection) {
+    if (isNodeItem(s) && isDraftKind(s.kind)) continue
+    entries.push({ kind: s.kind, id: s.id.toString() })
   }
-  if (guide !== null) entries.push({ kind: 'guide', id: guide.toString() })
-  if (annotation !== null) entries.push({ kind: 'annotation', id: annotation.toString() })
   return JSON.stringify(entries)
 }
 
