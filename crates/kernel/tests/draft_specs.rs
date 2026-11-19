@@ -607,45 +607,280 @@ fn soft_marks(doc: &Document, o: ObjectId) -> Vec<String> {
     rows
 }
 
-/// A line across the top at y = 3, soft left of x = 5 and hard right of
-/// it, with a stem from (5,3) up to (5,6). Erasing the stem leaves (5,3) a
-/// straight two-edge scar between a soft and a hard edge, which the
-/// re-trace heals into one edge. Undo puts the stem back, splitting that
-/// edge at (5,3), and each half gets back its own mark: the soft half
-/// soft, the hard half hard, byte for byte.
-#[test]
-fn undoing_an_erase_healed_across_mixed_soft_marks_restores_each_mark() {
-    let (mut doc, o) = boxdoc();
-    doc.draft(top(), None, &[o], "Lines", |w| {
-        w.add_segment(z3(0., 3.), z3(10., 3.))?;
-        w.add_segment(z3(5., 3.), z3(5., 6.))?;
-        Ok(())
-    })
-    .unwrap();
+/// A mark one half of a line can carry that the other half may lack.
+#[derive(Clone, Copy, Debug)]
+enum Mark {
+    Soft,
+    Crease,
+    Attrs,
+}
+
+fn put_mark(doc: &mut Document, o: ObjectId, e: kernel::EdgeId, mark: Mark) {
+    match mark {
+        Mark::Soft => doc.set_edge_soft_for_test(o, e, true),
+        Mark::Crease => doc.set_edge_crease_for_test(o, e, true),
+        Mark::Attrs => {
+            doc.edge_attr_set(o, e, "spec", "k", kernel::AttrValue::Int(1))
+                .unwrap();
+        }
+    }
+}
+
+/// The edges of `o` lying along `a`-`b`.
+fn object_edges_along(doc: &Document, o: ObjectId, a: Point3, b: Point3) -> Vec<kernel::EdgeId> {
     let obj = doc.object(o).unwrap();
-    let left: Vec<kernel::EdgeId> = obj
-        .edges()
+    obj.edges()
         .keys()
         .filter(|&e| {
+            let (p, q) = obj.edge_endpoints(e).unwrap();
+            on_segment(p, a, b) && on_segment(q, a, b)
+        })
+        .collect()
+}
+
+/// Every mark of `o`'s edges along `a`-`b` (all edges when `None`) as
+/// sorted (endpoints, soft, crease, polygon, dictionary) rows.
+fn edge_marks(doc: &Document, o: ObjectId, along: Option<(Point3, Point3)>) -> Vec<String> {
+    let obj = doc.object(o).unwrap();
+    let mut rows: Vec<String> = obj
+        .edges()
+        .iter()
+        .filter_map(|(e, edge)| {
             let (a, b) = obj.edge_endpoints(e).unwrap();
-            on_segment(a, z3(0., 3.), z3(5., 3.)) && on_segment(b, z3(0., 3.), z3(5., 3.))
+            if let Some((s, t)) = along
+                && !(on_segment(a, s, t) && on_segment(b, s, t))
+            {
+                return None;
+            }
+            let mut ends = [
+                format!("({:.3},{:.3},{:.3})", a.x, a.y, a.z),
+                format!("({:.3},{:.3},{:.3})", b.x, b.y, b.z),
+            ];
+            ends.sort();
+            Some(format!(
+                "{}-{} soft={} crease={} polygon={:?} attrs={:?}",
+                ends[0],
+                ends[1],
+                edge.soft,
+                edge.crease,
+                edge.polygon,
+                obj.edge_attrs(e)
+            ))
         })
         .collect();
-    assert_eq!(left.len(), 1);
-    doc.set_edge_soft_for_test(o, left[0], true);
-    doc.object(o).unwrap().validate().expect("valid");
-    let hash0 = doc.state_hash();
-    let marks0 = soft_marks(&doc, o);
-    draft_top(&mut doc, o, "Erase", |w| {
-        for e in edges_along(w, &[(z3(5., 3.), z3(5., 6.))]) {
+    rows.sort();
+    rows
+}
+
+const LINE: (Point3, Point3) = (
+    Point3 {
+        x: 0.,
+        y: 3.,
+        z: 3.,
+    },
+    Point3 {
+        x: 10.,
+        y: 3.,
+        z: 3.,
+    },
+);
+const STEM: (Point3, Point3) = (
+    Point3 {
+        x: 5.,
+        y: 3.,
+        z: 3.,
+    },
+    Point3 {
+        x: 5.,
+        y: 6.,
+        z: 3.,
+    },
+);
+
+fn erase_stem(doc: &mut Document, o: ObjectId) {
+    draft_top(doc, o, "Erase", |w| {
+        for e in edges_along(w, &[STEM]) {
             w.remove_edge(e)?;
         }
         Ok(())
     });
-    assert_sound(&doc, o);
+    assert_sound(doc, o);
+}
+
+/// A line across the top at y = 3 with a stem from (5,3) up to (5,6), and
+/// `mark` on the half of the line left of x = 5 (`left`) or right of it.
+/// Erasing the stem leaves (5,3) a straight two-edge scar between a marked
+/// and an unmarked edge. Healing it would keep one half's mark for the
+/// whole line (a soft half could swallow a visible hard one, and which
+/// survives would depend on loop direction), so the scar stays: the line
+/// keeps both halves, each with its own mark. Undo puts the stem back
+/// byte for byte.
+fn erasing_a_stem_keeps_mixed_marks_apart(mark: Mark, left: bool) {
+    let (mut doc, o) = boxdoc();
+    doc.draft(top(), None, &[o], "Lines", |w| {
+        w.add_segment(LINE.0, LINE.1)?;
+        w.add_segment(STEM.0, STEM.1)?;
+        Ok(())
+    })
+    .unwrap();
+    let half = if left {
+        (LINE.0, STEM.0)
+    } else {
+        (STEM.0, LINE.1)
+    };
+    let marked = object_edges_along(&doc, o, half.0, half.1);
+    assert_eq!(marked.len(), 1);
+    put_mark(&mut doc, o, marked[0], mark);
+    doc.object(o).unwrap().validate().expect("valid");
+    let hash0 = doc.state_hash();
+    let marks0 = edge_marks(&doc, o, None);
+    let line0 = edge_marks(&doc, o, Some(LINE));
+    assert_eq!(
+        line0.len(),
+        2,
+        "{mark:?} left={left}: the stem splits the line"
+    );
+    erase_stem(&mut doc, o);
+    assert_eq!(
+        edge_marks(&doc, o, Some(LINE)),
+        line0,
+        "{mark:?} left={left}: both halves stay, each with its own mark"
+    );
     doc.undo().unwrap();
-    assert_eq!(soft_marks(&doc, o), marks0, "undo restores every soft mark");
+    assert_eq!(
+        edge_marks(&doc, o, None),
+        marks0,
+        "{mark:?} left={left}: undo restores every mark"
+    );
+    assert_eq!(
+        doc.state_hash(),
+        hash0,
+        "{mark:?} left={left}: undo restores the state hash"
+    );
+}
+
+/// A line across the top at y = 3 carrying `mark` along its whole length;
+/// a stem drawn from (5,3) up to (5,6) splits it into two halves that both
+/// keep the mark, and erasing the stem heals them back into the one marked
+/// line. Undo puts the stem back byte for byte.
+fn erasing_a_stem_heals_a_uniformly_marked_line(mark: Mark) {
+    let (mut doc, o) = boxdoc();
+    doc.draft(top(), None, &[o], "Line", |w| {
+        w.add_segment(LINE.0, LINE.1)?;
+        Ok(())
+    })
+    .unwrap();
+    let line = object_edges_along(&doc, o, LINE.0, LINE.1);
+    assert_eq!(line.len(), 1);
+    put_mark(&mut doc, o, line[0], mark);
+    let whole = edge_marks(&doc, o, Some(LINE));
+    draft_top(&mut doc, o, "Stem", |w| {
+        w.add_segment(STEM.0, STEM.1)?;
+        Ok(())
+    });
+    let halves = edge_marks(&doc, o, Some(LINE));
+    assert_eq!(halves.len(), 2, "{mark:?}: the stem splits the line");
+    let hash0 = doc.state_hash();
+    erase_stem(&mut doc, o);
+    assert_eq!(
+        edge_marks(&doc, o, Some(LINE)),
+        whole,
+        "{mark:?}: the halves heal into the one marked line"
+    );
+    doc.undo().unwrap();
+    assert_eq!(
+        edge_marks(&doc, o, Some(LINE)),
+        halves,
+        "{mark:?}: undo splits it again"
+    );
+    assert_eq!(
+        doc.state_hash(),
+        hash0,
+        "{mark:?}: undo restores the state hash"
+    );
+}
+
+#[test]
+fn erasing_a_stem_between_soft_and_hard_halves_keeps_both() {
+    erasing_a_stem_keeps_mixed_marks_apart(Mark::Soft, true);
+    erasing_a_stem_keeps_mixed_marks_apart(Mark::Soft, false);
+}
+
+#[test]
+fn erasing_a_stem_between_creased_and_plain_halves_keeps_both() {
+    erasing_a_stem_keeps_mixed_marks_apart(Mark::Crease, true);
+    erasing_a_stem_keeps_mixed_marks_apart(Mark::Crease, false);
+}
+
+#[test]
+fn erasing_a_stem_between_halves_with_different_dictionaries_keeps_both() {
+    erasing_a_stem_keeps_mixed_marks_apart(Mark::Attrs, true);
+    erasing_a_stem_keeps_mixed_marks_apart(Mark::Attrs, false);
+}
+
+/// A polygon side lying along y = 3 left of x = 5 meets a plain line
+/// running on to the right, with a stem from (5,3) up to (5,6), all drawn
+/// in one draft. Erasing the stem leaves (5,3) a straight scar between a
+/// polygon side and a plain edge; healing it would hand one side's polygon
+/// claim to the whole line or drop it, so both edges stay, each with its
+/// own claim, and undo restores them exactly.
+#[test]
+fn erasing_a_stem_between_a_polygon_side_and_a_plain_line_keeps_both() {
+    let (mut doc, o) = boxdoc();
+    doc.draft(top(), None, &[o], "Lines", |w| {
+        w.begin_curve_with_kind(
+            CurveGeom {
+                center: z3(2.5, 3. - 2.5),
+                radius: 2.5 * std::f64::consts::SQRT_2,
+            },
+            kernel::SketchCurveKind::Polygon,
+        )?;
+        let r = w.add_segment(LINE.0, STEM.0);
+        w.end_curve();
+        r?;
+        w.add_segment(STEM.0, LINE.1)?;
+        w.add_segment(STEM.0, STEM.1)?;
+        Ok(())
+    })
+    .unwrap();
+    doc.object(o).unwrap().validate().expect("valid");
+    let line0 = edge_marks(&doc, o, Some(LINE));
+    assert_eq!(line0.len(), 2, "the stem splits the line");
+    assert_eq!(
+        line0.iter().filter(|r| r.contains("polygon=Some")).count(),
+        1,
+        "only the left half is a polygon side: {line0:?}"
+    );
+    let hash0 = doc.state_hash();
+    let marks0 = edge_marks(&doc, o, None);
+    erase_stem(&mut doc, o);
+    assert_eq!(
+        edge_marks(&doc, o, Some(LINE)),
+        line0,
+        "both edges stay, each with its own claim"
+    );
+    doc.undo().unwrap();
+    assert_eq!(
+        edge_marks(&doc, o, None),
+        marks0,
+        "undo restores every mark"
+    );
     assert_eq!(doc.state_hash(), hash0, "undo restores the state hash");
+}
+
+#[test]
+fn erasing_a_stem_heals_a_soft_line() {
+    erasing_a_stem_heals_a_uniformly_marked_line(Mark::Soft);
+}
+
+#[test]
+fn erasing_a_stem_heals_a_creased_line() {
+    erasing_a_stem_heals_a_uniformly_marked_line(Mark::Crease);
+}
+
+#[test]
+fn erasing_a_stem_heals_a_line_with_one_dictionary() {
+    erasing_a_stem_heals_a_uniformly_marked_line(Mark::Attrs);
 }
 
 /// A triangle drawn on the top beside a rectangle, its sides soft (a

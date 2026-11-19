@@ -12216,8 +12216,10 @@ pub(crate) fn repair_dangling_outgoing(obj: &mut Object) {
 /// [`do_merge_into_hole`]: each dissolved run's endpoint vertex that is
 /// left a pure two-edge scar of a `split_boundary_edge` call — exactly two
 /// departing half-edges, one in `merged_loop` and one in a single
-/// neighbor loop, their edges collinear — is healed away (the two edges
-/// merge on both sides). An endpoint at one of `keep_vertices` (matched
+/// neighbor loop, their edges collinear and alike in `soft`, `crease`,
+/// `polygon` and attribute slot — is healed away (the two edges merge on
+/// both sides). Edges that differ in any of those marks stay apart: one
+/// edge could keep only one side's. An endpoint at one of `keep_vertices` (matched
 /// within [`tol::POINT_MERGE`]) is never healed: the undo of an insert
 /// passes the vertices the insert met already there, which may have been
 /// the joints of straight runs before it. Returns the retired edges.
@@ -12290,6 +12292,24 @@ pub(crate) fn heal_run_endpoints(
         };
         if !collinear {
             continue;
+        }
+
+        // The healed edge keeps h_in's edge and its marks, so the two edges
+        // must carry the same ones: a scar left by splitting one edge does
+        // (both fragments inherit the parent's), but two edges marked apart
+        // do not, and healing them would silently drop one side's mark — a
+        // soft edge swallowing a visible hard one, say — with which side
+        // wins depending on loop direction. Skip, never guess.
+        {
+            let e_in = &obj.edges[h_in_he.edge];
+            let e_out = &obj.edges[obj.half_edges[h_out].edge];
+            if e_in.soft != e_out.soft
+                || e_in.crease != e_out.crease
+                || e_in.attrs != e_out.attrs
+                || e_in.polygon != e_out.polygon
+            {
+                continue;
+            }
         }
 
         // Twin of h_in: this half-edge departs V in the neighbor face (t_out_of_v).

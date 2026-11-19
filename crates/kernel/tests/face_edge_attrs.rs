@@ -465,6 +465,73 @@ fn heal_keeps_the_incoming_edges_dictionary() {
     assert_eq!(edges_with_any(o), 1);
 }
 
+/// When only one fragment of the split front edge carries a mark — a
+/// dictionary, the soft flag or the crease flag — merging the halves back
+/// leaves the scar unhealed: one healed edge could keep only one
+/// fragment's mark, so each fragment keeps its own, in either orientation.
+#[test]
+fn heal_skips_fragments_with_different_marks() {
+    // (mark name, mark the edge, does the edge carry the mark)
+    type Put = fn(&mut Document, ObjectId, EdgeId);
+    type Has = fn(&Object, EdgeId) -> bool;
+    let marks: [(&str, Put, Has); 3] = [
+        (
+            "dictionary",
+            |doc, id, e| {
+                doc.edge_attr_set(id, e, NS, "e", AttrValue::Int(7))
+                    .unwrap();
+            },
+            |o, e| o.edge_attrs(e) == Some(&dict("e", 7)),
+        ),
+        (
+            "soft",
+            |doc, id, e| doc.set_edge_soft_for_test(id, e, true),
+            |o, e| o.edges()[e].soft,
+        ),
+        (
+            "crease",
+            |doc, id, e| doc.set_edge_crease_for_test(id, e, true),
+            |o, e| o.edges()[e].crease,
+        ),
+    ];
+    for (name, put, has) in marks {
+        for which in 0..2 {
+            let mut doc = Document::new();
+            let id = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 1.0);
+            let front = edge_between(obj(&doc, id), p(0.0, 0.0, 1.0), p(1.0, 0.0, 1.0));
+            let r = split_top(&mut doc, id);
+            let (_, frags) = r
+                .split_boundary_edges
+                .iter()
+                .find(|(dead, _)| *dead == front)
+                .expect("the front edge was split");
+            assert_eq!(frags.len(), 2);
+            let marked = frags[which];
+            let other = frags[1 - which];
+            let (ma, mb) = obj(&doc, id).edge_endpoints(marked).unwrap();
+            let (oa, ob) = obj(&doc, id).edge_endpoints(other).unwrap();
+            put(&mut doc, id, marked);
+            doc.apply_object_op(
+                id,
+                KernelOp::MergeFaces {
+                    edge: r.new_edges[0],
+                    keep_vertices: Vec::new(),
+                },
+            )
+            .unwrap();
+            let o = obj(&doc, id);
+            o.validate().expect("valid");
+            assert!(has(o, edge_between(o, ma, mb)), "{name} fragment {which}");
+            assert!(!has(o, edge_between(o, oa, ob)), "{name} fragment {which}");
+            assert_eq!(
+                o.edges().keys().filter(|&e| has(o, e)).count(),
+                1,
+                "{name} fragment {which}"
+            );
+        }
+    }
+}
+
 #[test]
 fn push_pull_walls_have_none_and_the_moved_face_keeps_its_own() {
     let mut doc = Document::new();
