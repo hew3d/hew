@@ -486,3 +486,19 @@ fn edge_smoothness_classification() {
     assert_eq!(o.edge_smoothness(seam_edge), EdgeSmoothness::Hard);
     let _ = SurfaceRef::kind_name;
 }
+
+#[test]
+fn a_softened_tangent_joint_outside_a_blend_stays_hidden() {
+    // A blend marks the joints inside it soft and they still read as
+    // tangent joints; anywhere else a soft mark is the user's Soften, and
+    // a softened wall-to-arc joint hides like a facet seam.
+    let mut o = rounded_rect_prism(1.0, 0.6, 0.1, 0.3, 6);
+    let joint = o
+        .edges()
+        .keys()
+        .find(|&e| o.edge_smoothness(e) == EdgeSmoothness::Tangent)
+        .unwrap();
+    o.set_edge_soft_for_test(joint, true);
+    o.validate().unwrap();
+    assert_eq!(o.edge_smoothness(joint), EdgeSmoothness::Seam);
+}

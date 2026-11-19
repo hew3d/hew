@@ -1480,7 +1480,9 @@ fn with_creases(
         if edge.twin_half_edge.is_none() {
             return Err(shape(ShapeError::CreaseOnBoundary));
         }
-        if crease && obj.edge_smoothness(e) == crate::surface::EdgeSmoothness::Seam {
+        // A soft edge is refused even where it reads as a tangent joint (a
+        // blend's soft joints between two of its surfaces).
+        if crease && (edge.soft || obj.edge_smoothness(e) == crate::surface::EdgeSmoothness::Seam) {
             return Err(shape(ShapeError::CreaseOnSoftEdge));
         }
         after.edges[e].crease = crease;

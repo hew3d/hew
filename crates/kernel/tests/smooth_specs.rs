@@ -370,3 +370,49 @@ fn save_load_keeps_level_and_creases() {
         .count();
     assert_eq!(creased, 4);
 }
+
+#[test]
+fn crease_on_a_blends_soft_joint_refused() {
+    // A rolled corner's border with its strips is soft and reads as a
+    // tangent joint (a structure line); it is still a soft edge, so it
+    // cannot be creased.
+    let mut doc = Document::new();
+    let o = doc_box(&mut doc, 0.0);
+    let edges: Vec<_> = doc.object(o).unwrap().edges().keys().collect();
+    doc.blend_edges(
+        o,
+        &kernel::BlendSpec {
+            edges,
+            profile: kernel::BlendProfile::Round {
+                radius: 0.1,
+                segments: 6,
+            },
+            primary: None,
+            corners: kernel::CornerStyle::Default,
+            stops: None,
+            handles: Vec::new(),
+        },
+    )
+    .unwrap();
+    let obj = doc.object(o).unwrap();
+    let role = |f| obj.faces()[f].blend.map(|t| t.role);
+    let border = obj
+        .edges()
+        .keys()
+        .find(|&e| {
+            let (a, b) = obj.edge_faces_for_test(e).unwrap();
+            let mut pair = [role(a), role(b)];
+            pair.sort_by_key(|r| r.map(|r| r as u8));
+            pair == [
+                Some(kernel::BlendRole::Strip),
+                Some(kernel::BlendRole::Corner),
+            ]
+        })
+        .expect("a rolled corner borders a strip");
+    assert!(obj.edges()[border].soft);
+    assert_eq!(obj.edge_smoothness(border), EdgeSmoothness::Tangent);
+    assert_eq!(
+        doc.set_crease(o, &[border], true).err(),
+        Some(DocumentError::Shape(ShapeError::CreaseOnSoftEdge))
+    );
+}

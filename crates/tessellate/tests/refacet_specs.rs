@@ -1343,10 +1343,11 @@ fn non_pristine_torus_demotes() {
 }
 
 #[test]
-fn seams_inside_one_fillet_draw_only_with_the_tangent_edges() {
+fn creases_inside_one_fillet_draw_as_hard_edges() {
     // A box with only its top rim rounded: at each corner the two strips
-    // meet over the still-sharp vertical edge. That crease is part of the
-    // rounding, so it is drawn with the tangent edges, not as a hard line.
+    // meet over the still-sharp vertical edge. That is a real crease, so
+    // it draws as a hard line, not as one of the structure lines (the
+    // tangent edges).
     let mut s = Sketch::on_plane(ground());
     let c = [(0.0, 0.0), (0.3, 0.0), (0.3, 0.2), (0.0, 0.2)];
     for i in 0..4 {
@@ -1381,7 +1382,10 @@ fn seams_inside_one_fillet_draw_only_with_the_tangent_edges() {
         .edges()
         .keys()
         .filter(|&e| {
-            rounded.edge_is_inside_one_blend(e)
+            let (a, b) = rounded.edge_faces_for_test(e).unwrap();
+            let blend = rounded.blend_of_face(a);
+            blend.is_some()
+                && blend == rounded.blend_of_face(b)
                 && rounded.edge_smoothness(e) == kernel::EdgeSmoothness::Hard
         })
         .collect();
@@ -1406,12 +1410,9 @@ fn seams_inside_one_fillet_draw_only_with_the_tangent_edges() {
     for e in seams {
         let (p, q) = rounded.edge_endpoints(e).unwrap();
         assert!(
-            !hard.contains(&key(p, q)),
-            "an in-fillet seam is not a hard line"
+            hard.contains(&key(p, q)),
+            "an in-fillet crease is a hard line"
         );
-        assert!(
-            tangent.contains(&key(p, q)),
-            "it draws with the tangent edges"
-        );
+        assert!(!tangent.contains(&key(p, q)), "it is not a structure line");
     }
 }

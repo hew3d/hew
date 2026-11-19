@@ -390,7 +390,151 @@ fn check_result(
         Some("more") if moved < 0.0 => return Some("volume shrank".into()),
         _ => {}
     }
-    None
+    check_edge_classes(obj)
+}
+
+// -------------------------------------------------------- edge classes
+
+/// How one edge should read, from the geometry alone: the kernel's
+/// `edge_smoothness` must agree with it on every edge of every model and
+/// every built result (the structure lines draw exactly the `Tangent`
+/// class, true-curves finish plan W4).
+///
+/// - `Seam`: a facet seam of one smooth surface. Both faces claim the same
+///   surface, or neither claims one and the edge is marked soft (a facet
+///   seam of a faceted surface the engine knows only as facets).
+/// - `Tangent`: a joint between two different surfaces, at least one of
+///   them claimed, whose true normals agree at both ends: a fillet's rail, a
+///   corner patch's border, two strips of one blend meeting smoothly, a
+///   slot's flat wall against its round end.
+/// - A soft edge between two different surfaces reads `Seam` unless both
+///   faces belong to one blend and are tangent: a blend marks the joints
+///   inside it soft, but anywhere else the mark is the user's Soften.
+/// - `Hard`: everything else, which must be a real crease: two different
+///   surfaces whose true normals part by at least [`CREASE_MIN`] at an end
+///   (a strip's end against an end face, a miter, two strips meeting over
+///   a sharp edge), or two unclaimed faces with no soft mark.
+///
+/// Between a true normal gap of [`TANGENT_MAX`] and [`CREASE_MIN`] the edge
+/// is neither, and that is a failure in itself. An unclaimed blend facet
+/// against a face of no blend (a swept strip's rail) has no true normal to
+/// read: no model in the corpus makes one yet, and one that does fails
+/// here until this check learns how to judge it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EdgeReads {
+    Hard,
+    Seam,
+    Tangent,
+}
+
+/// The largest gap between two unit normals (a chord) that reads as
+/// tangent: far looser than the kernel's own, so float noise never fails
+/// the check, and far tighter than any facet.
+const TANGENT_MAX: f64 = 1e-6;
+/// The smallest gap between two unit normals (a chord, about 1°) that
+/// reads as a crease.
+const CREASE_MIN: f64 = 0.0175;
+
+fn expected_reading(
+    obj: &kernel::topo::Object,
+    edge: kernel::ids::EdgeId,
+) -> Result<Option<EdgeReads>, String> {
+    let e = &obj.edges()[edge];
+    let Some(twin) = e.twin_half_edge else {
+        return Ok(None);
+    };
+    if e.crease {
+        // A crease the user set reads hard whatever the geometry.
+        return Ok(Some(EdgeReads::Hard));
+    }
+    let face_of =
+        |h: kernel::ids::HalfEdgeId| &obj.faces()[obj.loops()[obj.half_edges()[h].loop_id].face];
+    let (fa, fb) = (face_of(e.half_edge), face_of(twin));
+    match (fa.surface, fb.surface) {
+        (Some(a), Some(b)) if a.same_surface(&b) => return Ok(Some(EdgeReads::Seam)),
+        (None, None) => {
+            if (fa.blend.is_some() != fb.blend.is_some())
+                && [fa, fb].iter().any(|f| {
+                    f.blend
+                        .is_some_and(|t| t.kind == kernel::topo::BlendKind::Fillet)
+                })
+            {
+                return Err("an unclaimed fillet facet against a face of no blend".into());
+            }
+            return Ok(Some(if e.soft {
+                EdgeReads::Seam
+            } else {
+                EdgeReads::Hard
+            }));
+        }
+        _ => {}
+    }
+    // At least one claim, two different surfaces: tangent or a crease.
+    let true_normal = |f: &kernel::topo::Face, x: Point3| {
+        let n = f.plane.normal();
+        match f.surface.and_then(|s| s.normal_at(x)) {
+            Some(a) if a.dot(n) < 0.0 => -a,
+            Some(a) => a,
+            None => n,
+        }
+    };
+    let (p, q) = obj
+        .edge_endpoints(edge)
+        .ok_or_else(|| "an edge without endpoints".to_string())?;
+    let gap = [p, q]
+        .into_iter()
+        .map(|x| (true_normal(fa, x) - true_normal(fb, x)).length())
+        .fold(0.0, f64::max);
+    let one_blend = fa.blend.zip(fb.blend).is_some_and(|(a, b)| a.id == b.id);
+    if e.soft && !one_blend {
+        // Softened on purpose (Soften): hidden like a facet seam.
+        Ok(Some(EdgeReads::Seam))
+    } else if gap <= TANGENT_MAX {
+        Ok(Some(EdgeReads::Tangent))
+    } else if e.soft {
+        Ok(Some(EdgeReads::Seam))
+    } else if gap >= CREASE_MIN {
+        Ok(Some(EdgeReads::Hard))
+    } else {
+        Err(format!(
+            "two surfaces neither tangent nor creased (normals {} apart)",
+            sig(gap, "")
+        ))
+    }
+}
+
+/// Checks every interior edge of `obj`. `None` is a pass; `Some` names the
+/// first edge that reads wrong, and how many do.
+fn check_edge_classes(obj: &kernel::topo::Object) -> Option<String> {
+    let mut first = None;
+    let mut count = 0usize;
+    for edge in obj.edges().keys() {
+        let got = match obj.edge_smoothness(edge) {
+            kernel::EdgeSmoothness::Hard => EdgeReads::Hard,
+            kernel::EdgeSmoothness::Seam => EdgeReads::Seam,
+            kernel::EdgeSmoothness::Tangent => EdgeReads::Tangent,
+        };
+        let problem = match expected_reading(obj, edge) {
+            Ok(None) => None,
+            Ok(Some(want)) if want == got => None,
+            Ok(Some(want)) => Some(format!("{got:?} where {want:?} is right")),
+            Err(why) => Some(why),
+        };
+        if let Some(problem) = problem {
+            count += 1;
+            if first.is_none() {
+                let at = obj
+                    .edge_endpoints(edge)
+                    .map(|(p, q)| {
+                        let mid = p + (q - p) * 0.5;
+                        point(&json!([mid.x, mid.y, mid.z]))
+                    })
+                    .unwrap_or_default();
+                first = Some(format!("edge at {at}: {problem}"));
+            }
+        }
+    }
+    first.map(|f| format!("{count} edges read wrong; first, {f}"))
 }
 
 // --------------------------------------------------------------- classes
@@ -577,6 +721,11 @@ fn rewind(s: &mut Session, depth: usize, hash: u64) -> bool {
 
 fn run_model(name: &str, model: &Model, rows: &mut Vec<Row>) {
     let mut session = Session::build(model, name);
+    for id in session.doc.live_object_ids() {
+        if let Some(why) = session.doc.object(id).and_then(check_edge_classes) {
+            panic!("{name}: the built model's {why}");
+        }
+    }
     let depth = session.doc.undo_depth();
     let hash = session.doc.state_hash();
     let labels = session.labels.clone();

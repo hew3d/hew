@@ -793,6 +793,13 @@ surface: a round that is valid but slightly off its true shape still reads
 `correct` here. A refusal that says a larger size would fit than the one it
 refused is `wrong`.
 
+Every edge of a `correct` result, and of every model as built, must also
+read the way its geometry says (`check_edge_classes`): a facet seam of one
+surface as a seam, a joint between two tangent surfaces (a fillet's rail,
+a corner patch's border) as a tangent joint, and everything else, a miter
+inside one blend included, as a hard edge. The structure lines of a curved
+part are exactly the tangent joints, so this keeps them honest.
+
 Which refusals name a cause is decided in one place, `class_of_refusal` in
 `crates/api/tests/curves_scoreboard.rs`. A refusal it does not list is
 `generic`, so a new one that names its cause is added there, in the same

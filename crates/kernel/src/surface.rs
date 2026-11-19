@@ -333,11 +333,12 @@ pub(crate) fn validate_face_claim(
 pub enum EdgeSmoothness {
     /// A real crease: drawn, flat-shaded across, pickable by Fillet.
     Hard,
-    /// A facet seam of one smooth surface: `soft`, or both faces claim the
-    /// same surface.
+    /// A facet seam of one smooth surface: both faces claim the same
+    /// surface, or the edge is `soft` and is not a tangent joint.
     Seam,
     /// Two different surfaces tangent along the edge (a fillet rail, a
-    /// rounded rectangle's wall-to-corner joint): hidden by default.
+    /// corner patch's border, a rounded rectangle's wall-to-corner joint):
+    /// the structure lines of a curved part.
     Tangent,
 }
 
@@ -346,14 +347,19 @@ impl crate::topo::Object {
     ///
     /// 1. no twin (boundary) → `Hard`;
     /// 2. `crease` → `Hard`;
-    /// 3. `soft` → `Seam`;
-    /// 4. both faces claimed and the claims are `same_surface` → `Seam`;
-    /// 5. at least one face claimed, and at BOTH endpoints the faces'
+    /// 3. both faces claimed and the claims are `same_surface` → `Seam`;
+    /// 4. at least one face claimed, and at BOTH endpoints the faces'
     ///    oriented normals agree (`|n_a − n_b| ≤ NORMAL_DIRECTION`), where an
     ///    unclaimed face's normal is its plane normal and a claimed face's is
     ///    its [`SurfaceRef::normal_at`] flipped to agree with its plane normal
-    ///    (the plane normal where that is undefined) → `Tangent`;
-    /// 6. one face is a strip of a rolling-ball fillet (`BlendKind::Fillet`,
+    ///    (the plane normal where that is undefined), and the edge is not
+    ///    `soft` or both its faces belong to one blend → `Tangent` (a blend
+    ///    marks the joints inside it soft, a corner patch's border among
+    ///    them, and those are still joints between two surfaces; elsewhere
+    ///    a soft mark is the user's Soften and hides the edge);
+    /// 5. `soft` → `Seam`;
+    /// 6. both faces unclaimed (and rule 7 does not apply) → `Hard`;
+    /// 7. one face is a strip of a rolling-ball fillet (`BlendKind::Fillet`,
     ///    `BlendRole::Strip`) and the other belongs to no blend, and at both
     ///    endpoints: for an unclaimed (swept) strip facet, the oriented
     ///    normals differ by at most [`tol::BLEND_RAIL_NORMAL`]; for a claimed
@@ -361,7 +367,7 @@ impl crate::topo::Object {
     ///    its component along the edge, differ by at most
     ///    [`tol::BLEND_CLAIMED_RAIL_NORMAL`] → `Tangent` (a fillet's rail,
     ///    where facets only approximate the tangency);
-    /// 7. otherwise `Hard`.
+    /// 8. otherwise `Hard`.
     ///
     /// Two unclaimed coplanar faces (a drawn imprint edge) stay `Hard`
     /// (decision I-20): line drawings and snapshots draw only hard edges.
@@ -376,9 +382,13 @@ impl crate::topo::Object {
         if e.crease {
             return EdgeSmoothness::Hard;
         }
-        if e.soft {
-            return EdgeSmoothness::Seam;
-        }
+        let soft = || {
+            if e.soft {
+                EdgeSmoothness::Seam
+            } else {
+                EdgeSmoothness::Hard
+            }
+        };
         let face_of = |h: crate::ids::HalfEdgeId| {
             let l = self.half_edges()[h].loop_id;
             &self.faces()[self.loops()[l].face]
@@ -403,11 +413,11 @@ impl crate::topo::Object {
         let rail = rail_strip.is_some();
         match (fa.surface, fb.surface) {
             (Some(a), Some(b)) if a.same_surface(&b) => return EdgeSmoothness::Seam,
-            (None, None) if !rail => return EdgeSmoothness::Hard,
+            (None, None) if e.soft || !rail => return soft(),
             _ => {}
         }
         let Some((p, q)) = self.edge_endpoints(edge) else {
-            return EdgeSmoothness::Hard;
+            return soft();
         };
         let oriented = |f: &crate::topo::Face, x: Point3| -> Vec3 {
             let n = f.plane.normal();
@@ -419,6 +429,14 @@ impl crate::topo::Object {
         };
         let within = |x: Point3| (oriented(fa, x) - oriented(fb, x)).length();
         let agree = |bound: f64| within(p) <= bound && within(q) <= bound;
+        if e.soft {
+            let one_blend = fa.blend.zip(fb.blend).is_some_and(|(a, b)| a.id == b.id);
+            return if one_blend && agree(tol::NORMAL_DIRECTION) {
+                EdgeSmoothness::Tangent
+            } else {
+                EdgeSmoothness::Seam
+            };
+        }
         let tangent = match rail_strip {
             _ if agree(tol::NORMAL_DIRECTION) => true,
             None => false,

@@ -128,11 +128,12 @@ pub struct RenderMesh {
     pub soft_edge_positions: Vec<f32>,
     /// Line-segment endpoints (xyz pairs) of the **tangent** edges: edges
     /// between two different surfaces that meet tangentially (fillet rails,
-    /// a rounded rectangle's wall-to-corner joints), classified by
-    /// `Object::edge_smoothness`, plus the seams inside one fillet
-    /// (`Object::edge_is_inside_one_blend`). Hidden by default, drawn thin by View ▸
-    /// Tangent Edges; line drawings treat them like soft edges. Empty for an
-    /// object with no analytic claims.
+    /// a corner patch's border, a rounded rectangle's wall-to-corner joints),
+    /// classified by `Object::edge_smoothness`: the structure lines of a
+    /// curved part. A crease inside one blend (a miter, two strips meeting
+    /// over a sharp edge) is a hard edge, not one of these. Drawn thin by
+    /// View ▸ Tangent Edges; line drawings treat them like soft edges.
+    /// Empty for an object with no analytic claims.
     pub tangent_edge_positions: Vec<f32>,
     /// Per-face vertex range into `positions`/`normals`/`colors`/`uvs`:
     /// `(face, base, count)`, `base`/`count` in VERTICES (not floats) — face
@@ -555,12 +556,6 @@ fn tessellate_filtered(
         let from = object.vertices()[he.origin].position;
         let to = object.vertices()[object.half_edges()[he.next].origin].position;
         let buffer = match object.edge_smoothness(eid) {
-            // A seam inside one fillet (a mitered corner, or two strips
-            // meeting over a sharp edge the fillet left) is part of the
-            // rounding: drawn only with the tangent edges.
-            kernel::EdgeSmoothness::Hard if object.edge_is_inside_one_blend(eid) => {
-                &mut mesh.tangent_edge_positions
-            }
             kernel::EdgeSmoothness::Hard => &mut mesh.edge_positions,
             kernel::EdgeSmoothness::Seam => &mut mesh.soft_edge_positions,
             kernel::EdgeSmoothness::Tangent => &mut mesh.tangent_edge_positions,

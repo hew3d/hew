@@ -366,3 +366,38 @@ fn rolled_corners_draw_no_line_and_a_two_fillet_corner_keeps_its_crease() {
         "four corners, one seam of six segments each"
     );
 }
+
+#[test]
+fn a_rolled_corner_borders_its_strips_in_tangent_joints() {
+    // The engine marks the joints inside a blend soft, a corner patch's
+    // border among them. That border is still a joint between two
+    // surfaces (the ball and a strip's cylinder), so it is one of the
+    // structure lines, while the seams of the ball's own fan stay hidden.
+    let obj = unit_box();
+    let (after, _) = blend_ok(
+        &obj,
+        &spec(all_edges(&obj), round(0.1, 6), CornerStyle::Default),
+    );
+    let role = |f| after.faces()[f].blend.map(|t| t.role);
+    let (mut borders, mut fan) = (0, 0);
+    for e in after.edges().keys() {
+        let (a, b) = after.edge_faces_for_test(e).unwrap();
+        let class = after.edge_smoothness(e);
+        match (role(a), role(b)) {
+            (Some(BlendRole::Corner), Some(BlendRole::Strip))
+            | (Some(BlendRole::Strip), Some(BlendRole::Corner)) => {
+                assert!(after.edges()[e].soft, "the engine marks it soft");
+                assert_eq!(class, kernel::EdgeSmoothness::Tangent, "a patch border");
+                borders += 1;
+            }
+            (Some(BlendRole::Corner), Some(BlendRole::Corner)) => {
+                assert_eq!(class, kernel::EdgeSmoothness::Seam, "a fan seam");
+                fan += 1;
+            }
+            _ => {}
+        }
+    }
+    // Eight corners, three borders of six segments each.
+    assert_eq!(borders, 8 * 3 * 6);
+    assert!(fan > 0);
+}

@@ -279,17 +279,6 @@ impl Object {
         self.faces().get(face).and_then(|f| f.blend).map(|t| t.id)
     }
 
-    /// Whether `edge` is a seam inside one blend: both of its faces carry
-    /// the same blend (two strips meeting at a mitered corner, or over a
-    /// sharp edge the blend did not round). Pure; display code draws these
-    /// with the tangent edges rather than as hard lines.
-    pub fn edge_is_inside_one_blend(&self, edge: EdgeId) -> bool {
-        self.edge_faces(edge).is_some_and(|(a, b)| {
-            let id = self.blend_of_face(a);
-            id.is_some() && id == self.blend_of_face(b)
-        })
-    }
-
     /// Every blend on the object, ascending id, each verified (pure; its
     /// cost grows with the blend count, so callers cache it).
     pub fn blend_features(&self) -> Vec<BlendFeature> {
