@@ -40,7 +40,7 @@ jobs:
       - name: Session fuzz
         env:
           PROPTEST_CASES: ${{ inputs.cases || '20000' }}
-        run: cargo test -p kernel --test all session_fuzz::
+        run: 'cargo test -p kernel --test all session_fuzz::'
 
       - name: Keep the failing seed
         if: failure()
