@@ -1694,6 +1694,29 @@ below.
   count: sides remain hard edges when extruded, unlike a circle's smooth
   wall
 
+- **Swept rounds on drawn faceted seams.** A round of the seam where
+  softened drawn facets meet a plate (the curves scoreboard's faceted
+  plinth) builds a valid, watertight solid, with three things still open.
+  First, where the rail runs along a softened seam of its side, the walk
+  leaves sliver strip facets on it (on the plinth and on the pipe tee's
+  swept rim), and the rail inherits the seam's soft mark, which hides
+  them as facet seams; dropping the mark exposes the slivers as hard
+  creases, so it waits for the walk's sliver fix, with the tee's two rail
+  specs in `crates/kernel/tests/blend_ext_specs.rs`
+  (`swept_blend_rails_are_tangent_edges` and
+  `a_swept_strip_shades_one_normal_per_vertex_and_meets_its_rails_tangent`)
+  as its acceptance. Second, beside a vertex lifted a few microns off the
+  plate the rail rides a seam between a wall facet and a steep facet and
+  is tangent to neither: with the soft rails of the first item, 3 or 4
+  rail edges read wrong at each size up to 1.2 mm, 7 at 1.5 mm and 5 at
+  1.7 mm (one there parts from its side about 30° where the strip turns
+  18°). Third, a round too large for the wall (2.5 mm) is built by the
+  solve against the side surfaces riding the plinth's hard top rim,
+  tangent nowhere (187 rail edges read wrong), where it should refuse as
+  too large; that needs a policy for when the surface solve may ride a
+  hard edge of a drawn object, and the cause carried from the swept
+  attempt to the refusal so it names the wall
+
 ### Longer-term
 
 - **More Model Health repairs** for what Close and Thicken… leave open:

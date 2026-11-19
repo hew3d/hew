@@ -798,7 +798,19 @@ read the way its geometry says (`check_edge_classes`): a facet seam of one
 surface as a seam, a joint between two tangent surfaces (a fillet's rail,
 a corner patch's border) as a tangent joint, and everything else, a miter
 inside one blend included, as a hard edge. The structure lines of a curved
-part are exactly the tangent joints, so this keeps them honest.
+part are exactly the tangent joints, so this keeps them honest. A swept
+strip's facets claim no surface, so its rail is judged against the strip's
+own turn across its section: a facet whose normal parts from the side
+face's by no more than it parts from the next strip facet in from the rail
+reads as a tangent joint, one 60° or more off reads as the strip's end, a
+hard edge, and anything in between fails. The next facet in is the one
+across an edge that touches neither end of the rail; a triangle on the
+rail has none, so its turn is read one facet further, through the strip
+facet beside it that has no rail of its own. Where there are several, the
+smallest turn counts, so a doubtful rail fails rather than passes. A rail
+with nothing to judge it by fails too: a soft rail, a facet with no strip
+facet in from it, or one that turns 60° or more to it. A rail more than
+60° off its tangent passes as an end.
 
 Which refusals name a cause is decided in one place, `class_of_refusal` in
 `crates/api/tests/curves_scoreboard.rs`. A refusal it does not list is

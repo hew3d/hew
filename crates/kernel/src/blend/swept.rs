@@ -3143,7 +3143,10 @@ fn cut_and_remove(
                             in_face(obj, f, p)
                         }
                     };
-                    if !interior_point(prof.outer()).is_some_and(inside) {
+                    // A point of the region itself, clear of its holes: a
+                    // ring's own ear can lie in a hole (a square plate's
+                    // corner ear under the boss its seam rings).
+                    if !region_point(&face.plane, prof.outer(), prof.holes()).is_some_and(inside) {
                         continue;
                     }
                     let map = |pts: &mut Pts, ring: &[Point3]| -> Result<Vec<usize>, PlanFail> {
@@ -3439,39 +3442,50 @@ fn across(obj: &Object, f: FaceId, a: Point3, b: Point3) -> Option<FaceId> {
     Some(if x == f { y } else { x })
 }
 
-/// A point strictly inside a simple polygon: the centroid of an ear.
-fn interior_point(ring: &[Point3]) -> Option<Point3> {
-    let n = ring.len();
-    if n < 3 {
+/// A point strictly inside the region bounded by `outer` and its `holes`
+/// (in `plane`): inside the outer ring and outside every hole. A line
+/// across the region midway between two vertex heights meets no vertex;
+/// the widest stretch of it inside the region (between an even-numbered
+/// crossing and the next) holds the point at its middle.
+fn region_point(plane: &Plane, outer: &[Point3], holes: &[Vec<Point3>]) -> Option<Point3> {
+    if outer.len() < 3 {
         return None;
     }
-    let normal = Plane::from_polygon(ring).ok()?.normal();
-    for i in 0..n {
-        let (a, b, c) = (ring[(i + n - 1) % n], ring[i], ring[(i + 1) % n]);
-        if (b - a).cross(c - b).dot(normal) <= 0.0 {
-            continue;
-        }
-        let g = Point3::new(
-            (a.x + b.x + c.x) / 3.0,
-            (a.y + b.y + c.y) / 3.0,
-            (a.z + b.z + c.z) / 3.0,
-        );
-        let inside_tri = |p: Point3| {
-            let s1 = (b - a).cross(p - a).dot(normal);
-            let s2 = (c - b).cross(p - b).dot(normal);
-            let s3 = (a - c).cross(p - c).dot(normal);
-            s1 > 0.0 && s2 > 0.0 && s3 > 0.0
-        };
-        if ring
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| ![(i + n - 1) % n, i, (i + 1) % n].contains(j))
-            .all(|(_, &p)| !inside_tri(p))
-        {
-            return Some(g);
+    let (u, v) = crate::triangulate::plane_basis(plane.normal());
+    let rings: Vec<Vec<[f64; 2]>> = std::iter::once(outer)
+        .chain(holes.iter().map(Vec::as_slice))
+        .map(|r| {
+            r.iter()
+                .map(|p| [p.to_vec().dot(u), p.to_vec().dot(v)])
+                .collect()
+        })
+        .collect();
+    let mut ys: Vec<f64> = rings.iter().flatten().map(|q| q[1]).collect();
+    ys.sort_by(f64::total_cmp);
+    ys.dedup();
+    // The widest gap between vertex heights: its middle is farthest from
+    // every vertex.
+    let y = ys
+        .windows(2)
+        .max_by(|a, b| (a[1] - a[0]).total_cmp(&(b[1] - b[0])))
+        .map(|w| 0.5 * (w[0] + w[1]))?;
+    let mut xs: Vec<f64> = Vec::new();
+    for r in &rings {
+        for i in 0..r.len() {
+            let (a, b) = (r[i], r[(i + 1) % r.len()]);
+            if (a[1] > y) != (b[1] > y) {
+                xs.push(a[0] + (y - a[1]) / (b[1] - a[1]) * (b[0] - a[0]));
+            }
         }
     }
-    None
+    xs.sort_by(f64::total_cmp);
+    let x = xs
+        .chunks_exact(2)
+        .filter(|c| c[1] > c[0])
+        .max_by(|a, b| (a[1] - a[0]).total_cmp(&(b[1] - b[0])))
+        .map(|c| 0.5 * (c[0] + c[1]))?;
+    let o = plane.normal() * plane.signed_distance(Point3::new(0.0, 0.0, 0.0));
+    Some(Point3::new(0.0, 0.0, 0.0) - o + u * x + v * y)
 }
 
 #[cfg(test)]
@@ -3543,5 +3557,126 @@ mod tests {
                 "zero-length edge at {p:?}"
             );
         }
+    }
+
+    /// A straight prism of the `xy` loop from `z0` to `z1`.
+    fn prism(pts: &[(f64, f64)], z0: f64, z1: f64) -> Object {
+        let prof = |z: f64| LoftProfile {
+            points: pts.iter().map(|&(x, y)| Point3::new(x, y, z)).collect(),
+            curves: Vec::new(),
+            smooth: Vec::new(),
+            through: Vec::new(),
+            start_offset: 0,
+        };
+        Object::from_loft(&LoftSpec {
+            profiles: vec![prof(z0), prof(z1)],
+            apex: None,
+            rails: Vec::new(),
+            stations: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_seam_round_keeps_the_plate_band_whose_ring_ear_lies_under_the_boss() {
+        // A 12-sided boss 40 mm across on a 60 mm square plate, its foot
+        // rounded as one swept loop. The plate's top keeps the band between
+        // the rail and the square; the centroid of an ear of the square
+        // alone lies 14 mm from the middle, under the boss: the band must
+        // be judged by a point of its own, or it is dropped and the solid
+        // left open.
+        let n = 12;
+        let ring: Vec<(f64, f64)> = (0..n)
+            .map(|i| {
+                let a = TAU * i as f64 / n as f64;
+                (0.02 * a.cos(), 0.02 * a.sin())
+            })
+            .collect();
+        let s = 0.03;
+        let plate = prism(&[(-s, -s), (s, -s), (s, s), (-s, s)], 0.0, 0.004);
+        let boss = prism(&ring, 0.002, 0.01);
+        let joined = Object::boolean(
+            crate::BooleanOp::Union,
+            &plate,
+            &boss,
+            &crate::Transform::IDENTITY,
+        )
+        .unwrap();
+        let seam: Vec<_> = joined
+            .edges()
+            .keys()
+            .filter(|&e| {
+                let (p, q) = joined.edge_endpoints(e).unwrap();
+                [p, q]
+                    .iter()
+                    .all(|r| (r.z - 0.004).abs() < 1e-9 && r.x.hypot(r.y) < 0.021)
+            })
+            .collect();
+        assert_eq!(seam.len(), n, "the seam is the boss's foot");
+        let spec = BlendSpec {
+            edges: seam,
+            profile: BlendProfile::Round {
+                radius: 0.001,
+                segments: 4,
+            },
+            primary: None,
+            corners: Default::default(),
+            stops: None,
+            handles: Vec::new(),
+        };
+        let (after, _, _) = classify::with_forced_swept(|| joined.blend_once(&spec))
+            .expect("the swept round closes the solid");
+        after.validate().unwrap();
+    }
+
+    #[test]
+    fn a_region_point_lies_clear_of_the_region_holes() {
+        // A square ring around a hole that covers every ear's centroid.
+        let plane = crate::math::Plane::from_point_normal(
+            Point3::new(0.0, 0.0, 0.0),
+            crate::Vec3::new(0.0, 0.0, 1.0),
+        )
+        .unwrap();
+        let square = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+            .map(|(x, y)| Point3::new(x, y, 0.0));
+        let hole: Vec<Point3> = (0..12)
+            .map(|i| {
+                let a = -TAU * i as f64 / 12.0;
+                Point3::new(0.6 * a.cos(), 0.6 * a.sin(), 0.0)
+            })
+            .collect();
+        let p = super::region_point(&plane, &square, &[hole]).unwrap();
+        assert!(
+            p.x.hypot(p.y) > 0.6 && p.x.abs() < 1.0 && p.y.abs() < 1.0,
+            "{p:?}"
+        );
+    }
+
+    #[test]
+    fn a_region_point_on_a_tilted_offset_plane_lies_in_the_region() {
+        // The same square around a hole, on a plane tilted off every axis
+        // and away from the origin: the point lies on the plane, inside the
+        // square and clear of the hole.
+        let n = crate::Vec3::new(0.3, -0.5, 0.8).normalized().unwrap();
+        let u = crate::Vec3::new(1.0, 0.0, 0.0);
+        let u = (u - n * u.dot(n)).normalized().unwrap();
+        let v = n.cross(u);
+        let o = Point3::new(0.7, -1.3, 2.1);
+        let at = |x: f64, y: f64| o + u * x + v * y;
+        let plane = crate::math::Plane::from_point_normal(o, n).unwrap();
+        let square = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].map(|(x, y)| at(x, y));
+        let hole: Vec<Point3> = (0..12)
+            .map(|i| {
+                let a = -TAU * i as f64 / 12.0;
+                at(0.6 * a.cos(), 0.6 * a.sin())
+            })
+            .collect();
+        let p = super::region_point(&plane, &square, &[hole]).unwrap();
+        assert!(plane.signed_distance(p).abs() < 1e-12, "{p:?}");
+        let (x, y) = ((p - o).dot(u), (p - o).dot(v));
+        assert!(
+            x.hypot(y) > 0.6 && x.abs() < 1.0 && y.abs() < 1.0,
+            "{x} {y}"
+        );
     }
 }

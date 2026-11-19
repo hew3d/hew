@@ -697,6 +697,15 @@ impl Object {
         classify::with_forced_swept(|| self.blend_once(spec)).is_ok()
     }
 
+    /// The result of one swept attempt, `None` where it refuses. Test
+    /// support only.
+    #[doc(hidden)]
+    pub fn blend_swept_result_for_test(&self, spec: &BlendSpec) -> Option<Object> {
+        classify::with_forced_swept(|| self.blend_once(spec))
+            .ok()
+            .map(|(o, _, _)| o)
+    }
+
     /// The refusal for a round on an imported mesh or a generated wall that
     /// neither the catalog nor the swept blend makes: where a smaller ball
     /// rolls, the size is too large and the largest that rolls is the limit

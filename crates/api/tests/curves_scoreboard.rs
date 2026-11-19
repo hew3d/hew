@@ -416,10 +416,11 @@ fn check_result(
 ///   a sharp edge), or two unclaimed faces with no soft mark.
 ///
 /// Between a true normal gap of [`TANGENT_MAX`] and [`CREASE_MIN`] the edge
-/// is neither, and that is a failure in itself. An unclaimed blend facet
-/// against a face of no blend (a swept strip's rail) has no true normal to
-/// read: no model in the corpus makes one yet, and one that does fails
-/// here until this check learns how to judge it.
+/// is neither, and that is a failure in itself. An unclaimed strip facet
+/// of a fillet against a face of no blend (a swept strip's rail) has no
+/// true normal to read; it is judged against the strip's own turn
+/// ([`swept_rail_reading`]). Any other unclaimed fillet facet against a
+/// face of no blend fails.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum EdgeReads {
     Hard,
@@ -434,6 +435,160 @@ const TANGENT_MAX: f64 = 1e-6;
 /// The smallest gap between two unit normals (a chord, about 1°) that
 /// reads as a crease.
 const CREASE_MIN: f64 = 0.0175;
+/// The smallest gap between two unit normals (a chord, 60°) at which a
+/// strip facet against a face of no blend reads as the strip's end, a
+/// crease, rather than its rail.
+const STRIP_END_MIN: f64 = 1.0;
+
+/// How far a strip facet `f` turns across its strip from its rail edge
+/// `rail`, and whether that took the hop: the smallest gap (a chord)
+/// between `f`'s plane normal and that of a strip facet of the same blend
+/// across an edge of `f` that touches neither end of the rail; where `f`
+/// has none (a triangle, whose every edge touches the rail), the same
+/// taken one facet further, through each strip facet beside `f` that has
+/// no rail of its own, to the strip facets across its edges that touch
+/// neither end of `f`'s rail. `n` is `f`'s normal. Also returns that
+/// facet's normal. `None` when neither finds one.
+fn rail_turn(
+    obj: &kernel::topo::Object,
+    f: kernel::ids::FaceId,
+    n: kernel::Vec3,
+    rail: kernel::ids::EdgeId,
+) -> Option<(f64, bool, kernel::Vec3)> {
+    let dest = |h: kernel::ids::HalfEdgeId| obj.half_edges()[obj.half_edges()[h].next].origin;
+    let rh = obj.edges()[rail].half_edge;
+    let (ra, rb) = (obj.half_edges()[rh].origin, dest(rh));
+    let tag = obj.faces()[f].blend.expect("a strip facet");
+    let face_of = |h: kernel::ids::HalfEdgeId| obj.loops()[obj.half_edges()[h].loop_id].face;
+    let strip = |g: kernel::ids::FaceId| {
+        obj.faces()[g]
+            .blend
+            .is_some_and(|b| b.id == tag.id && b.role == kernel::topo::BlendRole::Strip)
+    };
+    // The faces across each edge of `g`, with whether the edge touches the
+    // rail's ends.
+    let across = |g: kernel::ids::FaceId| -> Vec<(kernel::ids::FaceId, bool)> {
+        obj.loop_half_edges(obj.faces()[g].outer_loop)
+            .filter_map(|h| {
+                let twin = obj.half_edges()[h].twin?;
+                let touches = [obj.half_edges()[h].origin, dest(h)]
+                    .iter()
+                    .any(|v| *v == ra || *v == rb);
+                Some((face_of(twin), touches))
+            })
+            .collect()
+    };
+    let smallest = |c: Vec<kernel::ids::FaceId>| {
+        c.into_iter()
+            .map(|h| {
+                let m = obj.faces()[h].plane.normal();
+                ((m - n).length(), m)
+            })
+            .reduce(|a, b| if b.0 < a.0 { b } else { a })
+    };
+    let direct: Vec<_> = across(f)
+        .into_iter()
+        .filter(|&(g, touches)| !touches && strip(g))
+        .map(|(g, _)| g)
+        .collect();
+    if let Some((t, m)) = smallest(direct) {
+        return Some((t, false, m));
+    }
+    let mut hop = Vec::new();
+    for (g, _) in across(f) {
+        if !strip(g)
+            || across(g)
+                .iter()
+                .any(|&(w, _)| obj.faces()[w].blend.is_none())
+        {
+            continue;
+        }
+        hop.extend(
+            across(g)
+                .into_iter()
+                .filter(|&(h, touches)| !touches && h != f && strip(h))
+                .map(|(h, _)| h),
+        );
+    }
+    smallest(hop).map(|(t, m)| (t, true, m))
+}
+
+/// How the rail edge `rail` between an unclaimed strip facet `f` of a
+/// fillet and `wall`, a face of no blend, should read. The strip only
+/// approximates a round, so the rail's tangency is judged against the
+/// strip's own turn across its section: `g` is how far `f`'s normal parts
+/// from the wall's true normal (a chord, the larger at the rail's two
+/// ends), and `t` how far the strip turns from `f` to the next facet in
+/// from the rail ([`rail_turn`]: across an edge of `f` that touches
+/// neither end of the rail, or, for a triangle, one facet further on; the
+/// smallest such turn, so a doubtful rail fails rather than passes). A
+/// rail whose gap is no more than that turn is tangent; a gap of
+/// [`STRIP_END_MIN`] or more is the strip ending square against the face
+/// it stops at, a crease.
+///
+/// Fails on a rail with nothing to judge it by: a soft rail (a strip's
+/// joint is never a facet seam of its side), a facet with no strip facet
+/// in from its rail, or a turn of [`STRIP_END_MIN`] or more, or less than
+/// [`CREASE_MIN`]. Limit: a rail farther than [`STRIP_END_MIN`] off its
+/// tangent passes as a crease.
+fn swept_rail_reading(
+    obj: &kernel::topo::Object,
+    f: kernel::ids::FaceId,
+    wall: &kernel::topo::Face,
+    rail: kernel::ids::EdgeId,
+    ends: [Point3; 2],
+) -> Result<Option<EdgeReads>, String> {
+    rail_reading(obj, f, obj.faces()[f].plane.normal(), wall, rail, ends)
+}
+
+/// [`swept_rail_reading`] with `n` as the strip facet's normal.
+fn rail_reading(
+    obj: &kernel::topo::Object,
+    f: kernel::ids::FaceId,
+    n: kernel::Vec3,
+    wall: &kernel::topo::Face,
+    rail: kernel::ids::EdgeId,
+    ends: [Point3; 2],
+) -> Result<Option<EdgeReads>, String> {
+    if obj.edges()[rail].soft {
+        return Err("a soft rail between a strip facet and a face of no blend".into());
+    }
+    let Some((t, _, _)) = rail_turn(obj, f, n, rail) else {
+        return Err("a strip facet with no neighbor across the strip to judge its rail by".into());
+    };
+    if t >= STRIP_END_MIN {
+        return Err(format!(
+            "a strip facet that turns {} to its neighbor across the strip",
+            sig(t, "")
+        ));
+    }
+    if t < CREASE_MIN {
+        return Err("a strip facet with no turn to judge its rail by".into());
+    }
+    let g = ends
+        .into_iter()
+        .map(|x| {
+            let w = wall.plane.normal();
+            let w = match wall.surface.and_then(|s| s.normal_at(x)) {
+                Some(a) if a.dot(w) < 0.0 => -a,
+                Some(a) => a,
+                None => w,
+            };
+            (w - n).length()
+        })
+        .fold(0.0, f64::max);
+    if g <= t {
+        Ok(Some(EdgeReads::Tangent))
+    } else if g >= STRIP_END_MIN {
+        Ok(Some(EdgeReads::Hard))
+    } else {
+        Err(format!(
+            "strip facet neither on its rail's tangent nor ending square (normals {} apart, the strip turns {})",
+            sig(g, ""),
+            sig(t, "")
+        ))
+    }
+}
 
 fn expected_reading(
     obj: &kernel::topo::Object,
@@ -447,29 +602,9 @@ fn expected_reading(
         // A crease the user set reads hard whatever the geometry.
         return Ok(Some(EdgeReads::Hard));
     }
-    let face_of =
-        |h: kernel::ids::HalfEdgeId| &obj.faces()[obj.loops()[obj.half_edges()[h].loop_id].face];
+    let face_id = |h: kernel::ids::HalfEdgeId| obj.loops()[obj.half_edges()[h].loop_id].face;
+    let face_of = |h: kernel::ids::HalfEdgeId| &obj.faces()[face_id(h)];
     let (fa, fb) = (face_of(e.half_edge), face_of(twin));
-    match (fa.surface, fb.surface) {
-        (Some(a), Some(b)) if a.same_surface(&b) => return Ok(Some(EdgeReads::Seam)),
-        (None, None) => {
-            if (fa.blend.is_some() != fb.blend.is_some())
-                && [fa, fb].iter().any(|f| {
-                    f.blend
-                        .is_some_and(|t| t.kind == kernel::topo::BlendKind::Fillet)
-                })
-            {
-                return Err("an unclaimed fillet facet against a face of no blend".into());
-            }
-            return Ok(Some(if e.soft {
-                EdgeReads::Seam
-            } else {
-                EdgeReads::Hard
-            }));
-        }
-        _ => {}
-    }
-    // At least one claim, two different surfaces: tangent or a crease.
     let true_normal = |f: &kernel::topo::Face, x: Point3| {
         let n = f.plane.normal();
         match f.surface.and_then(|s| s.normal_at(x)) {
@@ -481,6 +616,32 @@ fn expected_reading(
     let (p, q) = obj
         .edge_endpoints(edge)
         .ok_or_else(|| "an edge without endpoints".to_string())?;
+    match (fa.surface, fb.surface) {
+        (Some(a), Some(b)) if a.same_surface(&b) => return Ok(Some(EdgeReads::Seam)),
+        (None, None) => {
+            if fa.blend.is_some() != fb.blend.is_some() {
+                let (strip_h, wall) = if fa.blend.is_some() {
+                    (e.half_edge, fb)
+                } else {
+                    (twin, fa)
+                };
+                let tag = obj.faces()[face_id(strip_h)].blend.expect("one blend face");
+                if tag.kind == kernel::topo::BlendKind::Fillet {
+                    if tag.role != kernel::topo::BlendRole::Strip {
+                        return Err("an unclaimed fillet facet against a face of no blend".into());
+                    }
+                    return swept_rail_reading(obj, face_id(strip_h), wall, edge, [p, q]);
+                }
+            }
+            return Ok(Some(if e.soft {
+                EdgeReads::Seam
+            } else {
+                EdgeReads::Hard
+            }));
+        }
+        _ => {}
+    }
+    // At least one claim, two different surfaces: tangent or a crease.
     let gap = [p, q]
         .into_iter()
         .map(|x| (true_normal(fa, x) - true_normal(fb, x)).length())
@@ -1172,4 +1333,263 @@ fn a_refusal_that_contradicts_itself_is_wrong() {
     );
     assert!(is_row_defect("ambiguous_locator"));
     assert!(!is_row_defect("radius_too_large"));
+}
+
+#[test]
+fn a_clean_swept_round_reads_its_rails_as_tangent() {
+    // A 12-sided boss 40 mm across on a 60 mm square plate, its foot
+    // rounded as one swept loop: every rail of the strip reads as a tangent
+    // joint, to the check and to the kernel, and every edge of the result
+    // reads as its geometry says.
+    use kernel::loft::{LoftProfile, LoftSpec};
+    let prism = |pts: &[(f64, f64)], z0: f64, z1: f64| {
+        let prof = |z: f64| LoftProfile {
+            points: pts.iter().map(|&(x, y)| Point3::new(x, y, z)).collect(),
+            curves: Vec::new(),
+            smooth: Vec::new(),
+            through: Vec::new(),
+            start_offset: 0,
+        };
+        kernel::Object::from_loft(&LoftSpec {
+            profiles: vec![prof(z0), prof(z1)],
+            apex: None,
+            rails: Vec::new(),
+            stations: None,
+        })
+        .unwrap()
+    };
+    let ring: Vec<(f64, f64)> = (0..12)
+        .map(|i| {
+            let a = std::f64::consts::TAU * i as f64 / 12.0;
+            (0.02 * a.cos(), 0.02 * a.sin())
+        })
+        .collect();
+    let s = 0.03;
+    let plate = prism(&[(-s, -s), (s, -s), (s, s), (-s, s)], 0.0, 0.004);
+    let boss = prism(&ring, 0.002, 0.01);
+    let joined = kernel::Object::boolean(
+        kernel::BooleanOp::Union,
+        &plate,
+        &boss,
+        &kernel::Transform::IDENTITY,
+    )
+    .unwrap();
+    let seam: Vec<_> = joined
+        .edges()
+        .keys()
+        .filter(|&e| {
+            let (p, q) = joined.edge_endpoints(e).unwrap();
+            [p, q]
+                .iter()
+                .all(|r| (r.z - 0.004).abs() < 1e-9 && r.x.hypot(r.y) < 0.021)
+        })
+        .collect();
+    assert_eq!(seam.len(), 12);
+    for r in [0.0005, 0.001, 0.002] {
+        let spec = kernel::BlendSpec {
+            edges: seam.clone(),
+            profile: kernel::BlendProfile::Round {
+                radius: r,
+                segments: 4,
+            },
+            primary: None,
+            corners: kernel::CornerStyle::Default,
+            stops: None,
+            handles: Vec::new(),
+        };
+        let after = joined
+            .blend_swept_result_for_test(&spec)
+            .unwrap_or_else(|| panic!("{r}: the swept round refused"));
+        assert_eq!(check_edge_classes(&after), None, "{r}");
+        let rails = rails_of(&after);
+        assert!(!rails.is_empty(), "{r}: the round has rails");
+        for (e, f, w) in rails {
+            let (p, q) = after.edge_endpoints(e).unwrap();
+            assert_eq!(
+                swept_rail_reading(&after, f, &after.faces()[w], e, [p, q]),
+                Ok(Some(EdgeReads::Tangent)),
+                "{r}: rail {e:?}"
+            );
+            assert_eq!(
+                after.edge_smoothness(e),
+                kernel::EdgeSmoothness::Tangent,
+                "{r}: rail {e:?}"
+            );
+        }
+    }
+}
+
+/// A 12-sided boss on a 60 mm square plate, its top ring smaller and turned
+/// half a side, so its walls are triangles; and the edges of its foot.
+fn twisted_boss() -> (kernel::Object, Vec<kernel::ids::EdgeId>) {
+    use kernel::loft::{LoftProfile, LoftSpec};
+    let ring = |r: f64, turn: f64, z: f64| LoftProfile {
+        points: (0..12)
+            .map(|i| {
+                let a = std::f64::consts::TAU * (i as f64 + turn) / 12.0;
+                Point3::new(r * a.cos(), r * a.sin(), z)
+            })
+            .collect(),
+        curves: Vec::new(),
+        smooth: Vec::new(),
+        through: Vec::new(),
+        start_offset: 0,
+    };
+    let boss = kernel::Object::from_loft(&LoftSpec {
+        profiles: vec![ring(0.02, 0.0, 0.0), ring(0.016, 0.5, 0.012)],
+        apex: None,
+        rails: Vec::new(),
+        stations: None,
+    })
+    .unwrap();
+    let s = 0.03;
+    let sq = LoftProfile {
+        points: vec![
+            Point3::new(-s, -s, -0.004),
+            Point3::new(s, -s, -0.004),
+            Point3::new(s, s, -0.004),
+            Point3::new(-s, s, -0.004),
+        ],
+        curves: Vec::new(),
+        smooth: Vec::new(),
+        through: Vec::new(),
+        start_offset: 0,
+    };
+    let mut top = sq.clone();
+    for p in &mut top.points {
+        p.z = 0.004;
+    }
+    let plate = kernel::Object::from_loft(&LoftSpec {
+        profiles: vec![sq, top],
+        apex: None,
+        rails: Vec::new(),
+        stations: None,
+    })
+    .unwrap();
+    let joined = kernel::Object::boolean(
+        kernel::BooleanOp::Union,
+        &plate,
+        &boss,
+        &kernel::Transform::IDENTITY,
+    )
+    .unwrap();
+    let seam = joined
+        .edges()
+        .keys()
+        .filter(|&e| {
+            let (p, q) = joined.edge_endpoints(e).unwrap();
+            [p, q]
+                .iter()
+                .all(|r| (r.z - 0.004).abs() < 1e-9 && r.x.hypot(r.y) < 0.0205)
+        })
+        .collect();
+    (joined, seam)
+}
+
+fn round_spec(edges: Vec<kernel::ids::EdgeId>, r: f64) -> kernel::BlendSpec {
+    kernel::BlendSpec {
+        edges,
+        profile: kernel::BlendProfile::Round {
+            radius: r,
+            segments: 4,
+        },
+        primary: None,
+        corners: kernel::CornerStyle::Default,
+        stops: None,
+        handles: Vec::new(),
+    }
+}
+
+/// The rails of `obj`: (edge, strip facet, wall face).
+fn rails_of(
+    obj: &kernel::Object,
+) -> Vec<(
+    kernel::ids::EdgeId,
+    kernel::ids::FaceId,
+    kernel::ids::FaceId,
+)> {
+    let face_of = |h: kernel::ids::HalfEdgeId| obj.loops()[obj.half_edges()[h].loop_id].face;
+    obj.edges()
+        .iter()
+        .filter_map(|(e, ed)| {
+            let (a, b) = (face_of(ed.half_edge), face_of(ed.twin_half_edge?));
+            let strip = |f: kernel::ids::FaceId| {
+                obj.faces()[f]
+                    .blend
+                    .is_some_and(|t| t.role == kernel::topo::BlendRole::Strip)
+            };
+            if strip(a) && obj.faces()[b].blend.is_none() {
+                Some((e, a, b))
+            } else if strip(b) && obj.faces()[a].blend.is_none() {
+                Some((e, b, a))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn a_strip_of_triangles_reads_its_rails_through_the_next_facet() {
+    // On a boss whose walls are triangles the walk splits the strip's
+    // quads, so a facet on the rail is a triangle whose every edge touches
+    // the rail: its turn is read one facet further in, and every rail
+    // reads tangent.
+    let (joined, seam) = twisted_boss();
+    assert_eq!(seam.len(), 24);
+    for r in [0.0005, 0.001, 0.002] {
+        let after = joined
+            .blend_swept_result_for_test(&round_spec(seam.clone(), r))
+            .unwrap_or_else(|| panic!("{r}: the swept round refused"));
+        assert_eq!(check_edge_classes(&after), None, "{r}");
+        let rails = rails_of(&after);
+        let mut hops = 0;
+        for &(e, f, w) in &rails {
+            let n = after.faces()[f].plane.normal();
+            let (_, hop, _) = rail_turn(&after, f, n, e).expect("a turn to judge by");
+            hops += usize::from(hop);
+            let (p, q) = after.edge_endpoints(e).unwrap();
+            assert_eq!(
+                swept_rail_reading(&after, f, &after.faces()[w], e, [p, q]),
+                Ok(Some(EdgeReads::Tangent)),
+                "{r}: rail {e:?}"
+            );
+        }
+        assert!(hops > 0, "{r}: no rail took the hop");
+    }
+}
+
+#[test]
+fn a_strip_facet_tilted_off_its_rail_fails() {
+    // The same strip with one triangle on the rail turned most of the way
+    // toward the facet beyond it: its rail parts from the wall by more than
+    // the strip turns there, and the check fails it.
+    let (joined, seam) = twisted_boss();
+    let after = joined
+        .blend_swept_result_for_test(&round_spec(seam, 0.001))
+        .expect("the swept round builds");
+    let (e, f, w, m) = rails_of(&after)
+        .into_iter()
+        .find_map(|(e, f, w)| {
+            let n = after.faces()[f].plane.normal();
+            match rail_turn(&after, f, n, e) {
+                Some((_, true, m)) => Some((e, f, w, m)),
+                _ => None,
+            }
+        })
+        .expect("a rail that took the hop");
+    let n = after.faces()[f].plane.normal();
+    let tilted = (n + (m - n) * 0.75).normalized().unwrap();
+    let (p, q) = after.edge_endpoints(e).unwrap();
+    let wall = &after.faces()[w];
+    assert_eq!(
+        rail_reading(&after, f, n, wall, e, [p, q]),
+        Ok(Some(EdgeReads::Tangent))
+    );
+    let got = rail_reading(&after, f, tilted, wall, e, [p, q]);
+    assert!(
+        got.as_ref()
+            .is_err_and(|why| why.starts_with("strip facet neither")),
+        "{got:?}"
+    );
 }
