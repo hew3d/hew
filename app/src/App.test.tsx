@@ -1489,6 +1489,7 @@ describe('App — hidden-by-default tag registry', () => {
     mockScene.tag_meta_hidden = defaultTagMetaHidden
     mockScene.node_tags = defaultNodeTags
     mockScene.object_ids = defaultObjectIds
+    for (const k of ['guide_ids', 'guide_kind', 'guide_tags']) delete (mockScene as Record<string, unknown>)[k]
   })
 
   it('seeds hiddenTagPaths from the registry on File ▸ New and pushes the hide to the kernel', async () => {
@@ -1532,6 +1533,33 @@ describe('App — hidden-by-default tag registry', () => {
     // Toggling again shows it — set_tag_hidden persists the flip back to false.
     fireEvent.click(screen.getByTitle('Show tagged objects'))
     expect(mockScene.set_tag_hidden).toHaveBeenCalledWith('Walls', false)
+  })
+
+  it('hiding a tag drops a selected guide on it from the selection', async () => {
+    mockScene.object_ids = () => new BigUint64Array([1n])
+    mockScene.node_tags = () => ['Walls']
+    const mock = mockScene as Record<string, unknown>
+    mock.guide_ids = () => new BigUint64Array([7n])
+    mock.guide_kind = () => 'point'
+    mock.guide_tags = () => []
+
+    await renderAndLoad()
+    const latest = () => {
+      const calls = vi.mocked(Viewport).mock.calls
+      return calls[calls.length - 1][0] as unknown as {
+        onSelectGuide: (id: bigint | null) => void
+        selectedGuides: bigint[]
+      }
+    }
+    act(() => latest().onSelectGuide(7n))
+    expect(Array.from(latest().selectedGuides)).toEqual([7n])
+
+    // What hiding the tag does in the kernel: the guide is no longer listed
+    // among the shown guides.
+    mock.guide_ids = () => new BigUint64Array()
+    fireEvent.click(screen.getByRole('button', { name: /^tags$/i }))
+    fireEvent.click(screen.getByTitle('Hide tagged objects'))
+    expect(Array.from(latest().selectedGuides)).toEqual([])
   })
 })
 

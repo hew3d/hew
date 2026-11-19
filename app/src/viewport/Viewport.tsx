@@ -50,6 +50,7 @@ import { CueLayer } from './CueLayer'
 import { SiblingPreviewMirror } from './siblingPreview'
 import { DrawPlaneCueLayer, planeCueFor, type PlaneCueSpec } from './DrawPlaneCueLayer'
 import { pipArrowKey, type DrawPlaneState, type PlanePip } from '../tools/drawPlane'
+import { soleGuideTarget } from '../tools/guideTarget'
 import { viewTurnEye, viewTurnRotation } from './viewTurn'
 import { PLANE_PIPS, cursorPlaneOf, pipClickAction, pipEnabledFor, pipWillReleaseFor, type PipContext } from './drawPlanePips'
 import { SnapService } from './snapService'
@@ -2850,9 +2851,9 @@ export default function Viewport({
   // Latest selected ids, readable inside the stable event closures.
   const selectedIdsRef = useRef<NodeRef[]>(selectedIds)
   // The Move and Rotate guide target: the selected guide when it is the
-  // only guide and no node is selected. Carrying several guides, or guides
-  // together with nodes, is not wired yet.
-  const guideTarget = selectedGuides.length === 1 && selectedIds.length === 0 ? selectedGuides[0] : null
+  // whole selection. Carrying several guides, or guides together with nodes
+  // or annotations, is not wired yet.
+  const guideTarget = soleGuideTarget(selectedGuides, selectedIds.length, selectedAnnotations.length)
   const selectedGuideRef = useRef<bigint | null>(guideTarget)
   // Latest selected guides and annotations, for Invert Selection.
   const selectedGuidesRef = useRef(selectedGuides)
@@ -11133,13 +11134,6 @@ export default function Viewport({
       return best
     }
 
-    /** Nearest annotation within ANNOTATION_PICK_PX of the NDC click, or null
-     * (docs/design/dimensions-text.md — "annotations are pickable via
-     * screen-space distance"). Tests the segment a real user would actually
-     * click: the dimension line for a linear dimension, the leader for a
-     * radial dimension or leader text — measured like a guide line in
-     * `pickGuide` above (screenPick.ts), just against the annotation's own
-     * two key points instead of a stretch of an infinite line. */
     /** The line a click on annotation `id` picks: the dimension line of a
      *  linear dimension, the leader of a radial dimension or a leader text.
      *  Null when the annotation is gone. */
@@ -11174,6 +11168,13 @@ export default function Viewport({
       ]
     }
 
+    /** Nearest annotation within ANNOTATION_PICK_PX of the NDC click, or null
+     * (docs/design/dimensions-text.md — "annotations are pickable via
+     * screen-space distance"). Tests the segment a real user would actually
+     * click: the dimension line for a linear dimension, the leader for a
+     * radial dimension or leader text — measured like a guide line in
+     * `pickGuide` above (screenPick.ts), just against the annotation's own
+     * two key points instead of a stretch of an infinite line. */
     function pickAnnotation(ndcX: number, ndcY: number): bigint | null {
       const w = renderer.domElement.clientWidth
       const h = renderer.domElement.clientHeight

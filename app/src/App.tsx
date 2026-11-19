@@ -2282,6 +2282,28 @@ export default function App() {
   }, [])
 
   // Bump the tree's revision; trim stale context path entries; mark dirty.
+  /** Drop dead or hidden entries from the selection (see
+   *  pruneDeadSelection). Runs after every document change, and after a tag
+   *  is hidden: a guide or annotation on it can no longer be selected. */
+  const pruneSelection = useCallback(() => {
+    setSelection((sel) => {
+      const scene = sceneRef.current
+      if (scene === null) return sel
+      const deepest = activeContext.length > 0
+        ? activeContext[activeContext.length - 1]
+        : undefined
+      if (deepest?.kind !== 'instance') return pruneDeadSelection(scene, sel)
+      const component = scene.instance_def(deepest.id)
+      if (component === undefined) return pruneDeadSelection(scene, sel)
+      return pruneDeadSelection(
+        scene,
+        sel,
+        Array.from(scene.component_member_objects(component)),
+        Array.from(scene.component_member_sketches(component)),
+      )
+    })
+  }, [activeContext])
+
   // Every scene mutation flows through here via Viewport's handleSceneRefresh.
   // (The first-sketch auto-zoom that used to fire here was removed by
   // maintainer decision: the welcome screen's unit choice already sets a
@@ -2301,22 +2323,7 @@ export default function App() {
     // consuming operands, extrusions consuming sketches — so they all
     // reconcile at this one choke point. pruneDeadSelection returns the
     // same array when nothing died, so this setState is a no-op then.
-    setSelection((sel) => {
-      const scene = sceneRef.current
-      if (scene === null) return sel
-      const deepest = activeContext.length > 0
-        ? activeContext[activeContext.length - 1]
-        : undefined
-      if (deepest?.kind !== 'instance') return pruneDeadSelection(scene, sel)
-      const component = scene.instance_def(deepest.id)
-      if (component === undefined) return pruneDeadSelection(scene, sel)
-      return pruneDeadSelection(
-        scene,
-        sel,
-        Array.from(scene.component_member_objects(component)),
-        Array.from(scene.component_member_sketches(component)),
-      )
-    })
+    pruneSelection()
     // Recompute dirty on any mutation — but NOT during programmatic loads
     // (suppressDirtyRef is true while applyLoadedBytes calls notifyLoaded).
     // `atSavedMark` is the kernel's own answer (Lane C): this is the single
@@ -2332,7 +2339,7 @@ export default function App() {
     // Every commit, undo, and redo reconciles here: subscribers hear of it
     // (docs/agents/HEW_API.md §4.5).
     if (sceneRef.current !== null) pumpEvents(sceneRef.current)
-  }, [activeContext, trimContextPath, armAutosaveTick])
+  }, [activeContext, trimContextPath, armAutosaveTick, pruneSelection])
 
   /** Re-tessellate + re-render after a kernel mutation committed OUTSIDE a
    *  tool — a tray panel calling a `Scene` method directly (material/
@@ -7736,7 +7743,9 @@ export default function App() {
     sceneRef.current?.set_tag_hidden(path.join('/'), nowHidden)
     setHiddenTagPaths(next)
     pushUnionHidden(hiddenKeys, next)
-  }, [hiddenTagPaths, hiddenKeys, pushUnionHidden])
+    // A guide or annotation now on a hidden tag leaves the selection.
+    pruneSelection()
+  }, [hiddenTagPaths, hiddenKeys, pushUnionHidden, pruneSelection])
   toggleTagPathRef.current = handleToggleTagPath
 
   // Re-seed hiddenTagPaths from the document's registry and re-push the

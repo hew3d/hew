@@ -521,7 +521,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       points: null as number | null,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scene, docRev, selectedIds, t])
+  }, [scene, docRev, selectedIds, others, t])
   const instanceCount = nodeInfo?.instanceIds.length ?? 0
 
   // Whether Mend has something to do for the selected open object: the

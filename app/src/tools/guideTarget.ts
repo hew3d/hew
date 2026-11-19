@@ -13,6 +13,17 @@
  */
 import type { Ray } from '../viewport/math'
 
+/** The guide Move and Rotate carry: the selected guide when it is the whole
+ *  selection (no node and no annotation beside it), else null. Carrying
+ *  guides together with nodes or annotations is not wired yet. */
+export function soleGuideTarget(
+  guides: readonly bigint[],
+  nodeCount: number,
+  annotationCount: number,
+): bigint | null {
+  return guides.length === 1 && nodeCount === 0 && annotationCount === 0 ? guides[0] : null
+}
+
 /** A guide transform landed, or a gesture on a guide ended: redraw the
  *  guides and make `guide` the selected guide (null: none). */
 export type OnGuideCommit = (guide: bigint | null) => void

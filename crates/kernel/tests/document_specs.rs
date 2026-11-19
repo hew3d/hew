@@ -2439,6 +2439,11 @@ fn delete_selection_skips_a_guide_or_annotation_listed_twice() {
     doc.delete_selection(&[], &[g, g], &[note, note])
         .expect("duplicates are skipped");
     assert_eq!(doc.undo_depth(), depth + 1);
+    // Two distinct items, however often each is listed.
+    assert_eq!(
+        doc.peek_undo_meta().map(|m| m.label.clone()).as_deref(),
+        Some("Delete 2 items")
+    );
     assert!(doc.guide_ids().is_empty());
     assert!(doc.annotation_ids().is_empty());
     doc.undo().expect("undo");

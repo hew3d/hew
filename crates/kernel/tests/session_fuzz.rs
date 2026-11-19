@@ -929,11 +929,18 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
             let mut sel_nodes = Vec::new();
             let mut sel_guides = Vec::new();
             let mut sel_notes = Vec::new();
+            // A definition member is not a world node and is refused; the
+            // batch lists only nodes the document calls live.
+            let world: Vec<NodeId> = nodes
+                .iter()
+                .copied()
+                .filter(|&n| doc.node_is_live(n))
+                .collect();
             if mask & 1 != 0 {
-                sel_nodes.extend(pick(&nodes, a));
+                sel_nodes.extend(pick(&world, a));
             }
             if mask & 2 != 0 {
-                sel_nodes.extend(pick(&nodes, b));
+                sel_nodes.extend(pick(&world, b));
             }
             if mask & 4 != 0 {
                 sel_guides.extend(pick(&guides, guide));
@@ -972,7 +979,13 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
                 Err(_) if (doc.state_hash(), doc.history_generation()) != before => {
                     return Err("a refused mixed delete changed the document".to_string());
                 }
-                Err(_) => {}
+                Err(e) => {
+                    // Every handle here is live (a stale guide is the only
+                    // deliberate bad one), so a refusal is a defect.
+                    if !stale {
+                        return Err(format!("a batch of live items was refused: {e:?}"));
+                    }
+                }
             }
         }
         Op::CopySketch { sel, step } => {

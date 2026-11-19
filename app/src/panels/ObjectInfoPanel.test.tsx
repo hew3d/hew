@@ -426,6 +426,26 @@ describe('ObjectInfoPanel — guide selection', () => {
     expect(screen.queryByText('Guide point')).toBeNull()
   })
 
+  it('switches to the per-kind count when a guide joins a one-object selection, and back', () => {
+    const scene = makeScene({
+      guide_kind: () => 'point',
+      guide_tags: () => [],
+      node_tags: () => [],
+      node_parent: () => undefined,
+      object_materials: () => [],
+      object_solid: () => true,
+      object_name: () => 'Door',
+    })
+    // The same selectedIds array across renders: only the guide changes.
+    const ids = [{ kind: 'object' as const, id: 10n }]
+    const view = render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={ids} />)
+    expect(screen.queryByText('1 object · 1 guide')).toBeNull()
+    view.rerender(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={ids} selectedGuides={[7n]} />)
+    expect(screen.getByText('1 object · 1 guide')).toBeTruthy()
+    view.rerender(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={ids} />)
+    expect(screen.queryByText('1 object · 1 guide')).toBeNull()
+  })
+
   it('shows the tags of a tagged guide read-only', () => {
     const scene = makeScene({ guide_kind: () => 'line', guide_tags: () => ['Rig', 'Cameras/Wide'] })
     render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuides={[7n]} />)

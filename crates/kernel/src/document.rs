@@ -3373,6 +3373,17 @@ fn touch_hidden_defs(change: &mut DocChange, hidden: &[HiddenDef]) {
     }
 }
 
+/// `items` without repeats, first occurrence kept, in order.
+fn unique<T: Copy + PartialEq>(items: &[T]) -> Vec<T> {
+    let mut out: Vec<T> = Vec::with_capacity(items.len());
+    for &i in items {
+        if !out.contains(&i) {
+            out.push(i);
+        }
+    }
+    out
+}
+
 fn merge_doc_change(into: &mut DocChange, from: DocChange) {
     merge_unique(&mut into.objects_touched, from.objects_touched);
     merge_unique(&mut into.sketches_touched, from.sketches_touched);
@@ -17735,6 +17746,9 @@ impl Document {
         if annotations.iter().any(|&a| self.annotation(a).is_none()) {
             return Err(DocumentError::UnknownAnnotation);
         }
+        // The label counts distinct items: one listed twice is one deletion.
+        let (nodes, guides, annotations) = (unique(nodes), unique(guides), unique(annotations));
+        let (nodes, guides, annotations) = (&nodes[..], &guides[..], &annotations[..]);
         let label = match (nodes, guides, annotations) {
             ([only], [], []) => match self.node_meta(*only) {
                 Ok((Some(name), _)) if !name.trim().is_empty() => format!("Delete '{name}'"),

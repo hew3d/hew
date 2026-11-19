@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { GuideTarget } from './guideTarget'
+import { GuideTarget, soleGuideTarget } from './guideTarget'
 import type { Ray } from '../viewport/math'
 
 const ray: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
@@ -86,5 +86,17 @@ describe('GuideTarget.canAcquire', () => {
     expect(target.canAcquire).toBe(true)
     target.setHooks(null, vi.fn())
     expect(target.canAcquire).toBe(false)
+  })
+})
+
+describe('soleGuideTarget', () => {
+  it('is the guide when it is the whole selection', () => {
+    expect(soleGuideTarget([7n], 0, 0)).toBe(7n)
+  })
+  it('is null beside a node, an annotation, or another guide', () => {
+    expect(soleGuideTarget([7n], 1, 0)).toBeNull()
+    expect(soleGuideTarget([7n], 0, 1)).toBeNull()
+    expect(soleGuideTarget([7n, 8n], 0, 0)).toBeNull()
+    expect(soleGuideTarget([], 0, 0)).toBeNull()
   })
 })

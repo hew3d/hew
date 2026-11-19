@@ -113,7 +113,7 @@ test('Shift-clicks mix a box, a guide and a dimension; Delete takes all three in
   await expectUndoLabel(page, 'Undo Delete 3 items')
 
   // ONE undo brings all three back.
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await expect.poll(() => page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(1)
   const restored = await page.evaluate(() => ({
     guides: window.__hew_test!.getGuideIds(),
@@ -235,7 +235,7 @@ test('Select All and Invert Selection take the shown guides and annotations at t
   const ids = await guidesScene(page)
   await focusViewport(page)
 
-  await page.keyboard.press('Control+a')
+  await page.keyboard.press('ControlOrMeta+a')
   await expect.poll(async () => (await selectedKinds(page)).guides.length).toBe(2)
   let sel = await selectedKinds(page)
   expect(sel.nodes).toEqual([ids.box])
