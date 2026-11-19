@@ -380,12 +380,16 @@ impl Document {
                 objects,
                 sketches,
                 instances,
+                guides,
                 reanchored,
                 ..
             } => {
                 b.objects(Modified, objects.iter().map(|(o, _)| *o));
                 b.sketches(Modified, sketches.iter().map(|(s, _)| *s));
                 b.instances(Modified, instances.iter().map(|(i, _)| *i));
+                for (g, _) in guides {
+                    b.guide(Modified, *g);
+                }
                 let objs: Vec<ObjectId> = objects.iter().map(|(o, _)| *o).collect();
                 let insts: Vec<InstanceId> = instances.iter().map(|(i, _)| *i).collect();
                 // A member group holding only drawing names its definition
@@ -560,8 +564,12 @@ impl Document {
                 objects,
                 groups,
                 instances,
+                guides,
                 copied,
             } => {
+                for g in guides {
+                    b.guide(Added, *g);
+                }
                 b.nodes(Added, roots.iter().map(|(n, _)| *n));
                 b.objects(Added, objects.iter().copied());
                 b.groups(Added, groups.iter().copied());

@@ -1588,12 +1588,14 @@ enum DocAction {
     /// A move/rotate/scale applied to a whole mixed selection in one step
     /// (`transform_selection`: select-all → Move). Baked into every world
     /// leaf object and listed sketch; composed into every leaf instance's
-    /// pose. Undo restores every baked target's RECORDED pre-transform
-    /// snapshot verbatim and each instance's exact prior pose — never a
-    /// recomputed inverse, the same rule-9 posture as [`DocAction::Transform`]/
+    /// pose; carried through every listed construction guide
+    /// (`transform_mixed_selection`). Undo restores every baked target's
+    /// RECORDED pre-transform snapshot verbatim, each instance's exact prior
+    /// pose and each guide's exact prior geometry — never a recomputed
+    /// inverse, the same rule-9 posture as [`DocAction::Transform`]/
     /// [`DocAction::Rescale`]. Redo re-applies `forward` to those same
-    /// snapshots/poses, reproducing the original commit bit-for-bit. All
-    /// handles are stable across undo/redo.
+    /// snapshots/poses/guides, reproducing the original commit bit-for-bit.
+    /// All handles are stable across undo/redo.
     TransformSelection {
         /// Every baked object's id paired with its exact pre-transform
         /// snapshot.
@@ -1603,6 +1605,9 @@ enum DocAction {
         sketches: Vec<(SketchId, Sketch)>,
         /// `(instance, prior pose)` pairs, in flattening order.
         instances: Vec<(InstanceId, Transform)>,
+        /// Every carried guide's id paired with its exact pre-transform
+        /// geometry, in listing order. Empty for every node-only transform.
+        guides: Vec<(GuideId, Guide)>,
         forward: Transform,
         /// The exact before/after snapshot of every annotation this bake
         /// re-anchored — see [`Document::reanchor_touched`].
@@ -1927,7 +1932,9 @@ enum DocAction {
     /// action**. Undo hides every created entity and removes each clone root
     /// from its parent's member list; redo unhides and re-appends the roots in
     /// creation order. All handles stay stable (hide-not-delete), mirroring
-    /// [`DocAction::Duplicated`] element-wise.
+    /// [`DocAction::Duplicated`] element-wise. The guide copies of a mixed
+    /// selection (`duplicate_mixed_placements`) are hidden and unhidden with
+    /// them, as [`DocAction::DuplicatedGuides`] does.
     DuplicatedArray {
         /// Every clone root paired with the parent group it was appended to
         /// (`None` at top level), in creation order.
@@ -1938,6 +1945,9 @@ enum DocAction {
         groups: Vec<GroupId>,
         /// Every instance created across all clones.
         instances: Vec<InstanceId>,
+        /// Every guide copy, in creation order. Empty for every node-only
+        /// copy.
+        guides: Vec<GuideId>,
         /// Every node the clones made, as `(new, source)`. Change sets
         /// only; undo and redo ignore it.
         copied: Vec<(NodeId, NodeId)>,
@@ -3272,7 +3282,10 @@ impl DocAction {
                 actions.iter().flat_map(|a| a.created_guides()).collect()
             }
             DocAction::CreatedGuide { guide } => vec![*guide],
-            DocAction::DuplicatedGuides { guides } => guides.clone(),
+            DocAction::DuplicatedGuides { guides } | DocAction::DuplicatedArray { guides, .. } => {
+                guides.clone()
+            }
+            DocAction::LinkedCopies { array, .. } => array.created_guides(),
             DocAction::Imported { guides, .. } => guides.clone(),
             _ => Vec::new(),
         }
@@ -17889,6 +17902,7 @@ impl Document {
             objects: pre_objects,
             sketches: pre_sketches,
             instances: instance_prevs,
+            guides: Vec::new(),
             forward: *t,
             reanchored,
         });
@@ -17935,7 +17949,50 @@ impl Document {
         sketches: &[SketchId],
         t: &Transform,
     ) -> Result<DocChange, DocumentError> {
-        info!(target: "kernel::op", op = "transform_selection");
+        self.transform_mixed_selection(nodes, sketches, &[], t)
+    }
+
+    /// [`Document::transform_selection`] over a selection that also holds
+    /// construction guides, as the same **one undoable step**
+    /// ([`DocAction::TransformSelection`]). Each listed guide is carried as
+    /// [`Document::transform_guide`] carries one — a point's position and a
+    /// line's origin move like any point, a line's direction turns with `t`
+    /// and its finite stretch follows — and keeps its id and its tags. A
+    /// guide listed twice moves once. The nodes and sketches may be empty
+    /// when guides are listed.
+    ///
+    /// Annotations are not listed: one anchored to a transformed node
+    /// already follows it (re-anchored once, however many of its anchors
+    /// moved), and one anchored elsewhere stays where it is.
+    ///
+    /// Undo restores every guide's exact prior geometry; redo re-applies `t`
+    /// to it (rule 9), alongside the nodes' recorded snapshots.
+    ///
+    /// # Errors
+    /// As [`Document::transform_selection`] (`EmptySelection` only when the
+    /// guides are empty too), plus:
+    /// - [`DocumentError::UnknownGuide`] — a listed guide is stale, deleted,
+    ///   or from another Document.
+    /// - [`DocumentError::DegenerateGuide`] — a guide's posed geometry is not
+    ///   a guide (a non-finite coordinate, or a line whose stretch
+    ///   collapses, as a scale to zero along it would).
+    ///
+    /// Every guide is checked and posed before anything mutates: on `Err`
+    /// the document is untouched (the strong guarantee).
+    pub fn transform_mixed_selection(
+        &mut self,
+        nodes: &[NodeId],
+        sketches: &[SketchId],
+        guides: &[GuideId],
+        t: &Transform,
+    ) -> Result<DocChange, DocumentError> {
+        info!(
+            target: "kernel::op",
+            op = "transform_mixed_selection",
+            nodes = nodes.len(),
+            sketches = sketches.len(),
+            guides = guides.len(),
+        );
         // Pre-validate invertibility before mutating.
         t.inverse().map_err(DocumentError::Transform)?;
 
@@ -17973,6 +18030,27 @@ impl Document {
                 return Err(DocumentError::UnknownSketch);
             }
         }
+        // Every guide live, then every guide posed, before anything mutates:
+        // a stale handle or a collapsing line anywhere refuses the batch.
+        let mut guide_set: BTreeSet<GuideId> = BTreeSet::new();
+        let mut pre_guides: Vec<(GuideId, Guide)> = Vec::new();
+        for &g in guides {
+            let before = match self.guides.get(g) {
+                Some(rec) if !rec.hidden => rec.guide,
+                _ => return Err(DocumentError::UnknownGuide),
+            };
+            if guide_set.insert(g) {
+                pre_guides.push((g, before));
+            }
+        }
+        let posed_guides: Vec<(GuideId, Guide)> = pre_guides
+            .iter()
+            .map(|&(g, before)| {
+                pose_guide(before, t)
+                    .map(|after| (g, after))
+                    .ok_or(DocumentError::DegenerateGuide)
+            })
+            .collect::<Result<_, _>>()?;
 
         // Flatten to unique leaf targets in first-listing order. Select-all →
         // Move visits every leaf in the model, so membership checks use
@@ -18018,14 +18096,18 @@ impl Document {
             }
         }
 
-        if objects.is_empty() && instances.is_empty() && sketch_targets.is_empty() {
+        if objects.is_empty()
+            && instances.is_empty()
+            && sketch_targets.is_empty()
+            && pre_guides.is_empty()
+        {
             return Err(DocumentError::EmptySelection);
         }
 
         // Snapshot every baked target's PRE-transform state before mutating
         // anything (rule 9 posture — same as [`DocAction::Transform`]/
         // [`DocAction::Rescale`]: undo restores this verbatim, never a
-        // recomputed inverse).
+        // recomputed inverse). The guides' prior geometry is `pre_guides`.
         let pre_objects: Vec<(ObjectId, Object)> = objects
             .iter()
             .map(|&id| (id, self.objects[id].object.clone()))
@@ -18055,6 +18137,11 @@ impl Document {
             let prev = rec.pose;
             rec.pose = prev.then(t);
             instance_prevs.push((inst, prev));
+        }
+        // The guides were posed up front, so this cannot fail either.
+        let guides_touched: Vec<GuideId> = posed_guides.iter().map(|&(g, _)| g).collect();
+        for (g, after) in posed_guides {
+            self.guides[g].guide = after;
         }
 
         // Flatten every listed group AND its nested subgroups (mirrors the
@@ -18087,6 +18174,7 @@ impl Document {
             objects: pre_objects,
             sketches: pre_sketches,
             instances: instance_prevs,
+            guides: pre_guides,
             forward: *t,
             reanchored,
         });
@@ -18099,7 +18187,7 @@ impl Document {
             groups_touched,
             instances_touched: instances,
             components_touched: Vec::new(),
-            guides_touched: Vec::new(),
+            guides_touched,
             linked: Vec::new(),
         })
     }
@@ -18455,6 +18543,7 @@ impl Document {
         objects: &[(ObjectId, Object)],
         sketches: &[(SketchId, Sketch)],
         instances: &[(InstanceId, Transform)],
+        guides: &[(GuideId, Guide)],
     ) -> DocChange {
         let objects_touched: Vec<ObjectId> = objects.iter().map(|&(id, _)| id).collect();
         let mut instances_touched: Vec<InstanceId> = instances.iter().map(|&(i, _)| i).collect();
@@ -18475,7 +18564,7 @@ impl Document {
             groups_touched: Vec::new(),
             instances_touched,
             components_touched,
-            guides_touched: Vec::new(),
+            guides_touched: guides.iter().map(|&(g, _)| g).collect(),
             linked: Vec::new(),
         }
     }
@@ -20396,9 +20485,37 @@ impl Document {
         normal: Vec3,
         about: FlipAbout,
     ) -> Result<DocChange, DocumentError> {
-        info!(target: "kernel::op", op = "flip_nodes", nodes = nodes.len(), sketches = sketches.len());
+        self.flip_mixed(nodes, sketches, &[], normal, about)
+    }
+
+    /// [`Document::flip_nodes`] over a selection that also holds
+    /// construction guides: the guides are carried through the same
+    /// reflection, as [`Document::transform_mixed_selection`] carries them,
+    /// in the same one undo entry. The mirror plane comes from the nodes and
+    /// sketches alone (a guide line has no extent to center on), so guides
+    /// with nothing else listed refuse [`DocumentError::EmptySelection`].
+    ///
+    /// # Errors
+    /// As [`Document::flip_matrix`], then as
+    /// [`Document::transform_mixed_selection`]. On `Err` the document is
+    /// untouched.
+    pub fn flip_mixed(
+        &mut self,
+        nodes: &[NodeId],
+        sketches: &[SketchId],
+        guides: &[GuideId],
+        normal: Vec3,
+        about: FlipAbout,
+    ) -> Result<DocChange, DocumentError> {
+        info!(
+            target: "kernel::op",
+            op = "flip_mixed",
+            nodes = nodes.len(),
+            sketches = sketches.len(),
+            guides = guides.len(),
+        );
         let m = self.flip_matrix(nodes, sketches, normal, about)?;
-        self.transform_selection(nodes, sketches, &m)
+        self.transform_mixed_selection(nodes, sketches, guides, &m)
     }
 
     /// A mirrored copy of `nodes` across the plane
@@ -20424,7 +20541,36 @@ impl Document {
         about: FlipAbout,
         policy: LinkPolicy,
     ) -> Result<(Vec<NodeId>, DocChange), DocumentError> {
-        info!(target: "kernel::op", op = "flip_copy", nodes = nodes.len(), policy = ?policy);
+        let (roots, _, change) = self.flip_mixed_copy(nodes, &[], normal, about, policy)?;
+        Ok((roots, change))
+    }
+
+    /// [`Document::flip_copy`] over a selection that also holds construction
+    /// guides: each guide gets one independent mirrored copy, as
+    /// [`Document::duplicate_mixed_placements`] copies it, in the same one
+    /// undo entry. The mirror plane comes from the nodes alone, so guides
+    /// with no node listed refuse [`DocumentError::EmptySelection`]. Returns
+    /// the node roots (as [`Document::flip_copy`]) and the guide copies.
+    ///
+    /// # Errors
+    /// As [`Document::flip_copy`], then as
+    /// [`Document::duplicate_mixed_placements`]. On `Err` the document is
+    /// untouched.
+    pub fn flip_mixed_copy(
+        &mut self,
+        nodes: &[NodeId],
+        guides: &[GuideId],
+        normal: Vec3,
+        about: FlipAbout,
+        policy: LinkPolicy,
+    ) -> Result<(Vec<NodeId>, Vec<GuideId>, DocChange), DocumentError> {
+        info!(
+            target: "kernel::op",
+            op = "flip_mixed_copy",
+            nodes = nodes.len(),
+            guides = guides.len(),
+            policy = ?policy,
+        );
         if nodes.is_empty() {
             return Err(DocumentError::EmptySelection);
         }
@@ -20436,7 +20582,7 @@ impl Document {
                 return Err(DocumentError::DuplicateMember);
             }
         }
-        self.duplicate_nodes_placements(nodes, &[m], policy)
+        self.duplicate_mixed_placements(nodes, guides, &[m], policy)
     }
 
     /// Edit the shared geometry of a definition by applying a per-Object op to
@@ -23744,8 +23890,8 @@ impl Document {
     ) -> Result<(NodeId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "duplicate_node", node = ?node);
         if policy == LinkPolicy::Linked {
-            let (roots, change) =
-                self.duplicate_linked(&[node], std::slice::from_ref(placement), true)?;
+            let (roots, _, change) =
+                self.duplicate_linked(&[node], Vec::new(), std::slice::from_ref(placement), true)?;
             return Ok((roots[0], change));
         }
         // Mid-session, only session geometry may be duplicated (the copy
@@ -23849,6 +23995,26 @@ impl Document {
         count: NonZeroU32,
         policy: LinkPolicy,
     ) -> Result<(Vec<NodeId>, DocChange), DocumentError> {
+        let (roots, _, change) = self.duplicate_mixed_array(nodes, &[], step, count, policy)?;
+        Ok((roots, change))
+    }
+
+    /// [`Document::duplicate_nodes_array`] over a selection that also holds
+    /// construction guides: [`Document::duplicate_mixed_placements`] over
+    /// `[step, step², …]`. Returns the node clone roots and the guide copies,
+    /// each in that op's order.
+    ///
+    /// # Errors
+    /// As [`Document::duplicate_mixed_placements`]. On `Err` the document
+    /// is untouched.
+    pub fn duplicate_mixed_array(
+        &mut self,
+        nodes: &[NodeId],
+        guides: &[GuideId],
+        step: &Transform,
+        count: NonZeroU32,
+        policy: LinkPolicy,
+    ) -> Result<(Vec<NodeId>, Vec<GuideId>, DocChange), DocumentError> {
         // `[step, step², …]`, each composed from the previous exactly as the
         // array op always has, so positions are bit-for-bit unchanged.
         let mut placements = Vec::with_capacity(count.get() as usize);
@@ -23859,7 +24025,7 @@ impl Document {
             }
             placements.push(placement);
         }
-        self.duplicate_nodes_placements(nodes, &placements, policy)
+        self.duplicate_mixed_placements(nodes, guides, &placements, policy)
     }
 
     /// Deep-clone each of `nodes` once per entry of `placements`, in
@@ -23901,20 +24067,77 @@ impl Document {
         placements: &[Transform],
         policy: LinkPolicy,
     ) -> Result<(Vec<NodeId>, DocChange), DocumentError> {
-        info!(
-            target: "kernel::op",
-            op = "duplicate_nodes_placements",
-            nodes = nodes.len(),
-            placements = placements.len(),
-        );
-        if policy == LinkPolicy::Linked {
-            return self.duplicate_linked(nodes, placements, false);
-        }
-        if placements.is_empty() {
-            return Err(DocumentError::EmptySelection);
-        }
         if nodes.is_empty() {
             return Err(DocumentError::EmptySelection);
+        }
+        let (roots, _, change) = self.duplicate_mixed_placements(nodes, &[], placements, policy)?;
+        Ok((roots, change))
+    }
+
+    /// [`Document::duplicate_nodes_placements`] over a selection that also
+    /// holds construction guides, as the same ONE undo entry. Each guide is
+    /// copied once per placement, each copy posed as
+    /// [`Document::transform_guide`] moves a guide and carrying the source's
+    /// dash and tags; the source is left as it is. Guide copies are always
+    /// independent: linking is a property of component definitions, and a
+    /// guide has none, so `policy` decides only how the nodes are copied.
+    ///
+    /// Returns the node clone roots (as [`Document::duplicate_nodes_placements`]
+    /// returns them) and the guide copies, placement-major (every guide's
+    /// copy at `placements[0]`, then at `placements[1]`, …; each block in
+    /// `guides` order). With nodes listed the whole copy is one
+    /// [`DocAction::DuplicatedArray`] (inside [`DocAction::LinkedCopies`]
+    /// under `Linked`); with guides alone it is one
+    /// [`DocAction::DuplicatedGuides`], as [`Document::duplicate_guide_array`]
+    /// records it.
+    ///
+    /// # Errors
+    /// As [`Document::duplicate_nodes_placements`] (`EmptySelection` when
+    /// `placements` is empty, or `nodes` and `guides` both are), plus:
+    /// - [`DocumentError::UnknownGuide`] — a listed guide is stale, deleted,
+    ///   or from another Document.
+    /// - [`DocumentError::DuplicateMember`] — the same guide listed twice.
+    /// - [`DocumentError::DegenerateGuide`] — a copy's geometry is not a
+    ///   guide (a non-finite coordinate, or a line whose stretch collapses).
+    ///
+    /// Every guide copy is posed before anything mutates: on `Err` the
+    /// document is untouched.
+    pub fn duplicate_mixed_placements(
+        &mut self,
+        nodes: &[NodeId],
+        guides: &[GuideId],
+        placements: &[Transform],
+        policy: LinkPolicy,
+    ) -> Result<(Vec<NodeId>, Vec<GuideId>, DocChange), DocumentError> {
+        info!(
+            target: "kernel::op",
+            op = "duplicate_mixed_placements",
+            nodes = nodes.len(),
+            guides = guides.len(),
+            placements = placements.len(),
+        );
+        if placements.is_empty() || (nodes.is_empty() && guides.is_empty()) {
+            return Err(DocumentError::EmptySelection);
+        }
+        let guide_copies = self.posed_guide_copies(guides, placements)?;
+        if nodes.is_empty() {
+            let ids: Vec<GuideId> = guide_copies
+                .into_iter()
+                .map(|rec| self.insert_guide_record(rec))
+                .collect();
+            self.undo.push(DocAction::DuplicatedGuides {
+                guides: ids.clone(),
+            });
+            self.commit_new_action();
+            self.debug_validate();
+            let change = DocChange {
+                guides_touched: ids.clone(),
+                ..Default::default()
+            };
+            return Ok((Vec::new(), ids, change));
+        }
+        if policy == LinkPolicy::Linked {
+            return self.duplicate_linked(nodes, guide_copies, placements, false);
         }
         // Same rule as `duplicate_node`: mid-session copies must be of
         // session geometry (each copy folds into the open definition/group
@@ -23972,12 +24195,18 @@ impl Document {
                 self.groups[pg].members.push(root);
             }
         }
+        // The guide copies were posed up front, so inserting them cannot fail.
+        let guide_ids: Vec<GuideId> = guide_copies
+            .into_iter()
+            .map(|rec| self.insert_guide_record(rec))
+            .collect();
 
         self.undo.push(DocAction::DuplicatedArray {
             roots: roots.clone(),
             objects: created.objects.clone(),
             groups: created.groups.clone(),
             instances: created.instances.clone(),
+            guides: guide_ids.clone(),
             copied: created.pairs.clone(),
         });
         self.commit_new_action();
@@ -23987,6 +24216,7 @@ impl Document {
             objects_touched: created.objects,
             groups_touched: created.groups,
             instances_touched: created.instances,
+            guides_touched: guide_ids.clone(),
             ..Default::default()
         };
         // Each distinct parent group is touched once (its member list grew).
@@ -23997,7 +24227,49 @@ impl Document {
                 change.groups_touched.push(pg);
             }
         }
-        Ok((roots.into_iter().map(|(root, _)| root).collect(), change))
+        Ok((
+            roots.into_iter().map(|(root, _)| root).collect(),
+            guide_ids,
+            change,
+        ))
+    }
+
+    /// The copies [`Document::duplicate_mixed_placements`] makes of
+    /// `guides`, placement-major, posed but not yet inserted — so a stale
+    /// handle, a guide listed twice, a singular placement or a collapsing
+    /// copy refuses before anything mutates.
+    fn posed_guide_copies(
+        &self,
+        guides: &[GuideId],
+        placements: &[Transform],
+    ) -> Result<Vec<GuideRecord>, DocumentError> {
+        if guides.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut sources: Vec<&GuideRecord> = Vec::with_capacity(guides.len());
+        for (i, &g) in guides.iter().enumerate() {
+            if guides[..i].contains(&g) {
+                return Err(DocumentError::DuplicateMember);
+            }
+            match self.guides.get(g) {
+                Some(rec) if !rec.hidden => sources.push(rec),
+                _ => return Err(DocumentError::UnknownGuide),
+            }
+        }
+        let mut copies = Vec::with_capacity(guides.len() * placements.len());
+        for placement in placements {
+            placement.inverse().map_err(DocumentError::Transform)?;
+            for src in &sources {
+                copies.push(GuideRecord {
+                    guide: pose_guide(src.guide, placement)
+                        .ok_or(DocumentError::DegenerateGuide)?,
+                    dash: src.dash,
+                    hidden: false,
+                    tags: src.tags.clone(),
+                });
+            }
+        }
+        Ok(copies)
     }
 
     /// The [`LinkPolicy::Linked`] form of
@@ -24021,9 +24293,14 @@ impl Document {
     fn duplicate_linked(
         &mut self,
         nodes: &[NodeId],
+        guide_copies: Vec<GuideRecord>,
         placements: &[Transform],
         single: bool,
-    ) -> Result<(Vec<NodeId>, DocChange), DocumentError> {
+    ) -> Result<(Vec<NodeId>, Vec<GuideId>, DocChange), DocumentError> {
+        debug_assert!(
+            !single || guide_copies.is_empty(),
+            "a single linked copy carries no guides"
+        );
         if placements.is_empty() || nodes.is_empty() {
             return Err(DocumentError::EmptySelection);
         }
@@ -24124,6 +24401,11 @@ impl Document {
                 self.groups[pg].members.push(root);
             }
         }
+        // Posed up front by the caller, so inserting them cannot fail.
+        let guide_ids: Vec<GuideId> = guide_copies
+            .into_iter()
+            .map(|rec| self.insert_guide_record(rec))
+            .collect();
         let array = if single {
             let (root, parent) = roots[0];
             DocAction::Duplicated {
@@ -24140,6 +24422,7 @@ impl Document {
                 objects: created.objects.clone(),
                 groups: created.groups.clone(),
                 instances: created.instances.clone(),
+                guides: guide_ids.clone(),
                 copied: created.pairs.clone(),
             }
         };
@@ -24154,6 +24437,7 @@ impl Document {
             objects_touched: created.objects,
             groups_touched: created.groups,
             instances_touched: created.instances,
+            guides_touched: guide_ids.clone(),
             ..Default::default()
         };
         for &(_, parent) in &roots {
@@ -24164,7 +24448,11 @@ impl Document {
             }
         }
         merge_doc_change(&mut change, copies);
-        Ok((roots.into_iter().map(|(root, _)| root).collect(), change))
+        Ok((
+            roots.into_iter().map(|(root, _)| root).collect(),
+            guide_ids,
+            change,
+        ))
     }
 
     /// Whether `node` sits somewhere inside `container`'s subtree (a group,
@@ -25087,20 +25375,22 @@ impl Document {
                 objects,
                 sketches,
                 instances,
+                guides,
                 forward,
                 ..
             } => {
-                let (o, s, i) = (objects.len(), sketches.len(), instances.len());
-                let noun = match (o > 0, s > 0, i > 0) {
-                    (true, false, false) => "object",
-                    (false, true, false) => "sketch",
-                    (false, false, true) => "instance",
+                let (o, s, i, g) = (objects.len(), sketches.len(), instances.len(), guides.len());
+                let noun = match (o > 0, s > 0, i > 0, g > 0) {
+                    (true, false, false, false) => "object",
+                    (false, true, false, false) => "sketch",
+                    (false, false, true, false) => "instance",
+                    (false, false, false, true) => "guide",
                     _ => "item",
                 };
                 k("transform")
                     .text("verb", transform_verb_id(forward))
                     .text("noun", noun)
-                    .count("count", o + s + i)
+                    .count("count", o + s + i + g)
             }
             DocAction::Rescale { factor, .. } => {
                 let factor = format!("{factor:.4}");
@@ -25133,7 +25423,9 @@ impl Document {
             // A bare wrap is the first half of a copy.
             DocAction::WrappedLinked { .. } => k("copy"),
             DocAction::LinkedCopies { array, .. } => self.describe_action(array, undo_index),
-            DocAction::DuplicatedArray { roots, .. } => k("copy-array").count("count", roots.len()),
+            DocAction::DuplicatedArray { roots, guides, .. } => {
+                k("copy-array").count("count", roots.len() + guides.len())
+            }
             DocAction::CreatedGuide { .. } => k("guide"),
             DocAction::DeletedGuide { .. } => k("delete-guide"),
             DocAction::DeletedGuides { guides } => k("delete-guides").count("count", guides.len()),
@@ -27015,13 +27307,14 @@ impl Document {
                 objects,
                 sketches,
                 instances,
+                guides,
                 reanchored,
                 ..
             } => {
                 // Undo by restoring every baked target's RECORDED
-                // pre-transform snapshot verbatim and every instance's exact
-                // prior pose (never a recomputed inverse — see the doc
-                // comment above).
+                // pre-transform snapshot verbatim, every instance's exact
+                // prior pose and every guide's exact prior geometry (never a
+                // recomputed inverse — see the doc comment above).
                 for (id, obj) in objects {
                     self.objects[*id].object = obj.clone();
                 }
@@ -27031,13 +27324,16 @@ impl Document {
                 for &(inst, prev) in instances {
                     self.instances[inst].pose = prev;
                 }
+                for &(g, before) in guides {
+                    self.guides[g].guide = before;
+                }
                 // Verbatim restore, not a re-derived reanchor — see
                 // `Document::reanchor_touched`'s doc comment for why.
                 for r in reanchored {
                     self.annotations[r.annotation].annotation = r.before.clone();
                     self.annotations[r.annotation].detached = r.before_detached;
                 }
-                self.transform_selection_change(objects, sketches, instances)
+                self.transform_selection_change(objects, sketches, instances, guides)
             }
             DocAction::RearrangedSketchVertex { sketch, before, .. } => {
                 // Undo a re-arranging vertex drag by restoring the recorded
@@ -27423,10 +27719,15 @@ impl Document {
                 objects,
                 groups,
                 instances,
+                guides,
                 ..
             } => {
                 // Hide every clone and unlink each root from its parent —
-                // [`DocAction::Duplicated`]'s undo, element-wise.
+                // [`DocAction::Duplicated`]'s undo, element-wise — and hide
+                // every guide copy, as [`DocAction::DuplicatedGuides`] does.
+                for &g in guides {
+                    self.guides[g].hidden = true;
+                }
                 for &o in objects {
                     self.objects[o].hidden = true;
                 }
@@ -27445,6 +27746,7 @@ impl Document {
                     objects_touched: objects.clone(),
                     groups_touched: groups.clone(),
                     instances_touched: instances.clone(),
+                    guides_touched: guides.clone(),
                     ..Default::default()
                 };
                 for &(_, parent) in roots {
@@ -29013,6 +29315,7 @@ impl Document {
                 objects,
                 sketches,
                 instances,
+                guides,
                 forward,
                 reanchored,
                 ..
@@ -29039,13 +29342,19 @@ impl Document {
                 for &(inst, prev) in instances.iter() {
                     self.instances[inst].pose = prev.then(forward);
                 }
+                for &(g, before) in guides {
+                    self.guides[g].guide = pose_guide(before, forward).expect(
+                        "re-posing the recorded pre-transform guide cannot fail: the same \
+                         transform already posed it once without refusing",
+                    );
+                }
                 // Verbatim replay, not a re-derived reanchor — see
                 // `Document::reanchor_touched`'s doc comment for why.
                 for r in reanchored {
                     self.annotations[r.annotation].annotation = r.after.clone();
                     self.annotations[r.annotation].detached = r.after_detached;
                 }
-                self.transform_selection_change(objects, sketches, instances)
+                self.transform_selection_change(objects, sketches, instances, guides)
             }
             DocAction::RearrangedSketchVertex { sketch, after, .. } => {
                 // Redo a re-arranging vertex drag by restoring the recorded
@@ -29411,11 +29720,15 @@ impl Document {
                 objects,
                 groups,
                 instances,
+                guides,
                 ..
             } => {
                 // Unhide every clone and re-append each root to its parent in
                 // creation order — [`DocAction::Duplicated`]'s redo,
-                // element-wise.
+                // element-wise — and unhide every guide copy.
+                for &g in guides {
+                    self.guides[g].hidden = false;
+                }
                 for &o in objects {
                     self.objects[o].hidden = false;
                 }
@@ -29434,6 +29747,7 @@ impl Document {
                     objects_touched: objects.clone(),
                     groups_touched: groups.clone(),
                     instances_touched: instances.clone(),
+                    guides_touched: guides.clone(),
                     ..Default::default()
                 };
                 for &(_, parent) in roots {
