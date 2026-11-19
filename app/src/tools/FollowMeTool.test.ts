@@ -1167,7 +1167,7 @@ describe('FollowMeTool — solid-face PROFILES (design §3a)', () => {
     tool.onPointerDown(null, RAY) // path: face loop on object 30n
     ;(scene.pick_face as ReturnType<typeof vi.fn>).mockReturnValue(makeFacePick(40n, 41n))
     tool.onPointerMove(null, RAY) // hover the locked solid's face
-    expect(tool.statusHint()).toBe('Locked. Unlock it to change it.')
+    expect(tool.statusHint()).toBe('Locked')
     // Back on a free face, the normal cue returns.
     ;(scene.pick_face as ReturnType<typeof vi.fn>).mockReturnValue(makeFacePick(50n, 51n))
     tool.onPointerMove(null, RAY)

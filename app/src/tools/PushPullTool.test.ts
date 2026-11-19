@@ -1997,14 +1997,14 @@ describe('PushPullTool — a locked thing refuses with the Unlock toast', () => 
     } as unknown as WasmScene
   }
 
-  it('hovering a locked box says "Locked. Unlock it to change it." beside the cursor; the click toasts it with its target', () => {
+  it('hovering a locked box says "Locked" beside the cursor; the click toasts it with its target', () => {
     const scene = withLocks(makeWasmScene({ facePick: makeFacePick(3n, 4n) }), ['0:3'])
     const { tool, onToast } = makeTool(scene)
     tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
-    expect(tool.hoverHint()).toBe('Locked. Unlock it to change it.')
+    expect(tool.hoverHint()).toBe('Locked')
     expect(onToast).not.toHaveBeenCalled() // a hover never toasts
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
-    expect(onToast).toHaveBeenCalledWith('Locked. Unlock it to change it.', 'LockedHint:object:3')
+    expect(onToast).toHaveBeenCalledWith('Locked', 'LockedHint:object:3')
     // Nothing starts: no drag, no kernel call.
     expect(tool.capturingInput()).toBe(false)
     expect(scene.push_pull).not.toHaveBeenCalled()
@@ -2014,9 +2014,9 @@ describe('PushPullTool — a locked thing refuses with the Unlock toast', () => 
     const scene = withLocks(makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) }), ['2:12'], { def: 5n, usage: 4 })
     const { tool, onToast } = makeTool(scene)
     tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
-    expect(tool.hoverHint()).toBe('Locked, along with its 3 copies.')
+    expect(tool.hoverHint()).toBe('All 4 copies are locked')
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
-    expect(onToast).toHaveBeenCalledWith('Locked, along with its 3 copies.', 'LockedHint:instance:12')
+    expect(onToast).toHaveBeenCalledWith('All 4 copies are locked', 'LockedHint:instance:12')
   })
 
   it('a free box still pushes and pulls', () => {

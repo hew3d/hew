@@ -12,7 +12,7 @@
 
 import { t } from '@lingui/core/macro'
 import type { Scene as WasmScene } from './wasm/loader'
-import type { NodeRef } from './panels/treeModel'
+import { linkedSetKind, nodeRefFromJs, type NodeRef } from './panels/treeModel'
 import { inHistoryBracket } from './tools/transformSelection'
 import { kernelErrorMessage } from './kernelErrors'
 
@@ -24,53 +24,136 @@ type LinkScene = Pick<
   | 'instances_of'
   | 'instance_name'
   | 'component_name'
+  | 'group_ids'
+  | 'owner_definition'
+  | 'component_has_nested_members'
 >
 
 export interface LinkedPlacement {
   instance: bigint
   definition: bigint
-  /** Placements sharing the set, this one included. */
+  /** Placements sharing the set, this one included, wherever they sit. Always more than one. */
   copies: number
+  /**
+   * The copies Unlink can reach from here: the ones standing at the top
+   * level of the document. A copy nested inside a component (or another set)
+   * still shares the shape and still counts in `copies`, but the kernel
+   * only unlinks top-level placements, so it is left out of Unlink all and
+   * of "select every copy".
+   */
+  topLevel: bigint[]
+  /** What the shared shape is: an Object, or a Group. */
+  kind: 'object' | 'group'
 }
 
-/** The selection as one placement of a linked set, or null when it is anything else. */
-export function linkedPlacementOf(scene: LinkScene, selected: readonly NodeRef[]): LinkedPlacement | null {
+/** The placements of `definition` that stand at the top level of the document. */
+export function topLevelCopies(scene: Pick<LinkScene, 'instances_of' | 'owner_definition'>, definition: bigint): bigint[] {
+  return Array.from(scene.instances_of(definition)).filter((i) => scene.owner_definition(2, i) === undefined)
+}
+
+/**
+ * Is this placement one the app presents as the plain Object or Group it
+ * wraps? True for every placement of a linked wrapper, including one whose
+ * set is down to a single copy (deleting copies leaves such a wrapper on
+ * purpose). Use this to decide how a thing LOOKS; use `isLinkedSet` to
+ * decide whether anything is linked.
+ */
+export function isWrapperPlacement(scene: Pick<LinkScene, 'is_linked'>, instance: bigint): boolean {
+  return scene.is_linked(instance)
+}
+
+/**
+ * Is this placement one of a linked set of two or more? Only then do the
+ * link icon, the "(N linked)" count, Unlink and the "linked" wording apply.
+ */
+export function isLinkedSet(scene: Pick<LinkScene, 'is_linked' | 'instance_def' | 'definition_usage'>, instance: bigint): boolean {
+  if (!scene.is_linked(instance)) return false
+  const definition = scene.instance_def(instance)
+  return definition !== undefined && scene.definition_usage(definition) > 1
+}
+
+/**
+ * The selection as one placement of a linked wrapper, however many copies
+ * the set has (one is fine), or null when it is anything else.
+ */
+export function wrapperPlacementOf(scene: LinkScene, selected: readonly NodeRef[]): LinkedPlacement | null {
   if (selected.length !== 1 || selected[0].kind !== 'instance') return null
   const instance = selected[0].id
   if (!scene.is_linked(instance)) return null
   const definition = scene.instance_def(instance)
   if (definition === undefined) return null
-  return { instance, definition, copies: scene.definition_usage(definition) }
+  const copies = scene.definition_usage(definition)
+  return { instance, definition, copies, topLevel: topLevelCopies(scene, definition), kind: linkedSetKind(scene, definition) }
+}
+
+/**
+ * The selection as one placement of a linked set, or null when it is anything
+ * else. "Linked" means the set has more than one placement: a set that is
+ * down to one is just a plain Object, whatever the data still says. A copy
+ * that is not at the top level (selected inside an open component) is not
+ * actionable either: the kernel only unlinks top-level placements.
+ */
+export function linkedPlacementOf(scene: LinkScene, selected: readonly NodeRef[]): LinkedPlacement | null {
+  const p = wrapperPlacementOf(scene, selected)
+  if (p === null || p.copies < 2 || !p.topLevel.includes(p.instance)) return null
+  return p
 }
 
 export interface LinkGates {
   canUnlink: boolean
-  /** More than one placement shares the set. */
+  /** Two or more copies stand at the top level, so there is more than this one to unlink. */
   canUnlinkAll: boolean
+  /** Make component: any placement of a wrapper, a set of one included. */
   canPromote: boolean
+  /** What the linked set is, for the dock's chip; null when nothing is linked. */
+  linkedKind: 'object' | 'group' | null
+  /** What the placement reads as (a set of one included), for the chip; null for a component. */
+  presentedKind: 'object' | 'group' | null
 }
 
 export function linkGates(scene: LinkScene, selected: readonly NodeRef[], sessionOpen: boolean): LinkGates {
-  const p = sessionOpen ? null : linkedPlacementOf(scene, selected)
-  return { canUnlink: p !== null, canUnlinkAll: p !== null && p.copies > 1, canPromote: p !== null }
+  const w = sessionOpen ? null : wrapperPlacementOf(scene, selected)
+  const p = w !== null ? linkedPlacementOf(scene, selected) : null
+  return {
+    canUnlink: p !== null,
+    canUnlinkAll: p !== null && p.topLevel.length > 1,
+    canPromote: w !== null,
+    linkedKind: p?.kind ?? null,
+    presentedKind: w?.kind ?? null,
+  }
 }
 
-/** Make this one copy independent; the others stay linked. One undo step. */
-export function unlinkCopy(scene: WasmScene, instance: bigint): void {
-  inHistoryBracket(scene, t`Unlink`, () => {
+/**
+ * Unlink: this copy becomes an ordinary Object (or Group) of its own; the
+ * rest stay linked, and a set left with one copy is plain too. One undo step.
+ * Returns the new nodes the copy became: the old instance id is gone, so the
+ * selection moves to these.
+ */
+export function unlinkCopy(scene: WasmScene, instance: bigint): NodeRef[] {
+  // A copy nested in a component is not the kernel's to unlink from here.
+  if (scene.owner_definition(2, instance) !== undefined) return []
+  return Array.from(scene.unlink_copies(BigUint64Array.of(instance)), nodeRefFromJs)
+}
+
+/** Unlink every copy of the set. One undo step. Returns the new nodes, in copy order. */
+export function unlinkAllCopies(scene: WasmScene, instance: bigint): NodeRef[] {
+  const def = scene.instance_def(instance)
+  if (def === undefined) return []
+  // Top-level copies only: the kernel refuses a placement owned by another
+  // definition, and one such copy would abort the whole operation.
+  const copies = topLevelCopies(scene, def)
+  if (copies.length === 0) return []
+  return Array.from(scene.unlink_copies(BigUint64Array.from(copies)), nodeRefFromJs)
+}
+
+/**
+ * Make Unique on one copy (the lock toast's button): the copy gets a shape of
+ * its own but stays a linked-style placement with the same id. One undo step.
+ */
+export function makeUniqueCopy(scene: WasmScene, instance: bigint): void {
+  inHistoryBracket(scene, t`Make Unique`, () => {
     scene.make_unique_by_path_json(BigUint64Array.of(instance), true, false)
   })
-}
-
-/** Make every copy of the set independent. One undo step. Returns how many were unlinked. */
-export function unlinkAllCopies(scene: WasmScene, instance: bigint): number {
-  const def = scene.instance_def(instance)
-  if (def === undefined) return 0
-  const all = Array.from(scene.instances_of(def))
-  inHistoryBracket(scene, t`Unlink all`, () => {
-    for (const id of all) scene.make_unique_by_path_json(BigUint64Array.of(id), true, false)
-  })
-  return all.length
 }
 
 /** Turn the set into a named component. One undo step. */

@@ -61,6 +61,9 @@ export interface SelectionPathInput {
   memberName: (objectId: bigint) => string | undefined
   /** The object or free sketch a drawn selection lives on, if any. */
   draftOwner: (ref: NodeRef) => NodeRef | null
+  /** True for a linked copy: it reads as the Object or Group it is, so its
+   *  shared shape is never named as a part of a component. */
+  isLinkedCopy?: (instanceId: bigint) => boolean
 }
 
 const WALK_LIMIT = 256
@@ -237,7 +240,9 @@ function belowCrumbs(
 
   if (hit.instance !== undefined && hit.object !== undefined) {
     const instanceNode: NodeRef = { kind: 'instance', id: hit.instance }
-    if (frameOf(instanceNode) === undefined) {
+    if (input.isLinkedCopy?.(hit.instance) === true) {
+      // A linked copy is the leaf: nothing below it is named.
+    } else if (frameOf(instanceNode) === undefined) {
       // The component is not open: the part is a definition member.
       out.push({
         key: `member:${hit.object}`,
@@ -268,7 +273,12 @@ export function hoverLine(
   labelFor: (n: NodeRef) => string,
   memberName: (objectId: bigint) => string | undefined,
   isOpenInstance: (instanceId: bigint) => boolean = () => false,
+  isLinkedCopy: (instanceId: bigint) => boolean = () => false,
 ): string | null {
+  // A linked copy reads as the Object or Group it is: the hit is the copy.
+  if (hit.instance !== undefined && isLinkedCopy(hit.instance) && !isOpenInstance(hit.instance)) {
+    hit = { instance: hit.instance }
+  }
   if (hit.instance !== undefined && hit.object !== undefined) {
     const inst: NodeRef = { kind: 'instance', id: hit.instance }
     // Inside an open component the part is an ordinary object: name it by its

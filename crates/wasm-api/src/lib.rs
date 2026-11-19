@@ -6037,6 +6037,50 @@ impl Scene {
         Ok(id.data().as_ffi())
     }
 
+    /// [`Scene::extrude_face_as_new_object`] for a face picked THROUGH the
+    /// world placement `instance` (a linked copy or a component copy, the
+    /// face pick's `.instance()`), `object` being the member of its
+    /// definition that the pick named: the new Object stands on the copy
+    /// that was clicked, at its pose, a plain top-level Object. The
+    /// placement, its definition and every other copy are untouched, and a
+    /// lock does not refuse it (nothing that exists changes). `distance` is
+    /// the WORLD drag distance, mapped through the pose like
+    /// [`Scene::push_pull_in_component`]'s.
+    ///
+    /// # Errors
+    /// `UnknownInstance` — a stale, hidden or definition-owned placement;
+    /// `ExplodeSessionOpen` — its definition is open for editing;
+    /// `UnknownObject` — `object` is not a member of the placement's own
+    /// definition; `UnknownFace`; `AmbiguousInstanceScale` — a non-uniformly
+    /// scaled placement; `Extrude` — a degenerate profile or distance. The
+    /// document is untouched on error.
+    pub fn extrude_face_as_new_object_in_instance(
+        &mut self,
+        instance: u64,
+        object: u64,
+        face: u64,
+        distance: f64,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        let (id, change) = self
+            .doc
+            .extrude_face_as_new_object_in_instance(
+                instance_id(instance),
+                object_id(object),
+                FaceId::from(KeyData::from_ffi(face)),
+                distance,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::ExtrudeFaceAsNewObjectInInstance {
+            instance,
+            object,
+            face,
+            distance,
+        });
+        Ok(id.data().as_ffi())
+    }
+
     /// Follow Me around a face reached THROUGH a component instance
     /// (design §2e): the definition face's loop rides the instance's pose
     /// into world space and the profile region sweeps around it. The
@@ -7251,6 +7295,23 @@ impl Scene {
         Ok(())
     }
 
+    /// Cut's delete ([`kernel::Document::cut_selection`]):
+    /// [`Scene::delete_selection`] exactly (same arguments, one undo step,
+    /// all-or-nothing), except that a linked set the Cut leaves with one
+    /// copy keeps that copy a placement, so pasting the cut copy back in
+    /// this document rejoins the set. A Delete makes such a copy plain.
+    pub fn cut_selection(&mut self, kinds: &[u8], ids: &[u64]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        let nodes = node_ids(kinds, ids)?;
+        let change = self.doc.cut_selection(&nodes).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::CutSelection {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+        });
+        Ok(())
+    }
+
     /// Moves a whole selection of live world nodes into `group` (a live
     /// group) or out to the top level (`undefined`/`None`) as ONE undo
     /// step — the Outliner drag-and-drop "Add to Group"/"Move to top
@@ -7851,6 +7912,46 @@ impl Scene {
             affine: rec_affine,
         });
         Ok(join)
+    }
+
+    /// Unlink: each listed placement of a linked set becomes plain world
+    /// geometry where it stands, and a set left with one placement is no
+    /// set: that copy becomes plain too ([`kernel::Document::unlink_copies`]).
+    /// So unlinking one of two copies leaves two plain Objects, and passing
+    /// every copy (`instances_of`) is Unlink all. Each copy keeps its name,
+    /// color and tags; a locked set's copies stay locked, each with a lock
+    /// of its own. One undo step, labeled "Unlink"; undo restores the set.
+    ///
+    /// Returns the nodes the LISTED placements became, in order (each is
+    /// usually one Object, or one group for a set of a group): what the
+    /// selection moves to.
+    ///
+    /// # Errors
+    /// `EmptySelection`; `UnknownInstance` for a stale, hidden or
+    /// definition-owned placement; `NotLinked` for a placement of a
+    /// component that is not a linked set; `ExplodeSessionScope` /
+    /// `ExplodeSessionOpen` while a session is open and the copy is outside
+    /// it; `LockedNode` for a copy in a locked group (or a locked set that
+    /// holds a component among its parts); `CannotExplodeNonUniformScale`.
+    /// The document is untouched on error.
+    pub fn unlink_copies(&mut self, instances: &[u64]) -> Result<Vec<NodeJs>, ApiError> {
+        self.ensure_not_busy()?;
+        let ids: Vec<InstanceId> = instances.iter().map(|&i| instance_id(i)).collect();
+        let (roots, change) = match self.doc.unlink_copies(&ids) {
+            Ok(done) => done,
+            Err(DocumentError::UnknownAttr) => {
+                return Err(ApiError::new(
+                    "NotLinked",
+                    "that placement is not one of a linked set",
+                ));
+            }
+            Err(e) => return Err(doc_err(e)),
+        };
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::UnlinkCopies {
+            instances: instances.to_vec(),
+        });
+        Ok(roots.into_iter().map(node_js).collect())
     }
 
     /// Whether `instance` places a linked set (its definition carries
@@ -14976,6 +15077,17 @@ impl Scene {
                 } => {
                     self.extrude_face_as_new_object(object, face, distance)?;
                 }
+                ExtrudeFaceAsNewObjectInInstance {
+                    instance,
+                    object,
+                    face,
+                    distance,
+                } => {
+                    self.extrude_face_as_new_object_in_instance(instance, object, face, distance)?;
+                }
+                UnlinkCopies { instances } => {
+                    self.unlink_copies(&instances)?;
+                }
                 SceneUndo => {
                     self.scene_undo()?;
                 }
@@ -15905,6 +16017,9 @@ impl Scene {
                     annotations,
                 } => {
                     self.delete_mixed_selection(&kinds, &ids, &guides, &annotations)?;
+                }
+                CutSelection { kinds, ids } => {
+                    self.cut_selection(&kinds, &ids)?;
                 }
                 Shell { object, spec } => {
                     self.shell(object, &spec)?;
@@ -22433,6 +22548,137 @@ mod tests {
         };
         assert!(scene.extrude_face_as_new_object(999_999, top, 1.0).is_err());
         assert!(scene.extrude_face_as_new_object(obj, 999_999, 1.0).is_err());
+    }
+
+    /// The top face (+z) of `obj`, an ffi handle.
+    fn top_face_of(scene: &Scene, obj: u64) -> u64 {
+        scene
+            .doc
+            .object(object_id(obj))
+            .unwrap()
+            .faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(fid, _)| fid.data().as_ffi())
+            .unwrap()
+    }
+
+    /// A unit box made a linked pair (the copy 3 m along +x): the box's
+    /// member id, the original placement, and the copy.
+    fn linked_pair(scene: &mut Scene) -> (u64, u64, u64) {
+        const SHIFT_X3: [f64; 12] = [1.0, 0.0, 0.0, 3.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let (sketch, region) = ground_unit_square(scene);
+        let b = scene.extrude_region(sketch, region, 1.0).unwrap();
+        let copies = scene
+            .duplicate_selection_array(&[0], &[b], &SHIFT_X3, 1, true)
+            .unwrap();
+        let copy = copies[0].id();
+        let all = scene.instance_ids();
+        let first = *all.iter().find(|&&i| i != copy).unwrap();
+        (b, first, copy)
+    }
+
+    /// Ctrl/Cmd Push/Pull through a linked copy: the plain entry point
+    /// answers `UnknownObject` for the copy's member (the face is not a
+    /// world Object's), the in-instance one makes a new plain Object on the
+    /// clicked copy, the set is untouched, and the call records and replays.
+    #[test]
+    fn a_new_object_from_a_linked_copys_face_records_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (member, _, copy) = linked_pair(&mut scene);
+        let face = top_face_of(&scene, member);
+        let err = scene
+            .extrude_face_as_new_object(member, face, 0.5)
+            .unwrap_err();
+        assert!(err.0.starts_with("UnknownObject"), "{}", err.0);
+        let made = scene
+            .extrude_face_as_new_object_in_instance(copy, member, face, 0.5)
+            .unwrap();
+        let bb = scene.object_bounds(made, None).unwrap();
+        assert!(
+            (bb[0] - 3.0).abs() < 1e-9 && (bb[3] - 4.0).abs() < 1e-9,
+            "{bb:?}"
+        );
+        assert!(
+            (bb[2] - 1.0).abs() < 1e-9 && (bb[5] - 1.5).abs() < 1e-9,
+            "{bb:?}"
+        );
+        assert_eq!(scene.instance_ids().len(), 2, "the set is as it was");
+        let hash = scene.doc.state_hash();
+        let rec = scene.take_recording();
+        assert!(
+            rec.contains("\"method\":\"extrude_face_as_new_object_in_instance\""),
+            "{rec}"
+        );
+        let mut fresh = Scene::new();
+        assert_eq!(fresh.replay(&rec).unwrap(), hash);
+    }
+
+    /// Unlink over the boundary: one of two copies leaves two plain
+    /// Objects and no placement, the node the copy became comes back, a
+    /// component placement answers `NotLinked`, undo restores the pair, and
+    /// the call records and replays.
+    #[test]
+    fn unlink_copies_leaves_plain_objects_and_records_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (_, first, copy) = linked_pair(&mut scene);
+        let before = scene.doc.state_hash();
+        let nodes = scene.unlink_copies(&[copy]).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].kind(), "object");
+        assert!(scene.instance_ids().is_empty(), "no copy is left linked");
+        assert!(!scene.is_linked(first));
+        assert_eq!(scene.object_ids().len(), 2);
+        let hash = scene.doc.state_hash();
+
+        let rec = scene.take_recording();
+        assert!(rec.contains("\"method\":\"unlink_copies\""), "{rec}");
+        let mut fresh = Scene::new();
+        assert_eq!(fresh.replay(&rec).unwrap(), hash);
+
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.doc.state_hash(), before);
+        assert!(scene.is_linked(first) && scene.is_linked(copy));
+
+        let (sketch, region) = ground_unit_square_at(&mut scene, 9.0, 0.0);
+        let b = scene.extrude_region(sketch, region, 1.0).unwrap();
+        let comp = scene.make_component(&[0], &[b]).unwrap();
+        let err = scene.unlink_copies(&[comp]).unwrap_err();
+        assert!(err.0.starts_with("NotLinked"), "{}", err.0);
+        let err = scene.unlink_copies(&[]).unwrap_err();
+        assert!(err.0.starts_with("EmptySelection"), "{}", err.0);
+    }
+
+    /// Cut over the boundary: cutting one of two copies leaves the other a
+    /// placement (a Delete makes it plain), and the call records and
+    /// replays.
+    #[test]
+    fn cut_selection_keeps_the_copy_left_a_placement_and_records_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (_, first, copy) = linked_pair(&mut scene);
+        let before = scene.doc.state_hash();
+        scene.cut_selection(&[2], &[copy]).unwrap();
+        assert_eq!(scene.instance_ids(), vec![first], "not made plain");
+        assert!(scene.is_linked(first));
+        let hash = scene.doc.state_hash();
+
+        let rec = scene.take_recording();
+        assert!(rec.contains("\"method\":\"cut_selection\""), "{rec}");
+        let mut fresh = Scene::new();
+        assert_eq!(fresh.replay(&rec).unwrap(), hash);
+
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.doc.state_hash(), before);
+        scene.delete_selection(&[2], &[copy]).unwrap();
+        assert!(scene.instance_ids().is_empty(), "a Delete makes it plain");
+        let err = scene.cut_selection(&[2], &[copy]).unwrap_err();
+        assert!(err.0.starts_with("UnknownInstance"), "{}", err.0);
     }
 
     /// `rescale_document` scales the model about the origin, refuses bad

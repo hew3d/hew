@@ -10,10 +10,11 @@ use std::num::NonZeroU32;
 
 use kernel::{
     Anchor, AttrTarget, AttrValue, ChangeRecord, ChangeRef, ComponentId, Document, DocumentError,
-    EntityRef, GroupId, InstanceId, KernelOp, LinkPolicy, LinkedJoin, LinkedWrap, Material, NodeId,
-    ObjectId, Plane, Point3, Rgba8, Transform, Vec3,
+    EntityRef, GroupId, InsertOptions, InstanceId, KernelOp, LinkPolicy, LinkedJoin, LinkedWrap,
+    Material, NodeId, ObjectId, Plane, Point3, Rgba8, Transform, Vec3,
 };
 use proptest::prelude::*;
+use proptest::test_runner::TestCaseError;
 
 use LinkPolicy::{Independent, Linked};
 
@@ -1107,12 +1108,13 @@ fn deleting_the_last_placement_of_a_linked_set_deletes_the_definition() {
 
 #[test]
 fn deleting_one_of_several_placements_keeps_the_definition() {
+    // Down to two, the set stays (down to one, it is no set: see the
+    // last-copy specs below).
     let mut doc = Document::new();
     let (_, def, first, rest) = linked_set(&mut doc, 2);
     doc.delete_node(NodeId::Instance(rest[0])).unwrap();
-    doc.delete_node(NodeId::Instance(first)).unwrap();
     assert!(doc.is_linked_set(def));
-    assert_eq!(doc.instances_of(def), vec![rest[1]]);
+    assert_eq!(doc.instances_of(def), vec![first, rest[1]]);
 }
 
 #[test]
@@ -1178,10 +1180,10 @@ fn exploding_the_last_placement_of_a_linked_set_hides_the_definition() {
     doc.undo().unwrap();
     assert_eq!(doc.state_hash(), hash);
     assert!(doc.is_linked_set(def));
-    // With another placement left, the set stays.
+    // With two other placements left, the set stays.
     let (_, _, a, rest) = {
         let mut d2 = Document::new();
-        let r = linked_set(&mut d2, 1);
+        let r = linked_set(&mut d2, 2);
         doc = d2;
         r
     };
@@ -1209,21 +1211,613 @@ fn unlinking_the_last_placement_hides_the_old_definition() {
 }
 
 #[test]
-fn a_set_reduced_to_one_placement_stays_a_set() {
-    // L9: unlink all but one.
+fn make_unique_on_each_copy_leaves_each_its_own_set_of_one() {
+    // Make Unique keeps the placement it forks (callers rely on its id
+    // staying a placement): each fork is a set of one, and the copy the
+    // forks leave behind is left as it is. Delete, explode and Unlink make
+    // a last copy plain (the last-copy specs below); Make Unique does not.
     let mut doc = Document::new();
     let (o, def, first, rest) = linked_set(&mut doc, 2);
     for &c in &rest {
-        let (forked, _, _, _) = doc.make_unique_by_path(&[c], true, false).unwrap();
-        assert!(
-            doc.is_linked_set(forked),
-            "each unlinked copy is a set of one"
-        );
+        let (forked, leaf, _, _) = doc.make_unique_by_path(&[c], true, false).unwrap();
+        assert_eq!(leaf, c, "the same placement");
+        assert!(doc.is_linked_set(forked), "a fork of a linked copy");
+        assert_eq!(doc.definition_usage(forked), 1);
     }
     assert!(doc.is_linked_set(def));
     assert_eq!(doc.instances_of(def), vec![first]);
     assert_eq!(doc.def_members(def).unwrap(), vec![o], "the row survives");
     assert!(doc.object(o).is_some());
+}
+
+// ------------------------------------- the last copy left by another step
+
+/// The label the history shows for `doc`'s newest entry, after `step` runs
+/// on a copy of a set of three (which leaves two copies, so nothing else is
+/// baked): what the step reads as on its own.
+fn label_without_a_bake(step: impl FnOnce(&mut Document, InstanceId)) -> String {
+    let mut doc = Document::new();
+    let (_, _, _, rest) = linked_set(&mut doc, 2);
+    step(&mut doc, rest[0]);
+    last_label(&doc)
+}
+
+#[test]
+fn deleting_one_of_two_copies_leaves_one_plain_object_and_no_set() {
+    let mut doc = Document::new();
+    let (member, def, first, rest) = linked_set(&mut doc, 1);
+    let before = doc.state_hash();
+    let change = doc.delete_node(NodeId::Instance(rest[0])).unwrap();
+
+    assert!(doc.instance_ids().is_empty(), "no placement is left");
+    assert!(!doc.is_linked_set(def), "the set is gone, not a set of one");
+    assert!(!doc.component_ids().contains(&def));
+    let [plain] = doc.visible_object_ids()[..] else {
+        panic!("one plain Object");
+    };
+    assert!(doc.is_world_object(plain));
+    assert_eq!(world_min_xs(&doc), vec![0.0], "where the kept copy stood");
+    assert_no_set_of_one(&doc);
+    // The history reads as the delete it is.
+    assert_eq!(
+        last_label(&doc),
+        label_without_a_bake(|d, c| {
+            d.delete_node(NodeId::Instance(c)).unwrap();
+        })
+    );
+    // The change names the delete and the bake, so the app redraws both.
+    assert!(change.instances_touched.contains(&rest[0]));
+    assert!(change.instances_touched.contains(&first));
+    assert!(change.objects_touched.contains(&plain));
+    assert!(change.components_touched.contains(&def));
+    assert!(change.objects_touched.contains(&member), "the set's row");
+
+    let after = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before, "undo restores the linked pair");
+    assert_eq!(doc.instances_of(def), vec![first, rest[0]]);
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), after, "redo is exact");
+
+    let re = Document::load(&doc.save()).unwrap();
+    assert!(re.component_ids().is_empty());
+    assert!(re.instance_ids().is_empty());
+    assert_eq!(world_min_xs(&re), vec![0.0]);
+}
+
+#[test]
+fn deleting_one_of_two_copies_by_selection_keeps_the_delete_label() {
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 1);
+    let before = doc.state_hash();
+    let depth = doc.undo_depth();
+    doc.delete_selection(&[NodeId::Instance(first)], &[], &[])
+        .unwrap();
+    assert_eq!(doc.undo_depth(), depth + 1, "one undo entry");
+    assert_eq!(
+        last_label(&doc),
+        label_without_a_bake(|d, c| {
+            d.delete_selection(&[NodeId::Instance(c)], &[], &[])
+                .unwrap();
+        })
+    );
+    assert!(doc.instance_ids().is_empty());
+    assert!(!doc.is_linked_set(def));
+    assert_eq!(world_min_xs(&doc), vec![2.0], "the other copy, plain");
+    let after = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    assert_eq!(doc.instances_of(def), vec![first, rest[0]]);
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), after);
+}
+
+#[test]
+fn deleting_two_of_three_copies_in_one_selection_leaves_one_plain() {
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 2);
+    let before = doc.state_hash();
+    doc.delete_selection(
+        &[NodeId::Instance(first), NodeId::Instance(rest[1])],
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert!(doc.instance_ids().is_empty());
+    assert!(!doc.is_linked_set(def));
+    assert_eq!(world_min_xs(&doc), vec![2.0]);
+    assert_eq!(last_label(&doc), "Delete 2 items");
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+}
+
+#[test]
+fn deleting_both_of_two_copies_in_one_selection_leaves_nothing() {
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 1);
+    let before = doc.state_hash();
+    doc.delete_selection(
+        &[NodeId::Instance(first), NodeId::Instance(rest[0])],
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert!(doc.visible_object_ids().is_empty(), "no copy is made plain");
+    assert!(doc.instance_ids().is_empty());
+    assert!(!doc.component_ids().contains(&def));
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+}
+
+#[test]
+fn deleting_a_group_holding_one_of_two_copies_makes_the_other_plain() {
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 1);
+    let other = board(&mut doc, 9.0);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Instance(rest[0]), NodeId::Object(other)])
+        .unwrap();
+    let before = doc.state_hash();
+    doc.delete_node(NodeId::Group(g)).unwrap();
+    assert!(doc.instance_ids().is_empty());
+    assert!(!doc.is_linked_set(def));
+    assert_eq!(world_min_xs(&doc), vec![0.0], "the copy outside the group");
+    assert!(doc.instance_def(first).is_none());
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+}
+
+#[test]
+fn the_last_copy_keeps_its_name_tags_hidden_flag_material_and_pose() {
+    let mut doc = Document::new();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 30, 30)));
+    let (member, def, first, rest) = linked_set(&mut doc, 1);
+    // Mirrored in x, turned a quarter about z, doubled, moved to x = 10.
+    let pose = Transform::scale(Vec3::new(-1.0, 1.0, 1.0))
+        .then(&Transform::rotation(Vec3::new(0.0, 0.0, 1.0), std::f64::consts::FRAC_PI_2).unwrap())
+        .then(&Transform::uniform_scale(2.0))
+        .then(&Transform::translation(Vec3::new(10.0, 0.0, 0.0)));
+    doc.transform_instance(first, &pose).unwrap();
+    doc.set_node_name(NodeId::Instance(first), Some("Left".to_string()))
+        .unwrap();
+    doc.add_node_tag(NodeId::Instance(first), tag(&["Legs"]))
+        .unwrap();
+    doc.set_instance_material(first, Some(red)).unwrap();
+    doc.set_node_user_hidden(NodeId::Instance(first), true);
+    let shown = placed_points(&doc, member, first);
+    let before = doc.state_hash();
+
+    doc.delete_node(NodeId::Instance(rest[0])).unwrap();
+    let [plain] = doc.visible_object_ids()[..] else {
+        panic!("one plain Object");
+    };
+    assert!(!doc.is_linked_set(def));
+    assert_eq!(doc.object_name(plain), Some("Left"));
+    assert_eq!(
+        doc.node_tags(NodeId::Object(plain)).to_vec(),
+        vec![tag(&["Legs"])]
+    );
+    assert!(doc.node_user_hidden(NodeId::Object(plain)), "still hidden");
+    assert_eq!(doc.object(plain).unwrap().default_material(), Some(red));
+    assert_eq!(point_set(polys(&doc, plain)), shown, "where the copy stood");
+    assert_eq!(
+        doc.object(plain).unwrap().watertight(),
+        kernel::WatertightState::Watertight
+    );
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    assert!(doc.node_user_hidden(NodeId::Instance(first)));
+}
+
+#[test]
+fn a_last_copy_that_cannot_be_baked_stays_a_set_of_one_and_the_delete_succeeds() {
+    // A stretched copy of a set holding a drawing cannot be made plain (the
+    // drawing's curves would not survive the stretch): it stays a
+    // placement of a set of one, which reads as not linked.
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 1);
+    doc.transform_instance(first, &Transform::scale(Vec3::new(2.0, 1.0, 1.0)))
+        .unwrap();
+    let (s, _) = doc
+        .begin_sketch_on_plane_in_instance(first, ground())
+        .unwrap();
+    doc.sketch_mut(s)
+        .unwrap()
+        .add_segment(Point3::new(0.2, 0.2, 0.0), Point3::new(0.6, 0.2, 0.0))
+        .unwrap();
+    assert_eq!(
+        doc.unlink_copies(&[first]),
+        Err(DocumentError::CannotExplodeNonUniformScale),
+        "not bakeable"
+    );
+    let before = doc.state_hash();
+    doc.delete_node(NodeId::Instance(rest[0])).unwrap();
+    assert_eq!(doc.instances_of(def), vec![first]);
+    assert!(doc.is_linked_set(def));
+    assert_eq!(doc.definition_usage(def), 1);
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+}
+
+#[test]
+fn a_last_copy_inside_another_definition_stays_and_goes_plain_with_it() {
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 1);
+    let (d, d_place, _) = doc.make_component(&[NodeId::Instance(rest[0])]).unwrap();
+    assert_eq!(doc.owner_definition(NodeId::Instance(rest[0])), Some(d));
+    let before = doc.state_hash();
+    // The world copy goes; the one inside the component stays, since
+    // making it plain would edit the component.
+    doc.delete_node(NodeId::Instance(first)).unwrap();
+    assert_eq!(doc.instances_of(def), vec![rest[0]]);
+    assert!(doc.is_linked_set(def));
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+
+    // Deleting the component instead leaves the world copy alone in the
+    // set, and it is made plain in the same entry.
+    doc.delete_node(NodeId::Instance(d_place)).unwrap();
+    assert!(
+        doc.is_linked_set(def),
+        "a component placed nowhere still holds it"
+    );
+    let depth = doc.undo_depth();
+    doc.delete_definition(d).unwrap();
+    assert_eq!(doc.undo_depth(), depth + 1, "one undo entry");
+    assert!(doc.instance_ids().is_empty());
+    assert!(!doc.is_linked_set(def));
+    assert_eq!(world_min_xs(&doc), vec![0.0]);
+    let after = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.instances_of(def), vec![first, rest[0]]);
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), after);
+}
+
+#[test]
+fn exploding_one_of_two_copies_makes_the_other_plain_too() {
+    let mut doc = Document::new();
+    let (_, def, _, rest) = linked_set(&mut doc, 1);
+    let before = doc.state_hash();
+    let depth = doc.undo_depth();
+    let (created, change) = doc.explode_instance(rest[0]).unwrap();
+    assert_eq!(created.len(), 1, "the exploded copy's own Objects");
+    assert!(approx(min_x(&doc, created[0]), 2.0));
+    assert!(doc.instance_ids().is_empty());
+    assert!(!doc.is_linked_set(def));
+    assert_eq!(world_min_xs(&doc), vec![0.0, 2.0]);
+    assert_eq!(doc.undo_depth(), depth + 1, "one undo entry");
+    assert_eq!(
+        last_label(&doc),
+        label_without_a_bake(|d, c| {
+            d.explode_instance(c).unwrap();
+        })
+    );
+    let other = doc
+        .visible_object_ids()
+        .into_iter()
+        .find(|o| !created.contains(o))
+        .unwrap();
+    assert!(change.objects_touched.contains(&other));
+    let after = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), after);
+    let re = Document::load(&doc.save()).unwrap();
+    assert!(re.component_ids().is_empty());
+}
+
+#[test]
+fn exploding_several_copies_at_once_makes_the_last_one_plain_once() {
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 2);
+    let before = doc.state_hash();
+    // Two of three: the third is made plain after both are gone.
+    let (roots, _) = doc.explode_instances(&[first, rest[0]]).unwrap();
+    assert_eq!(roots.len(), 2, "one list per listed copy");
+    assert!(roots.iter().all(|r| matches!(r[..], [NodeId::Object(_)])));
+    assert!(doc.instance_ids().is_empty());
+    assert!(!doc.is_linked_set(def));
+    assert_eq!(world_min_xs(&doc), vec![0.0, 2.0, 4.0]);
+    let after = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before, "one undo entry");
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), after);
+    // Both of two: nothing is left to make plain, and neither is taken
+    // before its own explode.
+    let mut doc = Document::new();
+    let (_, _, first, rest) = linked_set(&mut doc, 1);
+    let (roots, _) = doc.explode_instances(&[first, rest[0]]).unwrap();
+    assert_eq!(roots.len(), 2);
+    assert_eq!(world_min_xs(&doc), vec![0.0, 2.0]);
+    let hash = doc.state_hash();
+    assert_eq!(
+        doc.explode_instances(&[first]),
+        Err(DocumentError::UnknownInstance)
+    );
+    assert_eq!(doc.state_hash(), hash);
+}
+
+#[test]
+fn deleting_one_copy_of_a_group_set_leaves_a_plain_group() {
+    let mut doc = Document::new();
+    let a = board(&mut doc, 0.0);
+    let b = board(&mut doc, 0.0);
+    doc.transform_object(b, &Transform::translation(Vec3::new(0.0, 0.0, 1.0)))
+        .unwrap();
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .unwrap();
+    doc.set_node_name(NodeId::Group(g), Some("Shelf".to_string()))
+        .unwrap();
+    let (copies, change) = doc
+        .duplicate_nodes_array(
+            &[NodeId::Group(g)],
+            &shift(3.0),
+            NonZeroU32::new(1).unwrap(),
+            Linked,
+        )
+        .unwrap();
+    let wrap = change.linked[0];
+    let before = doc.state_hash();
+    doc.delete_node(copies[0]).unwrap();
+    assert!(doc.instance_ids().is_empty());
+    assert!(!doc.is_linked_set(wrap.definition));
+    let [plain] = doc.group_ids()[..] else {
+        panic!("one plain group");
+    };
+    assert_eq!(doc.group_members(plain).unwrap().len(), 2);
+    assert_eq!(world_min_xs(&doc), vec![0.0, 0.0]);
+    assert_eq!(doc.group_name(plain), Some("Shelf"));
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+}
+
+#[test]
+fn a_last_copy_a_bake_brings_out_of_another_shape_is_made_plain_too() {
+    // A board set with one copy loose and one inside a group; the group is
+    // copied linked, so the inner copy now belongs to the group's set.
+    // Deleting the loose board copy and one group copy leaves the other
+    // group copy alone: it is made plain, which brings the inner copy out
+    // as the board set's only copy, and that is made plain as well.
+    let mut doc = Document::new();
+    let (_, board_set, first, rest) = linked_set(&mut doc, 1);
+    let (g, _) = doc.group_nodes(&[NodeId::Instance(rest[0])]).unwrap();
+    let (copies, change) = doc
+        .duplicate_nodes_array(
+            &[NodeId::Group(g)],
+            &shift(5.0),
+            NonZeroU32::new(1).unwrap(),
+            Linked,
+        )
+        .unwrap();
+    let group_set = change.linked[0].definition;
+    let wrap = NodeId::Instance(change.linked[0].instance);
+    assert_eq!(doc.definition_usage(board_set), 2);
+    let before = doc.state_hash();
+    doc.delete_selection(&[wrap, NodeId::Instance(first)], &[], &[])
+        .unwrap();
+    assert!(doc.instance_ids().is_empty(), "no set of one anywhere");
+    assert!(!doc.is_linked_set(group_set) && !doc.is_linked_set(board_set));
+    assert_eq!(world_min_xs(&doc), vec![7.0], "the group copy's board");
+    assert!(doc.instance_def(ins(copies[0])).is_none());
+    let after = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), after);
+}
+
+/// A set whose shape holds a copy of another set directly (here a
+/// component marked linked, as a file can hold one) is exploded together
+/// with that other set's loose copy: the copy the first explode brings out
+/// is returned as a root, so the same call never makes it plain under the
+/// caller (it would hand back a stale id). It stays a set of one.
+#[test]
+fn explode_instances_never_makes_a_returned_root_plain() {
+    let mut doc = Document::new();
+    let (_, inner_set, first, rest) = linked_set(&mut doc, 1);
+    let (outer, outer_place, _) = doc.make_component(&[NodeId::Instance(first)]).unwrap();
+    doc.attr_set(
+        AttrTarget::Entity(EntityRef::Component(outer)),
+        "hew",
+        "linked",
+        AttrValue::Bool(true),
+    )
+    .unwrap();
+    assert!(doc.is_linked_set(outer));
+    let loose = rest[0];
+    let before = doc.state_hash();
+    let (roots, _) = doc.explode_instances(&[outer_place, loose]).unwrap();
+    let [NodeId::Instance(brought_out)] = roots[0][..] else {
+        panic!("the outer copy explodes into a placement: {:?}", roots[0]);
+    };
+    assert!(
+        doc.instance_def(brought_out).is_some(),
+        "a returned root is still live"
+    );
+    assert_eq!(doc.instance_def(brought_out), Some(inner_set));
+    assert_eq!(doc.definition_usage(inner_set), 1, "a set of one");
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+}
+
+/// A clipboard paste into this document at `x`, with `origin`.
+fn paste(doc: &mut Document, item: &Document, origin: &str, x: f64) -> kernel::InsertReport {
+    doc.insert_document(
+        item,
+        &InsertOptions {
+            pose: shift(x),
+            provenance: None,
+            origin: Some(origin.to_string()),
+            drawing: kernel::DrawingInsert::Skip,
+            hidden_objects: Default::default(),
+        },
+    )
+    .expect("paste")
+    .0
+}
+
+#[test]
+fn cutting_one_of_two_copies_leaves_the_other_a_set_of_one() {
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 1);
+    let before = doc.state_hash();
+    let depth = doc.undo_depth();
+    doc.cut_selection(&[NodeId::Instance(rest[0])]).unwrap();
+    assert_eq!(doc.undo_depth(), depth + 1, "one undo entry");
+    assert_eq!(
+        last_label(&doc),
+        label_without_a_bake(|d, c| {
+            d.delete_selection(&[NodeId::Instance(c)], &[], &[])
+                .unwrap();
+        }),
+        "a Cut's entry reads as the delete it is"
+    );
+    assert_eq!(doc.instances_of(def), vec![first], "not made plain");
+    assert!(doc.is_linked_set(def));
+    assert_eq!(doc.definition_usage(def), 1);
+    let after = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), after);
+}
+
+#[test]
+fn a_cut_copy_pasted_back_rejoins_its_set_and_a_deleted_one_does_not() {
+    const ORIGIN: &str = "window-a#0";
+    // Cut, then paste: the paste links to the live set again.
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 1);
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Instance(rest[0])], ORIGIN)
+        .unwrap();
+    doc.cut_selection(&[NodeId::Instance(rest[0])]).unwrap();
+    let report = paste(&mut doc, &item, ORIGIN, 3.0);
+    assert_eq!(report.definitions_linked, 1, "linked, not copied");
+    let [NodeId::Instance(pasted)] = report.roots[..] else {
+        panic!("a pasted placement: {:?}", report.roots);
+    };
+    assert_eq!(doc.instance_def(pasted), Some(def));
+    assert_eq!(doc.instances_of(def), vec![first, pasted]);
+    assert_no_set_of_one(&doc);
+
+    // A plain delete of the same still makes the other copy plain, so the
+    // set is gone and the same paste copies.
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 1);
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Instance(rest[0])], ORIGIN)
+        .unwrap();
+    doc.delete_selection(&[NodeId::Instance(rest[0])], &[], &[])
+        .unwrap();
+    assert!(doc.instance_def(first).is_none(), "baked");
+    let report = paste(&mut doc, &item, ORIGIN, 3.0);
+    assert_eq!(report.definitions_linked, 0);
+    assert!(!doc.is_linked_set(def));
+}
+
+#[test]
+fn a_paste_preview_works_beside_a_set_of_two() {
+    // The preview deletes every node of a scratch copy but the pasted
+    // ones; with two loose copies of a set, deleting the first must not
+    // make the second plain before its own delete.
+    const ORIGIN: &str = "window-a#0";
+    let mut doc = Document::new();
+    let (_, def, _, _) = linked_set(&mut doc, 1);
+    let o = board(&mut doc, 9.0);
+    let (_, comp, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Instance(comp)], ORIGIN)
+        .unwrap();
+    let before = doc.state_hash();
+    let preview = doc
+        .preview_clipboard_paste(&item, ORIGIN)
+        .expect("the preview builds")
+        .expect("a linked definition to show");
+    assert_eq!(preview.instance_ids().len(), 1, "only the pasted placement");
+    assert_eq!(doc.state_hash(), before, "this document is untouched");
+    assert_eq!(doc.definition_usage(def), 2);
+}
+
+#[test]
+fn a_last_copy_with_an_annotation_stays_a_set_of_one() {
+    // The automatic bake would detach the leader anchored to the copy the
+    // person did not touch: that copy stays a placement instead.
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 1);
+    let note = doc
+        .add_leader_text(
+            Anchor {
+                node: Some(NodeId::Instance(first)),
+                point: Point3::new(0.5, 0.5, 1.0),
+            },
+            Vec3::new(0.0, 0.0, 1.0),
+            "Leg".into(),
+        )
+        .unwrap();
+    assert_eq!(doc.annotation_detached(note), Some(false));
+    let before = doc.state_hash();
+    doc.delete_node(NodeId::Instance(rest[0])).unwrap();
+    assert_eq!(doc.instances_of(def), vec![first], "left as it is");
+    assert_eq!(doc.annotation_detached(note), Some(false), "still attached");
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    // An explicit Unlink of that copy still makes it plain (and detaches).
+    doc.delete_node(NodeId::Instance(rest[0])).unwrap();
+    doc.unlink_copies(&[first]).unwrap();
+    assert!(doc.instance_ids().is_empty());
+    assert_eq!(doc.annotation_detached(note), Some(true));
+    // Without the annotation, the same delete makes it plain.
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 1);
+    doc.delete_node(NodeId::Instance(rest[0])).unwrap();
+    assert!(doc.instance_def(first).is_none());
+    assert!(!doc.is_linked_set(def));
+}
+
+#[test]
+fn a_delete_inside_a_group_session_bakes_a_last_copy_only_inside_the_session() {
+    // The copy left outside the open group is not the session's to change:
+    // it stays a set of one and the delete succeeds.
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 1);
+    let other = board(&mut doc, 9.0);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Instance(rest[0]), NodeId::Object(other)])
+        .unwrap();
+    doc.open_group_session(g).unwrap();
+    doc.delete_selection(&[NodeId::Instance(rest[0])], &[], &[])
+        .unwrap();
+    assert_eq!(doc.instances_of(def), vec![first], "left as it is");
+    assert_eq!(doc.definition_usage(def), 1);
+    doc.close_group_session().unwrap();
+    assert_eq!(doc.instances_of(def), vec![first]);
+
+    // Both copies inside the open group: the one left is made plain, and
+    // the close keeps it in the group.
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 1);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Instance(first), NodeId::Instance(rest[0])])
+        .unwrap();
+    doc.open_group_session(g).unwrap();
+    let before = doc.state_hash();
+    doc.delete_selection(&[NodeId::Instance(rest[0])], &[], &[])
+        .unwrap();
+    assert!(doc.instance_ids().is_empty());
+    assert!(!doc.is_linked_set(def));
+    let after = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), after);
+    doc.close_group_session().unwrap();
+    let members = doc.group_members(g).unwrap();
+    assert!(matches!(members[..], [NodeId::Object(_)]), "{members:?}");
 }
 
 #[test]
@@ -1238,6 +1832,363 @@ fn undo_of_an_unlink_restores_the_set() {
     doc.undo().unwrap();
     assert_eq!(doc.state_hash(), hash);
     assert_eq!(doc.instances_of(def).len(), 2);
+}
+
+// ------------------------------------------------ Unlink (unlink_copies)
+
+/// The world-space minimum x of a world Object.
+fn min_x(doc: &Document, o: ObjectId) -> f64 {
+    polys(doc, o)
+        .iter()
+        .map(|p| p.x)
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Every visible world Object's minimum x, sorted.
+fn world_min_xs(doc: &Document) -> Vec<f64> {
+    let mut xs: Vec<f64> = doc
+        .visible_object_ids()
+        .into_iter()
+        .map(|o| min_x(doc, o))
+        .collect();
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    xs
+}
+
+/// No live linked set is placed exactly once at the world level: a set
+/// that drops to one placement is no set at all.
+fn assert_no_set_of_one(doc: &Document) {
+    for c in doc.component_ids() {
+        if doc.is_linked_set(c) {
+            assert_ne!(
+                doc.definition_usage(c),
+                1,
+                "a linked set of one is left: {c:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unlinking_one_of_two_copies_leaves_two_plain_objects() {
+    let mut doc = Document::new();
+    let (_, def, _, rest) = linked_set(&mut doc, 1);
+    let before = doc.state_hash();
+    let (roots, change) = doc.unlink_copies(&[rest[0]]).unwrap();
+
+    assert_eq!(roots.len(), 1, "the copy became one node");
+    let NodeId::Object(copy) = roots[0] else {
+        panic!("an Object, got {roots:?}");
+    };
+    assert!(doc.is_world_object(copy));
+    assert!(approx(min_x(&doc, copy), 2.0), "where the copy stood");
+    assert!(doc.instance_ids().is_empty(), "no placement is left");
+    assert!(!doc.is_linked_set(def), "the set is gone, not a set of one");
+    assert!(!doc.component_ids().contains(&def));
+    assert_eq!(world_min_xs(&doc), vec![0.0, 2.0], "two plain Objects");
+    assert_eq!(last_label(&doc), "Unlink");
+    assert!(change.objects_touched.contains(&copy));
+    assert!(change.components_touched.contains(&def));
+
+    let after = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before, "undo restores the linked pair");
+    assert!(doc.is_linked_set(def));
+    assert_eq!(doc.instances_of(def).len(), 2);
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), after, "redo is exact");
+
+    // It saves and reopens as two plain Objects, no set.
+    let re = Document::load(&doc.save()).unwrap();
+    assert!(re.component_ids().is_empty());
+    assert!(re.instance_ids().is_empty());
+    assert_eq!(world_min_xs(&re), vec![0.0, 2.0]);
+}
+
+#[test]
+fn unlinking_one_of_three_copies_leaves_the_other_two_linked() {
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 2);
+    let (roots, _) = doc.unlink_copies(&[rest[0]]).unwrap();
+    assert!(matches!(roots[..], [NodeId::Object(_)]));
+    assert!(doc.is_linked_set(def));
+    assert_eq!(doc.instances_of(def), vec![first, rest[1]]);
+    assert_eq!(doc.visible_object_ids().len(), 1, "only the unlinked one");
+    assert_no_set_of_one(&doc);
+}
+
+#[test]
+fn unlinking_every_copy_leaves_none_linked() {
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 2);
+    let before = doc.state_hash();
+    let all = [first, rest[0], rest[1]];
+    let (roots, _) = doc.unlink_copies(&all).unwrap();
+    assert_eq!(roots.len(), 3, "one root per listed copy, in order");
+    let xs: Vec<f64> = roots
+        .iter()
+        .map(|r| match r {
+            NodeId::Object(o) => min_x(&doc, *o),
+            other => panic!("an Object, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(xs, vec![0.0, 2.0, 4.0]);
+    assert!(!doc.is_linked_set(def));
+    assert!(doc.instance_ids().is_empty());
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+}
+
+#[test]
+fn unlinking_down_to_one_by_steps_leaves_no_set_of_one() {
+    // Unlink one of three, then one of the two left: all three are plain.
+    let mut doc = Document::new();
+    let (_, def, first, rest) = linked_set(&mut doc, 2);
+    doc.unlink_copies(&[rest[1]]).unwrap();
+    doc.unlink_copies(&[first]).unwrap();
+    assert!(!doc.is_linked_set(def));
+    assert!(doc.instance_ids().is_empty());
+    assert_eq!(world_min_xs(&doc), vec![0.0, 2.0, 4.0]);
+    assert_no_set_of_one(&doc);
+}
+
+#[test]
+fn an_unlinked_copy_keeps_its_name_and_tags_and_the_other_keeps_the_sets_name() {
+    let mut doc = Document::new();
+    let o = named_board(&mut doc, 0.0, "Leg", &[&["Legs"]], &[]);
+    let (copies, _) = doc
+        .duplicate_nodes_array(
+            &[NodeId::Object(o)],
+            &shift(2.0),
+            NonZeroU32::new(1).unwrap(),
+            Linked,
+        )
+        .unwrap();
+    let copy = ins(copies[0]);
+    doc.set_node_name(NodeId::Instance(copy), Some("Front leg".to_string()))
+        .unwrap();
+    doc.add_node_tag(NodeId::Instance(copy), tag(&["Front"]))
+        .unwrap();
+    let (roots, _) = doc.unlink_copies(&[copy]).unwrap();
+    let NodeId::Object(made) = roots[0] else {
+        panic!("an Object");
+    };
+    assert_eq!(doc.object_name(made), Some("Front leg"));
+    assert_eq!(
+        doc.node_tags(NodeId::Object(made)).to_vec(),
+        vec![tag(&["Legs"]), tag(&["Front"])],
+        "the copy's own tags"
+    );
+    let other = doc
+        .visible_object_ids()
+        .into_iter()
+        .find(|&x| x != made)
+        .unwrap();
+    assert_eq!(doc.object_name(other), Some("Leg"), "the set's name");
+    assert_eq!(
+        doc.node_tags(NodeId::Object(other)).to_vec(),
+        vec![tag(&["Legs"])]
+    );
+}
+
+#[test]
+fn a_hidden_copy_stays_hidden_when_its_sibling_is_unlinked() {
+    let mut doc = Document::new();
+    let (_, _, first, rest) = linked_set(&mut doc, 1);
+    doc.set_node_user_hidden(NodeId::Instance(first), true);
+    let before = doc.state_hash();
+    doc.unlink_copies(&[rest[0]]).unwrap();
+    let hidden: Vec<ObjectId> = doc
+        .visible_object_ids()
+        .into_iter()
+        .filter(|&o| doc.node_user_hidden(NodeId::Object(o)))
+        .collect();
+    assert_eq!(hidden.len(), 1, "the hidden copy is a hidden Object");
+    assert!(approx(min_x(&doc, hidden[0]), 0.0));
+    let after = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    assert!(doc.node_user_hidden(NodeId::Instance(first)));
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), after);
+    assert!(doc.node_user_hidden(NodeId::Object(hidden[0])));
+}
+
+#[test]
+fn unlinking_a_group_copy_leaves_plain_groups() {
+    let mut doc = Document::new();
+    let a = board(&mut doc, 0.0);
+    let b = board(&mut doc, 0.0);
+    doc.transform_object(b, &Transform::translation(Vec3::new(0.0, 0.0, 1.0)))
+        .unwrap();
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .unwrap();
+    let (copies, _) = doc
+        .duplicate_nodes_array(
+            &[NodeId::Group(g)],
+            &shift(3.0),
+            NonZeroU32::new(1).unwrap(),
+            Linked,
+        )
+        .unwrap();
+    let (roots, _) = doc.unlink_copies(&[ins(copies[0])]).unwrap();
+    assert!(matches!(roots[..], [NodeId::Group(_)]));
+    assert!(doc.instance_ids().is_empty());
+    assert_eq!(doc.group_ids().len(), 2, "two plain groups");
+    assert_eq!(world_min_xs(&doc), vec![0.0, 0.0, 3.0, 3.0]);
+}
+
+#[test]
+fn unlink_refuses_what_is_not_a_linked_copy_and_touches_nothing() {
+    let mut doc = Document::new();
+    let o = board(&mut doc, 0.0);
+    let (_, comp, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let (_, _, first, _) = linked_set(&mut doc, 1);
+    let before = doc.state_hash();
+    let depth = doc.undo_depth();
+    assert!(matches!(
+        doc.unlink_copies(&[]),
+        Err(DocumentError::EmptySelection)
+    ));
+    assert!(matches!(
+        doc.unlink_copies(&[comp]),
+        Err(DocumentError::UnknownAttr)
+    ));
+    assert!(matches!(
+        doc.unlink_copies(&[first, comp]),
+        Err(DocumentError::UnknownAttr)
+    ));
+    doc.delete_node(NodeId::Instance(first)).unwrap();
+    let before_stale = doc.state_hash();
+    assert!(matches!(
+        doc.unlink_copies(&[first]),
+        Err(DocumentError::UnknownInstance)
+    ));
+    assert_eq!(doc.state_hash(), before_stale);
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    assert_eq!(doc.undo_depth(), depth);
+}
+
+#[test]
+fn unlink_refuses_while_a_session_is_open_outside_it() {
+    let mut doc = Document::new();
+    let (_, _, first, rest) = linked_set(&mut doc, 1);
+    let other = board(&mut doc, 9.0);
+    let (g, _) = doc.group_nodes(&[NodeId::Object(other)]).unwrap();
+    doc.open_group_session(g).unwrap();
+    let before = doc.state_hash();
+    assert!(matches!(
+        doc.unlink_copies(&[first]),
+        Err(DocumentError::ExplodeSessionScope)
+    ));
+    assert!(matches!(
+        doc.unlink_copies(&[rest[0]]),
+        Err(DocumentError::ExplodeSessionScope)
+    ));
+    assert_eq!(doc.state_hash(), before);
+}
+
+// ------------------------- Ctrl/Cmd Push/Pull (new object) through a copy
+
+#[test]
+fn a_new_object_from_a_copys_face_stands_on_that_copy_and_the_set_is_unchanged() {
+    let mut doc = Document::new();
+    let (member, def, first, rest) = linked_set(&mut doc, 1);
+    let before = doc.state_hash();
+    let face = top_face(&doc, member);
+    let (made, change) = doc
+        .extrude_face_as_new_object_in_instance(rest[0], member, face, 0.5)
+        .unwrap();
+    assert!(doc.is_world_object(made), "a plain top-level Object");
+    assert_eq!(change.objects_touched, vec![made]);
+    assert!(approx(min_x(&doc, made), 2.0), "on the clicked copy");
+    let zs: Vec<f64> = polys(&doc, made).iter().map(|p| p.z).collect();
+    assert!(zs.iter().all(|&z| (1.0 - 1e-9..=1.5 + 1e-9).contains(&z)));
+    assert_eq!(
+        doc.instances_of(def),
+        vec![first, rest[0]],
+        "the set as it was"
+    );
+    assert!(
+        approx(max_z(&doc, member), 1.0),
+        "the shared shape as it was"
+    );
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+}
+
+#[test]
+fn a_new_object_from_a_rotated_mirrored_scaled_copy_follows_its_pose() {
+    let mut doc = Document::new();
+    let (member, def, _, _) = linked_set(&mut doc, 0);
+    // Turned a quarter about z, mirrored in x, doubled, moved to x = 10.
+    let pose = Transform::scale(Vec3::new(-1.0, 1.0, 1.0))
+        .then(&Transform::rotation(Vec3::new(0.0, 0.0, 1.0), std::f64::consts::FRAC_PI_2).unwrap())
+        .then(&Transform::uniform_scale(2.0))
+        .then(&Transform::translation(Vec3::new(10.0, 0.0, 0.0)));
+    let (placed, _) = doc.place_instance(def, pose).unwrap();
+    let face = top_face(&doc, member);
+    let (made, _) = doc
+        .extrude_face_as_new_object_in_instance(placed, member, face, 0.5)
+        .unwrap();
+    // The copy's top is at z = 2 (doubled); the new Object rises 0.5 above
+    // it in WORLD units and covers the copy's footprint.
+    let pts = polys(&doc, made);
+    let zmin = pts.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
+    let zmax = pts.iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max);
+    assert!(approx(zmin, 2.0) && approx(zmax, 2.5), "{zmin}..{zmax}");
+    let placed_pts: Vec<Point3> = polys(&doc, member)
+        .iter()
+        .map(|p| pose.apply_point(*p))
+        .collect();
+    let foot = |ps: &[Point3]| {
+        let mut b = [
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        for p in ps {
+            b = [b[0].min(p.x), b[1].min(p.y), b[2].max(p.x), b[3].max(p.y)];
+        }
+        b.map(|v| (v * 1e6).round() as i64)
+    };
+    assert_eq!(foot(&pts), foot(&placed_pts), "the copy's footprint");
+    assert_eq!(
+        doc.object(made).unwrap().watertight(),
+        kernel::WatertightState::Watertight
+    );
+}
+
+#[test]
+fn a_new_object_through_a_copy_refuses_bad_inputs_and_touches_nothing() {
+    let mut doc = Document::new();
+    let (member, def, first, _) = linked_set(&mut doc, 0);
+    let loose = board(&mut doc, 5.0);
+    let face = top_face(&doc, member);
+    let before = doc.state_hash();
+    assert!(matches!(
+        doc.extrude_face_as_new_object_in_instance(first, loose, top_face(&doc, loose), 0.5),
+        Err(DocumentError::UnknownObject)
+    ));
+    let (squashed, _) = doc
+        .place_instance(def, Transform::scale(Vec3::new(1.0, 2.0, 1.0)))
+        .unwrap();
+    let placed = doc.state_hash();
+    assert!(matches!(
+        doc.extrude_face_as_new_object_in_instance(squashed, member, face, 0.5),
+        Err(DocumentError::AmbiguousInstanceScale)
+    ));
+    assert_eq!(doc.state_hash(), placed);
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    // The plain entry point still refuses a member, as it always has.
+    assert!(matches!(
+        doc.extrude_face_as_new_object(member, face, 0.5),
+        Err(DocumentError::UnknownObject)
+    ));
 }
 
 // ------------------------------------------------ nested linked sets
@@ -1301,14 +2252,66 @@ fn nested_sets(doc: &mut Document) -> Nested {
     }
 }
 
+/// [`nested_sets`] with the group wrapped but not copied: `SG` has the
+/// one placement `gp[0]` (`gp[1]` repeats it).
+fn nested_set_of_one(doc: &mut Document) -> Nested {
+    let o = board(doc, 0.0);
+    let (sa, a1, _) = doc.wrap_linked(NodeId::Object(o)).unwrap();
+    let (a2, _) = doc
+        .duplicate_node(NodeId::Instance(a1), &shift(2.0), Linked)
+        .unwrap();
+    let a2 = ins(a2);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Instance(a1), NodeId::Instance(a2)])
+        .unwrap();
+    let (sg, gp, _) = doc.wrap_linked(NodeId::Group(g)).unwrap();
+    Nested {
+        o,
+        sa,
+        a: [a1, a2],
+        g,
+        sg,
+        gp: [gp, gp],
+    }
+}
+
+/// Deleting one of two outer copies makes the other a plain group holding
+/// the inner set's two placements, so the inner set lives on, linked.
 #[test]
-fn deleting_the_last_placements_of_an_outer_set_takes_the_inner_set_with_it() {
-    // Repro A.
+fn deleting_one_of_two_outer_copies_makes_the_other_a_plain_group_and_keeps_the_inner_set() {
     let mut doc = Document::new();
     let n = nested_sets(&mut doc);
+    let hash = doc.state_hash();
     doc.delete_node(NodeId::Instance(n.gp[0])).unwrap();
-    assert!(doc.is_linked_set(n.sg) && doc.is_linked_set(n.sa));
-    doc.delete_node(NodeId::Instance(n.gp[1])).unwrap();
+    assert!(!doc.component_ids().contains(&n.sg), "no outer set of one");
+    assert!(doc.is_linked_set(n.sa));
+    assert_eq!(doc.definition_usage(n.sa), 2, "copied out with the group");
+    assert_eq!(
+        doc.instance_ids().len(),
+        2,
+        "only the inner set's two copies"
+    );
+    assert_no_orphaned_linked_set(&doc);
+    assert_no_set_of_one(&doc);
+    let post = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), hash);
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), post);
+}
+
+#[test]
+fn deleting_the_last_placements_of_an_outer_set_takes_the_inner_set_with_it() {
+    // Repro A. Both outer copies go in one delete: one at a time, the
+    // first delete makes the other copy plain (the last-copy rule).
+    let mut doc = Document::new();
+    let n = nested_sets(&mut doc);
+    doc.delete_selection(
+        &[NodeId::Instance(n.gp[0]), NodeId::Instance(n.gp[1])],
+        &[],
+        &[],
+    )
+    .unwrap();
     assert!(!doc.component_ids().contains(&n.sg));
     assert!(
         !doc.component_ids().contains(&n.sa),
@@ -1323,9 +2326,13 @@ fn deleting_the_last_placements_of_an_outer_set_takes_the_inner_set_with_it() {
 fn undo_and_redo_of_the_nested_delete_restore_and_rehide_both_definitions() {
     let mut doc = Document::new();
     let n = nested_sets(&mut doc);
-    doc.delete_node(NodeId::Instance(n.gp[0])).unwrap();
     let mid = doc.state_hash();
-    doc.delete_node(NodeId::Instance(n.gp[1])).unwrap();
+    doc.delete_selection(
+        &[NodeId::Instance(n.gp[0]), NodeId::Instance(n.gp[1])],
+        &[],
+        &[],
+    )
+    .unwrap();
     let post = doc.state_hash();
     doc.undo().unwrap();
     assert_eq!(
@@ -1372,7 +2379,6 @@ fn the_nested_delete_change_lists_every_member_hidden_with_the_sets() {
     // S3: per-node caches of the hidden members must hear of them.
     let mut doc = Document::new();
     let n = nested_sets(&mut doc);
-    doc.delete_node(NodeId::Instance(n.gp[0])).unwrap();
     let check = |change: &kernel::DocChange, what: &str| {
         assert!(change.components_touched.contains(&n.sg), "{what}: SG");
         assert!(change.components_touched.contains(&n.sa), "{what}: SA");
@@ -1382,7 +2388,13 @@ fn the_nested_delete_change_lists_every_member_hidden_with_the_sets() {
             assert!(change.instances_touched.contains(&a), "{what}: {a:?}");
         }
     };
-    let change = doc.delete_node(NodeId::Instance(n.gp[1])).unwrap();
+    let change = doc
+        .delete_selection(
+            &[NodeId::Instance(n.gp[0]), NodeId::Instance(n.gp[1])],
+            &[],
+            &[],
+        )
+        .unwrap();
     check(&change, "delete");
     let change = doc.undo().unwrap();
     check(&change, "undo");
@@ -1392,9 +2404,10 @@ fn the_nested_delete_change_lists_every_member_hidden_with_the_sets() {
 
 #[test]
 fn exploding_the_last_outer_placement_keeps_the_inner_set_placed_by_the_copies() {
+    // The outer set is down to one placement by a bare wrap (deleting the
+    // other copy would make this one plain already, the same bake).
     let mut doc = Document::new();
-    let n = nested_sets(&mut doc);
-    doc.delete_node(NodeId::Instance(n.gp[1])).unwrap();
+    let n = nested_set_of_one(&mut doc);
     let hash = doc.state_hash();
     let (_, change) = doc.explode_instance(n.gp[0]).unwrap();
     assert!(!doc.component_ids().contains(&n.sg));
@@ -1434,8 +2447,9 @@ fn exploding_through_a_grouped_last_placement_hides_an_emptied_inner_set() {
 }
 
 /// Repro B's shape: an outer linked set `s` whose member group holds two
-/// placements `a` of an inner linked set `sa`; `s` has one placement `p`
-/// left (a second one was copied and deleted).
+/// placements `a` of an inner linked set `sa`; `s` has the one placement
+/// `p` a bare wrap gives it (a second one copied and deleted would make `p`
+/// plain).
 struct Outer {
     o: ObjectId,
     sa: ComponentId,
@@ -1455,10 +2469,6 @@ fn outer_holding_two_inner(doc: &mut Document) -> Outer {
         .group_nodes(&[NodeId::Instance(a1), NodeId::Instance(a2)])
         .unwrap();
     let (s, p, _) = doc.wrap_linked(NodeId::Group(g)).unwrap();
-    let (p2, _) = doc
-        .duplicate_node(NodeId::Instance(p), &shift(5.0), Linked)
-        .unwrap();
-    doc.delete_node(p2).unwrap();
     assert_eq!(doc.definition_usage(s), 1);
     Outer {
         o,
@@ -2047,6 +3057,250 @@ proptest! {
         }
         prop_assert_eq!(doc.state_hash(), before);
     }
+
+    /// Unlink any copies of a set, in steps: what renders is the same
+    /// solids in the same places, no set of one is ever left, the copies
+    /// that stay linked are exactly the ones a set of two or more holds,
+    /// and undoing every step restores the document exactly, redo too.
+    #[test]
+    fn unlink_steps_keep_the_solids_leave_no_set_of_one_and_undo_exactly(
+        copies in 1u32..5,
+        picks in proptest::collection::vec(0usize..8, 1..4),
+        locked in any::<bool>(),
+    ) {
+        let mut doc = Document::new();
+        let (_, def, first, rest) = linked_set(&mut doc, copies);
+        if locked {
+            doc.set_nodes_locked(&[NodeId::Instance(first)], true).unwrap();
+        }
+        let before = doc.state_hash();
+        let solids = rendered(&doc);
+        let total = 1 + rest.len();
+        let mut posts = Vec::new();
+        for p in picks {
+            let live = doc.instances_of(def);
+            if live.is_empty() {
+                break;
+            }
+            let pick = live[p % live.len()];
+            doc.unlink_copies(&[pick]).unwrap();
+            posts.push(doc.state_hash());
+            prop_assert_eq!(rendered(&doc), solids, "the same solids render");
+            assert_no_set_of_one(&doc);
+            let left = doc.instances_of(def).len();
+            prop_assert!(left == 0 || left >= 2, "{} left", left);
+            prop_assert_eq!(doc.visible_object_ids().len(), total - left);
+            if locked {
+                prop_assert!(doc
+                    .visible_object_ids()
+                    .iter()
+                    .all(|&o| doc.node_locked(NodeId::Object(o))));
+            }
+        }
+        for _ in 0..posts.len() {
+            doc.undo().unwrap();
+        }
+        prop_assert_eq!(doc.state_hash(), before);
+        for post in &posts {
+            doc.redo().unwrap();
+            prop_assert_eq!(doc.state_hash(), *post);
+        }
+    }
+}
+
+// ------------------------------- property: no set of one after a step
+
+/// One step of [`no_step_leaves_a_bakeable_set_of_one`]; indices pick
+/// among the live world nodes, modulo their count.
+#[derive(Debug, Clone)]
+enum Step {
+    Copy(usize, u32),
+    DeleteOne(usize),
+    DeleteTwo(usize, usize),
+    Explode(usize),
+    ExplodeTwo(usize, usize),
+    Unlink(usize),
+    Group(usize, usize),
+    Undo,
+    Redo,
+}
+
+fn arb_step() -> impl Strategy<Value = Step> {
+    prop_oneof![
+        (0usize..16, 1u32..3).prop_map(|(k, n)| Step::Copy(k, n)),
+        (0usize..16).prop_map(Step::DeleteOne),
+        (0usize..16, 0usize..16).prop_map(|(a, b)| Step::DeleteTwo(a, b)),
+        (0usize..16).prop_map(Step::Explode),
+        (0usize..16, 0usize..16).prop_map(|(a, b)| Step::ExplodeTwo(a, b)),
+        (0usize..16).prop_map(Step::Unlink),
+        (0usize..16, 0usize..16).prop_map(|(a, b)| Step::Group(a, b)),
+        Just(Step::Undo),
+        Just(Step::Redo),
+    ]
+}
+
+/// Every live world node: plain Objects, groups, and placements, in a
+/// stable order.
+fn world_nodes(doc: &Document) -> Vec<NodeId> {
+    let mut out: Vec<NodeId> = doc
+        .visible_object_ids()
+        .into_iter()
+        .filter(|&o| doc.is_world_object(o))
+        .map(NodeId::Object)
+        .collect();
+    out.extend(
+        doc.group_ids()
+            .into_iter()
+            .filter(|&g| doc.owner_definition(NodeId::Group(g)).is_none())
+            .map(NodeId::Group),
+    );
+    out.extend(world_placements(doc).into_iter().map(NodeId::Instance));
+    out
+}
+
+fn world_placements(doc: &Document) -> Vec<InstanceId> {
+    doc.instance_ids()
+        .into_iter()
+        .filter(|&i| doc.owner_definition(NodeId::Instance(i)).is_none())
+        .collect()
+}
+
+fn pick<T: Copy>(list: &[T], k: usize) -> Option<T> {
+    (!list.is_empty()).then(|| list[k % list.len()])
+}
+
+/// A linked set with one placement left is allowed only where that copy
+/// may not be made plain; in these documents (no session, no lock, no
+/// drawing in a shape, no stretch) that is a copy inside another set.
+fn assert_no_bakeable_set_of_one(doc: &Document) -> Result<(), TestCaseError> {
+    for c in doc.component_ids() {
+        if doc.is_linked_set(c) && doc.definition_usage(c) == 1 {
+            let only = doc.instances_of(c);
+            prop_assert!(
+                only.iter()
+                    .all(|&i| doc.owner_definition(NodeId::Instance(i)).is_some()),
+                "a world linked set of one is left: {:?} placed by {:?}",
+                c,
+                only
+            );
+        }
+    }
+    Ok(())
+}
+
+proptest! {
+    /// Copies, deletes (one node or two at once), explodes, unlinks and
+    /// groups in any order never leave a world linked set of one; a
+    /// refused step changes nothing, and every step undoes and redoes
+    /// exactly.
+    #[test]
+    fn no_step_leaves_a_bakeable_set_of_one(steps in proptest::collection::vec(arb_step(), 1..14)) {
+        let mut doc = Document::new();
+        let (_, _, _, _) = linked_set(&mut doc, 1);
+        board(&mut doc, 9.0);
+        let mut states = vec![doc.state_hash()];
+        let mut redo: Vec<u64> = Vec::new();
+        for step in steps {
+            let nodes = world_nodes(&doc);
+            let placements = world_placements(&doc);
+            let before = doc.state_hash();
+            let depth = doc.undo_depth();
+            let outcome: Option<Result<(), DocumentError>> = match step {
+                Step::Undo => {
+                    if states.len() > 1 {
+                        doc.undo().unwrap();
+                        redo.push(states.pop().unwrap());
+                        prop_assert_eq!(doc.state_hash(), *states.last().unwrap());
+                    }
+                    None
+                }
+                Step::Redo => {
+                    if let Some(h) = redo.pop() {
+                        doc.redo().unwrap();
+                        prop_assert_eq!(doc.state_hash(), h);
+                        states.push(h);
+                    }
+                    None
+                }
+                Step::Copy(k, n) => pick(&nodes, k).map(|node| {
+                    doc.duplicate_nodes_array(
+                        &[node],
+                        &shift(1.5),
+                        NonZeroU32::new(n).unwrap(),
+                        Linked,
+                    )
+                    .map(|_| ())
+                }),
+                Step::DeleteOne(k) => pick(&nodes, k).map(|n| doc.delete_node(n).map(|_| ())),
+                Step::DeleteTwo(a, b) => pick(&nodes, a).zip(pick(&nodes, b)).map(|(x, y)| {
+                    let list = if x == y { vec![x] } else { vec![x, y] };
+                    doc.delete_selection(&list, &[], &[]).map(|_| ())
+                }),
+                Step::Explode(k) => {
+                    pick(&placements, k).map(|i| doc.explode_instance(i).map(|_| ()))
+                }
+                Step::ExplodeTwo(a, b) => pick(&placements, a)
+                    .zip(pick(&placements, b))
+                    .filter(|(x, y)| x != y)
+                    .map(|(x, y)| {
+                        doc.explode_instances(&[x, y]).map(|(roots, _)| {
+                            // Every placement returned as a root is live.
+                            for r in roots.iter().flatten() {
+                                if let NodeId::Instance(i) = r {
+                                    assert!(doc.instance_def(*i).is_some(), "stale root {i:?}");
+                                }
+                            }
+                        })
+                    }),
+                Step::Unlink(k) => {
+                    let linked: Vec<InstanceId> = placements
+                        .iter()
+                        .copied()
+                        .filter(|&i| doc.instance_def(i).is_some_and(|d| doc.is_linked_set(d)))
+                        .collect();
+                    pick(&linked, k).map(|i| {
+                        doc.unlink_copies(&[i]).map(|(roots, _)| {
+                            for r in &roots {
+                                if let NodeId::Instance(p) = r {
+                                    assert!(doc.instance_def(*p).is_some(), "stale root {p:?}");
+                                }
+                            }
+                        })
+                    })
+                }
+                Step::Group(a, b) => pick(&nodes, a).zip(pick(&nodes, b)).map(|(x, y)| {
+                    let list = if x == y { vec![x] } else { vec![x, y] };
+                    doc.group_nodes(&list).map(|_| ())
+                }),
+            };
+            match outcome {
+                Some(Ok(())) => {
+                    if doc.undo_depth() != depth {
+                        states.push(doc.state_hash());
+                        redo.clear();
+                    }
+                }
+                Some(Err(_)) => {
+                    prop_assert_eq!(doc.state_hash(), before, "a refused step changes nothing");
+                    prop_assert_eq!(doc.undo_depth(), depth);
+                }
+                None => {}
+            }
+            assert_no_bakeable_set_of_one(&doc)?;
+            assert_no_orphaned_linked_set(&doc);
+        }
+        // Back to the start, and forward again, exactly.
+        let ends: Vec<u64> = states.clone();
+        while states.len() > 1 {
+            doc.undo().unwrap();
+            states.pop();
+            prop_assert_eq!(doc.state_hash(), *states.last().unwrap());
+        }
+        for &h in &ends[1..] {
+            doc.redo().unwrap();
+            prop_assert_eq!(doc.state_hash(), h);
+        }
+    }
 }
 
 // -------------------------------------- make unique by path: hidden on the path
@@ -2536,9 +3790,17 @@ fn join_linked_refuses_a_set_that_is_not_linked_a_stale_set_and_a_singular_pose(
     let plain = board(&mut doc, 6.0);
     let (_, plain_placement, _) = doc.make_component(&[NodeId::Object(plain)]).unwrap();
     let (_, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
-    let (gone, _) = doc
-        .duplicate_node(NodeId::Instance(set), &shift(12.0), Linked)
+    // Two more copies, one deleted: the set keeps two placements (down to
+    // one, `set` would be made plain).
+    let (copies, _) = doc
+        .duplicate_nodes_array(
+            &[NodeId::Instance(set)],
+            &shift(12.0),
+            NonZeroU32::new(2).unwrap(),
+            Linked,
+        )
         .unwrap();
+    let gone = copies[0];
     doc.delete_node(gone).unwrap();
     let before = doc.state_hash();
 
@@ -2938,8 +4200,16 @@ fn explode_after_a_join_gives_each_board_its_color_back_as_its_base() {
     doc.set_object_material(joiner, Some(blue)).unwrap();
     let (_, set, _) = doc.wrap_linked(NodeId::Object(keeper)).unwrap();
     let (join, _) = doc.join_linked(set, joiner, shift(3.0)).unwrap();
+    // Exploding the joiner's placement leaves the keeper the set's last
+    // copy, which the same explode makes plain.
     let (blue_out, _) = doc.explode_instance(join.instance).unwrap();
-    let (red_out, _) = doc.explode_instance(set).unwrap();
+    assert!(doc.instance_ids().is_empty(), "no set of one is left");
+    let red_out: Vec<ObjectId> = doc
+        .visible_object_ids()
+        .into_iter()
+        .filter(|o| !blue_out.contains(o))
+        .collect();
+    assert_eq!(red_out.len(), 1);
     assert_eq!(
         doc.object(blue_out[0]).unwrap().default_material(),
         Some(blue)

@@ -150,6 +150,16 @@ const LINKED_COPY_VERBS: DockVerb[] = [
   { id: 'save-to-library', label: msg`Save to Library` },
 ]
 
+/** A linked wrapper left with one copy: it reads as the plain Object or Group
+ * it wraps, so no Unlink and none of a component's Make Unique or Explode. */
+const SINGLE_WRAPPER_VERBS: DockVerb[] = [
+  { id: 'enter-context', label: msg`Edit` },
+  toolVerb('tool-move'),
+  toolVerb('tool-scale'),
+  { id: 'edit-make-component', label: msg`Make component` },
+  { id: 'save-to-library', label: msg`Save to Library` },
+]
+
 /** Move first (it works on any mix), then the three booleans (gated by
  * `DockGates.canBoolean` — the Object menu's gate, so they appear only for a
  * selection the kernel will take), then Group (gated by `DockGates.canGroup`)
@@ -223,6 +233,10 @@ export interface DockGates {
   canUnlink?: boolean
   /** More than one placement shares the set (Unlink all makes sense). */
   canUnlinkAll?: boolean
+  /** What the linked set is, for the chip: an Object or a Group, never "copies". */
+  linkedKind?: 'object' | 'group' | null
+  /** What a placement of a linked wrapper reads as, a set of one included: the chip says OBJECT or GROUP, never COMPNT. */
+  presentedKind?: 'object' | 'group' | null
   /** Something unlocked is selected: the dock offers Lock. Optional like the
    * gates above; omitted is treated as false (hidden). */
   canLock?: boolean
@@ -245,7 +259,9 @@ export function dockVerbsFor(context: DockContext, gates?: DockGates): DockVerb[
       case 'empty': return EMPTY_VERBS
       case 'object': return OBJECT_VERBS
       case 'group': return GROUP_VERBS
-      case 'instance': return gates?.canUnlink === true ? LINKED_COPY_VERBS : INSTANCE_VERBS
+      case 'instance':
+        if (gates?.canUnlink === true) return LINKED_COPY_VERBS
+        return gates?.presentedKind != null ? SINGLE_WRAPPER_VERBS : INSTANCE_VERBS
       case 'multi': return MULTI_VERBS
       case 'sketch': return SKETCH_VERBS
     }
@@ -279,10 +295,9 @@ export function dockVerbsFor(context: DockContext, gates?: DockGates): DockVerb[
 
 /** Display label for the context chip (`FACE`/`EDGE`/`COMPNT` in the spec's
  * literal terms — Hew's rescoped equivalents below). */
-export function dockChipLabel(context: DockContext, linkedCopy = false): string {
-  if (context === 'instance' && linkedCopy) {
-    return t({ comment: 'Short uppercase chip on the contextual dock when one linked copy is selected', message: 'COPIES' })
-  }
+export function dockChipLabel(context: DockContext, linkedKind: 'object' | 'group' | null = null): string {
+  // A placement of a linked set reads as the Object (or Group) it is.
+  if (context === 'instance' && linkedKind !== null) context = linkedKind
   switch (context) {
     case 'empty': return t({ comment: 'Short uppercase chip on the contextual dock naming what is selected', message: 'DRAW' })
     case 'object': return t({ comment: 'Short uppercase chip on the contextual dock naming what is selected', message: 'OBJECT' })

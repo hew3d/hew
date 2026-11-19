@@ -401,9 +401,12 @@ below.
   clipboard records the document and window it came from); Edit ▸ Paste
   independent and Paste linked force either form. A placement of a linked
   set reads in the Outliner by its own name, else the shared name, else its
-  part's name, else "Copies", with a link glyph and a ×N count (none for a
-  set of one) and a row "Copies" menu: Unlink, Unlink all, Make component
-  (promote: asks for a name), Select all copies, Rename. The same actions
+  part's name, else the plain "Object"/"Group" name, with a link glyph and a
+  ×N count (none for a set of one) and a row menu: Unlink, Unlink all, Make component
+  (promote: asks for a name), Select all copies, Rename. Unlink
+  (`Scene::unlink_copies`, `Document::unlink_copies`) turns the copy into
+  an ordinary world Object or Group, and a set left with one placement
+  becomes plain too; the selection moves to the new node. The same actions
   sit in the Object menu, the contextual dock, and Object Info ("Linked
   copies: N", "Name (all copies)", "This copy"). Subtract on a placement
   cuts through the shared shape (a strip offers "Cut all N copies" or
@@ -1805,7 +1808,7 @@ below.
   Object's base material onto its placement, a join moves any base the
   shared member still has onto every placement the set already has (a
   red keeper and a blue joiner stay red and blue), and Unlink
-  (`make_unique_by_path` on a linked set) and Explode put a placement's
+  (`unlink_copies`) and Explode put a placement's
   material back as the copied Object's base, so the round trip is
   lossless. Painting one copy whose shared member still has a base
   (Ctrl-click inside the open set, an older file) first makes the

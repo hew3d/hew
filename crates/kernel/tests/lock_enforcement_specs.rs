@@ -425,7 +425,9 @@ fn a_locked_object_refuses_delete_group_reparent_and_make_component() {
     let free = obj(board(&mut doc, 3.0));
     let (g, _) = doc.group_nodes(&[free]).unwrap();
     refused(&mut doc, n, false, |d| d.delete_node(n));
-    refused(&mut doc, n, false, |d| d.delete_selection(&[free, n]));
+    refused(&mut doc, n, false, |d| {
+        d.delete_selection(&[free, n], &[], &[])
+    });
     refused(&mut doc, n, false, |d| d.group_nodes(&[n]));
     refused(&mut doc, n, false, |d| d.reparent_nodes(&[n], Some(g)));
     refused(&mut doc, n, false, |d| d.make_component(&[n]));
@@ -1436,6 +1438,189 @@ fn make_unique_on_a_locked_copy_unlocks_alone_and_undoes_step_by_step() {
     assert!(doc.node_locked(NodeId::Instance(legs[3])));
     doc.undo().unwrap();
     assert_eq!(doc.instance_def(legs[3]), Some(def));
+}
+
+/// Unlink is Make Unique for linked copies (OW-1): it works on a locked
+/// copy, the copy becomes a plain Object with a lock of its own, and the
+/// copies left behind keep theirs. A set left with one copy is no set: that
+/// copy is a plain locked Object too.
+#[test]
+fn unlinking_a_locked_copy_gives_it_a_lock_of_its_own() {
+    let mut doc = Document::new();
+    let (legs, def, _) = four_legs(&mut doc);
+    doc.set_nodes_locked(&[NodeId::Instance(legs[0])], true)
+        .unwrap();
+    let before = doc.state_hash();
+    let others: Vec<_> = legs[..3]
+        .iter()
+        .map(|&l| points(&doc, NodeId::Instance(l)))
+        .collect();
+    let (roots, _) = doc.unlink_copies(&[legs[3]]).unwrap();
+    let [NodeId::Object(made)] = roots[..] else {
+        panic!("one Object, got {roots:?}");
+    };
+    assert!(doc.node_locked(obj(made)), "locked, with its own lock");
+    assert!(doc.component_locked(def), "the set keeps its lock");
+    for (k, &l) in legs[..3].iter().enumerate() {
+        assert!(doc.node_locked(NodeId::Instance(l)));
+        assert_eq!(points(&doc, NodeId::Instance(l)), others[k], "unchanged");
+    }
+    // Unlocking it leaves the other three locked.
+    doc.set_nodes_locked(&[obj(made)], false).unwrap();
+    assert!(
+        legs[..3]
+            .iter()
+            .all(|&l| doc.node_locked(NodeId::Instance(l)))
+    );
+    doc.undo().unwrap();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before, "undo restores the locked set");
+
+    // Down to two, then one more: both are plain and locked.
+    doc.unlink_copies(&[legs[3], legs[2]]).unwrap();
+    let (roots, _) = doc.unlink_copies(&[legs[1]]).unwrap();
+    assert_eq!(roots.len(), 1);
+    assert!(doc.instance_ids().is_empty(), "no set of one is left");
+    let all = doc.visible_object_ids();
+    assert_eq!(all.len(), 4);
+    assert!(
+        all.iter().all(|&o| doc.node_locked(obj(o))),
+        "each keeps the lock"
+    );
+    let re = Document::load(&doc.save()).unwrap();
+    assert!(
+        re.visible_object_ids()
+            .iter()
+            .all(|&o| re.node_locked(obj(o)))
+    );
+    doc.undo().unwrap();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+}
+
+/// A copy of a locked set is never deleted or exploded (OW-1), so a delete
+/// or an explode never reaches the last-copy bake with the set locked:
+/// each is refused before any work, with two copies as with four, and so is
+/// deleting a group that holds one.
+#[test]
+fn deleting_or_exploding_a_copy_of_a_locked_set_of_two_is_refused() {
+    let mut doc = Document::new();
+    let o = board(&mut doc, 0.0);
+    let (copies, change) = doc
+        .duplicate_nodes_array(
+            &[obj(o)],
+            &shift(2.0),
+            NonZeroU32::new(1).unwrap(),
+            LinkPolicy::Linked,
+        )
+        .unwrap();
+    let first = change.linked[0].instance;
+    let second = ins(copies[0]);
+    let leg = NodeId::Instance(second);
+    let (g, _) = doc.group_nodes(&[leg]).unwrap();
+    doc.set_nodes_locked(&[NodeId::Instance(first)], true)
+        .unwrap();
+    refused(&mut doc, leg, false, |d| d.delete_node(leg));
+    refused(&mut doc, leg, false, |d| {
+        d.delete_selection(&[leg], &[], &[])
+    });
+    refused(&mut doc, leg, false, |d| d.explode_instance(second));
+    refused(&mut doc, leg, false, |d| d.explode_instances(&[second]));
+    refused(&mut doc, leg, false, |d| d.delete_node(NodeId::Group(g)));
+    refused(&mut doc, NodeId::Instance(first), false, |d| {
+        d.delete_node(NodeId::Instance(first))
+    });
+}
+
+/// A set whose own lock is off can hold a locked node deeper in its shape
+/// (a member group's member): deleting one of its two copies makes the
+/// other plain, and the locked node's copy keeps the lock, as Unlink
+/// carries it. Undo restores the set exactly.
+#[test]
+fn the_last_copy_made_plain_after_a_delete_keeps_a_locked_members_lock() {
+    let mut doc = Document::new();
+    let a = board(&mut doc, 0.0);
+    let b = board(&mut doc, 0.0);
+    doc.transform_object(b, &Transform::translation(Vec3::new(0.0, 0.0, 1.0)))
+        .unwrap();
+    let (g, _) = doc.group_nodes(&[obj(a), obj(b)]).unwrap();
+    doc.set_nodes_locked(&[obj(b)], true).unwrap();
+    let (copies, change) = doc
+        .duplicate_nodes_array(
+            &[NodeId::Group(g)],
+            &shift(3.0),
+            NonZeroU32::new(1).unwrap(),
+            LinkPolicy::Linked,
+        )
+        .unwrap();
+    let def = change.linked[0].definition;
+    assert!(!doc.component_locked(def), "the set itself is not locked");
+    let before = doc.state_hash();
+    doc.delete_node(copies[0]).unwrap();
+    assert!(doc.instance_ids().is_empty(), "no set of one is left");
+    let locked: Vec<ObjectId> = doc
+        .visible_object_ids()
+        .into_iter()
+        .filter(|&o| doc.node_locked(obj(o)))
+        .collect();
+    assert_eq!(locked.len(), 1, "the locked member's copy is locked");
+    assert_eq!(doc.visible_object_ids().len(), 2);
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+}
+
+/// A copy inside a locked group is not "a locked copy": unlinking it
+/// rewrites the group, so it refuses naming the group. The copy left
+/// behind in a locked group when its sibling is unlinked stays where it is,
+/// a placement of a set of one.
+#[test]
+fn a_copy_in_a_locked_group_is_not_unlinked_and_stays_behind() {
+    let mut doc = Document::new();
+    let (legs, def, _) = four_legs(&mut doc);
+    let (g, _) = doc.group_nodes(&[NodeId::Instance(legs[0])]).unwrap();
+    doc.set_nodes_locked(&[NodeId::Group(g)], true).unwrap();
+    refused(&mut doc, NodeId::Group(g), false, |d| {
+        d.unlink_copies(&[legs[0]])
+    });
+    let inside = points(&doc, NodeId::Group(g));
+    doc.unlink_copies(&[legs[1], legs[2], legs[3]]).unwrap();
+    assert_eq!(doc.instances_of(def), vec![legs[0]], "it stays where it is");
+    assert_eq!(points(&doc, NodeId::Group(g)), inside);
+    assert_eq!(doc.definition_usage(def), 1, "which reads as not linked");
+}
+
+/// Ctrl/Cmd Push/Pull (a new Object from a face) changes nothing that
+/// exists, so it works on a locked box and through a locked copy, as
+/// copying does (OW-1); the new Object is not locked.
+#[test]
+fn a_new_object_from_a_locked_face_leaves_the_locked_thing_alone() {
+    let (mut doc, o, n) = locked_box();
+    let print0 = points(&doc, n);
+    let face = top_face(&doc, o);
+    let (made, _) = doc
+        .extrude_face_as_new_object(o, face, 0.5)
+        .expect("a new Object from a locked face");
+    assert_eq!(points(&doc, n), print0);
+    assert!(doc.node_locked(n));
+    assert!(doc.node_frozen(obj(made)).is_none(), "the new one is free");
+
+    let mut doc = Document::new();
+    let (legs, def, member) = four_legs(&mut doc);
+    doc.set_nodes_locked(&[NodeId::Instance(legs[0])], true)
+        .unwrap();
+    let prints: Vec<_> = legs
+        .iter()
+        .map(|&l| points(&doc, NodeId::Instance(l)))
+        .collect();
+    let face = top_face(&doc, member);
+    let (made, _) = doc
+        .extrude_face_as_new_object_in_instance(legs[2], member, face, 0.5)
+        .expect("a new Object through a locked copy");
+    for (k, &l) in legs.iter().enumerate() {
+        assert_eq!(points(&doc, NodeId::Instance(l)), prints[k]);
+    }
+    assert!(doc.component_locked(def));
+    assert!(doc.node_frozen(obj(made)).is_none());
 }
 
 #[test]

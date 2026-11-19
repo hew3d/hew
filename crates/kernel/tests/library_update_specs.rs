@@ -722,6 +722,75 @@ fn table_and_leg(doc: &Document) -> (ComponentId, ComponentId) {
     (table, leg)
 }
 
+/// An update whose new contents no longer place a linked set the old ones
+/// did: the set's one remaining copy is made plain in the same step, by
+/// the rule a delete follows, and undo restores the set exactly.
+#[test]
+fn an_update_that_drops_a_linked_copy_makes_the_last_copy_plain() {
+    // v1: a table holding one copy of a linked set (a board).
+    let mut src = Document::new();
+    let o = boxed(&mut src, 0.0, 1.0, 1.0);
+    let (_, copy, _) = src.wrap_linked(NodeId::Object(o)).unwrap();
+    let (_, table_i, _) = src.make_component(&[NodeId::Instance(copy)]).unwrap();
+    let v1 = src
+        .extract_item(&[NodeId::Instance(table_i)], true)
+        .unwrap();
+    let v1 = Document::load(&v1.save()).unwrap();
+    // v2: the same table with the copy exploded into a plain board.
+    let mut v2 = v1.clone();
+    let placed = v2
+        .instance_ids()
+        .into_iter()
+        .find(|&i| v2.owner_definition(NodeId::Instance(i)).is_none())
+        .expect("the item's placement");
+    v2.open_explode_session(placed).unwrap();
+    let inner = v2
+        .instance_ids()
+        .into_iter()
+        .find(|&i| i != placed && v2.instance_def(i).is_some_and(|d| v2.is_linked_set(d)))
+        .expect("the copy, surfaced");
+    v2.explode_instance(inner).unwrap();
+    v2.close_explode_session().unwrap();
+    let v2 = Document::load(&v2.save()).unwrap();
+
+    let mut doc = Document::new();
+    insert(&mut doc, &v1, prov("table", "t1", &v1), 0.0);
+    let set = doc
+        .component_ids()
+        .into_iter()
+        .find(|&c| doc.is_linked_set(c))
+        .expect("the linked set");
+    let table = doc
+        .component_ids()
+        .into_iter()
+        .find(|&c| c != set)
+        .expect("the table");
+    // The set's other copy stands alone in the model.
+    let (lone, _) = doc.place_instance(set, shift(8.0)).unwrap();
+    assert_eq!(doc.definition_usage(set), 2);
+    let before = doc.state_hash();
+    let depth = doc.undo_depth();
+
+    let (report, change) = doc
+        .update_definitions_from_items(&[update(table, &v2, prov("table", "t2", &v2))], digest)
+        .unwrap();
+    assert_eq!(report.updated, vec![table]);
+    assert_eq!(doc.undo_depth(), depth + 1, "one step");
+    assert_eq!(
+        doc.history_entries().undo.last().unwrap().label,
+        "Update from Library"
+    );
+    assert!(doc.instance_def(lone).is_none(), "the last copy is plain");
+    assert!(!doc.is_linked_set(set), "and no set of one is left");
+    assert!(change.instances_touched.contains(&lone));
+    let after = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    assert_eq!(doc.definition_usage(set), 2);
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), after);
+}
+
 #[test]
 fn a_nested_part_from_the_same_item_updates_in_the_same_step() {
     let (v1, v2) = table_items();

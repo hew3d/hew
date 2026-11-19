@@ -603,17 +603,6 @@ fn world_instances_under(ctx: &Ctx, node: NodeId) -> Result<Vec<kernel::Instance
         .collect())
 }
 
-/// The live world nodes directly under `parent` (the top level for `None`).
-fn world_children(ctx: &Ctx, parent: Option<kernel::GroupId>) -> Result<Vec<NodeId>, CmdError> {
-    Ok(ctx
-        .doc
-        .occurrences(None, true)?
-        .into_iter()
-        .filter(|r| r.path.is_empty() && r.parent_group == parent && ctx.doc.node_is_live(r.node))
-        .map(|r| r.node)
-        .collect())
-}
-
 /// Explodes every world instance at or below `node` until none is left
 /// (nested instances surface as world instances when their placement
 /// explodes); the instances first named are pushed to `unlinked`.
@@ -636,40 +625,87 @@ fn explode_all_under(
     ))
 }
 
-/// One operand made plain for a world boolean: a world instance exploded
-/// (its pieces grouped when there are several), a group's instances
-/// exploded in place, or a definition member's copy after its placement
-/// explodes.
+/// An operand of [`boolean_unlinking`] before anything explodes: what it
+/// will need once its placement has.
+enum Pending {
+    /// A plain world Object, used as it is.
+    Plain(NodeId),
+    /// A world group whose placements explode in place.
+    Group(NodeId),
+    /// A world placement, replaced by what it explodes into.
+    Placement(kernel::InstanceId),
+    /// A direct Object member of a world placement: the `k`-th such
+    /// member, in member order, whose copy stands in for it.
+    Member(kernel::InstanceId, usize),
+}
+
+/// Checks one operand and notes what it needs, before anything changes.
+fn prepare_operand(ctx: &Ctx, o: Operand) -> Result<Pending, CmdError> {
+    match o {
+        Operand::World(NodeId::Group(g)) => Ok(Pending::Group(NodeId::Group(g))),
+        Operand::World(NodeId::Instance(i)) => Ok(Pending::Placement(i)),
+        Operand::World(n) => Ok(Pending::Plain(n)),
+        Operand::Member { path, node } => {
+            let NodeId::Object(member) = node else {
+                return Err(unlink_member_rule());
+            };
+            let [placement] = path.as_slice() else {
+                return Err(unlink_member_rule());
+            };
+            let def = ctx.doc.instance_def(*placement).ok_or_else(|| {
+                CmdError::Internal("a resolved placement has no definition".into())
+            })?;
+            // An explode's roots hold one copy per live member, in member
+            // order: the direct Object members' copies are its Objects.
+            let k = ctx
+                .doc
+                .def_member_nodes(def)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|m| match m {
+                    NodeId::Object(o) if ctx.doc.object(o).is_some() => Some(o),
+                    _ => None,
+                })
+                .position(|o| o == member)
+                .ok_or_else(unlink_member_rule)?;
+            Ok(Pending::Member(*placement, k))
+        }
+    }
+}
+
+/// One operand made plain for a world boolean once every placement operand
+/// has exploded (`exploded`: each one's roots, where it stood): a world
+/// placement's roots (grouped when there are several, nested placements
+/// exploded in turn), a group's placements exploded in place, or a
+/// definition member's copy.
 fn settle_operand(
     ctx: &mut Ctx,
-    o: Operand,
+    p: Pending,
+    exploded: &[(kernel::InstanceId, Vec<NodeId>)],
     unlinked: &mut Vec<kernel::InstanceId>,
 ) -> Result<NodeId, CmdError> {
-    match o {
-        Operand::World(n @ NodeId::Object(_)) => Ok(n),
-        Operand::World(g @ NodeId::Group(_)) => {
+    let roots_of = |i: kernel::InstanceId| -> Result<Vec<NodeId>, CmdError> {
+        exploded
+            .iter()
+            .find(|(e, _)| *e == i)
+            .map(|(_, r)| r.clone())
+            .ok_or_else(|| CmdError::Internal("a placement operand did not explode".into()))
+    };
+    match p {
+        Pending::Plain(n) => Ok(n),
+        Pending::Group(g) => {
             explode_all_under(ctx, g, unlinked)?;
             Ok(g)
         }
-        Operand::World(NodeId::Instance(i)) => {
-            let parent = ctx.doc.node_parent(NodeId::Instance(i));
-            let before = world_children(ctx, parent)?;
-            unlinked.push(i);
-            ctx.doc.explode_instance(i)?;
-            let mut roots: Vec<NodeId> = world_children(ctx, parent)?
-                .into_iter()
-                .filter(|n| !before.contains(n))
-                .collect();
+        Pending::Placement(i) => {
+            let mut roots = roots_of(i)?;
             // Nested placements surfaced by the explode explode in turn.
             while let Some(k) = roots.iter().position(|n| matches!(n, NodeId::Instance(_))) {
                 let NodeId::Instance(inner) = roots[k] else {
                     unreachable!()
                 };
-                ctx.doc.explode_instance(inner)?;
-                roots = world_children(ctx, parent)?
-                    .into_iter()
-                    .filter(|n| !before.contains(n))
-                    .collect();
+                let (mut inner_roots, _) = ctx.doc.explode_instances(&[inner])?;
+                roots.splice(k..=k, inner_roots.pop().unwrap_or_default());
             }
             for &r in &roots {
                 if matches!(r, NodeId::Group(_)) {
@@ -682,39 +718,11 @@ fn settle_operand(
                 many => Ok(NodeId::Group(ctx.doc.group_nodes(many)?.0)),
             }
         }
-        Operand::Member { path, node } => {
-            let NodeId::Object(member) = node else {
-                return Err(unlink_member_rule());
-            };
-            let [placement] = path.as_slice() else {
-                return Err(unlink_member_rule());
-            };
-            let def = ctx.doc.instance_def(*placement).ok_or_else(|| {
-                CmdError::Internal("a resolved placement has no definition".into())
-            })?;
-            // `explode_instance` returns the copies of the definition's
-            // live direct Object members, in member order.
-            let live_objects: Vec<kernel::ObjectId> = ctx
-                .doc
-                .def_member_nodes(def)
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|m| match m {
-                    NodeId::Object(o) if ctx.doc.object(o).is_some() => Some(o),
-                    _ => None,
-                })
-                .collect();
-            let k = live_objects
-                .iter()
-                .position(|&o| o == member)
-                .ok_or_else(unlink_member_rule)?;
-            unlinked.push(*placement);
-            let (created, _) = ctx.doc.explode_instance(*placement)?;
-            created
-                .get(k)
-                .map(|&o| NodeId::Object(o))
-                .ok_or_else(|| CmdError::Internal("an exploded member has no copy".into()))
-        }
+        Pending::Member(placement, k) => roots_of(placement)?
+            .into_iter()
+            .filter(|n| matches!(n, NodeId::Object(_)))
+            .nth(k)
+            .ok_or_else(|| CmdError::Internal("an exploded member has no copy".into())),
     }
 }
 
@@ -726,8 +734,8 @@ fn unlink_member_rule() -> CmdError {
 
 /// `hew.solid.union` / `intersect` with `unlink: true` over a placement
 /// operand (Addendum D §5): each placement operand is exploded into plain
-/// solids (the other copies keep the shared geometry), then the world
-/// boolean runs. One undo entry with the command. `unlinked` lists the
+/// solids (the other copies keep the shared geometry, and a copy left
+/// alone in its set is made plain too), then the world boolean runs. One undo entry with the command. `unlinked` lists the
 /// placements that were split off.
 fn boolean_unlinking(
     ctx: &mut Ctx,
@@ -753,8 +761,27 @@ fn boolean_unlinking(
         .iter()
         .map(|&i| public_id_of(ctx, EntityRef::Instance(i)))
         .collect();
-    let a = settle_operand(ctx, a, &mut unlinked)?;
-    let b = settle_operand(ctx, b, &mut unlinked)?;
+    let a = prepare_operand(ctx, a)?;
+    let b = prepare_operand(ctx, b)?;
+    // Every placement operand explodes first, in one step: a linked set
+    // they leave with one copy has that copy made plain only once all of
+    // them are gone, so one operand's explode never takes the other's
+    // placement first, and its pieces are never taken for an operand's.
+    let mut placements: Vec<kernel::InstanceId> = Vec::new();
+    for &i in &named {
+        if !placements.contains(&i) {
+            placements.push(i);
+        }
+    }
+    let exploded: Vec<(kernel::InstanceId, Vec<NodeId>)> = if placements.is_empty() {
+        Vec::new()
+    } else {
+        let (roots, _) = ctx.doc.explode_instances(&placements)?;
+        placements.iter().copied().zip(roots).collect()
+    };
+    unlinked.extend(placements.iter().copied());
+    let a = settle_operand(ctx, a, &exploded, &mut unlinked)?;
+    let b = settle_operand(ctx, b, &exploded, &mut unlinked)?;
     let (result, _change) = ctx.doc.boolean_nodes(op, a, b)?;
     let mut out = boolean_result_json(ctx, op, result);
     let mut all: Vec<String> = unlinked_public;

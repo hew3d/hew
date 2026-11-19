@@ -54,7 +54,7 @@ export interface SaveToLibraryPopoverProps {
   updateInLibrary?: { name: string; confirm: boolean; cannotCompare?: boolean }
   /** The selection came from a Library item but is a linked copy, which cannot
    *  update it: no button, one line saying what to do instead. */
-  updateInLibraryBlocked?: { name: string }
+  updateInLibraryBlocked?: { name: string; linkedSet?: boolean }
   onUpdateInLibrary?: () => void
 }
 
@@ -186,9 +186,13 @@ export function SaveToLibraryPopover({
         </div>
         {updateInLibraryBlocked !== undefined && (
           <div data-testid="update-in-library-blocked" style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.4 }}>
-            <Trans>
-              This part is a linked copy, so it can’t update “{blockedName}” in the Library. Make it a component or unlink it first.
-            </Trans>
+            {updateInLibraryBlocked.linkedSet === false ? (
+              <Trans>This part can’t update “{blockedName}” in the Library as it is. Make it a component first.</Trans>
+            ) : (
+              <Trans>
+                This part is a linked copy, so it can’t update “{blockedName}” in the Library. Make it a component or unlink it first.
+              </Trans>
+            )}
           </div>
         )}
         {updateInLibrary !== undefined && onUpdateInLibrary !== undefined && (

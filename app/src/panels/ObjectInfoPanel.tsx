@@ -48,7 +48,7 @@ import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import { plural, t as tCore } from '@lingui/core/macro'
 import { Trans, useLingui } from '@lingui/react/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { entityLabel, resolveLabel, placementLabel, sharedLinkedLabel, makeLabelFor, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, isDraftKind, type NodeRef } from './treeModel'
+import { entityLabel, resolveLabel, sharedLinkedLabel, linkedSetKind, makeLabelFor, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, isDraftKind, type NodeRef } from './treeModel'
 import { pathAbove } from './selectionPath'
 import {
   runsOfCurve,
@@ -86,7 +86,8 @@ import { MIN_SEGMENTS_PER_TURN } from '../tools/arcMath'
 import { isComposingKey } from '../input/keyboard'
 import { SmoothSection } from './SmoothSection'
 import { selectionCountLine } from './selectionCounts'
-import { copiesRow, unlinkLabel, makeComponentLabel, selectAllCopiesLabel } from '../linkedCopyCopy'
+import { linkedCountLabel } from '../linkedCopyCopy'
+import { topLevelCopies } from '../linkedCopies'
 
 /**
  * The fewest facets a circle may have. Mirrors the kernel's
@@ -174,13 +175,6 @@ interface Props {
   sessionStack?: readonly { node: NodeRef; label: string }[]
   sessionMembers?: readonly NodeRef[] | null
   /**
-   * The Copies row's buttons for a placement of a linked set: make this
-   * copy independent, or turn the set into a named component. The buttons
-   * render only when supplied.
-   */
-  onUnlink?: (node: NodeRef) => void
-  onMakeComponent?: (node: NodeRef) => void
-  /**
    * Called after the Locked checkbox (or a locked tag refusal) changed the
    * document: the bookkeeping every mutation needs, plus a re-color of the
    * selection, which draws red while locked.
@@ -226,17 +220,6 @@ const LINK_BUTTON_STYLE: React.CSSProperties = {
   font: 'inherit',
   fontFamily: 'var(--font-family-ui)',
   color: 'var(--accent-base, #7aa7e0)',
-  cursor: 'pointer',
-}
-
-const ACTION_BUTTON_STYLE: React.CSSProperties = {
-  padding: '3px 10px',
-  background: 'var(--surface-input)',
-  border: '1px solid var(--border-panel)',
-  borderRadius: 'var(--radius-control)',
-  color: 'var(--text-primary)',
-  fontFamily: 'var(--font-family-ui)',
-  fontSize: '12px',
   cursor: 'pointer',
 }
 
@@ -297,7 +280,7 @@ const ADD_TAG_BUTTON_STYLE: React.CSSProperties = {
   flexShrink: 0,
 }
 
-export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onSelectTag, onSelectMaterial, onToast, onShowHealth, selectedAnnotations = NO_IDS, selectedGuides = NO_IDS, sessionStack, sessionMembers = null, onUnlink, onMakeComponent, onLockChanged }: Props) {
+export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onSelectTag, onSelectMaterial, onToast, onShowHealth, selectedAnnotations = NO_IDS, selectedGuides = NO_IDS, sessionStack, sessionMembers = null, onLockChanged }: Props) {
   const { t } = useLingui()
   // Re-render the length readouts when the format OR the Precision changes.
   const lengthDisplay = useLengthDisplay()
@@ -407,6 +390,10 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
         defId: null as bigint | null,
         defName: undefined as string | undefined,
         instanceIds: [] as bigint[],
+        linkedKind: null as 'object' | 'group' | null,
+        linkedCount: 0,
+        healthId: null as bigint | null,
+        smoothIds: [] as bigint[],
         points,
         length,
       }
@@ -446,6 +433,10 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
         defId: null as bigint | null,
         defName: undefined as string | undefined,
         instanceIds: [] as bigint[],
+        linkedKind: null as 'object' | 'group' | null,
+        linkedCount: 0,
+        healthId: null as bigint | null,
+        smoothIds: [] as bigint[],
         points: null as number | null,
       }
     }
@@ -456,9 +447,14 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     let defName: string | undefined
     let defId: bigint | null = null
     let instanceIds: bigint[] = []
-    // A placement of a linked set (what copies make) reads as a copy, not a
-    // component: its own words, its own two name fields.
+    // A placement of a linked set (what copies make) reads as the plain Object
+    // (or Group) it is, with a "(N linked)" count beside the type when more
+    // than one placement shares the shape. Edits made here go to the shape.
     let linked = false
+    let linkedKind: 'object' | 'group' | null = null
+    let linkedCount = 0
+    // The Objects a linked Object's shape is made of (empty for a Group).
+    let shapeObjects: bigint[] = []
     if (kind === 'object') {
       nameFromScene = scene.object_name(id)
     } else if (kind === 'group') {
@@ -473,6 +469,16 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
         // Every visible sibling placing the same definition, this one included
         // — the "(N instances)" count and the click-to-select set.
         instanceIds = Array.from(scene.instances_of(def))
+        if (linked) {
+          // A set of one stays on the plain Object/Group layout, no count.
+          // The count is every copy that shares the shape; the click selects
+          // the ones standing at the top level (a copy nested in a component
+          // cannot be selected from here).
+          linkedKind = linkedSetKind(scene, def)
+          linkedCount = instanceIds.length > 1 ? instanceIds.length : 0
+          instanceIds = topLevelCopies(scene, def)
+          if (linkedKind === 'object') shapeObjects = Array.from(scene.component_member_objects(def))
+        }
       }
     }
 
@@ -487,10 +493,11 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       (groupId) => scene.group_members(groupId).map(nodeRefFromJs),
     )
     const idx = treeIndex.get(nodeKey(node)) ?? 0
-    const defaultLabel = linked ? placementLabel(scene, id, idx) : resolveLabel(undefined, defName, kind, idx)
-    // "Name (all copies)" shows the shared name when the set has none of its own;
-    // never this copy's name, which belongs to the other field.
-    const sharedPlaceholder = linked ? (sharedLinkedLabel(scene, defId ?? undefined) ?? '') : ''
+    // A linked copy with no name of its own shows the shared name, else what a plain
+    // Object (or Group) with no name is called.
+    const defaultLabel = linked
+      ? (sharedLinkedLabel(scene, defId ?? undefined) ?? entityLabel(linkedKind ?? 'object', idx))
+      : resolveLabel(undefined, defName, kind, idx)
 
     // Tags: array of "Seg1/Seg2" strings from the kernel, split to string[][]
     const rawTags = scene.node_tags(kindNum, id)
@@ -500,11 +507,18 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
 
     // Solid / verdict only for objects: a non-solid object reads its Model
     // Health verdict (the kernel diagnosis, also for a definition member).
+    // A linked Object reads its shared shape (one Object, or the first one
+    // that is not solid when the set joined several).
     let solid: boolean | null = null
     let health: HealthRow | null = null
-    if (kind === 'object') {
-      solid = scene.object_solid(id)
-      if (!solid) health = readHealthReport(scene, docRev, [id]).rows[0] ?? null
+    let healthId: bigint | null = null
+    const solidIds = kind === 'object' ? [id] : shapeObjects
+    if (solidIds.length > 0) {
+      solid = solidIds.every((o) => scene.object_solid(o))
+      if (!solid) {
+        healthId = solidIds.find((o) => !scene.object_solid(o)) ?? null
+        if (healthId !== null) health = readHealthReport(scene, docRev, [healthId]).rows[0] ?? null
+      }
     }
 
     return {
@@ -526,7 +540,10 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       defName,
       instanceIds,
       linked,
-      sharedPlaceholder,
+      linkedKind,
+      linkedCount,
+      healthId,
+      smoothIds: kind === 'object' ? [id] : shapeObjects,
       points: null as number | null,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -538,9 +555,9 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
   // history generation).
   const mendHint = useMemo(() => {
     const row = nodeInfo?.health ?? null
-    if (nodeInfo === null || nodeInfo.kind !== 'object' || row === null || nodeInfo.solid === true) return false
+    if (nodeInfo === null || nodeInfo.healthId === null || row === null || nodeInfo.solid === true) return false
     if (!(mendCandidate(row, false) || hasWarpedHoles(row))) return false
-    const census = readMendCensus(scene, nodeInfo.id as bigint, undefined, docRev)
+    const census = readMendCensus(scene, nodeInfo.healthId, undefined, docRev)
     return census !== null && hasMendWork(census)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene, docRev, nodeInfo])
@@ -1219,13 +1236,13 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
           <div style={LABEL_STYLE}><Trans>Name</Trans></div>
           <div style={VALUE_STYLE}>{nodeInfo.defaultLabel}</div>
         </div>
-      ) : nodeInfo.kind === 'instance' ? (
+      ) : nodeInfo.kind === 'instance' && !nodeInfo.linked ? (
         <>
           <div>
-            <div style={LABEL_STYLE}>{nodeInfo.linked ? <Trans>Name (all copies)</Trans> : <Trans>Definition Name</Trans>}</div>
+            <div style={LABEL_STYLE}><Trans>Definition Name</Trans></div>
             <input
               style={INPUT_STYLE}
-              aria-label={nodeInfo.linked ? t`Name (all copies)` : t`Definition Name`}
+              aria-label={t`Definition Name`}
               value={localDefName}
               readOnly={defNameLocked}
               onChange={(e) => setLocalDefName(e.target.value)}
@@ -1236,16 +1253,15 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
                   e.currentTarget.blur()
                 }
               }}
-              title={nodeInfo.linked ? t`Shared by every linked copy` : t`Shared by every instance of this component`}
-              placeholder={nodeInfo.linked ? nodeInfo.sharedPlaceholder : undefined}
+              title={t`Shared by every instance of this component`}
               spellCheck={false}
             />
           </div>
           <div>
-            <div style={LABEL_STYLE}>{nodeInfo.linked ? <Trans>This copy</Trans> : <Trans>Instance Name</Trans>}</div>
+            <div style={LABEL_STYLE}><Trans>Instance Name</Trans></div>
             <input
               style={INPUT_STYLE}
-              aria-label={nodeInfo.linked ? t`This copy` : t`Instance Name`}
+              aria-label={t`Instance Name`}
               value={localName}
               readOnly={frozenSingle}
               onChange={(e) => setLocalName(e.target.value)}
@@ -1257,7 +1273,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
                 }
               }}
               placeholder={nodeInfo.defaultLabel}
-              title={nodeInfo.linked ? t`This copy only — leave empty to show the shared name` : t`This instance only — leave empty to show the definition name`}
+              title={t`This instance only — leave empty to show the definition name`}
               spellCheck={false}
             />
           </div>
@@ -1309,7 +1325,21 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       <div>
         <div style={LABEL_STYLE}><Trans>Type</Trans></div>
         <div style={VALUE_STYLE}>
-          <span>{nodeInfo.kind === 'instance' && nodeInfo.linked ? t`Linked copy` : kindLabel(nodeInfo.kind)}</span>
+          <span>{nodeInfo.kind === 'instance' && nodeInfo.linked ? kindLabel(nodeInfo.linkedKind ?? 'object') : kindLabel(nodeInfo.kind)}</span>
+          {nodeInfo.linkedCount > 1 && (
+            <>
+              {' '}
+              <button
+                type="button"
+                data-testid="object-info-linked-count"
+                onClick={selectAllInstances}
+                title={t`Select every linked copy`}
+                style={LINK_BUTTON_STYLE}
+              >
+                {`(${linkedCountLabel(nodeInfo.linkedCount)})`}
+              </button>
+            </>
+          )}
           {nodeInfo.store !== null && (
             <div data-testid="object-info-store" style={{ ...VALUE_STYLE, color: 'var(--text-faint, #888)' }}>
               {nodeInfo.store}
@@ -1372,40 +1402,6 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
           )}
         </div>
       </div>
-
-      {/* Copies — a placement of a linked set: how many copies share its
-       * shape, the way out of the link (Unlink), and the way to make the set
-       * a named component. */}
-      {nodeInfo.kind === 'instance' && nodeInfo.linked && (
-        <div data-testid="object-info-copies">
-          <div style={LABEL_STYLE}><Trans>Copies</Trans></div>
-          <div style={VALUE_STYLE}>
-            <span>{copiesRow(instanceCount)}</span>
-            {instanceCount > 1 && (
-              <>
-                {' '}
-                <button type="button" onClick={selectAllInstances} style={LINK_BUTTON_STYLE}>
-                  {selectAllCopiesLabel()}
-                </button>
-              </>
-            )}
-          </div>
-          {(onUnlink !== undefined || onMakeComponent !== undefined) && (
-            <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
-              {onUnlink !== undefined && (
-                <button type="button" style={ACTION_BUTTON_STYLE} onClick={() => onUnlink(nodeInfo.node)}>
-                  {unlinkLabel()}
-                </button>
-              )}
-              {onMakeComponent !== undefined && (
-                <button type="button" style={ACTION_BUTTON_STYLE} onClick={() => onMakeComponent(nodeInfo.node)}>
-                  {makeComponentLabel()}
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Length — a drawn line, or a curve (the sum of its edges). */}
       {drawnLength !== null && (
@@ -1490,7 +1486,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
                     type="button"
                     title={TOOLTIP.close(rowPlacements(nodeInfo.health))}
                     style={HEALTH_ACTION_STYLE}
-                    onClick={() => runHealthRepair(() => scene.cap_rims(nodeInfo.id, null))}
+                    onClick={() => runHealthRepair(() => scene.cap_rims(nodeInfo.healthId!, null))}
                   >
                     {ACTION.close}
                   </button>
@@ -1509,7 +1505,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
                   type="button"
                   title={nodeInfo.health.accepted ? TOOLTIP.unkeep(rowPlacements(nodeInfo.health)) : TOOLTIP.keep(rowPlacements(nodeInfo.health))}
                   style={HEALTH_ACTION_STYLE}
-                  onClick={() => runHealthRepair(() => scene.set_accepted_surface(nodeInfo.id, !nodeInfo.health!.accepted))}
+                  onClick={() => runHealthRepair(() => scene.set_accepted_surface(nodeInfo.healthId!, !nodeInfo.health!.accepted))}
                 >
                   {nodeInfo.health.accepted ? ACTION.unkeep : ACTION.keep}
                 </button>
@@ -1526,7 +1522,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
               <button
                 type="button"
                 aria-label={ACTION.showInList}
-                onClick={() => onShowHealth(nodeInfo.id)}
+                onClick={() => onShowHealth(nodeInfo.healthId!)}
                 style={{
                   background: 'none',
                   border: 'none',
@@ -1551,9 +1547,10 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
         </div>
       )}
 
-      {/* Smooth and Soften — objects only. */}
-      {nodeInfo.kind === 'object' && (
-        <SmoothSection scene={scene} docRev={docRev} objects={[nodeInfo.id]} onGeometryChanged={onGeometryChanged} onToast={onToast} />
+      {/* Smooth and Soften — objects only, a linked Object included (it acts
+       * on the shared shape, so every copy follows). */}
+      {nodeInfo.smoothIds.length > 0 && (
+        <SmoothSection scene={scene} docRev={docRev} objects={nodeInfo.smoothIds} onGeometryChanged={onGeometryChanged} onToast={onToast} />
       )}
 
       {/* Bounding Box — world AABB extents; hidden for a mesh-less selection

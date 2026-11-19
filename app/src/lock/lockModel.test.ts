@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { containerFreezeCause, copyAllowed, type LockScene } from './lockModel'
+import { containerFreezeCause, copyAllowed, isLockToastCode, lockedMessage, type LockScene } from './lockModel'
 import { gateCopyOperands } from './lockGate'
 
 /** A scene where object 1 is locked and sits in group 9, itself locked. */
@@ -28,7 +28,7 @@ describe('copyAllowed with a lock above', () => {
     expect(copyAllowed(s, { kind: 'object', id: 1n })).toBe(false)
     const toasts: Array<[string, string | undefined]> = []
     expect(gateCopyOperands(s, [{ kind: 'object', id: 1n }], (m, c) => toasts.push([m, c]))).toBeNull()
-    expect(toasts).toEqual([['Locked. Unlock it to change it.', 'LockedHint:group:9']])
+    expect(toasts).toEqual([['Locked', 'LockedHint:group:9']])
   })
 
   it('allows a locked box whose group is free', () => {
@@ -55,5 +55,26 @@ describe('copyAllowed with a lock above', () => {
     const s = scene({ node_parent: () => undefined })
     expect(containerFreezeCause(s, { kind: 'object', id: 1n })).toBeNull()
     expect(copyAllowed(s, { kind: 'object', id: 1n })).toBe(true)
+  })
+})
+
+describe('the lock toast words', () => {
+  it('a single locked thing says only "Locked"', () => {
+    expect(lockedMessage({ copies: 0, indirect: false })).toBe('Locked')
+  })
+  it('a set of two says both are locked; a bigger set counts every member', () => {
+    expect(lockedMessage({ copies: 1, indirect: false })).toBe('Both copies are locked')
+    expect(lockedMessage({ copies: 2, indirect: false })).toBe('All 3 copies are locked')
+    expect(lockedMessage({ copies: 5, indirect: false })).toBe('All 6 copies are locked')
+  })
+  it('a shape also used in a locked group says so, whatever the copy count', () => {
+    expect(lockedMessage({ copies: 3, indirect: true })).toBe('Also used in a locked group')
+  })
+  it('knows which toast codes are lock toasts', () => {
+    expect(isLockToastCode('LockedHint:object:3')).toBe(true)
+    expect(isLockToastCode('LockedNode')).toBe(true)
+    expect(isLockToastCode('LockedNodeViaSharedShape')).toBe(true)
+    expect(isLockToastCode('NothingToUndo')).toBe(false)
+    expect(isLockToastCode(undefined)).toBe(false)
   })
 })

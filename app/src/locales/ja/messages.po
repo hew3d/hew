@@ -152,8 +152,8 @@ msgstr ""
 
 #. placeholder {0}: block.copies
 #: src/lock/lockModel.ts
-msgid "{0, plural, one {Locked, along with its # copy.} other {Locked, along with its # copies.}}"
-msgstr ""
+#~ msgid "{0, plural, one {Locked, along with its # copy.} other {Locked, along with its # copies.}}"
+#~ msgstr ""
 
 #. placeholder {0}: d.openEdges
 #: src/panels/MakeSolidSketches.tsx
@@ -249,6 +249,11 @@ msgstr ""
 
 #: src/print/usePrintController.ts
 msgid "{count} + {extraPages} cut list"
+msgstr ""
+
+#. How many linked placements share one shape; shown beside the type in Object Info and as the Outliner badge tooltip
+#: src/linkedCopyCopy.ts
+msgid "{count} linked"
 msgstr ""
 
 #: src/panels/FollowNoticeBar.tsx
@@ -1499,6 +1504,15 @@ msgstr ""
 msgid "All"
 msgstr ""
 
+#. placeholder {0}: block.copies + 1
+#: src/lock/lockModel.ts
+#~ msgid "All {0} copies are locked"
+#~ msgstr ""
+
+#: src/lock/lockModel.ts
+msgid "All {total} copies are locked"
+msgstr ""
+
 #: src/panels/LibraryDialog.tsx
 msgid "All items"
 msgstr ""
@@ -1522,6 +1536,10 @@ msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
 msgid "Also open a public GitHub issue"
+msgstr ""
+
+#: src/lock/lockModel.ts
+msgid "Also used in a locked group"
 msgstr ""
 
 #: src/tools/PaintTool.ts
@@ -1818,6 +1836,10 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "boolean"
+msgstr ""
+
+#: src/lock/lockModel.ts
+msgid "Both copies are locked"
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
@@ -2443,6 +2465,7 @@ msgstr ""
 msgid "clip"
 msgstr ""
 
+#: src/App.tsx
 #: src/health/healthCopy.ts
 #: src/i18n/nativeMenu.ts
 #: src/panels/FloatingWindow.tsx
@@ -2694,23 +2717,20 @@ msgstr ""
 msgid "Copied"
 msgstr ""
 
-#: src/App.tsx
-#: src/panels/DocumentTree.tsx
-#: src/panels/ObjectInfoPanel.tsx
 #: src/settings/EditingPane.tsx
 msgid "Copies"
 msgstr ""
 
 #. Row label for a placement of a linked set that has no name at all
 #: src/panels/treeModel.ts
-msgctxt "unnamed item"
-msgid "Copies"
-msgstr ""
+#~ msgctxt "unnamed item"
+#~ msgid "Copies"
+#~ msgstr ""
 
 #. Short uppercase chip on the contextual dock when one linked copy is selected
 #: src/panels/dockLogic.ts
-msgid "COPIES"
-msgstr ""
+#~ msgid "COPIES"
+#~ msgstr ""
 
 #: src/palette/registry.ts
 msgid "copies along path"
@@ -2785,8 +2805,8 @@ msgstr ""
 
 #. Command palette entry that jumps to a named linked copy
 #: src/App.tsx
-msgid "Copy: {label}"
-msgstr ""
+#~ msgid "Copy: {label}"
+#~ msgstr ""
 
 #: src/i18n/nativeMenu.ts
 msgid "Could not check for updates.\n"
@@ -4771,13 +4791,13 @@ msgstr ""
 msgid "Hew can't show the 3D view"
 msgstr ""
 
+#: src/library/libraryUpdates.ts
+msgid "Hew can’t tell which one is newer. Updating would replace what is here."
+msgstr ""
+
 #: src/App.tsx
 #: src/shop/ShopApp.tsx
 msgid "Hew cannot open this kind of file."
-msgstr ""
-
-#: src/library/libraryUpdates.ts
-msgid "Hew can’t tell which one is newer. Updating would replace what is here."
 msgstr ""
 
 #: src/settings/AdvancedPane.tsx
@@ -5767,16 +5787,19 @@ msgstr ""
 msgid "link similar"
 msgstr ""
 
+#: src/panels/DocumentTree.tsx
+msgid "Linked"
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "linked copies"
 msgstr ""
 
 #. Object Info row: how many linked copies share this shape
 #: src/linkedCopyCopy.ts
-msgid "Linked copies: {count}"
-msgstr ""
+#~ msgid "Linked copies: {count}"
+#~ msgstr ""
 
-#: src/panels/ObjectInfoPanel.tsx
 #: src/tools/FlipTool.ts
 #: src/tools/MoveTool.ts
 #: src/tools/RotateTool.ts
@@ -5845,6 +5868,7 @@ msgstr ""
 msgid "Lock the selection so nothing can change it until it is unlocked. Locking one copy of a shared shape locks every copy."
 msgstr ""
 
+#: src/lock/lockModel.ts
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Locked"
 msgstr ""
@@ -5879,7 +5903,6 @@ msgid "Locked. Unlock it first to update it."
 msgstr ""
 
 #: src/kernelErrors.ts
-#: src/lock/lockModel.ts
 msgid "Locked. Unlock it to change it."
 msgstr ""
 
@@ -6032,12 +6055,17 @@ msgstr ""
 msgid "Make this model solid"
 msgstr ""
 
+#: src/App.tsx
+msgid "Make this part a component before updating “{name}” in the Library."
+msgstr ""
+
 #: src/i18n/historyLabels.ts
 msgid "Make unique"
 msgstr ""
 
 #: src/App.tsx
 #: src/i18n/nativeMenu.ts
+#: src/linkedCopies.ts
 #: src/palette/registry.ts
 #: src/panels/dockLogic.ts
 #: src/panels/MenuBar.tsx
@@ -6501,8 +6529,8 @@ msgstr ""
 
 #: src/linkedCopyCopy.ts
 #: src/panels/ObjectInfoPanel.tsx
-msgid "Name (all copies)"
-msgstr ""
+#~ msgid "Name (all copies)"
+#~ msgstr ""
 
 #: src/panels/MaterialPalette.tsx
 msgid "Name…"
@@ -9254,6 +9282,10 @@ msgstr ""
 msgid "Select every instance of this component"
 msgstr ""
 
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Select every linked copy"
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "Select every visible object, group, component, and sketch."
 msgstr ""
@@ -9442,8 +9474,8 @@ msgid "Shared by every instance of this component"
 msgstr ""
 
 #: src/panels/ObjectInfoPanel.tsx
-msgid "Shared by every linked copy"
-msgstr ""
+#~ msgid "Shared by every linked copy"
+#~ msgstr ""
 
 #: src/i18n/nativeMenu.ts
 #: src/tools/toolRegistry.ts
@@ -11068,8 +11100,8 @@ msgstr ""
 
 #: src/linkedCopyCopy.ts
 #: src/panels/ObjectInfoPanel.tsx
-msgid "This copy"
-msgstr ""
+#~ msgid "This copy"
+#~ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again."
@@ -11092,8 +11124,8 @@ msgid "This copy of Hew was installed with Portage, so Portage updates it. To up
 msgstr ""
 
 #: src/panels/ObjectInfoPanel.tsx
-msgid "This copy only — leave empty to show the shared name"
-msgstr ""
+#~ msgid "This copy only — leave empty to show the shared name"
+#~ msgstr ""
 
 #: src/panels/UnsavedChangesDialog.tsx
 msgid "This document has unsaved changes."
@@ -11121,6 +11153,10 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "This edge has a face on only one side — there's nothing to merge it with."
+msgstr ""
+
+#: src/tools/PushPullTool.ts
+msgid "This face is locked, so this makes a NEW object. Move to extrude, click to commit — or type an exact distance."
 msgstr ""
 
 #: src/panels/SentReportsDialog.tsx
@@ -11283,6 +11319,10 @@ msgstr ""
 msgid "This part"
 msgstr ""
 
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "This part can’t update “{blockedName}” in the Library as it is. Make it a component first."
+msgstr ""
+
 #: src/library/libraryUpdates.ts
 msgid "This part changed here and in the Library."
 msgstr ""
@@ -11377,7 +11417,6 @@ msgid "This shape has no circle behind it, so there's nothing to re-build. Only 
 msgstr ""
 
 #: src/kernelErrors.ts
-#: src/lock/lockModel.ts
 msgid "This shape is also used inside a locked group. Make this copy unique to change it."
 msgstr ""
 
@@ -11908,7 +11947,6 @@ msgid "unknown OS"
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
-#: src/linkedCopies.ts
 #: src/linkedCopyCopy.ts
 #: src/palette/registry.ts
 #: src/panels/dockLogic.ts
@@ -11917,7 +11955,6 @@ msgid "Unlink"
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
-#: src/linkedCopies.ts
 #: src/linkedCopyCopy.ts
 #: src/palette/registry.ts
 #: src/panels/dockLogic.ts

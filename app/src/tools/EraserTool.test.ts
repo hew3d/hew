@@ -496,10 +496,10 @@ describe('EraserTool — a locked Object keeps its drawing', () => {
     freeze(t.scene, 7n)
     t.setRef(lineRef())
     t.tool.onPointerMove(null, RAY)
-    expect(t.tool.hoverHint()).toBe('Locked. Unlock it to change it.')
+    expect(t.tool.hoverHint()).toBe('Locked')
     click(t.tool, null)
     expect(t.host.runDelete).not.toHaveBeenCalled()
-    expect(t.onToast).toHaveBeenCalledWith('Locked. Unlock it to change it.', 'LockedHint:object:7')
+    expect(t.onToast).toHaveBeenCalledWith('Locked', 'LockedHint:object:7')
   })
 
   it('the same line on a free Object is erased', () => {

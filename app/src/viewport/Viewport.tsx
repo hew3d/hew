@@ -66,6 +66,7 @@ import type { ToolContext, ToolRegistration } from '../tools/toolRegistration'
 import { toolRegistration } from '../tools/registrations'
 import { usableTool } from '../tools/toolRegistry'
 import { draftEdgesToErase, inHistoryBracket } from '../tools/transformSelection'
+import { isLinkedSet } from '../linkedCopies'
 import { routeBooleanMany, subtractThroughPlacement, opLabel, OP_SUBTRACT } from './placementBoolean'
 import { unlinkedLabel, unlinkedToJoin, cutOnlyThisOne, cutOneSolidAtATime } from '../linkedCopyCopy'
 import { DEFAULT_POLYGON_SIDES } from '../tools/PolygonTool'
@@ -758,8 +759,10 @@ export interface ViewportApi {
   runReparent: (nodes: NodeRef[], group: bigint | undefined) => boolean
   /** Delete whole tree nodes (Object/Group/Instance), undoably, together
    *  with any construction guides and annotations listed beside them: one
-   *  Undo step for the whole selection. */
-  runDelete: (nodes: NodeRef[], guides?: readonly bigint[], annotations?: readonly bigint[]) => void
+   *  Undo step for the whole selection. `cut` is Cut's delete: a linked set
+   *  it leaves with one copy keeps that copy a placement, so pasting the cut
+   *  copy back rejoins the set. */
+  runDelete: (nodes: NodeRef[], guides?: readonly bigint[], annotations?: readonly bigint[], options?: { cut?: boolean }) => void
   /** Fold a sibling selection into a component + identity instance. Returns the instance handle. */
   runMakeComponent: (nodes: NodeRef[]) => bigint | null
   /** Place a second instance of the given instance's definition, offset slightly. */
@@ -2615,9 +2618,19 @@ export function booleanUnlinkingPlacements(
   const kindNum = (n: NodeRef) => (n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0)
   const operands = [a, b, ...more]
   const placements = operands.filter((n) => n.kind === 'instance')
-  const unlinked = placements.filter((n) => wasmScene.is_linked(n.id)).length
+  // Only a copy of a set of two or more counts as unlinked: a wrapper left
+  // with one copy reads as a plain Object, so joining it unlinks nothing.
+  const unlinked = placements.filter((n) => isLinkedSet(wasmScene, n.id)).length
+  // The sets these copies leave. Settling a copy forks it out of its set
+  // (Make Unique), which can leave one sibling alone there; a copy alone in
+  // its set is made plain in the same step, as Delete and Explode do.
+  const setsLeft = new Set<bigint>()
+  for (const n of placements) {
+    const def = isLinkedSet(wasmScene, n.id) ? wasmScene.instance_def(n.id) : undefined
+    if (def !== undefined) setsLeft.add(def)
+  }
   try {
-    const node = inHistoryBracket(wasmScene, unlinkedLabel(opLabel(op)), () => {
+    const node = inHistoryBracket(wasmScene, unlinked > 0 ? unlinkedLabel(opLabel(op)) : opLabel(op), () => {
       const settle = (operand: NodeRef): NodeRef => {
         if (operand.kind !== 'instance') return operand
         const outcome = explodeInstanceOperand(wasmScene, operand)
@@ -2630,11 +2643,23 @@ export function booleanUnlinkingPlacements(
       const settled = operands.map(settle)
       // Exactly two operands use the original two-operand call; any other
       // count goes through the N-way `boolean_nodes_many` (as runBooleanCore).
-      return nodeRefFromJs(
+      const result = nodeRefFromJs(
         settled.length === 2
           ? wasmScene.boolean_nodes(op, kindNum(settled[0]), settled[0].id, kindNum(settled[1]), settled[1].id)
           : wasmScene.boolean_nodes_many(op, Uint8Array.from(settled.map(kindNum)), BigUint64Array.from(settled.map((n) => n.id))),
       )
+      for (const def of setsLeft) {
+        const left = Array.from(wasmScene.instances_of(def))
+        if (left.length !== 1 || wasmScene.owner_definition(2, left[0]) !== undefined) continue
+        try {
+          wasmScene.unlink_copies(BigUint64Array.of(left[0]))
+        } catch {
+          // The kernel will not make this one plain here (a frozen group, a
+          // stretched copy with a drawing). It stays a set of one, which
+          // reads as a plain Object anyway, and the join stands.
+        }
+      }
+      return result
     })
     return { kind: 'ok', node, unlinked, exploded: placements.length }
   } catch (err) {
@@ -5895,7 +5920,7 @@ export default function Viewport({
           return null
         }
         onSelectRef.current?.(joined.node, 'replace')
-        handleToast(unlinkedToJoin(joined.unlinked))
+        if (joined.unlinked > 0) handleToast(unlinkedToJoin(joined.unlinked))
         return joined.node
       }
 
@@ -6089,7 +6114,7 @@ export default function Viewport({
       }
     }
 
-    function runDelete(nodes: NodeRef[], guides: readonly bigint[] = [], annotations: readonly bigint[] = []): void {
+    function runDelete(nodes: NodeRef[], guides: readonly bigint[] = [], annotations: readonly bigint[] = [], options?: { cut?: boolean }): void {
       if (nodes.length === 0 && guides.length === 0 && annotations.length === 0) return
       // A delete that touches more than one store (drafts per plane context,
       // an emptied sketch husk, the world node delete) records several
@@ -6098,17 +6123,19 @@ export default function Viewport({
       // guide or annotation in the delete keeps the bracket, so the step is
       // always named here, in the user's language, never by the kernel's
       // English compound label.
-      const single = nodes.length === 1 && guides.length === 0 && annotations.length === 0 &&
+      // A Cut keeps the bracket too: its kernel call is the batch one.
+      const cut = options?.cut === true
+      const single = !cut && nodes.length === 1 && guides.length === 0 && annotations.length === 0 &&
         !isDraftKind(nodes[0].kind) && nodes[0].kind !== 'sketch'
       const label = deleteStepLabel([
         ...nodes,
         ...guides.map((id) => ({ kind: 'guide' as const, id })),
         ...annotations.map((id) => ({ kind: 'annotation' as const, id })),
       ])
-      inHistoryBracket(wasmScene, label, () => runDeleteSteps(nodes, guides, annotations), !single)
+      inHistoryBracket(wasmScene, label, () => runDeleteSteps(nodes, guides, annotations, cut), !single)
     }
 
-    function runDeleteSteps(nodes: NodeRef[], guides: readonly bigint[] = [], annotations: readonly bigint[] = []): void {
+    function runDeleteSteps(nodes: NodeRef[], guides: readonly bigint[] = [], annotations: readonly bigint[] = [], cut = false): void {
       // An explicit delete is deliberate and executes — but first disarm the
       // array window so no hot state points at the deleted copies.
       disarmActivePostCommitWindow()
@@ -6205,7 +6232,15 @@ export default function Viewport({
       // node detaches before it goes and comes back attached on Undo.
       if (worldDeleteKinds.length > 0 || guides.length > 0 || annotations.length > 0) {
         try {
-          if (worldDeleteKinds.length === 1 && guides.length === 0 && annotations.length === 0) {
+          if (cut) {
+            // Cut keeps a linked set's last copy a placement (a paste
+            // rejoins the set); Delete makes it plain. A Cut carries nodes
+            // only.
+            wasmScene.cut_selection(
+              new Uint8Array(worldDeleteKinds),
+              new BigUint64Array(worldDeleteIds),
+            )
+          } else if (worldDeleteKinds.length === 1 && guides.length === 0 && annotations.length === 0) {
             // A lone node goes through its own call, whose Undo step the
             // app names by its kind and name ("Delete object", "Delete
             // 'Roof'"); the batch call's label is the kernel's English.

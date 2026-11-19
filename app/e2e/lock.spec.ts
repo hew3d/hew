@@ -23,7 +23,7 @@ const CAMERA = {
   fovDeg: 45,
 }
 
-const LOCKED_LINE = 'Locked. Unlock it to change it.'
+const LOCKED_LINE = 'Locked'
 
 async function setup(page: Page): Promise<void> {
   await page.goto('/')
@@ -78,7 +78,8 @@ const isLocked = (page: Page, kind: string, id: string) =>
   page.evaluate(([k, i]) => window.__hew_test!.isNodeLocked(k, i), [kind, id])
 
 /** The toast's own message line (the cursor hint is a div, so a span filter leaves it out). */
-const toastLine = (page: Page, text: string) => page.locator('span', { hasText: new RegExp(`^${text.replace(/[.]/g, '\\.')}$`) }).first()
+// Inside a toast only: Object Info's "Locked" checkbox label reads the same.
+const toastLine = (page: Page, text: string) => page.getByTestId('toast').locator('span', { hasText: new RegExp(`^${text.replace(/[.]/g, '\\.')}$`) }).first()
 
 test.describe('lock', () => {
   test('a_locked_box_refuses_move_push_pull_delete_and_double_click_with_the_hint', async ({ page }, info) => {
@@ -218,7 +219,7 @@ test.describe('lock', () => {
     // Push/Pull on a locked copy: the hint names the set; the toast offers Unlock and Make Unique.
     await page.keyboard.press('p')
     await moveToWorld(page, topFace)
-    await expect(page.getByTestId('inference-tip-hint')).toHaveText('Locked, along with its 3 copies.')
+    await expect(page.getByTestId('inference-tip-hint')).toHaveText('All 4 copies are locked')
     await clickWorld(page, topFace)
     await expect(page.locator('[data-toast-action]')).toHaveText(['Unlock', 'Make Unique'])
     await page.locator('[data-toast-action]', { hasText: 'Make Unique' }).click()

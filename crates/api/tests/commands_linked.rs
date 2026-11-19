@@ -777,12 +777,19 @@ fn union_with_unlink_true_unlinks_and_joins() {
     assert!(s(&r["result"]).starts_with("obj_"));
     assert_eq!(r["unlinked"], json!([a]));
     assert_eq!(ses.doc.undo_depth(), depth + 1, "one undo entry");
-    // The other copy keeps the shared board.
-    assert!(ses.doc.instance_def(second).is_some());
-    assert!(ses.doc.object(b).is_some());
     assert!(
         ses.doc.instance_def(first).is_none(),
         "the placement was exploded"
+    );
+    // The other copy was the set's last: it is made plain too, in the same
+    // entry, and the set goes with it.
+    assert!(ses.doc.instance_def(second).is_none());
+    assert!(ses.doc.object(b).is_none());
+    assert!(ses.doc.instance_ids().is_empty());
+    assert_eq!(
+        ses.doc.visible_object_ids().len(),
+        2,
+        "the join and the copy"
     );
     // A world-only pair with unlink: true is accepted and ignored.
     let mut doc = Document::new();
@@ -806,7 +813,28 @@ fn union_with_unlink_true_takes_a_member_by_path() {
     assert_eq!(data["refusal"], "would_unlink");
     let r = ses.ok("hew.solid.union", json!({ "a": a, "b": t, "unlink": true }));
     assert!(s(&r["result"]).starts_with("obj_"));
-    assert!(ses.doc.instance_def(second).is_some());
+    // The other copy, the set's last, is plain now.
+    assert!(ses.doc.instance_def(second).is_none());
+    assert!(ses.doc.instance_ids().is_empty());
+}
+
+#[test]
+fn union_with_unlink_true_joins_both_copies_of_a_pair() {
+    // Each operand is a copy of the same set of two: neither explode makes
+    // the other operand plain before its own turn.
+    let (doc, _, first, second) = pair();
+    let (a, b) = (ins(&doc, first), ins(&doc, second));
+    let depth = doc.undo_depth();
+    let mut ses = Session::new(doc);
+    let r = ses.ok("hew.solid.union", json!({ "a": a, "b": b, "unlink": true }));
+    assert!(r["result"].is_string());
+    assert_eq!(r["unlinked"], json!([a, b]));
+    assert!(ses.doc.instance_ids().is_empty());
+    assert_eq!(ses.doc.undo_depth(), depth + 1, "one undo entry");
+    // Undone, the pair is back as it was.
+    ses.ok("hew.history.undo", json!({}));
+    assert_eq!(ses.doc.instance_def(first), ses.doc.instance_def(second));
+    assert!(ses.doc.instance_def(first).is_some());
 }
 
 #[test]

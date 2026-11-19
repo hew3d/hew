@@ -55,7 +55,7 @@ describe('a locked standalone box', () => {
     setNodesLocked(scene, [obj(box)], true)
     const block = lockBlockFor(scene, obj(box))
     expect(block).toMatchObject({ copies: 0, indirect: false })
-    expect(lockedMessage(block!)).toBe('Locked. Unlock it to change it.')
+    expect(lockedMessage(block!)).toBe('Locked')
     expect(lockToastSteps(scene, lockedHintCode(block!.cause!), [])).toEqual([{ action: 'unlock', node: obj(box) }])
   })
 
@@ -79,7 +79,7 @@ describe('a locked copy of a shared shape (the lock belongs to the shape)', () =
     for (const i of [a, b, c, d]) expect(isLocked(scene, inst(i))).toBe(true)
     const block = lockBlockFor(scene, inst(c))!
     expect(block.copies).toBe(3)
-    expect(lockedMessage(block)).toBe('Locked, along with its 3 copies.')
+    expect(lockedMessage(block)).toBe('All 4 copies are locked')
     const steps = lockToastSteps(scene, lockedHintCode(block.cause!), [])
     expect(steps?.map((s) => s.action)).toEqual(['unlock', 'make-unique'])
   })
@@ -97,11 +97,11 @@ describe('a locked copy of a shared shape (the lock belongs to the shape)', () =
     for (const i of [a, c, d]) expect(isLocked(scene, inst(i))).toBe(true)
   })
 
-  it('the singular reads "1 copy"', () => {
+  it('two copies read "Both copies are locked"', () => {
     const scene = new Scene()
     const [a] = copies(scene, 2)
     setNodesLocked(scene, [inst(a)], true)
-    expect(lockedMessage(lockBlockFor(scene, inst(a))!)).toBe('Locked, along with its 1 copy.')
+    expect(lockedMessage(lockBlockFor(scene, inst(a))!)).toBe('Both copies are locked')
   })
 })
 
@@ -119,7 +119,7 @@ describe('a shape also used inside a locked group (the indirect case)', () => {
     expect(lockBlockFor(scene, inst(outside))).toBeNull()
     const block = lockBlockFor(scene, inst(outside), { shape: true })!
     expect(block).toMatchObject({ indirect: true })
-    expect(lockedMessage(block)).toBe('This shape is also used inside a locked group. Make this copy unique to change it.')
+    expect(lockedMessage(block)).toBe('Also used in a locked group')
     const steps = lockToastSteps(scene, lockedHintCode(inst(outside), true), [])
     expect(steps).toEqual([
       { action: 'make-unique', node: inst(outside) },
@@ -195,7 +195,7 @@ describe('locked items are left behind', () => {
     const { scene, locked } = mixed()
     const toasts: Array<[string, string | undefined]> = []
     expect(leaveBehind(scene, [obj(locked)], (m, c) => toasts.push([m, c]))).toBeNull()
-    expect(toasts).toEqual([['Locked. Unlock it to change it.', lockedHintCode(obj(locked))]])
+    expect(toasts).toEqual([['Locked', lockedHintCode(obj(locked))]])
     expect(parseLockedHintCode(toasts[0][1])).toEqual({ node: obj(locked), indirect: false })
   })
 
@@ -218,7 +218,7 @@ describe('locked items are left behind', () => {
     const { scene, locked, free } = mixed()
     const toasts: string[] = []
     expect(refuseIfLocked(scene, [obj(locked), obj(free)], (m) => toasts.push(m))).toBe(true)
-    expect(toasts).toEqual(['Locked. Unlock it to change it.'])
+    expect(toasts).toEqual(['Locked'])
     expect(refuseIfLocked(scene, [obj(free)], (m) => toasts.push(m))).toBe(false)
   })
 })
@@ -245,7 +245,7 @@ describe('copying locked things', () => {
     setNodesLocked(scene, [grp(g)], true)
     const toasts: Array<[string, string | undefined]> = []
     expect(gateCopyOperands(scene, [obj(a)], (m, c) => toasts.push([m, c]))).toBeNull()
-    expect(toasts).toEqual([['Locked. Unlock it to change it.', lockedHintCode(grp(g))]])
+    expect(toasts).toEqual([['Locked', lockedHintCode(grp(g))]])
   })
 })
 
@@ -265,7 +265,7 @@ describe('a locked box inside a locked group', () => {
     const before = scene.object_ids().length
     const toasts: Array<[string, string | undefined]> = []
     expect(gateCopyOperands(scene, [obj(a)], (m, c) => toasts.push([m, c]))).toBeNull()
-    expect(toasts).toEqual([['Locked. Unlock it to change it.', lockedHintCode(grp(g))]])
+    expect(toasts).toEqual([['Locked', lockedHintCode(grp(g))]])
     expect(scene.object_ids().length).toBe(before)
     // The group is lifted: the box's own lock alone still lets it copy.
     setNodesLocked(scene, [grp(g)], false)

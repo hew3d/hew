@@ -400,6 +400,19 @@ pub enum RecordedCall {
         face: u64,
         distance: f64,
     },
+    /// `extrude_face_as_new_object_in_instance(instance, object, face,
+    /// distance)` — the same modifier on a face picked through a placement
+    /// (a linked copy). Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture).
+    ExtrudeFaceAsNewObjectInInstance {
+        instance: u64,
+        object: u64,
+        face: u64,
+        distance: f64,
+    },
+    /// `unlink_copies(instances)` — Unlink of linked copies. Additive
+    /// variant (the [`RecordedCall::SketchBeginCurveWith`] posture).
+    UnlinkCopies { instances: Vec<u64> },
     /// `scene_undo()` — recorded only when it succeeded (a refused undo
     /// commits nothing). Additive variant (the
     /// [`RecordedCall::SketchBeginCurveWith`] posture): old recordings
@@ -1260,6 +1273,10 @@ pub enum RecordedCall {
         guides: Vec<u64>,
         annotations: Vec<u64>,
     },
+    /// `cut_selection(kinds, ids)` — Cut's delete: `DeleteSelection`
+    /// without making a linked set's last copy plain. Additive variant
+    /// (the [`RecordedCall::SketchBeginCurveWith`] posture).
+    CutSelection { kinds: Vec<u8>, ids: Vec<u64> },
     /// `reparent_nodes(kinds, ids, group)` — the Outliner drag-and-drop
     /// "Add to Group"/"Move to top level" (v1.1-cycle.md grouping lane):
     /// every listed node moved as ONE undo step, `DeleteSelection`'s

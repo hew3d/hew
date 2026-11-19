@@ -226,7 +226,7 @@ export function ContextualDock({
             whiteSpace: 'nowrap',
           }}
         >
-          {dockChipLabel(context, gates?.canUnlink === true)}
+          {dockChipLabel(context, gates?.presentedKind ?? (gates?.canUnlink === true ? (gates.linkedKind ?? 'object') : null))}
         </span>
       </div>
 

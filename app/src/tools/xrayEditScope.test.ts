@@ -138,6 +138,20 @@ describe('regionInFrontOfFace — scope standing', () => {
     expect(regionInFrontOfFace(behind, face, false)).toBe(false)
   })
 
+  it('a locked face wins over a region behind it, in or out of a scope; a region on or in front of it wins', () => {
+    // The scope branch used to hand a region behind a locked face the click
+    // whatever the depth (the locked face counted as "foreign").
+    expect(regionInFrontOfFace(behind, face, false, true, true)).toBe(false)
+    expect(regionInFrontOfFace(behind, face, false, null, true)).toBe(false)
+    expect(regionInFrontOfFace(behind, face, false, false, true)).toBe(false)
+    const onFace = { sketch: 8n, region: 1n, depth: 5 + 1e-8, detached: false }
+    expect(regionInFrontOfFace(onFace, face, false, true, true)).toBe(true)
+    expect(regionInFrontOfFace(onFace, face, false, null, true)).toBe(true)
+    expect(regionInFrontOfFace(front, face, false, true, true)).toBe(true)
+    // A group's or component's face (ineligible, not locked) keeps its rule.
+    expect(regionInFrontOfFace(behind, face, false, true, false)).toBe(true)
+  })
+
   it('two candidates of the same standing compare by depth, as before', () => {
     expect(regionInFrontOfFace(front, face, true, true)).toBe(true)
     expect(regionInFrontOfFace(behind, face, true, true)).toBe(false)

@@ -263,12 +263,15 @@ longer replay.
 | `history_bracket_open` / `history_bracket_commit` / `history_bracket_abort` | `label` (commit) | bracket a multi-edit gesture (a selection transform that moves objects and drawing) into one undo step, or restore the document as it was at open |
 | `push_pull` | `object`, `face`, `distance` | push/pull a solid face; the kernel re-derives the routing (translate, whole-wall radial offset, boss/recess, or through-cut) on replay |
 | `extrude_face_as_new_object` | `object`, `face`, `distance` | straight-extrude a solid face's boundary into a new top-level Object and leave the source untouched |
+| `extrude_face_as_new_object_in_instance` | `instance`, `object`, `face`, `distance` | the same new-object extrude for a face picked through a placement (a linked copy) |
+| `unlink_copies` | `instances[]` | bake each listed linked copy into plain world geometry (a set left with one placement too), as one undo step "Unlink" |
 | `transform_object` | `object`, `affine[12]` (row-major 3×4) | apply an affine transform |
 | `transform_selection` | `kinds[]`/`ids[]` (parallel node lists), `sketches[]`, `affine[12]` | transform a whole multi-selection as one undo step |
 | `rescale_document` | `factor` | scale the whole document uniformly about the world origin, as one undo step |
 | `delete_node` | `kind` (0=object, 1=group, 2=instance), `id` | delete a node |
-| `delete_selection` | `kinds[]`, `ids[]` | delete several nodes as one undo step (the Delete and Cut batch delete) |
-| `delete_mixed_selection` | `kinds[]`, `ids[]`, `guides[]`, `annotations[]` | delete a selection that also holds construction guides and annotations, as one undo step; the node lists may be empty when guides or annotations are listed |
+| `delete_selection` | `kinds[]`, `ids[]` | delete several nodes as one undo step (the Delete batch delete); a linked set left with one copy has that copy made plain too |
+| `delete_mixed_selection` | `kinds[]`, `ids[]`, `guides[]`, `annotations[]` | delete a selection that also holds construction guides and annotations, as one undo step, making a linked set's last copy plain as `delete_selection` does; the node lists may be empty when guides or annotations are listed |
+| `cut_selection` | `kinds[]`, `ids[]` | Cut's delete: `delete_selection` without making a linked set's last copy plain, so a paste rejoins the set |
 | `reparent_nodes` | `kinds[]`, `ids[]`, `group` (or null) | move several nodes into a group, or to the top level when `group` is null, as one undo step |
 | `duplicate_selection_array` | `kinds[]`/`ids[]` (parallel node lists), `affine[12]`, `count` (1–1000; an out-of-range count fails the replay typed rather than hanging), `linked` (optional, written only when `true`) | array copy: every listed node cloned `count` times along the step, one undo step. With `linked`, each Object or Group is first wrapped as its own linked set and the copies are placements of it; a recording without the field replays as independent copies |
 | `duplicate_selection_placements` | `kinds[]`/`ids[]` (parallel node lists), `affines[]` (12 floats per placement, row-major 3x4, concatenated; 1–1000 placements, otherwise the replay fails typed), `linked` (optional, written only when `true`) | grid array copy: every listed node cloned once per placement, one undo step, placement-major. With `linked`, each Object or Group is first wrapped as its own linked set and the copies are placements of it; a recording without the field replays as independent copies |

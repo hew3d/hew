@@ -13,6 +13,9 @@ import init, { Scene } from './wasm/pkg/wasm_api.js'
 import {
   linkedPlacementOf,
   linkGates,
+  isLinkedSet,
+  isWrapperPlacement,
+  topLevelCopies,
   promoteToComponent,
   promoteForSave,
   undoPromotionIfUnmoved,
@@ -20,8 +23,10 @@ import {
   renameLinkedCopy,
   unlinkAllCopies,
   unlinkCopy,
+  makeUniqueCopy,
 } from './linkedCopies'
-import { makeLabelFor, placementLabel, type NodeRef } from './panels/treeModel'
+import { setSmoothLevel, softenEdges } from './panels/smoothActions'
+import { makeLabelFor, placementLabel, linkedSetKind, type NodeRef } from './panels/treeModel'
 import { canPasteLinked, pasteLinked, planPaste, resolveLinkSource } from './clipboard/linkedPaste'
 import { repointLinkSource, type ClipboardContent, type LinkSource } from './clipboard/modelClipboard'
 import { booleanUnlinkingPlacements, linkedPlacementPickEligible } from './viewport/Viewport'
@@ -92,33 +97,82 @@ describe('a linked copy through Move or Paste is a placement of one set', () => 
 })
 
 describe('Unlink, Unlink all, Make component', () => {
-  it('unlink_forks_only_the_selected_placement', () => {
+  it('unlinking one of two leaves two plain Objects, selection on the new node, one undo restores the pair', () => {
+    const scene = new Scene()
+    const { placements } = fourLegs(scene)
+    // Two copies only: drop two of the four.
+    scene.delete_selection(new Uint8Array([2, 2]), new BigUint64Array([placements[2], placements[3]]))
+    const [a, b] = placements
+    const def = scene.instance_def(a)!
+    expect(scene.definition_usage(def)).toBe(2)
+    expect(linkedPlacementOf(scene, [inst(a)])?.copies).toBe(2)
+    const objectsBefore = scene.object_ids().length
+    const made = unlinkCopy(scene, b)
+    expect(made).toHaveLength(1)
+    // The new node is a plain world Object; the old placement id is gone.
+    expect(made[0].kind).toBe('object')
+    expect(Array.from(scene.instance_ids())).not.toContain(b)
+    expect(Array.from(scene.instance_ids())).not.toContain(a)
+    expect(scene.object_ids().length).toBe(objectsBefore + 2)
+    expect(linkedPlacementOf(scene, made)).toBeNull()
+    expect(placementLabel(scene, a, 0)).toBeDefined()
+    expect(undoLabels(scene).at(-1)).toBe('Unlink')
+    scene.scene_undo().free()
+    expect(scene.definition_usage(scene.instance_def(a)!)).toBe(2)
+    expect(scene.instance_def(b)).toBe(scene.instance_def(a))
+    expect(linkedPlacementOf(scene, [inst(a)])?.copies).toBe(2)
+  })
+
+  it('unlinking one of four forks only that copy; the other three stay linked', () => {
     const scene = new Scene()
     const { placements } = fourLegs(scene)
     const [a, b, c, d] = placements
-    const defBefore = scene.instance_def(b)!
-    unlinkCopy(scene, b)
-    expect(scene.instance_def(b)).not.toBe(defBefore)
-    expect(scene.instance_def(a)).toBe(defBefore)
-    expect(scene.instance_def(c)).toBe(defBefore)
-    expect(scene.instance_def(d)).toBe(defBefore)
+    const defBefore = scene.instance_def(a)!
+    const made = unlinkCopy(scene, b)
+    expect(made).toHaveLength(1)
+    expect(made[0].kind).toBe('object')
+    expect(scene.instance_def(b)).toBeUndefined()
+    for (const p of [a, c, d]) expect(scene.instance_def(p)).toBe(defBefore)
     expect(scene.definition_usage(defBefore)).toBe(3)
-    // The forked copy keeps the board's name and is a set of one: a plain board.
-    expect(placementLabel(scene, b, 0)).toBe('Leg')
-    expect(scene.definition_usage(scene.instance_def(b)!)).toBe(1)
+    expect(scene.object_name(made[0].id)).toBe('Leg')
     expect(undoLabels(scene).at(-1)).toBe('Unlink')
+  })
+
+  it('unlink all of three turns every copy into a plain Object, one undo step', () => {
+    const scene = new Scene()
+    const { placements } = fourLegs(scene)
+    scene.delete_selection(new Uint8Array([2]), new BigUint64Array([placements[3]]))
+    const three = placements.slice(0, 3)
+    const depth = scene.undo_depth()
+    const made = unlinkAllCopies(scene, three[0])
+    expect(made).toHaveLength(3)
+    expect(made.every((n) => n.kind === 'object')).toBe(true)
+    expect(scene.undo_depth()).toBe(depth + 1)
+    expect(scene.instance_ids().length).toBe(0)
+    expect(linkedPlacementOf(scene, made)).toBeNull()
+    scene.scene_undo().free()
+    expect(new Set(three.map((p) => scene.instance_def(p))).size).toBe(1)
+    expect(scene.definition_usage(scene.instance_def(three[0])!)).toBe(3)
   })
 
   it('unlink_all_is_one_undo_entry', () => {
     const scene = new Scene()
     const { placements } = fourLegs(scene)
     const depth = scene.undo_depth()
-    expect(unlinkAllCopies(scene, placements[0])).toBe(4)
+    expect(unlinkAllCopies(scene, placements[0])).toHaveLength(4)
     expect(scene.undo_depth()).toBe(depth + 1)
-    const defs = new Set(placements.map((p) => scene.instance_def(p)))
-    expect(defs.size).toBe(4)
-    scene.scene_undo()
+    expect(scene.instance_ids().length).toBe(0)
+    scene.scene_undo().free()
     expect(new Set(placements.map((p) => scene.instance_def(p))).size).toBe(1)
+  })
+
+  it('Make Unique on a copy keeps its id and forks only that copy', () => {
+    const scene = new Scene()
+    const { placements } = fourLegs(scene)
+    const def = scene.instance_def(placements[0])!
+    makeUniqueCopy(scene, placements[1])
+    expect(scene.instance_def(placements[1])).not.toBe(def)
+    expect(scene.definition_usage(def)).toBe(3)
   })
 
   it('make_component_promotes_asks_for_a_name_and_cancel_changes_nothing', () => {
@@ -149,16 +203,36 @@ describe('Unlink, Unlink all, Make component', () => {
   it('gates: one linked placement, a set of one has nothing to unlink all', () => {
     const scene = new Scene()
     const { placements } = fourLegs(scene)
-    expect(linkGates(scene, [inst(placements[0])], false)).toEqual({ canUnlink: true, canUnlinkAll: true, canPromote: true })
-    expect(linkGates(scene, [inst(placements[0])], true)).toEqual({ canUnlink: false, canUnlinkAll: false, canPromote: false })
+    expect(linkGates(scene, [inst(placements[0])], false)).toEqual({ canUnlink: true, canUnlinkAll: true, canPromote: true, linkedKind: 'object', presentedKind: 'object' })
+    expect(linkGates(scene, [inst(placements[0])], true)).toEqual({ canUnlink: false, canUnlinkAll: false, canPromote: false, linkedKind: null, presentedKind: null })
     expect(linkGates(scene, [inst(placements[0]), inst(placements[1])], false).canUnlink).toBe(false)
     expect(linkGates(scene, [{ kind: 'object', id: 1n }], false).canUnlink).toBe(false)
-    unlinkCopy(scene, placements[1])
-    unlinkCopy(scene, placements[2])
-    unlinkCopy(scene, placements[3])
-    // The first is now a set of one: still a linked placement, but alone.
-    expect(linkedPlacementOf(scene, [inst(placements[0])])?.copies).toBe(1)
-    expect(linkGates(scene, [inst(placements[0])], false).canUnlinkAll).toBe(false)
+    // Make Unique forks the first into a set of one (deleting copies no
+    // longer leaves one: the last copy becomes plain). The kernel still
+    // marks it linked, but the app reads it as a plain Object: nothing to
+    // unlink, no gates.
+    makeUniqueCopy(scene, placements[0])
+    expect(linkedPlacementOf(scene, [inst(placements[0])])).toBeNull()
+    // Unlink and the link wording are off, but it still reads as a plain
+    // Object (chip) and can still be made a component.
+    expect(linkGates(scene, [inst(placements[0])], false)).toEqual({ canUnlink: false, canUnlinkAll: false, canPromote: true, linkedKind: null, presentedKind: 'object' })
+    expect(isWrapperPlacement(scene, placements[0])).toBe(true)
+    expect(isLinkedSet(scene, placements[0])).toBe(false)
+  })
+
+  it('a linked set of Objects reads as an Object, a linked set of Groups as a Group', () => {
+    const scene = new Scene()
+    const { placements } = fourLegs(scene)
+    expect(linkedPlacementOf(scene, [inst(placements[0])])?.kind).toBe('object')
+    expect(linkedPlacementOf(scene, [inst(placements[0])])?.copies).toBe(4)
+    const a = makeBox(scene, 10, 11, 0, 1, 1)
+    const b = makeBox(scene, 12, 13, 0, 1, 1)
+    const g = scene.group_nodes(new Uint8Array([0, 0]), new BigUint64Array([a, b]))
+    const r = parseLinkedResult(
+      scene.duplicate_selection_array_linked(new Uint8Array([1]), new BigUint64Array([g]), shift(5), 1),
+    )
+    const inst0 = r.linked[0].instance
+    expect(linkedPlacementOf(scene, [inst(inst0)])?.kind).toBe('group')
   })
 
   it('renaming_a_row_edits_the_instance_name_when_set_else_all_copies', () => {
@@ -571,5 +645,130 @@ describe('direct placement tools only act on a copy a click would select', () =>
     const inst1 = scene.make_component(new Uint8Array([0]), new BigUint64Array([b]))
     const member = Array.from(scene.component_member_objects(scene.instance_def(inst1)!))[0]
     expect(linkedPlacementPickEligible(scene, [], false, member, inst1)).toBe(false)
+  })
+})
+
+describe('Smooth and Soften Edges on a linked Object (the Object Info path)', () => {
+  it('Smooth changes the one shared shape, so every copy follows', () => {
+    const scene = new Scene()
+    const { placements } = fourLegs(scene)
+    const def = scene.instance_def(placements[0])!
+    const shape = Array.from(scene.component_member_objects(def))
+    expect(shape.length).toBe(1)
+    setSmoothLevel(scene, shape, 1)
+    expect(scene.smooth_level(shape[0])).toBe(1)
+    expect(scene.smooth_surface_available(shape[0])).toBe(true)
+    // Still one shape shared by all four placements.
+    expect(new Set(placements.map((p) => scene.instance_def(p))).size).toBe(1)
+    scene.scene_undo().free()
+    expect(scene.smooth_level(shape[0])).toBe(0)
+  })
+
+  it('Soften Edges changes the one shared shape, so every copy follows', () => {
+    const scene = new Scene()
+    const { placements } = fourLegs(scene)
+    const def = scene.instance_def(placements[0])!
+    const shape = Array.from(scene.component_member_objects(def))
+    const softened = softenEdges(scene, shape, 100)
+    expect(softened).toBeGreaterThan(0)
+    expect(new Set(placements.map((p) => scene.instance_def(p))).size).toBe(1)
+  })
+})
+
+describe('a copy nested in a component is not reachable by Unlink', () => {
+  /** Two linked boards; the second is then placed inside a component. */
+  function pairWithNestedCopy(scene: Scene): { a: bigint; b: bigint } {
+    const board = makeBox(scene, 0, 1, 0, 1, 1)
+    const r = parseLinkedResult(
+      scene.duplicate_selection_array_linked(new Uint8Array([0]), new BigUint64Array([board]), shift(3), 1),
+    )
+    const a = r.linked[0].instance
+    const b = r.nodes[0].id
+    scene.make_component(new Uint8Array([2]), new BigUint64Array([b]))
+    return { a, b }
+  }
+
+  it('Unlink all on the top-level copy no longer aborts on the nested one', () => {
+    const scene = new Scene()
+    const { a, b } = pairWithNestedCopy(scene)
+    const def = scene.instance_def(a)!
+    expect(scene.definition_usage(def)).toBe(2)
+    expect(scene.owner_definition(2, b)).toBeDefined()
+    expect(topLevelCopies(scene, def)).toEqual([a])
+    // The raw call over every placement is what used to throw.
+    expect(() => scene.unlink_copies(scene.instances_of(def))).toThrow(/UnknownInstance/)
+    const made = unlinkAllCopies(scene, a)
+    expect(made).toHaveLength(1)
+    expect(made[0].kind).toBe('object')
+    expect(unlinkCopy(scene, b)).toEqual([])
+  })
+
+  it('gates: the set is still linked (2), Unlink works, Unlink all needs two top-level copies', () => {
+    const scene = new Scene()
+    const { a, b } = pairWithNestedCopy(scene)
+    expect(linkedPlacementOf(scene, [inst(a)])?.copies).toBe(2)
+    expect(linkGates(scene, [inst(a)], false)).toEqual({ canUnlink: true, canUnlinkAll: false, canPromote: true, linkedKind: 'object', presentedKind: 'object' })
+    // The nested copy, were it selected, is not actionable.
+    expect(linkedPlacementOf(scene, [inst(b)])).toBeNull()
+    expect(linkGates(scene, [inst(b)], false).canUnlink).toBe(false)
+    const made = unlinkCopy(scene, a)
+    expect(made).toHaveLength(1)
+  })
+})
+
+describe('linkedSetKind needs only component_has_nested_members', () => {
+  const nestedOnly = (scene: Scene) => ({
+    component_has_nested_members: (d: bigint) => scene.component_has_nested_members(d),
+  })
+
+  it('a single Object, several Objects grouped, and nested groups classify correctly', () => {
+    const scene = new Scene()
+    // One Object.
+    const one = makeBox(scene, 0, 1, 0, 1, 1)
+    const r1 = parseLinkedResult(scene.duplicate_selection_array_linked(new Uint8Array([0]), new BigUint64Array([one]), shift(3), 1))
+    const d1 = scene.instance_def(r1.linked[0].instance)!
+    expect(linkedSetKind(nestedOnly(scene), d1)).toBe('object')
+    // Several Objects grouped.
+    const a = makeBox(scene, 10, 11, 0, 1, 1)
+    const b = makeBox(scene, 12, 13, 0, 1, 1)
+    const g = scene.group_nodes(new Uint8Array([0, 0]), new BigUint64Array([a, b]))
+    const r2 = parseLinkedResult(scene.duplicate_selection_array_linked(new Uint8Array([1]), new BigUint64Array([g]), shift(5), 1))
+    const d2 = scene.instance_def(r2.linked[0].instance)!
+    expect(linkedSetKind(nestedOnly(scene), d2)).toBe('group')
+    // Groups within a group.
+    const c = makeBox(scene, 20, 21, 0, 1, 1)
+    const d = makeBox(scene, 22, 23, 0, 1, 1)
+    const inner = scene.group_nodes(new Uint8Array([0, 0]), new BigUint64Array([c, d]))
+    const e = makeBox(scene, 24, 25, 0, 1, 1)
+    const outer = scene.group_nodes(new Uint8Array([1, 0]), new BigUint64Array([inner, e]))
+    const r3 = parseLinkedResult(scene.duplicate_selection_array_linked(new Uint8Array([1]), new BigUint64Array([outer]), shift(5), 1))
+    const d3 = scene.instance_def(r3.linked[0].instance)!
+    expect(linkedSetKind(nestedOnly(scene), d3)).toBe('group')
+  })
+})
+
+describe('a linked wrapper left with one copy reads as a plain Object everywhere', () => {
+  it('joining it unlinks nothing: no "(unlinked)" label, and the count is 0 so no toast', () => {
+    const scene = new Scene()
+    const { placements } = fourLegs(scene)
+    // Make Unique is what still leaves a set of one.
+    makeUniqueCopy(scene, placements[0])
+    expect(isWrapperPlacement(scene, placements[0])).toBe(true)
+    expect(isLinkedSet(scene, placements[0])).toBe(false)
+    const loose = makeBox(scene, 0.5, 1.5, 0.5, 1.5, 1)
+    const out = booleanUnlinkingPlacements(scene, 0, inst(placements[0]), { kind: 'object', id: loose })
+    expect(out.kind).toBe('ok')
+    if (out.kind !== 'ok') return
+    expect(out.unlinked).toBe(0)
+    expect(undoLabels(scene).at(-1)).toBe('Union')
+  })
+
+  it('it still reads as the Object it wraps (label, kind), not a component', () => {
+    const scene = new Scene()
+    const { placements } = fourLegs(scene)
+    // Make Unique is what still leaves a set of one.
+    makeUniqueCopy(scene, placements[0])
+    expect(placementLabel(scene, placements[0], 0)).toBe('Leg')
+    expect(linkGates(scene, [inst(placements[0])], false).presentedKind).toBe('object')
   })
 })

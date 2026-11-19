@@ -1,10 +1,12 @@
 //! The fuzz harnesses' lock oracle (OW-1), independent of the kernel's own
 //! commit audit. Across a forward step, a node frozen before it:
 //!
-//! - is still there: a frozen node is never deleted. The one exception is
-//!   a Make Unique that took a linked set's last copy, which takes the
-//!   emptied set and its members with it (the lock rides on the new
-//!   shape's copies);
+//! - is still there: a frozen node is never deleted. Two exceptions, both
+//!   a linked set going away with its members: a Make Unique that took the
+//!   set's last copy (the lock rides on the new shape's copies), and a
+//!   step that left the set one copy, which is made plain again. There the
+//!   member comes out as a new node, and one that is frozen with the same
+//!   name, tags and vertex count must be there in its place;
 //! - is still frozen, unless the step was an unlock: nothing moves a node
 //!   out of its lock (out of a locked group, or out of a locked shape);
 //! - keeps its geometry where it stands (in its own frame, through
@@ -142,6 +144,18 @@ pub fn check_frozen_kept(doc: &Document, before: &[Frozen], step: StepKind) -> R
             let set_went = step == StepKind::MakeUnique
                 && f.owner.is_some_and(|d| doc.def_member_nodes(d).is_none());
             if set_went {
+                continue;
+            }
+            // The set's last copy was made plain: the lock is carried onto
+            // the node the member became.
+            let baked = f.owner.is_some_and(|d| doc.def_member_nodes(d).is_none())
+                && all_live_nodes(doc).into_iter().any(|m| {
+                    doc.node_frozen(m).is_some() && {
+                        let now = kept(doc, m);
+                        now.0.len() == f.kept.0.len() && now.1 == f.kept.1 && now.2 == f.kept.2
+                    }
+                });
+            if baked {
                 continue;
             }
             return Err(format!("{n:?} was deleted while frozen"));

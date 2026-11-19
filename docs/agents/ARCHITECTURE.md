@@ -513,9 +513,16 @@ Group root is wrapped as its own set and every copy is a further placement
 of it, so a reflecting step makes a mirrored placement instead of baked
 geometry (a linked mirrored copy from Flip is such a placement, its pose
 the reflection across the chosen plane); the wraps and the copies are one
-undo entry, and undoing it returns the loose node exactly. A set reduced
-to one placement stays a set (only undoing the wrap itself restores the
-loose node), and a linked set goes with its last live placement —
+undo entry, and undoing it returns the loose node exactly. A set that a
+delete, an explode, an Unlink, or a definition delete reduces to one
+placement is no set at all: that last copy is baked into plain geometry
+where it stands, in the same undo entry, when that is an edit the document
+allows (a world placement, inside the open session if one is, bakeable);
+otherwise it stays a placement of a set of one, which reads as not
+linked. So does a copy that carries an annotation (the bake would detach
+it), the copy a Cut leaves (`cut_selection`, so a paste rejoins the set),
+and the copies Make Unique leaves (it keeps the placement it forks). A linked
+set goes with its last live placement —
 deleting, exploding, or unlinking it hides the definition and its members,
 and undo brings them back. The rule is transitive: a set placed only by
 instances among those hidden members goes too, as does one placed only

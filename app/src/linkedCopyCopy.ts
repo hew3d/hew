@@ -1,6 +1,7 @@
 /**
  * The words for linked copies. One place so every surface says the same
- * thing: copies, never "definition" or "instance".
+ * thing: a linked Object is an Object that happens to be linked, never
+ * "definition" or "instance".
  */
 
 import { t, plural } from '@lingui/core/macro'
@@ -23,16 +24,15 @@ export function cutAllCopies(count: number): string {
 
 export const onlyThisOne = (): string => t`Only this one`
 
-export function copiesRow(count: number): string {
-  return t({ comment: 'Object Info row: how many linked copies share this shape', message: `Linked copies: ${count}` })
+/** "N linked" — beside an Object's type, and on the Outliner's count badge. */
+export function linkedCountLabel(count: number): string {
+  return t({ comment: 'How many linked placements share one shape; shown beside the type in Object Info and as the Outliner badge tooltip', message: `${count} linked` })
 }
 
 export const unlinkLabel = (): string => t`Unlink`
 export const unlinkAllLabel = (): string => t`Unlink all`
 export const makeComponentLabel = (): string => t`Make component`
 export const selectAllCopiesLabel = (): string => t`Select all copies`
-export const nameAllLabel = (): string => t`Name (all copies)`
-export const nameThisLabel = (): string => t`This copy`
 export const pasteIndependentLabel = (): string => t`Paste independent`
 export const pasteLinkedLabel = (): string => t`Paste linked`
 export const cutOneSolidAtATime = (): string => t`Cut with one solid at a time`

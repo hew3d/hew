@@ -438,6 +438,21 @@ export interface LabelScene {
   /** Whether an instance places a linked set (copies made by Move, Paste, ...). */
   is_linked?(instance: bigint): boolean
   component_member_objects?(def: bigint): ArrayLike<bigint>
+  group_ids?(): ArrayLike<bigint>
+  component_has_nested_members?(def: bigint): boolean
+  owner_definition?(kind: number, id: bigint): bigint | undefined
+}
+
+/** What a linked set's shared shape is: a Group when it holds a group of its
+ *  own, otherwise an Object. */
+export function linkedSetKind(scene: Pick<LabelScene, 'component_has_nested_members'>, def: bigint): 'object' | 'group' {
+  try {
+    // A linked set holds either one Object or one member group (nested).
+    if (scene.component_has_nested_members?.(def) === true) return 'group'
+  } catch {
+    // A handle the kernel no longer knows: read it as an Object.
+  }
+  return 'object'
 }
 
 const namedOrNull = (n: string | undefined): string | null => {
@@ -462,7 +477,8 @@ export function sharedLinkedLabel(scene: LabelScene, def: bigint | undefined): s
 /**
  * The label of an instance row. A placement of a linked set reads as the
  * thing it is, never as a component: the placement's own name, else the
- * set's name, else its single part's name, else "Copies". Any other
+ * set's name, else its single part's name, else what a plain Object (or
+ * Group) with no name is called: no "Copies" wording. Any other
  * instance keeps `resolveLabel`'s component wording.
  */
 export function placementLabel(scene: LabelScene, instance: bigint, index: number | null): string {
@@ -475,7 +491,7 @@ export function placementLabel(scene: LabelScene, instance: bigint, index: numbe
   if (own !== null) return own
   const shared = sharedLinkedLabel(scene, def)
   if (shared !== null) return shared
-  return t({ context: 'unnamed item', comment: 'Row label for a placement of a linked set that has no name at all', message: 'Copies' })
+  return entityLabel(def === undefined ? 'object' : linkedSetKind(scene, def), index)
 }
 
 /**

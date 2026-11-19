@@ -140,19 +140,24 @@ test.describe('linked copies', () => {
     // Object ▸ Unlink on the selected copy.
     await chooseMenu(page, /^object$/i, 'Unlink')
     await page.waitForTimeout(150)
-    const copyDef = await page.evaluate((c) => window.__hew_test!.getInstanceDef(c), copy)
-    expect(copyDef).not.toBe(def)
-    expect(await page.evaluate((d) => window.__hew_test!.getInstancesOf(d), def)).toHaveLength(1)
-    // It is still the selected thing.
-    expect((await page.evaluate(() => window.__hew_test!.getSelection()))[0].id).toBe(copy)
+    // Unlinking one of two leaves two ordinary Objects: no placement is left.
+    expect(await page.evaluate((d) => window.__hew_test!.getInstancesOf(d), def)).toHaveLength(0)
+    // The selection moved to the new Object the copy became.
+    const sel = await page.evaluate(() => window.__hew_test!.getSelection())
+    expect(sel).toHaveLength(1)
+    expect(sel[0].kind).toBe('object')
+    const unlinked = sel[0].id
+    const ids = await page.evaluate(() => window.__hew_test!.getObjectIds())
+    expect(ids).toHaveLength(2)
+    const other = ids.find((id) => id !== unlinked)!
 
     await page.keyboard.press('p')
     await clickWorld(page, [5, 1, 1])
     await page.keyboard.type('0.5')
     await page.keyboard.press('Enter')
     await page.waitForTimeout(150)
-    expect(await memberHeight(page, copyDef!)).toBeCloseTo(1.5, 5)
-    expect(await memberHeight(page, def)).toBeCloseTo(1, 6) // the original did not change
+    expect((await boundsOf(page, unlinked))[5]).toBeCloseTo(1.5, 5)
+    expect((await boundsOf(page, other))[5]).toBeCloseTo(1, 6) // the other did not change
     await page.screenshot({ path: info.outputPath('unlinked-one-pushed.png') })
   })
 

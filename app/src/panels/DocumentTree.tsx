@@ -37,7 +37,8 @@ import {
   type NodeKind,
 } from './treeModel'
 import { draftRef, outlinerDrawing, resolveDraft, type OutlinerDrawing } from '../tools/planeUnits'
-import { isSketchScopedKind } from './treeModel'
+import { isSketchScopedKind, linkedSetKind } from './treeModel'
+import { topLevelCopies } from '../linkedCopies'
 import type { HealthClass } from '../health/healthReport'
 import { OUTLINER_TOOLTIP } from '../health/healthCopy'
 import { isComposingKey } from '../input/keyboard'
@@ -54,7 +55,7 @@ import { InlineIcon } from './InlineIcon'
 import { frozenCause, isLockableKind, isLocked } from '../lock/lockModel'
 import type { LibraryLink } from '../library/libraryUpdates'
 import { LibraryMark } from './LibraryMark'
-import { copiesRow, unlinkLabel, unlinkAllLabel, makeComponentLabel, selectAllCopiesLabel } from '../linkedCopyCopy'
+import { linkedCountLabel, unlinkLabel, unlinkAllLabel, makeComponentLabel, selectAllCopiesLabel } from '../linkedCopyCopy'
 
 interface Props {
   scene: WasmScene
@@ -1382,10 +1383,16 @@ const NodeRow = memo(function NodeRowInner({
 
   if (node.kind === 'instance') {
     const def = scene.instance_def(node.id)
-    const linked = scene.is_linked(node.id)
-    // "×N" shows only when more than one placement shares the set; a set of
-    // one reads as a plain board (no badge).
-    const copyCount = linked && def !== undefined ? scene.definition_usage(def) : 0
+    // Linked means more than one placement shares the set: a set of one reads
+    // as a plain object (no link icon, no badge, no copy menu).
+    // A placement of a linked wrapper reads as the Object or Group it wraps,
+    // whatever its count.
+    const wrapper = def !== undefined && scene.is_linked(node.id)
+    const copyCount = def !== undefined && wrapper ? scene.definition_usage(def) : 0
+    const linked = copyCount > 1
+    const wrapperKind = def !== undefined && wrapper ? linkedSetKind(scene, def) : null
+    // Unlink all and Select all copies act on the copies at the top level.
+    const topCount = def !== undefined && linked ? topLevelCopies(scene, def).length : 0
     const label = placementLabel(scene, node.id, index)
     // No `onToggleAllHidden`/`anyChildHidden` here, unlike the group branch
     // below: an instance's members live in its SHARED definition, not in
@@ -1399,7 +1406,7 @@ const NodeRow = memo(function NodeRowInner({
     return (
       <Row
         label={label}
-        icon={<NodeIcon kind="instance" linked={linked} />}
+        icon={<NodeIcon kind={linked || wrapperKind === null ? 'instance' : wrapperKind} linked={linked} />}
         {...lockProps}
         selected={selected}
         isPrimary={isPrimary}
@@ -1431,9 +1438,9 @@ const NodeRow = memo(function NodeRowInner({
                   ? undefined
                   : {
                       onUnlink: () => copiesCtx.actions?.onUnlink(node),
-                      onUnlinkAll: copyCount > 1 ? () => copiesCtx.actions?.onUnlinkAll(node) : undefined,
+                      onUnlinkAll: topCount > 1 ? () => copiesCtx.actions?.onUnlinkAll(node) : undefined,
                       onMakeComponent: () => copiesCtx.actions?.onMakeComponent(node),
-                      onSelectCopies: copyCount > 1 ? () => copiesCtx.actions?.onSelectCopies(node) : undefined,
+                      onSelectCopies: topCount > 1 ? () => copiesCtx.actions?.onSelectCopies(node) : undefined,
                       onRename: (name) => copiesCtx.actions?.onRename(node, name),
                     },
               }
@@ -1825,7 +1832,7 @@ function Row({
 }) {
   const { t } = useLingui()
   const copyCount = copies?.count ?? 0
-  const linkedCopiesTitle = copiesRow(copyCount)
+  const linkedCopiesTitle = linkedCountLabel(copyCount)
   const [renaming, setRenaming] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   // Selection highlight uses the theme accent tint (06_docked_panels.md: "the
@@ -1963,7 +1970,7 @@ function Row({
             onFocus={() => setAllHiddenFocused(true)}
             onBlur={() => setAllHiddenFocused(false)}
           >
-            <Trans>Copies</Trans>
+            <Trans>Linked</Trans>
           </button>
           {menuOpen && (
             <CopiesMenu

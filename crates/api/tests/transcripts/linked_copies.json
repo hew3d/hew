@@ -429,7 +429,7 @@
       "compare": "/error/data"
     },
     {
-      "note": "with unlink: true the copy is exploded and joined; its sibling keeps the set",
+      "note": "with unlink: true the copy is exploded and joined; the one copy it left in the set is made plain too",
       "request": {
         "id": 13,
         "jsonrpc": "2.0",
@@ -447,7 +447,7 @@
           "label": "hew.solid.union",
           "results": [
             {
-              "result": "obj_b",
+              "result": "obj_c",
               "unlinked": [
                 "ins_3"
               ]
@@ -457,7 +457,7 @@
       }
     },
     {
-      "note": "the set's other placements are untouched",
+      "note": "no set of one is left: only the made-unique copy is still a placement",
       "request": {
         "id": 14,
         "jsonrpc": "2.0",
@@ -508,46 +508,6 @@
             1.0,
             0.0
           ]
-        },
-        {
-          "definition": "cmp_2",
-          "definition_name": null,
-          "depth": 0,
-          "frozen": false,
-          "hidden": false,
-          "id": "ins_5",
-          "kind": "instance",
-          "locked": false,
-          "linked": true,
-          "material": null,
-          "material_effective": null,
-          "members": {
-            "groups": [],
-            "instances": [],
-            "objects": [
-              "obj_1"
-            ]
-          },
-          "mirrored": false,
-          "name": null,
-          "parent": null,
-          "path": [],
-          "tags": [],
-          "user_hidden": false,
-          "world_pose": [
-            1.0,
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-            1.0,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-            1.0,
-            0.0
-          ]
         }
       ],
       "compare": "/result/occurrences"
@@ -560,7 +520,7 @@
         "method": "hew.entity.flip",
         "params": {
           "ids": [
-            "obj_b"
+            "obj_c"
           ],
           "axis": "x",
           "copy": {}
@@ -574,13 +534,13 @@
           "results": [
             {
               "ids": [
-                "ins_e"
+                "ins_f"
               ],
               "linked": [
                 {
-                  "definition": "cmp_c",
-                  "instance": "ins_d",
-                  "source": "obj_b"
+                  "definition": "cmp_d",
+                  "instance": "ins_e",
+                  "source": "obj_c"
                 }
               ]
             }
@@ -600,18 +560,18 @@
             "instance"
           ],
           "roots": [
-            "ins_e"
+            "ins_f"
           ]
         }
       },
       "response": [
         {
-          "definition": "cmp_c",
+          "definition": "cmp_d",
           "definition_name": null,
           "depth": 0,
           "frozen": false,
           "hidden": false,
-          "id": "ins_e",
+          "id": "ins_f",
           "kind": "instance",
           "locked": false,
           "linked": true,
@@ -621,7 +581,7 @@
             "groups": [],
             "instances": [],
             "objects": [
-              "obj_b"
+              "obj_c"
             ]
           },
           "mirrored": true,

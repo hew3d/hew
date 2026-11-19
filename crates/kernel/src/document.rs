@@ -1266,6 +1266,49 @@ impl Freeze {
 /// Each unlocked definition's freeze cause, answered once per query.
 type FreezeMemo = BTreeMap<ComponentId, Option<NodeId>>;
 
+/// The history label of [`Document::unlink_copies`]' entry: a compound of
+/// [`DocAction::Exploded`] steps, which the commit audit recognizes by it
+/// (as it recognizes "Make Unique").
+const UNLINK_LABEL: &str = "Unlink";
+
+/// The label of the step that turns the last copy of a linked set into
+/// plain geometry after another operation (a delete, an explode, a
+/// definition delete) took the others away
+/// ([`Document::bake_lone_copies`]): a compound of [`DocAction::Exploded`]
+/// steps nested inside that operation's own entry. The commit audit
+/// recognizes it as it recognizes "Unlink"; the history reads the
+/// operation's own label and never this one.
+const LAST_COPY_LABEL: &str = "Unlink last copy";
+
+/// Whether `action` is the nested last-copy step
+/// ([`LAST_COPY_LABEL`]).
+fn is_last_copy_step(action: &DocAction) -> bool {
+    matches!(
+        action,
+        DocAction::Compound { meta: Some(m), .. } if m.label == LAST_COPY_LABEL
+    )
+}
+
+/// `action` and the last-copy step `bake` that follows it as one undo
+/// entry, or `action` alone when nothing was baked.
+fn with_last_copies(action: DocAction, bake: Option<DocAction>) -> DocAction {
+    match bake {
+        None => action,
+        Some(bake) => DocAction::Compound {
+            actions: vec![action, bake],
+            meta: None,
+        },
+    }
+}
+
+/// What an Unlink gives a copy's baked roots besides an explode's own
+/// rules ([`Document::explode_core`]): the set's lock, and the placement's
+/// tags.
+struct UnlinkCarry {
+    locked: bool,
+    tags: Vec<Vec<String>>,
+}
+
 impl LockHolder {
     /// The entity carrying the flag, for change sets.
     fn entity(self) -> EntityRef {
@@ -8869,8 +8912,10 @@ impl Document {
             return Ok(None);
         }
         for node in scratch.top_level_nodes() {
+            // Unbaked: making a linked set's last copy plain here would
+            // take a node this loop is about to delete (or a pasted root).
             if !report.roots.contains(&node) {
-                scratch.delete_node(node)?;
+                scratch.delete_node_entry(node)?;
             }
         }
         // The pasted drawing, as copied (a paste draws it, so its preview
@@ -12091,6 +12136,14 @@ impl Document {
         changes
     }
 
+    /// Whether a live annotation (a dimension or a leader, not deleted)
+    /// names `node` among its anchors. Pure.
+    fn annotation_anchored_to(&self, node: NodeId) -> bool {
+        self.annotations
+            .values()
+            .any(|rec| !rec.hidden && rec.annotation.touches_any(&[node]))
+    }
+
     /// Re-evaluates `detached` for every live annotation touching a node in
     /// `nodes` whose liveness (world-visible ⇄ hidden/consumed) this
     /// mutation just changed: `detached` clears iff EVERY node the
@@ -14265,6 +14318,7 @@ impl Document {
         let start_epoch = self.document_epoch;
         self.ring_holds.hold();
         let mut change = DocChange::default();
+        let mut seeds: Vec<ComponentId> = Vec::new();
         for inst in world_instances {
             // An instance inside a group that an EARLIER iteration's delete
             // already hid (a group holding two chairs) is no longer live;
@@ -14273,8 +14327,12 @@ impl Document {
             if !self.node_is_live(NodeId::Instance(inst)) {
                 continue;
             }
-            match self.delete_node(NodeId::Instance(inst)) {
-                Ok(c) => merge_doc_change(&mut change, c),
+            // Unbaked: a copy of a linked set is baked once, at the end.
+            match self.delete_node_entry(NodeId::Instance(inst)) {
+                Ok((c, sets)) => {
+                    merge_doc_change(&mut change, c);
+                    merge_unique(&mut seeds, sets);
+                }
                 Err(e) => {
                     *self = checkpoint;
                     return Err(e);
@@ -14302,14 +14360,24 @@ impl Document {
         self.set_definition_hidden(component, &hidden_nodes, true);
         // A linked set placed only by member instances of this definition
         // goes with them (decision 7, as for a delete).
-        let seeds = self.defs_placed_by(&hidden_nodes);
-        let hidden_defs = self.hide_emptied_linked_sets(seeds);
+        let emptied = self.defs_placed_by(&hidden_nodes);
+        let hidden_defs = self.hide_emptied_linked_sets(emptied);
         touch_hidden_defs(&mut change, &hidden_defs);
+        // A linked set left with one copy (a copy inside this definition
+        // went with it) has that copy made plain, in the same entry.
+        let mut removed = hidden_nodes.clone();
+        for (_, nodes) in &hidden_defs {
+            removed.extend(nodes.iter().copied());
+        }
+        merge_unique(&mut seeds, self.sets_losing_copies(&removed, &[]));
         self.undo.push(DocAction::DefinitionDeleted {
             component,
             hidden_nodes,
             hidden_defs,
         });
+        if let Some(bake) = self.bake_lone_copies(&seeds, &[], &mut change) {
+            self.undo.push(bake);
+        }
         let actions: Vec<DocAction> = self.undo.actions.drain(undo_start..).collect();
         self.undo.push(DocAction::Compound {
             actions,
@@ -15777,6 +15845,88 @@ impl Document {
             components_touched: Vec::new(),
             guides_touched: Vec::new(),
             linked: Vec::new(),
+        };
+        Ok((id, change))
+    }
+
+    /// [`Document::extrude_face_as_new_object`] for a face reached THROUGH
+    /// the world placement `instance` (a linked copy, or a component copy):
+    /// `object` is a member of the placement's definition, so its face is
+    /// in the definition's own frame. The face's boundary is extruded there
+    /// and the result rides the placement's pose into the world, so the new
+    /// Object stands on the copy that was clicked. It is a fresh top-level
+    /// world Object; the placement, its definition and every other copy are
+    /// untouched (the set stays as it was).
+    ///
+    /// `distance` is a WORLD length along the face's world normal, mapped
+    /// through the pose as [`Document::push_pull_in_component`]'s callers
+    /// do ([`Document::map_instance_world_distance`]). A reflecting pose is
+    /// fine (the baked copy turns its faces over, as an explode does).
+    ///
+    /// Nothing that exists changes, so a lock does not refuse it (OW-1): a
+    /// locked copy may be extruded from as it may be copied.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownInstance`] — `instance` is stale, hidden,
+    ///   or itself a member of a definition (its pose is not a world pose).
+    /// - [`DocumentError::ExplodeSessionOpen`] — its definition is on loan
+    ///   to an open session (its members are world objects right now).
+    /// - [`DocumentError::UnknownObject`] — `object` is stale, hidden, or
+    ///   not a member of `instance`'s own definition (a member of a nested
+    ///   placement inside it included).
+    /// - [`DocumentError::UnknownFace`] — a stale face.
+    /// - [`DocumentError::AmbiguousInstanceScale`] — the pose is not a
+    ///   similarity (non-uniform scale).
+    /// - [`DocumentError::Extrude`] — a degenerate profile or distance.
+    ///
+    /// The document is untouched on error.
+    pub fn extrude_face_as_new_object_in_instance(
+        &mut self,
+        instance: InstanceId,
+        object: ObjectId,
+        face: FaceId,
+        distance: f64,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "extrude_face_as_new_object_in_instance", distance);
+        let (def, pose) = self.instance_component(instance)?;
+        let rec = self
+            .objects
+            .get(object)
+            .filter(|r| {
+                !r.hidden && matches!(r.owner, ObjectOwner::Definition { def: d, .. } if d == def)
+            })
+            .ok_or(DocumentError::UnknownObject)?;
+        let local_distance = self.map_world_distance_through_pose(pose, distance)?;
+        let profile = rec
+            .object
+            .profile_from_face(face)
+            .ok_or(DocumentError::UnknownFace)?;
+        let mut new_object =
+            Object::from_extrusion(&profile, local_distance).map_err(DocumentError::Extrude)?;
+        new_object
+            .apply_transform(&pose)
+            .map_err(DocumentError::Transform)?;
+
+        let id = self.insert_object_record(ObjectRecord {
+            object: new_object,
+            history: History::new(),
+            hidden: false,
+            owner: ObjectOwner::World { parent: None },
+            name: None,
+            tags: Vec::new(),
+            imported: false,
+            locked: false,
+        });
+        self.undo.push(DocAction::FollowMeFace {
+            result: id,
+            merged_base: None,
+            reanchored: Vec::new(),
+        });
+        self.commit_new_action();
+        self.debug_validate();
+        let change = DocChange {
+            objects_touched: vec![id],
+            ..Default::default()
         };
         Ok((id, change))
     }
@@ -18955,6 +19105,14 @@ impl Document {
     /// out of its parent's member list (or the top-level order, which needs no
     /// bookkeeping); the exact position is captured for undo.
     ///
+    /// A linked set the delete leaves with a single copy is no set at all:
+    /// that copy becomes plain geometry where it stands, in the same undo
+    /// entry, by the rule [`Document::unlink_copies`] uses for the copy it
+    /// leaves behind ([`Document::bake_lone_copies`]). A copy that may not
+    /// be baked here (outside the open session, inside another definition,
+    /// or not bakeable) stays a placement of a set of one, and the delete
+    /// still succeeds. The history reads the delete's own label.
+    ///
     /// # Errors
     /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`] /
     ///   [`DocumentError::UnknownInstance`] — `node` is stale or already hidden.
@@ -18962,6 +19120,39 @@ impl Document {
     /// On `Err` the document is untouched (the strong guarantee).
     pub fn delete_node(&mut self, node: NodeId) -> Result<DocChange, DocumentError> {
         info!(target: "kernel::op", op = "delete_node", node = ?node);
+        let (action, mut change, seeds) = self.delete_node_core(node)?;
+        let bake = self.bake_lone_copies(&seeds, &[], &mut change);
+        self.undo.push(with_last_copies(action, bake));
+        self.commit_new_action();
+        self.debug_validate();
+        Ok(change)
+    }
+
+    /// [`Document::delete_node`] without the last-copy bake: pushes the
+    /// [`DocAction::Deleted`] entry alone and returns the linked sets the
+    /// delete took copies from, for a caller that deletes several nodes and
+    /// bakes once at the end (a copy deleted later in the same call must
+    /// not be baked first).
+    fn delete_node_entry(
+        &mut self,
+        node: NodeId,
+    ) -> Result<(DocChange, Vec<ComponentId>), DocumentError> {
+        let (action, change, seeds) = self.delete_node_core(node)?;
+        self.undo.push(action);
+        self.commit_new_action();
+        self.debug_validate();
+        Ok((change, seeds))
+    }
+
+    /// The work of [`Document::delete_node`] once nothing is pushed: hides
+    /// `node`'s live subtree and any linked set it emptied, and returns the
+    /// [`DocAction::Deleted`] entry, the change, and the linked sets left
+    /// with fewer copies ([`Document::sets_losing_copies`]). On `Err` the
+    /// document is untouched: every check runs before the first write.
+    fn delete_node_core(
+        &mut self,
+        node: NodeId,
+    ) -> Result<(DocAction, DocChange, Vec<ComponentId>), DocumentError> {
         if !self.node_is_live(node) {
             return Err(match node {
                 NodeId::Object(_) => DocumentError::UnknownObject,
@@ -18993,20 +19184,22 @@ impl Document {
         let hidden_defs = self.hide_emptied_linked_sets_of(&hidden_subtree);
 
         let reanchored = self.reevaluate_liveness_recorded(&hidden_subtree);
-        self.undo.push(DocAction::Deleted {
+        let mut removed = hidden_subtree.clone();
+        for (_, nodes) in &hidden_defs {
+            removed.extend(nodes.iter().copied());
+        }
+        let seeds = self.sets_losing_copies(&removed, &[]);
+        let mut change = delete_change(node, parent, &hidden_subtree);
+        touch_hidden_defs(&mut change, &hidden_defs);
+        let action = DocAction::Deleted {
             node,
             parent,
             prev_parent_members,
-            hidden_subtree: hidden_subtree.clone(),
+            hidden_subtree,
             reanchored,
-            hidden_defs: hidden_defs.clone(),
-        });
-        self.commit_new_action();
-        self.debug_validate();
-
-        let mut change = delete_change(node, parent, &hidden_subtree);
-        touch_hidden_defs(&mut change, &hidden_defs);
-        Ok(change)
+            hidden_defs,
+        };
+        Ok((action, change, seeds))
     }
 
     /// Deletes a whole selection — nodes, construction guides, and
@@ -19036,6 +19229,12 @@ impl Document {
     /// items are labeled by their count across all three kinds ("Delete 3
     /// items").
     ///
+    /// A linked set the whole selection leaves with a single copy has that
+    /// copy made plain, once, after every listed item is gone, inside the
+    /// same entry ([`Document::delete_node`] states the rule). Deleting two
+    /// of three copies leaves one plain copy; deleting both of two leaves
+    /// none.
+    ///
     /// # Errors
     /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`] /
     ///   [`DocumentError::UnknownInstance`] — a listed node is stale or
@@ -19053,6 +19252,32 @@ impl Document {
         nodes: &[NodeId],
         guides: &[GuideId],
         annotations: &[AnnotationId],
+    ) -> Result<DocChange, DocumentError> {
+        self.delete_selection_with(nodes, guides, annotations, true)
+    }
+
+    /// Cut: [`Document::delete_selection`] over nodes alone, without the
+    /// last-copy bake, the same single entry and label. What a Cut removes
+    /// is usually pasted back, and a paste in this document links to the
+    /// copy's linked set only while that set is live: making the copy left
+    /// behind plain would hide the set and the paste would no longer rejoin
+    /// it. A Cut that is never pasted leaves that copy a placement of a set
+    /// of one, which reads as not linked.
+    ///
+    /// # Errors
+    /// As [`Document::delete_selection`].
+    pub fn cut_selection(&mut self, nodes: &[NodeId]) -> Result<DocChange, DocumentError> {
+        self.delete_selection_with(nodes, &[], &[], false)
+    }
+
+    /// [`Document::delete_selection`] (`bake`) or
+    /// [`Document::cut_selection`] (no bake).
+    fn delete_selection_with(
+        &mut self,
+        nodes: &[NodeId],
+        guides: &[GuideId],
+        annotations: &[AnnotationId],
+        bake: bool,
     ) -> Result<DocChange, DocumentError> {
         info!(
             target: "kernel::op",
@@ -19099,6 +19324,7 @@ impl Document {
         };
         let txn = self.begin_transaction();
         let mut merged = DocChange::default();
+        let mut seeds: Vec<ComponentId> = Vec::new();
         // Every handle was live when the batch began (checked above), so one
         // that is gone now was removed by this batch: a member of a group
         // deleted before it, or an item listed twice. Skip it, as the
@@ -19107,8 +19333,11 @@ impl Document {
             if !self.node_is_live(node) {
                 continue;
             }
-            match self.delete_node(node) {
-                Ok(change) => merge_doc_change(&mut merged, change),
+            match self.delete_node_entry(node) {
+                Ok((change, sets)) => {
+                    merge_doc_change(&mut merged, change);
+                    merge_unique(&mut seeds, sets);
+                }
                 Err(e) => {
                     self.abort_transaction(txn);
                     return Err(e);
@@ -19138,6 +19367,12 @@ impl Document {
                     return Err(e);
                 }
             }
+        }
+        // The last copies, once every listed item is gone (not for a Cut).
+        if bake && let Some(baked) = self.bake_lone_copies(&seeds, &[], &mut merged) {
+            self.undo.push(baked);
+            self.commit_new_action();
+            self.debug_validate();
         }
         self.commit_transaction(
             txn,
@@ -22198,6 +22433,12 @@ impl Document {
     /// object stands in for it. Retargeting such an anchor onto the baked
     /// object automatically is future work.
     ///
+    /// Exploding one copy of a linked set that leaves the set with a single
+    /// copy makes that copy plain as well, in the same undo entry and by
+    /// the rule [`Document::unlink_copies`] uses for the copy it leaves
+    /// behind ([`Document::bake_lone_copies`]). The returned Objects are
+    /// still only the exploded instance's own; the change reports both.
+    ///
     /// # Errors
     /// - [`DocumentError::UnknownInstance`] — the instance is stale/hidden.
     /// - [`DocumentError::CannotExplodeNonUniformScale`] — the definition
@@ -22210,6 +22451,98 @@ impl Document {
         &mut self,
         instance: InstanceId,
     ) -> Result<(Vec<ObjectId>, DocChange), DocumentError> {
+        let (action, created, mut change, seeds) = self.explode_checked(instance)?;
+        // A linked set the explode left with one copy is no set at all:
+        // that copy becomes plain too, in the same entry.
+        let bake = self.bake_lone_copies(&seeds, &[], &mut change);
+        self.undo.push(with_last_copies(action, bake));
+        self.commit_new_action();
+        self.debug_validate();
+        Ok((created, change))
+    }
+
+    /// [`Document::explode_instance`] over several placements as ONE undo
+    /// entry, in list order. A linked set they leave with a single copy has
+    /// that copy made plain once, after every listed placement is gone
+    /// (as [`Document::delete_selection`] does), so exploding a copy never
+    /// makes a later listed one plain first. Returns, per listed placement,
+    /// the roots it became where it stood (Objects, groups, and the
+    /// placements its member instances surfaced as), and the change, which
+    /// also reports any last copy made plain.
+    ///
+    /// # Errors
+    /// [`DocumentError::EmptySelection`] for an empty list; a placement
+    /// listed twice is stale the second time
+    /// ([`DocumentError::UnknownInstance`]); otherwise as
+    /// [`Document::explode_instance`] for each placement.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn explode_instances(
+        &mut self,
+        instances: &[InstanceId],
+    ) -> Result<(Vec<Vec<NodeId>>, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "explode_instances", count = instances.len());
+        if instances.is_empty() {
+            return Err(DocumentError::EmptySelection);
+        }
+        let checkpoint = (instances.len() > 1).then(|| self.clone());
+        let mut actions: Vec<DocAction> = Vec::with_capacity(instances.len() + 1);
+        let mut roots: Vec<Vec<NodeId>> = Vec::with_capacity(instances.len());
+        let mut change = DocChange::default();
+        let mut seeds: Vec<ComponentId> = Vec::new();
+        for &i in instances {
+            match self.explode_checked(i) {
+                Ok((action, _, step, sets)) => {
+                    if let DocAction::Exploded { created_roots, .. } = &action {
+                        roots.push(created_roots.clone());
+                    }
+                    actions.push(action);
+                    merge_doc_change(&mut change, step);
+                    merge_unique(&mut seeds, sets);
+                }
+                Err(e) => {
+                    if let Some(checkpoint) = checkpoint {
+                        *self = checkpoint;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        // A placement the call returns as a root stays live for its caller.
+        let keep: Vec<InstanceId> = roots
+            .iter()
+            .flatten()
+            .filter_map(|&n| match n {
+                NodeId::Instance(i) => Some(i),
+                _ => None,
+            })
+            .collect();
+        actions.extend(self.bake_lone_copies(&seeds, &keep, &mut change));
+        let action = if actions.len() == 1 {
+            actions.pop().expect("one action")
+        } else {
+            DocAction::Compound {
+                actions,
+                meta: None,
+            }
+        };
+        self.undo.push(action);
+        self.commit_new_action();
+        self.debug_validate();
+        Ok((roots, change))
+    }
+
+    /// The checks and the work of [`Document::explode_instance`] without
+    /// the push or the last-copy bake: returns the
+    /// [`DocAction::Exploded`] step, the baked Objects, the change, and
+    /// the linked sets the explode left with fewer copies
+    /// ([`Document::sets_losing_copies`]). On `Err` the document is
+    /// untouched.
+    #[allow(clippy::type_complexity)]
+    fn explode_checked(
+        &mut self,
+        instance: InstanceId,
+    ) -> Result<(DocAction, Vec<ObjectId>, DocChange, Vec<ComponentId>), DocumentError> {
         // Mid-session, the exploded instance must be session geometry: its
         // baked objects are CREATED nodes, which the close folds into the
         // open group (group frame) or definition (component frame — where
@@ -22231,6 +22564,387 @@ impl Document {
         // linked set that holds a lock is not either: the set goes with it.
         self.refuse_frozen(&[NodeId::Instance(instance)])?;
         self.refuse_emptied_sets_frozen(&[NodeId::Instance(instance)])?;
+        let (action, created, change) = self.explode_core(instance, def, pose, parent, None)?;
+        let seeds = match &action {
+            DocAction::Exploded {
+                created_instances,
+                hidden_defs,
+                ..
+            } => {
+                let mut removed = vec![NodeId::Instance(instance)];
+                for (_, nodes) in hidden_defs {
+                    removed.extend(nodes.iter().copied());
+                }
+                self.sets_losing_copies(&removed, created_instances)
+            }
+            _ => Vec::new(),
+        };
+        Ok((action, created, change, seeds))
+    }
+
+    /// Unlink (linked copies): each listed placement of a linked set
+    /// becomes plain world geometry where it stands, as
+    /// [`Document::explode_instance`] bakes it, and a set left with a
+    /// single placement is no set at all: that last copy becomes plain too.
+    /// So unlinking one of two copies leaves two plain Objects (or groups),
+    /// and unlinking every copy leaves none linked. A set left with two or
+    /// more placements stays linked, unchanged.
+    ///
+    /// What each copy showed stays: its name (its own, else the set's), its
+    /// color (the placement's material bakes as an explode's does), whether
+    /// the person hid it, and, for the usual set of one Object or group, its
+    /// tags. A locked set's copies
+    /// stay locked, each with a lock of its own (OW-1: Unlink is Make
+    /// Unique for linked copies, and works on a locked copy). A set holding
+    /// a component placement among its roots cannot carry its lock that
+    /// way and refuses while locked.
+    ///
+    /// The copy left behind becomes plain only when that is an edit the
+    /// document allows here: a world placement, not in a frozen container,
+    /// inside the open session if one is, and bakeable (see
+    /// [`DocumentError::CannotExplodeNonUniformScale`]). Otherwise it stays a
+    /// placement of a set of one, which callers read as not linked (its
+    /// [`Document::definition_usage`] is 1).
+    ///
+    /// Returns the roots the LISTED placements became, in list order, and
+    /// the change. One undo entry: a compound labeled "Unlink" of one
+    /// [`DocAction::Exploded`] step per baked placement. Undo restores the
+    /// linked set exactly; redo re-bakes the same records.
+    ///
+    /// # Errors
+    /// - [`DocumentError::EmptySelection`] — `instances` is empty.
+    /// - [`DocumentError::UnknownInstance`] — a stale, hidden, or
+    ///   definition-owned placement.
+    /// - [`DocumentError::UnknownAttr`] — a placement of a component that
+    ///   is not a linked set (the wasm boundary says `NotLinked`).
+    /// - [`DocumentError::ExplodeSessionScope`] /
+    ///   [`DocumentError::ExplodeSessionOpen`] — a session is open and the
+    ///   placement is not session geometry, or its set is on loan.
+    /// - [`DocumentError::LockedNode`] — the placement sits in a frozen
+    ///   container (unlock the group first, as for Make Unique), or a locked
+    ///   set has a component placement among its roots.
+    /// - [`DocumentError::CannotExplodeNonUniformScale`] — as an explode.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn unlink_copies(
+        &mut self,
+        instances: &[InstanceId],
+    ) -> Result<(Vec<NodeId>, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "unlink_copies", count = instances.len());
+        if instances.is_empty() {
+            return Err(DocumentError::EmptySelection);
+        }
+        let mut targets: Vec<InstanceId> = Vec::with_capacity(instances.len());
+        for &i in instances {
+            if !targets.contains(&i) {
+                targets.push(i);
+            }
+        }
+        let listed = targets.len();
+        let mut defs: Vec<ComponentId> = Vec::new();
+        for &i in &targets {
+            let def = match self.instances.get(i) {
+                Some(r) if !r.hidden && r.owner_def.is_none() => r.def,
+                _ => return Err(DocumentError::UnknownInstance),
+            };
+            if !self.is_linked_set(def) {
+                return Err(DocumentError::UnknownAttr);
+            }
+            self.check_unlinkable(i)?;
+            if !defs.contains(&def) {
+                defs.push(def);
+            }
+        }
+        // The copy each set leaves behind, when it is the only one.
+        for &def in &defs {
+            if let Some(last) = self.lone_copy(def, &targets) {
+                targets.push(last);
+            }
+        }
+
+        // Every check has passed; an explode after the first can fail only
+        // on an invariant they cannot see, and the checkpoint makes even
+        // that leave the document untouched.
+        let checkpoint = (targets.len() > 1).then(|| self.clone());
+        let mut actions: Vec<DocAction> = Vec::with_capacity(targets.len());
+        let mut change = DocChange::default();
+        let mut roots: Vec<NodeId> = Vec::new();
+        for (k, &i) in targets.iter().enumerate() {
+            match self.unlink_core(i) {
+                Ok((action, step)) => {
+                    if k < listed
+                        && let DocAction::Exploded { created_roots, .. } = &action
+                    {
+                        roots.extend(created_roots.iter().copied());
+                    }
+                    actions.push(action);
+                    merge_doc_change(&mut change, step);
+                }
+                Err(e) => {
+                    if let Some(checkpoint) = checkpoint {
+                        *self = checkpoint;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        // A set the copies' own shapes placed may be left with one copy
+        // too (a copy inside a baked shape lost with its set): the same
+        // rule makes it plain, nested in the entry, which reads "Unlink".
+        let mut removed: Vec<NodeId> = Vec::new();
+        let mut added: Vec<InstanceId> = Vec::new();
+        for a in &actions {
+            if let DocAction::Exploded {
+                instance,
+                created_instances,
+                hidden_defs,
+                ..
+            } = a
+            {
+                removed.push(NodeId::Instance(*instance));
+                for (_, nodes) in hidden_defs {
+                    removed.extend(nodes.iter().copied());
+                }
+                added.extend(created_instances.iter().copied());
+            }
+        }
+        let seeds = self.sets_losing_copies(&removed, &added);
+        // A placement returned as a root stays live for the caller.
+        let keep: Vec<InstanceId> = roots
+            .iter()
+            .filter_map(|&n| match n {
+                NodeId::Instance(i) => Some(i),
+                _ => None,
+            })
+            .collect();
+        let bake = self.bake_lone_copies(&seeds, &keep, &mut change);
+        let unlink = DocAction::Compound {
+            actions,
+            meta: Some(CompoundMeta {
+                label: UNLINK_LABEL.to_string(),
+                origin: HistoryOrigin::User,
+                coalesce: None,
+            }),
+        };
+        self.undo.push(with_last_copies(unlink, bake));
+        self.commit_new_action();
+        self.debug_validate();
+        Ok((roots, change))
+    }
+
+    /// The copy linked set `def` is left with when it is its only one and
+    /// turning it into plain geometry is an edit the document allows here,
+    /// else `None`. The one rule [`Document::unlink_copies`] and every
+    /// operation that takes copies away ([`Document::bake_lone_copies`])
+    /// share: count the live placements of `def`, leaving out those in
+    /// `excluding` (the copies an Unlink is baking itself) and those owned
+    /// by a hidden definition; there must be exactly one, it must be a
+    /// world placement (a copy inside another definition stays, since
+    /// baking it would edit that definition), and
+    /// [`Document::check_unlinkable`] must pass (inside the open session if
+    /// one is, not in a frozen container, bakeable). `None` for a
+    /// definition that is not a live linked set. Pure.
+    fn lone_copy(&self, def: ComponentId, excluding: &[InstanceId]) -> Option<InstanceId> {
+        if !self.is_linked_set(def) {
+            return None;
+        }
+        let mut left = self.instances.iter().filter(|(i, r)| {
+            !r.hidden
+                && r.def == def
+                && !excluding.contains(i)
+                && r.owner_def
+                    .is_none_or(|o| self.components.get(o).is_some_and(|c| !c.hidden))
+        });
+        let (last, rec) = left.next()?;
+        if left.next().is_some() || rec.owner_def.is_some() {
+            return None;
+        }
+        self.check_unlinkable(last).ok().map(|()| last)
+    }
+
+    /// Bakes `instance`, a world placement of a linked set that
+    /// [`Document::check_unlinkable`] passed, into plain geometry where it
+    /// stands: [`Document::explode_core`] carrying what an Unlink carries
+    /// (the set's lock, the placement's tags). Returns the
+    /// [`DocAction::Exploded`] step, not pushed, and the change.
+    fn unlink_core(
+        &mut self,
+        instance: InstanceId,
+    ) -> Result<(DocAction, DocChange), DocumentError> {
+        let rec = &self.instances[instance];
+        let (def, pose, parent) = (rec.def, rec.pose, rec.parent);
+        let carry = UnlinkCarry {
+            locked: self.components[def].locked,
+            tags: rec.tags.clone(),
+        };
+        let (action, _, change) = self.explode_core(instance, def, pose, parent, Some(&carry))?;
+        Ok((action, change))
+    }
+
+    /// The linked sets a step left with fewer live placements than before:
+    /// each definition placed by an instance row among `removed` (rows the
+    /// step hid, which were live before it), counted once per row, less
+    /// the placements of it the same step made (`added`, the instances an
+    /// explode copied out). In first-seen order.
+    fn sets_losing_copies(&self, removed: &[NodeId], added: &[InstanceId]) -> Vec<ComponentId> {
+        let mut net: Vec<(ComponentId, isize)> = Vec::new();
+        let removed = removed.iter().filter_map(|&n| match n {
+            NodeId::Instance(i) => Some((i, 1)),
+            _ => None,
+        });
+        for (i, by) in removed.chain(added.iter().map(|&i| (i, -1))) {
+            let def = self.instances[i].def;
+            match net.iter_mut().find(|(d, _)| *d == def) {
+                Some((_, n)) => *n += by,
+                None => net.push((def, by)),
+            }
+        }
+        net.into_iter()
+            .filter(|&(d, n)| n > 0 && self.is_linked_set(d))
+            .map(|(d, _)| d)
+            .collect()
+    }
+
+    /// After a step took placements away from the linked sets `seeds`
+    /// ([`Document::sets_losing_copies`]): bakes the copy each is left
+    /// with when it is the only one ([`Document::lone_copy`]), as Unlink
+    /// bakes it, so a linked set that drops to one copy is no set at all;
+    /// and again for a set a bake itself left with one world copy.
+    /// Returns the [`LAST_COPY_LABEL`] compound of the bakes, not pushed
+    /// (the caller nests it in its own entry), and merges what they
+    /// changed into `change`; `None` when nothing was baked.
+    ///
+    /// A copy that may not be baked here stays a placement of a set of one
+    /// (callers read that as not linked). This bake is a side effect on a
+    /// copy the person did not touch, so it also leaves alone a copy that
+    /// carries an annotation (a dimension or a leader anchored to the
+    /// placement, which the bake would detach), and a copy in `keep` (a
+    /// root the calling step returns, which must stay live for its
+    /// caller). So does every copy when a bake
+    /// fails, which only an invariant the checks cannot see can cause: the
+    /// document is put back as it was before the first bake and the step
+    /// that called this still succeeds.
+    fn bake_lone_copies(
+        &mut self,
+        seeds: &[ComponentId],
+        keep: &[InstanceId],
+        change: &mut DocChange,
+    ) -> Option<DocAction> {
+        let lone_among = |doc: &Document, sets: &[ComponentId]| -> Vec<InstanceId> {
+            let mut lone: Vec<InstanceId> = Vec::new();
+            for &def in sets {
+                if let Some(last) = doc.lone_copy(def, &[])
+                    && !keep.contains(&last)
+                    && !doc.annotation_anchored_to(NodeId::Instance(last))
+                    && !lone.contains(&last)
+                {
+                    lone.push(last);
+                }
+            }
+            lone
+        };
+        let mut sets: Vec<ComponentId> = seeds.to_vec();
+        let mut lone = lone_among(self, &sets);
+        if lone.is_empty() {
+            return None;
+        }
+        let checkpoint = self.clone();
+        let mut actions: Vec<DocAction> = Vec::new();
+        let mut baked = DocChange::default();
+        // A bake can leave another set with one copy, or turn a set's one
+        // copy inside the baked shape into a world copy (its placement is
+        // copied out and the emptied set hidden): look again until nothing
+        // is left to bake. Each bake hides a placement, so this ends.
+        while !lone.is_empty() {
+            for i in lone {
+                match self.unlink_core(i) {
+                    Ok((action, step)) => {
+                        if let DocAction::Exploded {
+                            created_instances,
+                            hidden_defs,
+                            ..
+                        } = &action
+                        {
+                            let mut touched: Vec<NodeId> = created_instances
+                                .iter()
+                                .map(|&c| NodeId::Instance(c))
+                                .collect();
+                            for (_, nodes) in hidden_defs {
+                                touched.extend(nodes.iter().copied());
+                            }
+                            merge_unique(&mut sets, self.defs_placed_by(&touched));
+                        }
+                        actions.push(action);
+                        merge_doc_change(&mut baked, step);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "kernel::op",
+                            error = %e,
+                            "a linked set's last copy could not be made plain; it stays a set of one"
+                        );
+                        *self = checkpoint;
+                        return None;
+                    }
+                }
+            }
+            lone = lone_among(self, &sets);
+        }
+        merge_doc_change(change, baked);
+        Some(DocAction::Compound {
+            actions,
+            meta: Some(CompoundMeta {
+                label: LAST_COPY_LABEL.to_string(),
+                origin: HistoryOrigin::User,
+                coalesce: None,
+            }),
+        })
+    }
+
+    /// Every check [`Document::unlink_copies`] makes on one world placement
+    /// `instance` of a linked set before it bakes it. Pure.
+    fn check_unlinkable(&self, instance: InstanceId) -> Result<(), DocumentError> {
+        self.explode_scope_node(NodeId::Instance(instance))?;
+        let rec = &self.instances[instance];
+        let def = rec.def;
+        self.refuse_def_on_loan(def)?;
+        // Unlink is the one edit a locked copy takes (OW-1), but the copy's
+        // container is rewritten: a frozen one refuses, as for Make Unique.
+        self.refuse_frozen_container(NodeId::Instance(instance))?;
+        let c = &self.components[def];
+        let members: Vec<NodeId> = c
+            .members
+            .iter()
+            .copied()
+            .filter(|&m| self.node_live(m))
+            .collect();
+        if c.locked && members.iter().any(|m| matches!(m, NodeId::Instance(_))) {
+            return Err(DocumentError::LockedNode {
+                node: NodeId::Instance(instance),
+                via_shared_shape: false,
+            });
+        }
+        if rec.pose.similarity_scale().is_none() && !self.live_def_sketches_of(def).is_empty() {
+            return Err(DocumentError::CannotExplodeNonUniformScale);
+        }
+        Ok(())
+    }
+
+    /// The work of [`Document::explode_instance`] once its checks have
+    /// passed, without the push: bakes `instance`'s members into the
+    /// world, hides it, hides a linked set it emptied, and returns the
+    /// [`DocAction::Exploded`] entry, the baked Objects and the change.
+    /// `carry` is what an Unlink ([`Document::unlink_copies`]) gives the
+    /// copy's roots besides an explode's own rules: the set's lock and the
+    /// placement's tags.
+    fn explode_core(
+        &mut self,
+        instance: InstanceId,
+        def: ComponentId,
+        pose: Transform,
+        parent: Option<GroupId>,
+        carry: Option<&UnlinkCarry>,
+    ) -> Result<(DocAction, Vec<ObjectId>, DocChange), DocumentError> {
         let member_nodes: Vec<NodeId> = match self.components.get(def) {
             Some(c) if !c.hidden => c
                 .members
@@ -22411,6 +23125,48 @@ impl Document {
             }
         }
 
+        // An Unlink: the copy's roots are what the placement showed. They
+        // carry the set's lock as their own (OW-1: an unlinked locked copy
+        // stays locked, with a lock of its own), and a lone root takes the
+        // placement's tags (a linked copy's tags live on its placement).
+        if let Some(carry) = carry {
+            let lone = created_roots.len() == 1;
+            // A copy the person hid stays hidden (view state, as a join
+            // carries it). The placement keeps its own flag, so undo finds
+            // it unchanged; redo shows these same records, flag and all.
+            if self.user_hidden_instances.contains(&instance) {
+                for &root in &created_roots {
+                    self.set_node_user_hidden(root, true);
+                }
+            }
+            for &root in &created_roots {
+                match root {
+                    NodeId::Object(o) => {
+                        let rec = &mut self.objects[o];
+                        rec.locked |= carry.locked;
+                        if lone {
+                            rec.tags.clone_from(&carry.tags);
+                        }
+                    }
+                    NodeId::Group(g) => {
+                        let rec = &mut self.groups[g];
+                        rec.locked |= carry.locked;
+                        if lone {
+                            rec.tags.clone_from(&carry.tags);
+                        }
+                    }
+                    // Refused up front for a locked set
+                    // (`Document::unlink_copies`): a placement's lock is its
+                    // own definition's.
+                    NodeId::Instance(i) => {
+                        if lone {
+                            self.instances[i].tags.clone_from(&carry.tags);
+                        }
+                    }
+                }
+            }
+        }
+
         self.instances[instance].hidden = true;
         if let Some(pg) = parent {
             self.splice_out_parent(pg, NodeId::Instance(instance), &created_roots);
@@ -22424,7 +23180,7 @@ impl Document {
         // with it: the copies are the loose result now (and so does any
         // set placed only by that set's hidden member instances).
         let hidden_defs = self.hide_emptied_linked_sets(vec![self.instances[instance].def]);
-        self.undo.push(DocAction::Exploded {
+        let action = DocAction::Exploded {
             instance,
             created: created.clone(),
             created_groups: created_groups.clone(),
@@ -22435,9 +23191,7 @@ impl Document {
             baked_materials,
             baked_instance_materials,
             hidden_defs: hidden_defs.clone(),
-        });
-        self.commit_new_action();
-        self.debug_validate();
+        };
 
         let mut change = DocChange {
             objects_touched: created.clone(),
@@ -22449,7 +23203,7 @@ impl Document {
         change.instances_touched.extend(created_instances);
         change.groups_touched.extend(parent);
         touch_hidden_defs(&mut change, &hidden_defs);
-        Ok((created, change))
+        Ok((action, created, change))
     }
 
     /// Copy one def-owned member instance into `new_def` for
@@ -26269,6 +27023,47 @@ impl Document {
         self.audit_locks_in(action, &[]);
     }
 
+    /// The commit audit for one step of an Unlink
+    /// ([`Document::unlink_copies`]), a [`DocAction::Exploded`] of a linked
+    /// set's placement. Unlink works on a locked copy (OW-1), so the
+    /// placement it baked and the set it emptied (hidden with its members,
+    /// unchanged) are exempt; everything else the step touched is audited
+    /// as usual (the container it was spliced out of above all). In return
+    /// the lock must have moved, not gone: when the set was locked, every
+    /// root the copy became is locked.
+    #[cfg(any(debug_assertions, test))]
+    fn audit_unlinked(&self, step: &DocAction) {
+        let DocAction::Exploded {
+            instance,
+            created_roots,
+            hidden_defs,
+            ..
+        } = step
+        else {
+            unreachable!("an Unlink holds only Exploded steps");
+        };
+        let mut exempt = vec![EntityRef::Instance(*instance)];
+        for (d, nodes) in hidden_defs {
+            exempt.push(EntityRef::Component(*d));
+            exempt.extend(nodes.iter().map(|&n| change_entity(n)));
+        }
+        self.audit_locks_in(step, &exempt);
+        let def = self.instances[*instance].def;
+        if self.components[def].locked {
+            for &root in created_roots {
+                let carried = match root {
+                    NodeId::Object(o) => self.objects[o].locked,
+                    NodeId::Group(g) => self.groups[g].locked,
+                    NodeId::Instance(i) => self.components[self.instances[i].def].locked,
+                };
+                assert!(
+                    carried,
+                    "lock audit: Unlink dropped the lock of {def:?} on {root:?}"
+                );
+            }
+        }
+    }
+
     /// [`Document::audit_locks`] for one entry or compound child. `fresh`
     /// is what the Make Unique call this child belongs to created (empty
     /// outside one): a cascading or deep call is one "Make Unique"
@@ -26278,6 +27073,22 @@ impl Document {
         match action {
             DocAction::Compound { actions, meta } => {
                 if !actions.iter().any(action_holds_lock_change) {
+                    // An Unlink, or the last copy of a set made plain after
+                    // a delete or explode took the others (the same bake,
+                    // nested in that step's entry).
+                    if meta
+                        .as_ref()
+                        .is_some_and(|m| m.label == UNLINK_LABEL || m.label == LAST_COPY_LABEL)
+                        && !actions.is_empty()
+                        && actions
+                            .iter()
+                            .all(|a| matches!(a, DocAction::Exploded { .. }))
+                    {
+                        for child in actions {
+                            self.audit_unlinked(child);
+                        }
+                        return;
+                    }
                     let one_call = meta.as_ref().is_some_and(|m| m.label == "Make Unique")
                         && actions
                             .iter()
@@ -26313,7 +27124,8 @@ impl Document {
                 own.extend(made_unique_fresh(std::slice::from_ref(action)));
                 own
             }
-            _ => Vec::new(),
+            // An Unlink step's own exemptions ([`Document::audit_unlinked`]).
+            _ => fresh.to_vec(),
         };
         let changes = self.action_changes(action);
         if changes.full {
@@ -27208,8 +28020,12 @@ impl Document {
         ) {
             return HistoryKind::new("make-solid");
         }
+        // The last copy of a linked set made plain after a delete or an
+        // explode is part of that step, not a step of its own: the entry
+        // reads as the delete or explode it follows.
         let kinds: Vec<HistoryKind> = actions
             .iter()
+            .filter(|a| !is_last_copy_step(a))
             .map(|a| self.describe_action(a, undo_index))
             .collect();
         // Grouped by rendered label, exactly as the labels-only version did,

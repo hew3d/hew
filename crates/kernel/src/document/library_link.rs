@@ -1493,6 +1493,16 @@ impl Document {
         if swaps.is_empty() {
             return (report, DocChange::default());
         }
+        // A linked set the old contents placed, left with one copy, has
+        // that copy made plain in the same entry (the last-copy rule).
+        let mut removed: Vec<NodeId> = swaps
+            .iter()
+            .flat_map(|s| s.retired.iter().copied())
+            .collect();
+        for (_, nodes) in &hidden_defs {
+            removed.extend(nodes.iter().copied());
+        }
+        let seeds = self.sets_losing_copies(&removed, &instances);
         let action = DocAction::UpdatedFromLibrary {
             swaps,
             objects,
@@ -1503,8 +1513,9 @@ impl Document {
             hidden_defs,
             tags,
         };
-        let change = self.library_update_change(&action);
-        self.undo.push(action);
+        let mut change = self.library_update_change(&action);
+        let bake = self.bake_lone_copies(&seeds, &[], &mut change);
+        self.undo.push(with_last_copies(action, bake));
         self.commit_new_action();
         self.debug_validate();
         (report, change)

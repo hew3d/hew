@@ -560,6 +560,8 @@ describe('DocumentTree — linked copies', () => {
       is_linked: () => true,
       definition_usage: () => ids.length,
       instances_of: () => ids,
+      owner_definition: () => undefined,
+      component_has_nested_members: () => false,
       component_name: () => 'Leg',
       instance_name: (id: bigint) => opts.instanceNames?.[String(id)],
       component_member_objects: () => [9n],
@@ -587,8 +589,11 @@ describe('DocumentTree — linked copies', () => {
   it('a_set_of_one_shows_no_badge', () => {
     const { container } = render(<DocumentTree scene={linkedScene({ solo: true })} {...baseProps} onSelect={vi.fn()} />)
     expect(screen.queryByTestId('outliner-copies-badge')).toBeNull()
-    // Still the glyph, and still a board by name.
-    expect(container.querySelectorAll('[data-node-icon="linked"]').length).toBe(1)
+    // Linked means more than one: no glyph, and still a board by name.
+    expect(container.querySelectorAll('[data-node-icon="linked"]').length).toBe(0)
+    // It wears the Object icon, not the component one.
+    expect(container.querySelector('[data-node-icon="instance"]')).toBeNull()
+    expect(container.querySelector('[data-node-icon="object-solid"]')).not.toBeNull()
     expect(screen.getByTestId('outliner-row-label').textContent).toBe('Leg')
   })
 
@@ -617,7 +622,7 @@ describe('DocumentTree — linked copies', () => {
     expect(screen.getByTestId('outliner-row-label').textContent).toBe('Chair')
   })
 
-  it('the Copies menu offers Unlink, Unlink all, Make component, and Select all copies', () => {
+  it('the Linked menu offers Unlink, Unlink all, Make component, and Select all copies', () => {
     const a = actions()
     render(<DocumentTree scene={linkedScene()} {...baseProps} onSelect={vi.fn()} linkedActions={a} />)
     fireEvent.click(screen.getAllByTestId('outliner-copies-button')[0])
@@ -630,10 +635,9 @@ describe('DocumentTree — linked copies', () => {
     expect(a.onSelectCopies).toHaveBeenCalledWith({ kind: 'instance', id: 4n })
   })
 
-  it('a set of one offers no Unlink all or Select all copies', () => {
+  it('a set of one is not linked: no menu offering Unlink', () => {
     render(<DocumentTree scene={linkedScene({ solo: true })} {...baseProps} onSelect={vi.fn()} linkedActions={actions()} />)
-    fireEvent.click(screen.getByTestId('outliner-copies-button'))
-    expect(screen.getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Unlink', 'Make component', 'Rename'])
+    expect(screen.queryByTestId('outliner-copies-button')).toBeNull()
   })
 
   it('renaming from the row reports the typed name for the row\'s node', () => {

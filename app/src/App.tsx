@@ -62,7 +62,7 @@ import { ChangesPanel } from './panels/ChangesPanel'
 import { ModelHealthPanel, selectionObjectIds } from './panels/ModelHealthPanel'
 import { bakeSmooth, setSmoothLevel, smoothDenseToasts, smoothLevels, smoothRefusal } from './panels/smoothActions'
 import { ACTION_TOAST_MS, toastActionFor, type ToastAction } from './toastActions'
-import { anyLocked, allLockableNodes, isLocked, gateSelection, leftBehindMessage, lockHintFor, lockToastSteps } from './lock/lockModel'
+import { anyLocked, allLockableNodes, isLocked, isLockToastCode, gateSelection, leftBehindMessage, lockHintFor, lockToastSteps } from './lock/lockModel'
 import { lockedAmong, setNodesLocked, unlockedAmong } from './lock/lockActions'
 import { leaveBehind, refuseIfLocked, toastLocked } from './lock/lockGate'
 import { HISTORY_TRIM_NOTE_MS, HISTORY_TRIM_TOOLTIP, historyTrimNote, takeHistoryTrim } from './historyTrim'
@@ -78,7 +78,7 @@ import { parseHistoryEntries } from './panels/changesModel'
 import { ToolRail } from './panels/ToolRail'
 import { TrayHideRow, TrayShowTab } from './panels/TrayToggle'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, mergeSelection, withNodes, isNodeItem, type SelItem, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, isSketchScopedKind, makeLabelFor, placementLabel, stripTagSuffix, type NodeRef } from './panels/treeModel'
+import { nextSelection, mergeSelection, withNodes, isNodeItem, type SelItem, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, linkedSetKind, pruneDeadSelection, structuralSelection, isSketchScopedKind, makeLabelFor, placementLabel, stripTagSuffix, type NodeRef } from './panels/treeModel'
 import { SelectionPathStrip } from './panels/SelectionPathStrip'
 import { buildSelectionPath, frameClickAction, hoverLine, type HitLeaf } from './panels/selectionPath'
 import { tagPathKey } from './panels/tagModel'
@@ -207,7 +207,7 @@ import { routeBooleanMany } from './viewport/placementBoolean'
 import { CutScopeStrip } from './panels/CutScopeStrip'
 import { findLookAlikes, linkSimilar, linkSimilarMessage, linkSimilarScope, countLookAlikes, restrictToSelection } from './linkSimilar'
 import { useLookAlikeGroups } from './useLookAlikeGroups'
-import { blockedWhileEditing, promoteForSave, undoPromotionIfUnmoved, linkGates, linkedPlacementOf, unlinkCopy, unlinkAllCopies, promoteToComponent, renameLinkedCopy } from './linkedCopies'
+import { blockedWhileEditing, promoteForSave, undoPromotionIfUnmoved, linkGates, linkedPlacementOf, wrapperPlacementOf, isLinkedSet, isWrapperPlacement, unlinkCopy, unlinkAllCopies, makeUniqueCopy, promoteToComponent, renameLinkedCopy } from './linkedCopies'
 import { SettingsWindow } from './settings/SettingsWindow'
 import { FluentSettingsPage } from './settings/FluentSettingsPage'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
@@ -2616,7 +2616,13 @@ export default function App() {
     // A locked hint (or the kernel's own locked refusal) offers the way out.
     const actions = modelHealth !== undefined ? [modelHealth] : lockToastActionsRef.current(code)
     const persistent = opts?.persistent === true
-    setToasts((prev) => [...prev, { id, message, code, isError, emphasis, actions, persistent }])
+    // Never two lock toasts: a new one replaces the old. Nor two identical
+    // ordinary toasts (the same words and code) stacked from a repeated action.
+    const isLockToast = isLockToastCode(code)
+    setToasts((prev) => [
+      ...prev.filter((x) => (isLockToast ? !isLockToastCode(x.code) : !(x.sticky !== true && x.message === message && x.code === code))),
+      { id, message, code, isError, emphasis, actions, persistent },
+    ])
     if (persistent) return
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id))
@@ -2651,6 +2657,29 @@ export default function App() {
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id))
   }, [])
+
+  // A lock toast goes away on a press anywhere outside it (the press still
+  // does what it normally does: this only listens, in the capture phase, and
+  // never stops the event) and on Escape (also only listening, so a tool's own
+  // Escape still runs).
+  const lockToastUp = toasts.some((x) => isLockToastCode(x.code))
+  useEffect(() => {
+    if (!lockToastUp) return
+    const dismissLock = () => setToasts((prev) => prev.filter((x) => !isLockToastCode(x.code)))
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.target instanceof Element && e.target.closest('[data-lock-toast]') !== null) return
+      dismissLock()
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') dismissLock()
+    }
+    window.addEventListener('pointerdown', onPointerDown, true)
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown, true)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [lockToastUp])
 
   // A sticky, updatable toast — the Library save flow's "Rendering
   // thumbnail…" → "Saved" progression. Bypasses handleToast's LogStore/
@@ -2864,6 +2893,7 @@ export default function App() {
       labelFor,
       memberName,
       draftOwner,
+      isLinkedCopy: (id) => isWrapperPlacement(scene, id),
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathLabels, sessionStack, activeContext, selectedIds, pathHit, sessionMembers])
@@ -2886,6 +2916,7 @@ export default function App() {
     return hoverLine(
       { object: inferenceInfo.object, instance: inferenceInfo.instance },
       parentOf, pathLabels.labelFor, pathLabels.memberName, isOpenInstance,
+      (id) => isWrapperPlacement(pathLabels.scene, id),
     )
   }, [pathLabels, inferenceInfo?.object, inferenceInfo?.instance, sessionStack, activeContext, sessionMembers])
 
@@ -3018,7 +3049,12 @@ export default function App() {
     } catch {
       smoothObjects = []
     }
-    const linkedSelection = linkedPlacementOf(scene, selectedIds) !== null
+    // Any placement of a linked wrapper reads as a plain Object or Group, a
+    // set of one included: Place Copy and Make Unique speak of components.
+    // Explode stays for a real linked set only; an Object has no Explode.
+    const wrapperSelection = wrapperPlacementOf(scene, selectedIds) !== null
+    const linkedSelection = wrapperSelection
+    const wrapperOfOne = wrapperSelection && linkedPlacementOf(scene, selectedIds) === null
     // Lock (OW-1): Lock needs something unlocked selected, Unlock ▸ Selected
     // something locked, Unlock ▸ All anything locked anywhere. A component
     // open for editing refuses Lock (the kernel's ExplodeSessionScope) but
@@ -3060,7 +3096,7 @@ export default function App() {
         !componentFrameOpen && activeContext.length === 0 && canMakeComponent(selectedIds, parentOf),
       // A linked copy has its own copy actions; Make Unique and Place Copy speak of components.
       canPlaceCopy: !componentFrameOpen && canPlaceInstance(selectedIds) && !linkedSelection,
-      canExplode: canExplodeInstance(selectedIds),
+      canExplode: canExplodeInstance(selectedIds) && !wrapperOfOne,
       canMakeUnique: canMakeUnique(selectedIds) && !linkedSelection,
       // Object ▸ Flip Along: anything that can move can flip (solids,
       // groups, placements, and drawing).
@@ -3113,17 +3149,15 @@ export default function App() {
     const indexOf = (kind: NodeRef['kind'], id: bigint) =>
       treeIndex.get(nodeKey({ kind, id })) ?? 0
 
-    const pushNode = (kind: NodeRef['kind'], id: bigint, label: string, linkedCopy = false) => {
+    const pushNode = (kind: NodeRef['kind'], id: bigint, label: string, linkedKind: 'object' | 'group' | false = false) => {
       entries.push({
         id: `jump-node:${kind}:${id}`,
         label:
-          kind === 'object'
+          kind === 'object' || linkedKind === 'object'
             ? t({ comment: 'Command palette entry that jumps to a named object', message: `Object: ${label}` })
-            : kind === 'group'
+            : kind === 'group' || linkedKind === 'group'
               ? t({ comment: 'Command palette entry that jumps to a named group', message: `Group: ${label}` })
-              : linkedCopy
-                ? t({ comment: 'Command palette entry that jumps to a named linked copy', message: `Copy: ${label}` })
-                : t({ comment: 'Command palette entry that jumps to a named component instance', message: `Component: ${label}` }),
+              : t({ comment: 'Command palette entry that jumps to a named component instance', message: `Component: ${label}` }),
         description: t`Select it and reveal it in the Outliner.`,
         // oxlint-disable-next-line lingui/no-unlocalized-strings -- palette group ID
         group: 'Model',
@@ -3137,7 +3171,7 @@ export default function App() {
       pushNode('group', id, resolveLabel(scene.group_name(id), undefined, 'group', indexOf('group', id)))
     })
     Array.from(scene.instance_ids()).forEach((id) => {
-      pushNode('instance', id, placementLabel(scene, id, indexOf('instance', id)), scene.is_linked(id))
+      pushNode('instance', id, placementLabel(scene, id, indexOf('instance', id)), scene.is_linked(id) ? linkedSetKind(scene, scene.instance_def(id) ?? 0n) : false)
     })
 
     // Unique tag paths across all nodes (same walk the Tags panel does).
@@ -5338,7 +5372,11 @@ export default function App() {
     // A linked copy cannot stand for an item: the extract would carry its
     // "linked" mark into the Library file, and saving it the usual way makes
     // it a component first (renaming and unlinking it). The popover says so.
-    if (scene.is_linked(target.nodeIds[0]!)) return { linkedCopy: true as const, itemName: ref.name }
+    // The same holds for a wrapper left with one copy, which reads as a plain
+    // Object but still carries the mark; only the wording differs.
+    if (isWrapperPlacement(scene, target.nodeIds[0]!)) {
+      return { linkedCopy: true as const, linkedSet: isLinkedSet(scene, target.nodeIds[0]!), itemName: ref.name }
+    }
     return {
       linkedCopy: false as const,
       itemId: link.item,
@@ -5526,13 +5564,17 @@ export default function App() {
         // goes through: a failed extract takes the promotion back.
         const linked =
           target.kind === 'selection' && target.nodeIds.length === 1 && target.nodeKinds[0] === 2
-            ? linkedPlacementOf(scene, [{ kind: 'instance', id: target.nodeIds[0] }])
+            ? wrapperPlacementOf(scene, [{ kind: 'instance', id: target.nodeIds[0] }])
             : null
         if (linked !== null && updating !== undefined) {
           // Never reached from the popover (it does not offer the update for a
           // linked copy): an extract would carry the "linked" mark into the
           // item, and promoting would silently rename and unlink the set.
-          handleToast(t`This part is a linked copy. Make it a component, or unlink it, before updating “${name}” in the Library.`)
+          handleToast(
+            isLinkedSet(scene, linked.instance)
+              ? t`This part is a linked copy. Make it a component, or unlink it, before updating “${name}” in the Library.`
+              : t`Make this part a component before updating “${name}” in the Library.`,
+          )
           return
         }
         if (linked !== null) {
@@ -6527,7 +6569,7 @@ export default function App() {
     if (copied === null) return
     // Delete exactly what the copy carried (a picked edge's whole shape).
     const go = scene === null ? copied : cutTargets(scene, copied)
-    viewportApi.current?.runDelete(go)
+    viewportApi.current?.runDelete(go, [], [], { cut: true })
     // Only nodes were copied: guides and annotations stay, still selected.
     setSelection((cur) => cur.filter((n) => !isNodeItem(n) || !go.some((c) => nodeEq(c, n))))
     setDocRev((r) => r + 1)
@@ -8413,7 +8455,7 @@ export default function App() {
     const scene = sceneRef.current
     // Make Component needs every operand: a locked one refuses it whole.
     if (scene !== null && refuseIfLocked(scene, selectedIds, handleToast, { descendants: true })) return
-    const linked = scene !== null && !componentFrameOpen ? linkedPlacementOf(scene, selectedIds) : null
+    const linked = scene !== null && !componentFrameOpen ? wrapperPlacementOf(scene, selectedIds) : null
     if (linked !== null) {
       setPromoteTarget({ instance: linked.instance, defaultName: linkedLabelOf(linked.instance) })
       return
@@ -8446,18 +8488,19 @@ export default function App() {
     return true
   }
 
-  /** Unlink this copy (or every copy). The selection stays on the same copy.
-   *  `node` is the Outliner row the action came from; the Edit menu and dock
+  /** Unlink this copy (or every copy). The copy becomes a new Object/Group, so
+   *  the selection moves to what it became. `node` is the Outliner row the action came from; the Edit menu and dock
    *  act on the selection. */
   const handleUnlink = (all: boolean, node?: NodeRef) => {
     if (blockedWhileEditing(componentFrameOpen, handleToast)) return
     const scene = sceneRef.current
     const linked = scene !== null ? linkedPlacementOf(scene, node !== undefined ? [node] : selectedIds) : null
-    if (linked === null || (all && linked.copies < 2)) return
-    runLinkedOp((s) => {
-      if (all) unlinkAllCopies(s, linked.instance)
-      else unlinkCopy(s, linked.instance)
+    if (linked === null || (all && linked.topLevel.length < 2)) return
+    let made: NodeRef[] = []
+    const ok = runLinkedOp((s) => {
+      made = all ? unlinkAllCopies(s, linked.instance) : unlinkCopy(s, linked.instance)
     })
+    if (ok && made.length > 0) setSelection((cur) => withNodes(cur, made))
   }
 
   /** Edit ▸ Link identical copies: over the selected Objects (two or more),
@@ -8484,7 +8527,7 @@ export default function App() {
     const scene = sceneRef.current
     const linked = scene !== null ? linkedPlacementOf(scene, node !== undefined ? [node] : selectedIds) : null
     if (scene === null || linked === null) return
-    setSelection(Array.from(scene.instances_of(linked.definition)).map((id) => ({ kind: 'instance' as const, id })))
+    setSelection(linked.topLevel.map((id) => ({ kind: 'instance' as const, id })))
   }
 
   /** Outliner row actions for a linked copy (the row's "Copies" menu). */
@@ -8505,7 +8548,7 @@ export default function App() {
   /** The label a linked copy shows in the Outliner (also the default name for Make component). */
   const linkedLabelOf = (instance: bigint): string => {
     const scene = sceneRef.current
-    if (scene === null) return t`Copies`
+    if (scene === null) return entityLabel('object', null)
     return placementLabel(scene, instance, sharedTreeIndex?.get(nodeKey({ kind: 'instance', id: instance })) ?? 0)
   }
 
@@ -8634,7 +8677,8 @@ export default function App() {
           const s = sceneRef.current
           if (s === null) return
           if (s.is_linked(node.id)) {
-            runLinkedOp((sc) => unlinkCopy(sc, node.id))
+            // Make Unique keeps the placement's id, so the selection stays.
+            runLinkedOp((sc) => makeUniqueCopy(sc, node.id))
           } else {
             viewportApi.current?.runMakeUnique(node.id)
           }
@@ -9223,7 +9267,7 @@ export default function App() {
               hidden={cameraDragging}
               activeToolId={toolActionId(activeTool)}
               hoveringSketchRegion={hoveringSketchRegion}
-              gates={{ canGroup: canGroupNow, canMakeComponent: canMakeComp || (menuGates?.canPromote ?? false), canBoolean, canSaveToLibrary: libraryStore().available(), canUnlink: menuGates?.canUnlink ?? false, canUnlinkAll: menuGates?.canUnlinkAll ?? false, canLock: menuGates?.canLock ?? false, canUnlock: menuGates?.canUnlock ?? false }}
+              gates={{ canGroup: canGroupNow, canMakeComponent: canMakeComp || (menuGates?.canPromote ?? false), canBoolean, canSaveToLibrary: libraryStore().available(), canUnlink: menuGates?.canUnlink ?? false, canUnlinkAll: menuGates?.canUnlinkAll ?? false, linkedKind: menuGates?.linkedKind ?? null, presentedKind: menuGates?.presentedKind ?? null, canLock: menuGates?.canLock ?? false, canUnlock: menuGates?.canUnlock ?? false }}
               onRun={(id) => menuActionRef.current(id)}
             />
           </div>
@@ -9252,6 +9296,7 @@ export default function App() {
                 <div
                   key={toast.id}
                   data-testid="toast"
+                  data-lock-toast={isLockToastCode(toast.code) ? '' : undefined}
                   data-emphasis={toast.emphasis === true ? 'true' : undefined}
                   onClick={() => dismissToast(toast.id)}
                   style={{
@@ -9337,6 +9382,30 @@ export default function App() {
                       {action.label}
                     </button>
                   ))}
+                  {isLockToastCode(toast.code) && (
+                    <button
+                      type="button"
+                      data-toast-close
+                      aria-label={t`Close`}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        dismissToast(toast.id)
+                      }}
+                      style={{
+                        flexShrink: 0,
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'inherit',
+                        cursor: 'pointer',
+                        fontFamily: 'inherit',
+                        fontSize: '16px',
+                        lineHeight: 1,
+                        padding: '0 2px',
+                      }}
+                    >
+                      ×
+                    </button>
+                  )}
                 </div>
               )
             })}
@@ -9452,8 +9521,6 @@ export default function App() {
               sessionMembers={sessionMembers}
               onShowHealth={handleShowObjectHealth}
               onToast={handleToast}
-              onUnlink={(node) => linkedRowActions.onUnlink(node)}
-              onMakeComponent={(node) => linkedRowActions.onMakeComponent(node)}
             />
           </TraySection>
           <TraySection title={trayTitle.outliner} collapsed={!showModelInfo} onToggle={() => setShowModelInfo((v) => !v)}>
@@ -10268,7 +10335,7 @@ export default function App() {
               ? undefined
               : { name: libraryUpdateOffer.itemName, confirm: libraryUpdateOffer.confirm, cannotCompare: libraryUpdateOffer.confirmKind === 'different' }
           }
-          updateInLibraryBlocked={libraryUpdateOffer?.linkedCopy === true ? { name: libraryUpdateOffer.itemName } : undefined}
+          updateInLibraryBlocked={libraryUpdateOffer?.linkedCopy === true ? { name: libraryUpdateOffer.itemName, linkedSet: libraryUpdateOffer.linkedSet } : undefined}
           onUpdateInLibrary={libraryUpdateOffer === null || libraryUpdateOffer.linkedCopy ? undefined : () => handleUpdateInLibrary(libraryUpdateOffer)}
           onSave={handleSaveToLibraryCommit}
           onClose={() => setSaveToLibraryTarget(null)}

@@ -2928,6 +2928,65 @@ describe('App — toast severity', () => {
   })
 })
 
+describe('App — the lock toast', () => {
+  function latestOnToast(): (message: string, code?: string) => void {
+    const calls = vi.mocked(Viewport).mock.calls
+    const props = calls[calls.length - 1][0] as { onToast: (m: string, c?: string) => void }
+    return props.onToast
+  }
+  const lockToasts = () => screen.queryAllByTestId('toast').filter((el) => el.hasAttribute('data-lock-toast'))
+
+  it('never stacks: a second refusal replaces the first', async () => {
+    await renderAndLoad()
+    act(() => latestOnToast()('Locked', 'LockedNode'))
+    act(() => latestOnToast()('Both copies are locked', 'LockedNode'))
+    act(() => latestOnToast()('Both copies are locked', 'LockedNode'))
+    expect(lockToasts()).toHaveLength(1)
+    expect(lockToasts()[0].textContent).toContain('Both copies are locked')
+  })
+
+  it('has a close button that dismisses it', async () => {
+    await renderAndLoad()
+    act(() => latestOnToast()('Locked', 'LockedNode'))
+    fireEvent.click(within(lockToasts()[0]).getByRole('button', { name: 'Close' }))
+    expect(lockToasts()).toHaveLength(0)
+  })
+
+  it('goes away on a press anywhere outside it, without swallowing the press, but not on a press inside', async () => {
+    await renderAndLoad()
+    act(() => latestOnToast()('Locked', 'LockedNode'))
+    fireEvent.pointerDown(lockToasts()[0])
+    expect(lockToasts()).toHaveLength(1)
+    let reached = false
+    const probe = document.createElement('div')
+    probe.addEventListener('pointerdown', () => { reached = true })
+    document.body.appendChild(probe)
+    fireEvent.pointerDown(probe)
+    probe.remove()
+    expect(reached).toBe(true)
+    expect(lockToasts()).toHaveLength(0)
+  })
+
+  it('goes away on Escape, which still reaches everything else', async () => {
+    await renderAndLoad()
+    act(() => latestOnToast()('Locked', 'LockedNode'))
+    const e = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    act(() => { window.dispatchEvent(e) })
+    expect(lockToasts()).toHaveLength(0)
+    expect(e.defaultPrevented).toBe(false)
+  })
+
+  it('leaves other toasts alone, and an identical ordinary toast does not stack', async () => {
+    await renderAndLoad()
+    act(() => latestOnToast()('nothing to undo', 'NothingToUndo'))
+    act(() => latestOnToast()('nothing to undo', 'NothingToUndo'))
+    act(() => latestOnToast()('Locked', 'LockedNode'))
+    fireEvent.pointerDown(document.body)
+    expect(screen.getAllByText('nothing to undo')).toHaveLength(1)
+    expect(lockToasts()).toHaveLength(0)
+  })
+})
+
 describe('App — Smooth surface that can no longer be drawn', () => {
   it('toasts once per object after a commit that touched it, and stays quiet for untouched ones', async () => {
     const m = mockScene as unknown as Record<string, unknown>

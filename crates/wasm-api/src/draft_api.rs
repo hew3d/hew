@@ -4387,6 +4387,73 @@ mod tests {
         assert_eq!(scene.doc.object(object_id(b)).unwrap().faces().len(), faces);
     }
 
+    /// OW-1: the detached shape drawn on a locked face pulls into a new
+    /// Object while the box is STILL locked, the way Push/Pull reaches it:
+    /// the face and the region are picked on one ray and tie on depth from
+    /// any eye point (oblique, far, a non-unit direction), the region is
+    /// detached, and `extrude_region` makes a new Object. The locked box is
+    /// untouched and stays locked.
+    #[test]
+    fn a_detached_shape_on_a_locked_face_pulls_while_the_box_stays_locked() {
+        let mut scene = Scene::new();
+        let (b, f) = locked_ground_box(&mut scene);
+        let d = scene.draft_begin_face(b, f, "Rectangle").unwrap();
+        locked_face_rect(&mut scene, b, d);
+        let before = scene.doc.state_hash();
+        let faces = scene.doc.object(object_id(b)).unwrap().faces().len();
+
+        for (o, t) in [
+            ([23.0, -17.0, 11.0], [1.1, 0.9, 1.0]),
+            ([-40.0, 33.0, 9.0], [0.7, 1.3, 1.0]),
+            ([3.0, 2.0, 400.0], [1.2, 1.2, 1.0]),
+            ([1.0e3, -2.0e3, 1.5e3], [1.0, 1.0, 1.0]),
+        ] {
+            let dir = [
+                (t[0] - o[0]) * 3.7,
+                (t[1] - o[1]) * 3.7,
+                (t[2] - o[2]) * 3.7,
+            ];
+            let face = scene
+                .pick_face(o[0], o[1], o[2], dir[0], dir[1], dir[2])
+                .unwrap();
+            let region = scene
+                .pick_sketch_region(o[0], o[1], o[2], dir[0], dir[1], dir[2])
+                .unwrap();
+            // The region's depth is in raw-ray units, the face's in metres
+            // along the normalized ray (the app scales one onto the other).
+            let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+            assert!(
+                (region.depth() * len - face.depth()).abs() <= 1e-7,
+                "the shape ties with the face from {o:?}: {} vs {}",
+                region.depth() * len,
+                face.depth()
+            );
+        }
+        let face = scene.pick_face(1.0, 1.0, 5.0, 0.0, 0.0, -1.0).unwrap();
+        assert_eq!(face.object(), b);
+        let region = scene
+            .pick_sketch_region(1.0, 1.0, 5.0, 0.0, 0.0, -1.0)
+            .unwrap();
+        assert!(region.detached(), "the shape on the face is detached");
+        assert!(
+            region.depth() <= face.depth() + 1e-7,
+            "the shape ties with the face it lies on: {} vs {}",
+            region.depth(),
+            face.depth()
+        );
+        let made = scene
+            .extrude_region(region.sketch(), region.region(), 0.5)
+            .unwrap();
+        assert_ne!(made, b);
+        assert_ne!(scene.doc.state_hash(), before, "a new Object");
+        assert_eq!(scene.doc.object(object_id(b)).unwrap().faces().len(), faces);
+        assert!(scene.node_locked(0, b).unwrap(), "the box stays locked");
+        assert!(
+            scene.node_frozen(0, made).unwrap().is_none(),
+            "the new Object is free"
+        );
+    }
+
     /// The same through `draft_begin_ctx` with a face form.
     #[test]
     fn a_face_context_draft_on_a_locked_object_draws_a_detached_shape() {

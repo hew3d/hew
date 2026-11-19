@@ -1200,13 +1200,13 @@ describe('placementLabel', () => {
     component_member_objects: () => (opts.members ?? []).map((m) => m.id),
   })
 
-  it('placementLabel_prefers_instance_then_definition_then_single_member_then_copies', () => {
+  it('placementLabel_prefers_instance_then_definition_then_single_member_then_a_plain_object_name', () => {
     const members = [{ id: 5n, name: 'Leg' }]
     expect(placementLabel(scene({ linked: true, instanceName: 'Front leg', defName: 'Leg set', members }), 1n, 0)).toBe('Front leg')
     expect(placementLabel(scene({ linked: true, defName: 'Leg set', members }), 1n, 0)).toBe('Leg set')
     expect(placementLabel(scene({ linked: true, members }), 1n, 0)).toBe('Leg')
-    expect(placementLabel(scene({ linked: true, members: [{ id: 5n }] }), 1n, 0)).toBe('Copies')
-    expect(placementLabel(scene({ linked: true, members: [{ id: 5n, name: 'A' }, { id: 6n, name: 'B' }] }), 1n, 0)).toBe('Copies')
+    expect(placementLabel(scene({ linked: true, members: [{ id: 5n }] }), 1n, 0)).toBe('Object 1')
+    expect(placementLabel(scene({ linked: true, members: [{ id: 5n, name: 'A' }, { id: 6n, name: 'B' }] }), 1n, 0)).toBe('Object 1')
   })
 
   it('an_ordinary_component_keeps_its_label', () => {

@@ -54,6 +54,8 @@ function makeWasmScene(opts: {
   touched?: bigint[]
   /** The placement's linked set definition; omitted, not a linked copy. */
   linkedDef?: bigint
+  /** How many placements the linked set has (default 3). */
+  linkedCopies?: number
   /** `object_materials(object)` — the distinct materials an object carries. */
   objectMaterials?: Record<string, bigint[]>
 } = {}): WasmScene {
@@ -71,6 +73,7 @@ function makeWasmScene(opts: {
     set_instance_material: vi.fn(() => BigUint64Array.from(opts.touched ?? [])),
     is_linked: vi.fn(() => opts.linkedDef !== undefined),
     instance_def: vi.fn(() => opts.linkedDef),
+    definition_usage: vi.fn(() => opts.linkedCopies ?? 3),
     instance_expanded_members: vi.fn(() => BigUint64Array.from(opts.expanded?.members ?? [])),
     instance_expanded_inherited: vi.fn(() => BigUint64Array.from(opts.expanded?.inherited ?? [])),
     replace_material: vi.fn(() => {
@@ -357,6 +360,16 @@ describe('PaintTool — component placements', () => {
     expect(onToast).toHaveBeenCalledTimes(1)
     tool.onPointerDown(makeSnap(), RAY)
     expect(onToast).toHaveBeenCalledTimes(1)
+  })
+
+  it('painting a wrapper left with one copy refreshes it but says nothing: it reads as a plain Object', () => {
+    resetInstancePaintExplained()
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 9n), touched: [9n], linkedDef: 5n, linkedCopies: 1 })
+    const { tool, onInstanceCommit, onToast } = makeInstanceTool(scene)
+    tool.setCurrentMaterial(7n)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(onInstanceCommit).toHaveBeenCalledWith([9n], [5n])
+    expect(onToast).not.toHaveBeenCalled()
   })
 
   it('painting a linked copy refreshes its set and explains it as a copy', () => {
@@ -676,9 +689,9 @@ describe('PaintTool — a locked thing is not painted', () => {
     const { tool, onToast, onCommit } = makeTool(scene)
     tool.setCurrentMaterial(7n)
     tool.onPointerMove(makeSnap(), RAY)
-    expect(tool.hoverHint()).toBe('Locked. Unlock it to change it.')
+    expect(tool.hoverHint()).toBe('Locked')
     tool.onPointerDown(makeSnap(), RAY)
-    expect(onToast).toHaveBeenCalledWith('Locked. Unlock it to change it.', 'LockedHint:object:3')
+    expect(onToast).toHaveBeenCalledWith('Locked', 'LockedHint:object:3')
     expect(scene.paint_logical_face).not.toHaveBeenCalled()
     expect(onCommit).not.toHaveBeenCalled()
   })

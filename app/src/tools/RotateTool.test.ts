@@ -1966,7 +1966,7 @@ describe('RotateTool — locked items are left behind', () => {
     const all = makeTool({ selection: [{ kind: 'object', id: 2n }] })
     lock(all.wasmScene)
     all.tool.onPointerDown(makeSnap(), { origin: [0, 0, 5], direction: [0, 0, -1] })
-    expect(all.onToast).toHaveBeenCalledWith('Locked. Unlock it to change it.', 'LockedHint:object:2')
+    expect(all.onToast).toHaveBeenCalledWith('Locked', 'LockedHint:object:2')
     expect(all.tool.capturingInput()).toBe(false)
   })
 })

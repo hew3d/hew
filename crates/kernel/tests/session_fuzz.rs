@@ -1712,3 +1712,30 @@ fn a_plane_draft_leaves_a_locked_groups_drawing_alone() {
     ];
     run_case(3, ops).unwrap();
 }
+
+/// Fuzz find: a group holding a locked box is copied as a linked set, and
+/// one of the two copies is deleted. The copy left behind becomes a plain
+/// group again, so the locked box comes out of the shared shape as a new
+/// Object. It is still locked, with its name, tags and shape: the lock
+/// oracle reads that as the lock carried over, not as a frozen node deleted.
+#[test]
+fn a_locked_part_survives_its_set_turning_plain() {
+    let ops = vec![
+        Op::Duplicate { sel: 0 },
+        Op::Group {
+            a: 1092683716634947615,
+            b: 7404981378812678266,
+        },
+        Op::Lock {
+            sel: 4631545717330657277,
+            locked: true,
+        },
+        Op::DuplicateLinked {
+            sel: 5963565961606652284,
+        },
+        Op::Delete {
+            sel: 1439616416049823810,
+        },
+    ];
+    run_case(3, ops).unwrap();
+}

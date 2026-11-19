@@ -11,6 +11,7 @@
  * only, erased at runtime — the same convention ComponentsPanel.test.tsx /
  * scenePanels.test.tsx use), so no wasm/loader mock is required.
  */
+import { kernelErrorMessage } from '../kernelErrors'
 import { render, screen, fireEvent, within, act } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { ObjectInfoPanel } from './ObjectInfoPanel'
@@ -952,7 +953,106 @@ describe('ObjectInfoPanel — Locked checkbox and read-only fields (OW-1)', () =
     fireEvent.change(defNameInput(), { target: { value: 'Door' } })
     expect(() => fireEvent.blur(defNameInput())).not.toThrow()
     expect(onToast).toHaveBeenCalledTimes(1)
-    expect(onToast.mock.calls[0][0]).toBe('This shape is also used inside a locked group. Make this copy unique to change it.')
+    expect(onToast.mock.calls[0][0]).toBe(kernelErrorMessage('LockedNodeViaSharedShape', ''))
     expect(onToast.mock.calls[0][1]).toBe('LockedNodeViaSharedShape')
+  })
+})
+
+describe('ObjectInfoPanel — a linked Object reads as a plain Object', () => {
+  /** Instance 5 places definition 7 (one Object, 1); `placements` share it. */
+  function linkedScene(placements: bigint[], over: Record<string, unknown> = {}) {
+    return makeScene({
+      top_level_nodes: () => [{ kind: 'object', id: 2n }, ...placements.map((id) => ({ kind: 'instance', id }))],
+      node_tags: () => [],
+      node_parent: () => undefined,
+      object_solid: () => true,
+      object_name: () => undefined,
+      group_name: () => undefined,
+      instance_name: () => undefined,
+      instance_def: () => 7n,
+      is_linked: (id: bigint) => placements.includes(id),
+      component_name: () => undefined,
+      component_member_objects: () => [1n],
+      component_has_nested_members: () => false,
+      owner_definition: () => undefined,
+      instances_of: () => placements,
+      definition_usage: () => placements.length,
+      instance_expanded_members: () => [],
+      instance_expanded_inherited: () => [],
+      instance_pose: () => undefined,
+      object_materials: () => [],
+      smooth_level: () => 0,
+      node_locked: () => false,
+      node_frozen: () => undefined,
+      ...over,
+    })
+  }
+  const sel5: NodeRef[] = [{ kind: 'instance', id: 5n }]
+
+  it('Type reads Object with a clickable (N linked) that selects every copy', () => {
+    const onSelectMany = vi.fn()
+    render(<ObjectInfoPanel {...baseProps} onSelectMany={onSelectMany} scene={linkedScene([5n, 6n, 8n])} selectedIds={sel5} />)
+    expect(screen.queryByText(/Linked cop/i)).toBeNull()
+    expect(screen.queryByText('Copies')).toBeNull()
+    const count = screen.getByTestId('object-info-linked-count')
+    expect(count.textContent).toBe('(3 linked)')
+    fireEvent.click(count)
+    expect(onSelectMany).toHaveBeenCalledWith([
+      { kind: 'instance', id: 5n },
+      { kind: 'instance', id: 6n },
+      { kind: 'instance', id: 8n },
+    ])
+  })
+
+  it('the count includes a copy nested in a component, but the click selects only the top-level ones', () => {
+    const onSelectMany = vi.fn()
+    const scene = linkedScene([5n, 6n, 8n], { owner_definition: (_k: number, id: bigint) => (id === 8n ? 99n : undefined) })
+    render(<ObjectInfoPanel {...baseProps} onSelectMany={onSelectMany} scene={scene} selectedIds={sel5} />)
+    const count = screen.getByTestId('object-info-linked-count')
+    expect(count.textContent).toBe('(3 linked)')
+    fireEvent.click(count)
+    expect(onSelectMany).toHaveBeenCalledWith([
+      { kind: 'instance', id: 5n },
+      { kind: 'instance', id: 6n },
+    ])
+  })
+
+  it('a set that is down to one shows nothing extra', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={linkedScene([5n])} selectedIds={sel5} />)
+    expect(screen.queryByTestId('object-info-linked-count')).toBeNull()
+    expect(screen.queryByText(/linked/i)).toBeNull()
+  })
+
+  it('a linked set of Groups reads Group', () => {
+    const scene = linkedScene([5n, 6n], { component_has_nested_members: () => true, component_member_objects: () => [] })
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={sel5} />)
+    expect(screen.getByText('Group')).toBeTruthy()
+    expect(screen.getByTestId('object-info-linked-count').textContent).toBe('(2 linked)')
+  })
+
+  it('has no Unlink or Make component button, no Copies row, and one Name field', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={linkedScene([5n, 6n])} selectedIds={sel5} />)
+    expect(screen.queryByRole('button', { name: 'Unlink' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Make component/i })).toBeNull()
+    expect(screen.queryByTestId('object-info-copies')).toBeNull()
+    expect(screen.queryByLabelText('Definition Name')).toBeNull()
+    expect(screen.queryByLabelText('Name (all copies)')).toBeNull()
+  })
+
+  it('offers every row a plain Object gets: Type, Locked, Tags, Materials, Geometry, and Smooth/Soften as the plain Object does', () => {
+    const plain = render(<ObjectInfoPanel {...baseProps} scene={linkedScene([5n, 6n])} selectedIds={[{ kind: 'object', id: 1n }]} />)
+    const rows = (c: HTMLElement) => ({
+      locked: c.querySelector('[data-testid="object-info-locked"]') !== null,
+      materials: c.querySelector('[data-testid="object-info-materials"]') !== null,
+      geometry: c.textContent!.includes('Solid'),
+      smooth: c.querySelector('[data-smooth-section]') !== null,
+      soften: c.querySelector('[data-soften-section]') !== null,
+      tags: c.textContent!.includes('Tags'),
+    })
+    const plainRows = rows(plain.container)
+    plain.unmount()
+    const linked = render(<ObjectInfoPanel {...baseProps} scene={linkedScene([5n, 6n])} selectedIds={sel5} />)
+    expect(rows(linked.container)).toEqual(plainRows)
+    expect(plainRows.locked && plainRows.materials && plainRows.geometry && plainRows.tags).toBe(true)
   })
 })

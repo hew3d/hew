@@ -83,6 +83,14 @@ describe('buildSelectionPath', () => {
     expect(c[c.length - 2].node).toEqual(i(20))
   })
 
+  it('a linked copy is the leaf: no part of a component is named under it', () => {
+    const c = buildSelectionPath(input({
+      selected: [i(20)], hitLeaf: { object: 30n, instance: 20n }, isLinkedCopy: (id) => id === 20n,
+    }))
+    expect(labels(c)).toEqual(['Model', 'Island', 'Shaker Door'])
+    expect(c.some((x) => x.kind === 'member')).toBe(false)
+  })
+
   it('names an unnamed member "Part"', () => {
     const c = buildSelectionPath(input({ selected: [g(4)], hitLeaf: { object: 31n, instance: 20n } }))
     expect(c[c.length - 1].label).toBe('Part')
@@ -241,6 +249,10 @@ describe('hoverLine', () => {
   })
   it('reads a definition member as "<member> · in <instance>"', () => {
     expect(hoverLine({ object: 30n, instance: 20n }, parentOf, labelFor, memberName)).toBe('Door Panel · in Shaker Door')
+  })
+  it('a linked copy reads as itself, in its own parent', () => {
+    expect(hoverLine({ object: 30n, instance: 20n }, parentOf, labelFor, memberName, () => false, (id) => id === 20n))
+      .toBe('Shaker Door · in Island')
   })
   it('inside an open component the part reads by its own label, not Part', () => {
     const lf = (n: NodeRef) => (n.kind === 'object' && n.id === 31n ? 'Handle' : (NAMES.get(nodeKey(n)) ?? '?'))

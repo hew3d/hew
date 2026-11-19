@@ -227,10 +227,16 @@ describe('dock verbs for a linked copy', () => {
     expect(solo).toContain('edit-unlink')
   })
 
-  it('the chip reads COPIES for a linked copy and COMPNT otherwise', () => {
-    expect(dockChipLabel('instance', true)).toBe('COPIES')
+  it('a wrapper left with one copy reads as a plain Object: no Unlink, Make Unique or Explode', () => {
+    const one = dockVerbsFor('instance', { canGroup: false, canMakeComponent: true, canUnlink: false, canUnlinkAll: false, presentedKind: 'object' }).map((v) => v.id)
+    expect(one).toEqual(['enter-context', 'tool-move', 'tool-scale', 'edit-make-component'])
+  })
+
+  it('the chip reads OBJECT or GROUP for a linked copy (never COPIES) and COMPNT otherwise', () => {
+    expect(dockChipLabel('instance', 'object')).toBe('OBJECT')
+    expect(dockChipLabel('instance', 'group')).toBe('GROUP')
     expect(dockChipLabel('instance')).toBe('COMPNT')
-    expect(dockChipLabel('object', true)).toBe('OBJECT')
+    expect(dockChipLabel('object', 'object')).toBe('OBJECT')
   })
 })
 

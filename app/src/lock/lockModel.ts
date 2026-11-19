@@ -169,11 +169,13 @@ export function blockForCause(scene: LockScene, cause: NodeRef): LockBlock {
 
 /** The "Locked" line for a block, in plain words. */
 export function lockedMessage(block: Pick<LockBlock, 'copies' | 'indirect'>): string {
-  if (block.indirect) return t`This shape is also used inside a locked group. Make this copy unique to change it.`
-  if (block.copies > 0) {
-    return plural(block.copies, { one: 'Locked, along with its # copy.', other: 'Locked, along with its # copies.' })
+  if (block.indirect) return t`Also used in a locked group`
+  if (block.copies === 1) return t`Both copies are locked`
+  if (block.copies > 1) {
+    const total = block.copies + 1
+    return t`All ${total} copies are locked`
   }
-  return t`Locked. Unlock it to change it.`
+  return t`Locked`
 }
 
 /** "1 locked item was left alone." / "N locked items were left alone." */
@@ -223,6 +225,12 @@ export function parseLockedHintCode(code: string | undefined): LockedHintTarget 
   const [kind, id, flag] = code.slice(LOCKED_HINT_PREFIX.length).split(':')
   if (!isLockableKind(kind as NodeKind) || id === undefined || !/^\d+$/.test(id)) return null
   return { node: { kind: kind as NodeKind, id: BigInt(id) }, indirect: flag === 'indirect' }
+}
+
+/** Whether a toast code marks a lock toast: a locked hint or the kernel's own
+ *  locked refusal. There is only ever one such toast on screen. */
+export function isLockToastCode(code: string | null | undefined): boolean {
+  return (code !== undefined && code !== null && code.startsWith(LOCKED_HINT_PREFIX)) || isLockRefusalCode(code)
 }
 
 /** The kernel's refusal codes that mean "locked". */

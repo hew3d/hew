@@ -1948,7 +1948,8 @@ Semantics notes, normative:
   holding an instance) would split that placement from its copies, so it
   refuses `would_unlink` with `detail: {operands}` unless `unlink: true`
   is passed; with it, each placement operand is exploded into plain
-  solids (its other copies keep the shared solid), the world boolean
+  solids (its other copies keep the shared solid; a copy left alone in
+  its set is made plain too), the world boolean
   runs, and the result adds `unlinked`, the placements split off, all in
   one undo entry. A path member takes `unlink: true` when it is a direct
   object member of a world placement (`{path: [instance, object]}`);

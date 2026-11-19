@@ -51,6 +51,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import type { NodeRef } from '../panels/treeModel'
 import { inHistoryBracket } from './transformSelection'
+import { isLinkedSet, isWrapperPlacement } from '../linkedCopies'
 import { lockHintForPick, type LockHint } from '../lock/lockModel'
 import { leaveBehind } from '../lock/lockGate'
 
@@ -388,11 +389,17 @@ export class PaintTool implements Tool {
    *  the same undo step. */
   private _commitInstance(instance: bigint): void {
     try {
-      const linked = this.wasmScene.is_linked(instance)
+      // A linked wrapper's set is refreshed whatever its size; the "linked
+      // copy" explanation is for a set of two or more only. A wrapper left
+      // with one copy reads as a plain Object: it says nothing.
+      const wrapper = isWrapperPlacement(this.wasmScene, instance)
+      const linked = isLinkedSet(this.wasmScene, instance)
       const touched = this.wasmScene.set_instance_material(instance, this.currentMaterialId)
-      const def = linked ? this.wasmScene.instance_def(instance) : undefined
+      const def = wrapper ? this.wasmScene.instance_def(instance) : undefined
       this.onInstanceCommit(touched.length > 0 ? [...touched] : [instance], def !== undefined ? [def] : [])
-      if (linked) {
+      if (wrapper && !linked) {
+        // Nothing to explain.
+      } else if (linked) {
         if (!linkedPaintExplained) {
           linkedPaintExplained = true
           this.onToast(

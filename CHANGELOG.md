@@ -28,6 +28,7 @@ is not guaranteed: releases that change the `.hew` format say so under
 - **Follow Me:** Sweeps around a drawn circle now carry the exact sphere, torus, or cone they lie on.
 - **View:** View ▸ Tangent Edges shows the thin lines where a smooth surface joins another without a crease.
 - **API:** `draw_line` and `draw_arc` refuse a point that misses an open end of the sketch by less than 0.1 mm with `endpoint_near_miss`, naming the gap, instead of leaving a profile quietly open.
+- **Linked copies:** Unlink turns a copy back into an ordinary Object (or Group), and the last two copies of a set both become ordinary; deleting or exploding one of the last two copies leaves the other an ordinary Object too. Linked copies read as ordinary Objects in the Outliner, dock, and Object Info, with "(N linked)" beside the type. Push/Pull to a new Object now works on a linked copy.
 
 ### Changed
 

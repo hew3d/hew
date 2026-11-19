@@ -3280,6 +3280,7 @@ describe('ObjectInfoPanel — linked copies', () => {
       component_name: () => 'Leg',
       instances_of: () => new BigUint64Array([4n, 5n, 6n]),
       component_member_objects: () => new BigUint64Array([30n]),
+      owner_definition: () => undefined,
       node_tags: () => [],
       ...overrides,
     })
@@ -3296,57 +3297,40 @@ describe('ObjectInfoPanel — linked copies', () => {
     />
   )
 
-  it('a_linked_placement_shows_linked_copies_n_with_unlink_and_make_component', () => {
-    const onUnlink = vi.fn()
-    const onMakeComponent = vi.fn()
-    render(panel(linkedScene(), { onUnlink, onMakeComponent }))
-    const row = screen.getByTestId('object-info-copies')
-    expect(within(row).getByText('Linked copies: 3')).toBeInTheDocument()
-    fireEvent.click(within(row).getByRole('button', { name: 'Unlink' }))
-    expect(onUnlink).toHaveBeenCalledWith({ kind: 'instance', id: 4n })
-    fireEvent.click(within(row).getByRole('button', { name: 'Make component' }))
-    expect(onMakeComponent).toHaveBeenCalledWith({ kind: 'instance', id: 4n })
-    // The type reads as a copy, and neither "component" nor "instance" shows.
-    expect(screen.getByText('Linked copy')).toBeInTheDocument()
+  it('a_linked_placement_reads_as_an_object_with_a_count_and_no_unlink_or_make_component', () => {
+    render(panel(linkedScene()))
+    // The type is what a plain Object shows, with "(3 linked)" beside it.
+    expect(screen.getByText('Object')).toBeInTheDocument()
+    expect(screen.getByTestId('object-info-linked-count').textContent).toBe('(3 linked)')
+    expect(screen.queryByRole('button', { name: 'Unlink' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Make component' })).toBeNull()
+    expect(screen.queryByTestId('object-info-copies')).toBeNull()
+    expect(screen.queryByText(/linked copy/i)).toBeNull()
     expect(screen.queryByText(/instance/i)).toBeNull()
     expect(screen.queryByText(/definition/i)).toBeNull()
   })
 
-  it('two_name_fields_edit_the_definition_and_the_instance', () => {
+  it('one_name_field_names_this_copy_and_shows_the_shared_name_when_empty', () => {
     const scene = linkedScene({ instance_name: () => 'Front left' })
     render(panel(scene))
-    const all = screen.getByLabelText('Name (all copies)') as HTMLInputElement
-    const mine = screen.getByLabelText('This copy') as HTMLInputElement
-    expect(all.value).toBe('Leg')
-    expect(mine.value).toBe('Front left')
-    fireEvent.change(all, { target: { value: 'Table leg' } })
-    fireEvent.blur(all)
-    expect((scene as unknown as { set_component_name: ReturnType<typeof vi.fn> }).set_component_name).toHaveBeenCalledWith(9n, 'Table leg')
+    expect(screen.queryByLabelText('Name (all copies)')).toBeNull()
+    const mine = screen.getByDisplayValue('Front left') as HTMLInputElement
+    expect(mine.placeholder).toBe('Leg')
     fireEvent.change(mine, { target: { value: 'Front right' } })
     fireEvent.blur(mine)
     expect((scene as unknown as { set_node_name: ReturnType<typeof vi.fn> }).set_node_name).toHaveBeenCalledWith(2, 4n, 'Front right')
   })
 
-  it('the_all_copies_placeholder_shows_the_shared_name_never_this_copys_own', () => {
-    const scene = linkedScene({
-      instance_name: () => 'Front left',
-      component_name: () => undefined,
-      component_member_objects: () => new BigUint64Array([30n]),
-      object_name: () => 'Leg',
-    })
-    render(panel(scene))
-    expect((screen.getByLabelText('Name (all copies)') as HTMLInputElement).placeholder).toBe('Leg')
-    expect((screen.getByLabelText('This copy') as HTMLInputElement).value).toBe('Front left')
-    // With nothing to show, the placeholder is empty rather than a made-up word.
-    const bare = linkedScene({ instance_name: () => 'Front left', component_name: () => undefined, object_name: () => undefined })
+  it('an_unnamed_linked_object_shows_the_plain_object_label_as_its_name', () => {
+    const bare = linkedScene({ component_name: () => undefined, object_name: () => undefined, top_level_nodes: () => [{ kind: 'instance', id: 4n }] })
     render(panel(bare))
-    expect((screen.getAllByLabelText('Name (all copies)')[1] as HTMLInputElement).placeholder).toBe('')
+    expect((screen.getByPlaceholderText('Object 1') as HTMLInputElement).value).toBe('')
   })
 
-  it('select_all_copies_selects_every_placement', () => {
+  it('the_count_selects_every_placement', () => {
     const onSelectMany = vi.fn()
     render(panel(linkedScene(), { onSelectMany }))
-    fireEvent.click(screen.getByRole('button', { name: 'Select all copies' }))
+    fireEvent.click(screen.getByTestId('object-info-linked-count'))
     expect(onSelectMany).toHaveBeenCalledWith([
       { kind: 'instance', id: 4n },
       { kind: 'instance', id: 5n },
@@ -3354,10 +3338,11 @@ describe('ObjectInfoPanel — linked copies', () => {
     ])
   })
 
-  it('a set of one has no Select all copies', () => {
+  it('a set of one shows no count and no linked wording', () => {
     render(panel(linkedScene({ instances_of: () => new BigUint64Array([4n]) })))
-    expect(screen.queryByRole('button', { name: 'Select all copies' })).toBeNull()
-    expect(screen.getByText('Linked copies: 1')).toBeInTheDocument()
+    expect(screen.queryByTestId('object-info-linked-count')).toBeNull()
+    expect(screen.queryByText(/linked/i)).toBeNull()
+    expect(screen.getByText('Object')).toBeInTheDocument()
   })
 
   it('an_ordinary_component_keeps_definition_name_and_instance_count', () => {
