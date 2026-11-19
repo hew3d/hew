@@ -956,6 +956,84 @@ fn a_chain_along_an_edge_then_across_matches_the_ground() {
     assert_invariants(&mut w, &before, &bytes0, depth0);
 }
 
+/// The shrunk `line_chains_match_the_ground` case (regression seed): a
+/// chain running along the top edge of an imprint and past it, then down to
+/// the wall's far corner. The ground sketch has a vertex where a chain point
+/// lands on the imprint's edge; the solid has none there, but keeps the
+/// imprint's two corners on the face above, which the oracle must not shed.
+#[test]
+fn a_chain_running_along_an_imprints_edge_matches_the_ground() {
+    let mut w = front_wall();
+    let wall = w.face;
+    imprint_mm(&mut w, wall, 1.5, 1.5, 5.5, 2.0);
+    let path = vec![
+        mm(&w, 0.0, 3.5),
+        mm(&w, 20.0 / 3.0, 3.5),
+        mm(&w, 40.0 / 3.0, 3.5),
+        mm(&w, 20.0, 0.0),
+    ];
+    let before = w.obj().clone();
+    let bytes0 = w.doc.save();
+    let depth0 = w.doc.undo_depth();
+    let sk = ground_edit(w.plane, &before, &path, &[]);
+    let seed = w.face;
+    let (report, _) = draw_path(&mut w.doc, None, w.id, seed, &path, &[]).expect("the chain draws");
+    assert!(report.kept_as_sketch.is_empty(), "nothing kept as drawing");
+    assert!(!ground_has_pinch(&sk), "the ground's rings are simple");
+    assert_group_matches_ground(&w, &sk);
+    assert_invariants(&mut w, &before, &bytes0, depth0);
+    assert_eq!(
+        group_faces(w.obj(), &w.plane).len(),
+        3,
+        "upper, imprint, lower"
+    );
+}
+
+/// The oracle still rejects a genuinely stray vertex on the solid: a
+/// collinear vertex added to one solid ring that the ground does not have.
+#[test]
+fn the_ground_oracle_rejects_a_stray_solid_vertex() {
+    let mut w = front_wall();
+    let wall = w.face;
+    imprint_mm(&mut w, wall, 1.5, 1.5, 5.5, 2.0);
+    let path = vec![
+        mm(&w, 0.0, 3.5),
+        mm(&w, 20.0 / 3.0, 3.5),
+        mm(&w, 40.0 / 3.0, 3.5),
+        mm(&w, 20.0, 0.0),
+    ];
+    let before = w.obj().clone();
+    let sk = ground_edit(w.plane, &before, &path, &[]);
+    draw_path(&mut w.doc, None, w.id, w.face, &path, &[]).expect("the chain draws");
+    let n = w.plane.normal();
+    let ground = ground_regions(&sk);
+    let obj = w.obj();
+    let mut faces: Vec<Rings> = group_faces(obj, &w.plane)
+        .into_iter()
+        .map(|f| face_rings(obj, f))
+        .collect();
+    assert!(
+        faces_match_ground(&faces, &ground, n),
+        "the real result matches"
+    );
+    // A stray midpoint on the wall's top edge (the ground has none there).
+    let ring = &mut faces
+        .iter_mut()
+        .find(|(o, _)| o.iter().any(|p| p.approx_eq(mm(&w, 20.0, 10.0), 1e-9)))
+        .expect("the upper face")
+        .0;
+    let i = ring
+        .iter()
+        .position(|p| p.approx_eq(mm(&w, 20.0, 10.0), 1e-9))
+        .expect("corner");
+    let mid = ring[i] + (ring[(i + 1) % ring.len()] - ring[i]) * 0.5;
+    ring.insert(i + 1, mid);
+    assert!(
+        !faces_match_ground(&faces, &ground, n),
+        "a stray vertex fails"
+    );
+}
+
 // ------------------------------------- runs whose facets lost every claim
 
 #[test]
