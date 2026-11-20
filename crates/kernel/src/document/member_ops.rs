@@ -226,6 +226,7 @@ impl Document {
             objects: pre_objects,
             sketches: pre_sketches,
             instances: instance_prevs,
+            guides: Vec::new(),
             forward: *t,
             reanchored,
         });
@@ -350,6 +351,7 @@ impl Document {
             objects: created.objects.clone(),
             groups: created.groups.clone(),
             instances: created.instances.clone(),
+            guides: Vec::new(),
             copied: created.pairs.clone(),
         });
         self.commit_new_action();
