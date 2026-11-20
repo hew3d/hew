@@ -36,7 +36,9 @@ pub fn confirm_native(
 }
 
 /// The answer from the main thread; a dialog that went away without
-/// answering (its sender dropped) is a no.
+/// answering (its sender dropped) is a no. macOS shows the dialog plugin's
+/// box and never waits this way.
+#[cfg(not(target_os = "macos"))]
 fn received(rx: std::sync::mpsc::Receiver<bool>) -> bool {
     rx.recv().unwrap_or(false)
 }

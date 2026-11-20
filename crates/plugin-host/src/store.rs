@@ -539,11 +539,19 @@ pub fn folder_snapshot_until(
     let mut total = 0u64;
     let mut pending = vec![(root.clone(), String::new())];
     while let Some((dir, prefix)) = pending.pop() {
-        if std::fs::canonicalize(&dir).ok().as_deref() != Some(dir.as_path()) {
-            return Err(InstallError::PackagePathInvalid(prefix));
+        // The root can go away after it was checked, while the walk is in
+        // it or below it: that is a folder that is gone, like a root that
+        // cannot be listed, not a path that points elsewhere.
+        let root_gone = || dir == root || std::fs::symlink_metadata(&root).is_err();
+        match std::fs::canonicalize(&dir) {
+            Ok(now) if now == dir => {}
+            Err(_) if root_gone() => {
+                return Err(InstallError::FolderMissing(recorded.display().to_string()));
+            }
+            _ => return Err(InstallError::PackagePathInvalid(prefix)),
         }
         let listing = std::fs::read_dir(&dir).map_err(|_| {
-            if dir == root {
+            if root_gone() {
                 InstallError::FolderMissing(recorded.display().to_string())
             } else {
                 InstallError::PackagePathInvalid(prefix.clone())

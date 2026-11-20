@@ -338,12 +338,12 @@ grooved-knob	outer-top-rim-round	10mm		generic	unsupported_vertex at=(-19.8, 1.6
 grooved-knob	outer-top-rim-round	26mm	over	generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
 grooved-knob	outer-top-rim-chamfer	0.1mm		correct	
 grooved-knob	outer-top-rim-chamfer	1mm		generic	radius_too_large max=0mm by=unknown
-grooved-knob	outer-top-rim-chamfer	2mm		generic	unsupported_vertex at=(-1.68, -19.8, 25)mm
-grooved-knob	outer-top-rim-chamfer	3mm		generic	unsupported_vertex at=(-1.68, -19.8, 25)mm
-grooved-knob	outer-top-rim-chamfer	4mm		generic	unsupported_vertex at=(-1.68, -19.8, 25)mm
-grooved-knob	outer-top-rim-chamfer	6mm		generic	unsupported_vertex at=(-1.68, -19.8, 25)mm
+grooved-knob	outer-top-rim-chamfer	2mm		generic	unsupported_vertex at=(-18, -8.43, 25)mm
+grooved-knob	outer-top-rim-chamfer	3mm		generic	unsupported_vertex at=(-18, -8.43, 25)mm
+grooved-knob	outer-top-rim-chamfer	4mm		generic	unsupported_vertex at=(-18, -8.43, 25)mm
+grooved-knob	outer-top-rim-chamfer	6mm		generic	unsupported_vertex at=(-18, -8.43, 25)mm
 grooved-knob	outer-top-rim-chamfer	10mm		limit	radius_too_large max=0.214mm by=facet_width
-grooved-knob	outer-top-rim-chamfer	26mm	over	generic	unsupported_vertex at=(-1.68, -19.8, 25)mm
+grooved-knob	outer-top-rim-chamfer	26mm	over	generic	unsupported_vertex at=(-18, -8.43, 25)mm
 prism-08-sides	top-rim-round	0.1mm	fits	correct	
 prism-08-sides	top-rim-round	1mm	fits	correct	
 prism-08-sides	top-rim-round	5mm	fits	correct	

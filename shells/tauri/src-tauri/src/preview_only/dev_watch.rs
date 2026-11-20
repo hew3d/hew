@@ -607,15 +607,18 @@ mod tests {
         entered(&rx, "com.example.a");
         settle();
         assert!(rx.try_recv().is_err(), "the first listing is reported once");
+        let mut last = Instant::now();
         for n in 0..8 {
             // Each save changes the size, so it shows whatever the clock's
             // resolution. Saves come faster than the quiet, so none is
             // reported during the burst (a report there would be followed
             // by a second one, which the check below refuses).
+            // The quiet is measured from the save itself, not from the
+            // pause after it: the watcher can see the last save at once.
+            last = Instant::now();
             std::fs::write(src.join("lib/main.js"), "/".repeat(n + 3)).unwrap();
             std::thread::sleep(Duration::from_millis(30));
         }
-        let last = Instant::now();
         let event = rx.recv_timeout(Duration::from_secs(5)).expect("an event");
         assert_eq!(
             event,
