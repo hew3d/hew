@@ -105,7 +105,7 @@ pub fn dry_run_host_command(method: &str) -> Refusal {
     Refusal::api(
         "dry_run_host_command",
         &format!(
-            "A dry run can only rehearse edits to the model. {method} touches files, the library, or the screen, so run it for real."
+            "A dry run can only rehearse edits to the model. {method} reads or changes something outside it (files, windows, the open documents, the library, the screen, plugins), so run it for real."
         ),
     )
     .with_detail(serde_json::json!({ "method": method }))

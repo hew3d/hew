@@ -210,6 +210,141 @@ fn dry_run_refuses_sole_solitary_kernel_command() {
     );
 }
 
+/// The desktop app forwards every dry run here, the ones holding a command
+/// its shell answers for real included (`shells/tauri/src-tauri/src/
+/// live_router.rs`), so this is the answer an app connection gets: each
+/// such command refuses `dry_run_host_command` named in `detail.method`,
+/// alone and beside a read, and `hew.doc.attach` (Kernel-served,
+/// solitary) is `-32602`. The plugin commands are Preview: a production
+/// build refuses them `preview_only` first.
+#[test]
+fn dry_run_refuses_every_command_the_desktop_shell_answers() {
+    let mut doc = Document::new();
+    let mut conn = ready(Grant::app(), &mut doc);
+    let before = fingerprint(&doc);
+    for method in [
+        "hew.doc.save",
+        "hew.doc.revert",
+        "hew.meta.documents",
+        "hew.doc.new",
+        "hew.doc.open",
+        "hew.doc.close",
+        "hew.doc.focus",
+        "hew.plugin.list",
+        "hew.plugin.dev",
+        "hew.plugin.activity",
+        "hew.plugin.reload",
+    ] {
+        let one = json!({ "method": method, "params": { "path": "/tmp/x.hew" } });
+        let read = json!({ "method": "hew.query.scene" });
+        for commands in [json!([one.clone()]), json!([read, one])] {
+            let index = commands.as_array().unwrap().len() - 1;
+            let (r, was_dry) = tx(
+                &mut conn,
+                &mut doc,
+                json!({ "dry_run": true, "commands": commands }),
+            );
+            assert!(was_dry, "{method}");
+            let data = &r["error"]["data"];
+            assert_eq!(r["error"]["code"], -32000, "{method}: {r}");
+            assert_eq!(data["failed_index"], index, "{method}: {r}");
+            assert_eq!(data["failed_method"], method, "{method}: {r}");
+            if method.starts_with("hew.plugin.") && !api::preview::PREVIEW_BUILD {
+                assert_eq!(data["refusal"], "preview_only", "{method}: {r}");
+            } else {
+                assert_eq!(data["refusal"], "dry_run_host_command", "{method}: {r}");
+                assert_eq!(data["detail"], json!({ "method": method }), "{method}");
+            }
+        }
+    }
+    let (r, was_dry) = tx(
+        &mut conn,
+        &mut doc,
+        json!({ "dry_run": true, "commands": [{ "method": "hew.doc.attach" }] }),
+    );
+    assert!(was_dry);
+    assert_eq!(r["error"]["code"], -32602, "{r}");
+    assert_eq!(fingerprint(&doc), before, "nothing changed");
+}
+
+/// A `dry_run` that is not a boolean is `-32602` for the whole envelope,
+/// never read as `false`, for the commands the desktop shell answers too
+/// (it forwards such an envelope here). The parse comes before the
+/// Preview check, so a production build answers the plugin command the
+/// same way. Nothing changes and no document is opened or attached.
+#[test]
+fn a_malformed_dry_run_is_invalid_params_for_shell_answered_commands() {
+    for method in [
+        "hew.doc.save",
+        "hew.doc.new",
+        "hew.doc.open",
+        "hew.doc.close",
+        "hew.plugin.list",
+    ] {
+        for flag in [json!("true"), json!(1), json!(null), json!({})] {
+            let mut doc = Document::new();
+            let mut conn = ready(Grant::app(), &mut doc);
+            let before = fingerprint(&doc);
+            let (r, was_dry) = tx(
+                &mut conn,
+                &mut doc,
+                json!({ "dry_run": flag, "commands": [
+                    { "method": method, "params": { "path": "/tmp/x.hew" } }
+                ] }),
+            );
+            assert!(!was_dry, "{method} {flag}: not answered as a dry run");
+            assert_eq!(r["error"]["code"], -32602, "{method} {flag}: {r}");
+            assert!(
+                r["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("malformed transact params"),
+                "{method} {flag}: {r}"
+            );
+            assert_eq!(fingerprint(&doc), before, "{method} {flag}");
+        }
+    }
+}
+
+/// An unattached connection's rehearsal of a command the desktop shell
+/// answers (which the shell now forwards here): the envelope checks
+/// first, then `-32002`, both answered as a dry run, before the
+/// `dry_run_host_command` an attached one gets. The rehearsal of an edit
+/// is pinned by `an_unattached_dry_run_checks_the_envelope_first_like_the_commit`.
+#[test]
+fn an_unattached_rehearsal_of_a_host_command_is_no_document() {
+    let mut doc = Document::new();
+    let mut conn = Connection::new(Grant::app(), "dry");
+    let (r, _) = send_on(
+        &REGISTRY,
+        &mut conn,
+        &mut doc,
+        "hew.meta.hello",
+        json!({ "protocol": 1 }),
+    );
+    assert!(r.get("error").is_none(), "{r}");
+    for method in ["hew.doc.save", "hew.doc.new", "hew.meta.documents"] {
+        let one = json!([{ "method": method }]);
+        let (r, was_dry) = tx(
+            &mut conn,
+            &mut doc,
+            json!({ "dry_run": true, "expect_generation": 99, "commands": one }),
+        );
+        assert!(was_dry, "{method}");
+        assert_eq!(
+            r["error"]["data"]["refusal"], "generation_moved",
+            "{method}: {r}"
+        );
+        let (r, was_dry) = tx(
+            &mut conn,
+            &mut doc,
+            json!({ "dry_run": true, "commands": one }),
+        );
+        assert!(was_dry, "{method}");
+        assert_eq!(r["error"]["code"], -32002, "{method}: {r}");
+    }
+}
+
 #[test]
 fn dry_run_read_after_write_sees_the_rehearsed_geometry() {
     let mut doc = Document::new();

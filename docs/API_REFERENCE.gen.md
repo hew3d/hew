@@ -4204,6 +4204,7 @@ Close an open document window (the attached one, or the named `document`). Refus
 - `ambiguous_document`
 - `unsaved_changes`
 - `last_document`
+- `dry_run_host_command`
 - `document_busy` — A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window.
 
 ### `hew.doc.export`
@@ -4431,6 +4432,7 @@ Raise a document's window to the front. Every other command leaves the user's fo
 - `host_capability_missing`
 - `unknown_document`
 - `ambiguous_document`
+- `dry_run_host_command`
 
 ### `hew.doc.health`
 
@@ -4845,6 +4847,7 @@ Create a fresh document. The desktop app opens it in a new window — behind the
 
 - `host_capability_missing`
 - `window_not_ready`
+- `dry_run_host_command`
 - `document_busy` — A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window.
 
 ### `hew.doc.open`
@@ -4954,6 +4957,7 @@ Open a .hew or SketchUp .skp document. The desktop app opens it in a new window 
 - `host_capability_missing`
 - `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
 - `window_not_ready`
+- `dry_run_host_command`
 - `document_busy` — A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window.
 
 ### `hew.doc.purge_unused`
@@ -5040,6 +5044,7 @@ Revert to Saved: re-read the document's saved file in place, discarding every ch
 - `nothing_to_revert`
 - `unknown_document`
 - `ambiguous_document`
+- `dry_run_host_command`
 - `document_busy` — A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window.
 
 ### `hew.doc.save`
@@ -5169,6 +5174,7 @@ Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file i
 - `host_capability_missing`
 - `path_required`
 - `save_failed`
+- `dry_run_host_command`
 
 ### `hew.doc.transact`
 
@@ -8565,7 +8571,9 @@ The host's open documents: id, title, path, dirty, and — in the desktop app �
 }
 ```
 
-**Refusals:** none.
+**Refusals:**
+
+- `dry_run_host_command`
 
 ### `hew.meta.hello`
 
@@ -9015,6 +9023,7 @@ What a plugin did in the app, newest first, at most 500 entries: each state a wi
 - `not_installed`
 - `installed_unreadable`
 - `storage_unreadable`
+- `dry_run_host_command`
 - `io`
 
 ### `hew.plugin.dev`
@@ -9187,6 +9196,7 @@ List the plugins installed in the app: id, display name, version, where each cam
 - `host_capability_missing`
 - `plugins_disabled`
 - `no_plugin_dir`
+- `dry_run_host_command`
 
 ### `hew.plugin.reload`
 

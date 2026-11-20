@@ -1113,6 +1113,8 @@ fn check_and_sanitize_hello(line: &str, expected_token: &str) -> Option<String> 
 /// the token — the shell already decided this connection is authorized —
 /// so it never receives it.
 fn strip_token(line: &str) -> String {
+    /// What a token-bearing frame that repeats an envelope member becomes.
+    const DUPLICATE_MEMBER_FRAME: &str = r#"{"jsonrpc":"2.0","jsonrpc":"2.0"}"#;
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
         return line.to_string();
     };
@@ -1121,7 +1123,14 @@ fn strip_token(line: &str) -> String {
         .and_then(serde_json::Value::as_object_mut)
         .map(|params| params.remove("token").is_some())
         .unwrap_or(false);
-    if had {
+    if had && crate::live_router::repeats_an_envelope_member(line) {
+        // Re-serializing would keep the last of each repeated member and
+        // hand the router and the dispatcher a frame they both accept,
+        // where the dispatcher refuses the one sent. What goes on instead
+        // still repeats a member, so the router forwards it and the
+        // dispatcher refuses it as a parse error, and carries no token.
+        DUPLICATE_MEMBER_FRAME.to_string()
+    } else if had {
         value.to_string()
     } else {
         line.to_string()
@@ -2334,6 +2343,28 @@ mod tests {
     /// A frame with no token, and an unparseable frame, both pass through
     /// byte-identical — stripping must not reshape ordinary traffic or
     /// swallow the dispatcher's own parse error.
+    /// A token-bearing frame that repeats an envelope member is not
+    /// normalized into one the dispatcher would accept: what goes on still
+    /// repeats a member (so the router forwards it and the dispatcher
+    /// refuses it) and carries no token.
+    #[test]
+    fn strip_token_never_collapses_a_repeated_envelope_member() {
+        let line = r#"{"jsonrpc":"2.0","id":7,"method":"hew.doc.transact","params":{"dry_run":true,"token":"secret","commands":[]},"params":{"token":"secret","commands":[{"method":"hew.doc.save"}]}}"#;
+        let stripped = strip_token(line);
+        assert!(!stripped.contains("secret"), "{stripped}");
+        assert!(
+            crate::live_router::repeats_an_envelope_member(&stripped),
+            "{stripped}"
+        );
+        assert!(
+            matches!(
+                crate::live_router::classify(&stripped),
+                crate::live_router::Routed::Forward { .. }
+            ),
+            "{stripped}"
+        );
+    }
+
     #[test]
     fn strip_token_leaves_untokened_and_malformed_frames_alone() {
         let plain = r#"{"jsonrpc":"2.0","id":1,"method":"hew.query.scene","params":{}}"#;

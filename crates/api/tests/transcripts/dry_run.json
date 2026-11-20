@@ -242,7 +242,7 @@
             "detail": {
               "method": "hew.doc.export"
             },
-            "explanation": "A dry run can only rehearse edits to the model. hew.doc.export touches files, the library, or the screen, so run it for real.",
+            "explanation": "A dry run can only rehearse edits to the model. hew.doc.export reads or changes something outside it (files, windows, the open documents, the library, the screen, plugins), so run it for real.",
             "failed_index": 0,
             "failed_method": "hew.doc.export",
             "refusal": "dry_run_host_command"

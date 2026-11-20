@@ -1032,11 +1032,27 @@ after the edit, through `$ref`). A refusal is the commit's refusal, same
   namespace the grant does not own refuses `attr_namespace_not_granted`
   as a commit would.
 - **What cannot be rehearsed.** A Host-served command (files, the
-  library, the screen, the selection), a plugin command, and a view
-  effect a command would ask of the host (`hew.view.hide`, a Scene's
-  apply) refuse `-32000` `dry_run_host_command` with `detail: { method }`
-  and the command's index. A solitary Kernel-served command
+  library, the screen, the selection, the windows and the open
+  documents: `hew.doc.save`, `revert`, `new`, `open`, `close`, `focus`,
+  `hew.meta.documents`), the `hew.plugin.*` commands, a plugin command,
+  and a view effect a command would ask of the host (`hew.view.hide`, a
+  Scene's apply) refuse `-32000` `dry_run_host_command` with
+  `detail: { method }` and the command's index. A Host-served read is no
+  exception: the document list and the plugin list and activity are
+  refused in a rehearsal too (the Reads above are what a Kernel-served
+  command reads from its host). A solitary Kernel-served command
   (`hew.history.undo`, `hew.doc.attach`, …) is `-32602`.
+- **A malformed flag.** A `dry_run` that is not a boolean (`"true"`,
+  `1`, `null`, …) is `-32602`, never read as `false`: the envelope is
+  refused whole and nothing in it runs.
+- **On the desktop.** The app's shell answers no rehearsal itself; each
+  goes to a document's window, which answers as above. Two
+  consequences: a connection whose window has closed (§4.2) gets
+  `-32002` before the envelope checks run, since there is no window to
+  run them in; and a rehearsal that names another document with the
+  envelope's `document` member opens that window's session for the
+  connection, as any addressed request does. That is connection state;
+  the document does not change.
 - **Cost.** One copy of the whole document per call. That is right for a
   check before a commit and wrong for a preview on every pointer move:
   previews use `hew.compute.*` (§7.6), which copy only their operands.
@@ -2912,10 +2928,10 @@ the socket; the person does that in the app.
 
 | Command | Served | Params | Result | Refusals |
 |---|---|---|---|---|
-| `hew.plugin.list` | host, solitary | `{}` | `{plugins: [{id, name, version, source, enabled, state}], developer_mode, request_waiting}` | `plugins_disabled`, `no_plugin_dir`, `host_capability_missing` |
+| `hew.plugin.list` | host, solitary | `{}` | `{plugins: [{id, name, version, source, enabled, state}], developer_mode, request_waiting}` | `plugins_disabled`, `no_plugin_dir`, `dry_run_host_command`, `host_capability_missing` |
 | `hew.plugin.dev` | host, solitary | `{path}`: the plugin's folder | `{status: "awaiting_user"}` | `developer_mode_off`, `confirmation_open`, `plugins_off`, `request_waiting`, `request_dismissed`, `dry_run_host_command`, `plugins_disabled`, `no_plugin_dir`, `io`, `host_capability_missing`; `-32602` for a missing or empty `path` |
-| `hew.plugin.activity` | host, solitary, reads only | `{id}` | `{entries: [{at, window, state, reason}]}`, newest first, at most 500 | `invalid_params` (no id, or not a plugin id), `not_installed`, `installed_unreadable`, `storage_unreadable`, `io`, `plugins_disabled`, `no_plugin_dir`, `host_capability_missing` |
-| `hew.plugin.reload` | host, solitary | `{id}` | `{status: "reloading"}` | in order: `plugins_disabled`, `no_plugin_dir`, `invalid_params`, `plugins_off`, `developer_mode_off`, `not_installed` / `installed_unreadable`, `not_a_developer_folder`, `plugin_blocked`, `plugin_stopped`, `plugin_turned_off`, `reload_too_soon`; `dry_run_host_command` inside a rehearsal; `host_capability_missing` |
+| `hew.plugin.activity` | host, solitary, reads only | `{id}` | `{entries: [{at, window, state, reason}]}`, newest first, at most 500 | `invalid_params` (no id, or not a plugin id), `not_installed`, `installed_unreadable`, `storage_unreadable`, `io`, `plugins_disabled`, `no_plugin_dir`, `dry_run_host_command`, `host_capability_missing` |
+| `hew.plugin.reload` | host, solitary | `{id}` | `{status: "reloading"}` | inside a rehearsal, `dry_run_host_command` before any of the rest; otherwise in order: `plugins_disabled`, `no_plugin_dir`, `invalid_params`, `plugins_off`, `developer_mode_off`, `not_installed` / `installed_unreadable`, `not_a_developer_folder`, `plugin_blocked`, `plugin_stopped`, `plugin_turned_off`, `reload_too_soon`; `host_capability_missing` |
 
 `hew.plugin.activity` lists the states windows reported for a plugin
 (`enabled`, `activating`, `activated`, `crashed`, `blocked`, `idle`,
@@ -2926,6 +2942,8 @@ reload a plugin loaded from a developer folder, as a change to its
 files does; it never starts a plugin that stopped (the person turns it
 off and on), one turned off (`plugin_turned_off`) or one waiting for a
 review, and comes at most once every two seconds per plugin. Neither installs, enables or grants anything.
+Inside a rehearsal (§6.6) every `hew.plugin.*` command is refused
+`dry_run_host_command`, the two that only read included.
 
 `source` is `file`, `dir`, `index`, `git` or `url`. `state` is
 `installed`, `needs_developer_mode` (a folder plugin while developer mode

@@ -503,7 +503,7 @@ export interface DocAttachResult {
 /**
  * `hew.doc.close` (v1) — Close an open document window (the attached one, or the named `document`). Refuses unsaved changes unless `discard` is set.
  * Tier: Standard · Class: solitary · Served: host
- * Refusals: host_capability_missing, unknown_document, ambiguous_document, unsaved_changes, last_document, document_busy
+ * Refusals: host_capability_missing, unknown_document, ambiguous_document, unsaved_changes, last_document, dry_run_host_command, document_busy
  */
 export interface DocCloseParams {
   /** close even with unsaved changes (they are lost); default false */
@@ -544,7 +544,7 @@ export interface DocExportResult {
 /**
  * `hew.doc.focus` (v1) — Raise a document's window to the front. Every other command leaves the user's focus alone; this is the explicit opt-in.
  * Tier: Standard · Class: solitary · Served: host
- * Refusals: host_capability_missing, unknown_document, ambiguous_document
+ * Refusals: host_capability_missing, unknown_document, ambiguous_document, dry_run_host_command
  */
 export interface DocFocusParams {
   document?: string
@@ -602,7 +602,7 @@ export interface DocImportResult {
 /**
  * `hew.doc.new` (v1) — Create a fresh document. The desktop app opens it in a new window — behind the user's current one unless `focus` says otherwise — and attaches the connection to it; headless hosts replace the working document.
  * Tier: Required · Class: solitary · Served: host
- * Refusals: host_capability_missing, window_not_ready, document_busy
+ * Refusals: host_capability_missing, window_not_ready, dry_run_host_command, document_busy
  */
 export interface DocNewParams {
   /** where the new window goes; background (the default) never takes the user's focus */
@@ -618,7 +618,7 @@ export interface DocNewResult {
 /**
  * `hew.doc.open` (v1) — Open a .hew or SketchUp .skp document. The desktop app opens it in a new window (or attaches to the window that already has that file open), behind the user's current window unless `focus` says otherwise; headless hosts replace the working document.
  * Tier: Required · Class: solitary · Served: host
- * Refusals: host_capability_missing, load_failed, window_not_ready, document_busy
+ * Refusals: host_capability_missing, load_failed, window_not_ready, dry_run_host_command, document_busy
  */
 export interface DocOpenParams {
   /** where the new window goes; background (the default) never takes the user's focus */
@@ -650,7 +650,7 @@ export interface DocPurgeUnusedResult {
 /**
  * `hew.doc.revert` (v1) — Revert to Saved: re-read the document's saved file in place, discarding every change since the last save. The undo and redo history is cleared and the document reads clean. Refuses `nothing_to_revert` when the document has no saved file or has no changes since the last save. There is no confirmation step: the caller is deliberate.
  * Tier: Standard · Class: solitary · Served: host
- * Refusals: host_capability_missing, load_failed, nothing_to_revert, unknown_document, ambiguous_document, document_busy
+ * Refusals: host_capability_missing, load_failed, nothing_to_revert, unknown_document, ambiguous_document, dry_run_host_command, document_busy
  */
 export interface DocRevertParams {
   document?: string
@@ -661,7 +661,7 @@ export interface DocRevertResult {}
 /**
  * `hew.doc.save` (v1) — Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file is written, the unsaved mark cleared, and the document bound to it. `copy` writes a copy without any of that. With no `path` it re-saves in place; a document with no file yet, in a host that cannot ask where, hands the bytes back instead.
  * Tier: Required · Class: solitary · Served: host
- * Refusals: file_open_elsewhere, format_mismatch, host_capability_missing, path_required, save_failed
+ * Refusals: file_open_elsewhere, format_mismatch, host_capability_missing, path_required, save_failed, dry_run_host_command
  */
 export interface DocSaveParams {
   /** For the 2021-and-later container ("skp") only: write its revision 17, which every SketchUp since 2021 opens, leaving out what only newer versions hold (layer folders, hatch patterns, PBR materials, environments, snaps, procedures, page extras, CRS), each kind itemised in `writer_notes`. Absent or false: the lowest revision that holds the content. A save back over a revision-17 file keeps revision 17 either way. Refused for any other format. */
@@ -1353,7 +1353,7 @@ export interface MetaCapabilitiesResult {
 /**
  * `hew.meta.documents` (v1) — The host's open documents: id, title, path, dirty, and — in the desktop app — label, front, and attached.
  * Tier: Required · Class: read-only · Served: host
- * Refusals: none.
+ * Refusals: dry_run_host_command
  */
 export interface MetaDocumentsParams {}
 
@@ -1436,7 +1436,7 @@ export interface PermissionsRequestResult {
 /**
  * `hew.plugin.activity` (v1) — What a plugin did in the app, newest first, at most 500 entries: each state a window reported for it (enabled, activating, activated, crashed, blocked, idle, unloaded), when, in which window, and why. Reads only; the log is kept by the app and goes with the plugin when it is uninstalled.
  * Tier: Standard · Class: solitary · Served: host
- * Refusals: host_capability_missing, plugins_disabled, no_plugin_dir, invalid_params, not_installed, installed_unreadable, storage_unreadable, io
+ * Refusals: host_capability_missing, plugins_disabled, no_plugin_dir, invalid_params, not_installed, installed_unreadable, storage_unreadable, dry_run_host_command, io
  * Preview: Plugins (`plugins`). A production build leaves this command out and refuses it `preview_only`.
  */
 export interface PluginActivityParams {
@@ -1466,7 +1466,7 @@ export interface PluginDevResult {
 /**
  * `hew.plugin.list` (v1) — List the plugins installed in the app: id, display name, version, where each came from (file, dir, index, git or url), whether it is turned on, and its state. A folder plugin is needs_developer_mode while developer mode is off, needs_review while the person has not yet read a change to what it asks for, checking until its folder has been compared since it started being watched (nothing of it is read before), plugins_off for the same while no window runs a plugin host (nothing will compare it), and unreadable when its record cannot be read. The list says whether a request to load a folder (hew.plugin.dev) is still waiting for the person, including while they are reading what the plugin asks for, and carries no folder path and does not say whether a plugin is running. Reads only.
  * Tier: Standard · Class: solitary · Served: host
- * Refusals: host_capability_missing, plugins_disabled, no_plugin_dir
+ * Refusals: host_capability_missing, plugins_disabled, no_plugin_dir, dry_run_host_command
  * Preview: Plugins (`plugins`). A production build leaves this command out and refuses it `preview_only`.
  */
 export interface PluginListParams {}

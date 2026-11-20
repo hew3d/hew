@@ -695,8 +695,19 @@ impl Connection {
                 // inline here (its state lives on the connection).
                 let single_solitary = single_solitary_method(registry, &params);
                 if single_solitary.as_deref() == Some("hew.doc.attach") {
-                    // Served inline, so the grant check `transact::run`
-                    // would make happens here.
+                    // Served inline, so the envelope parse and the grant
+                    // check `transact::run` would make happen here: a
+                    // malformed envelope (a `dry_run` that is not a
+                    // boolean, a `label` that is not a string, …) is
+                    // `-32602` and attaches nothing.
+                    if let Err(e) = serde_json::from_value::<transact::TxParams>(params.clone()) {
+                        return Response::err(
+                            id,
+                            codes::INVALID_PARAMS,
+                            &format!("malformed transact params: {e}"),
+                        )
+                        .into();
+                    }
                     let decl = registry.get("hew.doc.attach").expect("registered");
                     if !self.grant.grants(decl) {
                         return Response::err_with(
@@ -1383,6 +1394,76 @@ mod tests {
             panic!("hello replies")
         };
         assert!(r.error.is_none(), "hello succeeds: {:?}", r.error);
+    }
+
+    /// The one-command attach envelope is served inline, but its envelope
+    /// is still parsed as `transact::run` parses every other one: a
+    /// malformed member (a `dry_run` that is not a boolean, a `label` that
+    /// is not a string, an `expect_generation` that is not a number) is
+    /// `-32602` and attaches nothing, so the next command is still
+    /// `-32002`. A rehearsal is never run for real because its flag was
+    /// misspelled.
+    #[test]
+    fn a_malformed_attach_envelope_is_invalid_params_and_attaches_nothing() {
+        let registry = Registry::protocol_1();
+        let attach = serde_json::json!([{ "method": "hew.doc.attach" }]);
+        for (member, value) in [
+            ("dry_run", serde_json::json!("true")),
+            ("dry_run", serde_json::json!(1)),
+            ("dry_run", serde_json::json!(null)),
+            ("dry_run", serde_json::json!({})),
+            ("label", serde_json::json!(5)),
+            ("expect_generation", serde_json::json!("x")),
+        ] {
+            let mut conn = Connection::new(Grant::core(), "test");
+            let mut doc = kernel::Document::new();
+            hello(&mut conn, &mut doc);
+            let mut params = serde_json::json!({ "commands": attach });
+            params[member] = value.clone();
+            let DispatchOutcome::Reply(r) = conn.dispatch(
+                &registry,
+                &mut doc,
+                &mut crate::host::NoHost,
+                req(1, "hew.doc.transact", params),
+            ) else {
+                panic!("{member}: {value}")
+            };
+            assert_eq!(
+                r.error.map(|e| e.code),
+                Some(codes::INVALID_PARAMS),
+                "{member}: {value}"
+            );
+            let DispatchOutcome::Reply(r) = conn.dispatch(
+                &registry,
+                &mut doc,
+                &mut crate::host::NoHost,
+                req(2, "hew.query.scene", serde_json::json!({})),
+            ) else {
+                panic!("{member}: {value}")
+            };
+            assert_eq!(
+                r.error.map(|e| e.code),
+                Some(codes::NO_DOCUMENT),
+                "{member}: {value}: still unattached"
+            );
+        }
+        // The well-formed envelope attaches, as before.
+        let mut conn = Connection::new(Grant::core(), "test");
+        let mut doc = kernel::Document::new();
+        hello(&mut conn, &mut doc);
+        let DispatchOutcome::Reply(r) = conn.dispatch(
+            &registry,
+            &mut doc,
+            &mut crate::host::NoHost,
+            req(
+                1,
+                "hew.doc.transact",
+                serde_json::json!({ "dry_run": false, "label": "a", "commands": attach }),
+            ),
+        ) else {
+            panic!()
+        };
+        assert!(r.error.is_none(), "{:?}", r.error);
     }
 
     #[test]

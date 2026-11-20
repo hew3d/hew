@@ -2043,7 +2043,7 @@ impl Registry {
                 },
                 "required": ["documents"]
             });
-            cmd.refusals = Vec::new();
+            cmd.refusals = vec!["dry_run_host_command"];
         }
         {
             let cmd = commands.get_mut("hew.query.scene").expect("declared above");
@@ -2525,7 +2525,11 @@ impl Registry {
                 "type": "object",
                 "properties": { "document": document_info_schema() }
             });
-            cmd.refusals = vec!["host_capability_missing", "window_not_ready"];
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "window_not_ready",
+                "dry_run_host_command",
+            ];
         }
         {
             let cmd = commands.get_mut("hew.doc.open").expect("declared above");
@@ -2553,7 +2557,12 @@ impl Registry {
                     }
                 }
             });
-            cmd.refusals = vec!["host_capability_missing", "load_failed", "window_not_ready"];
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "load_failed",
+                "window_not_ready",
+                "dry_run_host_command",
+            ];
         }
         {
             let cmd = commands.get_mut("hew.doc.close").expect("declared above");
@@ -2579,6 +2588,7 @@ impl Registry {
                 "ambiguous_document",
                 "unsaved_changes",
                 "last_document",
+                "dry_run_host_command",
             ];
         }
         {
@@ -2597,6 +2607,7 @@ impl Registry {
                 "host_capability_missing",
                 "unknown_document",
                 "ambiguous_document",
+                "dry_run_host_command",
             ];
         }
         {
@@ -2648,6 +2659,7 @@ impl Registry {
                 "host_capability_missing",
                 "path_required",
                 "save_failed",
+                "dry_run_host_command",
             ];
         }
         {
@@ -2671,6 +2683,7 @@ impl Registry {
                 "nothing_to_revert",
                 "unknown_document",
                 "ambiguous_document",
+                "dry_run_host_command",
             ];
         }
         {
@@ -4093,6 +4106,7 @@ impl Registry {
                 "host_capability_missing",
                 "plugins_disabled",
                 "no_plugin_dir",
+                "dry_run_host_command",
             ];
         }
         {
@@ -4169,6 +4183,7 @@ impl Registry {
                 "not_installed",
                 "installed_unreadable",
                 "storage_unreadable",
+                "dry_run_host_command",
                 "io",
             ];
         }

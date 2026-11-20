@@ -189,8 +189,10 @@ TRY AN EDIT BEFORE MAKING IT
 Add "dry_run": true to a hew_transact call to rehearse it: the answer is
 what the real call would answer, the ids it would mint included, with
 "dry_run": true beside it, and the document does not change. Commands
-that touch files, the library, the selection, or the screen refuse
-dry_run_host_command in a rehearsal.
+that touch files, the library, the selection, the screen, or the
+windows refuse dry_run_host_command in a rehearsal, reads of the app
+itself such as hew.meta.documents included; dry_run must be true or
+false.
 
 WHAT hew_query ADMITS
 hew_query runs every command that does not change the document: the

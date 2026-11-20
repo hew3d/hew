@@ -212,6 +212,42 @@ const PREVIEW_HOST_METHODS: &[&str] = &[
 #[cfg(not(hew_preview))]
 const PREVIEW_HOST_METHODS: &[&str] = &[];
 
+/// The envelope members the dispatcher's `api::Request` declares. Its
+/// derived parse refuses a frame that repeats any of them; a parse into a
+/// `Value` keeps the last one instead, so the two would read such a frame
+/// differently.
+const ENVELOPE_MEMBERS: [&str; 5] = ["jsonrpc", "id", "method", "params", "document"];
+
+/// Whether `line` is a JSON object that repeats one of the
+/// [`ENVELOPE_MEMBERS`] at its top level. Anything else (not JSON, not an
+/// object, repeats only of other members) is `false`.
+pub(crate) fn repeats_an_envelope_member(line: &str) -> bool {
+    use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
+
+    struct Repeats;
+    impl<'de> Visitor<'de> for Repeats {
+        type Value = bool;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a JSON-RPC frame")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+            // Read to the end: the deserializer checks the object closes.
+            let mut seen = [false; ENVELOPE_MEMBERS.len()];
+            let mut repeats = false;
+            while let Some(key) = map.next_key::<std::borrow::Cow<'de, str>>()? {
+                map.next_value::<IgnoredAny>()?;
+                if let Some(i) = ENVELOPE_MEMBERS.iter().position(|m| *m == key) {
+                    repeats |= seen[i];
+                    seen[i] = true;
+                }
+            }
+            Ok(repeats)
+        }
+    }
+    let mut de = serde_json::Deserializer::from_str(line);
+    de.deserialize_map(Repeats).unwrap_or(false)
+}
+
 /// What to do with one client frame.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Routed {
@@ -227,10 +263,6 @@ pub(crate) enum Routed {
         method: &'static str,
         params: Value,
         wrapped: bool,
-        /// The envelope asked for a rehearsal (`dry_run: true`, §6.6): a
-        /// command that would show or record something refuses
-        /// `dry_run_host_command`.
-        dry_run: bool,
     },
     /// Everything else: forward to a webview. `line` has the envelope's
     /// `document` member removed; `document` is that member, the target
@@ -259,6 +291,17 @@ fn classify_skipping(line: &str, skip: Option<&str>) -> Routed {
         .copied()
         .filter(|m| Some(*m) != skip)
         .collect();
+    // A frame that repeats an envelope member is the dispatcher's to
+    // refuse (its parse error), never the shell's to read last-wins and
+    // answer: forwarded byte for byte, `document` and all.
+    if repeats_an_envelope_member(line) {
+        return Routed::Forward {
+            line: line.to_string(),
+            document: None,
+            needs_reply: true,
+            is_hello: false,
+        };
+    }
     let Ok(mut value) = serde_json::from_str::<Value>(line) else {
         return Routed::Forward {
             line: line.to_string(),
@@ -308,12 +351,22 @@ fn classify_skipping(line: &str, skip: Option<&str>) -> Routed {
                     method: host_method,
                     params: with_envelope(host_method, params),
                     wrapped: false,
-                    dry_run: false,
                 },
                 None => Routed::Drop,
             };
         }
-        if method == "hew.doc.transact" {
+        // A rehearsal (`dry_run`, §6.6) is never the shell's to answer,
+        // whatever it holds: the shell has no way to run a command without
+        // its effect. It is forwarded like any other envelope, and the
+        // document's dispatcher answers it as every host does — the
+        // envelope checks, then `dry_run_host_command` for a Host-served
+        // command, `-32602` for a solitary Kernel-served one. Any
+        // `dry_run` but `false` counts, so a malformed one reaches the
+        // dispatcher's `-32602` instead of running for real here.
+        let rehearsal = params
+            .get("dry_run")
+            .is_some_and(|d| *d != Value::Bool(false));
+        if method == "hew.doc.transact" && !rehearsal {
             let commands = params.get("commands").and_then(Value::as_array);
             if let Some([only]) = commands.map(Vec::as_slice) {
                 let inner = only.get("method").and_then(Value::as_str);
@@ -327,7 +380,6 @@ fn classify_skipping(line: &str, skip: Option<&str>) -> Routed {
                                 only.get("params").cloned().unwrap_or_else(|| json!({})),
                             ),
                             wrapped: true,
-                            dry_run: params.get("dry_run") == Some(&Value::Bool(true)),
                         },
                         None => Routed::Drop,
                     };
@@ -1650,24 +1702,6 @@ fn unsubscribe_elsewhere(app: &AppHandle, conn: &ConnRoute, label: &str, line: &
 
 // ------------------------------------------------------------------ entry point
 
-/// Why a shell-answered command that shows or does something cannot run
-/// inside a rehearsal (`dry_run`), or `None` for one that may: a rehearsal
-/// changes nothing and shows nothing.
-fn rehearsal_refused(dry_run: bool, method: &str) -> Option<&'static str> {
-    if !dry_run {
-        return None;
-    }
-    match method {
-        "hew.plugin.dev" => {
-            Some("hew.plugin.dev asks the person in Hew, so it cannot be rehearsed.")
-        }
-        "hew.plugin.reload" => {
-            Some("hew.plugin.reload restarts a running plugin, so it cannot be rehearsed.")
-        }
-        _ => None,
-    }
-}
-
 /// Handles one sanitized client frame for `conn` and says what the
 /// transport should do next. This is the single place a frame is routed;
 /// both socket transports call it.
@@ -1701,24 +1735,12 @@ pub(crate) fn handle_frame(app: &AppHandle, conn: &mut ConnRoute, line: &str) ->
             method,
             params,
             wrapped,
-            dry_run,
         } => {
             if conn.hello.is_none() {
                 return Outcome::Reply(error_reply(&id, NOT_READY, "hew.meta.hello first"));
             }
             // An invalid-params refusal is protocol-level (-32602), not a
             // typed refusal — mirror the dispatcher's own classes.
-            // Asking the person is never rehearsed: a rehearsal changes
-            // nothing and shows nothing.
-            if let Some(why) = rehearsal_refused(dry_run, method) {
-                return Outcome::Reply(refusal_reply(
-                    &id,
-                    method,
-                    "dry_run_host_command",
-                    why,
-                    json!({ "method": method }),
-                ));
-            }
             match run_host_command(app, conn, method, &params) {
                 Ok(result) => Outcome::Reply(command_reply(&id, method, wrapped, result)),
                 Err(r)
@@ -1965,7 +1987,6 @@ mod tests {
                 method: "hew.doc.attach",
                 params: json!({"document":"doc_2"}),
                 wrapped: false,
-                dry_run: false
             }
         );
         let wrapped = classify(
@@ -1978,7 +1999,6 @@ mod tests {
                 method: "hew.doc.new",
                 params: json!({"focus":"front"}),
                 wrapped: true,
-                dry_run: false
             }
         );
     }
@@ -2012,28 +2032,203 @@ mod tests {
             PREVIEW_HOST_METHODS.is_empty() != cfg!(hew_preview),
             "the plugin commands exist exactly in a preview build"
         );
-        // In a preview build a rehearsal reaches the shell's answer marked
-        // `dry_run`, and `handle_frame` refuses `hew.plugin.dev` there
-        // (`dry_run_host_command`) before anything is recorded or shown; in
-        // a production build the method is forwarded as any unknown one.
+        // A rehearsal is never the shell's, in either build: the
+        // dispatcher refuses it (`dry_run_host_command`, or `preview_only`
+        // in a production build) before anything is recorded or shown.
         let rehearsal = classify(
             r#"{"jsonrpc":"2.0","id":3,"method":"hew.doc.transact","params":{"dry_run":true,"commands":[{"method":"hew.plugin.dev","params":{"path":"/x"}}]}}"#,
         );
-        if cfg!(hew_preview) {
-            assert!(
-                matches!(rehearsal, Routed::Host { dry_run: true, .. }),
-                "{rehearsal:?}"
-            );
-        } else {
-            assert!(matches!(rehearsal, Routed::Forward { .. }), "{rehearsal:?}");
-        }
+        assert!(matches!(rehearsal, Routed::Forward { .. }), "{rehearsal:?}");
         let real = classify(
             r#"{"jsonrpc":"2.0","id":4,"method":"hew.doc.transact","params":{"commands":[{"method":"hew.doc.new","params":{}}]}}"#,
         );
-        assert!(
-            matches!(real, Routed::Host { dry_run: false, .. }),
-            "{real:?}"
-        );
+        assert!(matches!(real, Routed::Host { .. }), "{real:?}");
+    }
+
+    /// Every command the shell answers, in this build.
+    fn shell_answered() -> Vec<&'static str> {
+        HOST_METHODS
+            .iter()
+            .chain(PREVIEW_HOST_METHODS)
+            .copied()
+            .collect()
+    }
+
+    /// A rehearsal of a command the shell answers (§6.6) never reaches
+    /// `run_host_command`: as the sole command of a dry run, whatever
+    /// the command and whether or not the envelope names a document, it
+    /// is forwarded to the document's dispatcher, which refuses it
+    /// `dry_run_host_command` (`-32602` for `hew.doc.attach`) with
+    /// nothing saved, reverted, opened, closed, focused or attached. The
+    /// envelope's `document` is the forward's target, as for any forward.
+    #[test]
+    fn a_dry_run_of_a_shell_answered_command_is_forwarded_never_answered() {
+        for method in shell_answered() {
+            let command = format!(r#"{{"method":"{method}","params":{{"path":"/m/a.hew"}}}}"#);
+            for (label, line) in [
+                (
+                    "sole",
+                    format!(
+                        r#"{{"jsonrpc":"2.0","id":1,"method":"hew.doc.transact","params":{{"dry_run":true,"commands":[{command}]}}}}"#
+                    ),
+                ),
+                (
+                    "addressed",
+                    format!(
+                        r#"{{"jsonrpc":"2.0","id":2,"method":"hew.doc.transact","params":{{"dry_run":true,"label":"x","commands":[{command}]}},"document":"doc_2"}}"#
+                    ),
+                ),
+                (
+                    "beside an edit",
+                    format!(
+                        r#"{{"jsonrpc":"2.0","id":3,"method":"hew.doc.transact","params":{{"dry_run":true,"commands":[{{"method":"hew.query.scene"}},{command}]}}}}"#
+                    ),
+                ),
+            ] {
+                match classify(&line) {
+                    Routed::Forward {
+                        line: forwarded,
+                        document,
+                        needs_reply,
+                        ..
+                    } => {
+                        assert!(needs_reply, "{method} {label}");
+                        let forwarded: Value = serde_json::from_str(&forwarded).unwrap();
+                        assert_eq!(forwarded["method"], "hew.doc.transact", "{method} {label}");
+                        assert_eq!(forwarded["params"]["dry_run"], true, "{method} {label}");
+                        assert_eq!(
+                            forwarded["params"]["commands"][0]["method"]
+                                .as_str()
+                                .map(|m| m == method || m == "hew.query.scene"),
+                            Some(true),
+                            "{method} {label}"
+                        );
+                        assert_eq!(document.is_some(), label == "addressed", "{method} {label}");
+                        assert!(forwarded.get("document").is_none(), "{method} {label}");
+                    }
+                    other => panic!("{method} {label}: answered by the shell: {other:?}"),
+                }
+            }
+            // A notification rehearsal is forwarded too (the dispatcher
+            // drops it), never dropped as a shell-answered one.
+            let note = format!(
+                r#"{{"jsonrpc":"2.0","method":"hew.doc.transact","params":{{"dry_run":true,"commands":[{command}]}}}}"#
+            );
+            assert!(
+                matches!(
+                    classify(&note),
+                    Routed::Forward {
+                        needs_reply: false,
+                        ..
+                    }
+                ),
+                "{method}"
+            );
+        }
+    }
+
+    /// The dispatcher reads `dry_run` as a boolean and answers any other
+    /// value `-32602`. The shell must not read a malformed one as `false`
+    /// and run the command for real: only an explicit `false` (or none)
+    /// leaves the command the shell's.
+    #[test]
+    fn only_a_dry_run_of_false_leaves_a_shell_answered_command_the_shells() {
+        for method in shell_answered() {
+            for value in [r#"true"#, r#""true""#, "1", "0", "null", "{}", "[]"] {
+                let line = format!(
+                    r#"{{"jsonrpc":"2.0","id":1,"method":"hew.doc.transact","params":{{"dry_run":{value},"commands":[{{"method":"{method}"}}]}}}}"#
+                );
+                assert!(
+                    matches!(classify(&line), Routed::Forward { .. }),
+                    "{method} dry_run {value}"
+                );
+            }
+            for params in [r#""dry_run":false,"#, ""] {
+                let line = format!(
+                    r#"{{"jsonrpc":"2.0","id":1,"method":"hew.doc.transact","params":{{{params}"commands":[{{"method":"{method}"}}]}}}}"#
+                );
+                assert!(
+                    matches!(classify(&line), Routed::Host { method: m, wrapped: true, .. } if m == method),
+                    "{method} {params}"
+                );
+            }
+        }
+    }
+
+    /// The dispatcher refuses a frame that repeats an envelope member
+    /// (its derived parse), where a parse into a `Value` keeps the last
+    /// one. Such a frame is forwarded byte for byte for that refusal and
+    /// never answered by the shell: a rehearsal hidden in the first
+    /// `params` must not become a real save read from the last.
+    #[test]
+    fn a_frame_that_repeats_an_envelope_member_is_forwarded_untouched() {
+        let save = r#"{"method":"hew.doc.save","params":{"path":"/m/a.hew"}}"#;
+        for line in [
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"hew.doc.transact","params":{{"dry_run":true,"commands":[{save}]}},"params":{{"commands":[{save}]}}}}"#
+            ),
+            r#"{"jsonrpc":"2.0","id":2,"method":"hew.query.scene","method":"hew.doc.save","params":{"path":"/m/a.hew"}}"#
+            .to_string(),
+            r#"{"jsonrpc":"2.0","id":3,"id":4,"method":"hew.doc.save","params":{"path":"/m/a.hew"}}"#
+            .to_string(),
+            r#"{"jsonrpc":"2.0","jsonrpc":"2.0","id":5,"method":"hew.doc.save","params":{}}"#
+            .to_string(),
+            r#"{"jsonrpc":"2.0","id":6,"method":"hew.doc.close","params":{},"document":"doc_1","document":"doc_2"}"#
+            .to_string(),
+            // A repeat whose name is escaped is still that member.
+            r#"{"jsonrpc":"2.0","id":7,"method":"hew.doc.save","par\u0061ms":{},"params":{}}"#
+            .to_string(),
+        ] {
+            assert!(repeats_an_envelope_member(&line), "{line}");
+            assert_eq!(
+                classify(&line),
+                Routed::Forward {
+                    line: line.clone(),
+                    document: None,
+                    needs_reply: true,
+                    is_hello: false,
+                },
+                "{line}"
+            );
+        }
+        // A repeat inside `params` is read the same way by both sides
+        // (each keeps the last), so it is classified as before: the last
+        // `dry_run` decides.
+        let inner = |first: bool, last: bool| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"hew.doc.transact","params":{{"dry_run":{first},"dry_run":{last},"commands":[{save}]}}}}"#
+            )
+        };
+        assert!(!repeats_an_envelope_member(&inner(true, false)));
+        assert!(matches!(
+            classify(&inner(false, true)),
+            Routed::Forward { .. }
+        ));
+        assert!(matches!(
+            classify(&inner(true, false)),
+            Routed::Host {
+                method: "hew.doc.save",
+                ..
+            }
+        ));
+        // Repeats of other members, and frames that are not objects, are
+        // not the dispatcher's parse error.
+        assert!(!repeats_an_envelope_member(
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.query.scene","x":1,"x":2}"#
+        ));
+        assert!(!repeats_an_envelope_member("[1,2]"));
+        assert!(!repeats_an_envelope_member("{not json"));
+        // Control: an ordinary save is still the shell's.
+        assert!(matches!(
+            classify(
+                r#"{"jsonrpc":"2.0","id":9,"method":"hew.doc.save","params":{"path":"/m/a.hew"}}"#
+            ),
+            Routed::Host {
+                method: "hew.doc.save",
+                wrapped: false,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2051,11 +2246,6 @@ mod tests {
                 assert!(matches!(bare, Routed::Forward { .. }), "{method}");
             }
         }
-        // A reload is never rehearsed; reading the activity may be.
-        assert!(rehearsal_refused(true, "hew.plugin.reload").is_some());
-        assert!(rehearsal_refused(true, "hew.plugin.dev").is_some());
-        assert!(rehearsal_refused(true, "hew.plugin.activity").is_none());
-        assert!(rehearsal_refused(false, "hew.plugin.reload").is_none());
     }
 
     #[test]
@@ -2073,7 +2263,6 @@ mod tests {
                 method: "hew.doc.close",
                 params: json!({"discard":true,"document":"doc_2"}),
                 wrapped: false,
-                dry_run: false
             }
         );
         let wrapped = classify(
@@ -2086,7 +2275,6 @@ mod tests {
                 method: "hew.doc.focus",
                 params: json!({"document":"doc_3"}),
                 wrapped: true,
-                dry_run: false
             }
         );
         // An explicit param wins over the envelope.

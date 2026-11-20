@@ -871,9 +871,14 @@ write under a namespace you do not own refuses as the commit would.
 
 A dry run cannot rehearse what is not an edit of the model: files, the
 library, the screen, the selection, hiding and showing, a Scene's apply,
-or another plugin's command. Those refuse `dry_run_host_command`; run them
-for real. Undo and the other solitary commands are `-32602` in a dry
-run. A dry run copies the whole document, so do not send one per pointer
+the windows and the open documents (`hew.doc.save`, `revert`, `new`,
+`open`, `close`, `focus`, `hew.meta.documents`), the `hew.plugin.*`
+commands, or another plugin's command. Those refuse
+`dry_run_host_command`, the ones that only read the app's state (the
+document list, the plugin list and activity) included; run them for
+real. Undo, `hew.doc.attach` and the other solitary commands are
+`-32602` in a dry run, and so is a `dry_run` that is not `true` or
+`false`. A dry run copies the whole document, so do not send one per pointer
 move.
 
 One computation runs at a time per connection; a second one sent while
@@ -1411,7 +1416,7 @@ nothing:
 | `confirmation_open` | a native dialog (a confirmation or a picker) is showing |
 | `request_dismissed` | the person dismissed a request less than 60 seconds ago |
 | `request_waiting` | a request for another path is waiting |
-| `dry_run_host_command` | sent inside a `hew.doc.transact` with `dry_run: true` |
+| `dry_run_host_command` | sent inside a `hew.doc.transact` with `dry_run: true`; checked before every other refusal here |
 
 The same path while its request waits answers `awaiting_user` again and
 shows nothing new, so a client that asks in a loop cannot bring a
@@ -1733,8 +1738,9 @@ for a review (`plugin_blocked`), and for one the person has turned off
 (`plugin_turned_off`): a plugin that stopped stays stopped until a person
 turns it off and on, and a reload is not a way around that or around a
 review. At most one reload per plugin every 2 seconds
-(`reload_too_soon`); inside a rehearsal (`dry_run`) it is refused
-`dry_run_host_command`. Nothing else about plugins is reachable from the
+(`reload_too_soon`). Inside a rehearsal (`dry_run`) it is refused
+`dry_run_host_command` before any of these, as every `hew.plugin.*`
+command is, the two that only read included. Nothing else about plugins is reachable from the
 socket.
 
 `installed.json`:

@@ -858,7 +858,8 @@ pub fn bus_activity(
 ///   on it, so nothing would reload.
 /// - `reload_too_soon`: less than [`RELOAD_INTERVAL_MS`] since the last.
 ///
-/// A rehearsal (`dry_run`) is refused by the router before this runs.
+/// A rehearsal (`dry_run`) never reaches this: the router forwards it to
+/// the document's dispatcher, which refuses it `dry_run_host_command`.
 pub fn bus_reload(
     state: &PluginState,
     params: &serde_json::Value,
