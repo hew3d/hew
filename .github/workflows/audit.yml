@@ -60,7 +60,7 @@ jobs:
       # Pinning the action pins cargo-deny itself: the tool ships inside this
       # action's container image rather than being resolved at run time.
       - name: cargo-deny (advisories, licenses, bans, sources)
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2.1.2
         with:
           manifest-path: ${{ matrix.manifest }}
           # One deny.toml at the repository root governs both trees. Naming it
