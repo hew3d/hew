@@ -1,8 +1,10 @@
 # German glossary (de)
 
 Decisions for the German catalog, `app/src/locales/de/messages.po`.
-Terms follow the German edition of SketchUp wherever one exists, so
-people coming from SketchUp recognize every tool.
+Terms follow the German edition of SketchUp in most cases, so people
+coming from SketchUp recognize the tools. The few places where this
+catalog departs from SketchUp on purpose are listed under
+"Deliberate departures from SketchUp" below.
 
 ## Register
 
@@ -45,7 +47,7 @@ people coming from SketchUp recognize every tool.
 | Axes / Drawing Axes | Achsen / Zeichenachsen |
 | Orbit | Orbit |
 | Pan | Schwenken |
-| Zoom / Zoom Extents / Zoom Window | Zoom / Zoom Grenzen / Zoom-Fenster |
+| Zoom / Zoom Extents / Zoom Window | Zoom / Alles zeigen / Zoom-Fenster |
 | Position Camera / Look Around / Walk | Kamera positionieren / Umsehen / Gehen |
 | Fly | Fliegen |
 | Slice | Schneiden |
@@ -56,6 +58,27 @@ people coming from SketchUp recognize every tool.
 | Bend / Twist / Taper | Biegen / Verdrehen / Verjüngen |
 | Edit Vertex | Eckpunkt bearbeiten |
 | Position Texture | Textur positionieren |
+
+The Paint tool is named "Farbeimer", as in SketchUp. The action it
+performs is "einfärben" ("Fläche einfärben", "Objekt einfärben"), never
+"malen", which reads as painting a picture.
+
+## Deliberate departures from SketchUp
+
+These terms differ from SketchUp's German edition on purpose. Please
+keep them unless there is a new reason to change them.
+
+| English | SketchUp (de) | Hew (de) | Why |
+| --- | --- | --- | --- |
+| Orbit | Rotieren | Orbit | "Rotieren" is too close to the Rotate tool ("Drehen"). "Orbit" is common in German 3D software. |
+| Pan | Hand | Schwenken | "Schwenken" names what the tool does. "Hand" only names the icon. |
+| Polygon | Vieleck | Polygon | Both are common. "Polygon" matches the English tool name and the search keyword. |
+| Zoom Window | Zoombereich | Zoom-Fenster | "Zoom-Fenster" is the term German CAD users know. |
+| Pie (arc completion) | Kuchen | Kreisausschnitt | The geometric term. It pairs with "Kreisabschnitt" for Segment. |
+| Look Around | Umschauen | Umsehen | Equivalent in meaning. "Umsehen" is the more neutral standard German form. |
+
+SketchUp names were checked against the German SketchUp 2024 Quick
+Reference Card.
 
 ## Objects and concepts
 
