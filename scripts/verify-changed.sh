@@ -191,7 +191,7 @@ if has '^app/' || [ "$SURFACE" = 1 ] || [ "$JS_DEPS" = 1 ]; then
     # The gate compares the catalogs with what is committed. Work in
     # progress may carry catalog edits that are not committed yet, so here
     # the test is that a fresh extract moves nothing further.
-    step "message catalogs in sync and complete"
+    step "message catalogs in sync"
     locales_sum() { find app/src/locales -type f | LC_ALL=C sort | xargs shasum | shasum; }
     LOCALES_BEFORE="$(locales_sum)"
     pnpm --dir app i18n:extract

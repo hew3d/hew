@@ -479,7 +479,8 @@ whatever tool is active.
 **UI text is localized.** Every string a person reads goes through a
 Lingui macro (`t`, `<Trans>`, `msg`) and into the gettext catalogs under
 `app/src/locales/`; `pnpm --dir app i18n:extract` regenerates them and the
-verify gate fails if they are stale or if a shipped locale is incomplete.
+verify gate fails if they are stale. A shipped locale may lag: untranslated
+messages show in English and the gate only reports the coverage.
 `pnpm --dir app lint` (Oxlint with the Lingui plugin) rejects an unwrapped
 string. Numbers a person reads go through `app/src/i18n/format.ts`, never
 `toFixed`. Strings in `crates/` stay English: the kernel speaks in typed

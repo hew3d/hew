@@ -3,16 +3,16 @@
  *
  * Dependency-free on purpose: `lingui.config.ts` (the extraction/compile
  * config, run by the Lingui CLI under Node) and `scripts/i18n-check.mjs`
- * (the verify-gate completeness check) import this file as well as the app,
+ * (the catalog coverage report) import this file as well as the app,
  * so it must stay plain data with no DOM, React, or Lingui imports.
  *
  * Three tiers of locale:
  *   - SOURCE_LOCALE: the language the source code is written in. Every
  *     message's key IS its English text (docs/LOCALIZATION.md).
  *   - SHIPPED_LOCALES: offered in Settings ▸ Language. A locale moves here
- *     only when its catalog is complete — `scripts/i18n-check.mjs` fails
- *     the gate on any empty translation in a shipped catalog, so a user
- *     who picks a language never sees a mixed interface.
+ *     when its catalog is first complete. It may lag afterwards: a message
+ *     added or reworded since shows in English until a translator catches
+ *     up, and `scripts/i18n-check.mjs` reports the coverage.
  *   - ALL_LOCALES: everything with a catalog on disk, shipped or not. A
  *     translator works on a catalog here before it is promoted.
  *

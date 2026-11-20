@@ -57,3 +57,58 @@ export function poLookup(entries) {
   for (const e of entries) map.set(`${e.msgctxt}\u0004${e.msgid}`, e.msgstr)
   return map
 }
+
+/**
+ * How much of a parsed catalog is translated. `percent` is rounded down
+ * to one decimal so a catalog with any gap never reads as 100.
+ */
+export function catalogCoverage(entries) {
+  const missing = entries.filter((e) => e.untranslated)
+  const total = entries.length
+  const translated = total - missing.length
+  const percent = total === 0 ? 0 : Math.floor((translated / total) * 1000) / 10
+  return { total, translated, missing, percent }
+}
+
+/**
+ * The i18n-check report: one line per locale, plus one per untranslated
+ * message when `list` is set. `read(locale)` returns the catalog text and
+ * may throw. `failed` is true only for a catalog that cannot be read or
+ * holds no messages; an untranslated message never fails.
+ */
+export function coverageReport({ locales, read, list = false }) {
+  const lines = []
+  let failed = false
+  const fail = (text) => {
+    failed = true
+    lines.push({ text, error: true })
+  }
+  for (const locale of locales) {
+    let entries
+    try {
+      entries = parsePo(read(locale))
+    } catch (err) {
+      fail(`i18n-check: ${locale} is shipped but its catalog cannot be read: ${err.message}`)
+      continue
+    }
+    const { total, translated, missing, percent } = catalogCoverage(entries)
+    if (total === 0) {
+      fail(`i18n-check: ${locale} is shipped but its catalog holds no messages`)
+      continue
+    }
+    if (missing.length === 0) {
+      lines.push({ text: `i18n-check: ${locale} complete (${total} messages)`, error: false })
+      continue
+    }
+    lines.push({
+      text: `i18n-check: ${locale} ${translated} of ${total} messages translated (${percent}%), ${missing.length} show in English`,
+      error: false,
+    })
+    if (list) {
+      for (const e of missing) {
+        lines.push({ text: `  ${e.msgctxt ? `[${e.msgctxt}] ` : ''}${JSON.stringify(e.msgid)}`, error: false })
+      }
+    }
+  }
+  return { lines, failed }
+}

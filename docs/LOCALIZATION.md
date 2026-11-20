@@ -7,9 +7,6 @@ those files in, and the app loads the catalog for the language the user
 picks. This document covers the three jobs that touch it: writing UI
 text, translating it, and adding a language.
 
-Status: the plumbing lands with the branch that introduces this document.
-Until then the app is English-only.
-
 ## What is translated
 
 The desktop and web app: menus, panels, dialogs, tooltips, accessibility
@@ -153,6 +150,11 @@ and the glossary. The pull request title is `i18n(<locale>): …`. The
 translator's name goes in the catalog header's `Last-Translator` field
 and in the changelog entry for the release that ships the update.
 
+To update a language that is already offered, run `pnpm --dir app
+i18n:check --list` on a current checkout. It names every message that
+has no translation yet, which are the entries with an empty `msgstr` in
+the catalog. A partial update is welcome; the rest stays in English.
+
 To see the result in the app, run the dev server with the catalog in
 place and pick the language in Settings. The dev server compiles catalogs
 on the fly; no build step.
@@ -170,13 +172,17 @@ choice is never overridden by the system locale. Switching languages
 re-renders the open windows, updates the document language attribute,
 and rebuilds the native menu without reloading or touching the model.
 
-A language ships only when its catalog is complete. `pnpm --dir app
-i18n:check` fails the verify gate on any untranslated entry in a shipped
-locale, so a user who picks a language never sees a mixed interface. A
-partial catalog can still be tested locally by adding its locale to
-`SHIPPED_LOCALES` in `app/src/i18n/locales.ts` on a branch.
+A language is first offered when its catalog is complete. After that it
+may lag behind the source. Hew adds and rewords text in every release,
+and a release does not wait for translators: a message with no
+translation shows in English, in the app and in the native menus, until
+the catalog catches up. `pnpm --dir app i18n:check` prints how much of
+each shipped catalog is translated, and `pnpm --dir app i18n:check
+--list` names every untranslated message. Neither fails the verify gate
+on a gap.
 
-Missing entries fall back to English at runtime in every case.
+A catalog that is not offered yet can be tested locally by adding its
+locale to `SHIPPED_LOCALES` in `app/src/i18n/locales.ts` on a branch.
 
 ### Pseudo-locale
 
@@ -238,8 +244,8 @@ and katakana are not treated as equivalent.
    `app/src/locales/<locale>/messages.po` appears.
 3. Translate, as above.
 4. When the catalog is complete, add the tag to `SHIPPED_LOCALES` in the
-   same file; `pnpm --dir app i18n:check` now enforces completeness for
-   it. Run `pnpm --dir app i18n:menus` to generate
+   same file; `pnpm --dir app i18n:check` now reports its coverage. Run
+   `pnpm --dir app i18n:menus` to generate
    `shells/tauri/src-tauri/locales/menu.<locale>.json`, commit it, and
    add it to `MENU_LOCALES` in `shells/tauri/src-tauri/src/menu_labels.rs`
    so the shell embeds it. `nativeMenuParity.test.ts` fails if the three
@@ -257,14 +263,16 @@ from menu IDs. Every label is a lookup into
 `pnpm --dir app i18n:menus` generates from the one label table in
 `app/src/i18n/nativeMenu.ts` and the gettext catalogs, so a translator
 never edits Rust and the HTML menu bar and the native one share entries.
-The shell embeds one file per shipped locale at compile time.
+The shell embeds one file per shipped locale at compile time, plus the
+pseudo-locale's as a debug aid.
 
 When the app activates a locale it tells the shell, which relabels every
 item in place (IDs, accelerators, check states, and enabled states
 survive) and writes the locale to a one-line `language` file in the app
 config directory. The next launch reads that file before building the
 menu, so the menu bar is in the right language from its first frame. An
-unshipped locale, the pseudo-locale included, shows English menus.
+unshipped locale shows English menus; the pseudo-locale shows its own
+bracketed labels.
 
 Menu labels are plain text with no placeholders. File names in the
 Recent menu and window titles are shown verbatim.
@@ -272,7 +280,9 @@ Recent menu and window titles are shown verbatim.
 ## Checks that run in `scripts/verify.sh`
 
 - `lingui extract` produces no diff against the committed catalogs.
-- `i18n:check` finds no untranslated entry in a shipped locale.
+- `i18n:check` reads every shipped catalog and prints its coverage. An
+  untranslated entry does not fail the gate; a shipped locale whose
+  catalog cannot be read or holds no messages does.
 - Oxlint with the Lingui rules reports nothing.
 - The generated native-menu JSON matches the catalogs.
 - Playwright runs pinned to English; one smoke test runs in the

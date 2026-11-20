@@ -196,8 +196,9 @@ if lane web; then
 
   # Localization (docs/LOCALIZATION.md): the committed catalogs must match the
   # source — a wrapped string with no catalog entry, or a stale entry, fails
-  # here rather than reaching a translator — and every SHIPPED locale's
-  # catalog must be complete.
+  # here rather than reaching a translator. A SHIPPED locale may lag behind
+  # the source (untranslated entries show in English), so its coverage is
+  # reported, not enforced.
   echo "=== pnpm --dir app i18n:extract (catalogs in sync) ==="
   pnpm --dir app i18n:extract
   # `git diff` sees modified tracked files; the second test catches a catalog
@@ -209,7 +210,7 @@ if lane web; then
     exit 1
   fi
 
-  echo "=== pnpm --dir app i18n:check (shipped catalogs complete) ==="
+  echo "=== pnpm --dir app i18n:check (shipped catalog coverage) ==="
   pnpm --dir app i18n:check
 
   echo "=== pnpm --dir app i18n:menus --check (native menu labels current) ==="
