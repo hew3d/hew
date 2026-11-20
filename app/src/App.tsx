@@ -21,6 +21,7 @@ import { toggledRenderMode, type RenderMode } from './viewport/SceneRenderer'
 import { InferenceTooltip } from './viewport/InferenceTooltip'
 import { AnnotationEditor } from './viewport/AnnotationEditor'
 import { SnapDot } from './viewport/SnapDot'
+import { createInferenceStore, useInferenceInfo, type InferenceStore } from './viewport/inferenceStore'
 import { MeasurementBox } from './viewport/MeasurementBox'
 import { ViewDie } from './viewport/ViewDie'
 import { GeoReferenceInfo } from './panels/GeoReferenceInfo'
@@ -591,6 +592,24 @@ function profileRedrawHint(): string {
   return t`Draw one open line or arc that runs from one side to the other without doubling back.`
 }
 
+/** The snap dot and tooltip chip. They re-render per pointer move; keeping
+ *  the subscription here keeps `App` itself out of that loop. */
+function InferenceOverlays({ store, detailFor }: {
+  store: InferenceStore
+  detailFor: (object: bigint | undefined, instance: bigint | undefined) => ReturnType<typeof hoverLine> | null
+}) {
+  const info = useInferenceInfo(store)
+  const object = info?.object
+  const instance = info?.instance
+  const detail = useMemo(() => detailFor(object, instance), [detailFor, object, instance])
+  return (
+    <>
+      <SnapDot info={info} />
+      <InferenceTooltip info={info} detail={detail} />
+    </>
+  )
+}
+
 export default function App() {
   const { t, i18n: activeI18n } = useLingui()
   /** Tray section titles: the heading text AND the key `toggleSection` uses
@@ -636,7 +655,6 @@ export default function App() {
   useEffect(() => () => {
     if (historyTrimTimerRef.current !== null) clearTimeout(historyTrimTimerRef.current)
   }, [])
-  const [snapKind, setSnapKind] = useState<string | null>(null)
   const [measurement, setMeasurement] = useState<string>('')
   /** True when `measurement` is a finished Tape Measure reading kept on
    *  screen for reference (tape-measure-rework part 1) rather than a live
@@ -644,7 +662,8 @@ export default function App() {
    *  this stays false for them. */
   const [measurementFrozen, setMeasurementFrozen] = useState(false)
   /** Live inference-cursor info for the tooltip chip. */
-  const [inferenceInfo, setInferenceInfo] = useState<InferenceInfo | null>(null)
+  const [inferenceStore] = useState(createInferenceStore)
+  const setInferenceInfo = inferenceStore.set
   const [toasts, setToasts] = useState<Toast[]>([])
   /** Per-object watertight map (bigint key) */
   const [watertightMap, setWatertightMap] = useState<Map<bigint, boolean>>(new Map())
@@ -1614,7 +1633,7 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', handler)
   }, [docSession.dirty])
 
-  const handleStatusChange = useCallback((name: string, kind: string | null) => {
+  const handleStatusChange = useCallback((name: string) => {
     // LibraryPlaceTool (viewport-level one-shot, armed imperatively via
     // armLibraryPlacement rather than the rail's switchToolRef path) reports
     // its real internal name here on every pointer move — 'LibraryPlace' is
@@ -1624,7 +1643,6 @@ export default function App() {
     // rail's own `activeTool` state, which armLibraryPlacement never changes.
     // oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifiers
     setToolName(name === 'LibraryPlace' || name === 'PlaceImage' ? 'Select' : name)
-    setSnapKind(kind)
   }, [])
 
   const handleMeasurement = useCallback((text: string, frozen = false) => {
@@ -2900,8 +2918,8 @@ export default function App() {
 
   /** The hover tip's second line for the object under the cursor (Select tool
    *  only — the viewport forwards `object` solely then). */
-  const hoverDetail = useMemo(() => {
-    if (pathLabels === null || inferenceInfo === null || (inferenceInfo.object === undefined && inferenceInfo.instance === undefined)) return null
+  const hoverDetailFor = useCallback((inferenceObject: bigint | undefined, inferenceInstance: bigint | undefined) => {
+    if (pathLabels === null || (inferenceObject === undefined && inferenceInstance === undefined)) return null
     // An open session frame erases its direct members' parent links, so a
     // member under the cursor names the innermost frame as its parent.
     const frame = sessionStack.length > 0 ? sessionStack[sessionStack.length - 1].node : null
@@ -2914,11 +2932,11 @@ export default function App() {
       sessionStack.some((f) => f.node.kind === 'instance' && f.node.id === id) ||
       activeContext.some((n) => n.kind === 'instance' && n.id === id)
     return hoverLine(
-      { object: inferenceInfo.object, instance: inferenceInfo.instance },
+      { object: inferenceObject, instance: inferenceInstance },
       parentOf, pathLabels.labelFor, pathLabels.memberName, isOpenInstance,
       (id) => isWrapperPlacement(pathLabels.scene, id),
     )
-  }, [pathLabels, inferenceInfo?.object, inferenceInfo?.instance, sessionStack, activeContext, sessionMembers])
+  }, [pathLabels, sessionStack, activeContext, sessionMembers])
 
   /** A strip crumb click: the selection becomes that node, nothing else
    *  changes. The hit leaf stays paired with it so the crumbs below survive. */
@@ -9044,8 +9062,7 @@ export default function App() {
           {/* Inference & viewport feedback (`07_inference_feedback.md`)
               — all net-new DOM overlays; Viewport.tsx rendered none of this
               before this milestone. */}
-          <SnapDot info={inferenceInfo} />
-          <InferenceTooltip info={inferenceInfo} detail={hoverDetail} />
+          <InferenceOverlays store={inferenceStore} detailFor={hoverDetailFor} />
           {/* The in-viewport annotation text editor (docs/design/
               dimensions-text.md): double-click-to-edit an existing dimension/
               leader, or the Text tool's second click wording a new leader. */}

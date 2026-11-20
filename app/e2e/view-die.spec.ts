@@ -28,12 +28,25 @@ async function setup(page: Page): Promise<void> {
 async function lookFrom(page: Page, dir: V3, dist = 9): Promise<void> {
   const len = Math.hypot(...dir)
   const position = dir.map((c) => (c / len) * dist) as V3
+  const frame = await page.evaluate(() => window.__hew_test!.frameCount())
   await page.evaluate(
     (position) => window.__hew_test!.setCamera({ position, target: [0, 0, 0], up: [0, 0, 1], fovDeg: 45 }),
     position,
   )
-  await expect(page.getByTestId('view-die')).toHaveAttribute('data-draw-active', /true|false/)
-  await page.waitForTimeout(120)
+  // The die hears about a new pose when the viewport next renders, so wait
+  // for that render before judging whether the die has settled.
+  await expect.poll(() => page.evaluate(() => window.__hew_test!.frameCount()), { timeout: 5000 }).toBeGreaterThan(frame)
+  // The die repaints at most every 66 ms while the camera moves (a trailing
+  // repaint lands the final pose), and a loaded runner can starve that timer:
+  // wait until the die's drawing has stopped changing, not for a fixed time.
+  const drawing = (): Promise<string> => page.getByTestId('view-die-svg').evaluate((el) => el.innerHTML)
+  await expect
+    .poll(async () => {
+      const before = await drawing()
+      await page.waitForTimeout(150)
+      return before === (await drawing())
+    }, { timeout: 5000 })
+    .toBe(true)
 }
 
 interface Pose { dir: V3; dist: number }

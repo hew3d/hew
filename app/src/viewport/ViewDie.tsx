@@ -137,6 +137,9 @@ const noFocus = (e: { preventDefault: () => void }): void => {
   e.preventDefault()
 }
 
+/** Longest the die goes without repainting while the camera moves. */
+const DIE_MIN_REPAINT_MS = 66
+
 export function ViewDie({ apiRef }: ViewDieProps) {
   const { i18n } = useLingui()
   const [q, setQ] = useState<Quat>([0, 0, 0, 1])
@@ -165,11 +168,41 @@ export function ViewDie({ apiRef }: ViewDieProps) {
         return
       }
       if (cancelled) return
-      const offCam = api.subscribeCameraOrientation?.((nq) => {
+      // The die repaints at most every DIE_MIN_REPAINT_MS while the camera
+      // moves: each repaint of its SVG costs several ms of the page's paint
+      // work, enough to halve the orbit frame rate on a large model. The
+      // first change paints at once and a trailing repaint always lands the
+      // final pose, so a discrete change (a view button, a tween's end) is
+      // never late by more than one interval.
+      let lastPaintAt = -Infinity
+      let pending: Quat | null = null
+      let trailing: ReturnType<typeof setTimeout> | null = null
+      const paint = (nq: Quat): void => {
+        lastPaintAt = performance.now()
         setQ(nq)
         syncPlane()
+      }
+      const offCam = api.subscribeCameraOrientation?.((nq) => {
+        const wait = DIE_MIN_REPAINT_MS - (performance.now() - lastPaintAt)
+        if (wait <= 0 && trailing === null) {
+          paint(nq)
+          return
+        }
+        pending = nq
+        if (trailing === null) {
+          trailing = setTimeout(() => {
+            trailing = null
+            if (pending !== null) paint(pending)
+            pending = null
+          }, Math.max(wait, 0))
+        }
       })
-      if (offCam !== undefined) offs.push(offCam)
+      if (offCam !== undefined) {
+        offs.push(offCam)
+        offs.push(() => {
+          if (trailing !== null) clearTimeout(trailing)
+        })
+      }
       // The viewport fires this only on a real change of its own signature
       // (plane, pip, hold, custom enablement, which pip would release), some
       // of which `samePlane` does not see: always repaint.

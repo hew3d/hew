@@ -4559,12 +4559,18 @@ export default function Viewport({
      */
     function refreshAcquireHover(ray?: Ray, force = false): void {
       const spec = toolControllerRef.current?.activeTool.clickAcquire?.() ?? null
-      const at = ray ?? heldPointerRay()
       let guide: bigint | null = null
       let node: NodeRef | null = null
-      if (spec !== null && at !== undefined && pointerInsideCanvas && heldButtons === 0 && !cameraModeRef.current && !readOnlyRef.current) {
-        if (spec.guides) guide = pickGuideTarget(at)
-        if (guide === null && spec.nodes) node = pickTransformableUnderCursor(at)
+      // The held-pointer ray is built only once nothing rules the pick out:
+      // it asks the document what is under the pointer (`elementFromPoint`),
+      // which forces a style and layout pass, and a camera gesture reaches
+      // here on every frame it moves the view.
+      if (spec !== null && pointerInsideCanvas && heldButtons === 0 && !cameraModeRef.current && !readOnlyRef.current) {
+        const at = ray ?? heldPointerRay()
+        if (at !== undefined) {
+          if (spec.guides) guide = pickGuideTarget(at)
+          if (guide === null && spec.nodes) node = pickTransformableUnderCursor(at)
+        }
       }
       acquireHoverLock = node !== null ? (lockHintFor(wasmScene, node)?.message ?? null) : null
       const activeInstance = activeInstanceOf(activeContextRef.current)
@@ -7788,8 +7794,15 @@ export default function Viewport({
       // One ray for both: the tool's own hover (Scale's grip) re-aims first,
       // so the highlight below sees whether a grip is hot now. No ray while a
       // button is held or a panel covers the pointer.
-      const viewRay = heldButtons === 0 ? heldPointerRay() : undefined
       const viewTool = toolControllerRef.current?.activeTool
+      // Only a tool that re-aims a hover grip or lights what a click would
+      // take has any use for the ray; building it costs a layout pass.
+      const wantsRay = viewTool?.onViewChanged !== undefined || (viewTool?.clickAcquire?.() ?? null) !== null
+      const viewRay = heldButtons === 0 && wantsRay ? heldPointerRay() : undefined
+      // A pose set by `lookAt`/the controls reaches `matrixWorld` only at
+      // render, and a click can land before it: refresh it here whether or
+      // not a ray was built (building one used to do this as a side effect).
+      camera.updateMatrixWorld()
       if (viewTool?.onViewChanged !== undefined) viewTool.onViewChanged(viewRay)
       if (viewTool?.hoverFace !== undefined) updateFaceCue(viewTool)
       refreshAcquireHover(viewRay)

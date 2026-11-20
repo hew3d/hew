@@ -80,10 +80,28 @@ describe('ViewDie', () => {
     expect(svg().textContent).not.toContain('Back')
   })
 
-  it('draws the outline dashed off a standard view and solid on one', () => {
+  /** Let the die's repaint throttle (a trailing repaint) fire. */
+  const settle = (): Promise<void> => act(() => new Promise<void>((r) => setTimeout(r, 120)))
+
+  it('repaints at once on the first change, then at most once per interval with the last pose landing', async () => {
+    const h = makeApi({ q: quatForEye([0.3, -1, 0.6]) })
+    mount(h)
+    await settle()
+    h.pushCamera(quatForEye([0, -1, 0]))
+    expect(screen.getByTestId('view-die')).toHaveAttribute('data-view', 'front')
+    // A burst right after: held back, but the last one is what ends up drawn.
+    h.pushCamera(quatForEye([1, 0, 0]))
+    h.pushCamera(quatForEye([0, 1, 0]))
+    expect(screen.getByTestId('view-die')).toHaveAttribute('data-view', 'front')
+    await settle()
+    expect(screen.getByTestId('view-die')).toHaveAttribute('data-view', 'back')
+  })
+
+  it('draws the outline dashed off a standard view and solid on one', async () => {
     const h = makeApi({ q: quatForEye([0.3, -1, 0.6]) })
     mount(h)
     expect(screen.getByTestId('view-die-silhouette')).toHaveAttribute('data-solid', 'false')
+    await settle()
     h.pushCamera(quatForEye([0, -1, 0]))
     expect(screen.getByTestId('view-die-silhouette')).toHaveAttribute('data-solid', 'true')
     expect(screen.getByTestId('view-die')).toHaveAttribute('data-view', 'front')
