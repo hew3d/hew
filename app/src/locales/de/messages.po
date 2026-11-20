@@ -1347,7 +1347,7 @@ msgstr "Mit Alt-Klick auf eine Fläche deren Material aufnehmen."
 
 #: src/viewport/MeasurementBox.tsx
 msgid "Amount"
-msgstr "Anzahl"
+msgstr "Stärke"
 
 #: src/tools/ArcTool.ts
 msgid "An arc stays on its drawing plane. Move the cursor along the plane, or press an arrow key to change it, then type the length."
@@ -1941,7 +1941,7 @@ msgstr "Klicken Sie auf eine Fläche oder ein geschlossenes Profil, um dessen Ra
 
 #: src/tools/PaintTool.ts
 msgid "Click a face to paint it with the current material. Click something selected to paint all of it. Shift-click replaces it everywhere, Ctrl/Cmd+Shift-click replaces within the object, Ctrl/Cmd-click fills the whole object, Alt = eyedropper."
-msgstr "Klicken Sie auf eine Fläche, um sie mit dem aktuellen Material zu malen. Klicken Sie auf etwas Ausgewähltes, um alles davon zu malen. Umschalt-Klick ersetzt es überall, Strg/Cmd+Umschalt-Klick ersetzt es innerhalb des Objekts, Strg/Cmd-Klick füllt das ganze Objekt, Alt = Pipette."
+msgstr "Klicken Sie auf eine Fläche, um sie mit dem aktuellen Material einzufärben. Klicken Sie auf etwas Ausgewähltes, um alles davon einzufärben. Umschalt-Klick ersetzt es überall, Strg/Cmd+Umschalt-Klick ersetzt es innerhalb des Objekts, Strg/Cmd-Klick füllt das ganze Objekt, Alt = Pipette."
 
 #: src/tools/PushPullTool.ts
 msgid "Click a face to push or pull it — double-click repeats the last distance."
@@ -2876,7 +2876,7 @@ msgstr "Dunkel"
 
 #: src/panels/GeoReferenceInfo.tsx
 msgid "Datum"
-msgstr "Datum"
+msgstr "Geodätisches Datum"
 
 #: src/settings/FluentSettingsPage.tsx
 #: src/settings/SettingsWindow.tsx
@@ -2915,7 +2915,7 @@ msgstr "Standard"
 
 #: src/panels/MaterialPalette.tsx
 msgid "Default (unpainted)"
-msgstr "Standard (unbemalt)"
+msgstr "Standard (nicht eingefärbt)"
 
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Definition Name"
@@ -7026,23 +7026,23 @@ msgstr "Farbeimer"
 
 #: src/i18n/historyLabels.ts
 msgid "Paint face"
-msgstr "Fläche malen"
+msgstr "Fläche einfärben"
 
 #: src/i18n/historyLabels.ts
 msgid "Paint instance"
-msgstr "Instanz malen"
+msgstr "Instanz einfärben"
 
 #: src/i18n/historyLabels.ts
 msgid "Paint object"
-msgstr "Objekt malen"
+msgstr "Objekt einfärben"
 
 #: src/tools/PaintTool.ts
 msgid "Painting a component colors this placement. Edit the component to paint its faces."
-msgstr "Das Malen einer Komponente färbt diese Platzierung. Bearbeiten Sie die Komponente, um ihre Flächen zu malen."
+msgstr "Das Einfärben einer Komponente färbt diese Platzierung. Bearbeiten Sie die Komponente, um ihre Flächen einzufärben."
 
 #: src/tools/PaintTool.ts
 msgid "Painting a linked copy colors just that copy. Edit the copy to paint faces on every copy."
-msgstr "Das Malen einer verknüpften Kopie färbt nur diese Kopie. Bearbeiten Sie die Kopie, um Flächen auf jeder Kopie zu malen."
+msgstr "Das Einfärben einer verknüpften Kopie färbt nur diese Kopie. Bearbeiten Sie die Kopie, um Flächen auf jeder Kopie einzufärben."
 
 #: src/i18n/nativeMenu.ts
 msgid "Pan"
@@ -11266,7 +11266,7 @@ msgstr "Oben"
 
 #: src/i18n/nativeMenu.ts
 msgid "Update"
-msgstr "Aktualisieren"
+msgstr "Update"
 
 #: src/i18n/nativeMenu.ts
 msgid "Update available"
@@ -11662,7 +11662,7 @@ msgstr "Zoom"
 #: src/panels/MenuBar.tsx
 #: src/shop/ShopApp.tsx
 msgid "Zoom Extents"
-msgstr "Zoom Grenzen"
+msgstr "Alles zeigen"
 
 #: src/palette/registry.ts
 msgid "zoom to fit"
