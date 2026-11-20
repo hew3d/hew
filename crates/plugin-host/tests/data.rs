@@ -239,7 +239,16 @@ fn document_storage_checks_the_ids_and_the_key_before_any_path() {
         );
     }
     // A bad plugin id is refused by the grammar first.
-    for bad in ["../x", "a", "hew.x", ""] {
+    for bad in [
+        "../x",
+        "a",
+        "hew.x",
+        "",
+        "con.example",
+        "com1.tools",
+        "lpt9.x",
+        "nul.b",
+    ] {
         assert!(matches!(
             data::doc_storage_set(&dir, bad, DOC, "a", "1"),
             Err(InstallError::Manifest(_))

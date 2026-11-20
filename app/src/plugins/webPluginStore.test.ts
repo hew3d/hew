@@ -27,6 +27,7 @@ import {
   type PluginWasm,
   type WebPluginStore,
   validDocumentId,
+  validPluginId,
 } from './webPluginStore'
 import { PluginError } from './pluginError'
 import type { Installed } from './types'
@@ -158,7 +159,7 @@ describe('stage and commit', () => {
     clock += 10 * 60 * 1000 + 1
     expect(await refusal(store.commit(staged.token, true))).toBe('pending_expired')
     expect(treeOf(root)).toEqual([])
-    for (const id of ['a/../b.c', '..', 'x', 'org.Hew.x', 'hew.core']) {
+    for (const id of ['a/../b.c', '..', 'x', 'org.Hew.x', 'hew.core', 'con.example', 'prn.x', 'aux.a', 'nul.b', 'com1.tools', 'com9.x', 'lpt1.x', 'lpt9.x', 'com0.x', 'lpt0.x']) {
       expect(await refusal(store.stageFile(pluginFile({ id }))), id).toBe('invalid_id')
     }
     expect(treeOf(root)).toEqual([])
@@ -183,6 +184,22 @@ describe('stage and commit', () => {
       'com.example.one',
       'com.example.two',
     ])
+  })
+})
+
+describe('plugin id grammar', () => {
+  it('says why a device-like first label is refused', async () => {
+    const { store } = setup()
+    await expect(store.stageFile(pluginFile({ id: 'con.example' }))).rejects.toMatchObject({
+      refusal: 'invalid_id',
+      message: expect.stringContaining('Windows reserves for devices'),
+    })
+  })
+
+  it('accepts ids whose device-like name is not the first label', () => {
+    for (const id of ['com.example', 'console.example', 'com10.x', 'lpt10.x', 'example.con', 'example.com1', 'auxiliary.x']) {
+      expect(validPluginId(id), id).toBe(true)
+    }
   })
 })
 

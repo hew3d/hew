@@ -113,7 +113,7 @@ read as opaque JSON until the parts that use them land.
 | Field | Rule |
 |---|---|
 | `manifest` | integer, required, must be `1` |
-| `id` | required; the plugin id: lowercase reverse-DNS, `label ("." label)+`, each label `[a-z0-9][a-z0-9-]*` of 1 to 63 characters, at most 128 in all. An id whose first label is `hew` is reserved (`org.hew3d.*` is not) |
+| `id` | required; the plugin id: lowercase reverse-DNS, `label ("." label)+`, each label `[a-z0-9][a-z0-9-]*` of 1 to 63 characters, at most 128 in all. An id whose first label is `hew` is reserved (`org.hew3d.*` is not), and so is one whose first label is a Windows device name (`con`, `prn`, `aux`, `nul`, `com0`..`com9`, `lpt0`..`lpt9`; `device_plugin_id`), because the id is a folder name; a later label such as `example.con` is fine. An id that a later rule change makes invalid keeps its files on disk and has to be removed by hand (known residual) |
 | `name` | required; 1 to 64 characters. Like every user-visible string in the manifest it may be a plain string, a per-locale object `{ "en": "...", "ja": "..." }` (at least one locale, every text 1 to 64 characters), or a catalog key `{ "$t": "key" }` |
 | `version` | required; semver 2.0.0 |
 | `description` | optional localizable string |
@@ -156,7 +156,8 @@ with several defects always reports the same one:
    happens to contain the words "unknown field".
 2. `manifest` is 1, else `manifest_version_unsupported`.
 3. `api` is 1, else `api_unsupported`.
-4. `id`: `invalid_plugin_id`, or `reserved_plugin_id` for a `hew` id.
+4. `id`: `invalid_plugin_id`, `reserved_plugin_id` for a `hew` id, or
+   `device_plugin_id` for a Windows device name as the first label.
 5. `name` length, else `name_too_long`.
 6. `main` is present and non-empty (`manifest_no_entry`); then `main`,
    `icon`, `locales.catalogs`, and `agent.notes` are package paths, else
@@ -173,7 +174,8 @@ with several defects always reports the same one:
    (`unknown_permission`), and each refusal name, which must match
    `[a-z][a-z0-9_]*` (`invalid_command_id`).
 10. `requires`, entry by entry: the id grammar (`invalid_plugin_id`, or
-    `reserved_plugin_id` for a `hew` id); then a repeated id is
+    `reserved_plugin_id` for a `hew` id, or `device_plugin_id` for a
+    Windows device name as the first label); then a repeated id is
     `duplicate_requirement`; then the plugin's own id is
     `self_requirement`.
 

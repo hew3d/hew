@@ -3326,7 +3326,10 @@ mod tests {
             for r in results {
                 let e = r.unwrap_err();
                 assert!(
-                    matches!(refusal_name(&e), "invalid_plugin_id" | "reserved_plugin_id"),
+                    matches!(
+                        refusal_name(&e),
+                        "invalid_plugin_id" | "reserved_plugin_id" | "device_plugin_id"
+                    ),
                     "{bad:?}: {e}"
                 );
             }

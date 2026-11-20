@@ -8721,12 +8721,21 @@ mod tests {
             reg.register_plugin("com.twice.lib", &twice),
             Err(RegisterError::DuplicateCommand("com.twice.lib.sum".into()))
         );
-        for bad_id in ["hew.evil", "nodot", "Com.Example"] {
+        for bad_id in [
+            "hew.evil",
+            "nodot",
+            "Com.Example",
+            "con.example",
+            "com1.tools",
+            "lpt9.a",
+        ] {
             assert_eq!(
                 reg.register_plugin(bad_id, &sample_plugin()),
                 Err(RegisterError::NameOutsidePluginNamespace(bad_id.into()))
             );
         }
+        assert!(reg.register_plugin("com10.lib", &sample_plugin()).is_ok());
+        reg.unregister_plugin("com10.lib");
         let mut bad_local = sample_plugin();
         bad_local[0].id = "Bad Name".into();
         assert_eq!(

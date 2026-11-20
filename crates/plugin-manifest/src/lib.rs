@@ -386,6 +386,8 @@ pub enum ManifestError {
     UnsupportedManifestVersion(u32),
     InvalidId(String),
     ReservedId(String),
+    /// The id's first label is a name Windows reserves for a device.
+    DeviceId(String),
     NameTooLong,
     NoEntry,
     /// `main`, `icon`, `locales.catalogs`, or `agent.notes` with a `..`
@@ -416,6 +418,7 @@ impl ManifestError {
             ManifestError::UnsupportedManifestVersion(_) => "manifest_version_unsupported",
             ManifestError::InvalidId(_) => "invalid_plugin_id",
             ManifestError::ReservedId(_) => "reserved_plugin_id",
+            ManifestError::DeviceId(_) => "device_plugin_id",
             ManifestError::NameTooLong => "name_too_long",
             ManifestError::NoEntry => "manifest_no_entry",
             ManifestError::InvalidPath(_) => "manifest_invalid_path",
@@ -447,6 +450,9 @@ impl ManifestError {
             ),
             ManifestError::ReservedId(id) => format!(
                 "\"{id}\" starts with \"hew\", which is reserved for Hew itself. Choose an id under a domain you own."
+            ),
+            ManifestError::DeviceId(id) => format!(
+                "\"{id}\" begins with a name Windows reserves for devices (the part before the first dot, such as con, aux, nul, com1 or lpt1), so Windows cannot use it as a folder name. Start the id with another label, like \"com.example.myplugin\"."
             ),
             ManifestError::NameTooLong => format!(
                 "The plugin name must be 1 to {MAX_NAME_LEN} characters in every language. Shorten it."
@@ -594,15 +600,33 @@ fn id_grammar_ok(id: &str) -> bool {
         })
 }
 
+/// Whether a lowercase id label is a name Windows opens as a device
+/// (`con`, `prn`, `aux`, `nul`, `com0`..`com9`, `lpt0`..`lpt9`). Windows
+/// applies this to the part of a file name before its first dot, which is
+/// the id's first label once the id is a folder name.
+pub fn is_device_label(label: &str) -> bool {
+    matches!(label, "con" | "prn" | "aux" | "nul")
+        || ["com", "lpt"].iter().any(|p| {
+            label
+                .strip_prefix(p)
+                .is_some_and(|d| matches!(d.as_bytes(), [b'0'..=b'9']))
+        })
+}
+
 /// The plugin id grammar (docs/agents/PLUGINS.md "Manifest"):
 /// `label ("." label)+`, label = `[a-z0-9][a-z0-9-]*`, 1..=63 per label,
-/// total `<= MAX_ID_LEN`; an id whose first label is `hew` is reserved.
+/// total `<= MAX_ID_LEN`; an id whose first label is `hew` is reserved,
+/// and so is one whose first label is a Windows device name.
 pub fn validate_plugin_id(id: &str) -> Result<(), ManifestError> {
     if !id_grammar_ok(id) {
         return Err(ManifestError::InvalidId(id.to_string()));
     }
-    if id.split('.').next() == Some("hew") {
+    let first = id.split('.').next().unwrap_or_default();
+    if first == "hew" {
         return Err(ManifestError::ReservedId(id.to_string()));
+    }
+    if is_device_label(first) {
+        return Err(ManifestError::DeviceId(id.to_string()));
     }
     Ok(())
 }
@@ -891,6 +915,45 @@ mod tests {
     }
 
     #[test]
+    fn plugin_id_refuses_windows_device_first_labels() {
+        for bad in [
+            "con.example",
+            "prn.x",
+            "aux.a",
+            "nul.b",
+            "com1.tools",
+            "com9.x",
+            "lpt1.x",
+            "lpt9.x",
+            "com0.x",
+            "lpt0.x",
+        ] {
+            assert_eq!(
+                validate_plugin_id(bad),
+                Err(ManifestError::DeviceId(bad.to_string())),
+                "{bad}"
+            );
+        }
+        for ok in [
+            "com.example",
+            "console.example",
+            "com10.x",
+            "lpt10.x",
+            "example.con",
+            "example.com1",
+            "auxiliary.x",
+            "com.example.con",
+        ] {
+            assert_eq!(validate_plugin_id(ok), Ok(()), "{ok}");
+        }
+        let text = validate_plugin_id("con.example").unwrap_err().explanation();
+        assert!(
+            text.contains("\"con.example\"") && text.contains("reserves for devices"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn hostnames() {
         for ok in ["example.com", "localhost", "a-b.example.com", "1.example"] {
             assert!(validate_hostname(ok), "{ok}");
@@ -1032,6 +1095,7 @@ mod tests {
             ManifestError::UnsupportedManifestVersion(2),
             ManifestError::InvalidId("x".into()),
             ManifestError::ReservedId("hew.x".into()),
+            ManifestError::DeviceId("con.x".into()),
             ManifestError::NameTooLong,
             ManifestError::NoEntry,
             ManifestError::InvalidPath("/x".into()),

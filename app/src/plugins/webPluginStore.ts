@@ -195,6 +195,8 @@ const MAX_PATH_BYTES = 1024
  *  slash, so a path of at most `MAX_PATH_BYTES` cannot reach further. */
 const MAX_FOLDER_DEPTH = MAX_PATH_BYTES >> 1
 const RESERVED_FIRST_LABEL = 'hew'
+/** Names Windows opens as a device; mirrors `is_device_label` in `plugin-manifest`. */
+const DEVICE_LABEL = /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/
 
 const KNOWN_RECORD_KEYS = new Set([
   'schema',
@@ -220,7 +222,8 @@ export function webPluginsSupported(): boolean {
 }
 
 /** The plugin id grammar of `plugin-manifest`: dotted labels of lowercase
- *  letters, digits and hyphens, and not Hew's own first label. Checked
+ *  letters, digits and hyphens, not Hew's own first label, and not a
+ *  Windows device name as the first label. Checked
  *  before an id is used as a folder name. */
 export function validPluginId(id: string): boolean {
   if (id.length === 0 || id.length > 128) return false
@@ -228,6 +231,7 @@ export function validPluginId(id: string): boolean {
   return (
     labels.length >= 2 &&
     labels[0] !== RESERVED_FIRST_LABEL &&
+    !DEVICE_LABEL.test(labels[0]) &&
     labels.every((l) => /^[a-z0-9][a-z0-9-]{0,62}$/.test(l))
   )
 }
@@ -241,6 +245,13 @@ export function validDocumentId(doc: string): boolean {
 
 function checkedId(id: string): string {
   if (!validPluginId(id)) {
+    const labels = id.split('.')
+    if (labels.length >= 2 && DEVICE_LABEL.test(labels[0])) {
+      throw new PluginError(
+        'invalid_id',
+        `"${id}" begins with a name Windows reserves for devices (the part before the first dot, such as con, aux, nul, com1 or lpt1), so Windows cannot use it as a folder name. Start the id with another label, like "com.example.myplugin".`,
+      )
+    }
     throw new PluginError('invalid_id', `"${id}" is not a plugin id Hew accepts.`)
   }
   return id

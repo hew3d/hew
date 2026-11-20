@@ -1050,7 +1050,17 @@ fn storage_needs_an_installed_plugin_and_never_creates_its_folder() {
     );
     assert!(!dir.root().join(other).exists());
     // A bad id is refused by the grammar before any path is built.
-    for bad in ["../x", "a", "hew.x", "a.b/../c", ""] {
+    for bad in [
+        "../x",
+        "a",
+        "hew.x",
+        "a.b/../c",
+        "",
+        "con.example",
+        "com1.tools",
+        "lpt9.x",
+        "nul.b",
+    ] {
         assert!(matches!(
             store::storage_set(&dir, bad, "a", "1"),
             Err(InstallError::Manifest(_))
