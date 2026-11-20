@@ -21,7 +21,7 @@ import { useViewSetting } from '../settings/useViewSetting'
 
 const KIND_LABEL: Record<string, MessageDescriptor> = {
   endpoint: msg`Endpoint`,
-  center: msg`Center`,
+  center: msg({ context: 'snap point', comment: 'Snap tooltip: the center of a circle or arc', message: 'Center' }),
   quadrant: msg`Quadrant`,
   tangent: msg`Tangent`,
   midpoint: msg`Midpoint`,

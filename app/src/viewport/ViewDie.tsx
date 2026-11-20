@@ -78,7 +78,7 @@ const FACE_NAME: Record<DieFaceId, MessageDescriptor> = {
   top: msg`Top`,
   bottom: msg`Bottom`,
   front: msg`Front`,
-  back: msg`Back`,
+  back: msg({ context: 'view', message: 'Back' }),
   left: msg`Left`,
   right: msg`Right`,
 }

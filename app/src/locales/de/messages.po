@@ -2,7 +2,7 @@
 msgid ""
 msgstr ""
 "POT-Creation-Date: 2026-11-17 15:45+0100\n"
-"Last-Translator: Moor and more\n"
+"Last-Translator: Torsten Galke (Moor and more)\n"
 "Language: de\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
@@ -38,10 +38,67 @@ msgstr "· rot"
 msgid "\"{matDeleteName}\" — used on {matDeleteUsage, plural, one {# face} other {# faces}} — delete and unpaint them?"
 msgstr "„{matDeleteName}“ – verwendet auf {matDeleteUsage, plural, one {# Fläche} other {# Flächen}} – löschen und Farbe entfernen?"
 
+#: src/library/libraryUpdates.ts
+msgid "“{name}” is locked and was not updated. Unlock it first."
+msgstr "„{name}“ ist gesperrt und wurde nicht aktualisiert. Heben Sie zuerst die Sperre auf."
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” is open for editing and was not updated. Close the open group or component first."
+msgstr "„{name}“ ist zum Bearbeiten geöffnet und wurde nicht aktualisiert. Schließen Sie zuerst die geöffnete Gruppe oder Komponente."
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” shares its shape with a locked part and was not updated. Unlock that part first."
+msgstr "„{name}“ teilt seine Form mit einem gesperrten Teil und wurde nicht aktualisiert. Entsperren Sie zuerst dieses Teil."
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was left as it is because it was changed here or is locked; the updated “{parentName}” got its own copy of the new “{name}”."
+msgstr "„{name}“ wurde unverändert gelassen, weil es hier geändert wurde oder gesperrt ist; das aktualisierte „{parentName}“ hat eine eigene Kopie des neuen „{name}“ erhalten."
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was left as it is because it was changed here or is locked; the updated part got its own copy of the new “{name}”."
+msgstr "„{name}“ wurde unverändert gelassen, weil es hier geändert wurde oder gesperrt ist; das aktualisierte Teil hat eine eigene Kopie des neuen „{name}“ erhalten."
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated: {reason}"
+msgstr "„{name}“ wurde nicht aktualisiert: {reason}"
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated: Hew couldn’t read its Library item."
+msgstr "„{name}“ wurde nicht aktualisiert: Hew konnte das zugehörige Bibliothekselement nicht lesen."
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated: it is no longer in this model."
+msgstr "„{name}“ wurde nicht aktualisiert: Es ist nicht mehr in diesem Modell vorhanden."
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated: its Library item is gone, or no longer has this part."
+msgstr "„{name}“ wurde nicht aktualisiert: Das zugehörige Bibliothekselement ist nicht mehr vorhanden oder enthält dieses Teil nicht mehr."
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated: the new version has parts nested too deeply."
+msgstr "„{name}“ wurde nicht aktualisiert: Die neue Version enthält zu tief verschachtelte Teile."
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated: the new version is too large to bring in."
+msgstr "„{name}“ wurde nicht aktualisiert: Die neue Version ist zu groß, um sie zu übernehmen."
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated: the new version would contain itself."
+msgstr "„{name}“ wurde nicht aktualisiert: Die neue Version würde sich selbst enthalten."
+
+#: src/library/libraryUpdates.ts
+msgid "“{name}” was not updated."
+msgstr "„{name}“ wurde nicht aktualisiert."
+
 #. placeholder {0}: r.frameDiffered
 #: src/linkSimilar.ts
 msgid "{0, plural, one {# copy had its own axes; the first copy’s axes now apply} other {# copies had their own axes; the first copy’s axes now apply}}"
 msgstr "{0, plural, one {# Kopie hatte eigene Achsen; jetzt gelten die Achsen der ersten Kopie} other {# Kopien hatten eigene Achsen; jetzt gelten die Achsen der ersten Kopie}}"
+
+#. placeholder {0}: row.copies
+#: src/panels/LibraryUpdateReview.tsx
+msgid "{0, plural, one {# copy in this model} other {# copies in this model}}"
+msgstr "{0, plural, one {# Kopie in diesem Modell} other {# Kopien in diesem Modell}}"
 
 #. placeholder {0}: item.summary.materials
 #: src/library/libraryModel.ts
@@ -139,9 +196,17 @@ msgstr "{count, plural, one {{count} Änderung seit dem letzten Speichern.} othe
 msgid "{count, plural, one {{count} change undone since last save.} other {{count} changes undone since last save.}}"
 msgstr "{count, plural, one {{count} Änderung seit dem letzten Speichern rückgängig gemacht.} other {{count} Änderungen seit dem letzten Speichern rückgängig gemacht.}}"
 
+#: src/lock/lockModel.ts
+msgid "{count, plural, one {# locked item was left alone.} other {# locked items were left alone.}}"
+msgstr "{count, plural, one {# gesperrtes Element wurde nicht verändert.} other {# gesperrte Elemente wurden nicht verändert.}}"
+
 #: src/health/healthCopy.ts
 msgid "{count, plural, one {# look-alike object can be linked} other {# look-alike objects can be linked}}"
 msgstr "{count, plural, one {# gleich aussehendes Objekt kann verknüpft werden} other {# gleich aussehende Objekte können verknüpft werden}}"
+
+#: src/panels/LibraryUpdateBar.tsx
+msgid "{count, plural, one {# part has a newer version in the Library.} other {# parts have newer versions in the Library.}}"
+msgstr "{count, plural, one {Für # Teil gibt es eine neuere Version in der Bibliothek.} other {Für # Teile gibt es neuere Versionen in der Bibliothek.}}"
 
 #: src/linkedCopyCopy.ts
 msgid "{count, plural, one {Cut all # copy} other {Cut all # copies}}"
@@ -166,6 +231,11 @@ msgstr "{count, plural, one {Verknüpfung von # Kopie gelöst, um sie zu vereini
 #: src/print/usePrintController.ts
 msgid "{count} + {extraPages} cut list"
 msgstr "{count} + {extraPages} Zuschnittliste"
+
+#. How many linked placements share one shape; shown beside the type in Object Info and as the Outliner badge tooltip
+#: src/linkedCopyCopy.ts
+msgid "{count} linked"
+msgstr "{count} verknüpft"
 
 #: src/panels/FollowNoticeBar.tsx
 msgid "{count} of your bug reports have news."
@@ -313,6 +383,10 @@ msgstr "{head} oder {last}"
 msgid "{hiddenCount, plural, one {+# more — refine your search} other {+# more — refine your search}}"
 msgstr "{hiddenCount, plural, one {+# weitere – Suche verfeinern} other {+# weitere – Suche verfeinern}}"
 
+#: src/lock/lockModel.ts
+msgid "{holding, plural, one {# group that holds something locked was left alone.} other {# groups that hold something locked were left alone.}}"
+msgstr "{holding, plural, one {# Gruppe, die etwas Gesperrtes enthält, wurde nicht verändert.} other {# Gruppen, die etwas Gesperrtes enthalten, wurden nicht verändert.}}"
+
 #: src/App.tsx
 msgid "{inModel, plural, one {# in this model} other {# in this model}}"
 msgstr "{inModel, plural, one {# in diesem Modell} other {# in diesem Modell}}"
@@ -391,6 +465,10 @@ msgstr "{mb} MB"
 msgid "{mendable, plural, one {# shape needs} other {# shapes need}}"
 msgstr "{mendable, plural, one {# Form muss} other {# Formen müssen}}"
 
+#: src/panels/LibraryUpdateReview.tsx
+msgid "{more, plural, one {+ # more part} other {+ # more parts}}"
+msgstr "{more, plural, one {+ # weiteres Teil} other {+ # weitere Teile}}"
+
 #: src/panels/UnsavedChangesDialog.tsx
 msgid "{more, plural, one {and # more (undone)} other {and # more (undone)}}"
 msgstr "{more, plural, one {und # weitere (rückgängig gemacht)} other {und # weitere (rückgängig gemacht)}}"
@@ -415,6 +493,10 @@ msgstr "{n, plural, one {{verb} # Objekt} other {{verb} # Objekte}}"
 msgid "{n, plural, one {{verb} # sketch} other {{verb} # sketches}}"
 msgstr "{n, plural, one {{verb} # Skizze} other {{verb} # Skizzen}}"
 
+#: src/panels/selectionCounts.ts
+msgid "{n, plural, one {# annotation} other {# annotations}}"
+msgstr "{n, plural, one {# Beschriftung} other {# Beschriftungen}}"
+
 #: src/panels/ImportingOverlay.tsx
 msgid "{n, plural, one {# byte} other {# bytes}}"
 msgstr "{n, plural, one {# Byte} other {# Bytes}}"
@@ -427,13 +509,33 @@ msgstr "{n, plural, one {# erfasstes Objekt existiert nicht mehr.} other {# erfa
 msgid "{n, plural, one {# gap will stay open.} other {# gaps will stay open.}}"
 msgstr "{n, plural, one {# Lücke bleibt offen.} other {# Lücken bleiben offen.}}"
 
+#: src/panels/selectionCounts.ts
+msgid "{n, plural, one {# group} other {# groups}}"
+msgstr "{n, plural, one {# Gruppe} other {# Gruppen}}"
+
+#: src/panels/selectionCounts.ts
+msgid "{n, plural, one {# guide} other {# guides}}"
+msgstr "{n, plural, one {# Hilfslinie} other {# Hilfslinien}}"
+
+#: src/panels/selectionCounts.ts
+msgid "{n, plural, one {# instance} other {# instances}}"
+msgstr "{n, plural, one {# Instanz} other {# Instanzen}}"
+
 #: src/panels/LibraryDialog.tsx
 msgid "{n, plural, one {# item} other {# items}}"
 msgstr "{n, plural, one {# Element} other {# Elemente}}"
 
+#: src/panels/selectionCounts.ts
+msgid "{n, plural, one {# object} other {# objects}}"
+msgstr "{n, plural, one {# Objekt} other {# Objekte}}"
+
 #: src/print/layout.ts
 msgid "{n, plural, one {# page} other {# pages ({cols} × {rows})}}"
 msgstr "{n, plural, one {# Seite} other {# Seiten ({cols} × {rows})}}"
+
+#: src/panels/selectionCounts.ts
+msgid "{n, plural, one {# sketch} other {# sketches}}"
+msgstr "{n, plural, one {# Skizze} other {# Skizzen}}"
 
 #: src/health/healthCopy.ts
 msgid "{n, plural, one {# zero-area face} other {# zero-area faces}}"
@@ -447,13 +549,38 @@ msgstr "{n, plural, one {Eine Öffnung schließen} other {# Öffnungen schließe
 msgid "{n, plural, one {Copy guide} other {Copy guide ×#}}"
 msgstr "{n, plural, one {Hilfslinie kopieren} other {Hilfslinie kopieren ×#}}"
 
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # annotation} other {Delete # annotations}}"
+msgstr "{n, plural, one {# Beschriftung löschen} other {# Beschriftungen löschen}}"
+
 #: src/i18n/historyLabels.ts
 msgid "{n, plural, one {Delete # face} other {Delete # faces}}"
 msgstr "{n, plural, one {# Fläche löschen} other {# Flächen löschen}}"
 
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # group} other {Delete # groups}}"
+msgstr "{n, plural, one {# Gruppe löschen} other {# Gruppen löschen}}"
+
 #: src/i18n/historyLabels.ts
+#: src/viewport/deleteLabel.ts
 msgid "{n, plural, one {Delete # guide} other {Delete # guides}}"
 msgstr "{n, plural, one {# Hilfslinie löschen} other {# Hilfslinien löschen}}"
+
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # instance} other {Delete # instances}}"
+msgstr "{n, plural, one {# Instanz löschen} other {# Instanzen löschen}}"
+
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # item} other {Delete # items}}"
+msgstr "{n, plural, one {# Element löschen} other {# Elemente löschen}}"
+
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # object} other {Delete # objects}}"
+msgstr "{n, plural, one {# Objekt löschen} other {# Objekte löschen}}"
+
+#: src/viewport/deleteLabel.ts
+msgid "{n, plural, one {Delete # sketch} other {Delete # sketches}}"
+msgstr "{n, plural, one {# Skizze löschen} other {# Skizzen löschen}}"
 
 #: src/i18n/historyLabels.ts
 msgid "{n, plural, one {Delete # tag} other {Delete # tags}}"
@@ -514,6 +641,10 @@ msgstr "{n, plural, one {# loses Teil abgetrennt} other {# lose Teile abgetrennt
 #: src/health/healthCopy.ts
 msgid "{n, plural, one {separated # spot where parts touched at a single point} other {separated # spots where parts touched at a single point}}"
 msgstr "{n, plural, one {# Stelle getrennt, an der sich Teile in einem Punkt berührten} other {# Stellen getrennt, an denen sich Teile in einem Punkt berührten}}"
+
+#: src/library/libraryUpdates.ts
+msgid "{n, plural, one {Updated # part from the Library.} other {Updated # parts from the Library.}}"
+msgstr "{n, plural, one {# Teil aus der Bibliothek aktualisiert.} other {# Teile aus der Bibliothek aktualisiert.}}"
 
 #: src/log/reportBundle.ts
 #: src/panels/ReportBugDialog.tsx
@@ -856,6 +987,10 @@ msgstr "{size} MB"
 msgid "{size} tile"
 msgstr "{size} Kachel"
 
+#: src/library/libraryUpdates.ts
+msgid "{skipped, plural, one {# part was not updated.} other {# parts were not updated.}}"
+msgstr "{skipped, plural, one {# Teil wurde nicht aktualisiert.} other {# Teile wurden nicht aktualisiert.}}"
+
 #: src/viewport/Viewport.tsx
 msgid "{skipped, plural, one {Inserted without # loose sketch/annotation element — library inserts carry solids, components, and guides.} other {Inserted without # loose sketch/annotation elements — library inserts carry solids, components, and guides.}}"
 msgstr "{skipped, plural, one {Ohne # loses Skizzen-/Beschriftungselement eingefügt – Einfügungen aus der Bibliothek enthalten Volumenkörper, Komponenten und Hilfslinien.} other {Ohne # lose Skizzen-/Beschriftungselemente eingefügt – Einfügungen aus der Bibliothek enthalten Volumenkörper, Komponenten und Hilfslinien.}}"
@@ -1118,9 +1253,25 @@ msgstr "Ein Kernel-Fehler ist aufgetreten – die Sitzung ist nicht mehr nutzbar
 msgid "A line needs a length. Type a length other than 0."
 msgstr "Eine Linie braucht eine Länge. Geben Sie eine Länge ungleich 0 ein."
 
+#: src/panels/DocumentTree.tsx
+msgid "A locked group can't take new items. Unlock it first."
+msgstr "Eine gesperrte Gruppe kann keine neuen Elemente aufnehmen. Entsperren Sie sie zuerst."
+
+#: src/panels/DocumentTree.tsx
+msgid "A locked item can't be moved. Unlock it first."
+msgstr "Ein gesperrtes Element kann nicht verschoben werden. Entsperren Sie es zuerst."
+
 #: src/tools/FlipTool.ts
 msgid "A mirrored copy can't be made while you're editing inside a component. Close the component first, or flip in place."
 msgstr "Eine gespiegelte Kopie kann nicht erstellt werden, während Sie in einer Komponente arbeiten. Schließen Sie zuerst die Komponente, oder spiegeln Sie an Ort und Stelle."
+
+#: src/updater/UpdateWindow.tsx
+msgid "A new version of Hew is available!"
+msgstr "Eine neue Version von Hew ist verfügbar!"
+
+#: src/library/libraryUpdates.ts
+msgid "A newer version of this part is in the Library."
+msgstr "Eine neuere Version dieses Teils ist in der Bibliothek."
 
 #: src/kernelErrors.ts
 msgid "A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis."
@@ -1316,9 +1467,15 @@ msgstr "Erweitert"
 msgid "Aligned"
 msgstr "Ausgerichtet"
 
+#: src/i18n/nativeMenu.ts
 #: src/panels/LibraryDialog.tsx
+#: src/panels/MenuBar.tsx
 msgid "All"
 msgstr "Alle"
+
+#: src/lock/lockModel.ts
+msgid "All {total} copies are locked"
+msgstr "Alle {total} Kopien sind gesperrt"
 
 #: src/panels/LibraryDialog.tsx
 msgid "All items"
@@ -1327,6 +1484,10 @@ msgstr "Alle Elemente"
 #: src/health/healthCopy.ts
 msgid "All of them are solid."
 msgstr "Alle sind geschlossen."
+
+#: src/updater/UpdateWindow.tsx
+msgid "All release notes ↗"
+msgstr "Alle Versionshinweise ↗"
 
 #: src/io/tauriFileHost.ts
 #: src/io/webFileHost.ts
@@ -1340,6 +1501,10 @@ msgstr "Schon vorhanden: Die eingefügte Zeichnung entspricht dem bereits Gezeic
 #: src/panels/ReportBugDialog.tsx
 msgid "Also open a public GitHub issue"
 msgstr "Auch ein öffentliches GitHub-Issue erstellen"
+
+#: src/lock/lockModel.ts
+msgid "Also used in a locked group"
+msgstr "Wird auch in einer gesperrten Gruppe verwendet"
 
 #: src/tools/PaintTool.ts
 msgid "Alt-click a face to sample its material."
@@ -1508,6 +1673,15 @@ msgstr "Automatisch"
 msgid "Auto follows your OS's light/dark appearance setting."
 msgstr "Automatisch folgt der Hell/Dunkel-Einstellung Ihres Betriebssystems."
 
+#: src/settings/AdvancedPane.tsx
+#: src/settings/FluentSettingsPage.tsx
+msgid "Automatically download and install updates"
+msgstr "Updates automatisch herunterladen und installieren"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Automatically download and install updates in the future"
+msgstr "Updates künftig automatisch herunterladen und installieren"
+
 #: src/io/docFormat.ts
 msgid "Avoid features older SketchUp versions cannot open"
 msgstr "Funktionen vermeiden, die ältere SketchUp-Versionen nicht öffnen können"
@@ -1526,15 +1700,15 @@ msgid "axis"
 msgstr "Achse"
 
 #: src/health/healthCopy.ts
-#: src/i18n/nativeMenu.ts
-#: src/panels/MenuBar.tsx
-#: src/print/printJob.ts
 #: src/settings/FluentSettingsPage.tsx
-#: src/viewport/ViewDie.tsx
 msgid "Back"
 msgstr "Zurück"
 
+#: src/i18n/nativeMenu.ts
+#: src/panels/MenuBar.tsx
+#: src/print/printJob.ts
 #: src/shop/ViewsSheet.tsx
+#: src/viewport/ViewDie.tsx
 msgctxt "view"
 msgid "Back"
 msgstr "Hinten"
@@ -1622,6 +1796,10 @@ msgstr "Bolzen"
 #: src/palette/registry.ts
 msgid "boolean"
 msgstr "boolesch"
+
+#: src/lock/lockModel.ts
+msgid "Both copies are locked"
+msgstr "Beide Kopien sind gesperrt"
 
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
@@ -1724,10 +1902,12 @@ msgstr "abbrechen"
 #: src/panels/CutScopeStrip.tsx
 #: src/panels/ExportDialog.tsx
 #: src/panels/library/LibraryDetailPane.tsx
+#: src/panels/LibraryUpdateReview.tsx
 #: src/panels/PrintDialog.tsx
 #: src/panels/ReportBugDialog.tsx
 #: src/panels/RescaleConfirmDialog.tsx
 #: src/panels/SaveFormatDialog.tsx
+#: src/panels/SaveToLibraryPopover.tsx
 #: src/panels/ScenesPanel.tsx
 #: src/panels/SentReportsDialog.tsx
 #: src/panels/StlUnitsDialog.tsx
@@ -1756,9 +1936,14 @@ msgid "Category"
 msgstr "Kategorie"
 
 #: src/panels/PrintDialog.tsx
-#: src/viewport/InferenceTooltip.tsx
 msgid "Center"
-msgstr "Mitte"
+msgstr "Zentrieren"
+
+#. Snap tooltip: the center of a circle or arc
+#: src/viewport/InferenceTooltip.tsx
+msgctxt "snap point"
+msgid "Center"
+msgstr "Mittelpunkt"
 
 #: src/health/healthCopy.ts
 msgid "Centered"
@@ -1800,6 +1985,14 @@ msgstr "Ändern …"
 msgid "Changed from the default"
 msgstr "Gegenüber dem Standard geändert"
 
+#: src/library/libraryUpdates.ts
+msgid "Changed here"
+msgstr "Hier geändert"
+
+#: src/library/libraryUpdates.ts
+msgid "Changed here and in the Library"
+msgstr "Hier und in der Bibliothek geändert"
+
 #: src/App.tsx
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
@@ -1827,6 +2020,11 @@ msgstr "Prüfen Sie, ob „Hardwarebeschleunigung verwenden, falls verfügbar“
 #: src/viewport/gpuCapability.ts
 msgid "Check that your graphics drivers are installed and that hardware acceleration is turned on, then try again."
 msgstr "Prüfen Sie, ob Ihre Grafiktreiber installiert und die Hardwarebeschleunigung eingeschaltet ist, und versuchen Sie es dann erneut."
+
+#: src/settings/FluentSettingsPage.tsx
+#: src/settings/FoldersPane.tsx
+msgid "Check the Library for newer parts"
+msgstr "Bibliothek auf neuere Teile prüfen"
 
 #: src/panels/ImportingOverlay.tsx
 msgid "Checking the objects"
@@ -2215,6 +2413,7 @@ msgstr "Klicken Sie, wohin der Punkt soll – seine Linien folgen."
 msgid "clip"
 msgstr "beschneiden"
 
+#: src/App.tsx
 #: src/health/healthCopy.ts
 #: src/i18n/nativeMenu.ts
 #: src/panels/FloatingWindow.tsx
@@ -2224,6 +2423,7 @@ msgstr "beschneiden"
 #: src/panels/ReportBugDialog.tsx
 #: src/panels/SentReportsDialog.tsx
 #: src/TitleBar.tsx
+#: src/updater/UpdateWindow.tsx
 msgid "Close"
 msgstr "Schließen"
 
@@ -2287,6 +2487,10 @@ msgstr "Geschlossen"
 msgid "Closer than"
 msgstr "Näher als"
 
+#: src/updater/UpdateWindow.tsx
+msgid "Closing your documents…"
+msgstr "Ihre Dokumente werden geschlossen …"
+
 #: src/palette/registry.ts
 msgid "cnc"
 msgstr "CNC"
@@ -2336,8 +2540,8 @@ msgid "Combining…"
 msgstr "Wird kombiniert …"
 
 #: src/i18n/nativeMenu.ts
-msgid "Command copied"
-msgstr "Befehl kopiert"
+#~ msgid "Command copied"
+#~ msgstr "Befehl kopiert"
 
 #: src/palette/CommandPalette.tsx
 msgid "Command palette"
@@ -2457,26 +2661,24 @@ msgstr "Koordinatensystem"
 #: src/ErrorBoundary.tsx
 #: src/log/LogPanel.tsx
 #: src/panels/ReportBugDialog.tsx
+#: src/updater/UpdateWindow.tsx
 msgid "Copied"
 msgstr "Kopiert"
 
-#: src/App.tsx
-#: src/panels/DocumentTree.tsx
-#: src/panels/ObjectInfoPanel.tsx
 #: src/settings/EditingPane.tsx
 msgid "Copies"
 msgstr "Kopien"
 
 #. Row label for a placement of a linked set that has no name at all
 #: src/panels/treeModel.ts
-msgctxt "unnamed item"
-msgid "Copies"
-msgstr "Kopien"
+#~ msgctxt "unnamed item"
+#~ msgid "Copies"
+#~ msgstr "Kopien"
 
 #. Short uppercase chip on the contextual dock when one linked copy is selected
 #: src/panels/dockLogic.ts
-msgid "COPIES"
-msgstr "KOPIEN"
+#~ msgid "COPIES"
+#~ msgstr "KOPIEN"
 
 #: src/palette/registry.ts
 msgid "copies along path"
@@ -2510,7 +2712,7 @@ msgstr "Den Rand einer Fläche oder eines Profils in einem festgelegten Abstand 
 msgid "Copy all log entries to the clipboard"
 msgstr "Alle Protokolleinträge in die Zwischenablage kopieren"
 
-#: src/i18n/nativeMenu.ts
+#: src/updater/UpdateWindow.tsx
 msgid "Copy Command"
 msgstr "Befehl kopieren"
 
@@ -2536,8 +2738,8 @@ msgstr "Die Auswahl in die Zwischenablage kopieren und dann löschen."
 
 #. Command palette entry that jumps to a named linked copy
 #: src/App.tsx
-msgid "Copy: {label}"
-msgstr "Kopie: {label}"
+#~ msgid "Copy: {label}"
+#~ msgstr "Kopie: {label}"
 
 #: src/i18n/nativeMenu.ts
 msgid "Could not check for updates.\n"
@@ -2599,6 +2801,10 @@ msgstr "Diese Datei konnte nicht komprimiert werden."
 #: src/log/reportBundle.ts
 msgid "Couldn’t compress this report. Save it to a file instead."
 msgstr "Dieser Bericht konnte nicht komprimiert werden. Speichern Sie ihn stattdessen in einer Datei."
+
+#: src/updater/UpdateWindow.tsx
+msgid "Couldn’t copy the command. Select it above and copy it, or click Update Help."
+msgstr "Der Befehl konnte nicht kopiert werden. Markieren Sie ihn oben und kopieren Sie ihn, oder klicken Sie auf „Hilfe zum Update“."
 
 #: src/tools/DimensionTool.ts
 msgid "Couldn't create dimension: {reason}"
@@ -2942,6 +3148,7 @@ msgstr "Verzögerung (s)"
 #: src/panels/LibraryDialog.tsx
 #: src/panels/MenuBar.tsx
 #: src/panels/ScenesPanel.tsx
+#: src/viewport/deleteLabel.ts
 #: src/viewport/Viewport.tsx
 msgid "Delete"
 msgstr "Löschen"
@@ -3170,6 +3377,10 @@ msgstr "Durchmesser"
 msgid "difference"
 msgstr "Differenz"
 
+#: src/library/libraryUpdates.ts
+msgid "Different from the Library"
+msgstr "Weicht von der Bibliothek ab"
+
 #: src/palette/registry.ts
 msgid "dimension"
 msgstr "Abmessung"
@@ -3293,6 +3504,7 @@ msgid "Don’t Save"
 msgstr "Nicht speichern"
 
 #: src/health/healthCopy.ts
+#: src/panels/LibraryUpdateReview.tsx
 #: src/panels/PrintDialog.tsx
 msgid "Done"
 msgstr "Fertig"
@@ -3305,10 +3517,18 @@ msgstr "Doppeltippen zoomt auf das Teil"
 msgid "Download Diagnostic Log…"
 msgstr "Diagnoseprotokoll herunterladen …"
 
+#: src/updater/UpdateWindow.tsx
+msgid "Download progress"
+msgstr "Download-Fortschritt"
+
 #: src/panels/library/LibraryDetailPane.tsx
 #: src/panels/library/LibraryMenu.tsx
 msgid "Download…"
 msgstr "Herunterladen …"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Downloading Hew {version}…"
+msgstr "Hew {version} wird heruntergeladen …"
 
 #: src/io/savePanel.ts
 msgid "Draft (24 segments per turn)"
@@ -3670,6 +3890,10 @@ msgstr "Jedes Objekt hier ist geschlossen."
 #: src/health/healthCopy.ts
 msgid "Every object in the model is solid."
 msgstr "Jedes Objekt im Modell ist geschlossen."
+
+#: src/panels/LibraryUpdateReview.tsx
+msgid "Every part from the Library matches it."
+msgstr "Alle Teile aus der Bibliothek sind auf dem aktuellen Stand."
 
 #: src/settings/units.ts
 msgid "Exact"
@@ -4165,6 +4389,10 @@ msgstr "fredoscale"
 msgid "free camera"
 msgstr "freie Kamera"
 
+#: src/palette/registry.ts
+msgid "freeze"
+msgstr "einfrieren"
+
 #: src/panels/library/LibraryDetailPane.tsx
 msgid "from {sourceDoc}"
 msgstr "aus {sourceDoc}"
@@ -4295,7 +4523,12 @@ msgstr "Boden"
 #: src/palette/registry.ts
 #: src/panels/dockLogic.ts
 #: src/panels/MenuBar.tsx
+msgid "Group"
+msgstr "Gruppieren"
+
+#. Object Info type label for a selected group; the plain "Group" is the command
 #: src/panels/ObjectInfoPanel.tsx
+msgctxt "kind of thing"
 msgid "Group"
 msgstr "Gruppe"
 
@@ -4328,6 +4561,10 @@ msgstr "Die ausgewählten Objekte gruppieren, damit sie sich gemeinsam bewegen."
 #: src/App.tsx
 msgid "Group: {label}"
 msgstr "Gruppe: {label}"
+
+#: src/App.tsx
+msgid "Grouping needs two or more, so nothing was grouped."
+msgstr "Zum Gruppieren sind mindestens zwei nötig, daher wurde nichts gruppiert."
 
 #: src/palette/registry.ts
 msgid "guide"
@@ -4423,16 +4660,44 @@ msgid "Hew — kernel load error"
 msgstr "Hew – Fehler beim Laden des Kernels"
 
 #: src/i18n/nativeMenu.ts
-msgid "Hew {version} is available — you have {current}."
-msgstr "Hew {version} ist verfügbar – Sie haben {current}."
+#~ msgid "Hew {version} is available — you have {current}."
+#~ msgstr "Hew {version} ist verfügbar – Sie haben {current}."
 
 #: src/i18n/nativeMenu.ts
-msgid "Hew {version} is available — you have {current}.\n"
-"\n"
-"Download and install it now?"
-msgstr "Hew {version} ist verfügbar – Sie haben {current}.\n"
-"\n"
-"Jetzt herunterladen und installieren?"
+#~ msgid "Hew {version} is available — you have {current}.\n"
+#~ "\n"
+#~ "Download and install it now?"
+#~ msgstr "Hew {version} ist verfügbar – Sie haben {current}.\n"
+#~ "\n"
+#~ "Jetzt herunterladen und installieren?"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Hew {version} is available — you have {currentVersion}."
+msgstr "Hew {version} ist verfügbar – Sie haben {currentVersion}."
+
+#: src/updater/UpdateWindow.tsx
+msgid "Hew {version} is installed"
+msgstr "Hew {version} ist installiert"
+
+#: src/updater/UpdateReadyBar.tsx
+msgid "Hew {version} is installed and will open the next time you start Hew."
+msgstr "Hew {version} ist installiert und wird beim nächsten Start verwendet."
+
+#: src/updater/UpdateWindow.tsx
+msgid "Hew {version} is installed. Restart now to use it?"
+msgstr "Hew {version} ist installiert. Jetzt neu starten, um die neue Version zu verwenden?"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Hew {version} is now available. You have {currentVersion}. Would you like to update now?"
+msgstr "Hew {version} ist jetzt verfügbar. Sie haben {currentVersion}. Möchten Sie jetzt aktualisieren?"
+
+#: src/updater/UpdateReadyBar.tsx
+msgid "Hew {version} is ready to install. Hew will close and reopen."
+msgstr "Hew {version} ist bereit zur Installation. Hew wird geschlossen und wieder geöffnet."
+
+#: src/updater/UpdateWindow.tsx
+msgid "Hew {version} is ready to install. Hew will close to finish installing."
+msgstr "Hew {version} ist bereit zur Installation. Hew wird geschlossen, um die Installation abzuschließen."
 
 #: src/shop/ShopApp.tsx
 msgid "Hew Beta"
@@ -4457,6 +4722,15 @@ msgstr "Hew kann dieses Bild nicht lesen. Speichern Sie es als PNG oder JPEG und
 #: src/viewport/gpuCapability.ts
 msgid "Hew can't show the 3D view"
 msgstr "Hew kann die 3D-Ansicht nicht anzeigen"
+
+#: src/library/libraryUpdates.ts
+msgid "Hew can’t tell which one is newer. Updating would replace what is here."
+msgstr "Hew kann nicht feststellen, welche Version neuer ist. Beim Aktualisieren würde der Stand in diesem Modell ersetzt."
+
+#: src/App.tsx
+#: src/shop/ShopApp.tsx
+msgid "Hew cannot open this kind of file."
+msgstr "Hew kann diese Art von Datei nicht öffnen."
 
 #: src/settings/AdvancedPane.tsx
 #: src/settings/FluentSettingsPage.tsx
@@ -4490,6 +4764,10 @@ msgstr "Hew konnte diese Änderung nicht vornehmen."
 #: src/kernelErrors.ts
 msgid "Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug."
 msgstr "Hew konnte diese Änderung nicht vornehmen, ohne das Objekt zu beschädigen, daher wurde nichts geändert. Bitte senden Sie die Datei über Hilfe ▸ Fehler melden."
+
+#: src/kernelErrors.ts
+msgid "Hew couldn't open that for editing."
+msgstr "Hew konnte das nicht zum Bearbeiten öffnen."
 
 #: src/kernelErrors.ts
 msgid "Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug."
@@ -4579,6 +4857,10 @@ msgstr "Hew hat versucht, diese Abmessung oder Beschriftung in eine andere Art v
 msgid "Hew tries to stand the profile up automatically, but couldn't square it to the path here. Move the profile closer to where the sweep should start — on a drawn circle, near the rim, in line with the circle's center."
 msgstr "Hew versucht, das Profil automatisch aufzurichten, konnte es hier aber nicht rechtwinklig zum Pfad ausrichten. Verschieben Sie das Profil näher an den Startpunkt des Sweeps – auf einem gezeichneten Kreis nahe am Rand, in einer Linie mit dem Kreismittelpunkt."
 
+#: src/updater/UpdateWindow.tsx
+msgid "Hew will close to finish installing."
+msgstr "Hew wird geschlossen, um die Installation abzuschließen."
+
 #: src/panels/MakeSolidSketches.tsx
 msgid "Hew will turn the closed shapes you selected into solids."
 msgstr "Hew macht aus den ausgewählten geschlossenen Formen Volumenkörper."
@@ -4614,6 +4896,10 @@ msgstr "Eine interne Anfrage von Hew an den Modell-Kernel enthielt eine fehlerha
 #: src/kernelErrors.ts
 msgid "Hew's own request to the model kernel carried a malformed flip plane or copy choice. If this keeps happening, use Report Bug."
 msgstr "Eine interne Anfrage von Hew an den Modell-Kernel enthielt eine fehlerhafte Spiegelebene oder Kopienwahl. Wenn das wiederholt passiert, nutzen Sie „Fehler melden“."
+
+#: src/kernelErrors.ts
+msgid "Hew's own request to the model kernel carried a malformed Library listing. If this keeps happening, use Report Bug."
+msgstr "Eine interne Anfrage von Hew an den Modell-Kernel enthielt eine fehlerhafte Bibliotheksliste. Wenn das wiederholt passiert, nutzen Sie „Fehler melden“."
 
 #: src/kernelErrors.ts
 msgid "Hew's own request to the model kernel carried a malformed move, rotate, or scale. If this keeps happening, use Report Bug."
@@ -4964,6 +5250,10 @@ msgstr "einrücken"
 msgid "inside"
 msgstr "innen"
 
+#: src/panels/DocumentTree.tsx
+msgid "Inside something that is locked. Click to unlock it."
+msgstr "Befindet sich in etwas Gesperrtem. Klicken zum Entsperren."
+
 #: src/tools/toolRegistry.ts
 msgid "Inspect"
 msgstr "Untersuchen"
@@ -4973,8 +5263,25 @@ msgid "inspector"
 msgstr "Inspektor"
 
 #: src/i18n/nativeMenu.ts
-msgid "Install"
-msgstr "Installieren"
+#~ msgid "Install"
+#~ msgstr "Installieren"
+
+#: src/updater/UpdateReadyBar.tsx
+#: src/updater/UpdateWindow.tsx
+msgid "Install and Restart"
+msgstr "Installieren und neu starten"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Install cancelled. Hew {version} is downloaded and ready when you are."
+msgstr "Installation abgebrochen. Hew {version} ist heruntergeladen und steht bereit, wenn Sie so weit sind."
+
+#: src/updater/UpdateWindow.tsx
+msgid "Install Update"
+msgstr "Update installieren"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Installing Hew {version}…"
+msgstr "Hew {version} wird installiert …"
 
 #: src/palette/registry.ts
 msgid "instance"
@@ -5204,8 +5511,10 @@ msgstr "Letzter Import"
 msgid "Last steps:"
 msgstr "Letzte Schritte:"
 
-#: src/i18n/nativeMenu.ts
 #: src/panels/FollowNoticeBar.tsx
+#: src/panels/LibraryUpdateBar.tsx
+#: src/updater/UpdateReadyBar.tsx
+#: src/updater/UpdateWindow.tsx
 msgid "Later"
 msgstr "Später"
 
@@ -5342,6 +5651,14 @@ msgstr "Bibliotheksmaterial"
 msgid "Library metadata"
 msgstr "Bibliotheks-Metadaten"
 
+#: src/library/libraryUpdates.ts
+msgid "Library part"
+msgstr "Teil aus der Bibliothek"
+
+#: src/panels/LibraryUpdateReview.tsx
+msgid "Library updates"
+msgstr "Aktualisierungen aus der Bibliothek"
+
 #: src/settings/FluentSettingsPage.tsx
 #: src/settings/ThemePane.tsx
 #: src/shop/SettingsMenu.tsx
@@ -5398,16 +5715,19 @@ msgstr "Identische Kopien verknüpfen"
 msgid "link similar"
 msgstr "Ähnliche verknüpfen"
 
+#: src/panels/DocumentTree.tsx
+msgid "Linked"
+msgstr "Verknüpft"
+
 #: src/palette/registry.ts
 msgid "linked copies"
 msgstr "verknüpfte Kopien"
 
 #. Object Info row: how many linked copies share this shape
 #: src/linkedCopyCopy.ts
-msgid "Linked copies: {count}"
-msgstr "Verknüpfte Kopien: {count}"
+#~ msgid "Linked copies: {count}"
+#~ msgstr "Verknüpfte Kopien: {count}"
 
-#: src/panels/ObjectInfoPanel.tsx
 #: src/tools/FlipTool.ts
 #: src/tools/MoveTool.ts
 #: src/tools/RotateTool.ts
@@ -5451,6 +5771,15 @@ msgstr "Systemschriften werden geladen …"
 msgid "Loading…"
 msgstr "Wird geladen …"
 
+#: src/i18n/historyLabels.ts
+#: src/i18n/nativeMenu.ts
+#: src/lock/lockActions.ts
+#: src/palette/registry.ts
+#: src/panels/dockLogic.ts
+#: src/panels/MenuBar.tsx
+msgid "Lock"
+msgstr "Sperren"
+
 #: src/viewport/ViewDie.tsx
 msgid "Lock blue plane  ↑"
 msgstr "Blaue Ebene sperren  ↑"
@@ -5462,6 +5791,15 @@ msgstr "Grüne Ebene sperren  ←"
 #: src/viewport/ViewDie.tsx
 msgid "Lock red plane  →"
 msgstr "Rote Ebene sperren  →"
+
+#: src/palette/registry.ts
+msgid "Lock the selection so nothing can change it until it is unlocked. Locking one copy of a shared shape locks every copy."
+msgstr "Die Auswahl sperren, damit sie unverändert bleibt, bis Sie sie entsperren. Wird eine Kopie einer gemeinsam genutzten Form gesperrt, sind alle Kopien gesperrt."
+
+#: src/lock/lockModel.ts
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Locked"
+msgstr "Gesperrt"
 
 #: src/tools/PlaceImageTool.ts
 msgid "Locked to the {axis} plane — click the first corner; same arrow or Esc unlocks."
@@ -5483,6 +5821,18 @@ msgstr "Auf die {axis}-Ebene gesperrt – klicken zum Beginnen; dieselbe Pfeilta
 #: src/tools/DimensionTool.ts
 msgid "Locked to the {lockedAxis} plane — same arrow or ArrowDown unlocks."
 msgstr "Auf die {lockedAxis}-Ebene gesperrt – dieselbe Pfeiltaste oder Pfeil nach unten entsperrt."
+
+#: src/panels/DocumentTree.tsx
+msgid "Locked. Click to unlock."
+msgstr "Gesperrt. Klicken zum Entsperren."
+
+#: src/library/libraryUpdates.ts
+msgid "Locked. Unlock it first to update it."
+msgstr "Gesperrt. Zum Aktualisieren zuerst entsperren."
+
+#: src/kernelErrors.ts
+msgid "Locked. Unlock it to change it."
+msgstr "Gesperrt. Zum Ändern entsperren."
 
 #: src/palette/curveEntries.ts
 msgid "loft"
@@ -5633,11 +5983,17 @@ msgstr "Diesen Import zu Volumenkörpern machen"
 msgid "Make this model solid"
 msgstr "Dieses Modell zu Volumenkörpern machen"
 
+#: src/App.tsx
+msgid "Make this part a component before updating “{name}” in the Library."
+msgstr "Machen Sie dieses Teil zu einer Komponente, bevor Sie „{name}“ in der Bibliothek aktualisieren."
+
 #: src/i18n/historyLabels.ts
 msgid "Make unique"
 msgstr "Eindeutig machen"
 
+#: src/App.tsx
 #: src/i18n/nativeMenu.ts
+#: src/linkedCopies.ts
 #: src/palette/registry.ts
 #: src/panels/dockLogic.ts
 #: src/panels/MenuBar.tsx
@@ -5655,6 +6011,10 @@ msgstr "Ränder"
 #: src/panels/PrintDialog.tsx
 msgid "Marks"
 msgstr "Markierungen"
+
+#: src/library/libraryUpdates.ts
+msgid "Matches the Library"
+msgstr "Stimmt mit der Bibliothek überein"
 
 #: src/App.tsx
 #: src/library/libraryModel.ts
@@ -6089,8 +6449,8 @@ msgstr "Name"
 
 #: src/linkedCopyCopy.ts
 #: src/panels/ObjectInfoPanel.tsx
-msgid "Name (all copies)"
-msgstr "Name (alle Kopien)"
+#~ msgid "Name (all copies)"
+#~ msgstr "Name (alle Kopien)"
 
 #: src/panels/MaterialPalette.tsx
 msgid "Name…"
@@ -6161,6 +6521,10 @@ msgstr "Neues Stichwort"
 #: src/panels/ObjectInfoPanel.tsx
 msgid "New tag for all selected"
 msgstr "Neuer Tag für alle ausgewählten"
+
+#: src/library/libraryUpdates.ts
+msgid "Newer in the Library"
+msgstr "Neuer in der Bibliothek"
 
 #: src/health/healthCopy.ts
 msgid "Next opening"
@@ -6358,6 +6722,10 @@ msgstr "In der Browser-Version noch nicht verfügbar."
 msgid "Not closed"
 msgstr "Nicht geschlossen"
 
+#: src/library/libraryUpdates.ts
+msgid "Not in the Library any more"
+msgstr "Nicht mehr in der Bibliothek"
+
 #: src/palette/registry.ts
 msgid "note"
 msgstr "Notiz"
@@ -6374,6 +6742,10 @@ msgstr "Es wurde noch nichts importiert."
 msgid "Nothing here to select. Double-click empty space to leave this context."
 msgstr "Hier gibt es nichts auszuwählen. Doppelklicken Sie in einen leeren Bereich, um diesen Kontext zu verlassen."
 
+#: src/palette/CommandPalette.tsx
+msgid "nothing is locked"
+msgstr "nichts ist gesperrt"
+
 #: src/panels/PrintDialog.tsx
 msgid "Nothing is selected."
 msgstr "Nichts ist ausgewählt."
@@ -6381,6 +6753,10 @@ msgstr "Nichts ist ausgewählt."
 #: src/health/healthCopy.ts
 msgid "Nothing matches your search."
 msgstr "Nichts entspricht Ihrer Suche."
+
+#: src/library/libraryUpdates.ts
+msgid "Nothing needed updating."
+msgstr "Es musste nichts aktualisiert werden."
 
 #: src/App.tsx
 msgid "Nothing selected is smooth. Set a Smooth level first."
@@ -6784,7 +7160,7 @@ msgstr "Als Dokument öffnen"
 msgid "Open Complete"
 msgstr "Öffnen abgeschlossen"
 
-#: src/i18n/nativeMenu.ts
+#: src/updater/UpdateWindow.tsx
 msgid "Open Download Page"
 msgstr "Download-Seite öffnen"
 
@@ -6960,6 +7336,10 @@ msgstr "ortho"
 msgid "orthographic"
 msgstr "orthogonal"
 
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "Other models that use it will be offered the update."
+msgstr "Anderen Modellen, die es verwenden, wird die Aktualisierung angeboten."
+
 #: src/App.tsx
 msgid "Outliner"
 msgstr "Gliederung"
@@ -7012,13 +7392,13 @@ msgstr "Seitenvorschau – Pfeiltasten verschieben das Kachelraster im Modus „
 msgid "Pages"
 msgstr "Seiten"
 
-#: src/i18n/nativeMenu.ts
 #: src/panels/library/LibraryDetailPane.tsx
 #: src/panels/LibraryDialog.tsx
 #: src/tools/PaintTool.ts
 msgid "Paint"
-msgstr "Farbeimer"
+msgstr "Einfärben"
 
+#: src/i18n/nativeMenu.ts
 #: src/tools/toolRegistry.ts
 msgctxt "tool"
 msgid "Paint"
@@ -7116,6 +7496,10 @@ msgstr "TEIL"
 #: src/panels/MenuBar.tsx
 msgid "Part Axes"
 msgstr "Teileachsen"
+
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Part of something that is locked."
+msgstr "Teil von etwas Gesperrtem."
 
 #: src/tools/CircleTool.ts
 msgid "Part of the circle is too thin to make a face, so it stays as drawing. Move it a little so it sits clear, or draw it larger."
@@ -7257,6 +7641,10 @@ msgstr "Stück einer geteilten Form"
 #: src/palette/curveEntries.ts
 msgid "pillow"
 msgstr "Kissen"
+
+#: src/palette/registry.ts
+msgid "pin"
+msgstr "anheften"
 
 #: src/viewport/ViewDie.tsx
 msgid "Pin the plane under the cursor  Shift"
@@ -7485,6 +7873,10 @@ msgstr "projiziert"
 #: src/shop/ViewsSheet.tsx
 msgid "Projection"
 msgstr "Projektion"
+
+#: src/palette/registry.ts
+msgid "protect"
+msgstr "schützen"
 
 #: src/i18n/nativeMenu.ts
 #: src/tools/toolRegistry.ts
@@ -7821,6 +8213,14 @@ msgstr "Blaue Ebene freigeben  ↑"
 msgid "Release green plane  ←"
 msgstr "Grüne Ebene freigeben  ←"
 
+#: src/updater/UpdateWindow.tsx
+msgid "Release notes"
+msgstr "Versionshinweise"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Release notes are on the Hew releases page."
+msgstr "Die Versionshinweise finden Sie auf der Seite „Releases“ von Hew."
+
 #: src/viewport/ViewDie.tsx
 msgid "Release red plane  →"
 msgstr "Rote Ebene freigeben  →"
@@ -7841,6 +8241,10 @@ msgstr "Neu laden"
 #: src/panels/SentReportsDialog.tsx
 msgid "Reload Hew"
 msgstr "Hew neu laden"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Remind Me Later"
+msgstr "Später erinnern"
 
 #: src/health/healthCopy.ts
 #: src/palette/registry.ts
@@ -7977,6 +8381,10 @@ msgstr "reparieren"
 msgid "Replace “{replaceName}”"
 msgstr "„{replaceName}“ ersetzen"
 
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "Replace it"
+msgstr "Ersetzen"
+
 #: src/App.tsx
 msgid "Replaced profile \"{name}\"."
 msgstr "Profil „{name}“ ersetzt."
@@ -8110,8 +8518,17 @@ msgid "Resize the selection uniformly about its center."
 msgstr "Die Auswahl gleichmäßig um ihre Mitte skalieren."
 
 #: src/i18n/nativeMenu.ts
-msgid "Restart"
-msgstr "Neu starten"
+#~ msgid "Restart"
+#~ msgstr "Neu starten"
+
+#: src/updater/UpdateWindow.tsx
+msgid "Restart cancelled. Hew {version} will open the next time you start Hew."
+msgstr "Neustart abgebrochen. Hew {version} wird beim nächsten Start verwendet."
+
+#: src/updater/UpdateReadyBar.tsx
+#: src/updater/UpdateWindow.tsx
+msgid "Restart Now"
+msgstr "Jetzt neu starten"
 
 #: src/TitleBar.tsx
 msgid "Restore"
@@ -8158,6 +8575,10 @@ msgstr "Auf die gespeicherte Datei zurückgesetzt."
 #: src/palette/registry.ts
 msgid "Review and send a bug report, or save it to a file."
 msgstr "Einen Fehlerbericht prüfen und senden oder in einer Datei speichern."
+
+#: src/panels/LibraryUpdateBar.tsx
+msgid "Review…"
+msgstr "Überprüfen …"
 
 #: src/i18n/nativeMenu.ts
 #: src/tools/toolRegistry.ts
@@ -8321,6 +8742,10 @@ msgstr "Speichern Sie eine Auswahl mit „In Bibliothek speichern“, um zu begi
 #: src/panels/SaveFormatDialog.tsx
 msgid "Save As"
 msgstr "Speichern unter"
+
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "Save as a new item"
+msgstr "Als neues Element speichern"
 
 #: src/App.tsx
 msgid "Save As failed: {reason}"
@@ -8725,6 +9150,10 @@ msgstr "Jede Kopie auswählen, die mit der ausgewählten verknüpft ist."
 msgid "Select every instance of this component"
 msgstr "Jede Instanz dieser Komponente auswählen"
 
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Select every linked copy"
+msgstr "Alle verknüpften Kopien auswählen"
+
 #: src/palette/registry.ts
 msgid "Select every visible object, group, component, and sketch."
 msgstr "Jedes sichtbare Objekt, jede Gruppe, Komponente und Skizze auswählen."
@@ -8754,6 +9183,11 @@ msgstr "Wählen Sie zuerst etwas im Modell aus."
 #: src/kernelErrorCopy/blend.ts
 msgid "Select the edges to fillet first."
 msgstr "Wählen Sie zuerst die abzurundenden Kanten aus."
+
+#: src/i18n/nativeMenu.ts
+#: src/panels/MenuBar.tsx
+msgid "Selected"
+msgstr "Auswahl"
 
 #: src/health/healthCopy.ts
 #: src/panels/PrintDialog.tsx
@@ -8908,8 +9342,8 @@ msgid "Shared by every instance of this component"
 msgstr "Gemeinsam für jede Instanz dieser Komponente"
 
 #: src/panels/ObjectInfoPanel.tsx
-msgid "Shared by every linked copy"
-msgstr "Gemeinsam für jede verknüpfte Kopie"
+#~ msgid "Shared by every linked copy"
+#~ msgstr "Gemeinsam für jede verknüpfte Kopie"
 
 #: src/i18n/nativeMenu.ts
 #: src/tools/toolRegistry.ts
@@ -9192,6 +9626,10 @@ msgstr "Haut"
 msgid "Skin a solid through two or more shapes (the same as Loft)."
 msgstr "Eine Haut als Volumenkörper durch zwei oder mehr Formen ziehen (wie Loft)."
 
+#: src/updater/UpdateWindow.tsx
+msgid "Skip This Version"
+msgstr "Diese Version überspringen"
+
 #: src/i18n/historyLabels.ts
 #: src/i18n/nativeMenu.ts
 msgid "Slice"
@@ -9257,6 +9695,10 @@ msgstr "abmildern"
 #: src/panels/MenuBar.tsx
 msgid "Soften Edges…"
 msgstr "Kanten abmildern …"
+
+#: src/i18n/nativeMenu.ts
+msgid "Software Update"
+msgstr "Softwareupdate"
 
 #: src/palette/registry.ts
 msgid "solid"
@@ -9843,6 +10285,10 @@ msgid "That part is no longer in the model. Pick it again."
 msgstr "Dieses Teil ist nicht mehr im Modell. Wählen Sie es erneut."
 
 #: src/kernelErrors.ts
+msgid "That part's Library item is no longer in the Library, so it can't be updated."
+msgstr "Das Bibliothekselement dieses Teils ist nicht mehr in der Bibliothek, daher kann es nicht aktualisiert werden."
+
+#: src/kernelErrors.ts
 msgid "That path line is no longer there — the model changed since it was picked. Click it again."
 msgstr "Diese Pfadlinie ist nicht mehr vorhanden – das Modell hat sich seit der Auswahl geändert. Klicken Sie sie erneut an."
 
@@ -10050,9 +10496,17 @@ msgstr "Die hervorgehobenen Kanten sind offen. Sie verlaufen entlang einer ebene
 msgid "The intuitive, Open Source, cross-platform, solids-first 3D modeler."
 msgstr "Der intuitive, quelloffene, plattformübergreifende 3D-Modellierer auf Volumenkörper-Basis."
 
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "The Library copy and this part have both changed or can’t be compared. Replacing it will lose the Library’s version."
+msgstr "Die Kopie in der Bibliothek und dieses Teil wurden beide geändert oder lassen sich nicht vergleichen. Beim Ersetzen geht die Version der Bibliothek verloren."
+
 #: src/io/webLibraryStore.ts
 msgid "The library folder needs permission again — reconnect it in the Library window."
 msgstr "Der Bibliotheksordner braucht erneut eine Berechtigung – verbinden Sie ihn im Bibliotheksfenster neu."
+
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "The Library has also changed since you inserted “{updateName}”. Replacing it will lose those changes."
+msgstr "Die Bibliothek hat sich ebenfalls geändert, seit Sie „{updateName}“ eingefügt haben. Beim Ersetzen gehen diese Änderungen verloren."
 
 #: src/io/libraryStore.ts
 #: src/settings/FoldersPane.tsx
@@ -10066,6 +10520,10 @@ msgstr "Die Bibliothek besteht aus normalen .hew-Dateien in dem gewählten Ordne
 #: src/panels/LibraryDialog.tsx
 msgid "The library isn’t available in this browser."
 msgstr "Die Bibliothek ist in diesem Browser nicht verfügbar."
+
+#: src/kernelErrors.ts
+msgid "The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged."
+msgstr "Das Bibliothekselement konnte nicht gelesen werden, daher wurde das Teil nicht aktualisiert. Die Bibliotheksdatei ist möglicherweise beschädigt."
 
 #: src/kernelErrors.ts
 msgid "The line crosses itself or touches the face's edge partway along. Draw a simple path from edge to edge."
@@ -10289,24 +10747,28 @@ msgid "The undo memory limit has to be a size of zero or more."
 msgstr "Die Speichergrenze für Rückgängig muss null oder größer sein."
 
 #: src/i18n/nativeMenu.ts
-msgid "The update command is on your clipboard. Paste it into a terminal to update Hew."
-msgstr "Der Update-Befehl ist in Ihrer Zwischenablage. Fügen Sie ihn in ein Terminal ein, um Hew zu aktualisieren."
+#~ msgid "The update command is on your clipboard. Paste it into a terminal to update Hew."
+#~ msgstr "Der Update-Befehl ist in Ihrer Zwischenablage. Fügen Sie ihn in ein Terminal ein, um Hew zu aktualisieren."
+
+#: src/updater/UpdateWindow.tsx
+msgid "The update could not be installed."
+msgstr "Das Update konnte nicht installiert werden."
 
 #: src/i18n/nativeMenu.ts
-msgid "The update could not be installed.\n"
-"\n"
-"{error}\n"
-"\n"
-"You can download the new version from the Download page instead."
-msgstr "Das Update konnte nicht installiert werden.\n"
-"\n"
-"{error}\n"
-"\n"
-"Sie können die neue Version stattdessen von der Download-Seite herunterladen."
+#~ msgid "The update could not be installed.\n"
+#~ "\n"
+#~ "{error}\n"
+#~ "\n"
+#~ "You can download the new version from the Download page instead."
+#~ msgstr "Das Update konnte nicht installiert werden.\n"
+#~ "\n"
+#~ "{error}\n"
+#~ "\n"
+#~ "Sie können die neue Version stattdessen von der Download-Seite herunterladen."
 
 #: src/i18n/nativeMenu.ts
-msgid "The update has been installed. Restart Hew now to use it?"
-msgstr "Das Update wurde installiert. Hew jetzt neu starten, um es zu verwenden?"
+#~ msgid "The update has been installed. Restart Hew now to use it?"
+#~ msgstr "Das Update wurde installiert. Hew jetzt neu starten, um es zu verwenden?"
 
 #: src/kernelErrors.ts
 msgid "The view mode must be shaded, xray or wireframe. If this keeps happening, use Report Bug."
@@ -10447,32 +10909,32 @@ msgstr "Diese Komponente wird in der Definition einer anderen Komponente verwend
 
 #: src/linkedCopyCopy.ts
 #: src/panels/ObjectInfoPanel.tsx
-msgid "This copy"
-msgstr "Diese Kopie"
+#~ msgid "This copy"
+#~ msgstr "Diese Kopie"
 
 #: src/kernelErrors.ts
 msgid "This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again."
 msgstr "Diese Kopie besteht aus mehr als einem Teil, daher gibt es kein einzelnes Teil zum Schneiden. Wählen Sie das Teil, das Sie schneiden möchten, und versuchen Sie es dann erneut."
 
-#: src/i18n/nativeMenu.ts
+#: src/updater/UpdateWindow.tsx
 msgid "This copy of Hew can’t update itself. Update it the same way you installed it, or get the new version from the Download page."
 msgstr "Diese Hew-Installation kann sich nicht selbst aktualisieren. Aktualisieren Sie sie auf dieselbe Weise, wie Sie sie installiert haben, oder holen Sie die neue Version von der Download-Seite."
 
-#: src/i18n/nativeMenu.ts
+#: src/updater/UpdateWindow.tsx
 msgid "This copy of Hew was installed with Flatpak, so Flatpak updates it. To update, run this in a terminal:"
 msgstr "Diese Hew-Installation wurde mit Flatpak installiert, daher aktualisiert Flatpak sie. Führen Sie zum Aktualisieren Folgendes in einem Terminal aus:"
 
-#: src/i18n/nativeMenu.ts
+#: src/updater/UpdateWindow.tsx
 msgid "This copy of Hew was installed with pacman, so pacman updates it. To update, run this in a terminal:"
 msgstr "Diese Hew-Installation wurde mit pacman installiert, daher aktualisiert pacman sie. Führen Sie zum Aktualisieren Folgendes in einem Terminal aus:"
 
-#: src/i18n/nativeMenu.ts
+#: src/updater/UpdateWindow.tsx
 msgid "This copy of Hew was installed with Portage, so Portage updates it. To update, run this in a terminal:"
 msgstr "Diese Hew-Installation wurde mit Portage installiert, daher aktualisiert Portage sie. Führen Sie zum Aktualisieren Folgendes in einem Terminal aus:"
 
 #: src/panels/ObjectInfoPanel.tsx
-msgid "This copy only — leave empty to show the shared name"
-msgstr "Nur diese Kopie – leer lassen, um den gemeinsamen Namen anzuzeigen"
+#~ msgid "This copy only — leave empty to show the shared name"
+#~ msgstr "Nur diese Kopie – leer lassen, um den gemeinsamen Namen anzuzeigen"
 
 #: src/panels/UnsavedChangesDialog.tsx
 msgid "This document has unsaved changes."
@@ -10501,6 +10963,10 @@ msgstr "Diese Kante kann noch nicht abgerundet werden."
 #: src/kernelErrors.ts
 msgid "This edge has a face on only one side — there's nothing to merge it with."
 msgstr "Diese Kante hat nur auf einer Seite eine Fläche – es gibt nichts, womit sie zusammengeführt werden könnte."
+
+#: src/tools/PushPullTool.ts
+msgid "This face is locked, so this makes a NEW object. Move to extrude, click to commit — or type an exact distance."
+msgstr "Diese Fläche ist gesperrt, daher entsteht ein NEUES Objekt. Bewegen zum Extrudieren, klicken zum Übernehmen – oder einen genauen Abstand eingeben."
 
 #: src/panels/SentReportsDialog.tsx
 msgid "This file can’t be sent."
@@ -10642,6 +11108,30 @@ msgstr "Diese Öffnung ist nicht eben, daher kann eine einzelne Fläche sie nich
 msgid "This operation can't target an object inside a group. Ungroup it, or leave the group context, first."
 msgstr "Diese Operation kann kein Objekt in einer Gruppe betreffen. Heben Sie die Gruppe auf oder verlassen Sie zuerst den Gruppenkontext."
 
+#: src/library/libraryUpdates.ts
+msgid "This part"
+msgstr "Dieses Teil"
+
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "This part can’t update “{blockedName}” in the Library as it is. Make it a component first."
+msgstr "Dieses Teil kann „{blockedName}“ in der Bibliothek so nicht aktualisieren. Machen Sie es zuerst zu einer Komponente."
+
+#: src/library/libraryUpdates.ts
+msgid "This part changed here and in the Library."
+msgstr "Dieses Teil wurde hier und in der Bibliothek geändert."
+
+#: src/library/libraryUpdates.ts
+msgid "This part differs from the Library, and Hew can’t tell which one is newer."
+msgstr "Dieses Teil weicht von der Bibliothek ab, und Hew kann nicht feststellen, welche Version neuer ist."
+
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "This part is a linked copy, so it can’t update “{blockedName}” in the Library. Make it a component or unlink it first."
+msgstr "Dieses Teil ist eine verknüpfte Kopie und kann daher „{blockedName}“ in der Bibliothek nicht aktualisieren. Machen Sie es zuerst zu einer Komponente oder lösen Sie die Verknüpfung."
+
+#: src/App.tsx
+msgid "This part is a linked copy. Make it a component, or unlink it, before updating “{name}” in the Library."
+msgstr "Dieses Teil ist eine verknüpfte Kopie. Machen Sie es zu einer Komponente oder lösen Sie die Verknüpfung, bevor Sie „{name}“ in der Bibliothek aktualisieren."
+
 #: src/tools/FollowMeTool.ts
 msgid "This path can't be swept in reverse from here — it either only closes going one direction, or bends too tightly to walk backward. Drag forward instead, or start the profile somewhere with more room to reverse."
 msgstr "Dieser Pfad kann von hier aus nicht rückwärts geführt werden – er schließt sich entweder nur in eine Richtung oder biegt zu eng, um rückwärts zu laufen. Ziehen Sie stattdessen vorwärts, oder beginnen Sie das Profil an einer Stelle mit mehr Platz zum Umkehren."
@@ -10713,6 +11203,10 @@ msgstr "Dieser Bericht ist zu groß zum Senden."
 #: src/kernelErrors.ts
 msgid "This shape has no circle behind it, so there's nothing to re-build. Only a circle drawn with the Circle tool has a segment count."
 msgstr "Hinter dieser Form steht kein Kreis, daher gibt es nichts neu aufzubauen. Nur ein mit dem Kreis-Werkzeug gezeichneter Kreis hat eine Segmentanzahl."
+
+#: src/kernelErrors.ts
+msgid "This shape is also used inside a locked group. Make this copy unique to change it."
+msgstr "Diese Form wird auch in einer gesperrten Gruppe verwendet. Machen Sie diese Kopie eindeutig, um sie zu ändern."
 
 #: src/panels/MakeSolidSketches.tsx
 msgid "This shape is inside a solid, so nothing was made. Push or pull its face to cut into the solid."
@@ -11170,6 +11664,14 @@ msgstr "Unerwartete Antwort vom Meldedienst."
 msgid "Unfiled"
 msgstr "Nicht abgelegt"
 
+#: src/palette/registry.ts
+msgid "unfreeze"
+msgstr "freigeben"
+
+#: src/palette/registry.ts
+msgid "unfreeze all"
+msgstr "alle freigeben"
+
 #: src/i18n/historyLabels.ts
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
@@ -11217,7 +11719,6 @@ msgid "unknown OS"
 msgstr "unbekanntes Betriebssystem"
 
 #: src/i18n/nativeMenu.ts
-#: src/linkedCopies.ts
 #: src/linkedCopyCopy.ts
 #: src/palette/registry.ts
 #: src/panels/dockLogic.ts
@@ -11226,7 +11727,6 @@ msgid "Unlink"
 msgstr "Verknüpfung lösen"
 
 #: src/i18n/nativeMenu.ts
-#: src/linkedCopies.ts
 #: src/linkedCopyCopy.ts
 #: src/palette/registry.ts
 #: src/panels/dockLogic.ts
@@ -11237,6 +11737,36 @@ msgstr "Alle Verknüpfungen lösen"
 #: src/linkedCopyCopy.ts
 msgid "Unlinked this copy and cut it"
 msgstr "Verknüpfung dieser Kopie gelöst und ausgeschnitten"
+
+#: src/App.tsx
+#: src/i18n/historyLabels.ts
+#: src/i18n/nativeMenu.ts
+#: src/lock/lockActions.ts
+#: src/panels/dockLogic.ts
+#: src/panels/DocumentTree.tsx
+#: src/panels/MenuBar.tsx
+msgid "Unlock"
+msgstr "Entsperren"
+
+#: src/palette/registry.ts
+msgid "Unlock All"
+msgstr "Alle entsperren"
+
+#: src/palette/registry.ts
+msgid "Unlock everything in the model."
+msgstr "Alles im Modell entsperren."
+
+#: src/palette/registry.ts
+msgid "Unlock Selected"
+msgstr "Auswahl entsperren"
+
+#: src/panels/DocumentTree.tsx
+msgid "Unlock the locked item above"
+msgstr "Das gesperrte Element darüber entsperren"
+
+#: src/palette/registry.ts
+msgid "Unlock the selected locked objects, groups, and components."
+msgstr "Die ausgewählten gesperrten Objekte, Gruppen und Komponenten entsperren."
 
 #: src/panels/SentReportsDialog.tsx
 msgid "Unread"
@@ -11268,11 +11798,31 @@ msgstr "Oben"
 msgid "Update"
 msgstr "Update"
 
-#: src/i18n/nativeMenu.ts
-msgid "Update available"
-msgstr "Update verfügbar"
+#: src/panels/SaveToLibraryPopover.tsx
+msgid "Update “{updateName}” in the Library"
+msgstr "„{updateName}“ in der Bibliothek aktualisieren"
+
+#: src/panels/LibraryUpdateReview.tsx
+msgid "Update {name}"
+msgstr "{name} aktualisieren"
+
+#: src/panels/LibraryUpdateBar.tsx
+msgid "Update All"
+msgstr "Alle aktualisieren"
+
+#: src/panels/LibraryUpdateReview.tsx
+msgid "Update all that changed in the Library"
+msgstr "Alle aktualisieren, die sich in der Bibliothek geändert haben"
 
 #: src/i18n/nativeMenu.ts
+#~ msgid "Update available"
+#~ msgstr "Update verfügbar"
+
+#: src/i18n/historyLabels.ts
+msgid "Update from Library"
+msgstr "Aus Bibliothek aktualisieren"
+
+#: src/updater/UpdateWindow.tsx
 msgid "Update Help"
 msgstr "Hilfe zum Update"
 
@@ -11285,8 +11835,8 @@ msgid "Update in progress"
 msgstr "Update läuft"
 
 #: src/i18n/nativeMenu.ts
-msgid "Update installed"
-msgstr "Update installiert"
+#~ msgid "Update installed"
+#~ msgstr "Update installiert"
 
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
@@ -11302,9 +11852,25 @@ msgstr "Szene aktualisieren – die Ansicht hat sich seit der Erfassung geänder
 msgid "Update Scene failed: {reason}"
 msgstr "Szene aktualisieren fehlgeschlagen: {reason}"
 
+#: src/panels/LibraryUpdateReview.tsx
+msgid "Update Selected"
+msgstr "Auswahl aktualisieren"
+
 #: src/viewport/gpuCapability.ts
 msgid "Update your graphics drivers first — that fixes most cases. Then check that hardware acceleration is turned on in Firefox's Performance settings, and that webgl.disabled hasn't been switched on in about:config."
 msgstr "Aktualisieren Sie zuerst Ihre Grafiktreiber – das behebt die meisten Fälle. Prüfen Sie dann, ob die Hardwarebeschleunigung in den Leistungseinstellungen von Firefox eingeschaltet ist und ob webgl.disabled in about:config nicht eingeschaltet wurde."
+
+#: src/App.tsx
+msgid "Updated \"{name}\" in the Library"
+msgstr "„{name}“ in der Bibliothek aktualisiert"
+
+#: src/settings/FluentSettingsPage.tsx
+msgid "Updates"
+msgstr "Updates"
+
+#: src/settings/AdvancedPane.tsx
+msgid "Updates:"
+msgstr "Updates:"
 
 #: src/settings/FluentSettingsPage.tsx
 msgid "Upload key"
@@ -11508,6 +12074,24 @@ msgstr "Das zum Bearbeiten Geöffnete konnte nicht mit einem verbundenen Program
 msgid "What’s included"
 msgstr "Was enthalten ist"
 
+#: src/updater/UpdateReadyBar.tsx
+msgid "What’s New"
+msgstr "Neuigkeiten"
+
+#: src/updater/UpdateWindow.tsx
+msgid "What’s new in Hew {version}"
+msgstr "Neu in Hew {version}"
+
+#: src/settings/AdvancedPane.tsx
+#: src/settings/FluentSettingsPage.tsx
+msgid "When a new version is out, Hew downloads it on its own and then asks before restarting. A version you skipped is never installed."
+msgstr "Wenn eine neue Version erscheint, lädt Hew sie selbstständig herunter und fragt vor dem Neustart bei Ihnen nach. Eine übersprungene Version wird nie installiert."
+
+#: src/settings/FluentSettingsPage.tsx
+#: src/settings/FoldersPane.tsx
+msgid "When a part you inserted from the Library has a newer version there, Hew says so under the menu bar. It never changes anything until you choose to update. With this off, Hew stops checking by itself and never shows that note, but it still checks when you open the Components panel or the Library, or save a part to the Library."
+msgstr "Wenn ein Teil, das Sie aus der Bibliothek eingefügt haben, dort in einer neueren Version vorliegt, weist Hew unter der Menüleiste darauf hin. Hew ändert nie etwas, bevor Sie die Aktualisierung auslösen. Ist dies ausgeschaltet, prüft Hew nicht mehr von selbst und zeigt diesen Hinweis nie an, prüft aber weiterhin, wenn Sie den Komponentenbereich oder die Bibliothek öffnen oder ein Teil in der Bibliothek speichern."
+
 #: src/settings/ViewPane.tsx
 msgid "Where the box that shows the number you are typing sits. The fly speed readout moves with it."
 msgstr "Wo das Feld mit der eingegebenen Zahl sitzt. Die Anzeige der Fluggeschwindigkeit wandert mit."
@@ -11603,6 +12187,14 @@ msgstr "Y oben, Meter, für AR Quick Look und USD-Arbeitsabläufe"
 msgid "You"
 msgstr "Sie"
 
+#: src/updater/UpdateWindow.tsx
+msgid "You can download the new version from the Download page instead."
+msgstr "Sie können die neue Version stattdessen von der Download-Seite herunterladen."
+
+#: src/library/libraryUpdates.ts
+msgid "You changed this part here. The Library still has the older version."
+msgstr "Sie haben dieses Teil hier geändert. Die Bibliothek enthält noch die ältere Version."
+
 #: src/panels/ReportBugDialog.tsx
 msgid "You’ll find replies and the report’s status under <0>Help ▸ Sent Reports…</0>"
 msgstr "Antworten und den Status des Berichts finden Sie unter <0>Hilfe ▸ Gesendete Berichte …</0>"
@@ -11623,7 +12215,11 @@ msgstr "Ihr Fehlerbericht {onlyId} hat eine Antwort vom Hew-Entwickler."
 msgid "Your bug report {onlyId} has an update from Hew’s developer."
 msgstr "Ihr Fehlerbericht {onlyId} hat eine Aktualisierung vom Hew-Entwickler."
 
-#: src/i18n/nativeMenu.ts
+#: src/library/libraryUpdates.ts
+msgid "Your changes here would be replaced."
+msgstr "Ihre Änderungen hier würden ersetzt."
+
+#: src/updater/UpdateWindow.tsx
 msgid "Your computer will ask for your password to install it."
 msgstr "Ihr Computer fragt zum Installieren nach Ihrem Passwort."
 

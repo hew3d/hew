@@ -153,7 +153,7 @@ export const NATIVE_MENU_LABELS: Record<string, MessageDescriptor> = {
 
   // Tools
   'tool-select': msg`Select`,
-  'tool-paint': msg`Paint`,
+  'tool-paint': msg({ context: 'tool', message: 'Paint' }),
   'tool-position-texture': msg`Position Texture`,
   'tool-move': msg`Move`,
   'tool-rotate': msg`Rotate`,
@@ -197,7 +197,7 @@ export const NATIVE_MENU_LABELS: Record<string, MessageDescriptor> = {
   'cam-view-top': msg`Top`,
   'cam-view-bottom': msg`Bottom`,
   'cam-view-front': msg`Front`,
-  'cam-view-back': msg`Back`,
+  'cam-view-back': msg({ context: 'view', message: 'Back' }),
   'cam-view-left': msg`Left`,
   'cam-view-right': msg`Right`,
   'cam-view-iso': msg`Iso`,

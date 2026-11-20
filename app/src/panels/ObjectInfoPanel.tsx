@@ -45,7 +45,8 @@
  */
 
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
-import { plural, t as tCore } from '@lingui/core/macro'
+import { i18n } from '@lingui/core'
+import { msg, plural, t as tCore } from '@lingui/core/macro'
 import { Trans, useLingui } from '@lingui/react/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { entityLabel, resolveLabel, sharedLinkedLabel, linkedSetKind, makeLabelFor, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, isDraftKind, type NodeRef } from './treeModel'
@@ -198,10 +199,14 @@ interface AnnotationScene {
   annotation_tags?(id: bigint): string[]
 }
 
+/** "Group" as the kind of thing selected. The plain "Group" message is the
+ *  command, which other languages word as a verb. */
+const GROUP_KIND_LABEL = msg({ context: 'kind of thing', comment: 'Object Info type label for a selected group; the plain "Group" is the command', message: 'Group' })
+
 /** Human-readable type label for each node kind. */
 function kindLabel(kind: NodeRef['kind']): string {
   if (kind === 'object') return tCore`Object`
-  if (kind === 'group') return tCore`Group`
+  if (kind === 'group') return i18n._(GROUP_KIND_LABEL)
   if (kind === 'sketch') return tCore`Sketch`
   if (isDraftKind(kind)) return draftKindLabel(kind)
   return tCore`Component`

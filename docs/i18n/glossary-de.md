@@ -63,6 +63,23 @@ The Paint tool is named "Farbeimer", as in SketchUp. The action it
 performs is "einfärben" ("Fläche einfärben", "Objekt einfärben"), never
 "malen", which reads as painting a picture.
 
+## One English word, two German words
+
+Some English labels are a command in one place and a name in another.
+The source gives each sense its own entry (a `msgctxt` in the catalog),
+so each gets its own word:
+
+| English | Where | German |
+| --- | --- | --- |
+| Group | the command (menu, dock, undo) | Gruppieren |
+| Group | the kind of thing (Object Info, unnamed group) | Gruppe |
+| Paint | the tool | Farbeimer |
+| Paint | the action (Library button, undo) | Einfärben |
+| Back | the button that goes back | Zurück |
+| Back | the camera view | Hinten |
+| Center | the Print button that centers the model | Zentrieren |
+| Center | the snap point of a circle or arc | Mittelpunkt |
+
 ## Deliberate departures from SketchUp
 
 These terms differ from SketchUp's German edition on purpose. Please
@@ -112,6 +129,12 @@ Reference Card.
 | degenerate face | entartete Fläche |
 | flat panel / curved sheet | ebene Platte / gekrümmte Folie |
 | Mend / Rejoin | Reparieren / Wieder verbinden |
+| Lock / Unlock / Locked | Sperren / Entsperren / Gesperrt |
+| Library / Library item | Bibliothek / Bibliothekselement |
+| part (a thing in the model) | Teil (das Teil) |
+| update a part from the Library | aktualisieren / Aktualisierung |
+| update (a new version of Hew) | Update |
+| release notes | Versionshinweise |
 | Model Health | Modellzustand |
 | Purge Unused | Bereinigen (Dialog: „Nicht verwendete Elemente löschen?“) |
 | Object Info / Model Info | Objektinformationen / Modellinformationen |

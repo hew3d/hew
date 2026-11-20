@@ -1580,7 +1580,7 @@ export function MenuBar({
               <MenuItem label={t`Top`} shortcut={sc('view-top')} onClick={withClose(() => onStandardView?.('top'))} />
               <MenuItem label={t`Bottom`} shortcut={sc('view-bottom')} onClick={withClose(() => onStandardView?.('bottom'))} />
               <MenuItem label={t`Front`} shortcut={sc('view-front')} onClick={withClose(() => onStandardView?.('front'))} />
-              <MenuItem label={t`Back`} shortcut={sc('view-back')} onClick={withClose(() => onStandardView?.('back'))} />
+              <MenuItem label={t({ context: 'view', message: 'Back' })} shortcut={sc('view-back')} onClick={withClose(() => onStandardView?.('back'))} />
               <MenuItem label={t`Left`} shortcut={sc('view-left')} onClick={withClose(() => onStandardView?.('left'))} />
               <MenuItem label={t`Right`} shortcut={sc('view-right')} onClick={withClose(() => onStandardView?.('right'))} />
               <div style={SEPARATOR_STYLE} />

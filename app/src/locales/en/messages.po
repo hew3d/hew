@@ -1741,15 +1741,15 @@ msgid "axis"
 msgstr "axis"
 
 #: src/health/healthCopy.ts
-#: src/i18n/nativeMenu.ts
-#: src/panels/MenuBar.tsx
-#: src/print/printJob.ts
 #: src/settings/FluentSettingsPage.tsx
-#: src/viewport/ViewDie.tsx
 msgid "Back"
 msgstr "Back"
 
+#: src/i18n/nativeMenu.ts
+#: src/panels/MenuBar.tsx
+#: src/print/printJob.ts
 #: src/shop/ViewsSheet.tsx
+#: src/viewport/ViewDie.tsx
 msgctxt "view"
 msgid "Back"
 msgstr "Back"
@@ -1977,7 +1977,12 @@ msgid "Category"
 msgstr "Category"
 
 #: src/panels/PrintDialog.tsx
+msgid "Center"
+msgstr "Center"
+
+#. Snap tooltip: the center of a circle or arc
 #: src/viewport/InferenceTooltip.tsx
+msgctxt "snap point"
 msgid "Center"
 msgstr "Center"
 
@@ -4602,7 +4607,12 @@ msgstr "Ground"
 #: src/palette/registry.ts
 #: src/panels/dockLogic.ts
 #: src/panels/MenuBar.tsx
+msgid "Group"
+msgstr "Group"
+
+#. Object Info type label for a selected group; the plain "Group" is the command
 #: src/panels/ObjectInfoPanel.tsx
+msgctxt "kind of thing"
 msgid "Group"
 msgstr "Group"
 
@@ -7522,13 +7532,13 @@ msgstr "Page preview — arrow keys nudge the tile grid in Scaled mode"
 msgid "Pages"
 msgstr "Pages"
 
-#: src/i18n/nativeMenu.ts
 #: src/panels/library/LibraryDetailPane.tsx
 #: src/panels/LibraryDialog.tsx
 #: src/tools/PaintTool.ts
 msgid "Paint"
 msgstr "Paint"
 
+#: src/i18n/nativeMenu.ts
 #: src/tools/toolRegistry.ts
 msgctxt "tool"
 msgid "Paint"
