@@ -302,6 +302,8 @@ export interface MenuBarProps {
   onDrawText?: () => void
   /** Reposition the camera to a standard view (Camera → Standard Views). */
   onStandardView?: (view: StandardView) => void
+  /** The Home view: tween to the default 3/4 view framing the whole model. */
+  onHomeView?: () => void
   /** Camera ▸ Parallel Projection checkbox state (docs/design/camera.md §1). */
   parallelProjectionChecked?: boolean
   /** Toggle Camera ▸ Parallel Projection. */
@@ -833,6 +835,7 @@ export function MenuBar({
   sceneTransitionsChecked = true,
   onToggleSceneTransitions,
   onStandardView,
+  onHomeView,
   parallelProjectionChecked = false,
   onToggleParallelProjection,
   flyChecked,
@@ -1585,6 +1588,7 @@ export function MenuBar({
               <MenuItem label={t`Right`} shortcut={sc('view-right')} onClick={withClose(() => onStandardView?.('right'))} />
               <div style={SEPARATOR_STYLE} />
               <MenuItem label={t`Iso`} shortcut={sc('view-iso')} onClick={withClose(() => onStandardView?.('iso'))} />
+              <MenuItem label={t`Home`} shortcut={sc('view-home')} onClick={withClose(() => onHomeView?.())} />
             </SubMenu>
           </div>
         )}

@@ -39,6 +39,12 @@ describe('paletteEntries', () => {
     expect(ids).toEqual(expect.arrayContaining(['new', 'open', 'save', 'save-as', 'undo', 'redo']))
   })
 
+  it('offers Home beside Iso as a standard view, with no default key', () => {
+    const ids = entries.map((e) => e.id)
+    expect(ids.indexOf('view-home')).toBe(ids.indexOf('view-iso') + 1)
+    expect(paletteShortcut(entries.find((e) => e.id === 'view-home')!)).toBe('')
+  })
+
   it('includes the Edit object commands (booleans, group/component verbs)', () => {
     const ids = entries.map((e) => e.id)
     expect(ids).toEqual(

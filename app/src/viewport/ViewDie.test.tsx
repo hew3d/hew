@@ -23,6 +23,7 @@ function makeApi(opts: { q?: Quat; plane?: DrawPlaneState | null } = {}) {
   const state = { plane: opts.plane ?? null }
   const api: ViewDieApi = {
     setViewDirection: vi.fn(),
+    goHomeView: vi.fn(),
     orbitDrag: vi.fn(),
     endOrbitDrag: vi.fn(),
     subscribeCameraOrientation: (cb) => {
@@ -253,6 +254,54 @@ describe('ViewDie', () => {
       const base = document.querySelector('[data-face="front"] polygon') as SVGElement
       expect(base.style.pointerEvents).toBe('auto')
       expect(screen.getByTestId('view-die-step-right').style.pointerEvents).toBe('all')
+    })
+  })
+
+  describe('home button', () => {
+    const home = () => screen.getByTestId('view-die-home')
+
+    it('renders a labelled button with no text content', () => {
+      mount(makeApi())
+      expect(home()).toHaveAttribute('role', 'button')
+      expect(home()).toHaveAttribute('aria-label', 'Home view')
+      expect(home().textContent).toBe('')
+      expect(home()).not.toHaveAttribute('tabindex')
+    })
+
+    it('a click tweens home through the viewport and never turns to a face', () => {
+      const h = makeApi({ q: quatForEye([0, -1, 0]) })
+      mount(h)
+      fireEvent.click(home())
+      expect(h.api.goHomeView).toHaveBeenCalledTimes(1)
+      expect(h.api.setViewDirection).not.toHaveBeenCalled()
+    })
+
+    it('cancels the default of its mousedown while the event still reaches the document', () => {
+      mount(makeApi())
+      const seen = vi.fn()
+      document.addEventListener('mousedown', seen)
+      try {
+        const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 })
+        home().dispatchEvent(down)
+        expect(down.defaultPrevented).toBe(true)
+        expect(seen).toHaveBeenCalledTimes(1)
+      } finally {
+        document.removeEventListener('mousedown', seen)
+      }
+    })
+
+    it('hover shows the "Home view" pill and leaving clears it', () => {
+      mount(makeApi())
+      fireEvent.pointerEnter(home())
+      expect(screen.getByTestId('view-die-tooltip')).toHaveTextContent('Home view')
+      fireEvent.pointerLeave(home())
+      expect(screen.queryByTestId('view-die-tooltip')).toBeNull()
+    })
+
+    it('the button takes pointer events while the die wrapper stays transparent to them', () => {
+      mount(makeApi())
+      expect(home().style.pointerEvents).toBe('auto')
+      expect(screen.getByTestId('view-die').style.pointerEvents).toBe('none')
     })
   })
 

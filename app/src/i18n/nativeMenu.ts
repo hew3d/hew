@@ -201,6 +201,7 @@ export const NATIVE_MENU_LABELS: Record<string, MessageDescriptor> = {
   'cam-view-left': msg`Left`,
   'cam-view-right': msg`Right`,
   'cam-view-iso': msg`Iso`,
+  'cam-view-home': msg`Home`,
 
   // Window
   'win-model-info': msg`Model Info`,

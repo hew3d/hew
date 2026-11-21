@@ -39,9 +39,10 @@ interface Props {
 const CRUMB_MAX_PX = 180
 
 /** Width the view die reserves at the viewport's top right (ViewDie.tsx:
- *  `right: 16px`, 76 px wide) plus a 12 px margin. The pips under it overhang
+ *  `right: 16px`, 76 px wide), the 28 px Home button to its left (24 px
+ *  plus a 4 px gap), and a 12 px margin. The pips under it overhang
  *  by 3 px each side, inside the margin. */
-const DIE_CLEAR_PX = 16 + 76 + 12
+const DIE_CLEAR_PX = 16 + 76 + 28 + 12
 /** Left edge of the strip's band. The old top-left view chips are gone, so
  *  the band is symmetric about the viewport and clears the die on both
  *  sides to stay centered. */

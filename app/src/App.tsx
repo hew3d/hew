@@ -7043,6 +7043,7 @@ export default function App() {
       case 'view-left':           viewportApi.current?.setStandardView('left'); break
       case 'view-right':          viewportApi.current?.setStandardView('right'); break
       case 'view-iso':            viewportApi.current?.setStandardView('iso'); break
+      case 'view-home':           viewportApi.current?.goHomeView(); break
       case 'open-settings':       openSettingsRef.current(); break
       case 'report-bug': handleReportBug(); break
       case 'sent-reports': handleSentReports(); break
@@ -8895,6 +8896,7 @@ export default function App() {
         copiesLinked={copiesLinked}
         onZoomExtents={handleZoomExtents}
         onStandardView={(view) => viewportApi.current?.setStandardView(view)}
+        onHomeView={() => viewportApi.current?.goHomeView()}
         parallelProjectionChecked={parallelProjection}
         onToggleParallelProjection={() => viewportApi.current?.toggleProjection()}
         flyChecked={fly.mode === 'latched'}

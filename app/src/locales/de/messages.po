@@ -5067,6 +5067,15 @@ msgstr "aushöhlen"
 msgid "Hollow out a solid to a wall thickness, leaving the faces you click open."
 msgstr "Einen Volumenkörper auf eine Wandstärke aushöhlen, wobei die angeklickten Flächen offen bleiben."
 
+#: src/i18n/nativeMenu.ts
+#: src/panels/MenuBar.tsx
+msgid "Home"
+msgstr "Startansicht"
+
+#: src/viewport/ViewDie.tsx
+msgid "Home view"
+msgstr "Startansicht"
+
 #: src/tools/SliceTool.ts
 msgid "Hover a solid's face before slicing"
 msgstr "Zeigen Sie vor dem Schneiden auf eine Fläche eines Volumenkörpers"
@@ -8456,6 +8465,10 @@ msgid "Reset Drawing Axes"
 msgstr "Zeichenachsen zurücksetzen"
 
 #: src/palette/registry.ts
+msgid "Reset the camera to the default 3/4 home view and frame the whole model."
+msgstr "Kamera auf die Standard-Startansicht (3/4) zurücksetzen und das ganze Modell einpassen."
+
+#: src/palette/registry.ts
 msgid "Reset the movable drawing axes back to world identity."
 msgstr "Die beweglichen Zeichenachsen auf die Weltachsen zurücksetzen."
 
@@ -9776,6 +9789,10 @@ msgstr "Standardansicht: Unten"
 #: src/palette/registry.ts
 msgid "Standard View: Front"
 msgstr "Standardansicht: Vorne"
+
+#: src/palette/registry.ts
+msgid "Standard View: Home"
+msgstr "Standardansicht: Startansicht"
 
 #: src/palette/registry.ts
 msgid "Standard View: Iso"

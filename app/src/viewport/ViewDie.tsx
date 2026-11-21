@@ -2,7 +2,9 @@
  * ViewDie — the corner-cut die and four plane pips in the viewport's top
  * right (docs/design/view-die.md §2, §3). The die turns with the camera;
  * clicking a face or corner turns the view, dragging orbits. The pips show
- * which plane the next draw click lands on and lock or release it.
+ * which plane the next draw click lands on and lock or release it. A small
+ * house button at the die's upper-left corner tweens the camera back to the
+ * default 3/4 home view.
  *
  * Pure geometry lives in `viewDieGeometry.ts`. This file is the SVG, the
  * pointer handling and the plane state read from the viewport API.
@@ -45,6 +47,8 @@ const PIPS: readonly PipId[] = ['red', 'green', 'blue', 'custom']
  */
 export interface ViewDieApi {
   setViewDirection?: (eye: [number, number, number], opts?: { tween?: boolean }) => void
+  /** Tween to the default 3/4 home view (the house button). */
+  goHomeView?: () => void
   orbitDrag?: (dxPx: number, dyPx: number) => void
   endOrbitDrag?: () => void
   subscribeCameraOrientation?: (cb: (q: [number, number, number, number]) => void) => () => void
@@ -112,9 +116,12 @@ const PIP_RELEASE_TIP: Record<PipId, MessageDescriptor> = {
   custom: msg`Release the pinned plane  Shift`,
 }
 
+const HOME_TIP = msg`Home view`
+
 type Hover =
   | { kind: 'die'; hit: DieHit; y: number }
   | { kind: 'pip'; pip: PipId; y: number }
+  | { kind: 'home' }
 
 function samePlane(a: DrawPlaneState | null, b: DrawPlaneState | null): boolean {
   if (a === b) return true
@@ -366,6 +373,7 @@ export function ViewDie({ apiRef }: ViewDieProps) {
   // ---- tooltip text ----
   const tipText = (h: Hover | null): string | null => {
     if (h === null) return null
+    if (h.kind === 'home') return i18n._(HOME_TIP)
     if (h.kind === 'pip') {
       return i18n._(pipHeld(h.pip) ? PIP_RELEASE_TIP[h.pip] : PIP_LOCK_TIP[h.pip])
     }
@@ -375,6 +383,8 @@ export function ViewDie({ apiRef }: ViewDieProps) {
     return i18n._(FACE_NAME[hit.face])
   }
   const tip = tipText(hover)
+  // The home pill sits beside the house button at the die's upper-left.
+  const homeGlyph = hover?.kind === 'home' ? 'var(--text-primary)' : 'var(--text-secondary)'
 
   const rootOpacity = drawActive || inside ? 1 : 0.7
   const pipOpacity = drawActive || inside ? 1 : 0.55
@@ -415,13 +425,51 @@ export function ViewDie({ apiRef }: ViewDieProps) {
         right: '16px',
         width: `${DIE_SIZE_PX}px`,
         zIndex: 20,
-        // Only the die's shapes and the pips take presses (see below).
+        // Only the die's shapes, the pips and the home button take presses (see below).
         pointerEvents: 'none',
         userSelect: 'none',
         WebkitUserSelect: 'none',
         touchAction: 'none',
       }}
     >
+      <div
+        role="button"
+        aria-label={i18n._(HOME_TIP)}
+        data-testid="view-die-home"
+        onMouseDown={noFocus}
+        onClick={() => apiRef.current?.goHomeView?.()}
+        onPointerEnter={() => setHover({ kind: 'home' })}
+        onPointerLeave={() => setHover((h) => (h?.kind === 'home' ? null : h))}
+        style={{
+          position: 'absolute',
+          top: '0px',
+          left: '-28px',
+          width: '24px',
+          height: '24px',
+          pointerEvents: 'auto',
+          cursor: 'pointer',
+          opacity: rootOpacity,
+          transition: 'opacity 120ms ease',
+        }}
+      >
+        <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" style={{ display: 'block', pointerEvents: 'none' }}>
+          {hover?.kind === 'home' && (
+            <rect x="1" y="1" width="22" height="22" rx="5" style={{ fill: 'var(--text-primary)', fillOpacity: 0.22 }} />
+          )}
+          <path
+            d="M6.5 11 V19 H17.5 V11"
+            style={{ fill: 'var(--surface-overlay)', stroke: homeGlyph, strokeWidth: 1.5, strokeLinejoin: 'round', strokeLinecap: 'round' }}
+          />
+          <path
+            d="M4.5 12.5 L12 5.5 L19.5 12.5"
+            style={{ fill: 'none', stroke: homeGlyph, strokeWidth: 1.5, strokeLinejoin: 'round', strokeLinecap: 'round' }}
+          />
+          <path
+            d="M10.5 19 v-4.5 h3 V19"
+            style={{ fill: 'none', stroke: homeGlyph, strokeWidth: 1.5, strokeLinejoin: 'round', strokeLinecap: 'round' }}
+          />
+        </svg>
+      </div>
       <svg
         ref={svgRef}
         data-testid="view-die-svg"
@@ -643,8 +691,8 @@ export function ViewDie({ apiRef }: ViewDieProps) {
           data-testid="view-die-tooltip"
           style={{
             position: 'absolute',
-            right: `${DIE_SIZE_PX + 8}px`,
-            top: `${Math.max(0, Math.min(hover.y, DIE_SIZE_PX + PIP_GAP_PX + PIP_PX) - 10)}px`,
+            right: hover.kind === 'home' ? `${DIE_SIZE_PX + 28 + 6}px` : `${DIE_SIZE_PX + 8}px`,
+            top: hover.kind === 'home' ? '0px' : `${Math.max(0, Math.min(hover.y, DIE_SIZE_PX + PIP_GAP_PX + PIP_PX) - 10)}px`,
             padding: '3px 8px',
             background: 'var(--surface-overlay)',
             border: '1px solid var(--border-strong)',

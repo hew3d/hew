@@ -102,7 +102,7 @@ export const ALL_NATIVE_COMMANDS: readonly string[] = [
   'tool-scale', 'tool-section-plane', 'tool-select', 'tool-slice',
   'tool-tape-measure', 'tool-text', 'tool-walk', 'tool-zoom',
   'tool-zoom-window', 'undo', 'view-back', 'view-bottom', 'view-front',
-  'view-iso', 'view-left', 'view-right', 'view-top', 'zoom-extents',
+  'view-home', 'view-iso', 'view-left', 'view-right', 'view-top', 'zoom-extents',
 ]
 
 /** The ones this build's native menu has (the Preview wall's commands exist

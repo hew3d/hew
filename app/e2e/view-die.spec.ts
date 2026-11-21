@@ -16,6 +16,8 @@ declare global {
 type V3 = [number, number, number]
 
 const HOME: V3 = [1, -1, 1]
+/** Mirrors `HOME_EYE_OFFSET` (viewport/math.ts): the mount-time 3/4 eye at metre scale. */
+const HOME_EYE_OFFSET: V3 = [3.5, -3.0, 2.5]
 
 async function setup(page: Page): Promise<void> {
   await page.goto('/')
@@ -152,6 +154,27 @@ test.describe('view die', () => {
     await expect
       .poll(async () => (await page.evaluate(() => window.__hew_test!.getCameraState())).up, { timeout: 3000 })
       .toEqual([0, 0, 1])
+  })
+
+  test('the home button resets to the 3/4 home direction, framing the model in perspective', async ({ page }) => {
+    await setup(page)
+    await lookFrom(page, [0, -1, 0])
+    // Start from the states Home must undo: parallel projection and a
+    // non-default field of view.
+    await page.evaluate(() => {
+      window.__hew_test!.setCamera({ position: [0, -9, 0], target: [0, 0, 0], up: [0, 0, 1], fovDeg: 30 })
+      window.__hew_test!.toggleProjection()
+    })
+    await expect.poll(() => page.evaluate(() => window.__hew_test!.getProjection())).toBe('parallel')
+    await page.getByTestId('view-die-home').click()
+    // Home keeps the 3/4 direction (HOME_EYE_OFFSET, math.ts) and frames the
+    // whole visible model, so it does not land on the origin; it always lands
+    // in perspective.
+    await expectLookingFrom(page, HOME_EYE_OFFSET)
+    await expect
+      .poll(async () => (await page.evaluate(() => window.__hew_test!.getCameraState())).projection, { timeout: 3000 })
+      .toBe('perspective')
+    expect((await page.evaluate(() => window.__hew_test!.getCameraState())).fovDeg).toBe(45)
   })
 
   test('hovering names the target in a pill, neutrally highlighted', async ({ page }) => {

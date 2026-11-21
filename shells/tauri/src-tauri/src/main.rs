@@ -1462,6 +1462,7 @@ fn menu_action_for(id: &str) -> Option<&'static str> {
         "cam-view-left" => "view-left",
         "cam-view-right" => "view-right",
         "cam-view-iso" => "view-iso",
+        "cam-view-home" => "view-home",
         "view-compact-rail" => "toggle-compact-rail",
         "view-tray" => "toggle-tray",
         "view-dock" => "toggle-dock",
@@ -4956,6 +4957,8 @@ fn main() {
                 MenuItemBuilder::with_id("cam-view-right", lbl!("cam-view-right")).build(handle)?;
             let view_iso =
                 MenuItemBuilder::with_id("cam-view-iso", lbl!("cam-view-iso")).build(handle)?;
+            let view_home =
+                MenuItemBuilder::with_id("cam-view-home", lbl!("cam-view-home")).build(handle)?;
             let standard_views = SubmenuBuilder::with_id(
                 handle,
                 "submenu:standard-views",
@@ -4969,6 +4972,7 @@ fn main() {
             .item(&view_right)
             .separator()
             .item(&view_iso)
+            .item(&view_home)
             .build()?;
 
             let camera_menu =

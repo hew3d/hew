@@ -36,6 +36,8 @@ export type Projection = 'perspective' | 'parallel'
  * screen-constant math and the frustum itself meaningless. */
 export const MIN_FOV_DEG = 1
 export const MAX_FOV_DEG = 120
+/** The field of view a fresh perspective camera starts with (the home reset uses it). */
+export const DEFAULT_FOV_DEG = 45
 
 /**
  * Reference vertical fov (degrees) `effectiveDistance` uses to translate an
@@ -65,7 +67,7 @@ export class CameraRig {
   /** The camera's STORED vertical angle (what `CameraState.fov_deg`, the
    * readout and the fov gestures speak). `perspective.fov` is what the
    * renderer gets: equal to this unless a scene frame fit is active. */
-  private storedFovDeg = 45
+  private storedFovDeg = DEFAULT_FOV_DEG
   /** The stored aspect ratio (width/height) of the scene camera being shown,
    * or null for a free camera. See `setFrameAspect`. */
   private frameRatio: number | null = null

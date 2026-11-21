@@ -277,6 +277,7 @@ function actionEntries(): PaletteEntry[] {
     { id: 'view-left', label: t`Standard View: Left`, description: t`Look at the model from the left.`, group: 'Actions' },
     { id: 'view-right', label: t`Standard View: Right`, description: t`Look at the model from the right.`, group: 'Actions' },
     { id: 'view-iso', label: t`Standard View: Iso`, description: t`Switch to the standard isometric view.`, group: 'Actions' },
+    { id: 'view-home', label: t`Standard View: Home`, description: t`Reset the camera to the default 3/4 home view and frame the whole model.`, group: 'Actions' },
     { id: 'toggle-tray', label: t`Toggle Tray`, description: t`Show or hide the right-hand tray and all its panels.`, group: 'Actions', synonyms: [t`hide tray`, t`show tray`, t`panels`, t`sidebar`, t`inspector`, t`more room`, t`hide panels`] },
     { id: 'toggle-dock', label: t`Toggle Contextual Dock`, description: t`Show or hide the floating action dock at the bottom of the viewport.`, group: 'Actions', synonyms: [t`dock`, t`action bar`, t`floating toolbar`, t`hide dock`, t`show dock`] },
     { id: 'toggle-compact-rail', label: t`Compact Tool Rail`, description: t`Shrink the tool rail to icons only, or bring the tool names back.`, group: 'Actions', synonyms: [t`tool rail`, t`toolbar`, t`icons only`, t`tool names`, t`collapse`, t`expand`, t`sidebar`] },

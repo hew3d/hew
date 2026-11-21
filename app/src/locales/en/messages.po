@@ -5151,6 +5151,15 @@ msgstr "hollow"
 msgid "Hollow out a solid to a wall thickness, leaving the faces you click open."
 msgstr "Hollow out a solid to a wall thickness, leaving the faces you click open."
 
+#: src/i18n/nativeMenu.ts
+#: src/panels/MenuBar.tsx
+msgid "Home"
+msgstr "Home"
+
+#: src/viewport/ViewDie.tsx
+msgid "Home view"
+msgstr "Home view"
+
 #: src/tools/SliceTool.ts
 msgid "Hover a solid's face before slicing"
 msgstr "Hover a solid's face before slicing"
@@ -8600,6 +8609,10 @@ msgid "Reset Drawing Axes"
 msgstr "Reset Drawing Axes"
 
 #: src/palette/registry.ts
+msgid "Reset the camera to the default 3/4 home view and frame the whole model."
+msgstr "Reset the camera to the default 3/4 home view and frame the whole model."
+
+#: src/palette/registry.ts
 msgid "Reset the movable drawing axes back to world identity."
 msgstr "Reset the movable drawing axes back to world identity."
 
@@ -9973,6 +9986,10 @@ msgstr "Standard View: Bottom"
 #: src/palette/registry.ts
 msgid "Standard View: Front"
 msgstr "Standard View: Front"
+
+#: src/palette/registry.ts
+msgid "Standard View: Home"
+msgstr "Standard View: Home"
 
 #: src/palette/registry.ts
 msgid "Standard View: Iso"

@@ -121,7 +121,7 @@ import {
   type CameraViewLimits,
 } from './math'
 import { dynamicClipPlanes, groundHitIsUsable, targetAtDepth, zoomFloorFor } from './cameraDepth'
-import { CameraRig, type Projection, isBehindCamera, turnedEyePosition } from './cameraRig'
+import { CameraRig, DEFAULT_FOV_DEG, type Projection, isBehindCamera, turnedEyePosition } from './cameraRig'
 import { guideLinePickSamples, segmentPickSamples, type PickSample } from './screenPick'
 import { drawnPointVisible, meshWritesDepth, type DrawnVisibilityDeps } from './drawnVisibility'
 import { worldFaceNormal } from '../tools/faceDraw'
@@ -1291,6 +1291,12 @@ export interface ViewportApi {
    * empty; this never inspects geometry.
    */
   setHomeFraming: (scale: number) => void
+  /**
+   * Reset the camera to the default 3/4 home view and frame the whole visible
+   * model (an empty scene keeps the unit-aware home distance at the origin).
+   * Always lands in perspective at the default field of view.
+   */
+  goHomeView: () => void
   /**
    * Update the renderer's hidden object/instance sets.  Hidden groups have
    * `.visible = false` (not raypicked by three.js tools) and are excluded from
@@ -3102,6 +3108,10 @@ export default function Viewport({
     // "can't zoom in any further / orbit swings wildly" bug was the old
     // model-scale `minDistance` floor doing exactly what it said.
     let worldLimits: CameraViewLimits = { ...MOUNT_LIMITS, minDistance: zoomFloorFor(MOUNT_LIMITS.far) }
+    /** The home eye position at `scale`× the meter-scale 3/4 offset (target at the origin). */
+    function homeEye(scale: number): [number, number, number] {
+      return [HOME_EYE_OFFSET[0] * scale, HOME_EYE_OFFSET[1] * scale, HOME_EYE_OFFSET[2] * scale]
+    }
     // Person-scale default: frames a ~2–3 m region; classic SketchUp 3/4 angle.
     // Distance ≈ 4.7 m; a 1.8 m figure reads as substantial, not dwarfed.
     // Scaled down for small-scale display units (cm/mm/inches imply a small
@@ -3109,11 +3119,7 @@ export default function Viewport({
     // `HOME_EYE_OFFSET` (math.ts) is the single source `MOUNT_FIT_DISTANCE`
     // is also derived from — see its doc comment (delta-review Finding 3).
     const homeScale = homeFramingScale(getLengthUnit())
-    rig.perspective.position.set(
-      HOME_EYE_OFFSET[0] * homeScale,
-      HOME_EYE_OFFSET[1] * homeScale,
-      HOME_EYE_OFFSET[2] * homeScale,
-    )
+    rig.perspective.position.set(...homeEye(homeScale))
     rig.perspective.up.set(0, 0, 1)
     rig.perspective.lookAt(0, 0, 0)
 
@@ -7950,7 +7956,7 @@ export default function Viewport({
       // meter-scale distance (welcome-screen unit choice on a blank
       // document). Same direction and target as the mount-time default —
       // `HOME_EYE_OFFSET` (math.ts), the same constant used there.
-      camera.position.set(HOME_EYE_OFFSET[0] * scale, HOME_EYE_OFFSET[1] * scale, HOME_EYE_OFFSET[2] * scale)
+      camera.position.set(...homeEye(scale))
       controls.target.set(0, 0, 0)
       camera.updateProjectionMatrix()
       controls.update()
@@ -7962,6 +7968,32 @@ export default function Viewport({
       // long-inactive camera was last left at.
       rig.syncInactiveCamera(controls.target)
       scheduleRender()
+    }
+
+    /**
+     * The Home view ("reset camera"): tween to the default 3/4 direction
+     * (`HOME_EYE_OFFSET`, up +Z) with the whole visible model framed, in
+     * perspective at the default field of view. An empty scene falls back to
+     * the literal home pose at the unit-aware distance, target at the origin.
+     */
+    function goHomeView(): void {
+      const fit = resyncViewLimitsToVisibleModel()
+      const dir = new THREE.Vector3(HOME_EYE_OFFSET[0], HOME_EYE_OFFSET[1], HOME_EYE_OFFSET[2]).normalize()
+      let target: [number, number, number] = [0, 0, 0]
+      let eye: [number, number, number] = homeEye(homeFramingScale(getLengthUnit()))
+      if (fit !== null) {
+        // Same framing as Iso: the box centre, at the distance that fits its
+        // sphere at the default field of view (the fov the tween lands on).
+        const center = fit.box.getCenter(new THREE.Vector3())
+        const distance = (fit.radius * 1.2) / tanHalfFovRad(DEFAULT_FOV_DEG)
+        target = [center.x, center.y, center.z]
+        const e = center.clone().addScaledVector(dir, distance)
+        eye = [e.x, e.y, e.z]
+      }
+      tweenCameraState(
+        { projection: 'perspective', fovDeg: DEFAULT_FOV_DEG, eye, target, up: [0, 0, 1] },
+        200,
+      )
     }
 
     // The user's own hidden leaves (eye ∪ tag), as the app pushed them, and
@@ -8506,7 +8538,7 @@ export default function Viewport({
       apiRefRef.current.current = { refreshSelectionColors: () => { sceneRenderer.refreshSelectionColors(); scheduleRender() }, runBoolean, operandTriangles, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runFlipAlong, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setViewDirection, orbitDrag, endOrbitDrag, subscribeCameraOrientation, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => {
         const isolation = isolationCtl.state()
         return isolation === null ? null : [...isolation.targets]
-      }, collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getFaceCue: () => faceCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, getHoverHighlight: () => sceneRenderer.getHoverHighlight(), rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setPartAxesVisible, getPartAxesInfo, setGridVisible, setViewStyle, getBackdropInfo, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, setTangentEdgesVisible, getTangentEdgeInfo: () => sceneRenderer.getTangentEdgeInfo(), deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getInstanceRenderedInherited: (id: bigint) => sceneRenderer.debugInstanceInherited(id), getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
+      }, collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getFaceCue: () => faceCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, getHoverHighlight: () => sceneRenderer.getHoverHighlight(), rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, goHomeView, setHidden, selectAll, invertSelection, setAxesVisible, setPartAxesVisible, getPartAxesInfo, setGridVisible, setViewStyle, getBackdropInfo, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, setTangentEdgesVisible, getTangentEdgeInfo: () => sceneRenderer.getTangentEdgeInfo(), deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getInstanceRenderedInherited: (id: bigint) => sceneRenderer.debugInstanceInherited(id), getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
       apiRefRef.current.current.getCageOverlayInfo = () => sceneRenderer.getCageOverlayInfo()
     }
 

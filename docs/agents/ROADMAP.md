@@ -549,7 +549,7 @@ below.
   plane like Shift. Each draw tool exposes a `DrawPlaneState` from
   `drawPlane.ts` that the die reads. The Orbit/Top/Iso/Front chips
   (`ViewportHUD`) are removed; the measurement box defaults to
-  bottom-right. Not shown in Shop mode.
+  bottom-right. A Home button left of the die (also Standard Views ▸ Home and a palette command, no shortcut) resets the camera: default 3/4 direction, perspective at the default field of view, whole model framed (default pose for an empty scene). Not shown in Shop mode.
 - Standard camera views (Top, Front, Iso, etc.), orbit/pan/zoom navigation,
   and a Parallel Projection toggle (true orthographic, not a narrowed
   field of view) that keeps every screen-constant widget (transform grips,
