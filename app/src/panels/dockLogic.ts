@@ -95,7 +95,7 @@ const OBJECT_VERBS: DockVerb[] = [
   toolVerb('tool-fillet'),
   toolVerb('tool-move'),
   // Paint is the way to Position Texture (the tool stays in the Tools menu and
-  // the palette): the row is capped at eight chips.
+  // the palette): the row is kept to nine chips with Lock.
   toolVerb('tool-paint'),
   toolVerb('tool-shell'),
   { id: 'edit-make-component', label: msg`Make Component` },

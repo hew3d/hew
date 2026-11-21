@@ -278,72 +278,72 @@ cylinder-imperial	bottom-rim-chamfer	3/8in	fits	correct
 cylinder-imperial	bottom-rim-chamfer	1/2in	fits	correct	
 cylinder-imperial	bottom-rim-chamfer	3/4in	fits	correct	
 cylinder-imperial	bottom-rim-chamfer	5/4in	over	limit	radius_too_large max=25.4mm by=other_geometry
-faceted-plinth-seam	seam-loop-round	0.1mm	fits	generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
-faceted-plinth-seam	seam-loop-round	0.3mm	fits	generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
-faceted-plinth-seam	seam-loop-round	0.5mm	fits	generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
-faceted-plinth-seam	seam-loop-round	1mm	fits	generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
-faceted-plinth-seam	seam-loop-round	1.2mm	fits	generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
-faceted-plinth-seam	seam-loop-round	1.5mm	fits	generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
-faceted-plinth-seam	seam-loop-round	1.7mm	fits	generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
-faceted-plinth-seam	seam-loop-round	2.5mm		generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
-faceted-plinth-seam	seam-click-round	0.5mm		generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
-faceted-plinth-seam	seam-click-round	1mm		generic	unsupported_vertex at=(-5.79, -18.4, 4)mm
-grooved-knob	one-groove-top-rim-round	0.1mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	one-groove-top-rim-round	1mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	one-groove-top-rim-round	2mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	one-groove-top-rim-round	3mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	one-groove-top-rim-round	4mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	one-groove-top-rim-round	6mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	one-groove-top-rim-round	10mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	one-groove-top-rim-round	26mm	over	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+faceted-plinth-seam	seam-loop-round	0.1mm	fits	generic	unsupported_vertex
+faceted-plinth-seam	seam-loop-round	0.3mm	fits	generic	unsupported_vertex
+faceted-plinth-seam	seam-loop-round	0.5mm	fits	generic	unsupported_vertex
+faceted-plinth-seam	seam-loop-round	1mm	fits	generic	unsupported_vertex
+faceted-plinth-seam	seam-loop-round	1.2mm	fits	generic	unsupported_vertex
+faceted-plinth-seam	seam-loop-round	1.5mm	fits	generic	unsupported_vertex
+faceted-plinth-seam	seam-loop-round	1.7mm	fits	generic	unsupported_vertex
+faceted-plinth-seam	seam-loop-round	2.5mm		generic	unsupported_vertex
+faceted-plinth-seam	seam-click-round	0.5mm		generic	unsupported_vertex
+faceted-plinth-seam	seam-click-round	1mm		generic	unsupported_vertex
+grooved-knob	one-groove-top-rim-round	0.1mm	fits	generic	unsupported_vertex
+grooved-knob	one-groove-top-rim-round	1mm	fits	generic	unsupported_vertex
+grooved-knob	one-groove-top-rim-round	2mm	fits	generic	unsupported_vertex
+grooved-knob	one-groove-top-rim-round	3mm	fits	generic	unsupported_vertex
+grooved-knob	one-groove-top-rim-round	4mm	fits	generic	unsupported_vertex
+grooved-knob	one-groove-top-rim-round	6mm		generic	unsupported_vertex
+grooved-knob	one-groove-top-rim-round	10mm		generic	unsupported_vertex
+grooved-knob	one-groove-top-rim-round	26mm	over	generic	unsupported_vertex
 grooved-knob	one-groove-top-rim-chamfer	0.1mm	fits	correct	
 grooved-knob	one-groove-top-rim-chamfer	1mm	fits	correct	
 grooved-knob	one-groove-top-rim-chamfer	2mm	fits	correct	
 grooved-knob	one-groove-top-rim-chamfer	3mm	fits	correct	
 grooved-knob	one-groove-top-rim-chamfer	4mm	fits	correct	
 grooved-knob	one-groove-top-rim-chamfer	6mm		correct	
-grooved-knob	one-groove-top-rim-chamfer	10mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	one-groove-top-rim-chamfer	26mm	over	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	every-groove-top-rim-round	0.1mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	every-groove-top-rim-round	1mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	every-groove-top-rim-round	2mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	every-groove-top-rim-round	3mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	every-groove-top-rim-round	4mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	every-groove-top-rim-round	6mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	every-groove-top-rim-round	10mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	every-groove-top-rim-round	26mm	over	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	one-groove-top-rim-chamfer	10mm		generic	unsupported_vertex
+grooved-knob	one-groove-top-rim-chamfer	26mm	over	generic	unsupported_vertex
+grooved-knob	every-groove-top-rim-round	0.1mm	fits	generic	unsupported_vertex
+grooved-knob	every-groove-top-rim-round	1mm	fits	generic	unsupported_vertex
+grooved-knob	every-groove-top-rim-round	2mm	fits	generic	unsupported_vertex
+grooved-knob	every-groove-top-rim-round	3mm		generic	unsupported_vertex
+grooved-knob	every-groove-top-rim-round	4mm		generic	unsupported_vertex
+grooved-knob	every-groove-top-rim-round	6mm		generic	unsupported_vertex
+grooved-knob	every-groove-top-rim-round	10mm		generic	unsupported_vertex
+grooved-knob	every-groove-top-rim-round	26mm	over	generic	unsupported_vertex
 grooved-knob	every-groove-top-rim-chamfer	0.1mm	fits	correct	
 grooved-knob	every-groove-top-rim-chamfer	1mm	fits	correct	
 grooved-knob	every-groove-top-rim-chamfer	2mm	fits	correct	
-grooved-knob	every-groove-top-rim-chamfer	3mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	every-groove-top-rim-chamfer	4mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	every-groove-top-rim-chamfer	6mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	every-groove-top-rim-chamfer	10mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	every-groove-top-rim-chamfer	26mm	over	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
-grooved-knob	one-groove-vertical-edge-round	0.1mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
-grooved-knob	one-groove-vertical-edge-round	1mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
-grooved-knob	one-groove-vertical-edge-round	2mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
-grooved-knob	one-groove-vertical-edge-round	3mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
-grooved-knob	one-groove-vertical-edge-round	4mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
-grooved-knob	one-groove-vertical-edge-round	6mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
-grooved-knob	one-groove-vertical-edge-round	10mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
-grooved-knob	one-groove-vertical-edge-round	26mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
-grooved-knob	outer-top-rim-round	0.1mm		generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
-grooved-knob	outer-top-rim-round	1mm		generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
-grooved-knob	outer-top-rim-round	2mm		generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
-grooved-knob	outer-top-rim-round	3mm		generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
-grooved-knob	outer-top-rim-round	4mm		generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
-grooved-knob	outer-top-rim-round	6mm		generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
-grooved-knob	outer-top-rim-round	10mm		generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
-grooved-knob	outer-top-rim-round	26mm	over	generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
+grooved-knob	every-groove-top-rim-chamfer	3mm		generic	unsupported_vertex
+grooved-knob	every-groove-top-rim-chamfer	4mm		generic	unsupported_vertex
+grooved-knob	every-groove-top-rim-chamfer	6mm		generic	unsupported_vertex
+grooved-knob	every-groove-top-rim-chamfer	10mm		generic	unsupported_vertex
+grooved-knob	every-groove-top-rim-chamfer	26mm	over	generic	unsupported_vertex
+grooved-knob	one-groove-vertical-edge-round	0.1mm		generic	unsupported_vertex
+grooved-knob	one-groove-vertical-edge-round	1mm		generic	unsupported_vertex
+grooved-knob	one-groove-vertical-edge-round	2mm		generic	unsupported_vertex
+grooved-knob	one-groove-vertical-edge-round	3mm		generic	unsupported_vertex
+grooved-knob	one-groove-vertical-edge-round	4mm		generic	unsupported_vertex
+grooved-knob	one-groove-vertical-edge-round	6mm		generic	unsupported_vertex
+grooved-knob	one-groove-vertical-edge-round	10mm		generic	unsupported_vertex
+grooved-knob	one-groove-vertical-edge-round	26mm		generic	unsupported_vertex
+grooved-knob	outer-top-rim-round	0.1mm		generic	unsupported_vertex
+grooved-knob	outer-top-rim-round	1mm		generic	unsupported_vertex
+grooved-knob	outer-top-rim-round	2mm		generic	unsupported_vertex
+grooved-knob	outer-top-rim-round	3mm		generic	unsupported_vertex
+grooved-knob	outer-top-rim-round	4mm		generic	unsupported_vertex
+grooved-knob	outer-top-rim-round	6mm		generic	unsupported_vertex
+grooved-knob	outer-top-rim-round	10mm		generic	unsupported_vertex
+grooved-knob	outer-top-rim-round	26mm	over	generic	unsupported_vertex
 grooved-knob	outer-top-rim-chamfer	0.1mm		correct	
 grooved-knob	outer-top-rim-chamfer	1mm		generic	radius_too_large max=0mm by=unknown
-grooved-knob	outer-top-rim-chamfer	2mm		generic	unsupported_vertex at=(-18, -8.43, 25)mm
-grooved-knob	outer-top-rim-chamfer	3mm		generic	unsupported_vertex at=(-18, -8.43, 25)mm
-grooved-knob	outer-top-rim-chamfer	4mm		generic	unsupported_vertex at=(-18, -8.43, 25)mm
-grooved-knob	outer-top-rim-chamfer	6mm		generic	unsupported_vertex at=(-18, -8.43, 25)mm
+grooved-knob	outer-top-rim-chamfer	2mm		generic	unsupported_vertex
+grooved-knob	outer-top-rim-chamfer	3mm		generic	unsupported_vertex
+grooved-knob	outer-top-rim-chamfer	4mm		generic	unsupported_vertex
+grooved-knob	outer-top-rim-chamfer	6mm		generic	unsupported_vertex
 grooved-knob	outer-top-rim-chamfer	10mm		limit	radius_too_large max=0.214mm by=facet_width
-grooved-knob	outer-top-rim-chamfer	26mm	over	generic	unsupported_vertex at=(-18, -8.43, 25)mm
+grooved-knob	outer-top-rim-chamfer	26mm	over	generic	unsupported_vertex
 prism-08-sides	top-rim-round	0.1mm	fits	correct	
 prism-08-sides	top-rim-round	1mm	fits	correct	
 prism-08-sides	top-rim-round	5mm	fits	correct	

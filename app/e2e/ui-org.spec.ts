@@ -127,7 +127,7 @@ test('Object > Smooth does nothing with nothing selected', async ({ page }) => {
   expect(await page.evaluate((id) => window.__hew_test!.getSmoothLevel(id), id)).toBe(2)
 })
 
-test('dock, object row: Push/Pull, Fillet, Move, Paint, Shell, Make Component, Save to Library, Erase', async ({ page }) => {
+test('dock, object row: Push/Pull, Fillet, Move, Paint, Shell, Make Component, Save to Library, Lock, Erase', async ({ page }) => {
   await aim(page, CAMERA)
   await page.evaluate(() => {
     const h = window.__hew_test!
@@ -135,15 +135,15 @@ test('dock, object row: Push/Pull, Fillet, Move, Paint, Shell, Make Component, S
   })
   await expect(dock(page)).toHaveAttribute('data-dock-context', 'object')
   const labels = await dockLabels(page)
-  // The full eight-chip row. Save to Library needs a library backend, which
+  // The full nine-chip row. Save to Library needs a library backend, which
   // Chromium provides through OPFS.
   expect(labels).toEqual(offeredTools([
-    'Push/Pull', 'Fillet', 'Move', 'Paint', 'Shell', 'Make Component', 'Save to Library', 'Erase',
+    'Push/Pull', 'Fillet', 'Move', 'Paint', 'Shell', 'Make Component', 'Save to Library', 'Lock', 'Erase',
   ]))
   await shot(page, 'dock-object')
 })
 
-test('dock, multi row: Move, Union, Subtract, Intersect, Group, Erase for two solids', async ({ page }) => {
+test('dock, multi row: Move, Union, Subtract, Intersect, Group, Lock, Erase for two solids', async ({ page }) => {
   await aim(page, CAMERA)
   await page.evaluate(() => {
     const h = window.__hew_test!
@@ -152,7 +152,7 @@ test('dock, multi row: Move, Union, Subtract, Intersect, Group, Erase for two so
     h.selectObjects([a, b])
   })
   await expect(dock(page)).toHaveAttribute('data-dock-context', 'multi')
-  expect(await dockLabels(page)).toEqual(['Move', 'Union', 'Subtract', 'Intersect', 'Group', 'Erase'])
+  expect(await dockLabels(page)).toEqual(['Move', 'Union', 'Subtract', 'Intersect', 'Group', 'Lock', 'Erase'])
   await shot(page, 'dock-multi')
   await dock(page).getByRole('button', { name: 'Union' }).click()
   await expect.poll(() => page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(1)
