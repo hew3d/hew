@@ -47,6 +47,9 @@ export interface LibraryStore {
    * Open as Document flow's non-pristine-window case needs a real path to
    * hand `open_in_new_window` (see `App.tsx`'s `onOpenAsDocument`). */
   itemPath(fileName: string): Promise<string | null>
+  /** Desktop: the library-relative name of `path` when it is an item inside
+   * the Library folder, else null (the web store never has one). */
+  nameForPath(path: string): Promise<string | null>
   /** What the current backend can do, for UI gating. `canDownload` is the
    * web's escape hatch — items live in browser storage there, so the
    * detail pane offers a plain file download instead of Reveal. */
@@ -82,6 +85,7 @@ export function unavailableLibraryStore(reason: string): LibraryStore {
     writeThumbnail: fail,
     reveal: fail,
     itemPath: () => Promise.resolve(null),
+    nameForPath: () => Promise.resolve(null),
     capabilities: () => ({ canReveal: false, canChooseFolder: false, canDownload: false }),
     subscribe: () => () => {},
   }
@@ -123,6 +127,7 @@ function makeWebFacade(): LibraryStore {
     writeThumbnail: (k, png) => load().then((b) => b.writeThumbnail(k, png)),
     reveal: (f) => load().then((b) => b.reveal(f)),
     itemPath: (f) => load().then((b) => b.itemPath(f)),
+    nameForPath: (p) => load().then((b) => b.nameForPath(p)),
     capabilities: () => ({
       canReveal: false,
       canChooseFolder: typeof showDirectoryPicker === 'function',
@@ -177,6 +182,7 @@ export function libraryStore(): LibraryStore {
     writeThumbnail: (k, png) => load().then((b) => b.writeThumbnail(k, png)),
     reveal: (f) => load().then((b) => b.reveal(f)),
     itemPath: (f) => load().then((b) => b.itemPath(f)),
+    nameForPath: (p) => load().then((b) => b.nameForPath(p)),
     capabilities: () => ({ canReveal: true, canChooseFolder: true, canDownload: false }),
     subscribe: (l) => {
       listeners.add(l)

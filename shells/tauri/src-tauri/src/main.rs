@@ -3078,6 +3078,32 @@ fn library_item_path(app: tauri::AppHandle, name: String) -> Result<String, Stri
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// The library-relative name of `path` when it is an item inside `root`,
+/// else `None`. Both sides are canonicalized, so a symlinked folder or a
+/// case-insensitive volume cannot fool a prefix check.
+fn library_name_within(root: &std::path::Path, path: &std::path::Path) -> Option<String> {
+    let root = std::fs::canonicalize(root).ok()?;
+    let path = std::fs::canonicalize(path).ok()?;
+    let rel = path.strip_prefix(&root).ok()?;
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_str().map(str::to_owned))
+        .collect::<Option<_>>()?;
+    let name = parts.join("/");
+    library::valid_item_name(&name).then_some(name)
+}
+
+/// The library-relative name of `path` when it is an item inside the
+/// library folder, else `None`. A window opened on such a file edits the
+/// Library item in place (`App.tsx`'s `libraryEditRef`), and re-asks at
+/// save time, so a Library folder moved in Settings mid-edit falls back to
+/// an ordinary save.
+#[tauri::command]
+fn library_name_for_path(path: String) -> Option<String> {
+    let dir = library::LibraryDir::resolve(None);
+    library_name_within(dir.root(), std::path::Path::new(&path))
+}
+
 /// Read a cached thumbnail PNG by content-hash key. Errs with the literal
 /// string `"not_found"` when absent (vs. any other message on a real I/O
 /// failure) — the one signal `tauriLibraryStore.ts` treats as "no thumbnail
@@ -3378,6 +3404,7 @@ fn main() {
             library_delete,
             library_reveal,
             library_item_path,
+            library_name_for_path,
             library_thumb_read,
             library_thumb_write,
             recovery_write,
@@ -5858,6 +5885,43 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_path_inside_the_library_folder_names_its_item() {
+        let root = library_scratch_dir("name-for-path");
+        std::fs::create_dir_all(root.join("Components")).unwrap();
+        std::fs::create_dir_all(root.join(".thumbnails")).unwrap();
+        for f in ["leg.hew", "Components/table.hew", ".thumbnails/x.hew"] {
+            std::fs::write(root.join(f), b"x").unwrap();
+        }
+        let outside = library_scratch_dir("name-for-path-outside");
+        std::fs::write(outside.join("leg.hew"), b"x").unwrap();
+        assert_eq!(
+            library_name_within(&root, &root.join("leg.hew")).as_deref(),
+            Some("leg.hew")
+        );
+        assert_eq!(
+            library_name_within(&root, &root.join("Components/table.hew")).as_deref(),
+            Some("Components/table.hew")
+        );
+        assert_eq!(library_name_within(&root, &outside.join("leg.hew")), None);
+        assert_eq!(
+            library_name_within(&root, &root.join(".thumbnails/x.hew")),
+            None
+        );
+        assert_eq!(library_name_within(&root, &root.join("missing.hew")), None);
+        #[cfg(unix)]
+        {
+            let link = outside.join("lib-link");
+            std::os::unix::fs::symlink(&root, &link).unwrap();
+            assert_eq!(
+                library_name_within(&root, &link.join("Components/table.hew")).as_deref(),
+                Some("Components/table.hew")
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     /// `library_list`/`library_read`/`library_write` (`main.rs`, above)

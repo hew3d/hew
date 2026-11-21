@@ -56,11 +56,19 @@ When the Library has a newer version of parts in your model, a bar appears under
 
 An update replaces what the part is, in every copy, and each copy stays exactly where it was. It is one undo step, however many parts it covers, so **Undo** puts everything back at once. A part Hew can't update, because it is locked, open for editing, or the new version would contain itself, is skipped and named afterward; the rest go through. Close any open group or component first if a part says it is open for editing. A smaller part inside the one you update that you changed in this model, or that is locked, is left exactly as it is: the updated part gets the Library's version of it as a new component instead.
 
-A small arrow beside a part in the Components panel and the Outliner shows where it stands: the Library has a newer version, you changed it here, or both. Hover it for the words. A part only changed in your model never raises the bar; it just gets the marker.
+A small arrow beside a part in the Components panel and the Outliner shows where it stands: the Library has a newer version, you changed it here, or both. Hover it for the words. A part only changed in your model never raises the bar; it just gets the marker. The markers follow your edits as you make them, even while you are inside the part, and the Library shows the same marks: a tile gets the arrow, and the item's detail pane says in words where the part stands, with **Review…** when there is something to bring in.
 
 To send your own change the other way, select the part, choose **Save to Library**, and pick **Update "…" in the Library**. It replaces that item, keeping the name, keywords, and collection the Library has now, and other models that use it will be offered the update. If the Library item also changed since you inserted the part, or Hew can't tell which one is newer, it asks before replacing it. The option appears for the part you inserted or saved as a whole, not for a smaller part nested inside it, and not for a linked copy (make it a component or unlink it first). The previous version of the item is not kept. **Save as a new item** is right beneath it when you'd rather keep both.
 
 If you'd rather Hew didn't look, turn off **Settings ▸ Folders ▸ Check the Library for newer parts**. An item that has been deleted from the Library says nothing; the part keeps working.
+
+## Editing an item
+
+To change an item itself, select it in the Library and choose **Edit** (also in the item's menu). Hew opens the Library's own file in a window. The title reads **Leg (Library item)**, and a message says that saving updates the Library. A component opens as the part's definition: to change its geometry, select the part in the Components panel and press **Edit** in the dock, as you would for any component. Press `Cmd/Ctrl+S` and the item in the Library is replaced (keeping the name, keywords, and collection the Library has at that moment), its thumbnail is redrawn, and every other model that uses it is offered the update, as above. Nothing in those models changes until their owners say so.
+
+On the desktop, Edit uses this window when it is empty, and a new window when it holds work, so your model stays open next to the part. On the web the item opens in this tab when it is empty and in a new tab when it holds work. If the item is already open for editing in another desktop window, that window comes to the front. On the web, a second tab for an item that is already open says so and opens nothing; switch to the first tab instead. Opening a file from inside the Library folder any other way, such as double-clicking it in Finder, edits it the same way. **Save As** makes a separate copy and ends the link to the item.
+
+**Open as document** is still there when you want to start a new model from an item: it makes a separate copy, and saving it never touches the Library. Materials have no Edit; change one in a model, then use **Save to Library**. Profiles keep **Open for editing**.
 
 ## Finding things
 

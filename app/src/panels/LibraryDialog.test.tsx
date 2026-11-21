@@ -1852,3 +1852,88 @@ describe('LibraryDialog', () => {
     })
   })
 })
+
+describe('LibraryDialog: status and Edit', () => {
+  beforeEach(() => {
+    seedDefault()
+    fx.builtIns = []
+  })
+
+  async function ready(props: Partial<LibraryDialogProps>) {
+    render(<LibraryDialog {...baseProps(props)} />)
+    await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
+    await within(grid()).findByText('Door Hinge')
+    fireEvent.click(within(grid()).getByText('Theater Chair'))
+  }
+
+  const LINES: Array<[import('../library/libraryUpdates').MarkedState, string]> = [
+    ['library_newer', 'A newer version of this part is in the Library.'],
+    ['edited_here', 'You changed this part here. The Library still has the older version.'],
+    ['both_changed', 'This part changed here and in the Library.'],
+    ['different', 'This part differs from the Library, and Hew can’t tell which one is newer.'],
+  ]
+
+  for (const [state, line] of LINES) {
+    it(`shows the ${state} line in the detail pane and a mark on the tile`, async () => {
+      await ready({ linkStates: { 'src-chair': state } })
+      const pane = await screen.findByTestId('library-item-state')
+      expect(pane).toHaveAttribute('data-state', state)
+      expect(within(pane).getByText(line)).toBeInTheDocument()
+      expect(within(grid()).getAllByTestId('library-mark')).toHaveLength(1)
+    })
+  }
+
+  it('edited here has no Review button and says how to put the change in the Library', async () => {
+    await ready({ linkStates: { 'src-chair': 'edited_here' }, onReviewUpdates: vi.fn() })
+    const pane = await screen.findByTestId('library-item-state')
+    expect(within(pane).queryByRole('button')).toBeNull()
+    expect(within(pane).getByText(/select the part and choose Save to Library/)).toBeInTheDocument()
+  })
+
+  it('Review calls the callback for the other states', async () => {
+    const onReviewUpdates = vi.fn()
+    await ready({ linkStates: { 'src-chair': 'library_newer' }, onReviewUpdates })
+    fireEvent.click(within(await screen.findByTestId('library-item-state')).getByRole('button', { name: /review/i }))
+    expect(onReviewUpdates).toHaveBeenCalledOnce()
+  })
+
+  it('an item that is in step shows no line and no mark', async () => {
+    await ready({ linkStates: {} })
+    expect(screen.queryByTestId('library-item-state')).toBeNull()
+    expect(screen.queryByTestId('library-mark')).toBeNull()
+  })
+
+  it('Edit is offered for a component and a model, and calls back with the item', async () => {
+    const onEdit = vi.fn()
+    await ready({ onEdit })
+    fireEvent.click(screen.getByTestId('library-edit'))
+    expect(onEdit).toHaveBeenCalledOnce()
+    expect(onEdit.mock.calls[0]![0].displayName).toBe('Theater Chair')
+    fireEvent.click(screen.getByRole('tab', { name: ALL_TAB }))
+    fireEvent.click(await within(grid()).findByText('Little House'))
+    expect(screen.getByTestId('library-edit')).toBeInTheDocument()
+  })
+
+  it('Edit is not offered for a material or an unreadable item', async () => {
+    await ready({ onEdit: vi.fn() })
+    fireEvent.click(screen.getByRole('tab', { name: ALL_TAB }))
+    for (const name of ['Oak', 'broken']) {
+      fireEvent.click(await within(grid()).findByText(name))
+      expect(screen.queryByTestId('library-edit')).toBeNull()
+    }
+  })
+
+  it('Edit is not offered for a profile or a built-in', async (ctx) => {
+    requiresPreview(ctx, 'fillet')
+    fx.files.set('round.hew', bytesFor('round'))
+    fx.summaries.set('round', summary({ doc_attrs: { 'hew.library': { id: 'src-round', name: 'Round Edge', category: 'profile' } }, profile_chain_only: true }))
+    fx.builtIns = [{ id: 'builtin:chamfer', name: 'Chamfer' }]
+    await ready({ onEdit: vi.fn() })
+    fireEvent.click(screen.getByRole('tab', { name: ALL_TAB }))
+    for (const name of ['Round Edge', 'Chamfer']) {
+      fireEvent.click(await within(grid()).findByText(name))
+      expect(screen.queryByTestId('library-edit')).toBeNull()
+    }
+  })
+})

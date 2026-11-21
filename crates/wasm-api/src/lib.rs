@@ -8516,11 +8516,18 @@ impl Scene {
     /// for a definition that isn't (or isn't currently) placed anywhere
     /// (`definition_usage() == 0`). The Components panel thumbnail path.
     /// `undefined` for a stale/hidden component, a definition with nothing
-    /// visible to render, or while a component-edit session is open —
-    /// best-effort: the caller just skips the thumbnail rather than the
-    /// panel surfacing an error for a purely cosmetic miss.
+    /// visible to render — best-effort: the caller just skips the
+    /// thumbnail rather than the panel surfacing an error for a purely
+    /// cosmetic miss. A part open for editing renders as it would once
+    /// the session closed.
     pub fn render_definition_thumbnail(&self, component: u64, size: u32) -> Option<Vec<u8>> {
-        let item = self.doc.definition_preview(component_id(component)).ok()?;
+        // While a part is open for editing, preview the document as it
+        // would stand with the session closed (a clone only then).
+        let item = self
+            .doc
+            .session_closed()
+            .definition_preview(component_id(component))
+            .ok()?;
         let size = size.clamp(16, 2048);
         softrender::render_document_thumbnail(&item, size)
     }
@@ -14223,8 +14230,9 @@ impl Scene {
     }
 
     /// Where every definition linked to a Library item stands against the
-    /// item (OW-2, [`kernel::Document::library_links`]), as JSON. Read-only,
-    /// not recorded.
+    /// item (OW-2, [`kernel::Document::library_links_as_if_closed`]), as
+    /// JSON. A part open for editing is reported as it would be saved.
+    /// Read-only, not recorded.
     ///
     /// `library` is what the Library says: a JS object keyed by item id,
     /// one entry per item the Library holds now, each `{ prints?: { "<def
@@ -14265,7 +14273,7 @@ impl Scene {
         let (prints, computed) = library_item_prints(items)?;
         let links = self
             .doc
-            .library_links(&prints, api::library_print::sha256_digest);
+            .library_links_as_if_closed(&prints, api::library_print::sha256_digest);
         let rows: Vec<serde_json::Value> = links
             .iter()
             .map(|l| {
@@ -14586,20 +14594,22 @@ impl Scene {
     /// `hew.library` stamp or whose definition's stamp names the source,
     /// or a live stamped group/object (each counted once, instances first).
     pub fn library_placements_json(&self) -> String {
+        // Model-wide: a part open for editing counts as it would once closed.
+        let doc = self.doc.session_closed();
         let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
         let source_of = |target: &kernel::AttrTarget| -> Option<String> {
-            let dict = self.doc.attr_get(target).ok().flatten()?;
+            let dict = doc.attr_get(target).ok().flatten()?;
             match dict.get("hew.library")?.get("source_id")? {
                 kernel::AttrValue::Text(s) => Some(s.clone()),
                 _ => None,
             }
         };
-        for iid in self.doc.instance_ids() {
+        for iid in doc.instance_ids() {
             let own = source_of(&kernel::AttrTarget::Entity(kernel::EntityRef::Instance(
                 iid,
             )));
             let via_def = own.or_else(|| {
-                let def = self.doc.instance_def(iid)?;
+                let def = doc.instance_def(iid)?;
                 source_of(&kernel::AttrTarget::Entity(kernel::EntityRef::Component(
                     def,
                 )))
@@ -14608,12 +14618,12 @@ impl Scene {
                 *counts.entry(s).or_default() += 1;
             }
         }
-        for gid in self.doc.group_ids() {
+        for gid in doc.group_ids() {
             if let Some(s) = source_of(&kernel::AttrTarget::Entity(kernel::EntityRef::Group(gid))) {
                 *counts.entry(s).or_default() += 1;
             }
         }
-        for oid in self.doc.visible_object_ids() {
+        for oid in doc.visible_object_ids() {
             if let Some(s) = source_of(&kernel::AttrTarget::Entity(kernel::EntityRef::Object(oid)))
             {
                 *counts.entry(s).or_default() += 1;
@@ -18535,6 +18545,13 @@ mod tests {
         assert_eq!(status["links"][0]["copies"], 2);
         let status = model.library_status_core(&by_prints(&v2)).unwrap();
         assert_eq!(status["links"][0]["state"], "library_newer");
+        // A part open for editing is still reported, as a save would write it.
+        let inst = model.instance_ids()[0];
+        model.open_explode_session(inst).unwrap();
+        let status = model.library_status_core(&by_prints(&v1)).unwrap();
+        assert_eq!(status["links"].as_array().unwrap().len(), 1);
+        assert_eq!(status["links"][0]["state"], "in_step");
+        model.close_explode_session().unwrap();
         // An item without prints: its bytes are printed here.
         let mut by_bytes = std::collections::BTreeMap::new();
         by_bytes.insert(
@@ -24236,6 +24253,49 @@ mod tests {
 
         // A stale/unknown handle: no thumbnail, no panic.
         assert!(scene.render_definition_thumbnail(comp + 999, 32).is_none());
+    }
+
+    /// The Library "in this model" count is model-wide: entering one of two
+    /// placements of a stamped part (which hides that instance while the
+    /// session is open) must not drop the count.
+    #[test]
+    fn library_placements_count_is_model_wide_inside_a_part() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        scene
+            .stamp_library_source(&[2u8], &[inst], "leg-1", "h1", None)
+            .unwrap();
+        let shifted = [1.0, 0.0, 0.0, 3.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        scene.place_instance(comp, &shifted).unwrap();
+        let count = |scene: &Scene| -> serde_json::Value {
+            serde_json::from_str::<serde_json::Value>(&scene.library_placements_json()).unwrap()
+                ["leg-1"]
+                .clone()
+        };
+        assert_eq!(count(&scene), serde_json::json!(2));
+        scene.open_explode_session(inst).unwrap();
+        assert_eq!(count(&scene), serde_json::json!(2), "same inside the part");
+    }
+
+    /// Inside a part open for editing the Components row keeps its model-wide
+    /// count and still gets a thumbnail.
+    #[test]
+    fn components_row_survives_an_open_component_session() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        assert_eq!(scene.definition_usage(comp), 1);
+        scene.open_explode_session(inst).unwrap();
+        assert_eq!(scene.definition_usage(comp), 1, "count is model-wide");
+        assert!(
+            scene.render_definition_thumbnail(comp, 32).is_some(),
+            "thumbnail renders from the closed view"
+        );
     }
 
     /// `component_member_objects` must filter out a member whose birth was

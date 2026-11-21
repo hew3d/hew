@@ -147,6 +147,15 @@ export function makeTauriLibraryStore(): LibraryStore {
       }
     },
 
+    async nameForPath(path: string): Promise<string | null> {
+      const { invoke } = await import('@tauri-apps/api/core')
+      try {
+        return (await invoke<string | null>('library_name_for_path', { path })) ?? null
+      } catch {
+        return null
+      }
+    },
+
     capabilities: () => ({ canReveal: true, canChooseFolder: true, canDownload: false }),
 
     subscribe(listener: () => void): () => void {

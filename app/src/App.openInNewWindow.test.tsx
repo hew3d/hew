@@ -139,13 +139,14 @@ vi.mock('./viewport/Viewport', () => ({
 const openAnyMock = vi.fn()
 const openForImportMock = vi.fn()
 const writeToMock = vi.fn()
+const fileSaveMock = vi.fn()
 vi.mock('./io/fileHost', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./io/fileHost')>()
   return {
     ...actual,
     makeFileHost: () => ({
       open: vi.fn(),
-      save: vi.fn(),
+      save: fileSaveMock,
       saveAs: vi.fn(),
       openForImport: openForImportMock,
       openAny: openAnyMock,
@@ -155,6 +156,7 @@ vi.mock('./io/fileHost', async (importOriginal) => {
   }
 })
 
+const recoveryClaimMock = vi.fn(async (_slot: string): Promise<unknown> => null)
 vi.mock('./io/recoveryStore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./io/recoveryStore')>()
   return {
@@ -162,10 +164,41 @@ vi.mock('./io/recoveryStore', async (importOriginal) => {
     makeRecoveryStore: () => ({
       write: async () => {},
       list: async () => [],
-      claim: async () => null,
+      claim: (slot: string) => recoveryClaimMock(slot),
       clear: async () => {},
       discardAll: async () => {},
     }),
+  }
+})
+
+// The Library store: no folder and no items unless a test sets nameForPath.
+const libStoreMock = {
+  available: () => true,
+  folderInfo: async () => ({ path: null }),
+  chooseFolder: async () => null,
+  list: vi.fn(async (): Promise<unknown[]> => []),
+  read: vi.fn(async (_n: string) => new Uint8Array([1])),
+  write: vi.fn(async (_n: string, _b: Uint8Array) => {}),
+  remove: async () => {},
+  readThumbnail: async () => null,
+  writeThumbnail: async () => {},
+  reveal: async () => {},
+  itemPath: async () => null,
+  nameForPath: vi.fn(async (_p: string): Promise<string | null> => null),
+  capabilities: () => ({ canReveal: true, canChooseFolder: true, canDownload: false }),
+  subscribe: () => () => {},
+}
+vi.mock('./io/libraryStore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./io/libraryStore')>()
+  return { ...actual, libraryStore: () => libStoreMock }
+})
+const readItemSummaryMock = vi.fn(async (_b: Uint8Array): Promise<unknown> => ({ doc_attrs: {} }))
+vi.mock('./library/itemFiles', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./library/itemFiles')>()
+  return {
+    ...actual,
+    readItemSummary: (b: Uint8Array) => readItemSummaryMock(b),
+    renderItemThumbnail: async () => null,
   }
 })
 
@@ -761,5 +794,91 @@ describe('App — the close guard reports Cancel to the shell (Tauri)', () => {
     expect(screen.queryByRole('dialog', { name: 'Unsaved changes' })).toBeNull()
     expect(destroyMock).toHaveBeenCalledTimes(1)
     expect(closeCancelledCalls()).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A Library item recovered after a crash is still the Library item: Save goes
+// through the Library, never as a plain document over the item's file.
+// ---------------------------------------------------------------------------
+
+describe('App — recovering a Library item file keeps it the Library item (Tauri)', () => {
+  it('Save writes through the Library and never writes a plain document over the file', async () => {
+    const itemPath = '/lib/Components/Leg.hew'
+    const scene = mockScene as Record<string, unknown>
+    scene.set_skp_source = vi.fn()
+    scene.commit_skp_save = vi.fn()
+    scene.extract_document_item = vi.fn(() => new Uint8Array([9, 9]))
+    libStoreMock.nameForPath.mockImplementation(async (p: string) => (p === itemPath ? 'Components/Leg.hew' : null))
+    libStoreMock.list.mockResolvedValue([{ fileName: 'Components/Leg.hew', size: 1, mtimeMs: 0 }])
+    readItemSummaryMock.mockResolvedValue({
+      doc_attrs: { 'hew.library': { id: 'item-1', name: 'Leg', category: 'component' } },
+      objects: 0,
+      materials: 0,
+      components: 1,
+      groups: 0,
+      material_entries: [],
+    })
+    recoveryClaimMock.mockResolvedValue({
+      bytes: new Uint8Array([1, 2, 3]),
+      source: null,
+      meta: { name: 'Leg.hew', path: itemPath, format: 'hew', savedAt: 1 },
+    })
+    invokeMock.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case 'take_pending_recovery':
+          return 'main'
+        case 'get_recents':
+        case 'list_windows':
+          return []
+        case 'take_pending_window_open':
+        case 'take_pending_open':
+        case 'updater_available':
+          return null
+        default:
+          return undefined
+      }
+    })
+    await renderAndLoad()
+    await waitFor(() => expect(libStoreMock.nameForPath).toHaveBeenCalledWith(itemPath))
+    await waitFor(() => expect(readItemSummaryMock).toHaveBeenCalled())
+    // The binding lands after the summary read; give React its render.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('Save'))
+    await waitFor(() => expect(libStoreMock.write).toHaveBeenCalledWith('Components/Leg.hew', expect.anything()))
+    expect(fileSaveMock).not.toHaveBeenCalled()
+    expect(writeToMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('App — File ▸ Open of a Library item file (Tauri)', () => {
+  it('opens in place as the Library item: announces the edit and Save writes through the Library', async () => {
+    const itemPath = '/lib/Components/Leg.hew'
+    const scene = mockScene as Record<string, unknown>
+    scene.set_skp_source = vi.fn()
+    scene.commit_skp_save = vi.fn()
+    scene.extract_document_item = vi.fn(() => new Uint8Array([9, 9]))
+    libStoreMock.nameForPath.mockImplementation(async (p: string) => (p === itemPath ? 'Components/Leg.hew' : null))
+    libStoreMock.list.mockResolvedValue([{ fileName: 'Components/Leg.hew', size: 1, mtimeMs: 0 }])
+    readItemSummaryMock.mockResolvedValue({
+      doc_attrs: { 'hew.library': { id: 'item-1', name: 'Leg', category: 'component' } },
+      objects: 0,
+      materials: 0,
+      components: 1,
+      groups: 0,
+      material_entries: [],
+    })
+    await renderAndLoad()
+    openAnyMock.mockResolvedValueOnce({ kind: 'hew', name: 'Leg.hew', bytes: new Uint8Array([1, 2, 3]), handle: itemPath })
+    triggerOpen()
+    expect(await screen.findByText('Editing "Leg" from the Library. Saving updates the Library.')).toBeInTheDocument()
+    expect(invokeMock).not.toHaveBeenCalledWith('open_in_new_window', expect.anything())
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('Save'))
+    await waitFor(() => expect(libStoreMock.write).toHaveBeenCalledWith('Components/Leg.hew', expect.anything()))
+    expect(fileSaveMock).not.toHaveBeenCalled()
   })
 })

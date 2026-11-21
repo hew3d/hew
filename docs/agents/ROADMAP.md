@@ -1190,6 +1190,24 @@ below.
   pre-resolves every library command on the CLI's own side (HEW_API.md
   §12.1), since the desktop app's live host has no filesystem of its own
 
+- Edit in place: a Library item's **Edit** (detail pane and menu; components
+  and models) opens the item's own file for editing and Save writes it back
+  through the Library (`extract_document_item`: sessions closed, prints
+  restamped, no document id, thumbnail redrawn), so every other window sees
+  it as newer. Desktop routes the real path through the ordinary open (focus
+  the window that has it, else this one when pristine, else a new window);
+  any file opened from inside the Library folder is edited the same way
+  (`library_name_for_path`). Web opens it in place when the tab is pristine,
+  else in a new tab (`?libraryEdit=`), with a Web Lock so a second tab cannot
+  edit the same item. The title reads `<item> (Library item)`; Save As ends
+  the binding. Materials, profiles and built-ins have no Edit
+- Live Library status: a part open for editing is reported as it would be
+  saved (`Document::library_links_as_if_closed`, used by `hew.library.status`
+  and the app), so the marks follow an edit while you are inside the part. The
+  Library panel shows the same state per item (a mark on the tile, a line and
+  **Review…** in the detail pane). An edit-triggered check is one kernel pass
+  and does not list the folder
+
 ### Annotations
 
 - Linear and radial dimensions and leader text, anchored to the geometry

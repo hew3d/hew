@@ -12,6 +12,8 @@
 import { useLingui } from '@lingui/react/macro'
 import { isBuiltInItem, materialSubline } from '../../library/libraryModel'
 import type { LibraryItem } from '../../library/types'
+import type { MarkedState } from '../../library/libraryUpdates'
+import { LibraryMark } from '../LibraryMark'
 import { CubeGlyph, WarningGlyph } from './icons'
 
 /** Stable DOM id for a tile, shared with the grid's `aria-activedescendant`
@@ -32,6 +34,8 @@ export interface LibraryTileProps {
   /** Materials only: whether this item's material already exists in the
    * document's palette. */
   inPalette: boolean
+  /** Where the model's copies of this item stand against it, when they differ. */
+  linkState?: MarkedState | undefined
   /** Label for the hover-revealed primary action button (category default). */
   defaultActionLabel: string
   onSelect: () => void
@@ -46,6 +50,7 @@ export function LibraryTile({
   selected,
   placementCount,
   inPalette,
+  linkState,
   defaultActionLabel,
   onSelect,
   onActivateDefault,
@@ -136,7 +141,10 @@ export function LibraryTile({
         </div>
       )}
 
-      <div className="hwlib__tile-name">{item.displayName}</div>
+      <div className="hwlib__tile-name">
+        {item.displayName}
+        {linkState !== undefined && <span style={{ marginLeft: 4 }}><LibraryMark state={linkState} /></span>}
+      </div>
       <div className="hwlib__tile-sub">
         {item.error
           ? t`Failed to load`

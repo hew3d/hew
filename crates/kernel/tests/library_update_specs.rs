@@ -947,6 +947,113 @@ fn a_part_open_for_editing_is_left_out_of_the_links_until_it_closes() {
 }
 
 #[test]
+fn an_open_part_reads_as_if_closed() {
+    let (mut doc, leg, v1, _v2) = two_legs();
+    let lib = library(&[("leg", &v1)]);
+    doc.open_explode_session(doc.instance_ids()[0]).unwrap();
+    let hash = doc.state_hash();
+    let links = doc.library_links_as_if_closed(&lib, digest);
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].definition, leg);
+    assert_eq!(links[0].state, LibraryLinkState::InStep);
+    assert_eq!(links[0].copies, 2);
+    assert_eq!(doc.state_hash(), hash, "reading changes nothing");
+}
+
+#[test]
+fn an_open_part_keeps_its_placement_count() {
+    let (mut doc, leg, _v1, _v2) = two_legs();
+    assert_eq!(doc.definition_usage(leg), 2);
+    doc.open_explode_session(doc.instance_ids()[0]).unwrap();
+    assert_eq!(doc.definition_usage(leg), 2, "uses are model-wide");
+    doc.close_innermost_session().unwrap();
+    assert_eq!(doc.definition_usage(leg), 2);
+}
+
+#[test]
+fn an_open_part_still_previews_as_it_would_once_closed() {
+    let (mut doc, leg, _v1, _v2) = two_legs();
+    doc.open_explode_session(doc.instance_ids()[0]).unwrap();
+    let o = doc.explode_session_objects().expect("open")[0];
+    let face = top_face(&doc, o);
+    doc.apply_object_op(
+        o,
+        KernelOp::PushPull {
+            face,
+            distance: 0.5,
+        },
+    )
+    .unwrap();
+    assert!(
+        doc.definition_preview(leg).is_err(),
+        "the live preview refuses"
+    );
+    let closed = doc.session_closed();
+    assert!(
+        closed.definition_preview(leg).is_ok(),
+        "the closed view previews"
+    );
+}
+
+#[test]
+fn an_edit_inside_an_open_part_reads_changed_here_before_it_closes() {
+    let (mut doc, leg, v1, _v2) = two_legs();
+    let lib = library(&[("leg", &v1)]);
+    doc.open_explode_session(doc.instance_ids()[0]).unwrap();
+    let o = doc.explode_session_objects().expect("open")[0];
+    let face = top_face(&doc, o);
+    doc.apply_object_op(
+        o,
+        KernelOp::PushPull {
+            face,
+            distance: 0.5,
+        },
+    )
+    .unwrap();
+    let open = doc.library_links_as_if_closed(&lib, digest);
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].state, LibraryLinkState::EditedHere);
+    doc.close_innermost_session().unwrap();
+    assert_eq!(state_of(&doc, &lib, leg), LibraryLinkState::EditedHere);
+    assert_eq!(doc.library_links(&lib, digest), open);
+}
+
+#[test]
+fn a_part_placing_an_open_part_reads_as_if_closed() {
+    let (mut doc, leg, v1, _v2) = two_legs();
+    let second = doc.instance_ids()[1];
+    let (table, table_i, _) = doc.make_component(&[NodeId::Instance(second)]).unwrap();
+    let t_print = print(&doc, table);
+    let base = LibraryProvenance {
+        source_id: "table".into(),
+        content_hash: "t1".into(),
+        prints: BTreeMap::from([(7u64, t_print.clone())]),
+    };
+    doc.stamp_library_source(&[NodeId::Instance(table_i)], &base, Some(7));
+    let mut lib = library(&[("leg", &v1)]);
+    lib.insert("table".into(), BTreeMap::from([(7u64, t_print)]));
+    let leg_copy = doc.instance_ids()[0];
+    doc.open_explode_session(leg_copy).unwrap();
+    assert!(doc.library_links(&lib, digest).is_empty());
+    let defs: Vec<ComponentId> = doc
+        .library_links_as_if_closed(&lib, digest)
+        .iter()
+        .map(|l| l.definition)
+        .collect();
+    assert!(defs.contains(&leg) && defs.contains(&table), "{defs:?}");
+}
+
+#[test]
+fn with_no_session_the_two_agree() {
+    let (doc, _leg, v1, _v2) = two_legs();
+    let lib = library(&[("leg", &v1)]);
+    assert_eq!(
+        doc.library_links_as_if_closed(&lib, digest),
+        doc.library_links(&lib, digest)
+    );
+}
+
+#[test]
 fn an_update_that_would_nest_a_part_in_itself_is_refused() {
     // The item: K places J, J places a box (J3).
     let mut src = Document::new();
@@ -1386,5 +1493,104 @@ proptest! {
         prop_assert_eq!(print(&doc, leg), print(&v2, v2c));
         doc.undo().unwrap();
         prop_assert_eq!(doc.state_hash(), before);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    /// Status read inside a posed, open part equals the closed document's;
+    /// entering and leaving without an edit reads in step.
+    #[test]
+    fn prop_open_part_status_matches_the_closed_document(
+        dx in -20.0f64..20.0,
+        dy in -20.0f64..20.0,
+        dz in -20.0f64..20.0,
+        angle in 0.0f64..std::f64::consts::TAU,
+        scale in 0.25f64..4.0,
+        push in proptest::option::of(0.05f64..2.0),
+    ) {
+        let (mut doc, _leg, v1, _v2) = two_legs();
+        let lib = library(&[("leg", &v1)]);
+        let i = doc.instance_ids()[0];
+        let pose = Transform::uniform_scale(scale)
+            .then(&Transform::rotation(Vec3::new(0.0, 0.0, 1.0), angle).unwrap())
+            .then(&Transform::translation(Vec3::new(dx, dy, dz)));
+        doc.transform_instance(i, &pose).unwrap();
+        doc.open_explode_session(i).unwrap();
+        if let Some(d) = push {
+            let o = doc.explode_session_objects().expect("open")[0];
+            let face = top_face(&doc, o);
+            doc.apply_object_op(o, KernelOp::PushPull { face, distance: d }).unwrap();
+        }
+        let open = doc.library_links_as_if_closed(&lib, digest);
+        let closed = {
+            let mut c = doc.clone();
+            c.close_innermost_session().unwrap();
+            c.library_links(&lib, digest)
+        };
+        prop_assert_eq!(&open, &closed);
+        if push.is_none() {
+            prop_assert!(open.iter().all(|l| l.state == LibraryLinkState::InStep), "{:?}", open);
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    /// A posed (scaled, rotated) part that places a posed, open part reads
+    /// the same states as the closed document, edited or not: the open part
+    /// is read as if it were closed, nested placements and all.
+    #[test]
+    fn prop_a_posed_part_placing_an_open_part_matches_the_closed_document(
+        dx in -20.0f64..20.0,
+        angle in 0.0f64..std::f64::consts::TAU,
+        scale in 0.25f64..4.0,
+        table_angle in 0.0f64..std::f64::consts::TAU,
+        table_scale in 0.25f64..4.0,
+        push in proptest::option::of(0.05f64..2.0),
+    ) {
+        let (mut doc, leg, v1, _v2) = two_legs();
+        let pose = |a: f64, s: f64, x: f64| {
+            Transform::uniform_scale(s)
+                .then(&Transform::rotation(Vec3::new(0.0, 0.0, 1.0), a).unwrap())
+                .then(&Transform::translation(Vec3::new(x, 0.0, 0.0)))
+        };
+        let second = doc.instance_ids()[1];
+        doc.transform_instance(second, &pose(angle, scale, dx)).unwrap();
+        let (table, table_i, _) = doc.make_component(&[NodeId::Instance(second)]).unwrap();
+        doc.transform_instance(table_i, &pose(table_angle, table_scale, -dx)).unwrap();
+        let t_print = print(&doc, table);
+        let base = LibraryProvenance {
+            source_id: "table".into(),
+            content_hash: "t1".into(),
+            prints: BTreeMap::from([(7u64, t_print.clone())]),
+        };
+        doc.stamp_library_source(&[NodeId::Instance(table_i)], &base, Some(7));
+        let mut lib = library(&[("leg", &v1)]);
+        lib.insert("table".into(), BTreeMap::from([(7u64, t_print)]));
+
+        let leg_copy = doc
+            .instance_ids()
+            .into_iter()
+            .find(|i| doc.instance_def(*i) == Some(leg))
+            .expect("a root copy of the leg");
+        doc.open_explode_session(leg_copy).unwrap();
+        if let Some(d) = push {
+            let o = doc.explode_session_objects().expect("open")[0];
+            let face = top_face(&doc, o);
+            doc.apply_object_op(o, KernelOp::PushPull { face, distance: d }).unwrap();
+        }
+        let open = doc.library_links_as_if_closed(&lib, digest);
+        let closed = {
+            let mut c = doc.clone();
+            c.close_innermost_session().unwrap();
+            c.library_links(&lib, digest)
+        };
+        prop_assert_eq!(open.len(), 2, "both the leg and the table are linked: {:?}", open);
+        prop_assert_eq!(&open, &closed);
+        let want = if push.is_some() { LibraryLinkState::EditedHere } else { LibraryLinkState::InStep };
+        prop_assert!(open.iter().all(|l| l.state == want), "{:?}", open);
     }
 }

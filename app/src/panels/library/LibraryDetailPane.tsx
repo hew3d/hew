@@ -13,6 +13,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { isBuiltInItem, materialSubline, metadataLine, type CollectionNode, normalizeCollectionPath, savedLine } from '../../library/libraryModel'
 import type { LibraryCategory, LibraryItem } from '../../library/types'
+import { markTooltip, type MarkedState } from '../../library/libraryUpdates'
 import { CubeGlyph, RerenderGlyph, WarningGlyph } from './icons'
 import { i18n } from '@lingui/core'
 import { plural, t as tCore } from '@lingui/core/macro'
@@ -53,6 +54,10 @@ export interface LibraryDetailPaneProps {
    * pre-order with `depth` for indentation — see `collectionTreeFromPaths`. */
   collections: CollectionNode[]
   placementCount: number
+  /** Where the model's copies stand against this item, when they differ. */
+  linkState?: MarkedState | undefined
+  /** Open Review for the parts that differ; absent where it cannot. */
+  onReview?: (() => void) | undefined
   canReveal: boolean
   /** Web: browser storage has no Reveal — offer a plain file download of
    * the item's `.hew` bytes instead (the data's escape hatch). */
@@ -77,6 +82,9 @@ export interface LibraryDetailPaneProps {
   onPrimaryAction: () => void
   onSecondaryAction: () => void
   onOpenAsDocument: () => void
+  /** Components and models can be opened in place for editing. */
+  canEdit: boolean
+  onEdit: () => void
   onReRenderThumbnail: () => void
   onReveal: () => void
   onDownload: () => void
@@ -93,6 +101,8 @@ export function LibraryDetailPane({
   native,
   collections,
   placementCount,
+  linkState,
+  onReview,
   canReveal,
   canDownload,
   inPalette,
@@ -107,6 +117,8 @@ export function LibraryDetailPane({
   onPrimaryAction,
   onSecondaryAction,
   onOpenAsDocument,
+  canEdit,
+  onEdit,
   onReRenderThumbnail,
   onReveal,
   onDownload,
@@ -417,6 +429,17 @@ export function LibraryDetailPane({
           {plural(placementCount, { one: '# instance in this model', other: '# instances in this model' })}
         </div>
       )}
+      {linkState !== undefined && (
+        <div className="hwlib__inmodel" data-testid="library-item-state" data-state={linkState}>
+          <div>{markTooltip(linkState)}</div>
+          {linkState === 'edited_here' && <div><Trans>To put your version in the Library, select the part and choose Save to Library.</Trans></div>}
+          {linkState !== 'edited_here' && onReview !== undefined && (
+            <button type="button" className="hwlib__btn-link" onClick={onReview}>
+              <Trans>Review…</Trans>
+            </button>
+          )}
+        </div>
+      )}
       {/* Materials aren't "placed" as instances, so there's no count — same
           "in this model" wording as components, just without one. */}
       {isMaterial && inPalette && <div className="hwlib__inmodel"><Trans>In this model</Trans></div>}
@@ -432,6 +455,17 @@ export function LibraryDetailPane({
         {isMaterial && (
           <button type="button" className={btnClass('hwlib__btn-secondary')} onClick={onOpenAsDocument}>
             <Trans>Open as document</Trans>
+          </button>
+        )}
+        {canEdit && (
+          <button
+            type="button"
+            className={btnClass('hwlib__btn-secondary')}
+            data-testid="library-edit"
+            title={t`Open this item to change it. Saving updates the Library.`}
+            onClick={onEdit}
+          >
+            <Trans>Edit</Trans>
           </button>
         )}
       </div>

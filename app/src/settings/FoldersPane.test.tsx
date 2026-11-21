@@ -30,6 +30,7 @@ function unavailableStore(): LibraryStore {
     writeThumbnail: fail,
     reveal: fail,
     itemPath: () => Promise.resolve(null),
+    nameForPath: () => Promise.resolve(null),
     capabilities: () => ({ canReveal: false, canChooseFolder: false, canDownload: false }),
     subscribe: () => () => {},
   }
@@ -48,6 +49,7 @@ function availableStore(overrides: Partial<LibraryStore> = {}): LibraryStore {
     writeThumbnail: () => Promise.resolve(),
     reveal: () => Promise.resolve(),
     itemPath: () => Promise.resolve(null),
+    nameForPath: () => Promise.resolve(null),
     capabilities: () => ({ canReveal: true, canChooseFolder: true, canDownload: false }),
     subscribe: () => () => {},
     ...overrides,

@@ -811,9 +811,10 @@ fn library_status(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let _: StatusParams = parse(params)?;
     let listing = ctx.host.library_list().map_err(CmdError::Refusal)?;
     let prints = library_prints(ctx, &listing, &linked_item_ids(ctx.doc));
+    // A part open for editing is reported as a save would write it.
     let links = ctx
         .doc
-        .library_links(&prints, crate::library_print::sha256_digest);
+        .library_links_as_if_closed(&prints, crate::library_print::sha256_digest);
     let resolver = ctx.resolver();
     let rows: Vec<Value> = links
         .iter()

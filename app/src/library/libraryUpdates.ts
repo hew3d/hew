@@ -132,6 +132,21 @@ export function markedState(state: LinkState): state is MarkedState {
   return state === 'library_newer' || state === 'edited_here' || state === 'both_changed' || state === 'different'
 }
 
+const STATE_RANK: Record<MarkedState, number> = { both_changed: 4, different: 3, library_newer: 2, edited_here: 1 }
+
+/** One marker state per Library item id, for the Library panel: the highest
+ *  of the model's links to that item (both changed, different, newer, edited
+ *  here). An item whose links are all in step or missing is absent. */
+export function itemStates(links: readonly LibraryLink[]): Record<string, MarkedState> {
+  const out: Record<string, MarkedState> = {}
+  for (const l of links) {
+    if (!markedState(l.state)) continue
+    const have = out[l.item]
+    if (have === undefined || STATE_RANK[l.state] > STATE_RANK[have]) out[l.item] = l.state
+  }
+  return out
+}
+
 /** The marker's tooltip. */
 export function markTooltip(state: MarkedState): string {
   switch (state) {

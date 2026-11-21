@@ -24,12 +24,15 @@ import { emit, listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { readItemSummary } from '../library/itemFiles'
 import type { LibraryItem } from '../library/types'
+import type { MarkedState } from '../library/libraryUpdates'
 import { LibraryDialog } from './LibraryDialog'
 import { useTextFieldMenuActions } from '../clipboard/useTextFieldMenuActions'
 
 /** The payload document windows push (and this window consumes). */
 interface PlacementsPush {
   placements: Record<string, number>
+  /** Where the model's copies of each item stand against it (the marks). */
+  linkStates?: Record<string, MarkedState>
   /** Content hashes of the document palette's live entries (decimal
    * strings) — the "in palette" badge's comparison set. */
   paletteHashes?: string[]
@@ -39,7 +42,7 @@ interface PlacementsPush {
  *  (`library_dispatch` → `library-action`). Bytes are NOT sent — the
  *  document window re-reads the item from the shared store by name. */
 export interface LibraryActionPayload {
-  action: 'insert' | 'open' | 'paint' | 'add-palette' | 'use-profile' | 'save-copy'
+  action: 'insert' | 'open' | 'paint' | 'add-palette' | 'use-profile' | 'save-copy' | 'review' | 'edit'
   fileName: string
   displayName: string
   sourceId: string | null
@@ -64,7 +67,7 @@ function dispatch(action: LibraryActionPayload['action'], item: LibraryItem, foc
         // silently doing nothing (adversarial review S4).
         void invoke('library_confirm', {
           title: t`Library`,
-          message: t`Open a document window first — library items are placed into a model.`,
+          message: action === 'edit' ? t`Open a document window first, then choose Edit.` : t`Open a document window first — library items are placed into a model.`,
           actionLabel: t`OK`,
         })
       }
@@ -74,9 +77,28 @@ function dispatch(action: LibraryActionPayload['action'], item: LibraryItem, foc
     })
 }
 
+/** Ask the active document window to open its Review list. */
+function dispatchReview(): void {
+  const payload: LibraryActionPayload = { action: 'review', fileName: '', displayName: '', sourceId: null, category: '' }
+  void invoke<boolean>('library_dispatch', { payload: JSON.stringify(payload), focusTarget: true })
+    .then((delivered) => {
+      if (!delivered) {
+        void invoke('library_confirm', {
+          title: t`Library`,
+          message: t`Open a document window first, then choose Review.`,
+          actionLabel: t`OK`,
+        })
+      }
+    })
+    .catch(() => {
+      /* the document window surfaces its own errors */
+    })
+}
+
 export function LibraryWindow() {
   useTextFieldMenuActions()
   const [placements, setPlacements] = useState<Record<string, number>>({})
+  const [linkStates, setLinkStates] = useState<Record<string, MarkedState>>({})
   const paletteHashesRef = useRef<Set<string>>(new Set())
   const requested = useRef(false)
 
@@ -90,6 +112,7 @@ export function LibraryWindow() {
       try {
         const parsed = JSON.parse(event.payload) as PlacementsPush
         setPlacements(parsed.placements ?? {})
+        setLinkStates(parsed.linkStates ?? {})
         paletteHashesRef.current = new Set(parsed.paletteHashes ?? [])
       } catch {
         /* a malformed push is ignored; the next one wins */
@@ -114,8 +137,11 @@ export function LibraryWindow() {
         void getCurrentWindow().close()
       }}
       placements={placements}
+      linkStates={linkStates}
+      onReviewUpdates={() => dispatchReview()}
       onInsert={(item) => dispatch('insert', item, true)}
       onOpenAsDocument={(item) => dispatch('open', item, true)}
+      onEdit={(item) => dispatch('edit', item, true)}
       onPaintWith={(item) => dispatch('paint', item, true)}
       onAddToPalette={(item) => dispatch('add-palette', item, false)}
       onUseProfile={(item) => dispatch('use-profile', item, true)}

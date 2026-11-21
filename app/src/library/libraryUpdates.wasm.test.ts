@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
 import init, { Scene, read_item_summary_json, update_item_meta } from '../wasm/pkg/wasm_api.js'
 import { parseLibraryStatus, parseUpdateOutcome, pendingNewer, updateCount, type LibraryLink } from './libraryUpdates'
+import { metaForEditSave } from './libraryModel'
 import type { LibraryItemSummary } from './types'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
@@ -180,3 +181,74 @@ describe('saving a linked set over its item', () => {
     expect(placed.length).toBeGreaterThan(0)
   })
 })
+
+describe('editing an item in place', () => {
+  /** Load `bytes` as a document, open its part and pull the top face up, as an edit window does. */
+  function editedItemScene(bytes: Uint8Array): Scene {
+    const scene = new Scene()
+    scene.load(bytes)
+    scene.open_explode_session(scene.instance_ids()[0]!)
+    const object = scene.explode_session_objects()![0]!
+    // The session's one box: find its top face by its normal (face handles are slot keys, 1-based).
+    let top: bigint | undefined
+    for (let i = 1n; i <= 16n && top === undefined; i++) {
+      const face = (1n << 32n) | i
+      try {
+        if (scene.face_normal(object, face)[2]! > 0.9) top = face
+      } catch {
+        /* not a face */
+      }
+    }
+    scene.push_pull(object, top!, 0.5)
+    return scene
+  }
+
+  it('Save restamps the prints, keeps the item identity, drops the document id, and the model sees it as newer', () => {
+    const v1 = itemBytes('item-1', 1)
+    const model = insertedModel(v1, 'item-1')
+    const before = JSON.parse(read_item_summary_json(v1)) as LibraryItemSummary
+
+    const edit = editedItemScene(v1)
+    const saved = edit.extract_document_item(JSON.stringify({ savedAt: '2026-02-02T00:00:00Z' }))
+    const after = JSON.parse(read_item_summary_json(saved)) as LibraryItemSummary
+    expect(manifestPrints(saved)).not.toEqual(manifestPrints(v1))
+    expect(after.doc_attrs['hew.library']?.id).toBe('item-1')
+    expect(after.first_component_sid).toBe(before.first_component_sid)
+    const reloaded = new Scene()
+    reloaded.load(saved)
+    expect(reloaded.document_id()).toBeUndefined()
+
+    const links = status(model, { 'item-1': { prints: manifestPrints(saved) } })
+    expect(links.map((l) => l.state)).toEqual(['library_newer'])
+    const depth = model.undo_depth()
+    const outcome = parseUpdateOutcome(
+      model.update_definitions_from_items({ all: true, items: { 'item-1': { bytes: saved, contentHash: 'hash-2' } } }),
+    )
+    expect(outcome?.updated).toEqual([links[0]!.definition])
+    expect(model.undo_depth()).toBe(depth + 1)
+  })
+
+  it('a rename and a new keyword made in the Library while the edit window was open survive the save', () => {
+    const v1 = itemBytes('item-1', 1)
+    const edit = editedItemScene(v1) // loaded with the old name and no keywords
+    // Meanwhile the Library renames the item and adds a keyword.
+    const current = update_item_meta(v1, JSON.stringify({ name: 'Oak leg', keywords: ['oak'], collection: 'Furniture' }))
+    const currentMeta = (JSON.parse(read_item_summary_json(current)) as LibraryItemSummary).doc_attrs['hew.library']
+    const saved = edit.extract_document_item(JSON.stringify(metaForEditSave(currentMeta, '2026-02-02T00:00:00Z')))
+    const after = (JSON.parse(read_item_summary_json(saved)) as LibraryItemSummary).doc_attrs['hew.library']
+    expect(after?.name).toBe('Oak leg')
+    expect(after?.keywords).toEqual(['oak'])
+    expect(after?.collection).toBe('Furniture')
+    expect(after?.id).toBe('item-1')
+    expect(after?.savedAt).toBe('2026-02-02T00:00:00Z')
+    expect(manifestPrints(saved)).not.toEqual(manifestPrints(v1))
+  })
+
+  it('a plain save leaves the prints stale, which is why Edit never uses it', () => {
+    const v1 = itemBytes('item-1', 1)
+    const edit = editedItemScene(v1)
+    const plain = edit.save()
+    expect(manifestPrints(plain)).toEqual(manifestPrints(v1))
+  })
+})
+

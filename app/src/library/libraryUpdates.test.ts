@@ -13,6 +13,7 @@ import {
   needsLibraryConfirm,
   libraryConfirmKind,
   isItemRoot,
+  itemStates,
   keptCopy,
   outcomeToast,
   newerLinks,
@@ -259,5 +260,46 @@ describe('what an update says', () => {
     expect(outcomeSummary(withSkips, links)).toBe('Updated 1 part from the Library. 1 part was not updated.')
     expect(outcomeSummary({ ...outcome, updated: [], skipped: [{ definition: '3', code: 'LockedNode' }] }, links)).toBe('1 part was not updated.')
     expect(outcomeSummary({ ...outcome, updated: [] }, links)).toBe('Nothing needed updating.')
+  })
+})
+
+describe('itemStates', () => {
+  it('is empty for no links', () => {
+    expect(itemStates([])).toEqual({})
+  })
+
+  it('gives one state per item for each marked state', () => {
+    for (const state of ['library_newer', 'edited_here', 'both_changed', 'different'] as const) {
+      expect(itemStates([link({ definition: '1', item: 'a', state })])).toEqual({ a: state })
+    }
+  })
+
+  it('leaves out an item whose links are all in step or missing', () => {
+    expect(
+      itemStates([
+        link({ definition: '1', item: 'a', state: 'in_step' }),
+        link({ definition: '2', item: 'b', state: 'item_missing' }),
+      ]),
+    ).toEqual({})
+  })
+
+  it('takes the higher state when one item has links in two states, in either order', () => {
+    const a = link({ definition: '1', item: 'a', state: 'edited_here' })
+    const b = link({ definition: '2', item: 'a', state: 'library_newer' })
+    expect(itemStates([a, b])).toEqual({ a: 'library_newer' })
+    expect(itemStates([b, a])).toEqual({ a: 'library_newer' })
+    const c = link({ definition: '3', item: 'a', state: 'both_changed' })
+    const d = link({ definition: '4', item: 'a', state: 'different' })
+    expect(itemStates([a, b, d, c])).toEqual({ a: 'both_changed' })
+    expect(itemStates([a, d])).toEqual({ a: 'different' })
+  })
+
+  it('reads in step plus edited here as edited here', () => {
+    expect(
+      itemStates([
+        link({ definition: '1', item: 'a', state: 'in_step' }),
+        link({ definition: '2', item: 'a', state: 'edited_here' }),
+      ]),
+    ).toEqual({ a: 'edited_here' })
   })
 })

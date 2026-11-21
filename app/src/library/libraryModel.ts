@@ -56,6 +56,24 @@ export function parseLibraryMeta(raw: unknown): LibraryItemMeta {
   return meta
 }
 
+/** The metadata an edit-save stamps into the item: the Library's CURRENT
+ * `hew.library` keys (name, keywords, collection, category, sourceDoc, id)
+ * with a fresh `savedAt`, so a rename or keyword change made in the Library
+ * while the edit window was open survives the save. Only the geometry comes
+ * from the edit window. `prints` are left out (the kernel restamps them) and
+ * so are `null` values (they cannot be written back). */
+export function metaForEditSave(currentRaw: unknown, savedAt: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  if (currentRaw !== null && typeof currentRaw === 'object' && !Array.isArray(currentRaw)) {
+    for (const [key, value] of Object.entries(currentRaw as Record<string, unknown>)) {
+      if (key === 'prints' || value === null || value === undefined) continue
+      out[key] = value
+    }
+  }
+  out.savedAt = savedAt
+  return out
+}
+
 /** The bare file name minus any category subfolder (`Components/`,
  * `Materials/`, `Models/`, `Profiles/`) and its `.hew` extension — the last-resort
  * display name for an item with no metadata and no named definition/root.

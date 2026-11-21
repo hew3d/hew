@@ -153,9 +153,13 @@ export function ComponentsPanel({
   }
   useEffect(() => {
     const cache = thumbCacheRef.current
+    const revs = thumbRevRef.current
     return () => {
       for (const url of cache.values()) URL.revokeObjectURL(url)
       cache.clear()
+      // An entry marked rendered with no image behind it would never render
+      // again: a remount (StrictMode's, in development) starts clean.
+      revs.clear()
     }
   }, [])
 

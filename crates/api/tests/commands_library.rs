@@ -1687,6 +1687,50 @@ fn a_newer_item_reads_library_newer_and_update_all_brings_it_in_step() {
 }
 
 #[test]
+fn status_lists_a_part_that_is_open_for_editing() {
+    let mut host = library_with_a_box();
+    let (mut conn, mut doc, def) = model_with_two_boxes(&mut host);
+    doc.open_explode_session(doc.instance_ids()[0]).unwrap();
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        10,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["in_step"]);
+    assert_eq!(status["links"][0]["definition"], def);
+
+    let o = doc.explode_session_objects().expect("open")[0];
+    let top = doc
+        .object(o)
+        .unwrap()
+        .faces()
+        .iter()
+        .find(|(_, f)| f.plane.normal().z > 0.9)
+        .map(|(id, _)| id)
+        .unwrap();
+    doc.apply_object_op(
+        o,
+        kernel::KernelOp::PushPull {
+            face: top,
+            distance: 0.5,
+        },
+    )
+    .unwrap();
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        11,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["edited_here"]);
+}
+
+#[test]
 fn renaming_an_item_announces_nothing() {
     let mut host = library_with_a_box();
     let (mut conn, mut doc, _) = model_with_two_boxes(&mut host);

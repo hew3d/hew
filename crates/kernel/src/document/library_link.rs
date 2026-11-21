@@ -33,6 +33,10 @@
 //! replaces a definition's contents with a copy of the item's, through the
 //! same copy engine a Library insert uses, keeping the definition's
 //! identity so every placement follows where it stands.
+//!
+//! **Status while a part is open** ([`Document::library_links_as_if_closed`])
+//! reads the document as a save would write it, so a part open for editing
+//! shows its state live; [`Document::library_links`] leaves such a part out.
 
 use super::*;
 
@@ -966,6 +970,29 @@ impl Document {
             });
         }
         out
+    }
+
+    /// [`Document::library_links`] for the document as it would stand with
+    /// every open session closed ([`Document::session_closed`]): a part open
+    /// for editing, and any part placing it, is included, printed as a save
+    /// right now would write it. Clones only when a linked definition is on
+    /// loan or places one. Read-only.
+    pub fn library_links_as_if_closed(
+        &self,
+        library: &dyn LibraryPrints,
+        digest: PrintDigest,
+    ) -> Vec<LibraryLink> {
+        let on_loan = self.defs_on_loan();
+        let touched = !on_loan.is_empty()
+            && self.linked_definitions().into_iter().any(|def| {
+                on_loan
+                    .iter()
+                    .any(|&l| l == def || self.def_reaches(def, l))
+            });
+        if !touched {
+            return self.library_links(library, digest);
+        }
+        self.session_closed().library_links(library, digest)
     }
 
     /// The live definition whose stable id is `sid`.

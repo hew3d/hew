@@ -2075,7 +2075,9 @@ Semantics notes, normative:
 - `hew.library.status` (query, `{}`) lists every definition linked to a
   Library item with its state against the item (§8.1's table:
   `in_step`, `library_newer`, `edited_here`, `both_changed`, `different`,
-  `item_missing`), its item id, name, copy count, whether a lock would
+  `item_missing`; a part open for editing is reported as it would be
+  saved, so the answer is the same inside the part as after leaving it),
+  its item id, name, copy count, whether a lock would
   make an update skip it (`locked`: the definition is frozen, its contents
   hold a locked node, or a set of linked copies only its contents place
   holds one; the very check `hew.library.update` makes), and its prints

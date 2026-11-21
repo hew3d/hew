@@ -221,3 +221,68 @@ test('with the check turned off there is no bar, but the Save popover still offe
   await page.waitForTimeout(3000)
   await expect(page.getByTestId('library-update-bar')).toHaveCount(0)
 })
+
+test('a part shows changed here while it is still open, and the Library shows it too', async ({ page }) => {
+  test.slow()
+  await setup(page)
+  await saveLeg(page)
+  const savedHash = await page.evaluate(() => window.__hew_test!.getStateHash())
+
+  const top = await pagePoint(page, [0.5, 0.5, 1])
+  await page.mouse.move(top.x, top.y)
+  await page.mouse.click(top.x, top.y, { clickCount: 2 })
+  await page.waitForTimeout(200)
+  await page.keyboard.press('p')
+  await dragWorld(page, [0.5, 0.5, 1], [0.5, 0.5, 2])
+  // Still inside the part: the mark follows the edit.
+  await expect(page.getByTestId('library-mark')).toHaveAttribute('data-state', 'edited_here', { timeout: 10_000 })
+  await expect(page.getByText(/editing/i).first()).toBeVisible()
+
+  await page.keyboard.press('Shift+L')
+  const state = page.getByTestId('library-item-state')
+  await expect(state).toHaveAttribute('data-state', 'edited_here', { timeout: 10_000 })
+  await expect(state).toContainText('You changed this part here.')
+  await page.keyboard.press('Escape')
+  await expect(state).not.toBeVisible()
+
+  // Undo back to the saved shape: the mark goes away.
+  const mod = (await page.evaluate(() => /Mac/.test(navigator.platform))) ? 'Meta' : 'Control'
+  for (let i = 0; i < 6; i++) {
+    if ((await page.evaluate(() => window.__hew_test!.getStateHash())) === savedHash) break
+    await page.keyboard.press(`${mod}+z`)
+    await page.waitForTimeout(100)
+  }
+  await expect(page.getByTestId('library-mark')).toHaveCount(0, { timeout: 10_000 })
+})
+
+test('a linked copy saved from a saved document is tracked', async ({ page }) => {
+  test.slow()
+  await setup(page)
+  const board = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+  await page.evaluate((id) => window.__hew_test!.selectObjects([id]), board)
+  await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
+  await page.keyboard.press('m')
+  const mac = await page.evaluate(() => /Mac|iPod|iPhone|iPad/.test(navigator.platform))
+  await page.keyboard.press(mac ? 'Alt' : 'Control')
+  await clickWorld(page, [1, 1, 0])
+  await page.keyboard.press('ArrowRight')
+  const far = await pagePoint(page, [5, 1, 0])
+  await page.mouse.move(far.x, far.y)
+  await page.keyboard.type('4')
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(200)
+  // A saved document: the title has no unsaved bullet.
+  await page.evaluate(() => window.__hew_test!.saveWithCameraState())
+  await page.waitForTimeout(200)
+  const sel = await page.evaluate(() => window.__hew_test!.getSelection())
+  expect(sel).toHaveLength(1)
+
+  await page.getByRole('button', { name: 'Save to Library' }).click()
+  const prompt = page.getByRole('dialog', { name: 'Save to Library' })
+  await prompt.getByRole('textbox').fill('Board')
+  await prompt.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByText('Saved "Board" to library')).toBeVisible()
+
+  await page.keyboard.press('Shift+L')
+  await expect(page.getByText('2 instances in this model').first()).toBeVisible({ timeout: 10_000 })
+})

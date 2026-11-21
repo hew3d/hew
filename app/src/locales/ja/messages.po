@@ -32,6 +32,18 @@ msgid "· red"
 msgstr ""
 
 #: src/App.tsx
+msgid "\"{itemName}\" can't be edited in place because it has no Library identity. Use Open as document, then Save to Library."
+msgstr ""
+
+#: src/App.tsx
+msgid "\"{label}\" is already open for editing in another tab."
+msgstr ""
+
+#: src/App.tsx
+msgid "\"{libraryItemGoneName}\" was removed from the Library while you were editing it. Save it back to the Library as an item again, or cancel and nothing is saved."
+msgstr ""
+
+#: src/App.tsx
 msgid "\"{matDeleteName}\" — used on {matDeleteUsage, plural, one {# face} other {# faces}} — delete and unpaint them?"
 msgstr ""
 
@@ -459,6 +471,14 @@ msgstr ""
 #. Undo label suffix; the first word is the action, e.g. "Union (unlinked)"
 #: src/linkedCopyCopy.ts
 msgid "{label} (unlinked)"
+msgstr ""
+
+#: src/App.tsx
+#~ msgid "{libraryEditingName} (Library item)"
+#~ msgstr ""
+
+#: src/io/documentSession.ts
+msgid "{libraryItemName} (Library item)"
 msgstr ""
 
 #: src/panels/ImportReportDialog.tsx
@@ -2928,6 +2948,10 @@ msgid "Couldn't move the drawing axes: {raw}"
 msgstr ""
 
 #: src/App.tsx
+msgid "Couldn't open \"{itemName}\" for editing: its file is no longer in the Library."
+msgstr ""
+
+#: src/App.tsx
 msgid "Couldn't open {fileName} — the file may have been moved or deleted."
 msgstr ""
 
@@ -3821,6 +3845,9 @@ msgstr ""
 #: src/i18n/historyLabels.ts
 #: src/i18n/nativeMenu.ts
 #: src/panels/dockLogic.ts
+#: src/panels/library/LibraryDetailPane.tsx
+#: src/panels/library/LibraryMenu.tsx
+#: src/panels/LibraryDialog.tsx
 #: src/panels/MenuBar.tsx
 msgid "Edit"
 msgstr ""
@@ -3861,6 +3888,10 @@ msgstr ""
 
 #: src/settings/SettingsWindow.tsx
 msgid "Editing"
+msgstr ""
+
+#: src/App.tsx
+msgid "Editing \"{itemName}\" from the Library. Saving updates the Library."
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
@@ -7242,6 +7273,14 @@ msgstr ""
 msgid "Open a document window first — library items are placed into a model."
 msgstr ""
 
+#: src/panels/LibraryWindow.tsx
+msgid "Open a document window first, then choose Edit."
+msgstr ""
+
+#: src/panels/LibraryWindow.tsx
+msgid "Open a document window first, then choose Review."
+msgstr ""
+
 #: src/panels/WelcomeScreen.tsx
 msgid "Open a file…"
 msgstr ""
@@ -7368,6 +7407,10 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "Open the online user guide in your browser."
+msgstr ""
+
+#: src/panels/library/LibraryDetailPane.tsx
+msgid "Open this item to change it. Saving updates the Library."
 msgstr ""
 
 #: src/settings/serverForm.ts
@@ -8513,6 +8556,10 @@ msgid "Rendering paused"
 msgstr ""
 
 #: src/App.tsx
+msgid "Rendering thumbnail for \"{itemName}\"…"
+msgstr ""
+
+#: src/App.tsx
 msgid "Rendering thumbnail for \"{name}\"…"
 msgstr ""
 
@@ -8727,6 +8774,7 @@ msgstr ""
 msgid "Review and send a bug report, or save it to a file."
 msgstr ""
 
+#: src/panels/library/LibraryDetailPane.tsx
 #: src/panels/LibraryUpdateBar.tsx
 msgid "Review…"
 msgstr ""
@@ -8913,6 +8961,10 @@ msgid "Save As…"
 msgstr ""
 
 #: src/App.tsx
+msgid "Save back to Library"
+msgstr ""
+
+#: src/App.tsx
 msgid "Save failed: {reason}"
 msgstr ""
 
@@ -8981,6 +9033,10 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "save view"
+msgstr ""
+
+#: src/App.tsx
+msgid "Save was canceled because the document changed. Try saving again."
 msgstr ""
 
 #: src/panels/ChangesPanel.tsx
@@ -11274,6 +11330,10 @@ msgstr ""
 msgid "This is the component's only member — deleting it would leave every instance empty. Delete the instances instead, or add another member first."
 msgstr ""
 
+#: src/App.tsx
+msgid "This Library item is gone"
+msgstr ""
+
 #: src/tools/LineTool.ts
 msgid "This line stays detached; the next one will not."
 msgstr ""
@@ -11483,6 +11543,10 @@ msgstr ""
 msgid "This throws away everything you changed since the last save."
 msgstr ""
 
+#: src/App.tsx
+msgid "This window is editing a Library item. Switch to a model window to insert it."
+msgstr ""
+
 #: src/kernelErrors.ts
 #~ msgid "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
 #~ msgstr ""
@@ -11513,6 +11577,10 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "To push, pull, combine, or 3D print one, make it solid first with Make Solid."
+msgstr ""
+
+#: src/panels/library/LibraryDetailPane.tsx
+msgid "To put your version in the Library, select the part and choose Save to Library."
 msgstr ""
 
 #: src/palette/registry.ts
@@ -12459,12 +12527,20 @@ msgstr ""
 msgid "You’ll find replies and the report’s status under <0>Help ▸ Sent Reports…</0>"
 msgstr ""
 
+#: src/App.tsx
+msgid "You're already editing \"{itemName}\"."
+msgstr ""
+
 #: src/panels/SentReportsDialog.tsx
 msgid "You’re on {running}."
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
 msgid "You’re up to date"
+msgstr ""
+
+#: src/App.tsx
+msgid "Your browser blocked the new tab. Allow pop-ups for this site, or save your model first so Edit can open the item in this tab."
 msgstr ""
 
 #. placeholder {0}: only.id

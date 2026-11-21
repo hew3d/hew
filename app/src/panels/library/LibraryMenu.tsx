@@ -37,7 +37,11 @@ export interface LibraryMenuProps {
   /** Whether `meta.sourceDoc` is set — gates the "Remove Source Info" row
    * the same way the detail pane gates its own copy of this action. */
   hasSourceInfo: boolean
+  /** Components and models (not materials, profiles or built-ins) can be
+   * opened in place for editing. */
+  canEdit: boolean
   onClose: () => void
+  onEdit: () => void
   onOpenAsDocument: () => void
   onAddToCollection: () => void
   onRename: () => void
@@ -55,7 +59,9 @@ export function LibraryMenu({
   canReveal,
   canDownload,
   hasSourceInfo,
+  canEdit,
   onClose,
+  onEdit,
   onOpenAsDocument,
   onAddToCollection,
   onRename,
@@ -71,7 +77,7 @@ export function LibraryMenu({
   // anchor can't push the menu off-screen (adversarial review S14). The
   // height estimate errs high, which only pulls the menu up a little
   // early — never off the top (floor at 8).
-  const estimatedHeight = errored ? 96 : 264 + (hasSourceInfo ? 32 : 0)
+  const estimatedHeight = errored ? 96 : 264 + (hasSourceInfo ? 32 : 0) + (canEdit ? 32 : 0)
   const style: React.CSSProperties = {
     position: 'fixed',
     top: Math.max(8, Math.min(anchor.bottom + 4, window.innerHeight - estimatedHeight)),
@@ -103,6 +109,7 @@ export function LibraryMenu({
       <div className="hwlib__menu" style={style} role="menu" aria-label={t`${itemName} actions`}>
         {!errored && (
           <>
+            {canEdit && item(t`Edit`, onEdit)}
             {item(t`Open as document`, onOpenAsDocument)}
             {item(t`Add to collection`, onAddToCollection)}
             {item(t`Rename`, onRename)}

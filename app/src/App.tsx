@@ -144,6 +144,7 @@ import {
   afterImport,
   afterRecovery,
   type DocSessionState,
+  libraryItemTitle,
 } from './io/documentSession'
 import { nextRelativeTimeBoundary } from './io/relativeTime'
 import { makeRecoveryStore, shouldPromptRecovery, type RecoveryListing, type RecoverySnapshot, type RecoveryMeta } from './io/recoveryStore'
@@ -183,7 +184,7 @@ import { libraryStore } from './io/libraryStore'
 import { buildItemGhost } from './library/ghostBuilder'
 import { readItemSummary, renderItemThumbnail, sha256Hex } from './library/itemFiles'
 import { loadThumbnails as loadSceneThumbnails, saveThumbnails as saveSceneThumbnails } from './scenes/sceneThumbnails'
-import { buildLibraryItem, builtInProfileItem } from './library/libraryModel'
+import { buildLibraryItem, builtInProfileItem, metaForEditSave } from './library/libraryModel'
 import { builtInFilletProfile, builtInItemBytes, bundledProfiles, chainFirstFix, chainItemBytes, profileShapeOfBytes, shapeProfile } from './library/profiles'
 import { selectionChain } from './library/profileSelection'
 import { useProfileSections } from './library/useProfileSections'
@@ -232,6 +233,7 @@ import {
   needsLibraryConfirm,
   libraryConfirmKind,
   isItemRoot,
+  itemStates,
   outcomeToast,
   parseUpdateOutcome,
   updateCount,
@@ -1241,6 +1243,71 @@ export default function App() {
   // trigger "the current save flow" without a forward reference.
   const saveDocumentRef = useRef<() => Promise<boolean>>(async () => false)
   const saveAsDocumentRef = useRef<() => Promise<boolean>>(async () => false)
+  // The Library item this window is editing in place, when it is (Library ▸
+  // Edit, or on the desktop any open of a file inside the Library folder):
+  // Save then writes the item through the Library, restamping its prints,
+  // instead of an ordinary file save. `ref` is the document's own file ref;
+  // a binding whose ref is no longer the current one (New, an import, Save
+  // As) is stale and ignored. Mirrored in state for the window title.
+  type LibraryEditBinding = { fileName: string; id: string; name: string; ref: FileRef }
+  const libraryEditRef = useRef<LibraryEditBinding | null>(null)
+  // `bindLibraryItemForPath`, defined below the open paths that call it.
+  const bindLibraryItemRef = useRef<(path: string, bytes: Uint8Array, ref: FileRef, announce: boolean) => Promise<void>>(async () => {})
+  // Counts document loads, so an answer that lands after another load is dropped.
+  const loadSeqRef = useRef(0)
+  const [libraryEdit, setLibraryEditState] = useState<LibraryEditBinding | null>(null)
+  // Web: releases the Web Lock that keeps a second tab off the same item.
+  const libraryEditLockRef = useRef<(() => void) | null>(null)
+  // Web: this tab was opened by Library ▸ Edit (`?libraryEdit=`), so it must
+  // not offer another window's crash snapshot or the welcome screen over the item.
+  const libraryEditBootingRef = useRef(!isTauri && typeof location !== 'undefined' && new URLSearchParams(location.search).has('libraryEdit'))
+  // The item this window edits is gone from the Library: the question waiting
+  // on an answer (true = save it back as an item, false = leave it).
+  const [libraryItemGone, setLibraryItemGone] = useState<{ name: string; resolve: (saveBack: boolean) => void } | null>(null)
+  const libraryItemGoneName = libraryItemGone?.name ?? ''
+  const setLibraryEdit = useCallback((v: LibraryEditBinding | null) => {
+    libraryEditRef.current = v
+    setLibraryEditState(v)
+    if (v === null) {
+      libraryEditLockRef.current?.()
+      libraryEditLockRef.current = null
+    }
+  }, [])
+  // The item's name in the Library right now, re-read at the moment of use
+  // (it may have been renamed since this window opened); the name the
+  // window loaded when the Library cannot be read.
+  const currentLibraryItemName = useCallback(async (binding: LibraryEditBinding): Promise<string> => {
+    try {
+      const bytes = await libraryStore().read(binding.fileName)
+      const summary = await readItemSummary(bytes)
+      return buildLibraryItem({ fileName: binding.fileName, size: bytes.length, mtimeMs: 0 }, summary, '').displayName
+    } catch {
+      return binding.name
+    }
+  }, [])
+  // Keep the window title on that name: when the window is looked at again,
+  // and whenever the Library changes.
+  useEffect(() => {
+    if (libraryEdit === null) return
+    const binding = libraryEdit
+    let cancelled = false
+    const refresh = () => {
+      void currentLibraryItemName(binding).then((name) => {
+        if (cancelled || libraryEditRef.current !== binding || name === binding.name) return
+        setLibraryEdit({ ...binding, name })
+      })
+    }
+    refresh()
+    window.addEventListener('focus', refresh)
+    const unsubscribe = libraryStore().subscribe(refresh)
+    return () => {
+      cancelled = true
+      window.removeEventListener('focus', refresh)
+      unsubscribe()
+    }
+  }, [libraryEdit, currentLibraryItemName, setLibraryEdit])
+  // Save to Library's thumbnail pass is defined far below the save path.
+  const renderAndWriteThumbnailRef = useRef<(toastId: number, name: string, bytes: Uint8Array, updated?: boolean) => void>(() => {})
   // Stable recovery-store instance (autosave / crash recovery).
   const recoveryStoreRef = useRef(makeRecoveryStore())
   // pushUnionHidden is defined further down (it depends on `state`); reach it
@@ -1537,6 +1604,10 @@ export default function App() {
   // handoff has been consumed, or the dialog races the open and can appear
   // over, then replace, a document the user explicitly double-clicked.)
 
+  // The Library item this window is editing, while its binding is current.
+  const libraryEditingName = libraryEdit !== null && libraryEdit.ref === docSession.currentRef ? libraryEdit.name : undefined
+  const shownDocumentName = libraryEditingName !== undefined ? libraryItemTitle(libraryEditingName) : documentName(docSession)
+
   // Update document.title whenever session state changes. Under Tauri, also
   // push the title to the shell via `set_window_title` — the in-app MenuBar
   // no longer renders a title for the native case, so the title now lives
@@ -1545,7 +1616,7 @@ export default function App() {
   // the Window-menu entry for this window tracks its document name and
   // dirty mark live.
   useEffect(() => {
-    const title = deriveTitle(docSession)
+    const title = deriveTitle(docSession, libraryEditingName)
     document.title = title
     if (isTauri) {
       // A preview build says so in the native window title too (English, like
@@ -1556,7 +1627,7 @@ export default function App() {
         invoke('set_window_title', { title: windowTitle }).catch(() => { /* ignore */ })
       }).catch(() => { /* ignore */ })
     }
-  }, [docSession, activeI18n.locale])
+  }, [docSession, libraryEditingName, activeI18n.locale])
   // Tell the shell which file this window has open (`DocumentPaths` in
   // main.rs) so opening the same path again focuses this window instead of
   // minting a second one. A Tauri FileRef handle is the absolute path; a
@@ -3335,6 +3406,8 @@ export default function App() {
     const scene = sceneRef.current
     if (scene === null) return false
     profileSourceRef.current = null
+    loadSeqRef.current += 1
+    setLibraryEdit(null)
     // Revert to Saved reloads the document under the person's feet: the view
     // stays where it is, over the camera the file was saved with.
     const keptCamera = opts?.keepCamera === true ? viewportApi.current?.getCameraState() : undefined
@@ -3482,7 +3555,7 @@ export default function App() {
     })()
     pumpEvents(scene)
     return true
-  }, [handleToast, toastOpenFailure, reseedHiddenStateFromScene, noteDocumentEvent])
+  }, [handleToast, toastOpenFailure, reseedHiddenStateFromScene, noteDocumentEvent, setLibraryEdit])
   // Keep the harness's Open path ( __hew_test.load) pointed at the latest
   // applyLoadedBytes closure.
   applyLoadedBytesRef.current = applyLoadedBytes
@@ -4023,12 +4096,15 @@ export default function App() {
           path: typeof pick.handle === 'string' ? pick.handle : undefined,
         })
         if (!ok) return
-        setDocSession(afterOpen({ name: pick.name, format: 'hew', handle: pick.handle }, Date.now()))
+        const openedRef: FileRef = { name: pick.name, format: 'hew', handle: pick.handle }
+        setDocSession(afterOpen(openedRef, Date.now()))
         if (discardsUnsaved) void clearRecoverySnapshot()
         if (isTauri && typeof pick.handle === 'string') {
           import('@tauri-apps/api/core').then(({ invoke }) =>
             invoke('push_recent', { path: pick.handle as string })
           ).catch(() => { /* ignore */ })
+          // A file inside the Library folder is the Library item itself.
+          await bindLibraryItemRef.current(pick.handle, pick.bytes, openedRef, true)
         } else if (!isTauri) {
           // Web build only — the Tauri desktop shell has its own path-based
           // recents (push_recent above); this is the IndexedDB-backed shelf
@@ -4222,6 +4298,8 @@ export default function App() {
   /** Why the last `saveToRef` failed — the live API reports it to its client. */
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English
   const lastSaveErrorRef = useRef('the document could not be saved')
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English
+  const DOC_CHANGED_BEFORE_SAVE = 'the document changed before it could be saved'
 
   /** Writes the document to `ref`, in `ref.format`, and commits the post-save
    * session state. The one save path: Save is this with the document's own
@@ -4236,14 +4314,61 @@ export default function App() {
       const scene = sceneRef.current
       if (scene === null) return false
       if (ref === null) return saveAsDocumentRef.current()
+      // A window editing a Library item writes the item through the Library.
+      let libEdit = libraryEditRef.current !== null && libraryEditRef.current.ref === ref && ref === docSessionRef.current.currentRef ? libraryEditRef.current : null
+      if (libEdit !== null && isTauri && typeof ref.handle === 'string') {
+        // The Library folder may have moved since this window opened.
+        const generation = docGenerationRef.current
+        const now = await libraryStore().nameForPath(ref.handle)
+        if (docGenerationRef.current !== generation || sceneRef.current !== scene) {
+          lastSaveErrorRef.current = DOC_CHANGED_BEFORE_SAVE
+          handleToast(t`Save was canceled because the document changed. Try saving again.`)
+          return false
+        }
+        if (now !== null && now !== libEdit.fileName) {
+          setLibraryEdit(null)
+          libEdit = null
+        }
+      }
+      if (libEdit !== null) {
+        // Saving must not quietly recreate an item that was deleted elsewhere.
+        const generation = docGenerationRef.current
+        const editName = libEdit.name
+        let gone: boolean
+        try {
+          gone = !(await libraryStore().list()).some((f) => f.fileName === libEdit!.fileName)
+        } catch {
+          gone = false
+        }
+        if (docGenerationRef.current !== generation || sceneRef.current !== scene) {
+          lastSaveErrorRef.current = DOC_CHANGED_BEFORE_SAVE
+          handleToast(t`Save was canceled because the document changed. Try saving again.`)
+          return false
+        }
+        if (gone) {
+          const saveBack = await new Promise<boolean>((resolve) => setLibraryItemGone({ name: editName, resolve }))
+          if (!saveBack) {
+            // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English
+            lastSaveErrorRef.current = 'the Library item was deleted, and saving it back was declined'
+            return false
+          }
+          if (docGenerationRef.current !== generation || sceneRef.current !== scene) {
+            lastSaveErrorRef.current = DOC_CHANGED_BEFORE_SAVE
+            handleToast(t`Save was canceled because the document changed. Try saving again.`)
+            return false
+          }
+        }
+      }
       // `Scene.save()` is transparent to an open explode session — it
       // serializes as-if-closed, so saving mid-session needs no special
       // handling here (the session, and its dimming/scoping, is untouched).
       pushCameraStateToScene(scene)
       // The first save mints the document's persistent id (a `.skp` save
       // inside `save_skp`); a canceled save leaves it on the document.
-      scene.ensure_document_id()
+      // (An item file never carries one: it is a separate document.)
+      if (libEdit === null) scene.ensure_document_id()
       const undoDepthAtSave = scene.undo_depth()
+      const docGenerationAtMeta = docGenerationRef.current
       noteDocumentEvent('will_save', documentName(docSessionRef.current), ref, ref.format)
       pumpEvents(scene)
       try {
@@ -4264,10 +4389,35 @@ export default function App() {
           bytes = out.bytes
           simplified = out.simplified
           writerNotes = out.writer_notes
+        } else if (libEdit !== null) {
+          // Closes open sessions, merges the item's `hew.library` keys and
+          // restamps its prints, so other documents see it as newer. A plain
+          // `save()` would leave the old prints behind.
+          // The Library's metadata as it is NOW wins over what this window
+          // loaded: a rename or keyword made meanwhile must survive.
+          let current: unknown
+          try {
+            const now = await libraryStore().read(libEdit.fileName)
+            current = (await readItemSummary(now)).doc_attrs?.['hew.library']
+          } catch {
+            current = undefined // the item is gone (saved back on request): this window's own
+          }
+          if (docGenerationRef.current !== docGenerationAtMeta || sceneRef.current !== scene) {
+            lastSaveErrorRef.current = DOC_CHANGED_BEFORE_SAVE
+            handleToast(t`Save was canceled because the document changed. Try saving again.`)
+            return false
+          }
+          bytes = new Uint8Array(scene.extract_document_item(JSON.stringify(metaForEditSave(current, new Date().toISOString()))))
         } else {
           bytes = new Uint8Array(scene.save())
         }
-        const newRef = await fileHostRef.current.save(bytes, ref)
+        let newRef: FileRef | null
+        if (libEdit !== null) {
+          await libraryStore().write(libEdit.fileName, bytes)
+          newRef = ref
+        } else {
+          newRef = await fileHostRef.current.save(bytes, ref)
+        }
         if (newRef === null) return false // user cancelled
         if (savedCompat !== null) skpCompatRef.current = savedCompat
         // The document is now bound to `newRef`: a `.skp` takes the written
@@ -4286,13 +4436,18 @@ export default function App() {
         LogStore.log.info('app', `Saved: ${newRef.name}`)
         // The work is now safely on disk — drop the autosave snapshot.
         void clearRecoverySnapshot()
-        if (isTauri && typeof newRef.handle === 'string') {
+        if (libEdit === null && isTauri && typeof newRef.handle === 'string') {
           import('@tauri-apps/api/core').then(({ invoke }) =>
             invoke('push_recent', { path: newRef.handle as string })
           ).catch(() => { /* ignore */ })
         }
         if (newRef.format === 'hew') persistSceneThumbnails(bytes)
         noteSkpSimplified(simplified, writerNotes)
+        if (libEdit !== null) {
+          // The item's thumbnail and "Saved" time are current at once.
+          const itemName = await currentLibraryItemName(libEdit)
+          renderAndWriteThumbnailRef.current(pushStickyToast(t`Rendering thumbnail for "${itemName}"…`), itemName, bytes, true)
+        }
         return true
       } catch (err: unknown) {
         lastSaveErrorRef.current = friendlyErrorText(err)
@@ -4300,7 +4455,7 @@ export default function App() {
         return false
       }
     },
-    [handleToast, toastOpenFailure, clearRecoverySnapshot, pushCameraStateToScene, noteSkpSimplified, noteDocumentEvent, reportDocumentId],
+    [handleToast, toastOpenFailure, clearRecoverySnapshot, pushCameraStateToScene, noteSkpSimplified, noteDocumentEvent, reportDocumentId, setLibraryEdit, pushStickyToast, DOC_CHANGED_BEFORE_SAVE, currentLibraryItemName],
   )
 
   const saveDocument = useCallback(
@@ -4392,6 +4547,8 @@ export default function App() {
       skpSourceGenRef.current += 1
       const atSavedMark = markSavedIfUnmoved(scene, undoDepthAtSave)
       setDocSession(afterSave(newRef, Date.now(), atSavedMark))
+      // A copy saved elsewhere is an ordinary document, not the Library item.
+      setLibraryEdit(null)
       await reportDocumentId()
       noteDocumentEvent('saved', newRef.name, newRef, newRef.format)
       pumpEvents(scene)
@@ -4436,6 +4593,40 @@ export default function App() {
     }
   }, [handleToast, pushCameraStateToScene, reportDocumentId])
 
+  /** Desktop: when `path` is a file inside the Library folder and its bytes
+   * carry a Library id, bind this window to that item so Save writes through
+   * the Library. Used by an open by path and by crash-recovery adoption, so a
+   * recovered item is never saved as a plain document over its Library file.
+   * Called right after the load; a later load drops the binding. */
+  const bindLibraryItemForPath = useCallback(
+    async (path: string, bytes: Uint8Array, ref: FileRef, announce: boolean): Promise<void> => {
+      const scene = sceneRef.current
+      const seq = loadSeqRef.current
+      let libraryName: string | null
+      try {
+        libraryName = await libraryStore().nameForPath(path)
+      } catch {
+        return
+      }
+      if (libraryName === null || sceneRef.current !== scene || loadSeqRef.current !== seq) return
+      try {
+        const summary = await readItemSummary(bytes)
+        const item = buildLibraryItem({ fileName: libraryName, size: bytes.length, mtimeMs: 0 }, summary, '')
+        // A file with no `hew.library` id is an ordinary document.
+        if (item.meta.id !== undefined && loadSeqRef.current === seq) {
+          setLibraryEdit({ fileName: libraryName, id: item.meta.id, name: item.displayName, ref })
+          if (announce) {
+            const itemName = item.displayName
+            handleToast(t`Editing "${itemName}" from the Library. Saving updates the Library.`)
+          }
+        }
+      } catch {
+        /* unreadable summary: an ordinary document */
+      }
+    },
+    [handleToast, setLibraryEdit],
+  )
+  bindLibraryItemRef.current = bindLibraryItemForPath
   // ---------------------------------------------------------------- open by path (Tauri only)
   // Reads the file at `path` and applies it to the CURRENT window
   // unconditionally — no pristine check, no discard guard. Callers must have
@@ -4466,9 +4657,12 @@ export default function App() {
         const discardsUnsaved = docSessionRef.current.dirty
         if (applyLoadedBytes(bytes, { name: basenameOf(path), label: OPEN_FILE_LABELS.hew, path })) {
           landed = true
-          setDocSession(afterOpen({ name: basenameOf(path), format: 'hew', handle: path }, Date.now()))
+          const openedRef: FileRef = { name: basenameOf(path), format: 'hew', handle: path }
+          setDocSession(afterOpen(openedRef, Date.now()))
           if (discardsUnsaved) void clearRecoverySnapshot()
           invoke('push_recent', { path }).catch(() => { /* ignore */ })
+          // A file inside the Library folder is the Library item itself.
+          await bindLibraryItemForPath(path, bytes, openedRef, true)
         }
       } finally {
         if (!landed) {
@@ -4511,7 +4705,7 @@ export default function App() {
     }
     await runImportPick(scene, pick)
     return true
-  }, [applyLoadedBytes, clearRecoverySnapshot, runImportPick, runOpenSkp, toastOpenFailure])
+  }, [applyLoadedBytes, clearRecoverySnapshot, runImportPick, runOpenSkp, toastOpenFailure, bindLibraryItemForPath])
 
   // File ▸ Revert to Saved, after its confirmation (and the live API's
   // `hew.doc.revert`, which asks none): read the saved file again, load it
@@ -4574,6 +4768,7 @@ export default function App() {
       return { ok: false, message, shown: true }
     }
     let landed: boolean
+    const editing = libraryEditRef.current
     if (isSkpFormat(ref.format)) {
       if (skpOpenStepsRef.current) {
         return { ok: false, message: t`Another file is still opening; try again in a moment.` }
@@ -4585,7 +4780,11 @@ export default function App() {
         { name: ref.name, label: OPEN_FILE_LABELS.hew, path: typeof ref.handle === 'string' ? ref.handle : undefined },
         { keepCamera: true },
       )
-      if (landed) setDocSession(afterOpen(ref, Date.now()))
+      if (landed) {
+        setDocSession(afterOpen(ref, Date.now()))
+        // The same file again: still the Library item being edited.
+        if (editing !== null && editing.ref === ref) setLibraryEdit(editing)
+      }
     }
     if (!landed) return { ok: false, message: t`The saved file could not be loaded.`, shown: true }
     // The unsaved work this replaced is gone: so is its crash snapshot.
@@ -4600,7 +4799,7 @@ export default function App() {
     }
     handleToast(t`Reverted to the saved file.`)
     return { ok: true }
-  }, [applyLoadedBytes, runOpenSkp, clearRecoverySnapshot, handleToast, t])
+  }, [applyLoadedBytes, runOpenSkp, clearRecoverySnapshot, handleToast, setLibraryEdit, t])
 
   // Tauri-only. The entry point for every "open this path" gesture that can
   // land on a window the user may already be working in: native/in-app "Open
@@ -4780,18 +4979,21 @@ export default function App() {
       takesCompat(normalizeDocFormat(meta.format)) &&
       SceneClass.skp_container_compat(snapshot.source)
     skpSourceGenRef.current += 1
-    setDocSession(afterRecovery(
-      meta.path !== null ? { name: meta.name, format: normalizeDocFormat(meta.format), handle: meta.path } : null,
-      meta.path !== null ? undefined : meta.name,
-      meta.savedAt,
-    ))
+    const recoveredRef: FileRef | null =
+      meta.path !== null ? { name: meta.name, format: normalizeDocFormat(meta.format), handle: meta.path } : null
+    setDocSession(afterRecovery(recoveredRef, meta.path !== null ? undefined : meta.name, meta.savedAt))
+    // Recovering a Library item's own file keeps it the Library item: a Save
+    // must go through the Library, never write a plain document over the file.
+    if (isTauri && recoveredRef !== null && meta.path !== null && normalizeDocFormat(meta.format) === 'hew') {
+      void bindLibraryItemForPath(meta.path, snapshot.bytes, recoveredRef, false)
+    }
     // The recovered document still only exists in the recovery snapshot —
     // claim() re-homed it to this window's own slot (the next autosave tick
     // refreshes it in place); arm the tick so it will actually fire if
     // nothing else changes.
     armAutosaveTick()
     return true
-  }, [applyLoadedBytes, armAutosaveTick])
+  }, [applyLoadedBytes, armAutosaveTick, bindLibraryItemForPath])
   const adoptSnapshotRef = useRef(adoptSnapshot)
   useEffect(() => { adoptSnapshotRef.current = adoptSnapshot }, [adoptSnapshot])
 
@@ -5297,6 +5499,11 @@ export default function App() {
   // panel opens (see useLibraryLinks); Settings ▸ Folders turns the automatic
   // checks and the bar off (a panel or the Save popover still checks).
   const checkLibraryUpdates = useCheckLibraryUpdates()
+  // Placement counts are scoped to an open session, so while one is open the
+  // last answer from outside it stands.
+  const hasLibraryPlacements = Object.keys(libraryPlacements).length > 0
+  const hadLibraryPlacementsRef = useRef(hasLibraryPlacements)
+  if (sessionStack.length === 0) hadLibraryPlacementsRef.current = hasLibraryPlacements
   const libLinks = useLibraryLinks({
     scene: state?.scene ?? null,
     docRev,
@@ -5304,9 +5511,10 @@ export default function App() {
     enabled: checkLibraryUpdates,
     sessionOpen: sessionStack.length > 0,
     openedKey: (showLibrary ? 1 : 0) + (showComponents ? 2 : 0),
-    hasLinks: Object.keys(libraryPlacements).length > 0,
+    hasLinks: hasLibraryPlacements || (sessionStack.length > 0 && hadLibraryPlacementsRef.current),
   })
   libraryRefreshRef.current = () => void libLinks.refreshNow()
+  const libraryItemStates = useMemo(() => itemStates(libLinks.links), [libLinks.links])
   const [libraryReviewOpen, setLibraryReviewOpen] = useState(false)
   const [libraryOutcome, setLibraryOutcome] = useState<{ outcome: UpdateOutcome; links: LibraryLink[] } | null>(null)
   const libraryReviewOpenRef = useRef(false)
@@ -5480,6 +5688,7 @@ export default function App() {
       }
     })()
   }, [updateToast])
+  renderAndWriteThumbnailRef.current = renderAndWriteThumbnail
 
   /** Commits the SaveToLibraryPopover's chosen name: extracts the selection
    * or whole document as item bytes, writes it under a collision-proofed
@@ -5620,9 +5829,11 @@ export default function App() {
       // The stamp below runs after an await — if the user replaced the
       // document meanwhile (File ▸ New/Open), the captured node handles
       // could resolve against RECYCLED slots in the new document and stamp
-      // the wrong entities (adversarial review). The session object's
-      // identity changes exactly on document replacement, so capture it
-      // now and bail if it moved.
+      // the wrong entities (adversarial review). The document generation
+      // changes exactly on document replacement (the session object also
+      // changes on a clean-to-dirty flip, which a promoted save causes), so
+      // capture it now and bail if it moved.
+      const generationAtSave = docGenerationRef.current
       const sessionAtSave = docSessionRef.current
       void (async () => {
         try {
@@ -5642,7 +5853,7 @@ export default function App() {
         // immediately and a re-insert reuses the existing definition
         // (playtest finding). Selection items only: a whole-document model
         // item has no meaningful in-model selection to mark.
-        if (target.kind !== 'document' && docSessionRef.current === sessionAtSave) {
+        if (target.kind !== 'document' && docGenerationRef.current === generationAtSave) {
           let stamped = false
           try {
             // Capture cleanliness BEFORE the stamp dirties the session. A
@@ -5791,9 +6002,19 @@ export default function App() {
     [handleToast],
   )
 
+  /** A window editing a Library item is no place to insert one: the item
+   * would land in the very file being edited. Says so and answers true. */
+  const refuseInsertIntoLibraryEdit = useCallback((): boolean => {
+    const editing = libraryEditRef.current
+    if (editing === null || editing.ref !== docSessionRef.current.currentRef) return false
+    handleToast(t`This window is editing a Library item. Switch to a model window to insert it.`)
+    return true
+  }, [handleToast])
+
   const onLibraryInsert = useCallback(
     (item: LibraryItem, bytes: Uint8Array) => {
       setShowLibrary(false)
+      if (refuseInsertIntoLibraryEdit()) return
       void (async () => {
         let ghost: Awaited<ReturnType<typeof buildItemGhost>>
         try {
@@ -5820,7 +6041,7 @@ export default function App() {
         )
       })()
     },
-    [handleToast],
+    [handleToast, refuseInsertIntoLibraryEdit],
   )
 
   // Open as Document: reuses THIS window only when it's pristine (same rule
@@ -5876,6 +6097,150 @@ export default function App() {
     },
     [applyLoadedBytes, handleToast],
   )
+
+  // Library ▸ Edit: open the Library's own file for editing. The desktop
+  // routes the item's real path through the ordinary open (focus the window
+  // that has it, else this one when pristine, else a new window). The web
+  // opens it here when this tab is pristine, else in a new tab, so the model
+  // that uses the part stays open. A window editing an item saves it back
+  // through the Library (`saveToRef`).
+  const openLibraryItemForEdit = useCallback(
+    async (fileName: string) => {
+      const scene = sceneRef.current
+      if (scene === null) return
+      // Web Lock: a second tab on the same item says so and loads nothing.
+      let release: (() => void) | null = null
+      const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined
+      if (locks !== undefined) {
+        const got = await new Promise<(() => void) | null>((resolve) => {
+          locks
+            .request(`hew-library-edit:${fileName}`, { ifAvailable: true }, (lock) => {
+              if (lock === null) {
+                resolve(null)
+                return null
+              }
+              return new Promise<void>((done) => resolve(() => done()))
+            })
+            .catch(() => resolve(() => {}))
+        })
+        if (got === null) {
+          // The item's own name when it reads; the file's name otherwise.
+          let label = fileName.replace(/^.*\//, '').replace(/\.hew$/i, '')
+          try {
+            const bytes = await libraryStore().read(fileName)
+            label = buildLibraryItem({ fileName, size: bytes.length, mtimeMs: 0 }, await readItemSummary(bytes), '').displayName
+          } catch {
+            /* keep the file's name */
+          }
+          handleToast(t`"${label}" is already open for editing in another tab.`)
+          return
+        }
+        release = got
+      }
+      let bytes: Uint8Array
+      try {
+        bytes = await libraryStore().read(fileName)
+      } catch (err) {
+        release?.()
+        handleToast(t`Couldn't read library item: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`)
+        return
+      }
+      let item: LibraryItem
+      try {
+        const summary = await readItemSummary(bytes)
+        item = buildLibraryItem({ fileName, size: bytes.length, mtimeMs: 0 }, summary, '')
+      } catch (err) {
+        release?.()
+        handleToast(t`Couldn't read library item: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`)
+        return
+      }
+      if (item.meta.id === undefined) {
+        // No Library id: Save would take the ordinary path and never update the Library.
+        release?.()
+        const itemName = item.displayName
+        handleToast(t`"${itemName}" can't be edited in place because it has no Library identity. Use Open as document, then Save to Library.`)
+        return
+      }
+      const name = `${item.displayName}.hew`
+      if (!applyLoadedBytes(bytes, { name, label: OPEN_FILE_LABELS.hew })) {
+        release?.()
+        return
+      }
+      const openedRef: FileRef = { name, format: 'hew', handle: null }
+      setDocSession(afterOpen(openedRef, Date.now()))
+      // After the load, which clears any earlier binding (and its lock).
+      setLibraryEdit({ fileName, id: item.meta.id, name: item.displayName, ref: openedRef })
+      libraryEditLockRef.current = release
+      const itemName = item.displayName
+      handleToast(t`Editing "${itemName}" from the Library. Saving updates the Library.`)
+    },
+    [applyLoadedBytes, handleToast, setLibraryEdit],
+  )
+
+  const onLibraryEdit = useCallback(
+    (item: LibraryItem) => {
+      const editing = libraryEditRef.current
+      if (editing !== null && editing.fileName === item.file.fileName && editing.ref === docSessionRef.current.currentRef) {
+        setShowLibrary(false)
+        const itemName = item.displayName
+        handleToast(t`You're already editing "${itemName}".`)
+        return
+      }
+      if (item.meta.id === undefined) {
+        const itemName = item.displayName
+        handleToast(t`"${itemName}" can't be edited in place because it has no Library identity. Use Open as document, then Save to Library.`)
+        return
+      }
+      if (isTauri) {
+        setShowLibrary(false)
+        void (async () => {
+          const path = await libraryStore().itemPath(item.file.fileName)
+          if (path === null) {
+            const itemName = item.displayName
+            handleToast(t`Couldn't open "${itemName}" for editing: its file is no longer in the Library.`)
+            return
+          }
+          await openPathRef.current(path)
+        })()
+        return
+      }
+      const scene = sceneRef.current
+      if (scene === null) return
+      if (!isPristineDocument(docSessionRef.current, scene)) {
+        // Opened inside the click, before any await, so the browser allows it.
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- a URL, not copy
+        const opened = window.open(`${location.pathname}?libraryEdit=${encodeURIComponent(item.file.fileName)}`, '_blank')
+        if (opened === null) {
+          // The Library stays open so the click can be repeated.
+          handleToast(t`Your browser blocked the new tab. Allow pop-ups for this site, or save your model first so Edit can open the item in this tab.`)
+        }
+        return
+      }
+      setShowLibrary(false)
+      void openLibraryItemForEdit(item.file.fileName)
+    },
+    [handleToast, openLibraryItemForEdit],
+  )
+
+  // Web: a tab opened by Library ▸ Edit boots with the item named in the URL.
+  const libraryEditBootRef = useRef(false)
+  useEffect(() => {
+    if (isTauri || state?.scene == null || libraryEditBootRef.current) return
+    libraryEditBootRef.current = true
+    const params = new URLSearchParams(location.search)
+    const wanted = params.get('libraryEdit')
+    if (wanted === null) return
+    params.delete('libraryEdit')
+    const rest = params.toString()
+    history.replaceState(null, '', `${location.pathname}${rest === '' ? '' : `?${rest}`}${location.hash}`)
+    if (wanted.includes('..') || !/^(?:(?:Components|Materials|Models)\/)?[^/\\:]+\.hew$/i.test(wanted)) {
+      libraryEditBootingRef.current = false
+      return
+    }
+    void openLibraryItemForEdit(wanted).finally(() => {
+      libraryEditBootingRef.current = false
+    })
+  }, [state, openLibraryItemForEdit])
 
   const onLibraryPaintWith = useCallback(
     (_item: LibraryItem, bytes: Uint8Array) => {
@@ -6828,6 +7193,7 @@ export default function App() {
           if (ids.length > 0) handleToast(t`Added "${ph({ name: entry.displayName })}" to palette.`)
           return
         }
+        if (refuseInsertIntoLibraryEdit()) return
         const displayName = entry?.displayName ?? fileName
         let ghost: Awaited<ReturnType<typeof buildItemGhost>>
         try {
@@ -7204,19 +7570,23 @@ export default function App() {
   const libraryBridgeRef = useRef({
     onLibraryInsert,
     onLibraryOpenAsDocument,
+    onLibraryEdit,
     onLibraryPaintWith,
     onLibraryAddToPalette,
     onLibraryUseProfile,
     onLibrarySaveProfileCopy,
+    openLibraryReview,
     handleToast,
   })
   libraryBridgeRef.current = {
     onLibraryInsert,
     onLibraryOpenAsDocument,
+    onLibraryEdit,
     onLibraryPaintWith,
     onLibraryAddToPalette,
     onLibraryUseProfile,
     onLibrarySaveProfileCopy,
+    openLibraryReview,
     handleToast,
   }
   useEffect(() => {
@@ -7231,6 +7601,10 @@ export default function App() {
           try {
             payload = JSON.parse(event.payload) as { action?: string; fileName?: string }
           } catch {
+            return
+          }
+          if (payload.action === 'review') {
+            bridge.openLibraryReview()
             return
           }
           const fileName = payload.fileName
@@ -7263,6 +7637,7 @@ export default function App() {
             const action = payload.action
             if (action === 'insert') bridge.onLibraryInsert(item, bytes)
             else if (action === 'open') bridge.onLibraryOpenAsDocument(item, bytes)
+            else if (action === 'edit') bridge.onLibraryEdit(item)
             else if (action === 'paint') bridge.onLibraryPaintWith(item, bytes)
             else if (action === 'add-palette') bridge.onLibraryAddToPalette(item, bytes)
             else if (action === 'use-profile') bridge.onLibraryUseProfile(item, bytes)
@@ -7301,7 +7676,7 @@ export default function App() {
         // active one's into the Library (adversarial review).
         void import('@tauri-apps/api/core').then(({ invoke }) =>
           invoke('library_push_placements', {
-            payload: JSON.stringify({ placements: libraryPlacements, paletteHashes }),
+            payload: JSON.stringify({ placements: libraryPlacements, linkStates: libraryItemStates, paletteHashes }),
           }),
         ).catch(() => { /* the Library window may simply not exist */ })
       }
@@ -7318,7 +7693,7 @@ export default function App() {
       cancelled = true
       unlisteners.forEach((u) => u())
     }
-  }, [libraryPlacements])
+  }, [libraryPlacements, libraryItemStates])
 
   // ---------------------------------------------------------------- menu-open-path listener (Tauri only)
   // Emitted by Rust when a recent-file menu item is clicked, or when a file
@@ -7535,7 +7910,7 @@ export default function App() {
       }
       try {
         const listings = await recoveryStoreRef.current.list()
-        if (shouldPromptRecovery(docSessionRef.current, listings)) {
+        if (!libraryEditBootingRef.current && shouldPromptRecovery(docSessionRef.current, listings)) {
           setRecoveryPrompt(listings)
           return
         }
@@ -7545,7 +7920,7 @@ export default function App() {
       // Bare launch confirmed: nothing pending, nothing to recover, primary
       // window. Offer the welcome screen (unless the user turned it off, or
       // a live file-open landed while the recovery check above was in flight).
-      if (getShowWelcome() && !documentLoadedRef.current) setWelcomeOpen(true)
+      if (getShowWelcome() && !documentLoadedRef.current && !libraryEditBootingRef.current) setWelcomeOpen(true)
     })()
   }, [state]) // runs once, after the kernel is ready; handlers accessed via refs
 
@@ -8729,7 +9104,7 @@ export default function App() {
           and macOS keep native decorations, so their OS caption (which reflects
           setTitle) is the title bar — no custom one. */}
       {isTauri && isLinux && (
-        <TitleBar name={documentName(docSession)} saveState={saveStateLabel(docSession, nowTick)} />
+        <TitleBar name={shownDocumentName} saveState={saveStateLabel(docSession, nowTick)} />
       )}
 
       {/* App bar / menu bar.
@@ -8740,7 +9115,7 @@ export default function App() {
           centered title is shown by TitleBar on Linux/Windows so it is
           hidden here in that case. */}
       <MenuBar
-        name={documentName(docSession)}
+        name={shownDocumentName}
         saveState={saveStateLabel(docSession, nowTick)}
         nativeMenuBar={isTauri && isMac}
         hideTitle={isTauri && (isLinux || isWindows)}
@@ -9897,6 +10272,25 @@ export default function App() {
         />
       )}
 
+      {/* Saving an edit window whose Library item is gone: nothing is written
+          unless the person asks for the item to come back. */}
+      {libraryItemGone !== null && (
+        <ConfirmDialog
+          heading={t`This Library item is gone`}
+          body={t`"${libraryItemGoneName}" was removed from the Library while you were editing it. Save it back to the Library as an item again, or cancel and nothing is saved.`}
+          confirmLabel={t`Save back to Library`}
+          cancelDefault
+          onConfirm={() => {
+            libraryItemGone.resolve(true)
+            setLibraryItemGone(null)
+          }}
+          onCancel={() => {
+            libraryItemGone.resolve(false)
+            setLibraryItemGone(null)
+          }}
+        />
+      )}
+
       {/* Material delete confirmation — only shown when the material is
           actually used somewhere (v1.1 assets lane); an unused one deletes
           immediately with no modal. */}
@@ -10315,8 +10709,11 @@ export default function App() {
         open={showLibrary}
         onClose={() => setShowLibrary(false)}
         placements={libraryPlacements}
+        linkStates={libraryItemStates}
+        onReviewUpdates={openLibraryReview}
         onInsert={onLibraryInsert}
         onOpenAsDocument={onLibraryOpenAsDocument}
+        onEdit={onLibraryEdit}
         onPaintWith={onLibraryPaintWith}
         onAddToPalette={onLibraryAddToPalette}
         materialInPalette={libraryMaterialInPalette}

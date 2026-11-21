@@ -10,16 +10,15 @@
  * first `await` is off the click that caused it, and the Library is read
  * through a cache so a file is read and hashed once per session.
  *
- * Two things hold the answer still. While a group or component is open for
- * editing the kernel scopes library placements to that session, so a fresh
- * check would read "no links" and the bar and markers would vanish; the last
- * answer stays instead (Update All then asks the kernel, which refuses each
- * part it cannot touch and names the open one). And with Settings > Folders
- * "Check the Library for newer parts" off, nothing runs on its own (open,
- * quiet after an edit, a Library change) and the bar is never raised, but a
- * check still runs when the Library or Components panel opens, or the Save
- * to Library popover does (`refreshNow`), so markers and "Update in Library"
- * keep working.
+ * The kernel answers for a part that is open for editing as it would be
+ * saved, so the markers follow an edit while you are still inside the part.
+ * An edit-triggered check makes one kernel pass and does not list the folder:
+ * it reuses the last items and falls back to the full scan only when the
+ * answer names an item it did not have. With Settings > Folders "Check the
+ * Library for newer parts" off, nothing runs on its own (open, quiet after an
+ * edit, a Library change) and the bar is never raised, but a check still runs
+ * when the Library or Components panel opens, or the Save to Library popover
+ * does (`refreshNow`), so markers and "Update in Library" keep working.
  *
  * Items made before prints existed carry none in their manifest: the first
  * time the kernel reads such a file's bytes it hands the prints back
@@ -77,7 +76,7 @@ export interface UseLibraryLinksOptions {
   /** Settings ▸ Folders: check on its own and raise the bar. Off still
    *  checks when the Library or Components panel opens, or on `refreshNow`. */
   enabled: boolean
-  /** A group or component is open for editing: keep the last answer. */
+  /** A group or component is open for editing: a check runs when it opens and closes. */
   sessionOpen?: boolean
   /** The Library dialog or the Components panel just opened. */
   openedKey: number
@@ -110,13 +109,15 @@ export function useLibraryLinks({ scene, docRev, docGeneration, enabled, session
     linksRef.current = next
     setLinksState(next)
   }, [])
-  const sessionOpenRef = useRef(sessionOpen)
-  sessionOpenRef.current = sessionOpen
+  const wantedRef = useRef<Set<string>>(new Set())
   const [dismissedRev, setDismissedRev] = useState(0)
   const dismissedRef = useRef<Set<string>>(new Set())
   const cacheRef = useRef<Map<string, FileEntry>>(new Map())
   const itemsRef = useRef<Map<string, FileEntry>>(new Map())
   const seqRef = useRef(0)
+  // Edit-triggered passes supersede each other without touching seqRef, so one
+  // cannot discard a full scan that is still reading the Library.
+  const fastSeqRef = useRef(0)
   const sceneRef = useRef(scene)
   sceneRef.current = scene
   const hasLinksRef = useRef(hasLinks)
@@ -193,17 +194,58 @@ export function useLibraryLinks({ scene, docRev, docGeneration, enabled, session
     [entryFor],
   )
 
+  /** What the kernel is asked: each item's prints (the manifest's, or ones
+   *  computed before), or its bytes for a pre-1.5 item. */
+  const buildRequest = useCallback(async (items: ReadonlyMap<string, FileEntry>) => {
+    const request: Record<string, { prints?: Record<string, string>; bytes?: Uint8Array }> = {}
+    for (const [id, entry] of items) {
+      const prints = entry.prints ?? entry.computed
+      if (prints !== undefined) {
+        request[id] = { prints }
+        continue
+      }
+      // A pre-1.5 item: the kernel computes its prints from the bytes, once.
+      try {
+        request[id] = { bytes: await libraryStore().read(entry.fileName) }
+      } catch {
+        // Unreadable now: it reads as missing, which says nothing.
+      }
+    }
+    return request
+  }, [])
+
   /** `force`: a check somebody asked for (a panel opening, an update, the
-   *  Save popover), which runs even with the setting off. */
-  const runCheck = useCallback(async (force = false): Promise<LibraryLink[]> => {
-    // A session scopes the kernel's placements: its answer would be "nothing".
-    if (sessionOpenRef.current) return linksRef.current
+   *  Save popover), which runs even with the setting off. `rescan` false: an
+   *  edit-triggered check, one kernel pass over the items already known. */
+  const runCheck = useCallback(async (force = false, rescan = true): Promise<LibraryLink[]> => {
     if (!force && !enabledRef.current) return linksRef.current
-    const mySeq = ++seqRef.current
     const s = sceneRef.current
+    const fast = !rescan && itemsRef.current.size > 0 && s !== null && hasLinksRef.current
+    let mySeq = fast ? seqRef.current : ++seqRef.current
+    const myFast = ++fastSeqRef.current
     if (s === null || !hasLinksRef.current) {
       if (mySeq === seqRef.current) setLinks(EMPTY)
       return EMPTY
+    }
+    if (fast && s !== null) {
+      const known = itemsRef.current
+      const request = await buildRequest(known)
+      if (mySeq !== seqRef.current || myFast !== fastSeqRef.current || sceneRef.current !== s) return EMPTY
+      try {
+        const status = parseLibraryStatus(s.library_status_json(request))
+        if (status.links.every((l) => wantedRef.current.has(l.item))) {
+          for (const [id, prints] of Object.entries(status.itemPrints)) {
+            const entry = known.get(id)
+            if (entry !== undefined) entry.computed = prints
+          }
+          setLinks(status.links)
+          return status.links
+        }
+      } catch {
+        return EMPTY
+      }
+      // The answer names an item this check did not know: the full scan below.
+      mySeq = ++seqRef.current
     }
     // A first, cheap pass with an empty Library: every link reads "missing",
     // which is all it takes to learn which items the model names. Only those
@@ -227,20 +269,7 @@ export function useLibraryLinks({ scene, docRev, docGeneration, enabled, session
     }
     // A newer check, or a different document, took over while the files were read.
     if (mySeq !== seqRef.current || sceneRef.current !== s) return EMPTY
-    const request: Record<string, { prints?: Record<string, string>; bytes?: Uint8Array }> = {}
-    for (const [id, entry] of items) {
-      const prints = entry.prints ?? entry.computed
-      if (prints !== undefined) {
-        request[id] = { prints }
-        continue
-      }
-      // A pre-1.5 item: the kernel computes its prints from the bytes, once.
-      try {
-        request[id] = { bytes: await libraryStore().read(entry.fileName) }
-      } catch {
-        // Unreadable now: it reads as missing, which says nothing.
-      }
-    }
+    const request = await buildRequest(items)
     if (mySeq !== seqRef.current || sceneRef.current !== s) return EMPTY
     let status
     try {
@@ -252,15 +281,14 @@ export function useLibraryLinks({ scene, docRev, docGeneration, enabled, session
       const entry = items.get(id)
       if (entry !== undefined) entry.computed = prints
     }
-    // A session opened while the files were read: its answer is the scoped one.
-    if (sessionOpenRef.current) return linksRef.current
     itemsRef.current = items
+    wantedRef.current = wanted
     setLinks(status.links)
     return status.links
-  }, [scanLibrary, setLinks])
+  }, [scanLibrary, setLinks, buildRequest])
 
   // After a document opens or is replaced, when the setting is turned on or a
-  // group or component closes, and when the Library folder changes. With the
+  // group or component opens or closes, and when the Library folder changes. With the
   // setting off these do nothing on their own, unless a panel is open (then
   // the check is the forced one, so its markers follow a new document or an
   // insert).
@@ -270,7 +298,7 @@ export function useLibraryLinks({ scene, docRev, docGeneration, enabled, session
 
   // A different document starts with nothing known when no check runs on its own.
   useEffect(() => {
-    if (!enabledRef.current && !sessionOpenRef.current && !panelOpenRef.current) setLinks(EMPTY)
+    if (!enabledRef.current && !panelOpenRef.current) setLinks(EMPTY)
   }, [scene, docGeneration, setLinks])
 
   // The Library or the Components panel opens (or closes): always checked.
@@ -284,7 +312,7 @@ export function useLibraryLinks({ scene, docRev, docGeneration, enabled, session
     if (docRev === firstRevRef.current) return
     firstRevRef.current = docRev
     // With the setting off this is a no-op unless a panel is open.
-    const handle = setTimeout(() => void runCheck(panelOpenRef.current), DEBOUNCE_MS)
+    const handle = setTimeout(() => void runCheck(panelOpenRef.current, false), DEBOUNCE_MS)
     return () => clearTimeout(handle)
   }, [docRev, runCheck])
 

@@ -899,7 +899,8 @@ catch up. `hew.library.status` lists every definition that came from
 the Library and where it stands: `in_step`, `library_newer`,
 `edited_here`, `both_changed`, `different` (a part placed before 1.5
 whose two sides differ), or `item_missing`. Renaming an item never
-shows up here; only a change to what the part holds does.
+shows up here; only a change to what the part holds does. A part that is
+open for editing is reported as it would be saved.
 
 ```sh
 hew-cli dispatch hew.library.status '{}' --file room.hew

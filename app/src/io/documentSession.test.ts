@@ -58,6 +58,14 @@ describe('documentSession', () => {
       expect(deriveTitle(state)).toBe('• Hew chair.hew — Hew Beta')
     })
 
+    it('names a Library item being edited, clean or dirty, in either build', () => {
+      const clean: DocSessionState = { currentRef: mockRef('leg-1a2b3c.hew'), dirty: false, lastEditAt: null, lastSavedAt: null, nonUndoableReasons: NO_REASONS }
+      expect(deriveTitle(clean, 'Leg')).toBe('Leg (Library item) — Hew')
+      expect(deriveTitle({ ...clean, dirty: true }, 'Leg')).toBe('• Leg (Library item) — Hew')
+      vi.stubGlobal('__HEW_BETA__', true)
+      expect(deriveTitle(clean, 'Leg')).toBe('Leg (Library item) — Hew Beta')
+    })
+
     it('shows "Untitled" when no ref', () => {
       expect(deriveTitle(INITIAL_SESSION)).toBe('Untitled — Hew')
     })

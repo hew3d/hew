@@ -16,9 +16,11 @@ const GLYPH: Record<MarkedState, string> = {
   different: '≠',
 }
 
-export function LibraryMark({ link, onReview }: { link: LibraryLink | undefined; onReview?: () => void }) {
-  if (link === undefined || !markedState(link.state)) return null
-  const state = link.state
+/** `link` is a model's link; `state` is a state already worked out (the
+ *  Library panel's per-item state). `link` wins when both are given. */
+export function LibraryMark({ link, state: given, onReview }: { link?: LibraryLink | undefined; state?: MarkedState | undefined; onReview?: () => void }) {
+  const state: MarkedState | undefined = link !== undefined ? (markedState(link.state) ? link.state : undefined) : given
+  if (state === undefined) return null
   const tip = markTooltip(state)
   const style: React.CSSProperties = {
     fontSize: '10px',

@@ -205,35 +205,129 @@ describe('useLibraryLinks', () => {
     expect(result.current.itemRef('a')?.rootSid).toBe('7')
   })
 
-  it('keeps the last answer while a group or component is open (the kernel scopes its placements to the session)', async () => {
+  it('checks while a part is open: an edit inside it reads as changed here', async () => {
     vi.mocked(libraryStore).mockReturnValue(store({ 'a.hew': enc(summary('a', { '7': 'p1:t' })) }, reads))
-    let rows: Array<Record<string, unknown>> = [ROW]
+    let rows: Array<Record<string, unknown>> = [{ ...ROW, state: 'in_step' }]
     const scene = {
       library_status_json: () => JSON.stringify({ links: rows, itemPrints: {} }),
     } as unknown as WasmScene
     const { result, rerender } = renderHook((o: UseLibraryLinksOptions) => useLibraryLinks(o), { initialProps: options(scene) })
-    await waitFor(() => expect(result.current.pending).toHaveLength(1))
+    await waitFor(() => expect(result.current.links).toHaveLength(1))
 
-    // A part opens: the kernel now answers "nothing", and no placements show.
-    rows = []
-    rerender(options(scene, { sessionOpen: true, hasLinks: false, docRev: 1 }))
+    // A part is open and the first check has run; now only an edit (docRev)
+    // changes anything, so the debounced pass is what must pick it up.
+    rerender(options(scene, { sessionOpen: true }))
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 1500))
+      await new Promise((r) => setTimeout(r, 100))
     })
-    expect(result.current.links).toHaveLength(1)
-    expect(result.current.pending).toHaveLength(1)
-    expect(result.current.byDefinition.get('1')?.state).toBe('library_newer')
-    // A forced check (an update just ran) keeps it too.
-    await act(async () => {
-      await result.current.refreshNow()
-    })
-    expect(result.current.links).toHaveLength(1)
+    rows = [{ ...ROW, state: 'edited_here' }]
+    expect(result.current.byDefinition.get('1')?.state).toBe('in_step')
+    rerender(options(scene, { sessionOpen: true, docRev: 1 }))
+    await waitFor(() => expect(result.current.byDefinition.get('1')?.state).toBe('edited_here'), { timeout: 4000 })
     // The update can still read the item's file while the part is open.
     expect(Object.keys(await result.current.readItems(['a']))).toEqual(['a'])
+  })
 
-    // Closed again: the answer is read afresh.
-    rerender(options(scene, { sessionOpen: false, hasLinks: true, docRev: 1 }))
-    await waitFor(() => expect(result.current.links).toHaveLength(0))
+  it('an edit makes one kernel pass and lists the folder no more; a Library change still lists it', async () => {
+    const files: Files = { 'a.hew': enc(summary('a', { '7': 'p1:t' })) }
+    let lists = 0
+    let notify: () => void = () => {}
+    vi.mocked(libraryStore).mockReturnValue({
+      ...store(files, reads),
+      list: async () => {
+        lists += 1
+        return Object.entries(files).map(([fileName, b]) => ({ fileName, size: b.length, mtimeMs: 5 }))
+      },
+      subscribe: (cb: () => void) => {
+        notify = cb
+        return () => {}
+      },
+    } as unknown as LibraryStore)
+    const { scene, calls } = fakeScene([ROW])
+    let probes = 0
+    const counted = {
+      library_status_json: (library: unknown) => {
+        if (Object.keys(library as object).length === 0) probes += 1
+        return scene.library_status_json(library as never)
+      },
+    } as unknown as WasmScene
+    const { result, rerender } = renderHook((o: UseLibraryLinksOptions) => useLibraryLinks(o), { initialProps: options(counted) })
+    await waitFor(() => expect(result.current.links).toHaveLength(1))
+    expect([lists, probes, calls.length]).toEqual([1, 1, 1])
+
+    rerender(options(counted, { docRev: 1 }))
+    await waitFor(() => expect(calls).toHaveLength(2), { timeout: 4000 })
+    expect([lists, probes]).toEqual([1, 1])
+
+    act(() => notify())
+    await waitFor(() => expect(lists).toBe(2), { timeout: 4000 })
+  })
+
+  it('an edit-triggered pass does not discard a full scan that is still reading', async () => {
+    // The first scan finishes, so items are known. The file then changes on
+    // disk and a full scan starts; its read is parked while an edit's quiet
+    // pass fires. The new prints must still land.
+    let prints = 'p1:old'
+    let fileBytes = enc(summary('a', { '7': prints }))
+    let mtime = 5
+    let gate: (() => void) | null = null
+    let park = false
+    let notify: () => void = () => {}
+    vi.mocked(libraryStore).mockReturnValue({
+      available: () => true,
+      list: async () => [{ fileName: 'a.hew', size: fileBytes.length, mtimeMs: mtime }],
+      read: async () => {
+        if (park) await new Promise<void>((r) => (gate = r))
+        return fileBytes
+      },
+      subscribe: (cb: () => void) => {
+        notify = cb
+        return () => {}
+      },
+    } as unknown as LibraryStore)
+    const scene = {
+      library_status_json: (library: Record<string, { prints?: Record<string, string> }>) => {
+        const got = library.a?.prints?.['7']
+        return JSON.stringify({ links: [{ ...ROW, theirs: got ?? 'p1:t', state: got === 'p1:new' ? 'library_newer' : 'in_step' }], itemPrints: {} })
+      },
+    } as unknown as WasmScene
+    const { result, rerender } = renderHook((o: UseLibraryLinksOptions) => useLibraryLinks(o), { initialProps: options(scene) })
+    await waitFor(() => expect(result.current.links[0]?.state).toBe('in_step'))
+
+    prints = 'p1:new'
+    fileBytes = enc(summary('a', { '7': prints }))
+    mtime = 6
+    park = true
+    act(() => notify())
+    await waitFor(() => expect(gate).not.toBeNull(), { timeout: 4000 })
+    // The edit's quiet pass runs while the full scan's read is parked.
+    rerender(options(scene, { docRev: 1 }))
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 1600))
+    })
+    park = false
+    act(() => gate!())
+    await waitFor(() => expect(result.current.links[0]?.state).toBe('library_newer'), { timeout: 4000 })
+  })
+
+  it('an edit that makes the answer name a new item falls back to a full scan', async () => {
+    vi.mocked(libraryStore).mockReturnValue(
+      store({ 'a.hew': enc(summary('a', { '7': 'p1:t' })), 'b.hew': enc(summary('b', { '7': 'p1:u' })) }, reads),
+    )
+    let rows: Array<Record<string, unknown>> = [ROW]
+    const requests: unknown[] = []
+    const scene = {
+      library_status_json: (library: unknown) => {
+        requests.push(library)
+        return JSON.stringify({ links: rows, itemPrints: {} })
+      },
+    } as unknown as WasmScene
+    const { result, rerender } = renderHook((o: UseLibraryLinksOptions) => useLibraryLinks(o), { initialProps: options(scene) })
+    await waitFor(() => expect(result.current.links).toHaveLength(1))
+    rows = [ROW, { ...ROW, definition: '2', item: 'b', theirs: 'p1:u' }]
+    rerender(options(scene, { docRev: 1 }))
+    await waitFor(() => expect(result.current.links).toHaveLength(2), { timeout: 4000 })
+    expect(result.current.itemRef('b')?.fileName).toBe('b.hew')
   })
 
   it('with the setting off: no check on its own and no bar, but a panel opening or a forced check still checks', async () => {

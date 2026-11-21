@@ -17,7 +17,9 @@ function baseProps() {
     canReveal: false,
     canDownload: false,
     hasSourceInfo: false,
+    canEdit: true,
     onClose: vi.fn(),
+    onEdit: vi.fn(),
     onOpenAsDocument: vi.fn(),
     onAddToCollection: vi.fn(),
     onRename: vi.fn(),
@@ -50,5 +52,23 @@ describe('LibraryMenu', () => {
     // Delete stays reachable — the one action an unreadable item still has
     // on a backend with no Reveal.
     expect(screen.getByText('Delete from library…')).toBeInTheDocument()
+  })
+
+  it('offers Edit first, runs it and closes the menu', () => {
+    const props = baseProps()
+    render(<LibraryMenu {...props} />)
+    const rows = screen.getAllByRole('button').map((b) => b.textContent)
+    expect(rows.indexOf('Edit')).toBeLessThan(rows.indexOf('Open as document'))
+    fireEvent.click(screen.getByText('Edit'))
+    expect(props.onEdit).toHaveBeenCalledOnce()
+    expect(props.onClose).toHaveBeenCalledOnce()
+  })
+
+  it('hides Edit when the item cannot be edited, and for an errored item', () => {
+    const { unmount } = render(<LibraryMenu {...baseProps()} canEdit={false} />)
+    expect(screen.queryByText('Edit')).toBeNull()
+    unmount()
+    render(<LibraryMenu {...baseProps()} errored />)
+    expect(screen.queryByText('Edit')).toBeNull()
   })
 })

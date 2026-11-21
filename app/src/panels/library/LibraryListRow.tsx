@@ -12,6 +12,8 @@ import { useLingui } from '@lingui/react/macro'
 import { categoryTypeLabel, formatBytes, isBuiltInItem } from '../../library/libraryModel'
 import type { LibraryItem } from '../../library/types'
 import type { LibraryListColWidths } from './LibraryListHead'
+import type { MarkedState } from '../../library/libraryUpdates'
+import { LibraryMark } from '../LibraryMark'
 import { CubeGlyph, WarningGlyph } from './icons'
 import { MaterialFill, tileElementId } from './LibraryTile'
 
@@ -24,6 +26,8 @@ export interface LibraryListRowProps {
   placementCount: number
   /** Material items only: content-equal entry already in the palette. */
   inPalette: boolean
+  /** Where the model's copies of this item stand against it, when they differ. */
+  linkState?: MarkedState | undefined
   /** Name/Type column widths, shared with `LibraryListHead` so the header
    * and every row line up under it. Size always takes the remainder. */
   widths: LibraryListColWidths
@@ -39,6 +43,7 @@ export function LibraryListRow({
   selected,
   placementCount,
   inPalette,
+  linkState,
   widths,
   onSelect,
   onActivateDefault,
@@ -86,6 +91,7 @@ export function LibraryListRow({
           )}
         </div>
         <span className="hwlib__row-name">{item.displayName}</span>
+        {linkState !== undefined && <span style={{ marginLeft: 6 }}><LibraryMark state={linkState} /></span>}
       </div>
       <div className="hwlib__row-cell hwlib__row-cell--type" style={{ flex: `0 0 ${widths.type}px`, width: widths.type }}>
         {item.error ? t`Failed to load` : isBuiltInItem(item) ? t`Profile (built-in)` : categoryTypeLabel(item.category)}

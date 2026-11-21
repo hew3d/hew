@@ -42,6 +42,7 @@ import {
 import { behaviorEnabled } from '../preview'
 import { bundledProfiles, profileShapeOfBytes, profileThumbnailPng } from '../library/profiles'
 import type { LibraryCategory, LibraryFileEntry, LibraryItem } from '../library/types'
+import type { MarkedState } from '../library/libraryUpdates'
 import { measureGridColumns } from './library/gridMeasure'
 import { GridViewGlyph, ListViewGlyph, CloseGlyph, SearchGlyph } from './library/icons'
 import { LibraryDetailPane } from './library/LibraryDetailPane'
@@ -185,10 +186,17 @@ export interface LibraryDialogProps {
   onClose(): void
   /** hew.library source_id → live placement count in the open document. */
   placements: Record<string, number>
+  /** hew.library source_id → where the model's copies stand against the item,
+   * for items that differ (the panel's marks and the detail pane's line). */
+  linkStates?: Record<string, MarkedState>
+  /** Open the Review list for the parts that differ from the Library. */
+  onReviewUpdates?(): void
   /** Insert a component/model item (closes the modal; App arms cursor placement). */
   onInsert(item: LibraryItem, bytes: Uint8Array): void
   /** Open the item as its own document. */
   onOpenAsDocument(item: LibraryItem, bytes: Uint8Array): void
+  /** Open the Library's own file for editing; saving updates the Library. */
+  onEdit?(item: LibraryItem): void
   /** Material primary action: copy into palette + arm Paint (App closes modal). */
   onPaintWith(item: LibraryItem, bytes: Uint8Array): void
   /** Material secondary action: copy into palette, keep the modal open. */
@@ -296,8 +304,11 @@ export function LibraryDialog({
   open,
   onClose,
   placements,
+  linkStates,
+  onReviewUpdates,
   onInsert,
   onOpenAsDocument,
+  onEdit,
   onPaintWith,
   onAddToPalette,
   materialInPalette,
@@ -781,6 +792,24 @@ export function LibraryDialog({
     return placements[item.meta.id] ?? 0
   }
 
+  function linkStateOf(item: LibraryItem | null): MarkedState | undefined {
+    if (item?.meta.id === undefined) return undefined
+    return linkStates?.[item.meta.id]
+  }
+
+  /** Components and models that read can be opened in place; materials have
+   * no edit (change one in a model, then Save to Library), profiles keep
+   * "Open for editing", built-ins are not files. */
+  function canEdit(item: LibraryItem | null): boolean {
+    return (
+      onEdit !== undefined &&
+      item !== null &&
+      (item.category === 'component' || item.category === 'model') &&
+      item.error === undefined &&
+      !isBuiltInItem(item)
+    )
+  }
+
   // --- Category-default / other action dispatch ---------------------------
   function bytesFor(item: LibraryItem): Uint8Array | undefined {
     return bytesRef.current.get(item.file.fileName)
@@ -805,6 +834,7 @@ export function LibraryDialog({
           { id: 'delete', label: t`Delete from Library…` },
         ]
       : [
+          ...(canEdit(item) ? [{ id: 'edit', label: t`Edit` }] : []),
           { id: 'open', label: item.category === 'profile' ? t`Open for Editing` : t`Open as Document` },
           { id: 'rename', label: t`Rename` },
           { id: 'collection', label: t`Add to Collection` },
@@ -821,6 +851,7 @@ export function LibraryDialog({
         ]
     const picked = await popupNativeMenu(entries)
     if (picked === 'open') handleOpenAsDocument(item)
+    else if (picked === 'edit') onEdit?.(item)
     else if (picked === 'rerender') void handleRerenderThumbnail(item)
     else if (picked === 'removeSourceInfo') handleRemoveSourceInfo(item)
     else if (picked === 'reveal') void handleReveal(item)
@@ -1468,6 +1499,7 @@ export function LibraryDialog({
                         selected={item.file.fileName === selectedFileName}
                         placementCount={placementCountOf(item)}
                         inPalette={inPaletteMap[item.file.fileName] ?? false}
+                        linkState={linkStateOf(item)}
                         widths={listColWidths}
                         onSelect={() => {
                           setSelectedFileName(item.file.fileName)
@@ -1490,6 +1522,7 @@ export function LibraryDialog({
                       selected={item.file.fileName === selectedFileName}
                       placementCount={placementCountOf(item)}
                       inPalette={inPaletteMap[item.file.fileName] ?? false}
+                      linkState={linkStateOf(item)}
                       defaultActionLabel={defaultActionLabel(item)}
                       onSelect={() => {
                         setSelectedFileName(item.file.fileName)
@@ -1526,6 +1559,8 @@ export function LibraryDialog({
             native={variant === 'window'}
             collections={allCollections}
             placementCount={placementCountOf(selectedItem)}
+            linkState={linkStateOf(selectedItem)}
+            onReview={onReviewUpdates}
             canReveal={canReveal}
             canDownload={canDownload}
             inPalette={selectedItem ? (inPaletteMap[selectedItem.file.fileName] ?? false) : false}
@@ -1540,6 +1575,8 @@ export function LibraryDialog({
             onPrimaryAction={() => selectedItem && runDefaultAction(selectedItem)}
             onSecondaryAction={() => selectedItem && runOtherAction(selectedItem)}
             onOpenAsDocument={() => selectedItem && handleOpenAsDocument(selectedItem)}
+            canEdit={canEdit(selectedItem)}
+            onEdit={() => selectedItem && onEdit?.(selectedItem)}
             onReRenderThumbnail={() => selectedItem && void handleRerenderThumbnail(selectedItem)}
             onReveal={() => selectedItem && void handleReveal(selectedItem)}
             onDownload={() => selectedItem && handleDownload(selectedItem)}
@@ -1574,7 +1611,9 @@ export function LibraryDialog({
             canReveal={canReveal}
             canDownload={canDownload}
             hasSourceInfo={menuItem.category !== 'model' && menuItem.meta.sourceDoc !== undefined}
+            canEdit={canEdit(menuItem)}
             onClose={() => setMenuFor(null)}
+            onEdit={() => onEdit?.(menuItem)}
             onOpenAsDocument={() => handleOpenAsDocument(menuItem)}
             onAddToCollection={() => setSelectedFileName(menuItem.file.fileName)}
             onRename={() => setSelectedFileName(menuItem.file.fileName)}

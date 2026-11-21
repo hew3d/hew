@@ -35,6 +35,18 @@ msgid "· red"
 msgstr "· rot"
 
 #: src/App.tsx
+msgid "\"{itemName}\" can't be edited in place because it has no Library identity. Use Open as document, then Save to Library."
+msgstr ""
+
+#: src/App.tsx
+msgid "\"{label}\" is already open for editing in another tab."
+msgstr ""
+
+#: src/App.tsx
+msgid "\"{libraryItemGoneName}\" was removed from the Library while you were editing it. Save it back to the Library as an item again, or cancel and nothing is saved."
+msgstr ""
+
+#: src/App.tsx
 msgid "\"{matDeleteName}\" — used on {matDeleteUsage, plural, one {# face} other {# faces}} — delete and unpaint them?"
 msgstr "„{matDeleteName}“ – verwendet auf {matDeleteUsage, plural, one {# Fläche} other {# Flächen}} – löschen und Farbe entfernen?"
 
@@ -437,6 +449,14 @@ msgstr "{label} (eingepasst)"
 #: src/linkedCopyCopy.ts
 msgid "{label} (unlinked)"
 msgstr "{label} (Verknüpfung gelöst)"
+
+#: src/App.tsx
+#~ msgid "{libraryEditingName} (Library item)"
+#~ msgstr ""
+
+#: src/io/documentSession.ts
+msgid "{libraryItemName} (Library item)"
+msgstr ""
 
 #: src/panels/ImportReportDialog.tsx
 msgid "{lines_added, plural, one {{lines_added} line of drawing came in too.} other {{lines_added} lines of drawing came in too.}}"
@@ -2860,6 +2880,10 @@ msgid "Couldn't move the drawing axes: {raw}"
 msgstr "Die Zeichenachsen konnten nicht verschoben werden: {raw}"
 
 #: src/App.tsx
+msgid "Couldn't open \"{itemName}\" for editing: its file is no longer in the Library."
+msgstr ""
+
+#: src/App.tsx
 msgid "Couldn't open {fileName} — the file may have been moved or deleted."
 msgstr "{fileName} konnte nicht geöffnet werden – die Datei wurde möglicherweise verschoben oder gelöscht."
 
@@ -3745,6 +3769,9 @@ msgstr "nur Kanten"
 #: src/i18n/historyLabels.ts
 #: src/i18n/nativeMenu.ts
 #: src/panels/dockLogic.ts
+#: src/panels/library/LibraryDetailPane.tsx
+#: src/panels/library/LibraryMenu.tsx
+#: src/panels/LibraryDialog.tsx
 #: src/panels/MenuBar.tsx
 msgid "Edit"
 msgstr "Bearbeiten"
@@ -3786,6 +3813,10 @@ msgstr "wird bearbeitet"
 #: src/settings/SettingsWindow.tsx
 msgid "Editing"
 msgstr "Bearbeitung"
+
+#: src/App.tsx
+msgid "Editing \"{itemName}\" from the Library. Saving updates the Library."
+msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
 msgid "Email for follow-up (optional)"
@@ -7144,6 +7175,14 @@ msgstr "Eine .hew-Datei vom Datenträger öffnen."
 msgid "Open a document window first — library items are placed into a model."
 msgstr "Öffnen Sie zuerst ein Dokumentfenster – Bibliothekselemente werden in ein Modell platziert."
 
+#: src/panels/LibraryWindow.tsx
+msgid "Open a document window first, then choose Edit."
+msgstr ""
+
+#: src/panels/LibraryWindow.tsx
+msgid "Open a document window first, then choose Review."
+msgstr ""
+
 #: src/panels/WelcomeScreen.tsx
 msgid "Open a file…"
 msgstr "Datei öffnen …"
@@ -7267,6 +7306,10 @@ msgstr "Die Liste aller nicht geschlossenen Objekte öffnen."
 #: src/palette/registry.ts
 msgid "Open the online user guide in your browser."
 msgstr "Das Online-Benutzerhandbuch im Browser öffnen."
+
+#: src/panels/library/LibraryDetailPane.tsx
+msgid "Open this item to change it. Saving updates the Library."
+msgstr ""
 
 #: src/settings/serverForm.ts
 msgid "open uploads"
@@ -8375,6 +8418,10 @@ msgid "Rendering paused"
 msgstr "Darstellung pausiert"
 
 #: src/App.tsx
+msgid "Rendering thumbnail for \"{itemName}\"…"
+msgstr ""
+
+#: src/App.tsx
 msgid "Rendering thumbnail for \"{name}\"…"
 msgstr "Vorschaubild für „{name}“ wird gerendert …"
 
@@ -8589,6 +8636,7 @@ msgstr "Auf die gespeicherte Datei zurückgesetzt."
 msgid "Review and send a bug report, or save it to a file."
 msgstr "Einen Fehlerbericht prüfen und senden oder in einer Datei speichern."
 
+#: src/panels/library/LibraryDetailPane.tsx
 #: src/panels/LibraryUpdateBar.tsx
 msgid "Review…"
 msgstr "Überprüfen …"
@@ -8771,6 +8819,10 @@ msgid "Save As…"
 msgstr "Speichern unter …"
 
 #: src/App.tsx
+msgid "Save back to Library"
+msgstr ""
+
+#: src/App.tsx
 msgid "Save failed: {reason}"
 msgstr "Speichern fehlgeschlagen: {reason}"
 
@@ -8840,6 +8892,10 @@ msgstr "In Bibliothek speichern …"
 #: src/palette/registry.ts
 msgid "save view"
 msgstr "Ansicht speichern"
+
+#: src/App.tsx
+msgid "Save was canceled because the document changed. Try saving again."
+msgstr ""
 
 #: src/panels/ChangesPanel.tsx
 msgid "Saved"
@@ -11069,6 +11125,10 @@ msgstr "Dies ist bereits ein Volumenkörper, daher gibt es nichts zu schließen.
 msgid "This is the component's only member — deleting it would leave every instance empty. Delete the instances instead, or add another member first."
 msgstr "Dies ist das einzige Mitglied der Komponente – es zu löschen würde jede Instanz leer lassen. Löschen Sie stattdessen die Instanzen oder fügen Sie zuerst ein weiteres Mitglied hinzu."
 
+#: src/App.tsx
+msgid "This Library item is gone"
+msgstr ""
+
 #: src/tools/LineTool.ts
 msgid "This line stays detached; the next one will not."
 msgstr "Diese Linie bleibt gelöst; die nächste nicht."
@@ -11257,6 +11317,10 @@ msgstr "Dieses System kann Berichte nicht komprimieren und daher nicht senden. S
 msgid "This throws away everything you changed since the last save."
 msgstr "Dadurch wird alles verworfen, was Sie seit dem letzten Speichern geändert haben."
 
+#: src/App.tsx
+msgid "This window is editing a Library item. Switch to a model window to insert it."
+msgstr ""
+
 #: src/panels/MakeSolidSketches.tsx
 msgid "Those edges don't lie flat on one plane, so a single face can't close them. Draw a line across the opening to split it into flat faces."
 msgstr "Diese Kanten liegen nicht eben in einer Ebene, daher kann eine einzelne Fläche sie nicht schließen. Zeichnen Sie eine Linie quer über die Öffnung, um sie in ebene Flächen zu teilen."
@@ -11284,6 +11348,10 @@ msgstr "Schriftfeld"
 #: src/health/healthCopy.ts
 msgid "To push, pull, combine, or 3D print one, make it solid first with Make Solid."
 msgstr "Um eines davon zu drücken, zu ziehen, zu kombinieren oder im 3D-Druck auszugeben, machen Sie es zuerst mit „Volumenkörper erstellen“ geschlossen."
+
+#: src/panels/library/LibraryDetailPane.tsx
+msgid "To put your version in the Library, select the part and choose Save to Library."
+msgstr ""
 
 #: src/palette/registry.ts
 msgid "to scale"
@@ -12216,6 +12284,10 @@ msgstr "Sie haben dieses Teil hier geändert. Die Bibliothek enthält noch die �
 msgid "You’ll find replies and the report’s status under <0>Help ▸ Sent Reports…</0>"
 msgstr "Antworten und den Status des Berichts finden Sie unter <0>Hilfe ▸ Gesendete Berichte …</0>"
 
+#: src/App.tsx
+msgid "You're already editing \"{itemName}\"."
+msgstr ""
+
 #: src/panels/SentReportsDialog.tsx
 msgid "You’re on {running}."
 msgstr "Sie verwenden {running}."
@@ -12223,6 +12295,10 @@ msgstr "Sie verwenden {running}."
 #: src/i18n/nativeMenu.ts
 msgid "You’re up to date"
 msgstr "Sie sind auf dem neuesten Stand"
+
+#: src/App.tsx
+msgid "Your browser blocked the new tab. Allow pop-ups for this site, or save your model first so Edit can open the item in this tab."
+msgstr ""
 
 #: src/panels/FollowNoticeBar.tsx
 msgid "Your bug report {onlyId} has a reply from Hew’s developer."

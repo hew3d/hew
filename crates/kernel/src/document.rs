@@ -14469,6 +14469,29 @@ impl Document {
                     .is_none_or(|o| self.components.get(o).is_some_and(|c| !c.hidden))
             })
             .count()
+            + self.on_loan_placements(component)
+    }
+
+    /// The placements an open component session hides for its duration
+    /// (the entered instance, whose geometry is on loan to the world tree)
+    /// that still place `component`: they are still uses of it, so a count
+    /// of uses does not drop while the part is open for editing.
+    fn on_loan_placements(&self, component: ComponentId) -> usize {
+        self.sessions
+            .iter()
+            .filter_map(|f| match f {
+                SessionFrame::Component(sess) if sess.component == component => Some(sess),
+                _ => None,
+            })
+            .flat_map(|sess| sess.hidden_instances.iter())
+            .filter(|&&i| {
+                self.instances.get(i).is_some_and(|r| {
+                    r.def == component
+                        && r.owner_def
+                            .is_none_or(|o| self.components.get(o).is_some_and(|c| !c.hidden))
+                })
+            })
+            .count()
     }
 
     /// Copies `component`'s own geometry (not any instance's placement) into

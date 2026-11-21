@@ -509,6 +509,8 @@ export function makeWebLibraryStore(overrides: WebLibraryDeps = {}): LibraryStor
 
     itemPath: () => Promise.resolve(null),
 
+    nameForPath: () => Promise.resolve(null),
+
     capabilities: () => ({
       canReveal: false,
       canChooseFolder: deps.pickDirectory !== null,
