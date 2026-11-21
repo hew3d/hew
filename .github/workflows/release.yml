@@ -201,6 +201,16 @@ jobs:
         shell: bash
         run: scripts/install-wasm-pack.sh
 
+      # wasm-pack downloads upstream's dynamically linked aarch64 gnu
+      # wasm-bindgen, which needs a newer glibc than this runner has (it stays
+      # on 22.04 for the bundles' glibc baseline). wasm-pack uses a matching
+      # wasm-bindgen from PATH before downloading, so put upstream's static
+      # musl build there, at the version Cargo.lock pins. x64 needs nothing:
+      # wasm-pack already fetches the static musl build there.
+      - name: Install wasm-bindgen (Linux arm64)
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        run: scripts/install-wasm-bindgen.sh
+
       # wasm-pack has no prebuilt wasm-opt for Windows-on-ARM and hard-fails
       # there; it looks for wasm-opt on PATH before downloading, so supply
       # binaryen's native arm64 build instead of shipping an unoptimized
