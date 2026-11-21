@@ -279,7 +279,7 @@ describe('PluginsPane', () => {
       const dialog = await screen.findByRole('dialog')
       expect(inst.stageFile).toHaveBeenCalledWith(file)
       expect(inst.commit).not.toHaveBeenCalled()
-      expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus()
+      await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus())
       fireEvent.click(within(dialog).getByRole('button', { name: 'Install' }))
       await waitFor(() => expect(inst.commit).toHaveBeenCalledWith('tok', true))
       await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
