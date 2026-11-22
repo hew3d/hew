@@ -22,12 +22,13 @@ afterEach(() => {
 })
 
 describe('FilletOptions', () => {
-  it('names the current profile and lists the four basic kinds', () => {
+  it('offers four quick choices without duplicating them in More shapes', () => {
     render(<FilletOptions />)
     expect(screen.getByRole('button', { name: /^More shapes/ })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
     for (const name of ['Round', 'Chamfer', 'Cove', 'Bullnose']) {
-      expect(screen.getByRole('menuitemradio', { name })).toBeTruthy()
+      expect(screen.getByRole('button', { name })).toBeTruthy()
+      expect(screen.queryByRole('menuitemradio', { name })).toBeNull()
     }
   })
 
@@ -43,9 +44,9 @@ describe('FilletOptions', () => {
     expect(round.getAttribute('aria-pressed')).toBe('false')
     fireEvent.click(round)
     expect(getFilletSettings().profile.kind).toBe('round')
-    // The menu keeps every entry.
+    // All four basic choices remain reachable directly while the additional menu is open.
     fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
-    expect(screen.getAllByRole('menuitemradio')).toHaveLength(4)
+    expect(screen.getByRole('group', { name: 'Quick edge shape' }).querySelectorAll('button')).toHaveLength(4)
   })
 
   it('the pills stay enabled over a drawn corner, and neither is pressed for Cove', () => {
@@ -75,24 +76,24 @@ describe('FilletOptions', () => {
     act(() => setFilletCornerOnly(true))
     fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
     for (const name of ['Cove', 'Bullnose', 'Ogee']) {
-      const row = screen.getByRole('menuitemradio', { name }) as HTMLButtonElement
+      const row = screen.getByRole(name === 'Ogee' ? 'menuitemradio' : 'button', { name }) as HTMLButtonElement
       expect(row.disabled).toBe(true)
       expect(row.title).toBe('Drawn corners can be rounded or chamfered.')
     }
     expect((screen.getByRole('menuitem', { name: 'Save profile…' }) as HTMLButtonElement).disabled).toBe(false)
-    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Cove' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cove' }))
     expect(getFilletSettings().profile.kind).toBe('round')
-    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Chamfer' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Chamfer' }))
     expect(getFilletSettings().profile.kind).toBe('chamfer')
     act(() => setFilletCornerOnly(false))
     fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
-    expect((screen.getByRole('menuitemradio', { name: 'Cove' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: 'Cove' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('picking a kind sets the session profile and closes the menu', () => {
     render(<FilletOptions />)
     fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
-    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Cove' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cove' }))
     expect(getFilletSettings().profile.kind).toBe('cove')
     expect(screen.queryByRole('menu')).toBeNull()
     expect(screen.getByRole('button', { name: /^More shapes/ })).toBeTruthy()
@@ -387,4 +388,71 @@ it('closing the card also closes its menu, including keyboard-only collapse', ()
   fireEvent.click(screen.getByRole('button', { name: 'Collapse Menu collapse options' }))
   fireEvent.click(screen.getByRole('button', { name: 'Expand Menu collapse options' }))
   expect(screen.queryByRole('menu')).toBeNull()
+})
+
+it('navigates additional profiles and actions, skipping disabled items and restoring trigger focus', () => {
+  const profile = { kind: 'shape' as const, id: 'curve', name: 'Curve', shape: {} }
+  const save = vi.fn()
+  render(<FilletOptions sections={[{ id: 'library', items: [
+    { id: 'curve', label: 'Curve', profile },
+    { id: 'off', label: 'Unavailable', profile, disabled: true },
+    { id: 'save', label: 'Save profile…', onSelect: save },
+  ] }]} />)
+  const trigger = screen.getByRole('button', { name: 'More shapes' })
+  fireEvent.keyDown(trigger, { key: 'ArrowDown' })
+  const curve = screen.getByRole('menuitemradio', { name: 'Curve' })
+  const action = screen.getByRole('menuitem', { name: 'Save profile…' })
+  expect(curve).toHaveFocus()
+  fireEvent.keyDown(curve, { key: 'ArrowDown' })
+  expect(action).toHaveFocus()
+  fireEvent.keyDown(action, { key: 'Home' })
+  expect(curve).toHaveFocus()
+  fireEvent.keyDown(curve, { key: 'End' })
+  expect(action).toHaveFocus()
+  fireEvent.keyDown(action, { key: 'Escape' })
+  expect(screen.queryByRole('menu')).toBeNull()
+  expect(trigger).toHaveFocus()
+  fireEvent.keyDown(trigger, { key: 'ArrowUp' })
+  expect(screen.getByRole('menuitem', { name: 'Save profile…' })).toHaveFocus()
+  fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Save profile…' }), { key: 'Home' })
+  fireEvent.click(screen.getByRole('menuitemradio', { name: 'Curve' }), { detail: 0 })
+  expect(getFilletSettings().profile).toEqual(profile)
+  expect(trigger).toHaveFocus()
+  expect(screen.queryByRole('menu')).toBeNull()
+  expect(save).not.toHaveBeenCalled()
+})
+
+it('keeps closing content mounted but inaccessible, and can reopen without losing profile identity', () => {
+  const profile = { kind: 'shape' as const, id: 'saved', name: 'A long saved profile name', shape: {} }
+  const { container } = render(<FilletOptions sections={[{ id: 'saved', heading: 'My profiles', items: [
+    { id: 'saved', label: profile.name, profile },
+  ] }]} />)
+  const trigger = screen.getByRole('button', { name: 'More shapes' })
+  const expansion = container.querySelector('.fillet-profile-expansion')!
+  expect(expansion).toHaveAttribute('inert')
+  fireEvent.keyDown(trigger, { key: 'ArrowDown' })
+  const row = screen.getByRole('menuitemradio', { name: profile.name })
+  expect(row).toHaveFocus()
+  expect(trigger.getAttribute('aria-controls')).toBe(screen.getByRole('menu').id)
+  fireEvent.click(row, { detail: 0 })
+  expect(expansion).toHaveAttribute('data-open', 'false')
+  expect(expansion).toHaveAttribute('aria-hidden', 'true')
+  expect(expansion).toHaveAttribute('inert')
+  expect(container.querySelector('[role="menuitemradio"]')).toBe(row)
+  expect(screen.queryByRole('menu')).toBeNull()
+  expect(trigger).toHaveFocus()
+  fireEvent.keyDown(trigger, { key: 'ArrowDown' })
+  expect(screen.getByRole('menuitemradio', { name: profile.name })).toBe(row)
+  expect(row).toHaveAttribute('aria-checked', 'true')
+  fireEvent.keyDown(row, { key: 'Tab' })
+  expect(screen.queryByRole('menu')).toBeNull()
+})
+
+it('unmounting an open menu removes its Escape listener', () => {
+  const { unmount } = render(<FilletOptions />)
+  fireEvent.click(screen.getByRole('button', { name: 'More shapes' }))
+  unmount()
+  const event = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true, bubbles: true })
+  window.dispatchEvent(event)
+  expect(event.defaultPrevented).toBe(false)
 })

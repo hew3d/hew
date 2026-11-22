@@ -1,5 +1,5 @@
 /* oxlint-disable lingui/no-unlocalized-strings -- True Curves strings are not yet wrapped for translation: this file is English-only until they are */
-import { useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useContext, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useLingui } from '@lingui/react/macro'
 import {
   getFilletCornerOnly,
@@ -22,6 +22,7 @@ import {
   MIN_CORNER_SEGMENTS,
   MAX_CORNER_SEGMENTS,
 } from '../tools/filletMath'
+import { ProfileMenuIcon } from './ProfileMenuIcon'
 import { isComposingKey } from '../input/keyboard'
 import { ToolOptionsInfo, ToolOptionsExpandedContext } from './ToolOptionsCard'
 
@@ -122,31 +123,22 @@ function ShapeOptions({ sections = [] }: FilletOptionsProps) {
   const expanded = useContext(ToolOptionsExpandedContext)
   useEffect(() => { if (!expanded) setOpen(false) }, [expanded])
   const rootRef = useRef<HTMLDivElement | null>(null)
-  const [menuBounds, setMenuBounds] = useState({ left: 0, bottom: 0, width: 200, maxHeight: 0 })
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const pendingFocus = useRef<'first' | 'last' | null>(null)
+  const focusItem = (last = false): boolean => {
+    const items = menuRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')
+    if (!items?.length) return false
+    items[last ? items.length - 1 : 0].focus({ preventScroll: true })
+    // Focusing while the opening grid is still 0fr must not scroll past its first row.
+    if (menuRef.current !== null) menuRef.current.scrollTop = last ? menuRef.current.scrollHeight : 0
+    return true
+  }
   useLayoutEffect(() => {
-    if (!open) return
-    const measure = (): void => {
-      const root = rootRef.current
-      if (root === null) return
-      const r = root.getBoundingClientRect()
-      const card = root.closest('[data-testid="tool-options-card"]') as HTMLElement | null
-      const viewport = card?.offsetParent
-      const top = viewport instanceof HTMLElement ? viewport.getBoundingClientRect().top : 0
-      const next = { left: r.left, bottom: window.innerHeight - r.top + 4, width: r.width,
-        maxHeight: Math.max(0, Math.min(window.innerHeight * 0.6, r.top - top - 20)) }
-      setMenuBounds(previous => Object.keys(next).every(key => previous[key as keyof typeof next] === next[key as keyof typeof next]) ? previous : next)
-    }
-    measure()
-    window.addEventListener('resize', measure)
-    window.addEventListener('scroll', measure, true)
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
-    if (rootRef.current !== null) observer?.observe(rootRef.current)
-    return () => {
-      window.removeEventListener('resize', measure)
-      window.removeEventListener('scroll', measure, true)
-      observer?.disconnect()
-    }
-  }, [open])
+    if (!open) pendingFocus.current = null
+    else if (pendingFocus.current !== null && focusItem(pendingFocus.current === 'last')) pendingFocus.current = null
+  }, [open, sections])
+  const menuId = useId()
 
   useEffect(() => {
     if (!open) return
@@ -158,6 +150,7 @@ function ShapeOptions({ sections = [] }: FilletOptionsProps) {
         setOpen(false)
         // A focused field owns its rollback even while the menu is open.
         if (ev.target instanceof Element && ev.target.closest('input, textarea, [contenteditable="true"]')) return
+        triggerRef.current?.focus()
         ev.preventDefault()
         ev.stopPropagation()
       }
@@ -203,15 +196,30 @@ function ShapeOptions({ sections = [] }: FilletOptionsProps) {
         })}
       </div>
       <button
+        ref={triggerRef}
         type="button"
         aria-haspopup="menu"
+        aria-controls={menuId}
+        onKeyDown={event => {
+          if (isComposingKey(event)) return
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault()
+            event.stopPropagation()
+            if (open) focusItem(event.key === 'ArrowUp')
+            else { pendingFocus.current = event.key === 'ArrowUp' ? 'last' : 'first'; setOpen(true) }
+          }
+        }}
         aria-expanded={open}
         title={t`Choose the shape of the edge`}
-        onClick={() => setOpen((o) => !o)}
+        onClick={event => {
+          if (!open && event.detail === 0) pendingFocus.current = 'first'
+          setOpen(o => !o)
+        }}
         style={{
           display: 'flex',
           alignItems: 'center',
           gap: 8,
+          justifyContent: 'space-between',
           padding: '6px 12px',
           background: 'var(--surface-overlay)',
           border: '1px solid var(--border-strong)',
@@ -223,51 +231,42 @@ function ShapeOptions({ sections = [] }: FilletOptionsProps) {
           cursor: 'pointer',
         }}
       >
-        <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>More shapes</span>
-        <span style={{ fontWeight: 600 }}>{profileLabel(current)}</span>
-        <span aria-hidden="true" style={{ fontSize: 9, color: 'var(--text-faint)' }}>
-          ▾
-        </span>
+        <span>More shapes</span>
+        {current.kind === 'shape' && <span style={{ flex: 1, textAlign: 'right', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{current.name}</span>}
+        <svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" style={{ flexShrink: 0 }}>
+          <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
       </button>
-      {open && (
+      <div className="fillet-profile-expansion" data-open={open} aria-hidden={!open} inert={!open}
+        onTransitionEnd={event => {
+          if (!open || event.target !== event.currentTarget || event.propertyName !== 'grid-template-rows') return
+          const focused = document.activeElement
+          if (focused instanceof HTMLElement && menuRef.current?.contains(focused)) focused.scrollIntoView({ block: 'nearest' })
+        }}>
         <div
+          id={menuId}
+          ref={menuRef}
+          className="fillet-profile-menu"
           role="menu"
-          style={{
-            // Fixed positioning escapes the card's scrolling body without a new window.
-            position: 'fixed',
-            bottom: menuBounds.bottom,
-            left: menuBounds.left,
-            width: menuBounds.width,
-            boxSizing: 'border-box',
-            maxHeight: menuBounds.maxHeight,
-            overflowY: 'auto',
-            padding: '4px 0',
-            background: 'var(--surface-overlay)',
-            border: '1px solid var(--border-strong)',
-            borderRadius: 'var(--radius-control, 7px)',
-            boxShadow: 'var(--shadow-popover, 0 6px 20px rgba(0,0,0,0.25))',
-            zIndex: 40,
+          aria-label="Additional edge profiles"
+          onKeyDown={event => {
+            if (isComposingKey(event)) return
+            const keys = ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End']
+            if (keys.includes(event.key)) {
+              event.preventDefault()
+              event.stopPropagation()
+              const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])
+              if (!items.length) return
+              const index = items.indexOf(document.activeElement as HTMLButtonElement)
+              const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+                : (index + (event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -1 : 1) + items.length) % items.length
+              items[next].focus()
+            } else if (event.key === 'Tab') {
+              setOpen(false)
+              triggerRef.current?.focus()
+            }
           }}
         >
-          {BASICS.map((b) => {
-            const off = cornerOnly && !cornerTakes(b.profile)
-            return (
-              <button
-                key={b.label}
-                type="button"
-                role="menuitemradio"
-                aria-checked={isCurrent(b.profile)}
-                disabled={off}
-                title={off ? CORNER_ONLY_TITLE : undefined}
-                onClick={() => {
-                  if (!off) pick(b.profile)
-                }}
-                style={itemStyle(isCurrent(b.profile), off)}
-              >
-                <span style={{ flex: 1 }}>{b.label}</span>
-              </button>
-            )
-          })}
           {sections
             .filter((s) => s.items.length > 0 || s.emptyHint !== undefined)
             .map((s) => (
@@ -279,6 +278,7 @@ function ShapeOptions({ sections = [] }: FilletOptionsProps) {
                 {s.items.length === 0 && (
                   <div style={{ padding: '4px 12px 6px', fontSize: 12, color: 'var(--text-faint)' }}>{s.emptyHint}</div>
                 )}
+                <div className={s.items.some(it => it.profile !== undefined) ? 'fillet-profile-choices' : undefined}>
                 {s.items.map((it) => {
                   const active = it.profile !== undefined && isCurrent(it.profile)
                   const cornerOff = cornerOnly && it.profile !== undefined && !cornerTakes(it.profile)
@@ -287,34 +287,39 @@ function ShapeOptions({ sections = [] }: FilletOptionsProps) {
                     <button
                       key={it.id}
                       type="button"
+                      tabIndex={-1}
                       role={it.profile !== undefined ? 'menuitemradio' : 'menuitem'}
                       aria-checked={it.profile !== undefined ? active : undefined}
                       disabled={off}
                       title={cornerOff ? CORNER_ONLY_TITLE : it.title}
-                      onClick={() => {
+                      onClick={event => {
                         if (off) return
-                        if (it.profile !== undefined) pick(it.profile)
+                        if (it.profile !== undefined) {
+                          pick(it.profile)
+                          if (event.detail === 0) triggerRef.current?.focus()
+                        }
                         else {
                           setOpen(false)
                           it.onSelect?.()
                         }
                       }}
-                      style={itemStyle(active, off)}
+                      style={{ ...itemStyle(active, off), minWidth: 0, padding: '6px 4px', gap: 5, borderRadius: 5, fontSize: 12,
+                        ...(it.profile === undefined ? { color: off ? 'var(--text-faint)' : 'var(--text-secondary)', fontSize: 11, padding: '6px 12px' } : {}) }}
                     >
-                      {it.thumbnail !== undefined && (
-                        <img src={it.thumbnail} width={32} height={32} alt="" style={{ borderRadius: 4 }} />
-                      )}
-                      <span style={{ flex: 1 }}>{it.label}</span>
-                      {it.badge !== undefined && (
+                      {it.profile?.kind === 'shape' && <ProfileMenuIcon shape={it.profile.shape} thumbnail={it.thumbnail} />}
+                      <span className="fillet-profile-label">{it.label}</span>
+                      {it.badge !== undefined && it.badge !== s.heading && (
                         <span style={{ fontSize: 10, color: 'var(--text-faint)' }}>{it.badge}</span>
                       )}
                     </button>
                   )
                 })}
+                </div>
               </div>
             ))}
         </div>
-      )}
+      </div>
+
     </div>
   )
 }
