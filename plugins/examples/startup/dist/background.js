@@ -14,7 +14,7 @@
     for (var i = 0; i < nodes.length; i++) {
       var node = nodes[i];
       if (node && node.kind === 'object') n++;
-      if (node && Array.isArray(node.children)) n += countObjects(node.children);
+      if (node && Array.isArray(node.members)) n += countObjects(node.members);
     }
     return n;
   }

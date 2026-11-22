@@ -119,7 +119,7 @@ read as opaque JSON until the parts that use them land.
 | `description` | optional localizable string |
 | `author` | optional `{ name, url? }` |
 | `license`, `homepage`, `source` | optional strings |
-| `hew` | optional semver range: the minimum app version, for features the API cannot express |
+| `hew` | optional semver range: the minimum app version, for features the API cannot express. A preview build of X.Y.Z counts as X.Y.Z (below) |
 | `api` | required; the protocol major the plugin speaks: `1` |
 | `main` | required; the background script, a package path. A package path is non-empty and relative, uses forward slashes, has no `..` segment, has no `:` in its first segment (so no drive letter or scheme), and, for a file, does not end in `/` |
 | `icon` | optional package path to a file |
@@ -133,6 +133,28 @@ read as opaque JSON until the parts that use them land.
 | `agent` | optional `{ notes }`: a package path to a markdown file of at most 4 KiB, shown to agents as untrusted plugin text |
 | `contributes` | optional; `commands`, `presave` and `events` are validated now, every other member is opaque for now |
 | `contributes.events` | optional; 1 to 32 distinct event names from the table in "Events" (`document_changed`, `selection_changed`, ...): the events that start the plugin when `activation` includes `on_event` (see "How a plugin runs"). An unknown, repeated or surplus name makes the file `manifest_malformed`, as an unknown activation value does |
+
+**The `hew` range and preview builds.** The range is checked against the
+running app's version, which a release build takes from its tag (the
+desktop shell and the web app built for a tag are both stamped with it,
+so a `1.5.0-pre.2` build reports `1.5.0-pre.2`, not the version last
+released). A build that is not made from a tag, such as a local
+`pnpm --dir shells/tauri dev`, reports the version in the source tree,
+which is the last release's; set `HEW_RELEASE_VERSION=1.5.0-pre.2` when
+building to test a plugin that names a newer range. The check is made in one place, `plugin_host::hew_version_ok`,
+and every install, update, rollback and listing goes through it. Under
+strict semver no pre-release satisfies `>=1.5.0`, which would leave no
+plugin able to target the build that first carries an API, so a preview
+build of X.Y.Z counts as X.Y.Z: the running version is compared with its
+pre-release and build metadata stripped. `1.5.0-pre.2` satisfies
+`>=1.5.0` and `^1.5`; it does not satisfy `>=1.5.1` or `<1.5.0`; `1.4.0`
+does not satisfy `>=1.5.0`. A plugin that needs a feature first shipped
+in a preview build of X.Y.Z writes `"hew": ">=X.Y.Z"`; it then also runs
+on the release of X.Y.Z and later. A range that names a pre-release
+of the running release itself (`>=1.5.0-pre.3`) is honored as written:
+`1.5.0-pre.2` does not satisfy it, `1.5.0-pre.3` and `1.5.0` do. A refusal shows the
+full real version: "This plugin needs Hew >=1.5.0, and this is Hew
+1.4.0."
 
 A contributed command is `{ id, class, summary, label?, permission?,
 timeout_ms?, concurrency?, params?, result?, refusals? }`: `class` is
@@ -1581,6 +1603,42 @@ lists the plugin's changes of state newest first in plain words
 (`plugin_activity_read`; on the web the changes the page saw while the
 pane was open). The pane's data is read through `app/src/plugins/paneData.ts`.
 
+### Finding out why a plugin stopped
+
+From outside the app (a preview desktop build, with the app running):
+
+```text
+hew-cli dispatch hew.plugin.activity '{"id":"com.example.hello"}' --live
+hew-cli dispatch hew.plugin.list --live
+hew-cli events --live --filter plugin_state
+```
+
+- **The kind of stop** is `reason` on the newest `crashed` entry that
+  `hew.plugin.activity` returns (newest first): `{"at": ..., "window":
+  "main", "state": "crashed", "reason": "violation"}`. The kinds are
+  `violation` (the plugin broke a limit of the port: too many messages,
+  too much text, a malformed message), `unresponsive` (two pings went
+  unanswered), `timeout` (a command did not answer in time), `error`
+  (its script threw or its Worker failed), `start` (it could not start),
+  `navigated` (its frame loaded another page) and `host` (the host could
+  not handle a message). The same word is the
+  `detail` of the `plugin_state` event (`{plugin, state: "crashed",
+  detail}`), which `hew-cli events` prints as it happens. The `reason:
+  "crashed"` a caller sees on a command that was in flight is something
+  else: it says the plugin stopped while handling the call, not why.
+  `hew-cli plugin list` and `hew.plugin.list` say whether a plugin is
+  installed and turned on, not whether it is running, so use the
+  activity list for that.
+- **Which limit** a `violation` broke is not in the activity list or the
+  event: the plugin's own text never rides in either. It is in Hew's log
+  as a `plugins` error line, "Plugin <id> <version> stopped
+  (violation): <what>". Turn on Debug Mode (Settings > Debug) and read
+  `diagnostic.log` in the app's log folder, or, in the app, Settings >
+  Plugins > Details > Activity, which shows the same kind in plain words.
+- **The plugin's console** is not reachable from the socket: it is
+  Settings > Plugins > Details > Console (desktop: `plugin_console_read`
+  from the page only).
+
 ### Where it is kept
 
 Desktop: `plugins/` in the app's data folder (`com.hew3d.Hew`), which a
@@ -2013,6 +2071,24 @@ or delete, and read what another plugin put there. On WebKit
 the realm frame can create a nested `about:blank` frame despite
 `frame-src 'none'`, in which nothing runs.
 
+**Building a compiled module for the realm.** The frame's own policy
+(`REALM_CSP` in `app/src/plugins/realm/frame.ts`) is `script-src blob:
+'sha256-...' 'wasm-unsafe-eval'`: WebAssembly may compile, but there is no
+`'unsafe-eval'`, so `eval` and the `Function` constructor throw
+`EvalError` in the Worker. Emscripten's embind builds its call wrappers
+with the `Function` constructor, so a module that uses embind must be
+built with `-sDYNAMIC_EXECUTION=0`, which makes it use wrappers that need
+no code generation. The Worker is a classic one (the boot script calls
+`new Worker(url)` with no `type`, and a `type: 'module'` nested Worker is
+refused), so the plugin's script and every Worker it starts are classic
+scripts. Emscripten's ES6-module output (`-sEXPORT_ES6`) has a top-level
+`export default` and reads `import.meta.url`, both syntax errors in a
+classic script: build it without them (drop the `export default` and the
+`import.meta.url` use, or leave `EXPORT_ES6` off and use the default
+output).
+Do not take `navigator.hardwareConcurrency` for the core count: a
+browser engine may cap it (WebKit reports at most 8).
+
 **The port.** `sdk/plugin/src/protocol.ts` lists every message. Every
 field whose size a plugin chooses is text (params, results and stored
 values cross as JSON text), so the host measures a message by adding
@@ -2021,6 +2097,18 @@ type, exactly its fields, each of the right type and size, at most
 1 MiB of text per message, at most 1,000 messages and 16 Mi characters
 in any rolling second, and forward and request ids that the host itself
 issued and that are still open. Anything else stops the plugin.
+What counts is every message the Worker posts to the host, of any type:
+bus calls, storage and file requests, console lines, progress, replies to
+a forward, pongs. The 1,000 a second is counted over all of them
+together, one each however large (the characters limit counts the text).
+One bus call is one message, and a `hew.doc.transact` is one bus call
+whatever it holds: a transaction of 500 commands is one message and one
+pending call. A plugin with many reads to make should batch them in one
+dry-run `hew.doc.transact` with `expect_generation` (HEW_API.md §6.5 and
+§6.6), which also tells it if the model moved. The 1,000 pending calls
+are the bus calls the host has accepted from a plugin and not yet
+answered (queued behind the host's slices, or dispatched and waiting for
+the document or a nested command); one more stops it.
 Messages are checked and counted when they arrive, then handled in
 arrival order a slice at a time (about 8 ms of the page's time, then the
 page runs before the next slice), so a burst of costly calls cannot hold

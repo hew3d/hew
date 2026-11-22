@@ -358,6 +358,34 @@ fn hew_version_ranges() {
     assert!(hew_version_ok(&m, &v("1.5.0-pre.2")));
 }
 
+#[test]
+fn a_preview_build_counts_as_its_release() {
+    let v = |s: &str| semver::Version::parse(s).unwrap();
+    let ok = |range: &str, running: &str| {
+        hew_version_ok(&manifest(json!({ "hew": range })), &v(running))
+    };
+    assert!(ok(">=1.5.0", "1.5.0-pre.2"));
+    assert!(ok(">=1.5.0", "1.5.0-pre.2+beta.ab12cd34"));
+    assert!(ok(">=1.5.0", "1.5.0+beta.ab12cd34"));
+    assert!(ok("^1.5", "1.5.0-pre.2"));
+    assert!(!ok(">=1.5.0", "1.4.0"));
+    assert!(!ok(">=1.5.1", "1.5.0-pre.2"));
+    assert!(!ok("<1.5.0", "1.5.0-pre.2"));
+    assert!(!ok("<1.5.0", "1.5.0-pre.2+beta.ab12cd34"));
+    // A range that names a preview of this release is honored as written:
+    // an earlier preview does not pass it, the named one and later do.
+    assert!(ok(">=1.5.0-pre.1", "1.5.0-pre.2"));
+    assert!(ok("=1.5.0-pre.2", "1.5.0-pre.2"));
+    assert!(!ok(">=1.5.0-pre.3", "1.5.0-pre.2"));
+    assert!(!ok("^1.5.0-pre.3", "1.5.0-pre.2"));
+    assert!(!ok(">1.5.0-pre.2", "1.5.0-pre.2"));
+    assert!(ok(">=1.5.0-pre.3", "1.5.0-pre.3+beta.ab12cd34"));
+    assert!(ok(">=1.5.0-pre.3", "1.5.0"));
+    // A pre-release of an older release named in the range does not block
+    // a later preview.
+    assert!(ok(">=1.4.0-pre.1", "1.5.0-pre.2"));
+}
+
 fn with_requires(id: &str, version: &str, requires: &[(&str, &str)]) -> (Installed, Manifest) {
     let m = manifest(json!({
         "id": id,

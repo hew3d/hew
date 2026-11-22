@@ -408,12 +408,18 @@ pub fn now_ms() -> u64 {
 }
 
 /// This build's version, the one a manifest's `hew` range is checked
-/// against.
+/// against: the release tag's version when the release workflow stamped
+/// one (a preview build's package version is still the last release's),
+/// else the package's own ([`crate::version::VERSION`]). A stamp that is
+/// not a semantic version falls back to the package's version rather than
+/// taking the app down at the first plugin check.
 fn running_version() -> &'static plugin_host::semver::Version {
     static RUNNING: OnceLock<plugin_host::semver::Version> = OnceLock::new();
     RUNNING.get_or_init(|| {
-        plugin_host::semver::Version::parse(env!("CARGO_PKG_VERSION"))
-            .expect("the shell's package version is a semantic version")
+        plugin_host::semver::Version::parse(crate::version::VERSION).unwrap_or_else(|_| {
+            plugin_host::semver::Version::parse(crate::version::PACKAGE)
+                .expect("the package version is a semantic version")
+        })
     })
 }
 
@@ -4251,8 +4257,17 @@ mod tests {
     }
 
     #[test]
-    fn the_running_version_is_this_builds() {
-        assert_eq!(running_version().to_string(), env!("CARGO_PKG_VERSION"));
+    fn the_running_version_is_the_stamped_one_not_the_crates() {
+        // A release build stamps HEW_RELEASE_VERSION; the crate's own
+        // version is the last release's and must not be what is checked.
+        assert_eq!(running_version().to_string(), crate::version::VERSION);
+        let source = include_str!("plugins.rs");
+        let crate_version = ["env!(\"CARGO_PKG", "_VERSION\")"].concat();
+        let non_test = source.split("#[cfg(test)]").next().unwrap();
+        assert!(!non_test.contains(&crate_version));
+        if let Some(stamp) = option_env!("HEW_RELEASE_VERSION").filter(|v| !v.is_empty()) {
+            assert_eq!(running_version().to_string(), stamp);
+        }
     }
 
     #[test]

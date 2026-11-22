@@ -1175,7 +1175,7 @@ impl Connection {
         let restricted = self.grant.is_restricted();
         let mut result = serde_json::json!({
             "protocol": PROTOCOL_VERSION,
-            "app": { "name": "hew", "version": env!("CARGO_PKG_VERSION") },
+            "app": { "name": "hew", "version": APP_VERSION },
             "profile": match (restricted, self.grant.ceiling) {
                 (true, _) => "plugin",
                 (false, crate::grant::Ceiling::Core) => "core",
@@ -1341,6 +1341,22 @@ fn single_plugin_method<'r>(
     decl.is_plugin().then_some((decl, tx))
 }
 
+/// The app version `hew.meta.hello` reports: the release tag's version when
+/// the release workflow stamped one at compile time (`HEW_RELEASE_VERSION`),
+/// else this crate's own. A preview tag does not edit the crate version, so
+/// without the stamp a `1.5.0-pre.2` build would name the last release.
+const APP_VERSION: &str = app_version_from(
+    option_env!("HEW_RELEASE_VERSION"),
+    env!("CARGO_PKG_VERSION"),
+);
+
+const fn app_version_from(stamp: Option<&'static str>, package: &'static str) -> &'static str {
+    match stamp {
+        Some(v) if !v.is_empty() => v,
+        _ => package,
+    }
+}
+
 /// Whether any command of a transact envelope can change the document.
 /// Unknown methods count as not, and are left to the static pass.
 fn transaction_mutates(registry: &Registry, params: &serde_json::Value) -> bool {
@@ -1372,6 +1388,16 @@ fn single_solitary_method(registry: &Registry, params: &serde_json::Value) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hello_names_the_stamped_version_when_there_is_one() {
+        assert_eq!(
+            app_version_from(Some("1.5.0-pre.2"), "1.4.0"),
+            "1.5.0-pre.2"
+        );
+        assert_eq!(app_version_from(Some(""), "1.4.0"), "1.4.0");
+        assert_eq!(app_version_from(None, "1.4.0"), "1.4.0");
+    }
 
     fn req(id: i64, method: &str, params: serde_json::Value) -> Request {
         Request {

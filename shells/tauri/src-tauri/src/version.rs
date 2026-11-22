@@ -9,6 +9,11 @@ pub const VERSION: &str = version_from(
     env!("CARGO_PKG_VERSION"),
 );
 
+/// This crate's own version, whatever the stamp says: what a check that
+/// needs a semantic version falls back to when the stamp is not one.
+#[cfg(hew_preview)]
+pub const PACKAGE: &str = env!("CARGO_PKG_VERSION");
+
 pub const fn version_from(stamp: Option<&'static str>, package: &'static str) -> &'static str {
     match stamp {
         Some(v) if !v.is_empty() => v,

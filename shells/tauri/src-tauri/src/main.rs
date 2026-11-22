@@ -3145,7 +3145,7 @@ fn rebuild_recent_submenu(
 
 /// The one-line version string `hew --version` prints.
 fn version_line() -> String {
-    format!("hew {}", env!("CARGO_PKG_VERSION"))
+    format!("hew {}", version::VERSION)
 }
 
 /// The `hew --help` page.
@@ -5564,7 +5564,7 @@ mod tests {
         for flag in ["-V", "--version"] {
             assert_eq!(
                 v(&[flag]),
-                Some(format!("hew {}\n", env!("CARGO_PKG_VERSION")))
+                Some(format!("hew {}\n", crate::version::VERSION))
             );
         }
         for flag in ["-h", "--help"] {

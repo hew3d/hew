@@ -39,11 +39,11 @@ beforeAll(async () => {
   await kernel.default({ module_or_path: readFileSync(join(process.cwd(), 'src/wasm/pkg/wasm_api_bg.wasm')) })
 })
 
-function makeBox(scene: Scene): void {
-  const sketch = scene.begin_sketch_on_plane(0, 0, 0, 0, 0, 1)
+function makeBox(scene: Scene, z = 0): bigint | number {
+  const sketch = scene.begin_sketch_on_plane(0, 0, z, 0, 0, 1)
   const c: Array<[number, number]> = [[0, 0], [1, 0], [1, 1], [0, 1]]
-  for (let i = 0; i < 4; i++) scene.sketch_add_segment(sketch, c[i][0], c[i][1], 0, c[(i + 1) % 4][0], c[(i + 1) % 4][1], 0)
-  scene.extrude_region(sketch, Array.from(scene.sketch_regions(sketch))[0], 1)
+  for (let i = 0; i < 4; i++) scene.sketch_add_segment(sketch, c[i][0], c[i][1], z, c[(i + 1) % 4][0], c[(i + 1) % 4][1], z)
+  return scene.extrude_region(sketch, Array.from(scene.sketch_regions(sketch))[0], 1) as unknown as bigint | number
 }
 
 describe('the hello plugin, through the real kernel', () => {
@@ -57,7 +57,15 @@ describe('the hello plugin, through the real kernel', () => {
     const main = readFileSync(join(HELLO, 'dist/background.js'), 'utf8')
 
     const scene = new kernel.Scene() as unknown as Scene
+    // One object at the top level and two inside a group: the plugin has to
+    // walk `members` (the scene's nested nodes) to count all three.
     makeBox(scene)
+    const a = makeBox(scene, 5)
+    const b = makeBox(scene, 10)
+    ;(scene as unknown as { group_nodes(k: Uint8Array, i: BigUint64Array): bigint }).group_nodes(
+      Uint8Array.from([0, 0]),
+      BigUint64Array.from([BigInt(a), BigInt(b)]),
+    )
     const installed: Installed = {
       schema: 1,
       id: 'com.example.hello',
@@ -129,7 +137,7 @@ describe('the hello plugin, through the real kernel', () => {
           result?: unknown
           error?: unknown
         }
-      expect(await greet(3)).toEqual({ jsonrpc: '2.0', id: 3, result: { greeting: 'Hello, Kurt!', objects: 1, times: 1 } })
+      expect(await greet(3)).toEqual({ jsonrpc: '2.0', id: 3, result: { greeting: 'Hello, Kurt!', objects: 3, times: 1 } })
       expect(await greet(4)).toMatchObject({ result: { times: 2 } })
       expect(stored.get('times')).toBe('2')
       expect(host.states()).toEqual({ 'com.example.hello': 'activated' })

@@ -348,9 +348,14 @@ pub fn permission_warnings(permissions: &[PermissionName]) -> Vec<String> {
 }
 
 /// Whether `manifest.hew` admits `running`. No range admits every version.
-/// A pre-release build (`1.5.0-pre.2`) is compared as its release
-/// (`1.5.0`) too, so a preview build can run a plugin written for the
-/// version it previews.
+/// A preview build of X.Y.Z counts as X.Y.Z: the range is checked against
+/// the running version with its pre-release and build metadata stripped
+/// (`1.5.0-pre.2+beta.ab12` satisfies `>=1.5.0`). Under strict semver no
+/// pre-release satisfies `>=1.5.0`, so no plugin could ever target the
+/// build that first carries an API. A range that names a pre-release of
+/// the running X.Y.Z itself (`>=1.5.0-pre.3`) is honored as written, so
+/// an earlier preview of the same release does not pass it. This is the
+/// one place the rule lives; every host check goes through here.
 pub fn hew_version_ok(manifest: &Manifest, running: &semver::Version) -> bool {
     let Some(req) = &manifest.hew else {
         return true;
@@ -358,11 +363,23 @@ pub fn hew_version_ok(manifest: &Manifest, running: &semver::Version) -> bool {
     if req.matches(running) {
         return true;
     }
-    if running.pre.is_empty() {
+    if running.pre.is_empty() && running.build.is_empty() {
+        return false;
+    }
+    // A comparator that names a pre-release of this very X.Y.Z asked for a
+    // particular preview: strict matching above already answered it.
+    let names_this_preview = req.comparators.iter().any(|c| {
+        !c.pre.is_empty()
+            && c.major == running.major
+            && c.minor == Some(running.minor)
+            && c.patch == Some(running.patch)
+    });
+    if names_this_preview {
         return false;
     }
     let mut release = running.clone();
     release.pre = semver::Prerelease::EMPTY;
+    release.build = semver::BuildMetadata::EMPTY;
     req.matches(&release)
 }
 

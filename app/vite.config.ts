@@ -21,6 +21,7 @@ const pkgVersion = JSON.parse(
 const { version: appVersion, beta: isBeta } = resolveBuildStamp(
   pkgVersion,
   process.env.HEW_BETA_SHA,
+  process.env.HEW_RELEASE_VERSION,
 )
 
 // Help ▸ Report Bug's web path posts same-origin to `/report/` (docs/design/

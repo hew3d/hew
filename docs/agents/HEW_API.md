@@ -244,6 +244,10 @@ documents:
   "documents": [{"id": "doc_1", "title": "Bird feeder", "path": "…"}]}}
 ```
 
+`app.version` is the version of the build that answers: a release or
+preview build reports its tag's version (`1.5.0-pre.2`), a build made
+from source reports the version in the source tree.
+
 Any request before a successful `hello` is rejected with `-32004` (not
 ready). A host that cannot serve the client's requested protocol version
 answers `hello` itself with an error naming the versions it speaks.

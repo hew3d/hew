@@ -413,7 +413,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Compile-time stamp read by the shell's outbound identifiers.
+          # Compile-time stamp read by the shell's outbound identifiers and by
+          # the plugin host's `hew` range check.
           HEW_RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
         with:
           projectPath: shells/tauri
@@ -612,7 +613,12 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # app build + CSP <meta> injection (shells/web/inject-csp.mjs).
+      # HEW_RELEASE_VERSION stamps the tag's version into the app (a preview
+      # tag does not edit package.json): the plugin host checks a plugin's
+      # `hew` range against it.
       - name: Build web shell
+        env:
+          HEW_RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
         run: pnpm --dir shells/web build
 
       - name: Check the kernel flavor
