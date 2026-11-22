@@ -408,7 +408,9 @@ fn arb_op() -> impl Strategy<Value = Op> {
 
 /// The nodes and guides a mixed op lists: bits 0 and 1 of `mask` pick a
 /// node each, bits 2 and 3 a guide each; a pick listed twice is dropped (a
-/// selection is a set). `stale` adds the null guide key, never live.
+/// selection is a set). Only nodes the document calls live are picked (a
+/// definition member is not a world node and is refused), so every handle
+/// is live but the one `stale` adds: the null guide key, never live.
 fn mixed_pick(
     doc: &Document,
     nodes: &[NodeId],
@@ -417,11 +419,16 @@ fn mixed_pick(
     stale: bool,
 ) -> (Vec<NodeId>, Vec<GuideId>) {
     let guides = doc.guide_ids();
+    let world: Vec<NodeId> = nodes
+        .iter()
+        .copied()
+        .filter(|&n| doc.node_is_live(n))
+        .collect();
     let mut sel_nodes: Vec<NodeId> = Vec::new();
     let mut sel_guides: Vec<GuideId> = Vec::new();
     for (bit, at) in [(1, a), (2, b)] {
         if mask & bit != 0
-            && let Some(n) = pick(nodes, at)
+            && let Some(n) = pick(&world, at)
             && !sel_nodes.contains(&n)
         {
             sel_nodes.push(n);
@@ -439,6 +446,21 @@ fn mixed_pick(
         sel_guides.push(GuideId::default());
     }
     (sel_nodes, sel_guides)
+}
+
+/// Whether one of `nodes` sits inside a group another of them is (at any
+/// depth): the listing a linked copy refuses `DuplicateMember`.
+fn nests(doc: &Document, nodes: &[NodeId]) -> bool {
+    nodes.iter().any(|&n| {
+        let mut up = doc.node_parent(n);
+        while let Some(g) = up {
+            if nodes.contains(&NodeId::Group(g)) {
+                return true;
+            }
+            up = doc.node_parent(NodeId::Group(g));
+        }
+        false
+    })
 }
 
 /// The drawing lattice: the boxes' corners (x = 3i, 3i + 1; y = 0, 1;
@@ -1383,7 +1405,30 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
                 Err(_) if (doc.state_hash(), doc.history_generation()) != before => {
                     return Err("a refused mixed transform changed the document".to_string());
                 }
-                Err(_) => {}
+                Err(kernel::DocumentError::LockedNode { .. }) => {
+                    // A lock on a listed node (or on what holds it) refuses
+                    // the whole batch, and it changed nothing (checked
+                    // above).
+                }
+                Err(kernel::DocumentError::ExplodeSessionScope)
+                    if !doc.session_stack().is_empty() =>
+                {
+                    // An open session refuses geometry from outside it (the
+                    // close would fold it into the open definition).
+                }
+                Err(kernel::DocumentError::EmptySelection) if sel_guides.is_empty() => {
+                    // Nodes that flatten to nothing visible (a group whose
+                    // members were all deleted) and no guide beside them.
+                }
+                Err(e) => {
+                    // Every handle here is live (a stale guide is the only
+                    // deliberate bad one), so any other refusal is a defect.
+                    if !stale {
+                        return Err(format!(
+                            "a mixed transform of live items was refused: {e:?}"
+                        ));
+                    }
+                }
             }
         }
         Op::CopyMixed {
@@ -1430,7 +1475,28 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
                 Err(_) if (doc.state_hash(), doc.history_generation()) != before => {
                     return Err("a refused mixed copy changed the document".to_string());
                 }
-                Err(_) => {}
+                Err(kernel::DocumentError::LockedNode { .. }) => {
+                    // A lock on a listed node (or on what holds it) refuses
+                    // the whole batch, and it changed nothing (checked
+                    // above).
+                }
+                Err(kernel::DocumentError::ExplodeSessionScope)
+                    if !doc.session_stack().is_empty() =>
+                {
+                    // An open session refuses geometry from outside it (the
+                    // close would fold it into the open definition).
+                }
+                Err(kernel::DocumentError::DuplicateMember) if linked && nests(doc, &sel_nodes) => {
+                    // A linked copy of a node beside the group that holds it
+                    // would place the node twice.
+                }
+                Err(e) => {
+                    // Every handle here is live (a stale guide is the only
+                    // deliberate bad one), so any other refusal is a defect.
+                    if !stale {
+                        return Err(format!("a mixed copy of live items was refused: {e:?}"));
+                    }
+                }
             }
         }
         Op::CopySketch { sel, step } => {
