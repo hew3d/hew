@@ -520,12 +520,43 @@ mod transport {
         /// dropped.
         pub fn poll_events(&mut self) -> Vec<Value> {
             let mut events = self.take_events();
-            while let Ok(frame) = self.read_frame(Some(Duration::from_millis(1))) {
+            while self.bytes_waiting() {
+                let Ok(frame) = self.read_frame(Some(Duration::from_millis(1))) else {
+                    break;
+                };
                 if frame.as_object().is_some_and(|o| !o.contains_key("id")) {
                     events.push(frame);
                 }
             }
             events
+        }
+
+        /// Whether a read would find bytes (or the end of the stream)
+        /// without waiting. A timed read on an idle socket sleeps until the
+        /// kernel timer fires, which is a whole scheduler tick; this check
+        /// flips the socket non-blocking just long enough to fill the
+        /// reader's buffer, so an idle socket costs one failed `recv`.
+        /// Bytes already buffered, or a half-read line, count as waiting.
+        fn bytes_waiting(&mut self) -> bool {
+            if !self.reader.buffer().is_empty() || !self.partial.is_empty() {
+                return true;
+            }
+            if self.stream.set_nonblocking(true).is_err() {
+                // Cannot probe: fall back to the timed read.
+                return true;
+            }
+            let ready = match self.reader.fill_buf() {
+                Ok(_) => true,
+                Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+            };
+            if self.stream.set_nonblocking(false).is_err() {
+                // A socket stuck non-blocking would turn every later read
+                // into a false timeout and cut large writes short. Close it
+                // so the next read reports the connection as gone instead.
+                let _ = self.stream.shutdown(std::net::Shutdown::Both);
+                return true;
+            }
+            ready
         }
 
         /// Writes one newline-delimited JSON-RPC frame and blocks for its
@@ -663,7 +694,7 @@ mod transport {
         SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
     };
     use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
-    use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+    use windows_sys::Win32::System::Pipes::{PeekNamedPipe, WaitNamedPipeW};
     use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
     fn wide(s: &str) -> Vec<u16> {
@@ -804,12 +835,41 @@ mod transport {
         /// dropped. The same as the unix transport's.
         pub fn poll_events(&mut self) -> Vec<Value> {
             let mut events = self.take_events();
-            while let Ok(frame) = self.read_frame(Some(Duration::from_millis(1))) {
+            while self.bytes_waiting() {
+                let Ok(frame) = self.read_frame(Some(Duration::from_millis(1))) else {
+                    break;
+                };
                 if frame.as_object().is_some_and(|o| !o.contains_key("id")) {
                     events.push(frame);
                 }
             }
             events
+        }
+
+        /// Whether a read would find bytes (or a broken pipe to report)
+        /// without waiting. A timed overlapped read on an idle pipe waits
+        /// out its timeout on a coarse timer, so the idle case is answered
+        /// by `PeekNamedPipe` instead, which never blocks. Bytes already
+        /// held, or any failure to peek, count as waiting: the read below
+        /// then decides.
+        fn bytes_waiting(&mut self) -> bool {
+            if !self.leftover.is_empty() {
+                return true;
+            }
+            let mut available: u32 = 0;
+            // SAFETY: a valid pipe handle and one valid out pointer; the
+            // others are documented as optional.
+            let ok = unsafe {
+                PeekNamedPipe(
+                    self.handle,
+                    ptr::null_mut(),
+                    0,
+                    ptr::null_mut(),
+                    &mut available,
+                    ptr::null_mut(),
+                )
+            };
+            ok == 0 || available > 0
         }
 
         /// Writes one newline-delimited JSON-RPC frame and blocks for its
@@ -1637,6 +1697,76 @@ mod tests {
         assert_eq!(polled.len(), 1);
         assert_eq!(polled[0]["method"], "hew.event.plugin_state");
         drop(server);
+        assert!(matches!(conn.read_frame(None), Err(LiveError::Closed)));
+    }
+
+    /// An idle poll must not wait: a timed read on a quiet socket sleeps a
+    /// whole scheduler tick (a millisecond at best), which used to be paid
+    /// twice around every live tool call. The fastest of several batches
+    /// is compared, so a loaded machine cannot fail it; the old timed read
+    /// could never finish a batch of 20 in under 20 ms.
+    #[cfg(unix)]
+    #[test]
+    fn polling_an_idle_socket_does_not_wait() {
+        let (client, _server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut conn = transport::RawConn::from_stream(client);
+        let mut fastest = Duration::MAX;
+        for _ in 0..10 {
+            let start = Instant::now();
+            for _ in 0..20 {
+                assert!(conn.poll_events().is_empty());
+            }
+            fastest = fastest.min(start.elapsed());
+        }
+        assert!(
+            fastest < Duration::from_millis(15),
+            "20 idle polls took {fastest:?}"
+        );
+    }
+
+    /// Events queued before a poll are all delivered in order, a frame
+    /// split across polls is reassembled, and the socket is left blocking.
+    #[cfg(unix)]
+    #[test]
+    fn polling_delivers_queued_and_split_frames() {
+        use std::io::Write;
+        let (client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut conn = transport::RawConn::from_stream(client);
+        server
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"method\":\"hew.event.a\",\"params\":{}}\n\
+                  {\"jsonrpc\":\"2.0\",\"method\":\"hew.event.b\",\"params\":{}}\n\
+                  {\"jsonrpc\":\"2.0\",\"method\":\"hew.ev",
+            )
+            .unwrap();
+        let polled = conn.poll_events();
+        let methods: Vec<_> = polled.iter().map(|e| e["method"].clone()).collect();
+        assert_eq!(methods, ["hew.event.a", "hew.event.b"]);
+        // The half frame is still held, not dropped.
+        assert!(conn.poll_events().is_empty());
+        server.write_all(b"ent.c\",\"params\":{}}\n").unwrap();
+        let polled = conn.poll_events();
+        assert_eq!(polled.len(), 1);
+        assert_eq!(polled[0]["method"], "hew.event.c");
+        // A blocking read still blocks for its timeout: a socket left
+        // non-blocking would report the same timeout at once.
+        let started = Instant::now();
+        assert!(matches!(
+            conn.read_frame(Some(Duration::from_millis(20))),
+            Err(LiveError::Timeout(_))
+        ));
+        assert!(
+            started.elapsed() >= Duration::from_millis(15),
+            "a blocking read returned after {:?}",
+            started.elapsed()
+        );
+        server
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"hew.event.d\",\"params\":{}}\n")
+            .unwrap();
+        let frame = conn.read_frame(Some(Duration::from_secs(5))).unwrap();
+        assert_eq!(frame["method"], "hew.event.d");
+        drop(server);
+        assert!(conn.poll_events().is_empty());
         assert!(matches!(conn.read_frame(None), Err(LiveError::Closed)));
     }
 
