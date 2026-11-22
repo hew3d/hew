@@ -33,6 +33,7 @@
 //! meshes that `from_polygons` would reject are still emitted — the kernel
 //! reports them as skipped (DEVELOPMENT.md rule 4).
 
+use kernel::trig;
 use kernel::{Plane, Point3, Transform, Vec3, tol};
 
 /// Faces whose hole loops overlap: a hole drawn twice loses its extra copy,
@@ -1017,7 +1018,7 @@ fn winding_number(p: Point3, faces: &[Vec<usize>], positions: &[Point3]) -> f64 
             let (la, lb, lc) = (a.length(), b.length(), c.length());
             let det = a.dot(b.cross(c));
             let denom = la * lb * lc + a.dot(b) * lc + b.dot(c) * la + c.dot(a) * lb;
-            total += 2.0 * det.atan2(denom);
+            total += 2.0 * trig::atan2(det, denom);
         }
     }
     total / (4.0 * std::f64::consts::PI)

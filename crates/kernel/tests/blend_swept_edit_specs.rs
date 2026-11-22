@@ -7,6 +7,7 @@
 //! refuses with a typed error and leaves the object as it was.
 
 use crate::common;
+use kernel::trig;
 
 use std::f64::consts::FRAC_PI_2;
 use std::io::{Cursor, Read as _};
@@ -142,7 +143,7 @@ fn sunk_sphere() -> (Object, Vec<EdgeId>) {
         .filter(|&e| {
             let (x, y) = u.edge_faces_for_test(e).unwrap();
             let (p, q) = u.edge_endpoints(e).unwrap();
-            (x == top) != (y == top) && p.x.hypot(p.y) < 0.35 && q.x.hypot(q.y) < 0.35
+            (x == top) != (y == top) && trig::hypot(p.x, p.y) < 0.35 && trig::hypot(q.x, q.y) < 0.35
         })
         .collect();
     (u, edges)
@@ -597,7 +598,7 @@ fn imported_disc() -> (Object, Vec<EdgeId>) {
     for z in [0.0, h] {
         for k in 0..n {
             let a = std::f64::consts::TAU * k as f64 / n as f64;
-            pts.push(p3(r * a.cos(), r * a.sin(), z));
+            pts.push(p3(r * trig::cos(a), r * trig::sin(a), z));
         }
     }
     let mut faces: Vec<Vec<usize>> = Vec::new();

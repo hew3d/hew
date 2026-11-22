@@ -6,6 +6,7 @@
 //! share one implementation. Pure geometry: no I/O, no UI.
 
 use crate::math::{Point3, Vec3};
+use crate::trig;
 use std::collections::BTreeMap;
 
 /// A point carried through triangulation: xyz plus its 2D projection uv.
@@ -348,7 +349,7 @@ fn bridge_hole_into_polygon(
                     continue;
                 }
                 // Vertex inside the triangle; compute angle from M's +u ray.
-                let angle = (k_v - m_v).atan2(k_u - m_u).abs();
+                let angle = trig::atan2(k_v - m_v, k_u - m_u).abs();
                 if angle < best_angle {
                     best_angle = angle;
                     refined = k;
@@ -458,7 +459,7 @@ fn segments_intersect_2d(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> 
 /// by the band of points this admits (the tolerance divided by |AB|) so it
 /// never skips a vertex the exact test could accept.
 fn segment_collinear_tol(a: [f64; 2], b: [f64; 2]) -> f64 {
-    crate::tol::TRIANGULATE_COLLINEAR * ((b[0] - a[0]).hypot(b[1] - a[1]) + 1.0)
+    crate::tol::TRIANGULATE_COLLINEAR * (trig::hypot(b[0] - a[0], b[1] - a[1]) + 1.0)
 }
 
 /// True if point P lies strictly on the open segment AB (between A and B,
@@ -528,7 +529,7 @@ pub fn ear_clip_reference(poly: &[Pt5]) -> (Vec<[usize; 3]>, ClipCounters) {
 /// planar projection of kernel geometry, in meters, so the constant applies
 /// unchanged).
 fn must_containment_test(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> bool {
-    let chord = (c[0] - a[0]).hypot(c[1] - a[1]);
+    let chord = trig::hypot(c[0] - a[0], c[1] - a[1]);
     signed_area_2d(a, b, c) <= 0.5 * crate::tol::POINT_MERGE * chord
 }
 
@@ -643,7 +644,7 @@ impl RingGrid {
 /// degrades to scanning every cell, which is exactly the conservative
 /// full scan.
 fn grid_query_pad(a: [f64; 2], c: [f64; 2]) -> f64 {
-    let diagonal = (c[0] - a[0]).hypot(c[1] - a[1]);
+    let diagonal = trig::hypot(c[0] - a[0], c[1] - a[1]);
     crate::tol::POINT_MERGE.max(segment_collinear_tol(a, c) / diagonal)
 }
 
@@ -1246,7 +1247,7 @@ mod tests {
         (0..64)
             .map(|i| {
                 let a = -(i as f64) * std::f64::consts::TAU / 64.0;
-                [cx + r * a.cos(), cy + r * a.sin(), 0.0]
+                [cx + r * trig::cos(a), cy + r * trig::sin(a), 0.0]
             })
             .collect()
     }

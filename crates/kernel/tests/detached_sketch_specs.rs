@@ -15,6 +15,7 @@
 //! - a detached sketch is never object-owned (I9), and the listing names it
 //!   as its own entry.
 
+use kernel::trig;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use kernel::{
@@ -86,7 +87,7 @@ fn circle(w: &mut Sketch, c: Point3, r: f64, n: usize) -> Result<(), SketchError
     let ring: Vec<Point3> = (0..n)
         .map(|i| {
             let a = TAU * i as f64 / n as f64;
-            p(c.x + r * a.cos(), c.y + r * a.sin(), c.z)
+            p(c.x + r * trig::cos(a), c.y + r * trig::sin(a), c.z)
         })
         .collect();
     let drawn = draw_ring(w, &ring);
@@ -827,7 +828,7 @@ proptest! {
                     let ring: Vec<Point3> = (0..24)
                         .map(|i| {
                             let a = TAU * f64::from(i) / 24.0;
-                            c + u * (sw * a.cos()) + v * (sw * a.sin())
+                            c + u * (sw * trig::cos(a)) + v * (sw * trig::sin(a))
                         })
                         .collect();
                     w.begin_curve_with(CurveGeom { center: c, radius: sw })?;

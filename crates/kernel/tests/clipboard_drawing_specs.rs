@@ -13,6 +13,7 @@
 //! and the paste's pose cancel exactly and geometry keys compare bit for
 //! bit with a Move+copy of the same displacement.
 
+use kernel::trig;
 use std::collections::BTreeSet;
 
 use kernel::{
@@ -294,7 +295,7 @@ fn circles_and_polygons_keep_their_identity() {
         (0..=n)
             .map(|i| {
                 let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
-                p(cx + r * a.cos(), cy + r * a.sin(), 0.0)
+                p(cx + r * trig::cos(a), cy + r * trig::sin(a), 0.0)
             })
             .collect()
     };

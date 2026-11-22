@@ -6,6 +6,7 @@
 //! [`CurveGeom`] (so extruding it stamps cylinder walls), or one chamfer
 //! segment, with both lines trimmed back to the tangent points.
 
+use crate::trig;
 use serde::{Deserialize, Serialize};
 
 use crate::math::{Point3, Vec3};
@@ -230,9 +231,9 @@ impl Sketch {
         let room2 = l2 - tol::POINT_MERGE;
         match profile {
             CornerProfile::Round { radius, segments } => {
-                let s = radius / half.tan();
+                let s = radius / trig::tan(half);
                 if !(s < room1 && s < room2) {
-                    let max = (room1.min(room2) * half.tan()).max(0.0);
+                    let max = (room1.min(room2) * trig::tan(half)).max(0.0);
                     return Err(SketchError::CornerRadiusTooLarge { max });
                 }
                 let t1 = v + d1 * s;
@@ -240,7 +241,7 @@ impl Sketch {
                 let bisector = (d1 + d2)
                     .normalized()
                     .map_err(|_| SketchError::CornerIsStraight)?;
-                let center = v + bisector * (radius / half.sin());
+                let center = v + bisector * (radius / trig::sin(half));
                 let (u1, u2) = (t1 - center, t2 - center);
                 let sweep = std::f64::consts::PI - g.theta;
                 let sign = if u1.cross(u2).dot(n) >= 0.0 {
@@ -254,7 +255,7 @@ impl Sketch {
                 arc.push(t1);
                 for k in 1..count {
                     let a = sweep * k as f64 / count as f64;
-                    arc.push(center + u1 * a.cos() + tangent * a.sin());
+                    arc.push(center + u1 * trig::cos(a) + tangent * trig::sin(a));
                 }
                 arc.push(t2);
                 Ok(CornerPlan {
@@ -318,7 +319,7 @@ impl Sketch {
         let d2 = w2
             .normalized()
             .map_err(|_| SketchError::CornerNotBlendable)?;
-        let theta = d1.cross(d2).length().atan2(d1.dot(d2));
+        let theta = trig::atan2(d1.cross(d2).length(), d1.dot(d2));
         if std::f64::consts::PI - theta <= tol::NORMAL_DIRECTION {
             return Err(SketchError::CornerIsStraight);
         }

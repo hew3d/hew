@@ -6,6 +6,7 @@
 
 #![allow(dead_code)]
 
+use kernel::trig;
 use std::f64::consts::TAU;
 
 use kernel::{
@@ -94,7 +95,7 @@ impl Wall {
         (0..n)
             .map(|i| {
                 let a = phase + TAU * i as f64 / n as f64;
-                c + self.u * (r * a.cos()) + self.v * (r * a.sin())
+                c + self.u * (r * trig::cos(a)) + self.v * (r * trig::sin(a))
             })
             .collect()
     }

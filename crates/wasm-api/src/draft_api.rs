@@ -2207,6 +2207,7 @@ fn cell_json(c: &kernel::CellOutcome) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kernel::trig;
     use serde_json::Value;
 
     const GROUND: &str = r#"{"plane":[0,0,0,0,0,1]}"#;
@@ -2329,11 +2330,11 @@ mod tests {
             scene
                 .draft_add_segment(
                     d,
-                    cx + t0.cos(),
-                    cy + t0.sin(),
+                    cx + trig::cos(t0),
+                    cy + trig::sin(t0),
                     0.0,
-                    cx + t1.cos(),
-                    cy + t1.sin(),
+                    cx + trig::cos(t1),
+                    cy + trig::sin(t1),
                     0.0,
                 )
                 .unwrap();
@@ -2616,11 +2617,11 @@ mod tests {
             scene
                 .draft_add_segment(
                     d,
-                    0.5 + r * a0.cos(),
-                    0.5 + r * a0.sin(),
+                    0.5 + r * trig::cos(a0),
+                    0.5 + r * trig::sin(a0),
                     1.0,
-                    0.5 + r * a1.cos(),
-                    0.5 + r * a1.sin(),
+                    0.5 + r * trig::cos(a1),
+                    0.5 + r * trig::sin(a1),
                     1.0,
                 )
                 .unwrap();
@@ -2747,11 +2748,11 @@ mod tests {
             scene
                 .draft_add_segment(
                     d,
-                    1.0 + 0.5 * a0.cos(),
-                    1.0 + 0.5 * a0.sin(),
+                    1.0 + 0.5 * trig::cos(a0),
+                    1.0 + 0.5 * trig::sin(a0),
                     1.0,
-                    1.0 + 0.5 * a1.cos(),
-                    1.0 + 0.5 * a1.sin(),
+                    1.0 + 0.5 * trig::cos(a1),
+                    1.0 + 0.5 * trig::sin(a1),
                     1.0,
                 )
                 .unwrap();
@@ -2871,7 +2872,15 @@ mod tests {
                 std::f64::consts::TAU * f64::from(i + 1) / f64::from(n),
             );
             scene
-                .draft_add_segment(d, a0.cos(), a0.sin(), 0.0, a1.cos(), a1.sin(), 0.0)
+                .draft_add_segment(
+                    d,
+                    trig::cos(a0),
+                    trig::sin(a0),
+                    0.0,
+                    trig::cos(a1),
+                    trig::sin(a1),
+                    0.0,
+                )
                 .unwrap();
         }
         scene.draft_end_curve(d).unwrap();
@@ -3105,11 +3114,11 @@ mod tests {
             scene
                 .draft_add_segment(
                     d,
-                    c[0] + r * a0.cos(),
-                    c[1] + r * a0.sin(),
+                    c[0] + r * trig::cos(a0),
+                    c[1] + r * trig::sin(a0),
                     c[2],
-                    c[0] + r * a1.cos(),
-                    c[1] + r * a1.sin(),
+                    c[0] + r * trig::cos(a1),
+                    c[1] + r * trig::sin(a1),
                     c[2],
                 )
                 .unwrap();
@@ -3581,11 +3590,11 @@ mod tests {
             scene
                 .draft_add_segment(
                     d,
-                    1.0 + 0.5 * a0.cos(),
-                    1.0 + 0.5 * a0.sin(),
+                    1.0 + 0.5 * trig::cos(a0),
+                    1.0 + 0.5 * trig::sin(a0),
                     1.0,
-                    1.0 + 0.5 * a1.cos(),
-                    1.0 + 0.5 * a1.sin(),
+                    1.0 + 0.5 * trig::cos(a1),
+                    1.0 + 0.5 * trig::sin(a1),
                     1.0,
                 )
                 .unwrap();

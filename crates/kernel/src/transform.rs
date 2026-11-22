@@ -11,6 +11,7 @@
 
 use crate::math::{Plane, Point3, Vec3};
 use crate::tol;
+use crate::trig;
 
 /// Error from constructing or inverting a transform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +113,7 @@ impl Transform {
         let k = axis
             .normalized()
             .map_err(|_| TransformError::DegenerateAxis)?;
-        let (sin, cos) = angle.sin_cos();
+        let (sin, cos) = trig::sin_cos(angle);
         let one_c = 1.0 - cos;
         Ok(Transform {
             linear: [

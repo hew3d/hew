@@ -4,6 +4,7 @@
 //! refusal names.
 
 use crate::common;
+use kernel::trig;
 
 use common::curves::*;
 use kernel::{
@@ -35,7 +36,7 @@ fn scan_at(amp: f64, z: f64, union: bool) -> (Object, Vec<EdgeId>) {
             let (a, b) = o.edge_endpoints(e).unwrap();
             (a.z - z).abs() < 1e-7
                 && (b.z - z).abs() < 1e-7
-                && a.x.hypot(a.y) < 0.0245
+                && trig::hypot(a.x, a.y) < 0.0245
                 && o.edge_smoothness(e) == EdgeSmoothness::Hard
         })
         .collect();

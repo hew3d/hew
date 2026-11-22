@@ -6,13 +6,14 @@ use kernel::math::{Point3, Vec3};
 use kernel::shape_error::ShapeError;
 use kernel::station::{SkinSpecForTest, build_skin_for_test};
 use kernel::topo::{Object, WatertightState};
+use kernel::trig;
 
 fn square(z: f64, half: f64, angle: f64) -> Vec<Point3> {
     (0..4)
         .map(|k| {
             let a = angle + std::f64::consts::FRAC_PI_4 + k as f64 * std::f64::consts::FRAC_PI_2;
             let r = half * std::f64::consts::SQRT_2;
-            Point3::new(r * a.cos(), r * a.sin(), z)
+            Point3::new(r * trig::cos(a), r * trig::sin(a), z)
         })
         .collect()
 }

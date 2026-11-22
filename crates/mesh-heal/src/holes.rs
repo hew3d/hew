@@ -113,6 +113,7 @@ pub fn resolve_overlapping_holes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kernel::trig;
 
     /// A 20 x 20 square face at z = 0 (CCW from +Z) and `rings` as its holes
     /// (each CW from +Z); returns positions, faces and holes.
@@ -137,7 +138,7 @@ mod tests {
         (0..24)
             .map(|i| {
                 let a = -std::f64::consts::TAU * (i as f64 / 24.0 + phase);
-                (cx + r * a.cos(), cy + r * a.sin())
+                (cx + r * trig::cos(a), cy + r * trig::sin(a))
             })
             .collect()
     }

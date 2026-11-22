@@ -4,6 +4,7 @@
 //! test file.
 #![allow(dead_code)]
 
+use kernel::trig;
 use std::collections::BTreeMap;
 use std::f64::consts::{PI, TAU};
 
@@ -108,7 +109,10 @@ pub fn prism(pts: &[(f64, f64)], h: f64) -> Object {
 /// A unit-height prism whose vertical edge at the origin has dihedral
 /// `theta` (the triangle `(0,0)`, `(1,0)`, `(cos θ, sin θ)` extruded 1 m).
 pub fn wedge(theta: f64) -> Object {
-    prism(&[(0.0, 0.0), (1.0, 0.0), (theta.cos(), theta.sin())], 1.0)
+    prism(
+        &[(0.0, 0.0), (1.0, 0.0), (trig::cos(theta), trig::sin(theta))],
+        1.0,
+    )
 }
 
 /// Adds a closed analytic circle chain of `n` facets to `s`, in the plane
@@ -118,7 +122,7 @@ pub fn add_circle(s: &mut Sketch, center: Point3, normal: Vec3, r: f64, n: usize
     s.begin_curve_with(CurveGeom { center, radius: r }).unwrap();
     let p = |i: usize| {
         let a = TAU * (i % n) as f64 / n as f64;
-        center + u * (r * a.cos()) + v * (r * a.sin())
+        center + u * (r * trig::cos(a)) + v * (r * trig::sin(a))
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -132,7 +136,11 @@ pub fn add_arc(s: &mut Sketch, center: Point3, r: f64, a0: f64, sweep: f64, n: u
     s.begin_curve_with(CurveGeom { center, radius: r }).unwrap();
     let p = |i: usize| {
         let a = a0 + sweep * i as f64 / n as f64;
-        p3(center.x + r * a.cos(), center.y + r * a.sin(), center.z)
+        p3(
+            center.x + r * trig::cos(a),
+            center.y + r * trig::sin(a),
+            center.z,
+        )
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -192,11 +200,11 @@ pub fn rounded_rect_prism(w: f64, d: f64, r: f64, h: f64, n_arc: usize) -> Objec
     for (i, &(cx, cy, a0)) in corners.iter().enumerate() {
         add_arc(&mut s, p3(cx, cy, 0.0), r, a0, PI / 2.0, n_arc);
         let end = (
-            cx + r * (a0 + PI / 2.0).cos(),
-            cy + r * (a0 + PI / 2.0).sin(),
+            cx + r * trig::cos(a0 + PI / 2.0),
+            cy + r * trig::sin(a0 + PI / 2.0),
         );
         let (nx, ny, na) = corners[(i + 1) % 4];
-        let next_start = (nx + r * na.cos(), ny + r * na.sin());
+        let next_start = (nx + r * trig::cos(na), ny + r * trig::sin(na));
         s.add_segment(p3(end.0, end.1, 0.0), p3(next_start.0, next_start.1, 0.0))
             .unwrap();
     }
@@ -379,9 +387,9 @@ pub fn assert_mismatch(obj: &Object, f: FaceId, s: SurfaceRef) {
 
 pub fn sphere_pt(r: f64, lat: f64, lon: f64) -> Point3 {
     p3(
-        r * lat.cos() * lon.cos(),
-        r * lat.cos() * lon.sin(),
-        r * lat.sin(),
+        r * trig::cos(lat) * trig::cos(lon),
+        r * trig::cos(lat) * trig::sin(lon),
+        r * trig::sin(lat),
     )
 }
 
@@ -406,8 +414,12 @@ pub fn sphere_facet() -> (Object, FaceId, SurfaceRef) {
 }
 
 pub fn torus_pt(major: f64, minor: f64, phi: f64, psi: f64) -> Point3 {
-    let rho = major + minor * psi.cos();
-    p3(rho * phi.cos(), rho * phi.sin(), minor * psi.sin())
+    let rho = major + minor * trig::cos(psi);
+    p3(
+        rho * trig::cos(phi),
+        rho * trig::sin(phi),
+        minor * trig::sin(psi),
+    )
 }
 
 /// The facet between meridians 0° and 15° and tube rows 0° and 30° of the
@@ -430,8 +442,8 @@ pub fn torus_facet() -> (Object, FaceId, SurfaceRef) {
 }
 
 pub fn cone_pt(alpha: f64, theta: f64, t: f64) -> Point3 {
-    let r = t * alpha.tan();
-    p3(r * theta.cos(), r * theta.sin(), t)
+    let r = t * trig::tan(alpha);
+    p3(r * trig::cos(theta), r * trig::sin(theta), t)
 }
 
 /// The trapezoid between generators 0° and 15° of the cone `apex = origin,
@@ -457,8 +469,8 @@ pub fn cylinder_facet() -> (Object, FaceId, SurfaceRef) {
     let d = PI / 12.0;
     let (o, f) = facet([
         p3(1.0, 0.0, 0.0),
-        p3(d.cos(), d.sin(), 0.0),
-        p3(d.cos(), d.sin(), 1.0),
+        p3(trig::cos(d), trig::sin(d), 0.0),
+        p3(trig::cos(d), trig::sin(d), 1.0),
         p3(1.0, 0.0, 1.0),
     ]);
     let s = SurfaceRef::Cylinder {
@@ -486,7 +498,7 @@ pub fn imported_sphere(n_lat: usize, n_lon: usize, r: f64, degenerate: usize) ->
 pub fn noisy_sphere(n_lat: usize, n_lon: usize, r: f64, amp: f64) -> Object {
     let (mut pts, tris) = sphere_soup(n_lat, n_lon, r, 0);
     for (i, p) in pts.iter_mut().enumerate() {
-        let h = ((i as f64 * 12.9898).sin() * 43758.5453).fract();
+        let h = (trig::sin(i as f64 * 12.9898) * 43758.5453).fract();
         let k = 1.0 + amp * (h - 0.5) * 2.0;
         *p = p3(
             (p.x * k) as f32 as f64,
@@ -511,9 +523,9 @@ pub fn sphere_soup(
         for j in 0..n_lon {
             let lon = std::f64::consts::TAU * j as f64 / n_lon as f64;
             pts.push(p3(
-                f32r(r * lat.cos() * lon.cos()),
-                f32r(r * lat.cos() * lon.sin()),
-                f32r(r * lat.sin()),
+                f32r(r * trig::cos(lat) * trig::cos(lon)),
+                f32r(r * trig::cos(lat) * trig::sin(lon)),
+                f32r(r * trig::sin(lat)),
             ));
         }
     }
@@ -563,9 +575,9 @@ pub fn add_arc_through(s: &mut Sketch, a: (f64, f64), mid: (f64, f64), b: (f64, 
     let cx = (sq(ax, ay) * (my - by) + sq(mx, my) * (by - ay) + sq(bx, by) * (ay - my)) / d;
     let cy = (sq(ax, ay) * (bx - mx) + sq(mx, my) * (ax - bx) + sq(bx, by) * (mx - ax)) / d;
     let r = ((ax - cx).powi(2) + (ay - cy).powi(2)).sqrt();
-    let a0 = (ay - cy).atan2(ax - cx);
-    let am = (my - cy).atan2(mx - cx);
-    let mut a1 = (by - cy).atan2(bx - cx);
+    let a0 = trig::atan2(ay - cy, ax - cx);
+    let am = trig::atan2(my - cy, mx - cx);
+    let mut a1 = trig::atan2(by - cy, bx - cx);
     // Sweep through the bulge point.
     let ccw = |from: f64, to: f64| (to - from).rem_euclid(TAU);
     let sweep = if ccw(a0, am) <= ccw(a0, a1) {
@@ -586,7 +598,7 @@ pub fn add_arc_through(s: &mut Sketch, a: (f64, f64), mid: (f64, f64), b: (f64, 
             p3(bx, by, 0.0)
         } else {
             let t = a0 + sweep * i as f64 / n as f64;
-            p3(cx + r * t.cos(), cy + r * t.sin(), 0.0)
+            p3(cx + r * trig::cos(t), cy + r * trig::sin(t), 0.0)
         }
     };
     for i in 0..n {
@@ -629,7 +641,7 @@ pub fn revolved_dome(n_arc: usize, segments: u32) -> Object {
         .unwrap();
         let at = |k: usize| {
             let a = (PI / 2.0) * k as f64 / n_arc as f64;
-            p3(0.5 * a.cos(), 0.0, 0.5 * a.sin())
+            p3(0.5 * trig::cos(a), 0.0, 0.5 * trig::sin(a))
         };
         for k in 0..n_arc {
             sk.add_segment(at(k), at(k + 1)).unwrap();
@@ -664,7 +676,7 @@ pub fn lofted_hull() -> Object {
         points: (0..24)
             .map(|k| {
                 let a = TAU * k as f64 / 24.0;
-                p3(r * a.cos(), r * a.sin(), z)
+                p3(r * trig::cos(a), r * trig::sin(a), z)
             })
             .collect(),
         curves: vec![
@@ -732,7 +744,7 @@ pub fn app_pipe_tee_sized(
             .unwrap();
             let at = |i: usize| {
                 let a = phase + TAU * (i % n) as f64 / n as f64;
-                p3(c.x + r * a.cos(), c.y + r * a.sin(), 0.0)
+                p3(c.x + r * trig::cos(a), c.y + r * trig::sin(a), 0.0)
             };
             for i in 0..n {
                 sk.add_segment(at(i), at(i + 1)).unwrap();
@@ -809,7 +821,7 @@ pub fn grooved_knob(turn: f64) -> (Object, Vec<Vec<EdgeId>>) {
     let mut operands = vec![NodeId::Object(knob)];
     for k in 0..12 {
         let a = (3.75 + 30.0 * k as f64).to_radians();
-        let c = p3(0.02 * a.cos(), 0.02 * a.sin(), -0.002);
+        let c = p3(0.02 * trig::cos(a), 0.02 * trig::sin(a), -0.002);
         let plane = Plane::from_point_normal(c, Vec3::new(0.0, 0.0, 1.0)).unwrap();
         let g = doc.add_sketch(plane);
         doc.begin_sketch_gesture(g).unwrap();
@@ -822,7 +834,7 @@ pub fn grooved_knob(turn: f64) -> (Object, Vec<Vec<EdgeId>>) {
             .unwrap();
             let at = |i: usize| {
                 let b = TAU * (i % 48) as f64 / 48.0;
-                p3(c.x + 0.003 * b.cos(), c.y + 0.003 * b.sin(), c.z)
+                p3(c.x + 0.003 * trig::cos(b), c.y + 0.003 * trig::sin(b), c.z)
             };
             for i in 0..48 {
                 sk.add_segment(at(i), at(i + 1)).unwrap();
@@ -852,7 +864,7 @@ pub fn grooved_knob(turn: f64) -> (Object, Vec<Vec<EdgeId>>) {
     // top, turned with the knob.
     let corner = |k: i32| {
         let a = (15.0 * k as f64).to_radians() + turn;
-        p3(0.02 * a.cos(), 0.02 * a.sin(), 0.025)
+        p3(0.02 * trig::cos(a), 0.02 * trig::sin(a), 0.025)
     };
     let off = |p: Point3, a: Point3, b: Point3| {
         let d = b - a;
@@ -889,7 +901,7 @@ pub fn grooved_knob(turn: f64) -> (Object, Vec<Vec<EdgeId>>) {
     }
     let angle = |c: &[(EdgeId, Point3, Point3)]| {
         let (_, a, b) = c[0];
-        (a.y + b.y).atan2(a.x + b.x)
+        trig::atan2(a.y + b.y, a.x + b.x)
     };
     chains.sort_by(|x, y| angle(x).total_cmp(&angle(y)));
     let chains = chains

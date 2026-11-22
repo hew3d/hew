@@ -70,6 +70,11 @@ plugin-host = { path = "crates/plugin-host" }
 skpwright = "0.6.1"
 
 slotmap = "1"
+# The kernel's transcendental math (crates/kernel/src/trig.rs), one pure-Rust
+# implementation on every target. Held to an exact version, unlike the rest:
+# a new release can round a function differently in the last bit, which moves
+# geometry, so a bump is its own reviewed change with regenerated goldens.
+libm = "=0.2.16"
 # Plugin manifest versions and ranges (crates/plugin-manifest). The serde
 # feature lets `Manifest` derive its own (de)serialization.
 semver = { version = "1", features = ["serde"] }

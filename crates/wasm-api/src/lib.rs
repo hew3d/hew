@@ -40,6 +40,7 @@ use inference::{
     SketchRegionFace, SnapKind, SnapLock, SnapQuery, SnapWeights,
 };
 use js_sys::{Object as JsObject, Reflect, Uint8Array};
+use kernel::trig;
 use kernel::{
     Anchor, Annotation, AnnotationId, BooleanOp, CapturedCurve, ComponentId, DocChange, Document,
     DocumentError, EdgeId, FaceId, GroupId, Guide, GuideId, HistoryOrigin, ImageFormat, InstanceId,
@@ -11046,7 +11047,7 @@ fn ray_meets_posed_box(
         }
         reach = reach.max((p - origin).length());
     }
-    let margin = reach * aperture.tan() + kernel::tol::POINT_MERGE;
+    let margin = reach * trig::tan(aperture) + kernel::tol::POINT_MERGE;
     let o = [origin.x, origin.y, origin.z];
     let d = [dir.x, dir.y, dir.z];
     let (mut t0, mut t1) = (0.0_f64, f64::INFINITY);
@@ -16431,7 +16432,7 @@ mod tests {
         let n = 24usize;
         let p = |i: usize| {
             let a = 2.0 * std::f64::consts::PI * (i as f64 + 0.5) / (n as f64);
-            (1.0 + 0.1 * a.cos(), 1.0 + 0.1 * a.sin())
+            (1.0 + 0.1 * trig::cos(a), 1.0 + 0.1 * trig::sin(a))
         };
         for i in 0..n {
             let (ax, ay) = p(i);
@@ -16929,7 +16930,7 @@ mod tests {
             .unwrap();
         let p = |i: usize| {
             let a = 2.0 * std::f64::consts::PI * (i as f64 + 0.5) / (n as f64);
-            (cx + r * a.cos(), cy + r * a.sin())
+            (cx + r * trig::cos(a), cy + r * trig::sin(a))
         };
         for i in 0..n {
             let (ax, ay) = p(i);
@@ -17018,7 +17019,7 @@ mod tests {
         // cardinal, so a Quadrant candidate is never shadowed by an Endpoint.
         let p = |i: usize| {
             let a = 2.0 * std::f64::consts::PI * (i as f64 + 0.5) / (n as f64);
-            (cx + r * a.cos(), cy + r * a.sin())
+            (cx + r * trig::cos(a), cy + r * trig::sin(a))
         };
         for i in 0..n {
             let (ax, ay) = p(i);
@@ -17058,7 +17059,7 @@ mod tests {
         let mut endpoint_hits = 0usize;
         for k in 0..steps {
             let a = 2.0 * std::f64::consts::PI * (k as f64) / (steps as f64);
-            let (wx, wy) = (cx + r * a.cos(), cy + r * a.sin());
+            let (wx, wy) = (cx + r * trig::cos(a), cy + r * trig::sin(a));
             let snap = scene
                 .snap(
                     wx, wy, 3.0, 0.0, 0.0, -1.0, 0.01, None, None, None, None, None, None, None,
@@ -17135,7 +17136,7 @@ mod tests {
         // A hexagon's six sides, drawn corner to corner exactly like the tool.
         let p = |i: usize| {
             let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
-            (cx + r * a.cos(), cy + r * a.sin())
+            (cx + r * trig::cos(a), cy + r * trig::sin(a))
         };
         for i in 0..n {
             let (ax, ay) = p(i);
@@ -17304,7 +17305,7 @@ mod tests {
         // and the facet vertex beside it are distinct competing candidates.
         let p = |i: usize| {
             let a = 2.0 * std::f64::consts::PI * (i as f64 + 0.5) / (n as f64);
-            (cx + r * a.cos(), cy + r * a.sin())
+            (cx + r * trig::cos(a), cy + r * trig::sin(a))
         };
         for i in 0..n {
             let (ax, ay) = p(i);
@@ -20311,8 +20312,8 @@ mod tests {
         let mut loop_pts = Vec::with_capacity(n * 3);
         for i in 0..n {
             let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
-            loop_pts.push(cx + r * a.cos());
-            loop_pts.push(cy + r * a.sin());
+            loop_pts.push(cx + r * trig::cos(a));
+            loop_pts.push(cy + r * trig::sin(a));
             loop_pts.push(cz);
         }
         let disk = draft_loop_on_face(
@@ -23212,7 +23213,7 @@ mod tests {
         let mut loop_pts = Vec::new();
         for i in 0..=18 {
             let a = std::f64::consts::PI * i as f64 / 18.0;
-            loop_pts.extend([0.5 + 0.3 * a.cos(), 0.5 + 0.3 * a.sin(), 1.0]);
+            loop_pts.extend([0.5 + 0.3 * trig::cos(a), 0.5 + 0.3 * trig::sin(a), 1.0]);
         }
         let seg = draft_loop_on_face(
             &mut scene,
@@ -25690,8 +25691,8 @@ mod tests {
         let mut world_loop = Vec::new();
         for i in 0..8 {
             let theta = std::f64::consts::TAU * (i as f64) / 8.0;
-            world_loop.push(0.5 + 0.3 * theta.cos());
-            world_loop.push(0.5 + 0.3 * theta.sin());
+            world_loop.push(0.5 + 0.3 * trig::cos(theta));
+            world_loop.push(0.5 + 0.3 * trig::sin(theta));
             world_loop.push(1.0);
         }
         let sub_face = draft_loop_on_face(
@@ -25743,8 +25744,8 @@ mod tests {
         for i in 0..8 {
             let theta = std::f64::consts::TAU * (i as f64) / 8.0;
             let local_pt = Point3::new(
-                local_center.x + local_radius * theta.cos(),
-                local_center.y + local_radius * theta.sin(),
+                local_center.x + local_radius * trig::cos(theta),
+                local_center.y + local_radius * trig::sin(theta),
                 1.0,
             );
             let w = pose.apply_point(local_pt);
@@ -25797,8 +25798,8 @@ mod tests {
         for i in 0..8 {
             let theta = std::f64::consts::TAU * (i as f64) / 8.0;
             let local_pt = Point3::new(
-                local_center.x + local_radius * theta.cos(),
-                local_center.y + local_radius * theta.sin(),
+                local_center.x + local_radius * trig::cos(theta),
+                local_center.y + local_radius * trig::sin(theta),
                 1.0,
             );
             let w = pose.apply_point(local_pt);
@@ -26759,7 +26760,15 @@ mod tests {
             let a = std::f64::consts::TAU * i as f64 / n as f64;
             let b = std::f64::consts::TAU * (i + 1) as f64 / n as f64;
             scene
-                .sketch_add_segment(circle, a.cos(), a.sin(), 0.0, b.cos(), b.sin(), 0.0)
+                .sketch_add_segment(
+                    circle,
+                    trig::cos(a),
+                    trig::sin(a),
+                    0.0,
+                    trig::cos(b),
+                    trig::sin(b),
+                    0.0,
+                )
                 .unwrap();
         }
         scene.sketch_end_curve(circle).unwrap();

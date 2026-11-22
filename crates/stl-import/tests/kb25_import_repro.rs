@@ -3,6 +3,7 @@
 //! millimeters, then a boolean with a native disc overlapping its base —
 //! the shape of the reported failure (a sculpted pawn on a base disc).
 
+use kernel::trig;
 use kernel::{BooleanOp, CurveGeom, Document, DocumentError, ObjectId, Plane, Point3, Vec3};
 
 /// Binary STL bytes of a UV sphere (`n_lat` × `n_lon`, radius `r` in the
@@ -20,13 +21,13 @@ pub fn noisy_sphere_stl(n_lat: usize, n_lon: usize, r: f64, noise: f64) -> Vec<u
         let rr = r
             * (1.0
                 + noise
-                    * lat.cos()
-                    * ((7.0 * lat).sin() * (11.0 * lon).cos()
-                        + (5.0 * lon).sin() * (13.0 * lat).cos()));
+                    * trig::cos(lat)
+                    * (trig::sin(7.0 * lat) * trig::cos(11.0 * lon)
+                        + trig::sin(5.0 * lon) * trig::cos(13.0 * lat)));
         [
-            (rr * lat.cos() * lon.cos()) as f32,
-            (rr * lat.cos() * lon.sin()) as f32,
-            (rr * lat.sin()) as f32,
+            (rr * trig::cos(lat) * trig::cos(lon)) as f32,
+            (rr * trig::cos(lat) * trig::sin(lon)) as f32,
+            (rr * trig::sin(lat)) as f32,
         ]
     };
     let mut tris: Vec<[[f32; 3]; 3]> = Vec::new();
@@ -85,7 +86,7 @@ pub fn disc(doc: &mut Document, r: f64, sphere_r: f64, overlap: f64) -> ObjectId
         let n = 48;
         let q = |i: usize| {
             let a = std::f64::consts::TAU * (i % n) as f64 / n as f64;
-            Point3::new(r * a.cos(), r * a.sin(), z0)
+            Point3::new(r * trig::cos(a), r * trig::sin(a), z0)
         };
         for i in 0..n {
             sk.add_segment(q(i), q(i + 1)).unwrap();

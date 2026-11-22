@@ -21,6 +21,7 @@
 //! concave one); the strip's winding is the one opposite the kept pieces
 //! along the rails.
 
+use crate::trig;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod geo;
@@ -299,7 +300,7 @@ fn seg_dist(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     } else {
         (((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / l2).clamp(0.0, 1.0)
     };
-    (p[0] - a[0] - ab[0] * t).hypot(p[1] - a[1] - ab[1] * t)
+    trig::hypot(p[0] - a[0] - ab[0] * t, p[1] - a[1] - ab[1] * t)
 }
 
 /// Whether `p` (in `f`'s plane) lies in face `f`, its boundary counting.
@@ -347,7 +348,7 @@ fn beyond_edge(obj: &Object, f: FaceId, p: Point3) -> Option<EdgeId> {
             let a = to2(obj.vertices()[he.origin].position);
             let b = to2(obj.vertices()[obj.half_edges()[he.next].origin].position);
             let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-            let len = dx.hypot(dy);
+            let len = trig::hypot(dx, dy);
             if len <= tol::POINT_MERGE {
                 continue;
             }
@@ -491,7 +492,7 @@ impl Solver<'_> {
                 let fb = c + nb * (self.sigma * r);
                 let (u0, u1) = ((fa - c) / r, (fb - c) / r);
                 let cosphi = u0.dot(u1).clamp(-1.0, 1.0);
-                let phi = cosphi.acos();
+                let phi = trig::acos(cosphi);
                 let w = (u1 - u0 * cosphi)
                     .normalized()
                     .map_err(|_| unsupported(q))?;
@@ -499,7 +500,7 @@ impl Solver<'_> {
                 offsets.push(fa - q);
                 for k in 1..n {
                     let a = phi * k as f64 / n as f64;
-                    offsets.push(c + (u0 * a.cos() + w * a.sin()) * r - q);
+                    offsets.push(c + (u0 * trig::cos(a) + w * trig::sin(a)) * r - q);
                 }
                 offsets.push(fb - q);
                 Ok(Section {
@@ -1098,7 +1099,7 @@ fn arc_section(
 ) -> Result<Section, PlanFail> {
     let (u0, u1) = ((fa - c) / r, (fb - c) / r);
     let cosphi = u0.dot(u1).clamp(-1.0, 1.0);
-    let phi = cosphi.acos();
+    let phi = trig::acos(cosphi);
     let w = (u1 - u0 * cosphi)
         .normalized()
         .map_err(|_| unsupported(q))?;
@@ -1106,7 +1107,7 @@ fn arc_section(
     offsets.push(fa - q);
     for k in 1..n {
         let a = phi * k as f64 / n as f64;
-        offsets.push(c + (u0 * a.cos() + w * a.sin()) * r - q);
+        offsets.push(c + (u0 * trig::cos(a) + w * trig::sin(a)) * r - q);
     }
     offsets.push(fb - q);
     Ok(Section {
@@ -3512,6 +3513,7 @@ mod tests {
     use crate::loft::{LoftProfile, LoftSpec};
     use crate::math::Point3;
     use crate::topo::Object;
+    use crate::trig;
     use std::f64::consts::TAU;
 
     #[test]
@@ -3523,7 +3525,7 @@ mod tests {
             points: (0..24)
                 .map(|k| {
                     let a = TAU * k as f64 / 24.0;
-                    Point3::new(r * a.cos(), r * a.sin(), z)
+                    Point3::new(r * trig::cos(a), r * trig::sin(a), z)
                 })
                 .collect(),
             curves: vec![
@@ -3606,7 +3608,7 @@ mod tests {
         let ring: Vec<(f64, f64)> = (0..n)
             .map(|i| {
                 let a = TAU * i as f64 / n as f64;
-                (0.02 * a.cos(), 0.02 * a.sin())
+                (0.02 * trig::cos(a), 0.02 * trig::sin(a))
             })
             .collect();
         let s = 0.03;
@@ -3626,7 +3628,7 @@ mod tests {
                 let (p, q) = joined.edge_endpoints(e).unwrap();
                 [p, q]
                     .iter()
-                    .all(|r| (r.z - 0.004).abs() < 1e-9 && r.x.hypot(r.y) < 0.021)
+                    .all(|r| (r.z - 0.004).abs() < 1e-9 && trig::hypot(r.x, r.y) < 0.021)
             })
             .collect();
         assert_eq!(seam.len(), n, "the seam is the boss's foot");
@@ -3659,12 +3661,12 @@ mod tests {
         let hole: Vec<Point3> = (0..12)
             .map(|i| {
                 let a = -TAU * i as f64 / 12.0;
-                Point3::new(0.6 * a.cos(), 0.6 * a.sin(), 0.0)
+                Point3::new(0.6 * trig::cos(a), 0.6 * trig::sin(a), 0.0)
             })
             .collect();
         let p = super::region_point(&plane, &square, &[hole]).unwrap();
         assert!(
-            p.x.hypot(p.y) > 0.6 && p.x.abs() < 1.0 && p.y.abs() < 1.0,
+            trig::hypot(p.x, p.y) > 0.6 && p.x.abs() < 1.0 && p.y.abs() < 1.0,
             "{p:?}"
         );
     }
@@ -3685,14 +3687,14 @@ mod tests {
         let hole: Vec<Point3> = (0..12)
             .map(|i| {
                 let a = -TAU * i as f64 / 12.0;
-                at(0.6 * a.cos(), 0.6 * a.sin())
+                at(0.6 * trig::cos(a), 0.6 * trig::sin(a))
             })
             .collect();
         let p = super::region_point(&plane, &square, &[hole]).unwrap();
         assert!(plane.signed_distance(p).abs() < 1e-12, "{p:?}");
         let (x, y) = ((p - o).dot(u), (p - o).dot(v));
         assert!(
-            x.hypot(y) > 0.6 && x.abs() < 1.0 && y.abs() < 1.0,
+            trig::hypot(x, y) > 0.6 && x.abs() < 1.0 && y.abs() < 1.0,
             "{x} {y}"
         );
     }

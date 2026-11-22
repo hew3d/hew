@@ -6,6 +6,7 @@
 //! one step.
 
 use kernel::topo::LoopKind;
+use kernel::trig;
 use kernel::{
     CurveGeom, Document, DocumentError, FaceId, History, KernelOp, KernelOpReport, Object, Plane,
     Point3, StickyError, Transform, Vec3, WatertightState, tol,
@@ -74,7 +75,7 @@ fn circle(cx: f64, cy: f64, r: f64, n: usize) -> Vec<Point3> {
     (0..n)
         .map(|i| {
             let a = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
-            Point3::new(cx + r * a.cos(), cy + r * a.sin(), 1.0)
+            Point3::new(cx + r * trig::cos(a), cy + r * trig::sin(a), 1.0)
         })
         .collect()
 }

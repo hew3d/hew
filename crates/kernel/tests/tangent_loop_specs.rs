@@ -45,6 +45,7 @@
 //! (6, tessellation, lives in `crates/tessellate`; `.skp` write and read in
 //! `crates/skp-export`; STL export in `crates/mesh-export`.)
 
+use kernel::trig;
 use std::f64::consts::PI;
 
 use kernel::topo::WatertightState;
@@ -67,15 +68,15 @@ fn segments_per_turn(radius: f64) -> usize {
     if ratio >= 1.0 {
         return 24;
     }
-    let exact = PI / (1.0 - ratio).acos();
+    let exact = PI / trig::acos(1.0 - ratio);
     (((exact / 4.0).ceil() * 4.0) as usize).clamp(24, 96)
 }
 
 /// The Circle tool's polygon (`circlePolygonFace`): vertex 0 at the rim,
 /// the rest counter-clockwise about `center`, in the wall's frame.
 fn tool_circle(w: &Wall, cx: f64, cy: f64, rim_x: f64, rim_y: f64) -> (Vec<Point3>, CurveGeom) {
-    let r = (rim_x - cx).hypot(rim_y - cy);
-    let start = (rim_y - cy).atan2(rim_x - cx);
+    let r = trig::hypot(rim_x - cx, rim_y - cy);
+    let start = trig::atan2(rim_y - cy, rim_x - cx);
     let n = segments_per_turn(r);
     (w.ring(cx, cy, r, n, start), w.circle_geom(cx, cy, r))
 }
@@ -472,7 +473,7 @@ fn two_circles_touching_on_the_ground_are_two_discs() {
         (0..24)
             .map(|i| {
                 let a = 2.0 * PI * f64::from(i) / 24.0;
-                p(cx + r * a.cos(), 1.0 + r * a.sin())
+                p(cx + r * trig::cos(a), 1.0 + r * trig::sin(a))
             })
             .collect()
     };
@@ -945,15 +946,15 @@ fn a_cut_around_a_hole_takes_a_second_hole_touching_it() {
     // quarter about the top's center, so the shared vertex meets the cut
     // region's boundary from every side.
     let r = 0.3;
-    let a2 = (-r + r * (PI / 6.0).cos(), r * (PI / 6.0).sin());
+    let a2 = (-r + r * trig::cos(PI / 6.0), r * trig::sin(PI / 6.0));
     for quarter in 0..4 {
         let turn = quarter as f64 * PI / 2.0;
         // Local frame: the first circle about (-r, 0), the second about
         // (r, 0), touching at the origin.
         let at = |x: f64, y: f64| {
             (
-                1.0 + x * turn.cos() - y * turn.sin(),
-                1.0 + x * turn.sin() + y * turn.cos(),
+                1.0 + x * trig::cos(turn) - y * trig::sin(turn),
+                1.0 + x * trig::sin(turn) + y * trig::cos(turn),
             )
         };
         for forward in [true, false] {
@@ -1350,7 +1351,7 @@ fn a_ground_region_with_a_touching_hole_refuses_extrusion_typed_but_drags_freely
     let mut ring: Vec<Point3> = (0..72)
         .map(|i| {
             let a = -std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * f64::from(i) / 72.0;
-            p(1.0 + 0.5 * a.cos(), 0.5 + 0.5 * a.sin())
+            p(1.0 + 0.5 * trig::cos(a), 0.5 + 0.5 * trig::sin(a))
         })
         .collect();
     ring[0] = p(1.0, 0.0);
@@ -1696,7 +1697,7 @@ fn an_older_file_with_a_ring_visiting_a_vertex_twice_loads_and_re_traces() {
     let mut ring: Vec<Point3> = (0..24)
         .map(|i| {
             let a = -std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * f64::from(i) / 24.0;
-            p(1.0 + 0.5 * a.cos(), 0.5 + 0.5 * a.sin())
+            p(1.0 + 0.5 * trig::cos(a), 0.5 + 0.5 * trig::sin(a))
         })
         .collect();
     ring[0] = p(1.0, 0.0);

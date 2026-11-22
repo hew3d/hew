@@ -6,6 +6,7 @@
 
 use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, Response, codes};
 use kernel::Document;
+use kernel::trig;
 use serde_json::{Value, json};
 use std::f64::consts::{PI, TAU};
 
@@ -363,7 +364,7 @@ fn draw_arc_creates_an_open_chain_with_no_region() {
 /// (rather than the analytic one loosened by some chord-count-dependent
 /// tolerance) is what lets the assertion below use a tight epsilon.
 fn wedge_area(radius: f64, sweep: f64, n: usize) -> f64 {
-    n as f64 * 0.5 * radius * radius * (sweep / n as f64).sin()
+    n as f64 * 0.5 * radius * radius * trig::sin(sweep / n as f64)
 }
 
 #[test]

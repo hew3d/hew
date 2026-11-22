@@ -6,6 +6,7 @@
 //! keeps all three.
 
 use kernel::sketch::{CurveGeom, SketchCurveKind};
+use kernel::trig;
 use kernel::{
     BlendProfile, BlendSpec, CornerStyle, Document, DocumentError, EdgeId, NodeId, ObjectId, Plane,
     Point3, SurfaceRef, Transform, Vec3,
@@ -200,7 +201,11 @@ fn ngon(
 ) -> Result<(), kernel::SketchError> {
     let at = |k: usize| {
         let a = std::f64::consts::TAU * k as f64 / n as f64;
-        Point3::new(center.x + r * a.cos(), center.y + r * a.sin(), center.z)
+        Point3::new(
+            center.x + r * trig::cos(a),
+            center.y + r * trig::sin(a),
+            center.z,
+        )
     };
     if let Some(kind) = kind {
         w.begin_curve_with_kind(CurveGeom { center, radius: r }, kind)?;

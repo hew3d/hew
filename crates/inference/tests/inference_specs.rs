@@ -11,6 +11,7 @@ use inference::{
     PickScope, PiercedFace, SOFT_AXIS_SCREEN_REACH, Snap, SnapKind, SnapLock, SnapQuery,
     SnapSource, SnapWeights,
 };
+use kernel::trig;
 use kernel::{
     AxesFrame, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchEdgeId, SketchId,
     Transform, Vec3, tol,
@@ -331,7 +332,7 @@ fn cylinder_query(radius: f64) -> SnapQuery {
 /// point, so both tolerances reach `POINT_SNAP_REACH` times as far.
 #[test]
 fn cylinder_cone_equivalence_at_target_distance() {
-    let radius = CYL_REF_DEPTH * CYL_APERTURE_RAD.tan();
+    let radius = CYL_REF_DEPTH * trig::tan(CYL_APERTURE_RAD);
     let reach = radius * POINT_SNAP_REACH;
 
     let inside = single_point_scene(0.9 * reach, CYL_REF_DEPTH);
@@ -361,14 +362,14 @@ fn cylinder_cone_equivalence_at_target_distance() {
 /// fixed-radius cylinder.
 #[test]
 fn cylinder_cone_diverge_when_the_candidate_is_farther_than_the_target_distance() {
-    let radius = CYL_REF_DEPTH * CYL_APERTURE_RAD.tan();
+    let radius = CYL_REF_DEPTH * trig::tan(CYL_APERTURE_RAD);
     let far_depth = 100.0 * CYL_REF_DEPTH;
     // Comfortably inside the cone at `far_depth` (its radius there is
     // `far_depth * tan(aperture)`, far larger than `offset`), but well
     // outside the cylinder's constant `radius`.
     let offset = 5.0 * radius;
     assert!(
-        offset < far_depth * CYL_APERTURE_RAD.tan(),
+        offset < far_depth * trig::tan(CYL_APERTURE_RAD),
         "still inside the cone"
     );
     assert!(offset > radius, "already outside the cylinder");
@@ -392,13 +393,13 @@ fn cylinder_cone_diverge_when_the_candidate_is_farther_than_the_target_distance(
 /// the cone.
 #[test]
 fn cylinder_cone_diverge_when_the_candidate_is_nearer_than_the_target_distance() {
-    let radius = CYL_REF_DEPTH * CYL_APERTURE_RAD.tan();
+    let radius = CYL_REF_DEPTH * trig::tan(CYL_APERTURE_RAD);
     let near_depth = CYL_REF_DEPTH / 100.0;
     // Well inside the cylinder's constant radius, but well outside the
     // cone's shrunk radius at this depth (`near_depth * tan(aperture)`).
     let offset = 0.5 * radius;
     assert!(
-        offset > near_depth * CYL_APERTURE_RAD.tan(),
+        offset > near_depth * trig::tan(CYL_APERTURE_RAD),
         "already outside the cone"
     );
     assert!(offset < radius, "still inside the cylinder");
@@ -1345,8 +1346,8 @@ fn analytic_cylinder(center: Point3, radius: f64, n: usize, height: f64) -> Obje
     let p = |i: usize| {
         let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
         Point3::new(
-            center.x + radius * a.cos(),
-            center.y + radius * a.sin(),
+            center.x + radius * trig::cos(a),
+            center.y + radius * trig::sin(a),
             0.0,
         )
     };
@@ -1452,7 +1453,7 @@ fn unattributed_prism_has_no_center_candidates() {
     let mut s = kernel::Sketch::on_plane(plane);
     let p = |i: usize| {
         let a = 2.0 * std::f64::consts::PI * (i as f64) / 24.0;
-        Point3::new(a.cos(), a.sin(), 0.0)
+        Point3::new(trig::cos(a), trig::sin(a), 0.0)
     };
     for i in 0..24 {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -1628,7 +1629,7 @@ fn analytic_half_cylinder(radius: f64, n: usize, height: f64) -> Object {
     .unwrap();
     let p = |i: usize| {
         let a = std::f64::consts::PI * (i as f64) / (n as f64);
-        Point3::new(radius * a.cos(), radius * a.sin(), 0.0)
+        Point3::new(radius * trig::cos(a), radius * trig::sin(a), 0.0)
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -1716,10 +1717,10 @@ fn tangent_from_anchor_snaps_on_the_true_circle() {
 
     let anchor = Point3::new(3.0, 0.0, 1.0);
     // Expected tangent point in the top rim plane: alpha = acos(r/d).
-    let alpha = (1.0f64 / 3.0).acos();
+    let alpha = trig::acos(1.0f64 / 3.0);
     // The tangent point at +Y side: (cos a, sin a) relative to the +X
     // direction of the anchor.
-    let expected = Point3::new(alpha.cos(), alpha.sin(), 1.0);
+    let expected = Point3::new(trig::cos(alpha), trig::sin(alpha), 1.0);
 
     let mut q = query(ray_at(Point3::new(2.0, 3.0, 4.0), expected), PIN);
     q.anchor = Some(anchor);
@@ -1748,9 +1749,9 @@ fn tangent_respects_the_covered_angular_range() {
     // Anchor on +X far side: tangent points sit at ±alpha off the +X
     // direction — one on the covered +Y side, one on the uncovered -Y side.
     let anchor = Point3::new(3.0, 0.0, 0.5);
-    let alpha = (1.0f64 / 3.0).acos();
-    let covered = Point3::new(alpha.cos(), alpha.sin(), 0.5);
-    let uncovered = Point3::new(alpha.cos(), -alpha.sin(), 0.5);
+    let alpha = trig::acos(1.0f64 / 3.0);
+    let covered = Point3::new(trig::cos(alpha), trig::sin(alpha), 0.5);
+    let uncovered = Point3::new(trig::cos(alpha), -trig::sin(alpha), 0.5);
 
     let mut q = query(ray_at(Point3::new(2.0, 3.0, 3.0), covered), PIN);
     q.anchor = Some(anchor);
@@ -1847,8 +1848,8 @@ fn placed_analytic_candidates_match_the_linear_reference() {
     assert_eq!(scene.resolve(&qq), scene.resolve_linear(&qq));
 
     // Anchored tangent: anchor at (13, 0, 1), tangent at +alpha off +X.
-    let alpha = (0.5f64 / 3.0).acos();
-    let tan = Point3::new(10.0 + 0.5 * alpha.cos(), 0.5 * alpha.sin(), 1.0);
+    let alpha = trig::acos(0.5f64 / 3.0);
+    let tan = Point3::new(10.0 + 0.5 * trig::cos(alpha), 0.5 * trig::sin(alpha), 1.0);
     let mut tq = query(ray_at(Point3::new(10.0, 3.0, 4.0), tan), PIN);
     tq.anchor = Some(Point3::new(13.0, 0.0, 1.0));
     let snap = scene.resolve(&tq).expect("placed tangent resolves");
@@ -1884,9 +1885,13 @@ fn placed_analytic_candidates_match_the_linear_reference() {
     assert_eq!(scene.resolve(&mqq), scene.resolve_linear(&mqq));
 
     let mtan_anchor = Point3::new(0.0, 23.0, 1.0);
-    let malpha = (0.5f64 / 3.0).acos();
+    let malpha = trig::acos(0.5f64 / 3.0);
     // Anchor is +Y of the mirrored center; tangent at +alpha off +Y.
-    let mtan = Point3::new(-0.5 * malpha.sin(), 20.0 + 0.5 * malpha.cos(), 1.0);
+    let mtan = Point3::new(
+        -0.5 * trig::sin(malpha),
+        20.0 + 0.5 * trig::cos(malpha),
+        1.0,
+    );
     let mut mtq = query(ray_at(Point3::new(-2.0, 21.0, 4.0), mtan), PIN);
     mtq.anchor = Some(mtan_anchor);
     // Whatever it resolves to, the two paths must agree (the load-bearing
@@ -2018,8 +2023,8 @@ fn sketch_with_circle(plane: Plane, center: Point3, radius: f64, n: usize) -> ke
         // candidates aren't shadowed by an Endpoint at the same spot.
         let a0 = 2.0 * std::f64::consts::PI * (i as f64 + 0.5) / (n as f64);
         let a1 = 2.0 * std::f64::consts::PI * (i as f64 + 1.5) / (n as f64);
-        let p0 = center + u * (radius * a0.cos()) + v * (radius * a0.sin());
-        let p1 = center + u * (radius * a1.cos()) + v * (radius * a1.sin());
+        let p0 = center + u * (radius * trig::cos(a0)) + v * (radius * trig::sin(a0));
+        let p1 = center + u * (radius * trig::cos(a1)) + v * (radius * trig::sin(a1));
         s.add_segment(p0, p1).unwrap();
     }
     s.end_curve();
@@ -2085,8 +2090,9 @@ fn sketch_circle_center_snaps_before_any_extrusion() {
     // An anchored tangent resolves on the exact circle.
     let rim = &rims[0];
     let anchor = center + rim.basis_u * 1.5;
-    let alpha = (0.5f64 / 1.5).acos();
-    let tan = center + rim.basis_u * (0.5 * alpha.cos()) + rim.basis_v * (0.5 * alpha.sin());
+    let alpha = trig::acos(0.5f64 / 1.5);
+    let tan =
+        center + rim.basis_u * (0.5 * trig::cos(alpha)) + rim.basis_v * (0.5 * trig::sin(alpha));
     let mut tq = query(ray_at(tan + Vec3::new(0.0, 0.0, 3.0), tan), PIN);
     tq.anchor = Some(anchor);
     let snap = scene.resolve(&tq).expect("drawn circle tangent resolves");
@@ -2167,8 +2173,9 @@ fn drawn_curve_analytic_points_name_their_curve() {
 
     // An anchored tangent point lies exactly ON the curve, so it names it too.
     let anchor = center + rim.basis_u * 1.5;
-    let alpha = (0.5f64 / 1.5).acos();
-    let tan = center + rim.basis_u * (0.5 * alpha.cos()) + rim.basis_v * (0.5 * alpha.sin());
+    let alpha = trig::acos(0.5f64 / 1.5);
+    let tan =
+        center + rim.basis_u * (0.5 * trig::cos(alpha)) + rim.basis_v * (0.5 * trig::sin(alpha));
     let mut tq = query(ray_at(tan + Vec3::new(0.0, 0.0, 3.0), tan), PIN);
     tq.anchor = Some(anchor);
     let snap = scene.resolve(&tq).expect("drawn circle tangent resolves");
@@ -2236,8 +2243,8 @@ fn a_drawn_arc_names_its_curve_like_a_circle() {
     for i in 0..6 {
         let a0 = (i as f64 + 0.5) * step;
         let a1 = (i as f64 + 1.5) * step;
-        let p0 = center + u * (radius * a0.cos()) + v * (radius * a0.sin());
-        let p1 = center + u * (radius * a1.cos()) + v * (radius * a1.sin());
+        let p0 = center + u * (radius * trig::cos(a0)) + v * (radius * trig::sin(a0));
+        let p1 = center + u * (radius * trig::cos(a1)) + v * (radius * trig::sin(a1));
         s.add_segment(p0, p1).unwrap();
     }
     s.end_curve();
@@ -2281,7 +2288,7 @@ fn a_drawn_arc_names_its_curve_like_a_circle() {
     // stronger-kinded candidate at the same spot would win the pin.
     let basis_angle = |p: Point3| -> f64 {
         let d = p - center;
-        d.dot(rim.basis_v).atan2(d.dot(rim.basis_u))
+        trig::atan2(d.dot(rim.basis_v), d.dot(rim.basis_u))
     };
     let mut competitors: Vec<f64> = Vec::new();
     for (_, e) in s.edges().iter() {
@@ -2319,9 +2326,11 @@ fn a_drawn_arc_names_its_curve_like_a_circle() {
     }
     let (alpha, theta) =
         chosen.expect("the arc must offer a covered tangent clear of its facet snaps");
-    let d = radius / alpha.cos();
+    let d = radius / trig::cos(alpha);
     let anchor = center + rim.basis_u * d;
-    let tan = center + rim.basis_u * (radius * theta.cos()) + rim.basis_v * (radius * theta.sin());
+    let tan = center
+        + rim.basis_u * (radius * trig::cos(theta))
+        + rim.basis_v * (radius * trig::sin(theta));
     let mut tq = query(ray_at(tan + Vec3::new(0.0, 0.0, 0.5), tan), PIN);
     tq.anchor = Some(anchor);
     let snap = scene.resolve(&tq).expect("arc tangent resolves");
@@ -2362,8 +2371,8 @@ fn a_polygon_center_names_its_curve_too() {
     for i in 0..6 {
         let a0 = 2.0 * std::f64::consts::PI * (i as f64) / 6.0;
         let a1 = 2.0 * std::f64::consts::PI * (i as f64 + 1.0) / 6.0;
-        let p0 = center + u * (radius * a0.cos()) + v * (radius * a0.sin());
-        let p1 = center + u * (radius * a1.cos()) + v * (radius * a1.sin());
+        let p0 = center + u * (radius * trig::cos(a0)) + v * (radius * trig::sin(a0));
+        let p1 = center + u * (radius * trig::cos(a1)) + v * (radius * trig::sin(a1));
         s.add_segment(p0, p1).unwrap();
     }
     s.end_curve();
@@ -2832,7 +2841,7 @@ fn a_center_with_no_quadrant_companions_still_has_full_gravity() {
         let b = s.vertices()[e.to].position;
         let mid = Point3::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5, (a.z + b.z) * 0.5);
         let d = mid - center;
-        let angle = d.dot(bv).atan2(d.dot(bu));
+        let angle = trig::atan2(d.dot(bv), d.dot(bu));
         if !(angle > 0.17 && angle < 1.40) {
             s.remove_edge(eid).unwrap();
         }
@@ -3332,7 +3341,7 @@ fn edge_on_axis_produces_no_soft_candidate() {
     let two_deg = 2.0_f64.to_radians();
     let ray = PickRay {
         origin: Point3::new(-500.0, 500.0, 500.0),
-        direction: Vec3::new(two_deg.cos(), 0.0, two_deg.sin()),
+        direction: Vec3::new(trig::cos(two_deg), 0.0, trig::sin(two_deg)),
     };
     let q = SnapQuery {
         aperture_mode: ApertureMode::Cone,
@@ -3391,8 +3400,8 @@ fn soft_axis_admission_does_not_widen_with_an_oblique_camera() {
     // anchor's ground plane (z unchanged) — an ordinary ground-plane drag.
     let deg25 = 25.0_f64.to_radians();
     let target = Point3::new(
-        anchor.x + 5.0 * deg25.cos(),
-        anchor.y + 5.0 * deg25.sin(),
+        anchor.x + 5.0 * trig::cos(deg25),
+        anchor.y + 5.0 * trig::sin(deg25),
         anchor.z,
     );
     let ray = PickRay {
@@ -3902,8 +3911,10 @@ fn a_locked_hover_on_geometry_resolves_its_station_from_every_camera() {
         let mut tested = 0;
         for i in 0..16 {
             let theta = std::f64::consts::TAU * f64::from(i) / 16.0;
-            let eye =
-                Point3::ORIGIN + e1 * (8.0 * theta.cos()) + e2 * (8.0 * theta.sin()) + u * 6.0;
+            let eye = Point3::ORIGIN
+                + e1 * (8.0 * trig::cos(theta))
+                + e2 * (8.0 * trig::sin(theta))
+                + u * 6.0;
 
             // Skip the azimuths whose ray to the vertex ALSO passes within
             // the pick aperture of the lock line itself. There the cursor is
@@ -5147,7 +5158,7 @@ fn the_reported_two_box_crossing_is_a_true_crossing() {
     let to = crossing - eye;
     let dist = to.length();
     let side = to.cross(Vec3::new(0.0, 0.0, 1.0)).normalized().unwrap();
-    let aim = crossing + side * (dist * (1.4 * 6e-3_f64).tan());
+    let aim = crossing + side * (dist * trig::tan(1.4 * 6e-3_f64));
     let past_aperture = query(ray_at(eye, aim), 6e-3);
     let snap = resolve(&scene, past_aperture).expect("within a point's reach");
     assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
@@ -5348,7 +5359,7 @@ fn crossing_pairs_past_the_cap_are_skipped_and_counted() {
         let mut scene = InferenceScene::new();
         for i in 0..n {
             let t = std::f64::consts::PI * i as f64 / n as f64;
-            let d = Vec3::new(t.cos(), t.sin(), 0.0);
+            let d = Vec3::new(trig::cos(t), trig::sin(t), 0.0);
             scene.add_sketch(sid(i + 1), &[(eid(i + 1), center - d * 0.3, center + d)]);
         }
         scene
@@ -5446,7 +5457,7 @@ fn edges_of_one_owner_cost_the_crossing_walk_nothing() {
     let fan: Vec<_> = (0..n)
         .map(|i| {
             let t = std::f64::consts::PI * i as f64 / n as f64;
-            let d = Vec3::new(t.cos(), t.sin(), 0.0);
+            let d = Vec3::new(trig::cos(t), trig::sin(t), 0.0);
             (eid(i + 1), center - d * 0.3, center + d)
         })
         .collect();
@@ -5465,7 +5476,7 @@ fn edges_of_one_owner_cost_the_crossing_walk_nothing() {
     scene.add_sketch(sid(1), &fan);
     for k in 0..2u64 {
         let t = 0.37 + 0.9 * k as f64;
-        let d = Vec3::new(t.cos(), t.sin(), 0.0);
+        let d = Vec3::new(trig::cos(t), trig::sin(t), 0.0);
         scene.add_sketch(
             sid(10 + k),
             &[(eid(1000 + k), center - d * 0.4, center + d * 0.9)],
@@ -5967,7 +5978,7 @@ fn hovering_around_the_piercing_lands_on_it_instead_of_flickering() {
     let mut aims = vec![PIERCE];
     for k in 0..8 {
         let t = std::f64::consts::TAU * k as f64 / 8.0;
-        aims.push(PIERCE + Vec3::new(0.0, 0.005 * t.cos(), 0.005 * t.sin()));
+        aims.push(PIERCE + Vec3::new(0.0, 0.005 * trig::cos(t), 0.005 * trig::sin(t)));
     }
     for aim in aims {
         let snap = scene
@@ -5986,7 +5997,7 @@ fn hovering_around_the_piercing_lands_on_it_instead_of_flickering() {
     // still takes it over the face it is sitting on.
     let to = PIERCE - PIERCE_EYE;
     let side = to.cross(Vec3::new(0.0, 0.0, 1.0)).normalized().unwrap();
-    let aim = PIERCE + side * (to.length() * (1.4 * NARROW).tan());
+    let aim = PIERCE + side * (to.length() * trig::tan(1.4 * NARROW));
     let snap = resolve(&scene, pierce_query(aim)).expect("within a point's reach");
     assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
     assert_at(&snap, PIERCE);
@@ -6894,7 +6905,7 @@ fn the_meeting_lines_middle_reaches_as_far_as_a_real_edges() {
     let angle = |at: Point3| {
         let r = meeting_query(eye, at).ray.direction.normalized().unwrap();
         let m = (mid - eye).normalized().unwrap();
-        r.cross(m).length().atan2(r.dot(m))
+        trig::atan2(r.cross(m).length(), r.dot(m))
     };
     let target = 1.6 * NARROW;
     assert!(target < POINT_SNAP_REACH * NARROW);
@@ -7452,7 +7463,11 @@ fn a_flush_box_makes_no_meeting_line_at_any_rotation() {
     let flush = box_object(Point3::new(0.5, 0.6, 0.4), Point3::new(1.0, 1.4, 0.5));
     for i in 0..40 {
         let k = i as f64;
-        let axis = Vec3::new((k * 1.7).sin(), (k * 2.3).cos(), 1.0 + (k * 0.9).sin());
+        let axis = Vec3::new(
+            trig::sin(k * 1.7),
+            trig::cos(k * 2.3),
+            1.0 + trig::sin(k * 0.9),
+        );
         let pose =
             Transform::rotation(axis, 0.37 + k * 0.29)
                 .unwrap()
@@ -7510,7 +7525,7 @@ fn a_meeting_with_a_curved_surface_offers_no_middle_per_facet() {
     // line between them and that piece's middle.
     let vertex = |deg: f64| {
         let a = deg.to_radians();
-        Point3::new(r * a.cos(), r * a.sin(), 0.5)
+        Point3::new(r * trig::cos(a), r * trig::sin(a), 0.5)
     };
     let (a, b) = (vertex(165.0), vertex(180.0));
     let mid = Point3::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0, 0.5);
@@ -7543,7 +7558,7 @@ fn a_meeting_with_a_curved_surface_offers_no_middle_per_facet() {
     let mut s = kernel::Sketch::on_plane(plane);
     let p = |i: usize| {
         let t = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
-        Point3::new(r * t.cos(), r * t.sin(), 0.0)
+        Point3::new(r * trig::cos(t), r * trig::sin(t), 0.0)
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();

@@ -3,6 +3,7 @@
 //! self-intersection guard, driven through their `…_for_test` hooks.
 
 use crate::common;
+use kernel::trig;
 
 use std::collections::BTreeMap;
 
@@ -303,7 +304,7 @@ proptest! {
         let pts: Vec<(f64, f64)> = (0..n)
             .map(|i| {
                 let a = std::f64::consts::TAU * i as f64 / n as f64;
-                (r * a.cos(), r * a.sin())
+                (r * trig::cos(a), r * trig::sin(a))
             })
             .collect();
         let o = prism(&pts, h);
@@ -523,7 +524,7 @@ fn improper_contact_is_fast_on_a_large_object() {
     for z in [0.0, 0.5] {
         for i in 0..n {
             let a = std::f64::consts::TAU * i as f64 / n as f64;
-            pts.push(p3(a.cos(), a.sin(), z));
+            pts.push(p3(trig::cos(a), trig::sin(a), z));
         }
     }
     let mut faces: Vec<Vec<usize>> = vec![(0..n).rev().collect(), (n..2 * n).collect()];

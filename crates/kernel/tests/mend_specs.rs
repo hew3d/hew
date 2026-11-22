@@ -4,6 +4,7 @@
 
 use kernel::health::{Finding, RimRole, Verdict, diagnose};
 use kernel::repair::{FillScope, MendPlan, RepairError};
+use kernel::trig;
 use kernel::{
     DefRecipe, Document, DocumentError, ImportNode, ImportScene, MeshRecipe, NodeId, Object,
     ObjectId, Point3, Transform, Vec3, WatertightState,
@@ -171,8 +172,8 @@ fn split_corner_box(
 
 fn rotation(yaw: f64, pitch: f64) -> impl Fn(Vec3) -> Vec3 {
     move |v: Vec3| {
-        let (sy, cy) = yaw.sin_cos();
-        let (sp, cp) = pitch.sin_cos();
+        let (sy, cy) = trig::sin_cos(yaw);
+        let (sp, cp) = trig::sin_cos(pitch);
         let v = Vec3::new(v.x * cy - v.y * sy, v.x * sy + v.y * cy, v.z);
         Vec3::new(v.x, v.y * cp - v.z * sp, v.y * sp + v.z * cp)
     }
@@ -180,7 +181,11 @@ fn rotation(yaw: f64, pitch: f64) -> impl Fn(Vec3) -> Vec3 {
 
 /// A unit direction from two angles.
 fn dir(a: f64, b: f64) -> Vec3 {
-    Vec3::new(a.cos() * b.cos(), a.sin() * b.cos(), b.sin())
+    Vec3::new(
+        trig::cos(a) * trig::cos(b),
+        trig::sin(a) * trig::cos(b),
+        trig::sin(b),
+    )
 }
 
 /// A UV sphere of radius `r`: poles as single points, triangles only.
@@ -191,9 +196,9 @@ fn sphere(n_lat: usize, n_lon: usize, r: f64) -> (Vec<Point3>, Vec<Vec<usize>>) 
         for j in 0..n_lon {
             let lon = std::f64::consts::TAU * j as f64 / n_lon as f64;
             pos.push(p(
-                r * lat.cos() * lon.cos(),
-                r * lat.cos() * lon.sin(),
-                r * lat.sin(),
+                r * trig::cos(lat) * trig::cos(lon),
+                r * trig::cos(lat) * trig::sin(lon),
+                r * trig::sin(lat),
             ));
         }
     }
@@ -254,7 +259,7 @@ proptest! {
     ) {
         let rot = rotation(yaw, pitch);
         let shake = move |f: usize, v: usize| {
-            let h = (seed as f64 + f as f64 * 7.3 + v as f64 * 1.9).sin();
+            let h = trig::sin(seed as f64 + f as f64 * 7.3 + v as f64 * 1.9);
             dir(h * 11.0, h * 5.0) * (jitter * D / 3.0)
         };
         let (pos, faces) = split_corner_box([a, b, c], &rot, &shake);
@@ -417,7 +422,7 @@ fn cones(k: usize, segments: usize) -> (Vec<Point3>, Vec<Vec<usize>>) {
         let base = pos.len();
         for s in 0..segments {
             let t = std::f64::consts::TAU * s as f64 / segments as f64;
-            pos.push(Point3::ORIGIN + axis * 2.0 + (u * t.cos() + v * t.sin()) * 0.3);
+            pos.push(Point3::ORIGIN + axis * 2.0 + (u * trig::cos(t) + v * trig::sin(t)) * 0.3);
         }
         for s in 0..segments {
             faces.push(vec![0, base + (s + 1) % segments, base + s]);
@@ -546,12 +551,12 @@ fn bent_tube(n: usize) -> (Vec<Point3>, Vec<Vec<usize>>) {
     let mut pos = Vec::new();
     for j in 0..n {
         let t = std::f64::consts::TAU * j as f64 / n as f64;
-        pos.push(p(t.cos(), t.sin(), 0.0));
+        pos.push(p(trig::cos(t), trig::sin(t), 0.0));
     }
     for j in 0..n {
         let t = std::f64::consts::TAU * j as f64 / n as f64;
         let z = 10.0 + if j % 2 == 0 { 0.05 } else { -0.05 };
-        pos.push(p(t.cos(), t.sin(), z));
+        pos.push(p(trig::cos(t), trig::sin(t), z));
     }
     let mut faces = vec![(0..n).rev().collect::<Vec<_>>()];
     for j in 0..n {
@@ -1326,7 +1331,7 @@ fn the_diameter_does_not_depend_on_the_listing() {
     let pos: Vec<Point3> = pos
         .iter()
         .enumerate()
-        .map(|(k, q)| *q + Vec3::new((k as f64 * 0.7).sin() * 0.01, 0.0, 0.0))
+        .map(|(k, q)| *q + Vec3::new(trig::sin(k as f64 * 0.7) * 0.01, 0.0, 0.0))
         .collect();
     let d0 = kernel::health::diameter(&pos);
     let mut rev = pos.clone();

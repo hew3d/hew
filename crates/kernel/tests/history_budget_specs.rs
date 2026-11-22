@@ -9,6 +9,7 @@
 //! redoes bit-for-bit as before.
 
 use kernel::repair::{MendPlan, default_weld_distance};
+use kernel::trig;
 use kernel::{
     CompoundMeta, DEFAULT_HISTORY_BUDGET_BYTES, DEFAULT_HISTORY_MIN_STEPS, Document, DocumentError,
     HistoryBudget, HistoryOrigin, ImportNode, ImportScene, KernelOp, MeshRecipe, NodeId, ObjectId,
@@ -26,9 +27,9 @@ fn scan(n: usize) -> MeshRecipe {
         for j in 0..2 * n {
             let ph = std::f64::consts::PI * j as f64 / n as f64;
             positions.push(Point3::new(
-                th.sin() * ph.cos(),
-                th.sin() * ph.sin(),
-                th.cos(),
+                trig::sin(th) * trig::cos(ph),
+                trig::sin(th) * trig::sin(ph),
+                trig::cos(th),
             ));
         }
     }
@@ -219,7 +220,7 @@ fn a_paint_step_counts_its_face_fingerprint() {
         let ring = |z: f64| {
             (0..n).map(move |i| {
                 let a = std::f64::consts::TAU * i as f64 / n as f64;
-                Point3::new(a.cos(), a.sin(), z)
+                Point3::new(trig::cos(a), trig::sin(a), z)
             })
         };
         let positions: Vec<Point3> = ring(0.0).chain(ring(1.0)).collect();

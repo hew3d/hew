@@ -44,6 +44,7 @@
 //!   frozen unless the step unlocked, and keeps its geometry where it
 //!   stands, its name and its tags (`lock_oracle`).
 
+use kernel::trig;
 use kernel::{
     Anchor, Annotation, BooleanOp, CapturedCurve, Document, DocumentError, FaceId, KernelOp,
     KernelOpError, Material, MaterialId, MaterialScope, NodeId, ObjectId, PendingActionKind, Plane,
@@ -2614,7 +2615,7 @@ fn interior_triangle(
     if r.is_nan() || r <= 0.02 {
         return None;
     }
-    let corner = |ang: f64| c + u * (r * ang.cos()) + v * (r * ang.sin());
+    let corner = |ang: f64| c + u * (r * trig::cos(ang)) + v * (r * trig::sin(ang));
     let tri = [
         corner(turn),
         corner(turn + 2.094_395_1),
@@ -2819,7 +2820,7 @@ fn apply_draw_detached(
             let ring: Vec<Point3> = (0..segments)
                 .map(|i| {
                     let t = std::f64::consts::TAU * i as f64 / segments as f64;
-                    center + u * (radius * t.cos()) + v * (radius * t.sin())
+                    center + u * (radius * trig::cos(t)) + v * (radius * trig::sin(t))
                 })
                 .collect();
             drawn.extend(ring.iter().copied());
@@ -3070,7 +3071,7 @@ fn apply_draft(
                 let ring: Vec<Point3> = (0..segments)
                     .map(|i| {
                         let t = std::f64::consts::TAU * i as f64 / segments as f64;
-                        center + u * (radius * t.cos()) + v * (radius * t.sin())
+                        center + u * (radius * trig::cos(t)) + v * (radius * trig::sin(t))
                     })
                     .collect();
                 sk.begin_curve_with(kernel::CurveGeom { center, radius })?;
@@ -3432,7 +3433,7 @@ fn apply_doc_op(
                 (0..24)
                     .map(|k| {
                         let ang = std::f64::consts::TAU * k as f64 / 24.0;
-                        c + start * (rad * ang.cos()) + side_dir * (rad * ang.sin())
+                        c + start * (rad * trig::cos(ang)) + side_dir * (rad * trig::sin(ang))
                     })
                     .collect()
             };
@@ -3639,7 +3640,7 @@ fn apply_doc_op(
                     .map(|i| {
                         let t = std::f64::consts::PI / 24.0
                             + std::f64::consts::TAU * f64::from(i) / 24.0;
-                        m + eu * (r * t.cos()) + ev * (r * t.sin())
+                        m + eu * (r * trig::cos(t)) + ev * (r * trig::sin(t))
                     })
                     .collect();
                 (
@@ -3855,7 +3856,7 @@ fn apply_doc_op(
                     .map(|i| {
                         let t = std::f64::consts::PI / 24.0
                             + std::f64::consts::TAU * f64::from(i) / 24.0;
-                        m + along * (r * t.cos()) + out * (r * t.sin())
+                        m + along * (r * trig::cos(t)) + out * (r * trig::sin(t))
                     })
                     .collect();
                 (
@@ -5099,8 +5100,8 @@ fn apply_doc_op(
             let at = |i: usize| {
                 let a = std::f64::consts::TAU * (i as f64) / (*segments as f64);
                 Point3::new(
-                    center.x + radius * a.cos(),
-                    center.y + radius * a.sin(),
+                    center.x + radius * trig::cos(a),
+                    center.y + radius * trig::sin(a),
                     0.0,
                 )
             };

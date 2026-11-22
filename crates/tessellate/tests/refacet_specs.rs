@@ -5,6 +5,7 @@
 //! at ANY resolution — the caps are re-triangulated with bitwise the same
 //! rim points the new wall quads use.
 
+use kernel::trig;
 use std::collections::BTreeMap;
 
 use kernel::{CurveGeom, Document, KernelOp, Object, ObjectId, Plane, Point3, Sketch};
@@ -25,8 +26,8 @@ fn circle_sketch(center: Point3, radius: f64, n: usize) -> Sketch {
     let p = |i: usize| {
         let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
         Point3::new(
-            center.x + radius * a.cos(),
-            center.y + radius * a.sin(),
+            center.x + radius * trig::cos(a),
+            center.y + radius * trig::sin(a),
             0.0,
         )
     };
@@ -62,7 +63,7 @@ fn drilled_block(hole_radius: f64, n: usize, h: f64) -> Object {
     .unwrap();
     let p = |i: usize| {
         let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
-        Point3::new(hole_radius * a.cos(), hole_radius * a.sin(), 0.0)
+        Point3::new(hole_radius * trig::cos(a), hole_radius * trig::sin(a), 0.0)
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -88,7 +89,7 @@ fn d_solid(n: usize, h: f64) -> Object {
     .unwrap();
     let p = |i: usize| {
         let a = std::f64::consts::PI * (i as f64) / (n as f64);
-        Point3::new(a.cos(), a.sin(), 0.0)
+        Point3::new(trig::cos(a), trig::sin(a), 0.0)
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -148,7 +149,7 @@ fn soup_volume(soup: &[f64]) -> f64 {
 
 /// Volume of an inscribed n-gon prism of radius r, height h.
 fn prism_volume(n: usize, r: f64, h: f64) -> f64 {
-    0.5 * (n as f64) * r * r * (2.0 * std::f64::consts::PI / (n as f64)).sin() * h
+    0.5 * (n as f64) * r * r * trig::sin(2.0 * std::f64::consts::PI / (n as f64)) * h
 }
 
 fn contains_point(soup: &[f64], p: Point3) -> bool {
@@ -391,7 +392,7 @@ proptest::proptest! {
                 .unwrap();
                 let p = |i: usize| {
                     let a = std::f64::consts::PI * (i as f64) / (n_draw as f64);
-                    Point3::new(r * a.cos(), r * a.sin(), 0.0)
+                    Point3::new(r * trig::cos(a), r * trig::sin(a), 0.0)
                 };
                 for i in 0..n_draw {
                     s.add_segment(p(i), p(i + 1)).unwrap();
@@ -788,7 +789,7 @@ fn bent_sweep_walls_deliberately_export_at_stored_facets() {
     .unwrap();
     let p = |i: usize| {
         let a = 2.0 * std::f64::consts::PI * ((i % 24) as f64) / 24.0;
-        Point3::new(0.0, 0.3 * a.cos(), 0.3 * a.sin())
+        Point3::new(0.0, 0.3 * trig::cos(a), 0.3 * trig::sin(a))
     };
     for i in 0..24 {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -832,7 +833,7 @@ fn open_arc_sweep_rows_demote_rather_than_orphan_their_seam() {
     .unwrap();
     let p = |i: usize| {
         let a = std::f64::consts::PI * (i as f64) / 12.0;
-        Point3::new(a.cos(), a.sin(), 0.0)
+        Point3::new(trig::cos(a), trig::sin(a), 0.0)
     };
     for i in 0..12 {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -894,7 +895,7 @@ fn box_with_circles(circles: &[(f64, f64, f64)], distance: f64) -> (Document, Ob
         let pts: Vec<Point3> = (0..n)
             .map(|i| {
                 let a = phase + TAU * i as f64 / n as f64;
-                Point3::new(cx + radius * a.cos(), cy + radius * a.sin(), 1.0)
+                Point3::new(cx + radius * trig::cos(a), cy + radius * trig::sin(a), 1.0)
             })
             .collect();
         doc.draft(top, None, &[id], "Circle", |sk| {
@@ -981,11 +982,20 @@ fn a_band_tangent_to_any_edge_of_its_face_refacets() {
 fn sphere_and_torus_facets_shade_with_analytic_normals() {
     use kernel::{SurfaceRef, Vec3};
     let d = 15f64.to_radians();
-    let sphere_pt =
-        |lat: f64, lon: f64| Point3::new(lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin());
+    let sphere_pt = |lat: f64, lon: f64| {
+        Point3::new(
+            trig::cos(lat) * trig::cos(lon),
+            trig::cos(lat) * trig::sin(lon),
+            trig::sin(lat),
+        )
+    };
     let torus_pt = |phi: f64, psi: f64| {
-        let rho = 2.0 + 0.5 * psi.cos();
-        Point3::new(rho * phi.cos(), rho * phi.sin(), 0.5 * psi.sin())
+        let rho = 2.0 + 0.5 * trig::cos(psi);
+        Point3::new(
+            rho * trig::cos(phi),
+            rho * trig::sin(phi),
+            0.5 * trig::sin(psi),
+        )
     };
     let cases = [
         (
@@ -1093,7 +1103,8 @@ fn rounded_rect_prism() -> Object {
         (-hx + r, -hy + r, std::f64::consts::PI),
         (hx - r, -hy + r, 3.0 * std::f64::consts::FRAC_PI_2),
     ];
-    let at = |cx: f64, cy: f64, a: f64| Point3::new(cx + r * a.cos(), cy + r * a.sin(), 0.0);
+    let at =
+        |cx: f64, cy: f64, a: f64| Point3::new(cx + r * trig::cos(a), cy + r * trig::sin(a), 0.0);
     for (i, &(cx, cy, a0)) in corners.iter().enumerate() {
         s.begin_curve_with(CurveGeom {
             center: Point3::new(cx, cy, 0.0),
@@ -1289,7 +1300,7 @@ fn cylinder_rim_torus_refacets_sharing_the_wall_stations() {
     // Refined: more points around the rail circle than the 48 stored.
     let on_rail: BTreeMap<u64, ()> = torus_soup_points(&soup, 0.85)
         .iter()
-        .filter(|p| (p.z - 0.9).abs() < 1e-12 && (p.x.hypot(p.y) - 0.5).abs() < 1e-9)
+        .filter(|p| (p.z - 0.9).abs() < 1e-12 && (trig::hypot(p.x, p.y) - 0.5).abs() < 1e-9)
         .map(|p| (p.x.to_bits() ^ p.y.to_bits().rotate_left(17), ()))
         .collect();
     assert!(on_rail.len() >= 96, "{} rail points", on_rail.len());
@@ -1310,7 +1321,7 @@ fn cone_chamfer_band_refacets() {
     assert_manifold(&soup);
     let top_ring = torus_soup_points(&soup, 0.99)
         .iter()
-        .filter(|p| (p.z - 1.0).abs() < 1e-12 && (p.x.hypot(p.y) - 0.45).abs() < 1e-9)
+        .filter(|p| (p.z - 1.0).abs() < 1e-12 && (trig::hypot(p.x, p.y) - 0.45).abs() < 1e-9)
         .count();
     assert!(top_ring > 48 * 3, "{top_ring}");
 }

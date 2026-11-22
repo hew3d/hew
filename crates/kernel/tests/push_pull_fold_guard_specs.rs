@@ -19,6 +19,7 @@
 //!   (`footprints_overlap`'s own doc), so the slot reaching the step reaches
 //!   the boolean path through the fold test, not through that contact.
 
+use kernel::trig;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use kernel::{FaceId, Object, Plane, Point3, Profile, PushPullError, Transform, Vec3};
@@ -90,11 +91,11 @@ fn push(obj: &Object, face: FaceId, distance: f64) -> Result<Vec<Object>, PushPu
 fn block_on_cylinder() -> (Object, FaceId) {
     const R: f64 = 0.049;
     const XW: f64 = 0.008;
-    let phase = ((XW + 2.2e-5) / R).acos();
+    let phase = trig::acos((XW + 2.2e-5) / R);
     let rim: Vec<Point3> = (0..30)
         .map(|i| {
             let a = phase + TAU * f64::from(i) / 30.0;
-            Point3::new(R * a.cos(), R * a.sin(), 0.0)
+            Point3::new(R * trig::cos(a), R * trig::sin(a), 0.0)
         })
         .collect();
     let mut obj = prism(rim, 0.05);

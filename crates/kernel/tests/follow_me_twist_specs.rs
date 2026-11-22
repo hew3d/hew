@@ -3,6 +3,7 @@
 //! turned and scaled about the transported profile centroid, assembled by
 //! the skin builder.
 
+use kernel::trig;
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, PI};
 
 use kernel::SweepOptions;
@@ -39,7 +40,7 @@ fn opts(twist: f64, end_scale: f64) -> SweepOptions {
 
 fn rotate(p: Point3, c: Point3, axis: Vec3, angle: f64) -> Point3 {
     let v = p - c;
-    let (s, co) = angle.sin_cos();
+    let (s, co) = trig::sin_cos(angle);
     c + v * co + axis.cross(v) * s + axis * (axis.dot(v) * (1.0 - co))
 }
 
@@ -131,7 +132,7 @@ fn defaults_are_byte_identical() {
     let circle: Vec<Point3> = (0..n)
         .map(|k| {
             let a = k as f64 * 2.0 * PI / n as f64;
-            Point3::new(2.0 * a.cos(), 2.0 * a.sin(), 0.0)
+            Point3::new(2.0 * trig::cos(a), 2.0 * trig::sin(a), 0.0)
         })
         .collect();
     let g = CurveGeom {
@@ -229,7 +230,7 @@ fn airfoil() -> Profile {
     let n = 8;
     let p = |k: usize| {
         let a = k as f64 * PI / n as f64;
-        Point3::new(0.1 * a.cos(), 0.1 * a.sin(), 0.0)
+        Point3::new(0.1 * trig::cos(a), 0.1 * trig::sin(a), 0.0)
     };
     sk.begin_curve_with(CurveGeom {
         center: Point3::ORIGIN,

@@ -5,6 +5,7 @@
 
 use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId};
 use kernel::Document;
+use kernel::trig;
 use serde_json::{Value, json};
 
 static REGISTRY: std::sync::LazyLock<api::Registry> =
@@ -607,7 +608,7 @@ fn an_oversized_prism_is_refused_before_it_is_built() {
     let ring: Vec<[f64; 3]> = (0..n)
         .map(|k| {
             let t = k as f64 / n as f64 * std::f64::consts::TAU;
-            [t.cos(), t.sin(), 0.0]
+            [trig::cos(t), trig::sin(t), 0.0]
         })
         .collect();
     let started = std::time::Instant::now();
@@ -634,7 +635,7 @@ fn a_finely_faceted_prism_builds_correctly() {
     let ring: Vec<[f64; 3]> = (0..n)
         .map(|k| {
             let t = k as f64 / n as f64 * std::f64::consts::TAU;
-            [t.cos(), t.sin(), 0.0]
+            [trig::cos(t), trig::sin(t), 0.0]
         })
         .collect();
     let r = prism_measure(&mut s, json!([ring]), 1.0).unwrap();
@@ -649,7 +650,7 @@ fn a_loop_past_the_point_cap_is_a_params_error() {
     let ring: Vec<[f64; 3]> = (0..n)
         .map(|k| {
             let t = k as f64 / n as f64 * std::f64::consts::TAU;
-            [t.cos(), t.sin(), 0.0]
+            [trig::cos(t), trig::sin(t), 0.0]
         })
         .collect();
     let r = s.call(

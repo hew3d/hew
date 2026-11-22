@@ -1,6 +1,7 @@
 //! WP16: the offset engine and Shell.
 
 use crate::common;
+use kernel::trig;
 
 use std::collections::BTreeMap;
 use std::f64::consts::{FRAC_PI_2, PI};
@@ -110,7 +111,11 @@ fn rounded_box(a: f64, b: f64, c: f64, r: f64, n: usize) -> Object {
             } else if i == 2 * n {
                 Vec3::new(0.0, 0.0, 1.0)
             } else {
-                Vec3::new(lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin())
+                Vec3::new(
+                    trig::cos(lat) * trig::cos(lon),
+                    trig::cos(lat) * trig::sin(lon),
+                    trig::sin(lat),
+                )
             };
             // Pole points coincide within a quadrant.
             let k = if i == 0 || i == 2 * n {
@@ -240,7 +245,7 @@ fn revolved(profile: &[(f64, f64)], claims: &[Option<SurfaceRef>], m: usize) -> 
             let ring = (0..m)
                 .map(|j| {
                     let t = j as f64 * 2.0 * PI / m as f64;
-                    pts.push(p3(rho * t.cos(), rho * t.sin(), z));
+                    pts.push(p3(rho * trig::cos(t), rho * trig::sin(t), z));
                     pts.len() - 1
                 })
                 .collect();
@@ -321,7 +326,7 @@ fn capsule_rod(r: f64, l: f64, n: usize, m: usize) -> Object {
         profile.push(if i == n {
             (0.0, l + r)
         } else {
-            (r * lat.cos(), l + r * lat.sin())
+            (r * trig::cos(lat), l + r * trig::sin(lat))
         });
         claims.push(sph);
     }
@@ -332,7 +337,7 @@ fn capsule_rod(r: f64, l: f64, n: usize, m: usize) -> Object {
 /// at height `−h0`) above the ground plane, which cuts it at an angle.
 fn dome(r: f64, h0: f64, n: usize, m: usize) -> Object {
     let base = (r * r - h0 * h0).sqrt();
-    let lat0 = (h0 / r).asin();
+    let lat0 = trig::asin(h0 / r);
     let mut profile = vec![(0.0, 0.0), (base, 0.0)];
     let sph = Some(SurfaceRef::Sphere {
         center: p3(0.0, 0.0, -h0),
@@ -344,7 +349,7 @@ fn dome(r: f64, h0: f64, n: usize, m: usize) -> Object {
         profile.push(if i == n {
             (0.0, r - h0)
         } else {
-            (r * lat.cos(), r * lat.sin() - h0)
+            (r * trig::cos(lat), r * trig::sin(lat) - h0)
         });
         claims.push(sph);
     }
@@ -388,7 +393,7 @@ fn soft_hull() -> Object {
     for &(z, rho, twist) in &stations {
         for j in 0..m {
             let t = j as f64 * 2.0 * PI / m as f64 + twist;
-            pts.push(p3(rho * t.cos(), rho * t.sin(), z));
+            pts.push(p3(rho * trig::cos(t), rho * trig::sin(t), z));
         }
     }
     let mut faces: Vec<Vec<usize>> = Vec::new();
@@ -998,7 +1003,7 @@ fn a_pocket_floor_under_a_thicker_wall_opens_a_hole_through_the_top() {
                     (pa.x - pb.x).abs() < 1e-12
                         && (pa.y - pb.y).abs() < 1e-12
                         && (pa.z - pb.z).abs() > 0.5 * t
-                        && (pa.x - 0.5).hypot(pa.y - 0.5) < a + 1e-9
+                        && trig::hypot(pa.x - 0.5, pa.y - 0.5) < a + 1e-9
                 })
                 .filter(|e| e.soft)
                 .count();
@@ -1477,7 +1482,7 @@ proptest::proptest! {
         // corners moved `t` out onto the offset cylinder.
         let grown = if round {
             let n = 32.0;
-            0.5 * n * (a + t).powi(2) * (2.0 * PI / n).sin()
+            0.5 * n * (a + t).powi(2) * trig::sin(2.0 * PI / n)
         } else {
             4.0 * (a + t).powi(2)
         };

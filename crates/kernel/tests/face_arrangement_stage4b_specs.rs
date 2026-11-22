@@ -27,6 +27,7 @@
 //! byte-identical saves, I6 the face group equals the ground's regions for
 //! the same lines, I7 the saved document reopens.
 
+use kernel::trig;
 use std::f64::consts::PI;
 
 use kernel::{
@@ -346,11 +347,11 @@ fn strip_with_circle(aligned: bool) -> (Wall, Vec<Rings>, CurveGeom) {
 fn arc_path(w: &Wall, n: usize) -> (Vec<Point3>, Vec<Option<CurveGeom>>, CurveGeom) {
     let (cx, cy, r) = (10.0 * MM, -6.0 * MM, 10.0 * MM);
     let g = w.circle_geom(cx, cy, r);
-    let (a0, a1) = ((6.0f64).atan2(-8.0), (6.0f64).atan2(8.0));
+    let (a0, a1) = (trig::atan2(6.0f64, -8.0), trig::atan2(6.0f64, 8.0));
     let mut path: Vec<Point3> = (0..=n)
         .map(|i| {
             let a = a0 + (a1 - a0) * i as f64 / n as f64;
-            w.at(cx + r * a.cos(), cy + r * a.sin())
+            w.at(cx + r * trig::cos(a), cy + r * trig::sin(a))
         })
         .collect();
     // The ends exactly on the bottom edge (on the circle exactly, too).
@@ -1055,7 +1056,7 @@ fn a_circle_whose_runs_lost_every_claim_is_still_one_whole_circle() {
     assert!(runs_close(&runs), "a whole circle");
     // Every chord lying on the circle's facets (each point and each
     // segment midpoint within one facet's sagitta of the rim) is on a run.
-    let sagitta = r * (1.0 - (PI / 24.0).cos());
+    let sagitta = r * (1.0 - trig::cos(PI / 24.0));
     let on_rim = |p: Point3| {
         let d = (p - g.center).length();
         d <= r + 1e-12 && d >= r - sagitta - 1e-12

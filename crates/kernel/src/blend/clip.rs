@@ -5,6 +5,7 @@
 //! instead), so one algorithm covers run-outs at any valence, non-prismatic
 //! miters and chamfer apexes.
 
+use crate::trig;
 use std::collections::BTreeMap;
 
 use crate::ids::{EdgeId, FaceId};
@@ -156,7 +157,7 @@ impl ConvexCell {
                 / on_cap.len() as f64;
             let ang = |i: usize| {
                 let r = self.verts[i].to_vec() - c;
-                r.dot(v).atan2(r.dot(u))
+                trig::atan2(r.dot(v), r.dot(u))
             };
             on_cap.sort_by(|&a, &b| ang(a).total_cmp(&ang(b)).then(a.cmp(&b)));
             new_faces.push(CellFace {

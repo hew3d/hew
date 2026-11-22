@@ -10,6 +10,7 @@
 //! sets; see `document.rs`).
 
 use crate::math::{Point3, Vec3};
+use crate::trig;
 
 /// Which projection [`CameraState`] describes. Mirrors the app's
 /// `CameraRig.projection` (`'perspective' | 'parallel'`) one-to-one; kept as
@@ -63,7 +64,7 @@ impl CameraState {
     /// existed, or one given by eye, target and fov alone).
     pub fn height_at_target(eye: Point3, target: Point3, fov_deg: f64) -> f64 {
         let dist = (eye - target).length();
-        CameraState::usable_height(2.0 * dist * (fov_deg.to_radians() / 2.0).tan())
+        CameraState::usable_height(2.0 * dist * trig::tan(fov_deg.to_radians() / 2.0))
     }
 
     /// `height` when it is a height a view can span (finite and positive),

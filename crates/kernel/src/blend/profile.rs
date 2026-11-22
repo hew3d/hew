@@ -6,13 +6,14 @@ use super::{BlendError, ProfileSeg, ProfileShape};
 use crate::math::{Point3, Vec3};
 use crate::sketch::CurveGeom;
 use crate::tol;
+use crate::trig;
 
 /// One sampled point of a profile and the arc (center, radius) of the facet
 /// ending at it, `None` for a line facet (and for the start point).
 pub type ProfileSample = ([f64; 2], Option<([f64; 2], f64)>);
 
 fn d2(a: [f64; 2], b: [f64; 2]) -> f64 {
-    (a[0] - b[0]).hypot(a[1] - b[1])
+    trig::hypot(a[0] - b[0], a[1] - b[1])
 }
 
 fn cross(o: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -70,8 +71,8 @@ impl ProfileShape {
                     {
                         return Err(bad);
                     }
-                    let a0 = (prev[1] - center[1]).atan2(prev[0] - center[0]);
-                    let a1 = (to[1] - center[1]).atan2(to[0] - center[0]);
+                    let a0 = trig::atan2(prev[1] - center[1], prev[0] - center[0]);
+                    let a1 = trig::atan2(to[1] - center[1], to[0] - center[0]);
                     let mut sweep = a1 - a0;
                     if ccw {
                         while sweep <= 0.0 {
@@ -90,7 +91,7 @@ impl ProfileShape {
                             to
                         } else {
                             let a = a0 + sweep * k as f64 / n as f64;
-                            [center[0] + r0 * a.cos(), center[1] + r0 * a.sin()]
+                            [center[0] + r0 * trig::cos(a), center[1] + r0 * trig::sin(a)]
                         };
                         out.push((p, Some((center, r0))));
                     }

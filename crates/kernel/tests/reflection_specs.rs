@@ -2,6 +2,7 @@
 //! solids and sketches: the geometry is mirrored and every face is turned
 //! over, so the solid stays watertight and right side out.
 
+use kernel::trig;
 use kernel::{
     Document, DocumentError, Object, ObjectId, Plane, Point3, SketchId, Transform, TransformError,
     Vec3, WatertightState,
@@ -461,7 +462,11 @@ fn reflection_maps_cylinder_surfaces_and_drops_them_under_anisotropy() {
             .unwrap();
             let pt = |i: usize| {
                 let a = (i % n) as f64 / n as f64 * std::f64::consts::TAU;
-                Point3::new(center.x + 0.5 * a.cos(), center.y + 0.5 * a.sin(), 0.0)
+                Point3::new(
+                    center.x + 0.5 * trig::cos(a),
+                    center.y + 0.5 * trig::sin(a),
+                    0.0,
+                )
             };
             for i in 0..n {
                 sk.add_segment(pt(i), pt(i + 1)).unwrap();

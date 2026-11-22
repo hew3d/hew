@@ -1,3 +1,9 @@
+// Test-only, and outside the determinism-critical kernel scope (kernel /
+// inference / tessellate / mesh-heal): transcendentals here build the
+// inputs and expectations of a native test, never a document a user keeps.
+// Suppress the workspace clippy.toml ban for this integration-test crate.
+#![allow(clippy::disallowed_methods)]
+
 //! Saving back over the `.skp` a document was opened from: an unchanged
 //! open-and-save keeps the file's structure — every definition and its
 //! geometry as the file has it (soft edges, curves, texture placements,

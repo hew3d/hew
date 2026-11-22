@@ -8,7 +8,7 @@
 //! filesystem, or network dependencies, ever. The WASM boundary lives in
 //! `crates/wasm-api`.
 //!
-//! Module map: `math`, `tol`, `ids`, `topo`, `error`, `transform`,
+//! Module map: `math`, `trig`, `tol`, `ids`, `topo`, `error`, `transform`,
 //! construction (`build`), the validator (`validate`), and the fully
 //! implemented `sketch`, `ops`, `history`, and `serialize`. Executable
 //! specs live in `tests/op_specs.rs`.
@@ -66,6 +66,7 @@ pub mod tol;
 pub mod topo;
 pub mod transform;
 pub mod triangulate;
+pub mod trig;
 pub mod unit_key;
 
 pub use annotation::{Anchor, Annotation, CapturedCurve, RadialKind};

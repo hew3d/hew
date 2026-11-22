@@ -16,6 +16,7 @@
 //! - replaying the entire redo stack restores the post-sequence geometry
 //!   (exercises inverse re-anchoring in `history.rs`).
 
+use kernel::trig;
 use kernel::{
     CurveGeom, History, HistoryError, KernelOp, KernelOpError, Object, Plane, Point3, Profile,
     PushPullError, Transform, Vec3, WatertightState, tol,
@@ -247,7 +248,7 @@ fn arb_ngon_prism() -> impl Strategy<Value = Object> {
         let outer: Vec<Point3> = (0..n)
             .map(|k| {
                 let a = std::f64::consts::TAU * k as f64 / n as f64;
-                Point3::new(r * a.cos(), r * a.sin(), 0.0)
+                Point3::new(r * trig::cos(a), r * trig::sin(a), 0.0)
             })
             .collect();
         let profile = Profile::new(plane, outer, vec![]).expect("n-gon profile");
@@ -585,7 +586,7 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
             let loop_path: Vec<Point3> = (0..sides)
                 .map(|i| {
                     let ang = 2.0 * std::f64::consts::PI * (i as f64) / (sides as f64);
-                    c + u * (radius * ang.cos()) + v * (radius * ang.sin())
+                    c + u * (radius * trig::cos(ang)) + v * (radius * trig::sin(ang))
                 })
                 .collect();
             Some(KernelOp::SplitFaceInner {
@@ -1070,7 +1071,7 @@ fn recess_wall_offset_undo_is_guard_exempt_on_replay() {
     let outer: Vec<Point3> = (0..n)
         .map(|k| {
             let a = std::f64::consts::TAU * k as f64 / n as f64;
-            Point3::new(r * a.cos(), r * a.sin(), 0.0)
+            Point3::new(r * trig::cos(a), r * trig::sin(a), 0.0)
         })
         .collect();
     let profile = Profile::new(plane, outer, vec![]).unwrap();

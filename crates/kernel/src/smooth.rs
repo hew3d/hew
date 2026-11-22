@@ -3,6 +3,7 @@
 //! the cage with its subdivided solid. The surface itself is
 //! [`crate::subdiv`]'s.
 
+use crate::trig;
 use std::collections::BTreeMap;
 
 use crate::math::Plane;
@@ -153,7 +154,7 @@ impl Object {
                 self.faces()[face_of(edge.half_edge)].plane.normal(),
                 self.faces()[face_of(twin)].plane.normal(),
             );
-            let bend = na.dot(nb).clamp(-1.0, 1.0).acos();
+            let bend = trig::acos(na.dot(nb).clamp(-1.0, 1.0));
             if bend > tol::NORMAL_DIRECTION && bend < max_angle {
                 out.edges[e].soft = true;
                 count += 1;

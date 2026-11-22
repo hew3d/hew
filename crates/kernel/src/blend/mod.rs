@@ -1174,6 +1174,7 @@ mod tests {
     use crate::SurfaceRef;
     use crate::loft::{LoftProfile, LoftSpec};
     use crate::math::{Point3, Vec3};
+    use crate::trig;
 
     /// A prism of the `xy` loop, from z 0 to z 1, its walls unclaimed.
     fn prism(pts: &[(f64, f64)]) -> Object {
@@ -1259,7 +1260,7 @@ mod tests {
     /// fold back on each other, they do not run flush.
     #[test]
     fn a_razor_wedge_is_not_flush() {
-        let h = (0.5_f64.to_radians()).tan();
+        let h = trig::tan(0.5_f64.to_radians());
         let mut wedge = prism(&[(0.0, 0.0), (1.0, -h), (1.0, h)]);
         let fin = wall_edge(&wedge, 0.0, 0.0);
         let apex = Point3::new(0.0, 0.0, 0.0);
@@ -1274,7 +1275,7 @@ mod tests {
     /// the corner's.
     #[test]
     fn a_shallow_unclaimed_crease_is_not_flush() {
-        let t = 1.5_f64.to_radians().tan();
+        let t = trig::tan(1.5_f64.to_radians());
         let scan = prism(&[(0.0, 0.0), (1.0, 0.0), (2.0, t), (2.0, 1.0), (0.0, 1.0)]);
         let crease = wall_edge(&scan, 1.0, 0.0);
         stays_unsupported(&scan, crease, Point3::new(1.0, 0.0, 0.0));
@@ -1285,7 +1286,7 @@ mod tests {
     /// the planner's refusal does not say which edge it was.
     #[test]
     fn claimed_tangent_faces_are_flush_only_at_their_own_edge() {
-        let t = 1.5_f64.to_radians().tan();
+        let t = trig::tan(1.5_f64.to_radians());
         let mut scan = prism(&[(0.0, 0.0), (1.0, 0.0), (2.0, t), (2.0, 1.0), (0.0, 1.0)]);
         let crease = wall_edge(&scan, 1.0, 0.0);
         let at = Point3::new(1.0, 0.0, 0.0);

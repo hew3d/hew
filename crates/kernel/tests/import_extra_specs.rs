@@ -4,6 +4,7 @@
 //! dictionaries, scene display state, and the importer-key report the
 //! `.skp` re-save builds its provenance from.
 
+use kernel::trig;
 use std::collections::BTreeMap;
 
 use kernel::{
@@ -17,7 +18,7 @@ const N: usize = 12;
 
 fn ring(i: usize, z: f64) -> Point3 {
     let t = std::f64::consts::TAU * i as f64 / N as f64;
-    Point3::new(t.cos(), t.sin(), z)
+    Point3::new(trig::cos(t), trig::sin(t), z)
 }
 
 /// A closed 12-sided prism of radius 1 and height 1 about the Z axis: the

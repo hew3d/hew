@@ -53,6 +53,7 @@ use crate::topo::{
     AttrSlot, Edge, Face, HalfEdge, Loop, LoopKind, Object, Vertex, WatertightState,
 };
 use crate::transform::{Transform, TransformError};
+use crate::trig;
 
 /// The explicit combination modes (ARCHITECTURE.md: combining Objects is always a
 /// deliberate user action; nothing ever welds implicitly).
@@ -3017,7 +3018,7 @@ impl Object {
                             Some(crate::topo::SurfaceRef::Cone {
                                 apex: c + a * t_apex,
                                 axis: toward,
-                                half_angle: ((rq - rp).abs() / (tq - tp).abs()).atan(),
+                                half_angle: trig::atan((rq - rp).abs() / (tq - tp).abs()),
                             })
                         }
                     }
@@ -9962,7 +9963,7 @@ pub(crate) fn chord_facet_ok(p: Point3, q: Point3, g: &crate::sketch::CurveGeom)
         return false;
     }
     let half = ((q - p).length() / (2.0 * g.radius)).min(1.0);
-    let subtends = 2.0 * half.asin();
+    let subtends = 2.0 * trig::asin(half);
     let step = std::f64::consts::TAU / crate::sketch::MIN_CIRCLE_SEGMENTS as f64;
     subtends <= 1.5 * step
 }
@@ -12449,7 +12450,7 @@ mod tests {
             for turn in 0..8 {
                 let a = f64::from(turn) * 0.7;
                 let (u, v) = crate::geom2d::plane_axes(normal);
-                let (c, s) = (a.cos(), a.sin());
+                let (c, s) = (trig::cos(a), trig::sin(a));
                 // The far footprint sits 0.5 deeper along the normal.
                 let place = |pts: &[(f64, f64)], depth: f64| -> Vec<Point3> {
                     pts.iter()
@@ -13399,7 +13400,7 @@ mod tests {
         .unwrap();
         let p = |i: usize| {
             let a = std::f64::consts::TAU * (i % 48) as f64 / 48.0;
-            Point3::new(far + 0.25 * a.cos(), far + 0.25 * a.sin(), 0.0)
+            Point3::new(far + 0.25 * trig::cos(a), far + 0.25 * trig::sin(a), 0.0)
         };
         for i in 0..48 {
             sk.add_segment(p(i), p(i + 1)).unwrap();

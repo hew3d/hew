@@ -8,6 +8,7 @@
 
 use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, Response, codes};
 use kernel::Document;
+use kernel::trig;
 use serde_json::{Value, json};
 
 /// The registry every dispatch in this file runs against.
@@ -1068,7 +1069,7 @@ fn extruding_a_ground_region_with_a_touching_hole_refuses_region_touches_hole() 
     let mut pts: Vec<Value> = (0..24)
         .map(|i| {
             let a = -std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * f64::from(i) / 24.0;
-            json!([0.1 + 0.05 * a.cos(), 0.05 + 0.05 * a.sin(), 0.0])
+            json!([0.1 + 0.05 * trig::cos(a), 0.05 + 0.05 * trig::sin(a), 0.0])
         })
         .collect();
     pts[0] = json!([0.1, 0.0, 0.0]);

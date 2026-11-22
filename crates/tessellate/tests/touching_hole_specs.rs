@@ -9,6 +9,7 @@
 //! face's net area (outer less holes). Property-tested over random circles
 //! on a lattice that makes the touches exact.
 
+use kernel::trig;
 use std::f64::consts::{PI, TAU};
 
 use kernel::{CurveGeom, Document, FaceId, Object, ObjectId, Plane, Point3, Vec3};
@@ -64,7 +65,7 @@ fn ring(cx: f64, cy: f64, r: f64, n: usize, phase: f64) -> Vec<Point3> {
     (0..n)
         .map(|i| {
             let a = phase + TAU * i as f64 / n as f64;
-            Point3::new(cx + r * a.cos(), cy + r * a.sin(), 1.0)
+            Point3::new(cx + r * trig::cos(a), cy + r * trig::sin(a), 1.0)
         })
         .collect()
 }
@@ -231,7 +232,7 @@ fn touching_case(
         let far = a[n / 2];
         let r2 = 0.5 * r;
         let (dx, dy) = (far.x - cx, far.y - cy);
-        let len = dx.hypot(dy);
+        let len = trig::hypot(dx, dy);
         let (c2x, c2y) = (far.x + dx / len * r2, far.y + dy / len * r2);
         // Clear of every edge by a margin, so the second circle touches only
         // the first.

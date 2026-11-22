@@ -5,6 +5,7 @@
 //! from the planes around the blend, accepted only when re-blending the
 //! restored edges reproduces the blend exactly.
 
+use crate::trig;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::plan::PlanFail;
@@ -639,7 +640,7 @@ impl Object {
                 }
             }
         }
-        best.map(|(_, off)| off * (theta / 2.0).tan())
+        best.map(|(_, off)| off * trig::tan(theta / 2.0))
     }
 
     /// A bullnose strip's radius.
@@ -1053,7 +1054,7 @@ impl Object {
             )
             .map(|(o, _)| o)
         };
-        let gap = 1.0 / (theta / 2.0).sin() - 1.0;
+        let gap = 1.0 / trig::sin(theta / 2.0) - 1.0;
         match r.spec.profile.clone() {
             BlendProfile::Round { radius, segments } => {
                 let m = radius * gap + sigma * distance;
@@ -1081,9 +1082,9 @@ impl Object {
             } => {
                 // The chamfer line's distance from the corner.
                 let chord = (setback_a * setback_a + setback_b * setback_b
-                    - 2.0 * setback_a * setback_b * theta.cos())
+                    - 2.0 * setback_a * setback_b * trig::cos(theta))
                 .sqrt();
-                let h = setback_a * setback_b * theta.sin() / chord;
+                let h = setback_a * setback_b * trig::sin(theta) / chord;
                 let k = (h + sigma * distance) / h;
                 if k <= pm {
                     return r.object.rewind_blends(&r.dependents);
@@ -1104,8 +1105,8 @@ impl Object {
                 let h = pts
                     .iter()
                     .map(|(p, _)| {
-                        let (x, y) = (p[0] + p[1] * theta.cos(), p[1] * theta.sin());
-                        x.hypot(y) * width
+                        let (x, y) = (p[0] + p[1] * trig::cos(theta), p[1] * trig::sin(theta));
+                        trig::hypot(x, y) * width
                     })
                     .fold(0.0, f64::max);
                 let k = (h + sigma * distance) / h;

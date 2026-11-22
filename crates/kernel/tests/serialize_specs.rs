@@ -10,6 +10,7 @@
 //! slotmap handles and dense ids are free to differ; geometry, tree shape,
 //! poses, materials, and sketch contents are not.
 
+use kernel::trig;
 use kernel::{
     Anchor, Annotation, CameraProjection, CameraState, CapturedCurve, CurveGeom, DecodeError,
     Document, Guide, ImageFormat, Material, NodeId, Object, Plane, Point3, Profile, RadialKind,
@@ -245,7 +246,7 @@ fn imprinted_circle_edge_claim_round_trips_through_geometry_buffer_v5() {
     let circle: Vec<Point3> = (0..24)
         .map(|i| {
             let a = 2.0 * std::f64::consts::PI * (i as f64) / 24.0;
-            Point3::new(radius * a.cos(), radius * a.sin(), h)
+            Point3::new(radius * trig::cos(a), radius * trig::sin(a), h)
         })
         .collect();
     obj.split_face_inner_with_curve(top, &circle, Some(CurveGeom { center, radius }))
@@ -335,7 +336,11 @@ fn disagreeing_shared_edge_claims_are_rejected_on_load() {
     let circle: Vec<Point3> = (0..24)
         .map(|i| {
             let a = 2.0 * std::f64::consts::PI * (i as f64) / 24.0;
-            Point3::new(center.x + radius * a.cos(), center.y + radius * a.sin(), h)
+            Point3::new(
+                center.x + radius * trig::cos(a),
+                center.y + radius * trig::sin(a),
+                h,
+            )
         })
         .collect();
     obj.split_face_inner_with_curve(top, &circle, Some(CurveGeom { center, radius }))
@@ -2191,7 +2196,7 @@ fn circle_and_polygon_doc() -> Document {
     .unwrap();
     let corner = |k: i32| {
         let a = std::f64::consts::TAU * (k as f64) / 3.0;
-        Point3::new(10.0 + a.cos(), a.sin(), 0.0)
+        Point3::new(10.0 + trig::cos(a), trig::sin(a), 0.0)
     };
     for k in 0..3 {
         sk.add_segment(corner(k), corner(k + 1)).unwrap();
@@ -2466,7 +2471,7 @@ fn soft_edges_round_trip_v6() {
         let n = 24;
         let pt = |i: usize| {
             let a = i as f64 / n as f64 * std::f64::consts::TAU;
-            kernel::Point3::new(2.0 * a.cos(), 2.0 * a.sin(), 0.0)
+            kernel::Point3::new(2.0 * trig::cos(a), 2.0 * trig::sin(a), 0.0)
         };
         for i in 0..n {
             sk.add_segment(pt(i), pt((i + 1) % n)).expect("facet");
@@ -3384,7 +3389,11 @@ fn detached_doc(detached: bool) -> (Document, kernel::ObjectId, Option<kernel::S
                 let n = 24;
                 let at = |i: usize| {
                     let a = std::f64::consts::TAU * i as f64 / n as f64;
-                    Point3::new(g.center.x + 0.5 * a.cos(), g.center.y + 0.5 * a.sin(), 2.0)
+                    Point3::new(
+                        g.center.x + 0.5 * trig::cos(a),
+                        g.center.y + 0.5 * trig::sin(a),
+                        2.0,
+                    )
                 };
                 for i in 0..n {
                     w.add_segment(at(i), at(i + 1))?;

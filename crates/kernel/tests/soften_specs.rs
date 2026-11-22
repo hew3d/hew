@@ -1,6 +1,7 @@
 //! WP20 Part 3: Soften by angle.
 
 use crate::common;
+use kernel::trig;
 
 use common::curves::*;
 use kernel::{Document, DocumentError, Object, Plane, Point3, ShapeError, Vec3};
@@ -13,7 +14,7 @@ fn stl_cylinder() -> Object {
     for z in [0.0, 0.1] {
         for k in 0..n {
             let t = k as f64 * std::f64::consts::TAU / n as f64;
-            pts.push(p3(0.05 * t.cos(), 0.05 * t.sin(), z));
+            pts.push(p3(0.05 * trig::cos(t), 0.05 * trig::sin(t), z));
         }
     }
     let mut faces: Vec<Vec<usize>> = (0..n)
@@ -113,7 +114,7 @@ fn document_soften_is_one_undo_step() {
         let n = 12;
         let p = |k: usize| {
             let t = k as f64 * std::f64::consts::TAU / n as f64;
-            p3(t.cos(), t.sin(), 0.0)
+            p3(trig::cos(t), trig::sin(t), 0.0)
         };
         for k in 0..n {
             sk.add_segment(p(k), p(k + 1)).unwrap();

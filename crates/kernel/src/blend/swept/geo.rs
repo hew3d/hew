@@ -10,6 +10,7 @@
 //! took to it. That makes the feet a function of the station, so bisecting
 //! for where they change finds the change.
 
+use crate::trig;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
@@ -701,7 +702,7 @@ fn ball_arc(
     let u0 = (ends[0] - c).normalized().map_err(|_| unsupported(q))?;
     let u1 = (ends[1] - c).normalized().map_err(|_| unsupported(q))?;
     let cosphi = u0.dot(u1).clamp(-1.0, 1.0);
-    let phi = cosphi.acos();
+    let phi = trig::acos(cosphi);
     let w = (u1 - u0 * cosphi)
         .normalized()
         .map_err(|_| unsupported(q))?;
@@ -709,7 +710,7 @@ fn ball_arc(
     out.push(ends[0] - q);
     for k in 1..n {
         let a = phi * k as f64 / n as f64;
-        out.push(c + (u0 * a.cos() + w * a.sin()) * r - q);
+        out.push(c + (u0 * trig::cos(a) + w * trig::sin(a)) * r - q);
     }
     out.push(ends[1] - q);
     Ok(out)

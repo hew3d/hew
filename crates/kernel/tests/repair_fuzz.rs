@@ -16,6 +16,7 @@
 //!   twice reproduces the same states (canonical fingerprints).
 
 use kernel::repair::{FillScope, MendPlan, RepairError};
+use kernel::trig;
 use kernel::{
     DefRecipe, Document, DocumentError, FaceId, ImportNode, ImportScene, KernelOp, MeshRecipe,
     ObjectId, Point3, Transform, Vec3,
@@ -93,9 +94,9 @@ fn soup(x0: f64, jitter: f64, private: u64, removed: u64, bow_ties: usize) -> Me
         for j in 0..n_lon {
             let lon = std::f64::consts::TAU * j as f64 / n_lon as f64;
             pos.push(Point3::new(
-                x0 + lat.cos() * lon.cos(),
-                lat.cos() * lon.sin(),
-                lat.sin(),
+                x0 + trig::cos(lat) * trig::cos(lon),
+                trig::cos(lat) * trig::sin(lon),
+                trig::sin(lat),
             ));
         }
     }
@@ -122,8 +123,8 @@ fn soup(x0: f64, jitter: f64, private: u64, removed: u64, bow_ties: usize) -> Me
         }
         if i < 64 && private & (1 << i) != 0 {
             for (k, v) in f.iter_mut().enumerate() {
-                let h = ((i * 3 + k) as f64 * 1.7).sin();
-                let q = pos[*v] + Vec3::new(h, (h * 3.1).cos(), (h * 5.3).sin()) * jitter;
+                let h = trig::sin((i * 3 + k) as f64 * 1.7);
+                let q = pos[*v] + Vec3::new(h, trig::cos(h * 3.1), trig::sin(h * 5.3)) * jitter;
                 pos.push(q);
                 *v = pos.len() - 1;
             }

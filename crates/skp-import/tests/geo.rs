@@ -1,6 +1,7 @@
 //! A 2026-container file's coordinate reference system opens as the
 //! document's geo-reference, field for field.
 
+use kernel::trig;
 use std::path::Path;
 
 fn open(name: &str) -> Option<kernel::GeoReference> {
@@ -23,7 +24,7 @@ fn a_crs_opens_with_every_field() {
     assert_eq!(g.height, 12.5);
     assert_eq!(g.scale, 0.9996);
     assert_eq!(g.x_axis, [0.6, 0.8]);
-    assert!((g.x_axis_angle().unwrap() - 0.8_f64.atan2(0.6)).abs() < 1e-12);
+    assert!((g.x_axis_angle().unwrap() - trig::atan2(0.8_f64, 0.6)).abs() < 1e-12);
     assert_eq!(g.map_zone, "Zone 10");
     assert_eq!(g.geodetic_datum, "");
     assert_eq!(g.map_unit, "");

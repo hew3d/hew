@@ -1017,6 +1017,7 @@ pub(crate) fn region_aabb(plane: &kernel::Plane, boundary: &[Point3]) -> Aabb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kernel::trig;
 
     fn boxes_on_a_line(n: usize) -> Vec<Aabb> {
         (0..n)
@@ -1065,7 +1066,7 @@ mod tests {
         let b = Aabb::of_point(Point3::new(0.0, 0.0, 10.0)).padded();
         let origin = Point3::ORIGIN;
         let dir = Vec3::new(0.0, 0.0, 1.0);
-        let tan = Some(0.1_f64.tan());
+        let tan = Some(trig::tan(0.1_f64));
         assert!(b.maybe_in_cone(origin, dir, tan), "on-axis box is admitted");
         let behind = Aabb::of_point(Point3::new(0.0, 0.0, -10.0)).padded();
         assert!(!behind.maybe_in_cone(origin, dir, tan));
@@ -1089,7 +1090,7 @@ mod tests {
         let b = b.padded();
         let origin = Point3::new(-1.0606601717798211e-7, -13.0, -1.0606601717798211e-7);
         let dir = Vec3::new(0.0, 1.0, 0.0);
-        assert!(b.maybe_in_cone(origin, dir, Some(1e-8_f64.tan())));
+        assert!(b.maybe_in_cone(origin, dir, Some(trig::tan(1e-8_f64))));
     }
 
     #[test]

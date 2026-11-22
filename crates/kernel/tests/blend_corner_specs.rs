@@ -2,6 +2,7 @@
 //! corners, the mitered and flat options, and two-pass mixed corners.
 
 use crate::common;
+use kernel::trig;
 
 use std::f64::consts::PI;
 
@@ -104,7 +105,7 @@ fn rolled_corner_non_square() {
         [
             p3(0.0, 0.0, 1.0),
             p3(1.0, 0.0, 0.0),
-            p3((PI / 3.0).cos(), (PI / 3.0).sin(), 0.0),
+            p3(trig::cos(PI / 3.0), trig::sin(PI / 3.0), 0.0),
         ],
     );
     let (after, _) = blend_ok(&obj, &spec(edges, round(0.05, 4), CornerStyle::Default));

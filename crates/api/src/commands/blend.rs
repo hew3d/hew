@@ -12,6 +12,7 @@ use super::{CmdError, Ctx, Handler};
 use crate::geom;
 use crate::locate;
 use crate::refusal::Refusal;
+use kernel::trig;
 use kernel::{
     BlendProfile, BlendSpec, BlendStops, CornerProfile, CornerStyle, EdgeId, EntityRef, ObjectId,
     ProfileShape, RadiusHandle,
@@ -510,7 +511,7 @@ fn chamfer(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                         .with_detail(json!({ "max": PI - theta })),
                 ));
             }
-            (d, d * alpha.sin() / (PI - theta - alpha).sin())
+            (d, d * trig::sin(alpha) / trig::sin(PI - theta - alpha))
         }
         _ => {
             return Err(CmdError::Params(

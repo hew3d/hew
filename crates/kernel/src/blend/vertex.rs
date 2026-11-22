@@ -5,6 +5,7 @@
 //! (§7.2), then the general convex clip (§7.3; with one extra plane for a
 //! flat chamfer corner).
 
+use crate::trig;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::classify::EdgeKind;
@@ -651,7 +652,7 @@ fn clip_vertex(
         }
     }
     planes.extend(facets);
-    let half0 = (4.0 * size / (theta_min / 2.0).sin()).max(4.0 * size);
+    let half0 = (4.0 * size / trig::sin(theta_min / 2.0)).max(4.0 * size);
     let stable = |planes: &[(Plane, CellTag)]| -> Result<(ConvexCell, Vec<Plane>), PlanFail> {
         let mut half = half0;
         for _ in 0..5 {
@@ -1301,13 +1302,13 @@ fn rolled_corner(
         }
         let (u0, u1) = (unit_from_c(pts.pos(pole)), unit_from_c(pts.pos(end)));
         let cosa = u0.dot(u1).clamp(-1.0, 1.0);
-        let alpha = cosa.acos();
+        let alpha = trig::acos(cosa);
         let w = (u1 - u0 * cosa).normalized().map_err(|_| unsupported)?;
         let mut col = Vec::with_capacity(n + 1);
         col.push(pole);
         for s_ in 1..n {
             let a = alpha * s_ as f64 / n as f64;
-            col.push(pts.add(c + (u0 * a.cos() + w * a.sin()) * r));
+            col.push(pts.add(c + (u0 * trig::cos(a) + w * trig::sin(a)) * r));
         }
         col.push(end);
         grid.push(col);

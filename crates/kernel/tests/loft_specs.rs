@@ -1,5 +1,6 @@
 //! Executable specs for Loft (true-curves.md §5.4; decisions I-17, I-23).
 
+use kernel::trig;
 use std::f64::consts::{PI, TAU};
 
 use kernel::loft::{LoftProfile, LoftSpec};
@@ -39,7 +40,7 @@ fn circle(r: f64, z: f64, n: usize, phase: f64) -> LoftProfile {
         points: (0..n)
             .map(|k| {
                 let a = phase + TAU * k as f64 / n as f64;
-                Point3::new(r * a.cos(), r * a.sin(), z)
+                Point3::new(r * trig::cos(a), r * trig::sin(a), z)
             })
             .collect(),
         curves: vec![Some(g); n],
@@ -129,7 +130,7 @@ fn reversed_and_rotated_inputs_orient_and_align() {
 fn fold_deg(o: &Object, e: kernel::EdgeId) -> f64 {
     let (f, g) = o.edge_faces_for_test(e).unwrap();
     let d = (o.faces()[f].plane.normal() - o.faces()[g].plane.normal()).length();
-    2.0 * (d / 2.0).asin().to_degrees()
+    2.0 * trig::asin(d / 2.0).to_degrees()
 }
 
 /// A square to a circle as large as it, square-on: no wall edge is hard,
@@ -168,7 +169,7 @@ fn a_circle_to_a_square_lofts_square_on() {
     for o in [&circle_first, &square_first] {
         assert_solid(o);
         let corner = Point3::new(0.5, 0.5, 0.0);
-        let at45 = Point3::new(0.5 * (PI / 4.0).cos(), 0.5 * (PI / 4.0).sin(), 1.0);
+        let at45 = Point3::new(0.5 * trig::cos(PI / 4.0), 0.5 * trig::sin(PI / 4.0), 1.0);
         let joined = o.edges().keys().any(|e| {
             let (p, q) = o.edge_endpoints(e).unwrap();
             ((p - corner).length() < 1e-12 && (q - at45).length() < 1e-12)
@@ -242,7 +243,7 @@ fn triangle_to_square_keeps_all_corners() {
     for c in &square(0.5, 1.0).points {
         assert!(top.iter().any(|p| (*p - *c).length() < 1e-12));
     }
-    let crease = 2.0 * (kernel::tol::LOFT_CREASE_FOLD / 2.0).asin().to_degrees();
+    let crease = 2.0 * trig::asin(kernel::tol::LOFT_CREASE_FOLD / 2.0).to_degrees();
     let mut named = false;
     for (eid, e) in o.edges() {
         let (a, b) = o.edge_endpoints(eid).unwrap();
@@ -601,14 +602,14 @@ fn rounded_runs(w: f64, h: f64, r: f64, z: f64, how: Rounding) -> LoftProfile {
     for (key, &(cx, cy, a0)) in corners.iter().enumerate() {
         let on_circle = |t: f64| {
             let a = a0 + t * PI / 2.0;
-            (cx + r * a.cos(), cy + r * a.sin())
+            (cx + r * trig::cos(a), cy + r * trig::sin(a))
         };
         let (p0, p3) = (on_circle(0.0), on_circle(1.0));
         // Bézier controls along the end tangents (the circle's 0.5523).
         let k = 0.552_284_75 * r;
         let (t0, t1) = (
-            (-a0.sin(), a0.cos()),
-            (-(a0 + PI / 2.0).sin(), (a0 + PI / 2.0).cos()),
+            (-trig::sin(a0), trig::cos(a0)),
+            (-trig::sin(a0 + PI / 2.0), trig::cos(a0 + PI / 2.0)),
         );
         let c1 = (p0.0 + k * t0.0, p0.1 + k * t0.1);
         let c2 = (p3.0 - k * t1.0, p3.1 - k * t1.1);
@@ -701,10 +702,10 @@ fn smooth_keyed_rounded_corners_are_no_corners() {
     pts.push(at);
     for deg in [120.0_f64, 140.0, 160.0] {
         let a = deg.to_radians();
-        at = Point3::new(at.x + l * a.cos(), at.y + l * a.sin(), 0.0);
+        at = Point3::new(at.x + l * trig::cos(a), at.y + l * trig::sin(a), 0.0);
         pts.push(at);
     }
-    let end = Point3::new(at.x + l * 175f64.to_radians().cos(), 0.5, 0.0);
+    let end = Point3::new(at.x + l * trig::cos(175f64.to_radians()), 0.5, 0.0);
     pts.push(end);
     pts.push(Point3::new(-0.5, 0.5, 0.0));
     let n = pts.len();
@@ -739,7 +740,7 @@ fn a_keyed_edge_straight_on_from_a_plain_one_is_no_corner() {
     for i in 0..199 {
         let turn = TAU * i as f64 / 199.0 + 0.123;
         let at = |x: f64, y: f64| {
-            let (s, c) = turn.sin_cos();
+            let (s, c) = trig::sin_cos(turn);
             Point3::new(0.5 * (c * x - s * y), 0.5 * (s * x + c * y), 0.0)
         };
         let points = vec![
@@ -784,8 +785,8 @@ fn a_circle_started_between_vertices_puts_its_markers_on_its_columns() {
     assert_eq!(markers.len(), 48);
     let at = |deg: f64| {
         Point3::new(
-            0.4 * deg.to_radians().cos(),
-            0.4 * deg.to_radians().sin(),
+            0.4 * trig::cos(deg.to_radians()),
+            0.4 * trig::sin(deg.to_radians()),
             1.0,
         )
     };
@@ -854,7 +855,7 @@ fn polygon(n: usize, r: f64, z: f64, phase: f64) -> LoftProfile {
         (0..n)
             .map(|k| {
                 let a = phase + TAU * k as f64 / n as f64;
-                Point3::new(r * a.cos(), r * a.sin(), z)
+                Point3::new(r * trig::cos(a), r * trig::sin(a), z)
             })
             .collect(),
     )
@@ -901,14 +902,18 @@ fn square_one_round(k: usize, r: f64, chords: usize, z: f64) -> LoftProfile {
             y - d_in.1 * r + d_out.1 * r,
             z,
         );
-        let a0 = (y - d_in.1 * r - c.y).atan2(x - d_in.0 * r - c.x);
+        let a0 = trig::atan2(y - d_in.1 * r - c.y, x - d_in.0 * r - c.x);
         let g = Some(CurveGeom {
             center: c,
             radius: r,
         });
         for j in 0..=chords {
             let a = a0 + (j as f64 / chords as f64) * PI / 2.0;
-            points.push(Point3::new(c.x + r * a.cos(), c.y + r * a.sin(), z));
+            points.push(Point3::new(
+                c.x + r * trig::cos(a),
+                c.y + r * trig::sin(a),
+                z,
+            ));
             curves.push(if j < chords { g } else { None });
         }
     }
@@ -1009,7 +1014,7 @@ fn a_coarse_star_keeps_its_tips_against_a_circle() {
             .map(|k| {
                 let a = TAU * k as f64 / 10.0;
                 let r = if k % 2 == 0 { 0.5 } else { 0.25 };
-                Point3::new(r * a.cos(), r * a.sin(), 0.0)
+                Point3::new(r * trig::cos(a), r * trig::sin(a), 0.0)
             })
             .collect(),
     );
@@ -1029,7 +1034,7 @@ fn a_star_keeps_its_points_against_a_circle() {
             .map(|k| {
                 let a = TAU * k as f64 / 64.0;
                 let r = if k % 2 == 0 { 0.5 } else { 0.35 };
-                Point3::new(r * a.cos(), r * a.sin(), 0.0)
+                Point3::new(r * trig::cos(a), r * trig::sin(a), 0.0)
             })
             .collect(),
     );
@@ -1061,7 +1066,7 @@ fn a_many_sided_prism_keeps_every_corner() {
     // The 64 corner columns: every bottom corner has a hard edge up.
     for k in 0..64 {
         let a = TAU * k as f64 / 64.0;
-        let c = Point3::new(0.5 * a.cos(), 0.5 * a.sin(), 0.0);
+        let c = Point3::new(0.5 * trig::cos(a), 0.5 * trig::sin(a), 0.0);
         assert!(
             hard_longitudinal(&o)
                 .iter()
@@ -1117,7 +1122,7 @@ fn u_section(w: f64, d: f64, z: f64) -> LoftProfile {
     let mut pts = vec![Point3::new(w, 0.0, z)];
     for k in 1..8 {
         let a = PI * k as f64 / 8.0;
-        pts.push(Point3::new(w * a.cos(), -d * a.sin(), z));
+        pts.push(Point3::new(w * trig::cos(a), -d * trig::sin(a), z));
     }
     pts.push(Point3::new(-w, 0.0, z));
     profile(pts)
@@ -1161,7 +1166,7 @@ fn radial_extent(o: &Object) -> (f64, f64, f64) {
     let mut out = (0.0_f64, f64::INFINITY, f64::NEG_INFINITY);
     for v in o.vertices().values() {
         let p = v.position;
-        out.0 = out.0.max(p.x.hypot(p.y));
+        out.0 = out.0.max(trig::hypot(p.x, p.y));
         out.1 = out.1.min(p.z);
         out.2 = out.2.max(p.z);
     }
@@ -1210,7 +1215,7 @@ fn station_radii(o: &Object) -> Vec<(f64, f64)> {
     let mut rings: Vec<(f64, f64)> = Vec::new();
     for v in o.vertices().values() {
         let p = v.position;
-        let r = p.x.hypot(p.y);
+        let r = trig::hypot(p.x, p.y);
         match rings.iter().find(|(z, _)| (z - p.z).abs() < 1e-12) {
             Some(&(_, r0)) => assert!((r - r0).abs() < 1e-12, "a station is not a circle at {p:?}"),
             None => rings.push((p.z, r)),
@@ -1227,7 +1232,7 @@ fn circle_at(r: f64, z: f64, angles: &[f64]) -> LoftProfile {
     LoftProfile {
         points: angles
             .iter()
-            .map(|a| Point3::new(r * a.cos(), r * a.sin(), z))
+            .map(|a| Point3::new(r * trig::cos(*a), r * trig::sin(*a), z))
             .collect(),
         curves: vec![
             Some(CurveGeom {
@@ -1322,7 +1327,7 @@ fn arcs_and_lines(angles: &[f64], arc: &[bool]) -> LoftProfile {
     LoftProfile {
         points: angles
             .iter()
-            .map(|a| Point3::new(a.to_radians().cos(), a.to_radians().sin(), 0.0))
+            .map(|a| Point3::new(trig::cos(a.to_radians()), trig::sin(a.to_radians()), 0.0))
             .collect(),
         curves: arc.iter().map(|&a| a.then_some(g)).collect(),
         smooth: Vec::new(),
@@ -1494,8 +1499,8 @@ fn a_lone_arc_takes_the_short_way_unless_a_tangent_neighbor_decides() {
         let o = Object::from_loft(&s).unwrap_or_else(|e| panic!("{lo}–{hi}: {e:?}"));
         assert_solid(&o);
         for p in ring_at(&o, 0.0) {
-            if (p.x.hypot(p.y) - 1.0).abs() < 1e-9 {
-                let a = p.y.atan2(p.x).to_degrees().rem_euclid(360.0);
+            if (trig::hypot(p.x, p.y) - 1.0).abs() < 1e-9 {
+                let a = trig::atan2(p.y, p.x).to_degrees().rem_euclid(360.0);
                 let a = if a < 1e-9 && hi > 300.0 { 360.0 } else { a };
                 assert!(a >= lo - 1e-9 && a <= hi + 1e-9, "{lo}–{hi}: {a}");
             }
@@ -1514,7 +1519,13 @@ fn a_lone_arc_takes_the_short_way_unless_a_tangent_neighbor_decides() {
 /// confirms its direction or, contradicting it, refuses.
 #[test]
 fn a_given_arc_point_decides_its_direction() {
-    let on = |deg: f64| Point3::new(deg.to_radians().cos(), deg.to_radians().sin(), 0.0);
+    let on = |deg: f64| {
+        Point3::new(
+            trig::cos(deg.to_radians()),
+            trig::sin(deg.to_radians()),
+            0.0,
+        )
+    };
     let wedge = |through: Option<Point3>| {
         let mut p = arcs_and_lines(&[0.0, 250.0], &[true, false]);
         p.points.push(Point3::ORIGIN);
@@ -1535,8 +1546,8 @@ fn a_given_arc_point_decides_its_direction() {
         assert_solid(&o);
         ring_at(&o, 0.0)
             .into_iter()
-            .filter(|p| (p.x.hypot(p.y) - 1.0).abs() < 1e-9)
-            .map(|p| p.y.atan2(p.x).to_degrees().rem_euclid(360.0))
+            .filter(|p| (trig::hypot(p.x, p.y) - 1.0).abs() < 1e-9)
+            .map(|p| trig::atan2(p.y, p.x).to_degrees().rem_euclid(360.0))
             .collect()
     };
     // Through 125°: every arc sample within 0°..250°, counterclockwise.
@@ -1589,7 +1600,7 @@ fn a_given_arc_point_decides_its_direction() {
     // its own): through its outer middle it bulges out; a hair either side
     // of either end refuses (before, one just short of the start read as a
     // point on the long way round, and the arc dented the side instead).
-    let r = 0.05_f64.hypot(0.1);
+    let r = trig::hypot(0.05_f64, 0.1);
     let notch = |through: Option<Point3>| {
         let g = Some((0.95, 0.0, r));
         let mut p = with_arcs(
@@ -1607,7 +1618,7 @@ fn a_given_arc_point_decides_its_direction() {
         p.through = vec![None, None, through, None, None, None];
         Object::from_loft(&spec(vec![p, circle(1.2, 1.0, 256, 0.0)]))
     };
-    let at = |a: f64| Point3::new(0.95 + r * a.cos(), r * a.sin(), 0.0);
+    let at = |a: f64| Point3::new(0.95 + r * trig::cos(a), r * trig::sin(a), 0.0);
     let o = notch(Some(at(0.0))).unwrap();
     assert_solid(&o);
     let side: Vec<f64> = ring_at(&o, 0.0)
@@ -1619,7 +1630,7 @@ fn a_given_arc_point_decides_its_direction() {
         !side.is_empty() && side.iter().all(|&x| x > 1.0 + 1e-6),
         "bulges out: {side:?}"
     );
-    for end in [-2f64.atan(), 2f64.atan()] {
+    for end in [-trig::atan(2f64), trig::atan(2f64)] {
         for noise in [-1e-12, 1e-12, -5e-10, 5e-10] {
             assert_eq!(
                 notch(Some(at(end + noise))).map(|_| ()),
@@ -2228,7 +2239,7 @@ fn dense_rings_times_many_stations_refuse() {
         (0..512)
             .map(|i| {
                 let a = std::f64::consts::TAU * i as f64 / 512.0;
-                Point3::new(a.cos(), a.sin(), z)
+                Point3::new(trig::cos(a), trig::sin(a), z)
             })
             .collect()
     };
@@ -2262,7 +2273,7 @@ fn circle_doc(
         .unwrap();
         let at = |k: usize| {
             let a = TAU * k as f64 / n as f64;
-            Point3::new(r * a.cos(), r * a.sin(), z)
+            Point3::new(r * trig::cos(a), r * trig::sin(a), z)
         };
         for k in 0..n {
             sk.add_segment(at(k), at(k + 1)).unwrap();

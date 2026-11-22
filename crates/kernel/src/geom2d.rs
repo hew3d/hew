@@ -753,6 +753,7 @@ pub(crate) fn polygon_is_simple(pts: &[Point3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trig;
     use proptest::prelude::*;
     use std::f64::consts::PI;
 
@@ -1487,7 +1488,7 @@ mod tests {
         ) {
             let scale = 10f64.powi(exp);
             let base = Point3::new(far + ox * scale, far * 0.5 + oy * scale, 0.0);
-            let dir = Vec3::new(ang.cos(), ang.sin(), 0.0);
+            let dir = Vec3::new(trig::cos(ang), trig::sin(ang), 0.0);
             let nrm = Vec3::new(-dir.y, dir.x, 0.0);
             let p = base;
             let q = base + dir * scale;
@@ -1502,7 +1503,7 @@ mod tests {
                     (foot, foot + nrm * scale)
                 }
                 _ => {
-                    let d2 = Vec3::new((ang + turn).cos(), (ang + turn).sin(), 0.0);
+                    let d2 = Vec3::new(trig::cos(ang + turn), trig::sin(ang + turn), 0.0);
                     let x = p + dir * (t.clamp(0.05, 0.95) * scale);
                     (x - d2 * (scale * 0.5), x + d2 * (scale * 0.5 + nudge * 1e-9))
                 }
@@ -1548,7 +1549,7 @@ mod tests {
         ) {
             let scale = 10f64.powi(exp);
             let base = Point3::new(far + ox * scale, far * 0.5 + oy * scale, 0.0);
-            let dir = Vec3::new(ang.cos(), ang.sin(), 0.0);
+            let dir = Vec3::new(trig::cos(ang), trig::sin(ang), 0.0);
             let nrm = Vec3::new(-dir.y, dir.x, 0.0);
             let p = base;
             let q = base + dir * scale;
@@ -1567,7 +1568,7 @@ mod tests {
                 // Crossing within nanometres of the ENDS q and s, at any
                 // angle, the segments micrometres to kilometres long.
                 3 => {
-                    let d2 = Vec3::new((ang + turn).cos(), (ang + turn).sin(), 0.0);
+                    let d2 = Vec3::new(trig::cos(ang + turn), trig::sin(ang + turn), 0.0);
                     let x = q - dir * a;
                     (x - d2 * (scale * (0.3 + t.abs())), x + d2 * b)
                 }

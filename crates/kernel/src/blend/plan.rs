@@ -2,6 +2,7 @@
 //! constructions, assemble one patch, and check it. Pure; nothing is
 //! applied here.
 
+use crate::trig;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
@@ -1385,7 +1386,7 @@ fn segment_claim(obj: &Object, s: &Strip, i: usize, k: usize) -> Option<SurfaceR
             return Some(SurfaceRef::Cone {
                 apex: c0 - (c1 - c0) * (r0 / (r1 - r0)),
                 axis,
-                half_angle: ((r1 - r0).abs() / span).asin(),
+                half_angle: trig::asin((r1 - r0).abs() / span),
             });
         }
         Variable::Constant => {}
@@ -1430,7 +1431,7 @@ fn segment_claim(obj: &Object, s: &Strip, i: usize, k: usize) -> Option<SurfaceR
                     Some(SurfaceRef::Cone {
                         apex: axis_point + axis * t_apex,
                         axis: dir,
-                        half_angle: ((r1 - r0) / (t1 - t0)).abs().atan(),
+                        half_angle: trig::atan(((r1 - r0) / (t1 - t0)).abs()),
                     })
                 }
                 None => None,
@@ -1727,7 +1728,7 @@ fn plan_bullnose(
         let ps = (0..=n)
             .map(|k| {
                 let a = std::f64::consts::PI * k as f64 / n as f64;
-                c + (n_s1 * a.cos() + n_f * a.sin()) * r
+                c + (n_s1 * trig::cos(a) + n_f * trig::sin(a)) * r
             })
             .collect();
         (c, ps)
@@ -2211,13 +2212,13 @@ fn taper_onto_cone(
             .map_err(|_| BlendError::BlendDegenerate)?;
         let v = (pn - cc) / rho;
         let cosphi = u.dot(v).clamp(-1.0, 1.0);
-        let phi = cosphi.acos();
+        let phi = trig::acos(cosphi);
         let w = (v - u * cosphi)
             .normalized()
             .map_err(|_| BlendError::BlendDegenerate)?;
         for k in 1..n {
             let a = phi * k as f64 / n as f64;
-            let p = cc + (u * a.cos() + w * a.sin()) * rho;
+            let p = cc + (u * trig::cos(a) + w * trig::sin(a)) * rho;
             sec.offsets[k] = p - q(i);
         }
     }

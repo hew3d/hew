@@ -5,6 +5,7 @@
 //! geometry buffer v4; and the validator holds a present reference to the
 //! geometry it claims.
 
+use kernel::trig;
 use kernel::{
     CurveGeom, Document, Object, Plane, Point3, Sketch, SurfaceRef, Transform, Vec3, tol,
 };
@@ -26,8 +27,8 @@ fn circle_sketch(center: Point3, radius: f64, n: usize) -> Sketch {
     let p = |i: usize| {
         let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
         Point3::new(
-            center.x + radius * a.cos(),
-            center.y + radius * a.sin(),
+            center.x + radius * trig::cos(a),
+            center.y + radius * trig::sin(a),
             0.0,
         )
     };
@@ -99,7 +100,7 @@ fn plain_polygon_extrusion_carries_nothing() {
     s.begin_curve();
     let p = |i: usize| {
         let a = 2.0 * std::f64::consts::PI * (i as f64) / 24.0;
-        Point3::new(a.cos(), a.sin(), 0.0)
+        Point3::new(trig::cos(a), trig::sin(a), 0.0)
     };
     for i in 0..24 {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -122,7 +123,7 @@ fn mixed_arc_and_chord_profile_attributes_only_the_arc_walls() {
     let n = 12; // facets over the upper half
     let p = |i: usize| {
         let a = std::f64::consts::PI * (i as f64) / (n as f64);
-        Point3::new(a.cos(), a.sin(), 0.0)
+        Point3::new(trig::cos(a), trig::sin(a), 0.0)
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -160,7 +161,7 @@ fn hole_walls_carry_the_hole_curves_cylinder() {
     .unwrap();
     let p = |i: usize| {
         let a = 2.0 * std::f64::consts::PI * (i as f64) / 16.0;
-        Point3::new(a.cos(), a.sin(), 0.0)
+        Point3::new(trig::cos(a), trig::sin(a), 0.0)
     };
     for i in 0..16 {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -236,7 +237,7 @@ fn boolean_subtract_inherits_attribution_per_arrangement_fragment() {
     // distance from the axis — the cutter's own walls sit elsewhere. Every
     // such fragment must carry the original cylinder reference; every other
     // face (cap fragments, cutter-derived walls) must carry none.
-    let apothem = (std::f64::consts::PI / n as f64).cos();
+    let apothem = trig::cos(std::f64::consts::PI / n as f64);
     let expected = SurfaceRef::Cylinder {
         axis_point: Point3::new(0.0, 0.0, 0.0),
         axis: Vec3::new(0.0, 0.0, 1.0),
@@ -494,7 +495,7 @@ fn surface_refs_round_trip_through_save_load() {
         .unwrap();
         let p = |i: usize| {
             let a = 2.0 * std::f64::consts::PI * (i as f64) / 16.0;
-            Point3::new(1.0 + 0.5 * a.cos(), 2.0 + 0.5 * a.sin(), 0.0)
+            Point3::new(1.0 + 0.5 * trig::cos(a), 2.0 + 0.5 * trig::sin(a), 0.0)
         };
         for i in 0..16 {
             s.add_segment(p(i), p(i + 1)).unwrap();
@@ -644,7 +645,7 @@ fn hole_wall_offset_resizes_the_hole() {
     .unwrap();
     let p = |i: usize| {
         let a = 2.0 * std::f64::consts::PI * (i as f64) / 16.0;
-        Point3::new(a.cos(), a.sin(), 0.0)
+        Point3::new(trig::cos(a), trig::sin(a), 0.0)
     };
     for i in 0..16 {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -697,7 +698,7 @@ fn d_profile_chord_wall_translates_with_the_arc() {
     let n = 12;
     let p = |i: usize| {
         let a = std::f64::consts::PI * (i as f64) / (n as f64);
-        Point3::new(a.cos(), a.sin(), 0.0)
+        Point3::new(trig::cos(a), trig::sin(a), 0.0)
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -749,7 +750,7 @@ fn rounded_corner_solid() -> Object {
     let n = 6;
     let p = |i: usize| {
         let a = std::f64::consts::PI / 2.0 * (i as f64) / (n as f64);
-        Point3::new(1.0 + a.cos(), 1.0 + a.sin(), 0.0)
+        Point3::new(1.0 + trig::cos(a), 1.0 + trig::sin(a), 0.0)
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -1253,7 +1254,7 @@ fn partial_arc_rims_cover_only_the_drawn_range() {
     let n = 12;
     let p = |i: usize| {
         let a = std::f64::consts::PI * (i as f64) / (n as f64);
-        Point3::new(a.cos(), a.sin(), 0.0)
+        Point3::new(trig::cos(a), trig::sin(a), 0.0)
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -1512,7 +1513,7 @@ fn circle_loop(cx: f64, cy: f64, z: f64, r: f64, n: usize) -> Vec<Point3> {
     (0..n)
         .map(|i| {
             let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
-            Point3::new(cx + r * a.cos(), cy + r * a.sin(), z)
+            Point3::new(cx + r * trig::cos(a), cy + r * trig::sin(a), z)
         })
         .collect()
 }
@@ -1934,7 +1935,7 @@ fn bossing_an_arc_closed_by_a_chord_stamps_the_arc_not_the_chord() {
     let loop_pts: Vec<Point3> = (0..21)
         .map(|i| {
             let a = std::f64::consts::PI / 12.0 * (i as f64); // 15° steps
-            Point3::new(r * a.cos(), r * a.sin(), h)
+            Point3::new(r * trig::cos(a), r * trig::sin(a), h)
         })
         .collect();
     let disk = obj
@@ -2178,7 +2179,7 @@ fn an_arc_closed_by_a_secant_pushed_up_stamps_and_carries_only_its_arc() {
     let ring: Vec<Point3> = (0..28)
         .map(|i| {
             let a = (10.0 * i as f64).to_radians();
-            Point3::new(r * a.cos(), r * a.sin(), h)
+            Point3::new(r * trig::cos(a), r * trig::sin(a), h)
         })
         .collect();
     let obj = push_holed_disk(&ring, r, h, d);

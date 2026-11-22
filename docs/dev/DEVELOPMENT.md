@@ -162,6 +162,8 @@ workers/bug-intake/   the private Help ▸ Report Bug intake Worker (chunked
 tools/                replay runner and development tooling
 corpus/curves/        the curves scoreboard: test models as API scripts and
                       the checked-in result table (section 7)
+corpus/determinism/   the determinism golden: hash table, case list, extra
+                      models (section 7)
 site/                 the hew3d.com website (Astro)
 docs/                 architecture, file format spec, roadmap, this guide
 scripts/              verify.sh (per-commit gate), verify-changed.sh (quick
@@ -761,6 +763,28 @@ stream, once captured, becomes a permanent, exact reproducer rather than a
 "works on my machine" anecdote. See `docs/dev/DIAGNOSTICS.md` for the full
 determinism, logging, and record/replay architecture.
 
+Two bans in `clippy.toml` hold the kernel crates (`kernel`, `inference`,
+`tessellate`, `mesh-heal`) to this, and the gate fails on either:
+
+- **No hash collections.** `HashMap` and `HashSet` iterate in an order that
+  changes from run to run. Use `BTreeMap` and `BTreeSet`.
+- **Transcendentals go through `kernel::trig`.** Kernel crates call the
+  math module, never std's transcendental methods (`sin`, `cos`, `tan`,
+  their inverses, `atan2`, `sin_cos`, `exp`, `ln`, `powf`, `hypot` and the
+  rest). IEEE 754 rounds `+ - * /` and `sqrt` exactly, but not these, and
+  std computes them with the platform's C math library on a native build
+  and with pure-Rust code in WASM, so the same call gives a different last
+  bit on Linux, macOS, Windows and the web. `kernel::trig` is one
+  implementation on every target: the `libm` crate, pinned to an exact
+  version. Its `hypot` is `sqrt(x² + y²)` as written, for model-scale
+  lengths. A function the module lacks is added there, with its pinned
+  bits in the module's tests.
+
+A crate outside the kernel whose use never reaches a document (a renderer,
+an exporter, a test of one) carries a crate-root `#![allow(...)]` with the
+reason written beside it. Code that builds or changes a document, in
+`api`, `wasm-api` or an importer, calls `kernel::trig` like the kernel.
+
 ### The curves scoreboard
 
 The scoreboard says, case by case, what Fillet and Chamfer do on a set of
@@ -867,6 +891,33 @@ Never shape a row to get a better class. A refusal or a wrong result on a
 real model is what the table is for. Run `scripts/scoreboard.sh`, read the
 comparison, and commit the row and the table together.
 
+### The determinism golden
+
+`corpus/determinism/golden.tsv` records, for every curves-corpus model as
+built, a few extra models (revolve, loft, sweep, shell, deform, booleans)
+and one representative size of each blend case
+(`corpus/determinism/cases.tsv`), the document's `state_hash` and a hash of
+the exact bits of every object's tessellation. The kernel must produce the
+same geometry on every platform and in WASM, so the native test
+`crates/api/tests/determinism_golden.rs` runs on each platform in the
+preview build and prints every row that differs from the table, expected and
+actual. `scripts/determinism.sh` rewrites the table (commit it with any
+change that moves geometry on purpose), `--check` fails on a difference, and
+`--out <file>` writes this machine's table and exits 0, to diff against the
+checked-in one. The table is generated on Linux x86_64.
+`node tools/replay-runner/determinism.mjs` runs the same rows through the
+WASM kernel (after `scripts/wasm-flavors.sh build preview nodejs` and
+`use-node preview`) and lists every row that differs; it exits 0 unless given
+`--strict`. A production module cannot run the rows that need a Preview
+command; it reports them as unavailable and checks the rest. With
+`--strict` it is a gate: `scripts/verify-full.sh` and CI's `replay` job run
+it after the replay gate on both modules, and it fails on any differing
+row, or on an unavailable one in the preview module. The native table and
+the WASM module agree because every transcendental goes through
+`kernel::trig` (above), so a row that differs only in WASM is a call that
+bypassed it, or another platform difference, and is a bug to find, not a
+row to regenerate.
+
 ## 8. Dependencies & toolchains
 
 Everything Hew builds with is pinned to an exact version, and a bot proposes
@@ -914,6 +965,14 @@ upstream constraint rather than chosen:
 Each is pinned where it applies, with the reason and the condition for removing
 it written beside the pin. Nothing else should acquire a second version of a
 shared tool without the same treatment.
+
+**`libm` is held to an exact version** (`=0.2.16` in the root `Cargo.toml`,
+where every other crate takes a caret range and leaves the pin to
+`Cargo.lock`). It computes the kernel's transcendentals (`kernel::trig`), and
+a new release may round one of them differently in the last bit, which moves
+geometry. The pinned bits in `kernel::trig`'s tests, the determinism golden
+and the replay fixtures are there to catch such a change. Take a bump only
+on purpose, and regenerate whichever of them it moves in the same change.
 
 One dependency is deliberately held back rather than diverged: **`opentype.js`
 stays on the exact version `1.3.4`** — note the absent caret. Version 2 throws

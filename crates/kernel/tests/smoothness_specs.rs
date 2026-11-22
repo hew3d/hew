@@ -5,6 +5,7 @@
 //! `Object::edge_smoothness`, classifies every edge.
 
 use crate::common;
+use kernel::trig;
 
 use std::f64::consts::{PI, TAU};
 
@@ -93,7 +94,7 @@ fn swept_ring(big_r: f64, r: f64) -> Object {
     let path: Vec<Point3> = (0..n)
         .map(|i| {
             let a = TAU * i as f64 / n as f64;
-            p3(big_r * a.cos(), big_r * a.sin(), 0.0)
+            p3(big_r * trig::cos(a), big_r * trig::sin(a), 0.0)
         })
         .collect();
     let curves = vec![
@@ -201,7 +202,7 @@ fn boolean_regains_cylinder_rim_claims() {
     // Angles in the rim's own (u, v) frame: world +x is the notch, −x the
     // far side.
     let angle_of =
-        |rim: &kernel::AnalyticRim, d: Vec3| d.dot(rim.basis_v).atan2(d.dot(rim.basis_u));
+        |rim: &kernel::AnalyticRim, d: Vec3| trig::atan2(d.dot(rim.basis_v), d.dot(rim.basis_u));
     let (notch, far) = (Vec3::new(1.0, 0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0));
     assert!(
         top.covers(angle_of(top, far)),
@@ -365,7 +366,7 @@ fn stretched_chain_extruded(kind: SketchCurveKind, n: usize) -> Object {
         .unwrap();
         let p = |i: usize| {
             let a = TAU * (i % n) as f64 / n as f64;
-            p3(0.5 * a.cos(), 0.5 * a.sin(), 0.0)
+            p3(0.5 * trig::cos(a), 0.5 * trig::sin(a), 0.0)
         };
         for i in 0..n {
             sk.add_segment(p(i), p(i + 1)).unwrap();
@@ -432,7 +433,7 @@ fn edge_smoothness_classification() {
         let on_corner_circle = |x: Point3| {
             let cx = if x.x > 0.0 { w / 2.0 - r } else { -w / 2.0 + r };
             let cy = if x.y > 0.0 { d / 2.0 - r } else { -d / 2.0 + r };
-            ((x.x - cx).hypot(x.y - cy) - r).abs() <= 1e-9
+            (trig::hypot(x.x - cx, x.y - cy) - r).abs() <= 1e-9
         };
         // A wall-to-arc joint sits where a straight wall meets the arc: one
         // face claims a cylinder, the other is a plane, tangent there.

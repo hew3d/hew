@@ -760,12 +760,13 @@ mod tests {
     use crate::math::Point3;
     use crate::tol;
     use crate::topo::Object;
+    use crate::trig;
     use std::cell::Cell;
 
     /// Sizes from 0.3 mm to 30 mm, 40 to the decade, as asked sizes.
     fn asked_sizes() -> Vec<f64> {
         (0..=80)
-            .map(|k| 0.3e-3 * 10f64.powf(k as f64 / 40.0))
+            .map(|k| 0.3e-3 * trig::powf(10f64, k as f64 / 40.0))
             .collect()
     }
 

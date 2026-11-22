@@ -455,6 +455,7 @@ fn start_order(turns: &[f64], keys: &[[i64; 3]]) -> Vec<usize> {
 mod tests {
     use super::*;
     use crate::math::Point3;
+    use crate::trig;
 
     /// The start index on a regular `n`-gon of radius `r` centered at `c`,
     /// with turns computed as [`canonical_swept`] computes them.
@@ -462,7 +463,7 @@ mod tests {
         let p: Vec<Point3> = (0..n)
             .map(|k| {
                 let a = std::f64::consts::TAU * k as f64 / n as f64;
-                Point3::new(c.x + r * a.cos(), c.y + r * a.sin(), c.z)
+                Point3::new(c.x + r * trig::cos(a), c.y + r * trig::sin(a), c.z)
             })
             .collect();
         let dir = |i: usize| (p[(i + 1) % n] - p[i % n]).normalized().unwrap();

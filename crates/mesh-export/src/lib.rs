@@ -1,3 +1,9 @@
+// Outside the determinism-critical kernel scope (kernel / inference /
+// tessellate / mesh-heal). The one transcendental here converts an exported
+// color from sRGB; it writes a file and never reaches a document. The
+// workspace clippy.toml ban is suppressed here deliberately.
+#![allow(clippy::disallowed_methods)]
+
 //! STL, 3MF, GLB, and USDZ writers for `hew.doc.export` (docs/agents/HEW_API.md
 //! §7, `format` "stl" | "3mf" | "glb" (alias "gltf") | "usdz") — shared by
 //! every host

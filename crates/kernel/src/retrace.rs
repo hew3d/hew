@@ -24,6 +24,7 @@
 //! a straight run, is healed away by a plain swapped call. The history's
 //! undo keeps such vertices (the report's `vertex_ends`).
 
+use crate::trig;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::geom2d::{
@@ -639,7 +640,7 @@ impl Object {
             let (a, b) = (he.origin, dest[&h]);
             for (at, to, out) in [(a, b, Some(h)), (b, a, None)] {
                 let d = obj.vertices[to].position - obj.vertices[at].position;
-                let angle = d.dot(v).atan2(d.dot(u));
+                let angle = trig::atan2(d.dot(v), d.dot(u));
                 let list = spokes.entry(at).or_default();
                 match list.iter_mut().find(|s| s.1 == he.edge) {
                     Some(s) => {

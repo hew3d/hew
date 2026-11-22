@@ -2,6 +2,7 @@
 //! revolution it sweeps (true-curves.md §5.1; WP12).
 
 use crate::common;
+use kernel::trig;
 
 use std::collections::BTreeMap;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
@@ -52,7 +53,7 @@ fn arc(sk: &mut kernel::Sketch, cx: f64, cz: f64, r: f64, a0: f64, sweep: f64, n
     .unwrap();
     let at = |k: usize| {
         let a = a0 + sweep * k as f64 / n as f64;
-        p3(cx + r * a.cos(), 0.0, cz + r * a.sin())
+        p3(cx + r * trig::cos(a), 0.0, cz + r * trig::sin(a))
     };
     for k in 0..n {
         sk.add_segment(at(k), at(k + 1)).unwrap();
@@ -110,7 +111,7 @@ fn rectangle_on_axis_is_cylinder() {
         assert!(f.plane.normal().z.abs() > 1.0 - 1e-9);
     }
     let v = signed_volume(o);
-    let expected = PI * 0.25 * (48.0 / TAU * (TAU / 48.0).sin()); // inscribed 48-gon area × h
+    let expected = PI * 0.25 * (48.0 / TAU * trig::sin(TAU / 48.0)); // inscribed 48-gon area × h
     assert!((v - expected).abs() <= 1e-9, "{v} vs {expected}");
 }
 
@@ -168,7 +169,7 @@ fn triangle_is_cone() {
             axis.approx_eq(Vec3::new(0.0, 0.0, -1.0), 1e-9),
             "opening downward"
         );
-        assert!((half_angle - 0.5f64.atan()).abs() <= 1e-9);
+        assert!((half_angle - trig::atan(0.5f64)).abs() <= 1e-9);
         assert!(c.same_surface(&cones[0]));
     }
 }
@@ -361,7 +362,7 @@ fn follow_me_around_drawn_circle_stamps_torus() {
     let path: Vec<Point3> = (0..n)
         .map(|i| {
             let a = TAU * i as f64 / n as f64;
-            p3(a.cos(), a.sin(), 0.0)
+            p3(trig::cos(a), trig::sin(a), 0.0)
         })
         .collect();
     let curves = vec![

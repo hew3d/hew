@@ -1,3 +1,10 @@
+// Outside the determinism-critical kernel scope (kernel / inference /
+// tessellate / mesh-heal). Transcendentals here only frame a rendered
+// snapshot (the view's span from its field of view); nothing computed here
+// reaches a document, so the platform math library's last bit cannot move
+// one. The workspace clippy.toml ban is suppressed here deliberately.
+#![allow(clippy::disallowed_methods)]
+
 //! The headless renderers behind `hew.view.snapshot` and
 //! `hew.view.line_drawing`, shared by every host that owns a `Document`:
 //! `hew-cli`'s `CliHost` and the app's `LiveHost`. Pure over `&Document`;

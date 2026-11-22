@@ -7,6 +7,7 @@
 //! on it. The sticky-rule numbering in comments refers to the module docs of
 //! `kernel::sketch`.
 
+use kernel::trig;
 use kernel::{Plane, Point3, Profile, ProfileError, Sketch, SketchError, SketchVertexId, tol};
 use proptest::prelude::*;
 
@@ -137,7 +138,7 @@ fn inner_circuit_makes_a_hole_at_millimeter_scale_far_from_the_origin() {
         let ring = |r: f64| -> Vec<(Point3, Point3)> {
             let at = |k: usize| {
                 let a = std::f64::consts::TAU * (k as f64 + 0.3) / 13.0;
-                Point3::new(x + r * a.cos(), y + r * a.sin(), 0.0)
+                Point3::new(x + r * trig::cos(a), y + r * trig::sin(a), 0.0)
             };
             (0..13).map(|k| (at(k), at(k + 1))).collect()
         };
@@ -562,7 +563,10 @@ fn circle_chain(s: &mut Sketch, center: Point3, radius: f64, n: usize) -> kernel
         .unwrap();
     let p = |i: usize| {
         let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
-        pt(center.x + radius * a.cos(), center.y + radius * a.sin())
+        pt(
+            center.x + radius * trig::cos(a),
+            center.y + radius * trig::sin(a),
+        )
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -741,7 +745,7 @@ fn curve_rims_arc_covers_only_its_swept_range() {
     let n = 12;
     let p = |i: usize| {
         let a = std::f64::consts::PI * (i as f64) / (n as f64);
-        pt(a.cos(), a.sin())
+        pt(trig::cos(a), trig::sin(a))
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -756,7 +760,7 @@ fn curve_rims_arc_covers_only_its_swept_range() {
     // (world −Y side). `covers` takes angles in the rim's own basis frame,
     // so map the world directions through it rather than assuming
     // basis_u == world X.
-    let frame_angle = |d: kernel::Vec3| d.dot(rim.basis_v).atan2(d.dot(rim.basis_u));
+    let frame_angle = |d: kernel::Vec3| trig::atan2(d.dot(rim.basis_v), d.dot(rim.basis_u));
     assert!(rim.covers(frame_angle(kernel::Vec3::new(0.0, 1.0, 0.0))));
     assert!(!rim.covers(frame_angle(kernel::Vec3::new(0.0, -1.0, 0.0))));
     // Cardinals +X, +Y, −X survive (arc endpoints inclusive); −Y does not.
@@ -790,7 +794,7 @@ fn curve_rims_trims_coverage_when_part_of_the_circle_is_deleted() {
         let e = s.edges()[eid];
         let a = s.vertices()[e.from].position;
         let b = s.vertices()[e.to].position;
-        let mid_angle = ((a.y + b.y) * 0.5).atan2((a.x + b.x) * 0.5);
+        let mid_angle = trig::atan2((a.y + b.y) * 0.5, (a.x + b.x) * 0.5);
         if mid_angle < -std::f64::consts::FRAC_PI_4
             && mid_angle > -3.0 * std::f64::consts::FRAC_PI_4
         {
@@ -804,7 +808,7 @@ fn curve_rims_trims_coverage_when_part_of_the_circle_is_deleted() {
     // The center survives (an arc still exists) but the deleted cardinal is
     // no longer covered while the opposite one still is (frame-mapped, as in
     // the arc spec above).
-    let frame_angle = |d: kernel::Vec3| d.dot(rim.basis_v).atan2(d.dot(rim.basis_u));
+    let frame_angle = |d: kernel::Vec3| trig::atan2(d.dot(rim.basis_v), d.dot(rim.basis_u));
     assert!(rim.coverage.is_some());
     assert!(!rim.covers(frame_angle(kernel::Vec3::new(0.0, -1.0, 0.0))));
     assert!(rim.covers(frame_angle(kernel::Vec3::new(0.0, 1.0, 0.0))));
@@ -832,7 +836,7 @@ fn curve_rims_work_on_a_standing_plane() {
     let n = 24;
     let p = |i: usize| {
         let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
-        Point3::new(1.0 + 0.25 * a.cos(), 2.0, 1.0 + 0.25 * a.sin())
+        Point3::new(1.0 + 0.25 * trig::cos(a), 2.0, 1.0 + 0.25 * trig::sin(a))
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -857,7 +861,7 @@ fn edge_mid_angle_deg(s: &Sketch, eid: kernel::SketchEdgeId) -> f64 {
     let e = s.edges()[eid];
     let a = s.vertices()[e.from].position;
     let b = s.vertices()[e.to].position;
-    let deg = ((a.y + b.y) * 0.5).atan2((a.x + b.x) * 0.5).to_degrees();
+    let deg = trig::atan2((a.y + b.y) * 0.5, (a.x + b.x) * 0.5).to_degrees();
     if deg < 0.0 { deg + 360.0 } else { deg }
 }
 
@@ -913,7 +917,7 @@ fn curve_rims_does_not_bridge_coverage_across_disconnected_surviving_fragments()
         "two disjoint surviving arcs must stay separate entries, never bridged into one: {coverage:?}"
     );
 
-    let frame_angle = |d: kernel::Vec3| d.dot(rim.basis_v).atan2(d.dot(rim.basis_u));
+    let frame_angle = |d: kernel::Vec3| trig::atan2(d.dot(rim.basis_v), d.dot(rim.basis_u));
     // Interior of each surviving quarter: covered.
     assert!(rim.covers(frame_angle(kernel::Vec3::new(1.0, 1.0, 0.0)))); // ~45deg, inside [0,90]
     assert!(rim.covers(frame_angle(kernel::Vec3::new(-1.0, -1.0, 0.0)))); // ~225deg, inside [180,270]
@@ -1004,7 +1008,7 @@ fn ring_angles(s: &Sketch, curve: kernel::SketchCurveId, center: Point3) -> Vec<
         .into_iter()
         .map(|v| {
             let p = s.vertices()[v].position;
-            (p.y - center.y).atan2(p.x - center.x)
+            trig::atan2(p.y - center.y, p.x - center.x)
         })
         .collect();
     angles.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -1039,7 +1043,10 @@ fn refacet_curve_rebuilds_the_ring_and_preserves_the_circle() {
 
     // Every new vertex is ON the exact circle.
     for a in ring_angles(&s, curve, center) {
-        let p = pt(center.x + 0.75 * a.cos(), center.y + 0.75 * a.sin());
+        let p = pt(
+            center.x + 0.75 * trig::cos(a),
+            center.y + 0.75 * trig::sin(a),
+        );
         let hit = s
             .vertices()
             .values()
@@ -1074,7 +1081,7 @@ fn refacet_curve_anchors_the_new_ring_on_an_old_vertex() {
         .unwrap();
     let p = |i: usize| {
         let a = phase + std::f64::consts::TAU * (i as f64) / (n as f64);
-        pt(a.cos(), a.sin())
+        pt(trig::cos(a), trig::sin(a))
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -1155,7 +1162,7 @@ fn refacet_curve_refuses_a_polygon() {
         .unwrap();
     let p = |i: usize| {
         let a = std::f64::consts::TAU * (i as f64) / 24.0;
-        pt(a.cos(), a.sin())
+        pt(trig::cos(a), trig::sin(a))
     };
     for i in 0..24 {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -1308,7 +1315,7 @@ fn refacet_curve_refuses_two_disjoint_rings_under_one_chain() {
     let mut s = xy_sketch();
     let on_circle = |deg: f64| {
         let a = deg.to_radians();
-        pt(a.cos(), a.sin())
+        pt(trig::cos(a), trig::sin(a))
     };
 
     let curve = s
@@ -1902,7 +1909,7 @@ fn a_near_end_proper_crossing_splits_both_for_every_length() {
     // vertex merge): each end is within POINT_MERGE of the other segment
     // (2e-9 * sin 5deg), so each touches the other and both split.
     let angle = 5.0_f64.to_radians();
-    let d = (angle.cos(), angle.sin());
+    let d = (trig::cos(angle), trig::sin(angle));
     let tip = 2e-9;
     for f in frames() {
         for &len in &LENGTHS {
@@ -2303,8 +2310,8 @@ fn segments_added_at_once_on_curves_build_what_one_by_one_builds() {
             .map(|i| {
                 let a = |k: usize| std::f64::consts::TAU * k as f64 / n as f64;
                 (
-                    pt(cx + r * a(i).cos(), cy + r * a(i).sin()),
-                    pt(cx + r * a(i + 1).cos(), cy + r * a(i + 1).sin()),
+                    pt(cx + r * trig::cos(a(i)), cy + r * trig::sin(a(i))),
+                    pt(cx + r * trig::cos(a(i + 1)), cy + r * trig::sin(a(i + 1))),
                 )
             })
             .collect::<Vec<_>>()

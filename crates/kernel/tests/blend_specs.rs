@@ -3,6 +3,7 @@
 //! the size limit and every refusal.
 
 use crate::common;
+use kernel::trig;
 
 use std::collections::BTreeSet;
 use std::f64::consts::{FRAC_PI_2, PI};
@@ -93,7 +94,7 @@ fn rails(obj: &Object, new_faces: &[FaceId], dir: Vec3) -> Vec<EdgeId> {
 /// the corner and the arc center less the N triangles of the polygon.
 fn fillet_area(r: f64, theta: f64, n: usize) -> f64 {
     let phi = PI - theta;
-    r * r * ((phi / 2.0).tan() - (n as f64 / 2.0) * (phi / n as f64).sin())
+    r * r * (trig::tan(phi / 2.0) - (n as f64 / 2.0) * trig::sin(phi / n as f64))
 }
 
 fn top_front_edge(obj: &Object, x: f64, z: f64) -> EdgeId {
@@ -170,7 +171,7 @@ fn wedge_fillets_at_60_and_120() {
         let e = edge_between(&obj, p3(0.0, 0.0, 0.0), p3(0.0, 0.0, 1.0));
         let r = 0.1;
         let (after, report) = blend_ok(&obj, &spec(vec![e], round(r, 8)));
-        let setback = r / (theta / 2.0).tan();
+        let setback = r / trig::tan(theta / 2.0);
         // A rail point on the x axis face sits at the setback.
         let has_rail = after
             .vertices()
@@ -219,7 +220,7 @@ fn quarter_section(r: f64, n: usize) -> (f64, f64) {
     let mut poly = vec![(0.0, 0.0)];
     for k in 0..=n {
         let a = FRAC_PI_2 * k as f64 / n as f64;
-        poly.push((r - r * a.sin(), r - r * a.cos()));
+        poly.push((r - r * trig::sin(a), r - r * trig::cos(a)));
     }
     let (mut area, mut cx) = (0.0, 0.0);
     for i in 0..poly.len() {

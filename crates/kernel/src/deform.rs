@@ -6,6 +6,7 @@
 //! tags go (a non-similarity map); the edges that shaded smooth are
 //! softened first, so the result still reads as the curve it was.
 
+use crate::trig;
 use std::collections::BTreeMap;
 
 use crate::geom2d::plane_axes;
@@ -435,7 +436,7 @@ impl Map {
             } => {
                 let d = p - *o;
                 let (w, x, y) = (d.dot(*a), d.dot(*u), d.dot(*v));
-                let (s, c) = (angle * w / l).sin_cos();
+                let (s, c) = trig::sin_cos(angle * w / l);
                 *o + *a * w + *u * (x * c - y * s) + *v * (x * s + y * c)
             }
             Map::Taper {
@@ -466,7 +467,7 @@ impl Map {
                 }
                 let r = l / angle;
                 let phi = w / r;
-                let (s, c) = phi.sin_cos();
+                let (s, c) = trig::sin_cos(phi);
                 *o + *a * ((r - x) * s) + *u * (r - (r - x) * c) + *v * y
             }
             Map::Path(pm) => pm.map(p),

@@ -9,6 +9,7 @@
 //! before v11 keeps the refit, with a fixed list of fallback planes for a
 //! face whose points stray from it.
 
+use kernel::trig;
 use std::collections::BTreeMap;
 
 use crate::common;
@@ -722,7 +723,7 @@ fn far_cylinder(doc: &mut Document, far: f64) -> kernel::ObjectId {
     .unwrap();
     let p = |i: usize| {
         let a = std::f64::consts::TAU * (i % 48) as f64 / 48.0;
-        Point3::new(far + 0.25 * a.cos(), far + 0.25 * a.sin(), 0.0)
+        Point3::new(far + 0.25 * trig::cos(a), far + 0.25 * trig::sin(a), 0.0)
     };
     for i in 0..48 {
         sk.add_segment(p(i), p(i + 1)).unwrap();
@@ -822,7 +823,7 @@ fn revolved(torus: bool) -> Object {
             .unwrap();
             let at = |k: usize| {
                 let a = std::f64::consts::TAU * (k % 24) as f64 / 24.0;
-                p3(1.0 + 0.2 * a.cos(), 0.0, 0.5 + 0.2 * a.sin())
+                p3(1.0 + 0.2 * trig::cos(a), 0.0, 0.5 + 0.2 * trig::sin(a))
             };
             for k in 0..24 {
                 sk.add_segment(at(k), at(k + 1)).unwrap();

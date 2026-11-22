@@ -4,6 +4,7 @@
 //! built at the import planarity tolerance).
 
 use crate::common;
+use kernel::trig;
 
 use common::curves::*;
 use kernel::{BooleanOp, Object, Transform, Vec3};
@@ -165,7 +166,7 @@ fn imported_lathe_mm(n: usize) -> Object {
     for &(r, z) in &prof {
         for j in 0..n {
             let a = std::f64::consts::TAU * j as f64 / n as f64;
-            pts.push(p3(mm(r * a.cos()), mm(r * a.sin()), mm(z)));
+            pts.push(p3(mm(r * trig::cos(a)), mm(r * trig::sin(a)), mm(z)));
         }
     }
     pts.push(p3(0.0, 0.0, mm(27.0)));
@@ -229,9 +230,8 @@ fn tee_intersection_volume(a: &Object, end: f64) -> f64 {
     );
     let mut poly = base;
     poly.sort_by(|p, q| {
-        (p.1 - cy)
-            .atan2(p.0 - cx)
-            .partial_cmp(&(q.1 - cy).atan2(q.0 - cx))
+        trig::atan2(p.1 - cy, p.0 - cx)
+            .partial_cmp(&trig::atan2(q.1 - cy, q.0 - cx))
             .unwrap()
     });
     let n = poly.len();

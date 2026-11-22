@@ -10,6 +10,7 @@
 #![cfg_attr(not(hew_preview), allow(dead_code, unused_imports))]
 
 use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, Response, codes};
+use kernel::trig;
 use kernel::{Document, ObjectId, Plane, Point3, SurfaceRef, Vec3};
 use serde_json::{Value, json};
 
@@ -1488,7 +1489,7 @@ fn chamfer_angle_form_uses_the_law_of_sines() {
         })
         .collect();
     let want =
-        0.5 - 0.1 * (std::f64::consts::FRAC_PI_6).sin() / (std::f64::consts::FRAC_PI_3).sin();
+        0.5 - 0.1 * trig::sin(std::f64::consts::FRAC_PI_6) / trig::sin(std::f64::consts::FRAC_PI_3);
     assert!(
         front_z.iter().any(|z| (z - want).abs() < 1e-9),
         "the front face ends at {want}: {front_z:?}"
@@ -1928,7 +1929,7 @@ fn equal_radius_tee(doc: &mut Document) -> (ObjectId, Vec<(Point3, Point3)>) {
             .unwrap();
             let at = |i: usize| {
                 let a = TAU * (i % n) as f64 / n as f64;
-                Point3::new(c.x + r * a.cos(), c.y + r * a.sin(), 0.0)
+                Point3::new(c.x + r * trig::cos(a), c.y + r * trig::sin(a), 0.0)
             };
             for i in 0..n {
                 sk.add_segment(at(i), at(i + 1)).unwrap();

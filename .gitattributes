@@ -3,3 +3,9 @@
 # checkout may rewrite their line endings.
 app/src/plugins/boot/boot-1.js -text
 app/src/plugins/boot/boot-1.hash -text
+
+# The corpus is read as text on every platform (the golden tables and the
+# JSON frames), and the golden's hashes must not depend on a checkout's
+# line-ending conversion.
+corpus/determinism/** text eol=lf
+corpus/curves/** text eol=lf

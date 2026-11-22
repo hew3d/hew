@@ -9,6 +9,7 @@
 //! the shape cannot absorb is a typed refusal with the sketch/object
 //! untouched — never a repaired or clamped result.
 
+use kernel::trig;
 use kernel::{
     CurveGeom, Document, History, KernelOp, Object, Plane, Point3, Profile, Sketch, SketchError,
     offset_face_boundary, offset_profile, tol,
@@ -55,8 +56,8 @@ fn circle_sketch(center: Point3, radius: f64, n: usize) -> Sketch {
     let p = |i: usize| {
         let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
         Point3::new(
-            center.x + radius * a.cos(),
-            center.y + radius * a.sin(),
+            center.x + radius * trig::cos(a),
+            center.y + radius * trig::sin(a),
             0.0,
         )
     };
@@ -194,7 +195,7 @@ fn pie_region_offsets_arc_and_lines_together() {
     let n = 12; // quarter arc, 12 facets
     let arc = |i: usize| {
         let a = std::f64::consts::FRAC_PI_2 * (i as f64) / (n as f64);
-        pt(radius * a.cos(), radius * a.sin())
+        pt(radius * trig::cos(a), radius * trig::sin(a))
     };
     for i in 0..n {
         s.add_segment(arc(i), arc(i + 1)).expect("arc facet");
@@ -278,7 +279,7 @@ fn sharp_but_sane_corners_still_offset() {
         let outer = vec![
             pt(0.0, 0.0),
             pt(10.0, 0.0),
-            pt(10.0 * a.cos(), 10.0 * a.sin()),
+            pt(10.0 * trig::cos(a), 10.0 * trig::sin(a)),
         ];
         let profile = Profile::new(ground(), outer, Vec::new()).expect("wedge profile");
         let off = offset_profile(&profile, 0.1).expect("a sane sharp corner offsets");
@@ -286,7 +287,7 @@ fn sharp_but_sane_corners_still_offset() {
         // The apex vertex (index 0) sits at exactly d / sin(θ/2) from its
         // source — the miter is exact, merely bounded.
         let got = (off.outer.points[0] - pt(0.0, 0.0)).length();
-        let expect = 0.1 / (a / 2.0).sin();
+        let expect = 0.1 / trig::sin(a / 2.0);
         assert!(
             (got - expect).abs() <= 1e-9,
             "apex {apex_deg}°: miter displacement {got} != {expect}"
@@ -385,7 +386,10 @@ fn half_turn_facet_material_side_is_refused_not_guessed() {
     let radius = 3.0;
     let p = |deg: f64| {
         let a = deg.to_radians();
-        pt(center.x + radius * a.cos(), center.y + radius * a.sin())
+        pt(
+            center.x + radius * trig::cos(a),
+            center.y + radius * trig::sin(a),
+        )
     };
     let mut s = Sketch::on_plane(ground());
     s.begin_curve_with(CurveGeom { center, radius })
@@ -609,7 +613,7 @@ fn regular_polygon(n: usize, r: f64, cx: f64, cy: f64, phase: f64) -> Vec<Point3
     (0..n)
         .map(|i| {
             let a = phase + 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
-            pt(cx + r * a.cos(), cy + r * a.sin())
+            pt(cx + r * trig::cos(a), cy + r * trig::sin(a))
         })
         .collect()
 }

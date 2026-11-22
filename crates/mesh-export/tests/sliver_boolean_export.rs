@@ -1,3 +1,9 @@
+// Test-only, and outside the determinism-critical kernel scope (kernel /
+// inference / tessellate / mesh-heal): transcendentals here build the
+// inputs and expectations of a native test, never a document a user keeps.
+// Suppress the workspace clippy.toml ban for this integration-test crate.
+#![allow(clippy::disallowed_methods)]
+
 //! A boolean result that keeps faces under the old area-only floor (KB-25:
 //! faces down to 10 nm wide now keep a plane) tessellates with every face
 //! drawn and outward-wound, and exports as a closed binary STL; and so does

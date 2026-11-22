@@ -25,6 +25,7 @@
 use crate::geom2d::plane_axes;
 use crate::math::{Point3, Vec3};
 use crate::tol;
+use crate::trig;
 
 /// Triangles covering the face bounded by `outer` (counter-clockwise seen
 /// from `normal`) less `holes` (clockwise), as index triples into the
@@ -116,7 +117,7 @@ fn strictly_between(p: [f64; 2], a: [f64; 2], c: [f64; 2]) -> bool {
 /// How far `b` sits off the chord `a → c`, signed: positive on the left
 /// (a convex corner of a counter-clockwise ring).
 fn clearance(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
-    let chord = (c[0] - a[0]).hypot(c[1] - a[1]);
+    let chord = trig::hypot(c[0] - a[0], c[1] - a[1]);
     if chord == 0.0 {
         return 0.0;
     }
@@ -132,7 +133,7 @@ fn segment_distance(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     } else {
         (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
     };
-    (p[0] - (a[0] + t * dx)).hypot(p[1] - (a[1] + t * dy))
+    trig::hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy))
 }
 
 /// True if the segments `a`–`b` and `c`–`d` cross at a point interior to
@@ -331,7 +332,7 @@ fn ring_perimeter(pts: &[[f64; 2]], ring: &[usize]) -> f64 {
     (0..ring.len())
         .map(|i| {
             let (a, b) = (pts[ring[i]], pts[ring[(i + 1) % ring.len()]]);
-            (b[0] - a[0]).hypot(b[1] - a[1])
+            trig::hypot(b[0] - a[0], b[1] - a[1])
         })
         .sum()
 }
@@ -558,7 +559,7 @@ mod tests {
     /// A star-shaped hole about `c` (clockwise): from `c` out to the ray at
     /// angle `a1`, an optional middle corner, back from the ray at `a0`.
     fn sector_hole(c: (f64, f64), a0: f64, a1: f64, r: [f64; 3], mid: bool) -> Vec<Point3> {
-        let at = |a: f64, r: f64| (c.0 + r * a.cos(), c.1 + r * a.sin());
+        let at = |a: f64, r: f64| (c.0 + r * trig::cos(a), c.1 + r * trig::sin(a));
         let mut h = vec![c, at(a1, r[0])];
         if mid {
             h.push(at((a0 + a1) / 2.0, r[1]));

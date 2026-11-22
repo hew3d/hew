@@ -9,6 +9,7 @@
 //! a live one, losslessly, as one undo step, with provenance-based
 //! idempotent re-insert and content-deduplicated materials).
 
+use kernel::trig;
 use kernel::{
     AttrTarget, CurveGeom, Document, DocumentError, EntityRef, InsertOptions, InsertReport,
     LibraryProvenance, Material, NodeId, Plane, Point3, Rgba8, Transform, Vec3, WatertightState,
@@ -61,8 +62,8 @@ fn extrude_cylinder(doc: &mut Document, center: Point3, radius: f64, h: f64) -> 
     let p = |i: usize| {
         let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
         Point3::new(
-            center.x + radius * a.cos(),
-            center.y + radius * a.sin(),
+            center.x + radius * trig::cos(a),
+            center.y + radius * trig::sin(a),
             0.0,
         )
     };
@@ -2008,7 +2009,7 @@ fn profile_document_from_a_drawn_chain() {
         let n = 6;
         let at = |k: usize| {
             let a = std::f64::consts::FRAC_PI_2 * (k as f64) / (n as f64);
-            Point3::new(0.1 + 0.1 * a.cos(), 0.1 + 0.1 * a.sin(), 0.0)
+            Point3::new(0.1 + 0.1 * trig::cos(a), 0.1 + 0.1 * trig::sin(a), 0.0)
         };
         for k in 0..n {
             sk.add_segment(at(k), at(k + 1)).unwrap();

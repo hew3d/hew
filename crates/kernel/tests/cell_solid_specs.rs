@@ -18,6 +18,7 @@
 //!   saves and reopens; one undo restores the drawing exactly;
 //! - push-through's result pieces keep the source's name and tags.
 
+use kernel::trig;
 use kernel::{
     CellDeclineReason, CellOutcome, CellScope, CellSeed, Document, DraftReport, NodeId, Object,
     ObjectId, Plane, Point3, SketchId, Transform, Vec3, WatertightState,
@@ -2011,7 +2012,7 @@ fn detached_arc(doc: &mut Document) -> SketchId {
     let pts: Vec<Point3> = (0..=8)
         .map(|i| {
             let t = std::f64::consts::PI * f64::from(i) / 8.;
-            p(t.cos(), t.sin(), 0.)
+            p(trig::cos(t), trig::sin(t), 0.)
         })
         .collect();
     doc.draft_detached_new(ground(), None, "Arc", move |w| {
@@ -2088,7 +2089,7 @@ fn a_detached_arc_and_its_chord_keep_the_curve_in_either_order() {
         let region = doc.extrudable_regions(face).unwrap()[0];
         let (obj, _) = doc.extrude_region(face, region, 0.5).unwrap();
         // Eight fan triangles of the unit circle, each sin(π/8)/2, by 0.5.
-        solid(&doc, obj, 2. * (std::f64::consts::PI / 8.).sin());
+        solid(&doc, obj, 2. * trig::sin(std::f64::consts::PI / 8.));
         let o = doc.object(obj).unwrap();
         let walls: Vec<_> = o.faces().values().filter_map(|f| f.surface).collect();
         assert_eq!(
@@ -2115,7 +2116,7 @@ fn a_chord_across_part_of_an_arc_leaves_two_curved_runs() {
     let arc = detached_arc(&mut doc);
     let at = |i: u32| {
         let t = std::f64::consts::PI * f64::from(i) / 8.;
-        p(t.cos(), t.sin(), 0.)
+        p(trig::cos(t), trig::sin(t), 0.)
     };
     let before = doc.state_hash();
     draw_detached(&mut doc, ground(), &[(at(2), at(6))]);
@@ -2213,7 +2214,7 @@ fn a_line_from_a_lent_circles_point_leaves_the_circle_whole() {
     let center = p(7.5, 0., 0.);
     let facet = |i: usize| {
         let t = std::f64::consts::TAU * i as f64 / 25.;
-        p(7.5 + 1.5 * t.cos(), 1.5 * t.sin(), 0.)
+        p(7.5 + 1.5 * trig::cos(t), 1.5 * trig::sin(t), 0.)
     };
     let objects = doc.drawable_objects_on_plane(ground(), None);
     let circle = doc

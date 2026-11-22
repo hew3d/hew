@@ -8,6 +8,7 @@
 use super::BlendProfile;
 use crate::math::Vec3;
 use crate::tol;
+use crate::trig;
 
 /// One side's cross-section as 3D directions in the section plane, from the
 /// edge point outward: segment `i` runs `dirs[i]·lens[i]`. The last length
@@ -162,7 +163,7 @@ pub(crate) fn solve_section(
             let u = mul(sub(p0, c), 1.0 / r);
             let v = mul(sub(pn, c), 1.0 / r);
             let cosphi = dot(u, v).clamp(-1.0, 1.0);
-            let phi = cosphi.acos();
+            let phi = trig::acos(cosphi);
             let w = sub(v, mul(u, cosphi));
             let wl = len(w);
             let w = if wl > tol::NORMALIZE_MIN_LENGTH {
@@ -176,7 +177,7 @@ pub(crate) fn solve_section(
                 let ang = phi * k as f64 / n as f64;
                 offsets.push(to3(add(
                     c,
-                    add(mul(u, r * ang.cos()), mul(w, r * ang.sin())),
+                    add(mul(u, r * trig::cos(ang)), mul(w, r * trig::sin(ang))),
                 )));
             }
             offsets.push(to3(pn));
@@ -234,11 +235,11 @@ pub(crate) fn solve_section(
             let (pn, sb) = tb.at_length(r).ok_or(TraceEnd)?;
             let flat = sa == 0 && sb == 0;
             let mut offsets: Vec<Vec3> = if flat {
-                let theta = dot(to2(b.dirs[0]), [1.0, 0.0]).clamp(-1.0, 1.0).acos();
+                let theta = trig::acos(dot(to2(b.dirs[0]), [1.0, 0.0]).clamp(-1.0, 1.0));
                 (0..=n)
                     .map(|k| {
                         let ang = theta * k as f64 / n as f64;
-                        to3([r * ang.cos(), r * ang.sin()])
+                        to3([r * trig::cos(ang), r * trig::sin(ang)])
                     })
                     .collect()
             } else {
@@ -247,13 +248,13 @@ pub(crate) fn solve_section(
                 let ua = va.normalized().map_err(|_| TraceEnd)?;
                 let ub = vb.normalized().map_err(|_| TraceEnd)?;
                 let cos_theta = ua.dot(ub).clamp(-1.0, 1.0);
-                let theta = cos_theta.acos();
+                let theta = trig::acos(cos_theta);
                 let w = (ub - ua * cos_theta).normalized().map_err(|_| TraceEnd)?;
                 (0..=n)
                     .map(|k| {
                         let s = k as f64 / n as f64;
                         let ang = theta * s;
-                        (ua * ang.cos() + w * ang.sin()) * (ra + (rb - ra) * s)
+                        (ua * trig::cos(ang) + w * trig::sin(ang)) * (ra + (rb - ra) * s)
                     })
                     .collect()
             };

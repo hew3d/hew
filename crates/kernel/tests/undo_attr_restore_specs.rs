@@ -7,6 +7,7 @@
 //! Both merge/split pairs are covered: the inner (imprint) pair and the
 //! outer (boundary-split) pair.
 
+use kernel::trig;
 use kernel::{
     CurveGeom, Document, FaceId, History, KernelOp, KernelOpReport, Object, Plane, Point3, Sketch,
     Vec3,
@@ -31,7 +32,7 @@ fn analytic_cylinder(radius: f64, n: usize, height: f64) -> Object {
     .unwrap();
     let p = |i: usize| {
         let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
-        Point3::new(radius * a.cos(), radius * a.sin(), 0.0)
+        Point3::new(radius * trig::cos(a), radius * trig::sin(a), 0.0)
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();

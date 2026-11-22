@@ -163,8 +163,10 @@ jobs:
         run: scripts/verify.sh tauri
 
   # Replay gate — replay every committed recording into a fresh kernel and
-  # assert its golden state_hash still matches. Consumes the `--target
-  # nodejs` (CommonJS) bindings built by the `wasm` job.
+  # assert its golden state_hash still matches, then rebuild the determinism
+  # golden's models in the same kernel and assert they match the native
+  # table. Consumes the `--target nodejs` (CommonJS) bindings built by the
+  # `wasm` job.
   replay:
     needs: wasm
     runs-on: ubuntu-latest
@@ -182,12 +184,15 @@ jobs:
           name: wasm-flavors
           path: target/wasm-flavors
 
-      # Both modules, as scripts/verify-full.sh runs it.
-      - name: Replay gate (golden state-hash fixtures, both flavors)
+      # Both modules, as scripts/verify-full.sh runs it. The determinism
+      # golden's wasm leg holds each module to the table the native build
+      # wrote (docs/dev/DEVELOPMENT.md, "The determinism golden").
+      - name: Replay gate and determinism golden (both flavors)
         run: |
           for flavor in production preview; do
             scripts/wasm-flavors.sh use-node "$flavor"
             node tools/replay-runner/run.mjs
+            node tools/replay-runner/determinism.mjs --strict
           done
 
   # Chromium (SwiftShader software GL): boot smoke, harness specs, and the

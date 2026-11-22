@@ -14,6 +14,7 @@ use crate::shape_error::ShapeError;
 use crate::sketch::Profile;
 use crate::sketch::SketchVertexId;
 use crate::sketch_corner::{CornerBlendReport, CornerProfile};
+use crate::trig;
 
 /// Exactly the inputs of one in-place reshape, as values valid against the
 /// `before` snapshot (ids inside it, positions, sizes) — never a reference
@@ -966,7 +967,7 @@ pub(crate) fn revolve_profile(
         if phi == 0.0 {
             g
         } else {
-            c + u * (r * phi.cos()) + w * (r * phi.sin())
+            c + u * (r * trig::cos(phi)) + w * (r * trig::sin(phi))
         }
     };
     let closed = spec.angle.abs() >= full - tol::NORMAL_DIRECTION;
@@ -2244,7 +2245,7 @@ fn path_array_transforms(
                     .map_err(|_| shape(ShapeError::ShapeDegenerate))?
             }
         } else {
-            Transform::rotation(axis, axis.length().atan2(t_in.dot(t_out)))
+            Transform::rotation(axis, trig::atan2(axis.length(), t_in.dot(t_out)))
                 .map_err(|_| shape(ShapeError::ShapeDegenerate))?
         };
         let n = rot

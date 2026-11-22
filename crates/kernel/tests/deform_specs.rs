@@ -1,6 +1,7 @@
 //! Executable specs for Deform (true-curves.md §5.3): Twist, Bend, Taper
 //! and Bend to Path, and the Bend to Path checkpoint (00-README §5.1).
 
+use kernel::trig;
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_6, PI};
 
 use kernel::deform::{DeformFrame, DeformSpec};
@@ -58,7 +59,7 @@ fn assert_solid(o: &Object) {
 }
 
 fn rot_z(p: Point3, a: f64) -> Point3 {
-    let (s, c) = a.sin_cos();
+    let (s, c) = trig::sin_cos(a);
     Point3::new(p.x * c - p.y * s, p.x * s + p.y * c, p.z)
 }
 
@@ -69,7 +70,7 @@ fn tipped_blade(l: f64, w: f64, h: f64, n: usize) -> Object {
     let mut pts = vec![Point3::new(0.0, 0.0, 0.0), Point3::new(l, 0.0, 0.0)];
     for i in 1..n {
         let t = -FRAC_PI_2 + PI * i as f64 / n as f64;
-        pts.push(Point3::new(l + r * t.cos(), r + r * t.sin(), 0.0));
+        pts.push(Point3::new(l + r * trig::cos(t), r + r * trig::sin(t), 0.0));
     }
     pts.push(Point3::new(l, w, 0.0));
     pts.push(Point3::new(0.0, w, 0.0));
@@ -249,7 +250,7 @@ fn cylinder() -> Object {
     let n = 24;
     let p = |k: usize| {
         let a = k as f64 * 2.0 * PI / n as f64;
-        Point3::new(0.1 * a.cos(), 0.1 * a.sin(), 0.0)
+        Point3::new(0.1 * trig::cos(a), 0.1 * trig::sin(a), 0.0)
     };
     for k in 0..n {
         sk.add_segment(p(k), p((k + 1) % n)).unwrap();
@@ -297,7 +298,11 @@ fn l_with_arc() -> Vec<Point3> {
     let mut path = vec![Point3::ORIGIN, Point3::new(0.0, 0.0, 0.4)];
     for k in 1..=24 {
         let t = FRAC_PI_2 * k as f64 / 24.0;
-        path.push(Point3::new(0.2 - 0.2 * t.cos(), 0.0, 0.4 + 0.2 * t.sin()));
+        path.push(Point3::new(
+            0.2 - 0.2 * trig::cos(t),
+            0.0,
+            0.4 + 0.2 * trig::sin(t),
+        ));
     }
     path.push(Point3::new(0.6, 0.0, 0.6));
     path
@@ -513,7 +518,7 @@ fn quarter(n: usize) -> Vec<Point3> {
     (0..=n)
         .map(|k| {
             let t = FRAC_PI_2 * k as f64 / n as f64;
-            Point3::new(1.0 - t.cos(), 0.0, t.sin())
+            Point3::new(1.0 - trig::cos(t), 0.0, trig::sin(t))
         })
         .collect()
 }
@@ -546,7 +551,7 @@ fn bend_to_path_keeps_material_beyond_the_base_line() {
     // The far end continues one base-line length straight along the last
     // chord (the polyline's end tangent), a few degrees off +x.
     let tilt = FRAC_PI_2 / 24.0 / 2.0;
-    let expected = r + 0.4 * tilt.cos() + 0.025 * tilt.sin();
+    let expected = r + 0.4 * trig::cos(tilt) + 0.025 * trig::sin(tilt);
     let far = out
         .vertices()
         .values()
@@ -568,7 +573,7 @@ fn checkpoint_bend_to_path_s_curve() {
     let mut path = quarter(24);
     for k in 1..=24 {
         let t = FRAC_PI_2 * k as f64 / 24.0;
-        path.push(Point3::new(1.0 + t.sin(), 0.0, 2.0 - t.cos()));
+        path.push(Point3::new(1.0 + trig::sin(t), 0.0, 2.0 - trig::cos(t)));
     }
     let (ratio, worst) = checkpoint(path);
     println!("S-curve: volume ratio {ratio:.6}, worst ring tilt {worst:.3e}");
@@ -1023,7 +1028,7 @@ fn a_heavy_preview_stops_at_the_cap() {
         (0..n)
             .map(|k| {
                 let a = k as f64 * 2.0 * PI / n as f64;
-                Point3::new(0.1 * a.cos(), 0.1 * a.sin(), 0.0)
+                Point3::new(0.1 * trig::cos(a), 0.1 * trig::sin(a), 0.0)
             })
             .collect(),
         vec![],
@@ -1475,7 +1480,7 @@ fn dense_cylinder(n: usize, r: f64) -> Object {
     .unwrap();
     let p = |k: usize| {
         let a = k as f64 * 2.0 * PI / n as f64;
-        Point3::new(r * a.cos(), r * a.sin(), 0.0)
+        Point3::new(r * trig::cos(a), r * trig::sin(a), 0.0)
     };
     for k in 0..n {
         sk.add_segment(p(k), p((k + 1) % n)).unwrap();

@@ -14,8 +14,9 @@
 #
 #   verify.sh            fmt, clippy, cargo test, wasm (web), vitest, builds, tauri
 #   cargo-deny           advisories (incl. yanked crates) for both cargo trees
-#   replay gate          node-target wasm + golden state-hash fixtures, on
-#                        the production and the preview module
+#   replay gate          node-target wasm + golden state-hash fixtures, and
+#                        the wasm leg of the determinism golden, on the
+#                        production and the preview module
 #   web E2E (chromium)   Playwright, in the preview build (flag on) and in
 #                        the production-shape build (flag off). By default
 #                        the SMOKE SET: scripts/e2e-smoke-specs.txt, the
@@ -141,13 +142,17 @@ cargo deny --manifest-path shells/tauri/src-tauri/Cargo.toml --config deny.toml 
 # build, unoptimized as in CI (the replay checks state hashes, not size).
 # Both modules: a recording replays the same in either (the kernel is never
 # gated), except a recorded live-API frame of a preview command, which the
-# production module refuses.
+# production module refuses. The determinism golden's wasm leg then holds the
+# same module to the table the native build wrote (docs/dev/DEVELOPMENT.md,
+# "The determinism golden").
 for flavor in production preview; do
   echo "=== build kernel for Node (replay runner, $flavor) ==="
   scripts/wasm-flavors.sh build "$flavor" nodejs --no-opt
   scripts/wasm-flavors.sh use-node "$flavor"
   echo "=== replay gate (golden state-hash fixtures, $flavor) ==="
   node tools/replay-runner/run.mjs
+  echo "=== determinism golden, wasm leg ($flavor) ==="
+  node tools/replay-runner/determinism.mjs --strict
 done
 
 # Web E2E — the chromium lane. Playwright starts its own vite

@@ -47,6 +47,7 @@
 //! ([`Document::close_faces_through`]): a draft, and a move, copy or vertex
 //! drag of free drawing. Never on load, import, undo or redo.
 
+use crate::trig;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::draft::{along, face_on_plane_either, uncovered_parts};
@@ -1036,7 +1037,7 @@ impl Document {
                     let t = if fwd { d } else { d * -1.0 };
                     let u = faces[fi].normal.cross(t);
                     let u = u * (1.0 / u.length());
-                    (u.dot(w).atan2(u.dot(v)), u, fi, fwd)
+                    (trig::atan2(u.dot(w), u.dot(v)), u, fi, fwd)
                 })
                 .collect();
             at.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.2.cmp(&y.2)));

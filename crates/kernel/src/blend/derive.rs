@@ -13,6 +13,7 @@ use crate::math::{Point3, Vec3};
 use crate::surface;
 use crate::tol;
 use crate::topo::{Object, SurfaceRef};
+use crate::trig;
 
 /// The circle the loop of `face` holding `edge` runs on, as (center, axis,
 /// radius): every edge of the loop a chord of one attributed circle
@@ -88,7 +89,7 @@ fn band_claim(
         SurfaceRef::Cone {
             apex,
             axis: (center - apex).normalized().ok()?,
-            half_angle: ((radius - r).abs() / h.abs()).atan(),
+            half_angle: trig::atan((radius - r).abs() / h.abs()),
         }
     };
     (claim.holds_on(&ring, &face.plane, tol::PLANE_DIST)

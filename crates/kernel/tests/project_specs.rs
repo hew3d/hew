@@ -2,6 +2,7 @@
 //! depth.
 
 use crate::common;
+use kernel::trig;
 
 use common::curves::*;
 use kernel::project::{DepthMode, DepthSpec, ImprintSpec, ProjectedRegion};
@@ -41,7 +42,7 @@ fn ngon(c: Point3, dir: Vec3, u: Vec3, r: f64, n: usize) -> ProjectedRegion {
     let outer = (0..n)
         .map(|k| {
             let t = k as f64 * std::f64::consts::TAU / n as f64 + 0.1;
-            c + u * (r * t.cos()) + v * (r * t.sin())
+            c + u * (r * trig::cos(t)) + v * (r * trig::sin(t))
         })
         .collect();
     ProjectedRegion {
@@ -480,7 +481,7 @@ fn a_hexagon_projected_through_a_cylinder_keeps_its_corners() {
     let e = porthole_up_through_a_lying_cylinder(|sk| {
         let p = |k: usize| {
             let t = k as f64 * std::f64::consts::TAU / 6.0 + 0.1;
-            p3(0.3 + 0.05 * t.cos(), 0.015 + 0.05 * t.sin(), 0.0)
+            p3(0.3 + 0.05 * trig::cos(t), 0.015 + 0.05 * trig::sin(t), 0.0)
         };
         for k in 0..6 {
             sk.add_segment(p(k), p(k + 1)).unwrap();
@@ -542,7 +543,7 @@ fn label_on_a_cylinder(claimed: bool) -> (Object, Vec<kernel::EdgeId>) {
         } else {
             let p = |k: usize| {
                 let t = k as f64 * std::f64::consts::TAU / 24.0;
-                p3(0.5 * t.cos(), 0.5 * t.sin(), 0.0)
+                p3(0.5 * trig::cos(t), 0.5 * trig::sin(t), 0.0)
             };
             for k in 0..24 {
                 sk.add_segment(p(k), p(k + 1)).unwrap();

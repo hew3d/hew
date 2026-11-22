@@ -4,6 +4,7 @@
 //! read-only dispatch adds no undo entry.
 
 use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, Response, codes};
+use kernel::trig;
 use kernel::{CurveGeom, Document, Material, NodeId, ObjectId, Plane, Point3, Rgba8, SketchId};
 use serde_json::{Value, json};
 
@@ -66,7 +67,7 @@ fn build_circle_sketch(doc: &mut Document, cx: f64, cy: f64, r: f64) -> SketchId
         let pts: Vec<Point3> = (0..segments)
             .map(|i| {
                 let theta = std::f64::consts::TAU * (i as f64) / (segments as f64);
-                Point3::new(cx + r * theta.cos(), cy + r * theta.sin(), 0.0)
+                Point3::new(cx + r * trig::cos(theta), cy + r * trig::sin(theta), 0.0)
             })
             .collect();
         for i in 0..segments {

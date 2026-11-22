@@ -1,3 +1,10 @@
+// Outside the determinism-critical kernel scope (kernel / inference /
+// tessellate / mesh-heal). Transcendentals here only project a rendered
+// image; nothing computed here reaches a document, so the platform math
+// library's last bit cannot move one. The workspace clippy.toml ban is
+// suppressed here deliberately.
+#![allow(clippy::disallowed_methods)]
+
 //! The headless render device (docs/design/headless-snapshot.md): a pure
 //! software rasterizer over `tessellate`'s renderer-agnostic buffers —
 //! the second "device" behind the same primitives the WebGL2 viewport

@@ -11,6 +11,7 @@
 //! as the ignored pawn test (`crates/stl-import/tests/boolean_pawn.rs`),
 //! with no file outside the repository.
 
+use kernel::trig;
 use std::collections::{BTreeMap, BTreeSet};
 
 use kernel::{
@@ -258,7 +259,7 @@ fn all_three(a: &Object, b: &Object, what: &str) -> [BooleanTidy; 3] {
 /// horizontal cut.
 fn aimed_vertex(s: &Object) -> Point3 {
     let a = 60f64.to_radians();
-    let target = CENTER + Vec3::new(a.sin(), 0.0, a.cos()) * RADIUS;
+    let target = CENTER + Vec3::new(trig::sin(a), 0.0, trig::cos(a)) * RADIUS;
     s.vertices()
         .values()
         .map(|v| v.position)
@@ -546,8 +547,12 @@ fn a_native_cut_by_a_corner_splits_the_face_it_bends() {
 fn a_tidy_reaching_past_the_rebuilt_region_grows_it() {
     let s = sphere();
     let (lat, lon) = (31.5f64.to_radians(), 179f64.to_radians());
-    let target =
-        CENTER + Vec3::new(lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin()) * RADIUS;
+    let target = CENTER
+        + Vec3::new(
+            trig::cos(lat) * trig::cos(lon),
+            trig::cos(lat) * trig::sin(lon),
+            trig::sin(lat),
+        ) * RADIUS;
     let v = s
         .vertices()
         .values()
@@ -653,7 +658,7 @@ fn spike_down_to(apex: Point3) -> Object {
         .iter()
         .map(|d| {
             let t = d.to_radians();
-            base + Vec3::new(t.cos(), t.sin(), 0.0) * MM
+            base + Vec3::new(trig::cos(t), trig::sin(t), 0.0) * MM
         })
         .collect();
     pts.push(apex);

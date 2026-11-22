@@ -1,3 +1,9 @@
+// Test-only, and outside the determinism-critical kernel scope (kernel /
+// inference / tessellate / mesh-heal): transcendentals here build the
+// inputs and expectations of a native test, never a document a user keeps.
+// Suppress the workspace clippy.toml ban for this integration-test crate.
+#![allow(clippy::disallowed_methods)]
+
 //! STL export of a solid whose face holds a hole touching its outer loop
 //! at one vertex (a circle drawn tangent to the face's edge, then pushed
 //! into a pocket or left as a disc): the triangle soup is closed — every

@@ -5,6 +5,7 @@
 //! with a soft diagonal where they are not, soft seams where the profile
 //! or the path is smooth, and planar caps.
 
+use crate::trig;
 use std::collections::BTreeMap;
 
 use crate::material::FaceMaterial;
@@ -112,7 +113,7 @@ type BandSides = (Option<Vec3>, Option<Vec3>);
 /// little sharper does not. The arguments are differences of unit normals
 /// (`2 sin(θ/2)` for an angle θ), as the folds are measured.
 fn stands_out(fold: f64, reference: f64, threshold: f64) -> bool {
-    let angle = |chord: f64| 2.0 * (chord / 2.0).clamp(0.0, 1.0).asin();
+    let angle = |chord: f64| 2.0 * trig::asin((chord / 2.0).clamp(0.0, 1.0));
     let (f, r, t) = (angle(fold), angle(reference), angle(threshold));
     f > (r + t).max(2.0 * r)
 }
@@ -127,7 +128,7 @@ fn stands_out(fold: f64, reference: f64, threshold: f64) -> bool {
 /// spike, a square's corner beside a coarse round one); a corner whose
 /// fold is between half and two thirds of its turn there still softens.
 fn creases(fold: f64, reference: f64, turn: f64, floor: f64, threshold: f64) -> bool {
-    let angle = |chord: f64| 2.0 * (chord / 2.0).clamp(0.0, 1.0).asin();
+    let angle = |chord: f64| 2.0 * trig::asin((chord / 2.0).clamp(0.0, 1.0));
     let (f, fl, t) = (angle(fold), angle(floor), angle(threshold));
     stands_out(fold, reference, threshold) || (f > (2.0 * turn / 3.0).max(2.0 * fl) && f > t)
 }
@@ -594,7 +595,7 @@ pub(crate) fn area_centroid(ring: &[Point3], normal: Vec3) -> Option<Point3> {
 /// (right-hand rule), Rodrigues' formula.
 pub(crate) fn rotate_about(p: Point3, c: Point3, axis: Vec3, angle: f64) -> Point3 {
     let v = p - c;
-    let (s, co) = angle.sin_cos();
+    let (s, co) = trig::sin_cos(angle);
     let r = v * co + axis.cross(v) * s + axis * (axis.dot(v) * (1.0 - co));
     c + r
 }
@@ -633,6 +634,7 @@ mod tests {
     use crate::math::Point3;
     use crate::surface::EdgeSmoothness;
     use crate::tol;
+    use crate::trig;
 
     /// Whether column 0's wall edge on the upper band of a prism two units
     /// tall over `ring` is hard, under `rule` there and `others` at every
@@ -662,7 +664,7 @@ mod tests {
             column_fade: Some(ColumnFade {
                 fold: tol::LOFT_CREASE_FOLD,
                 rule: vec![vec![Fade::Crease; k], upper],
-                floor: vec![0.0, 2.0 * (floor / 2.0).sin()],
+                floor: vec![0.0, 2.0 * trig::sin(floor / 2.0)],
                 turn: vec![vec![0.0; k], turns],
             }),
         })
@@ -684,7 +686,7 @@ mod tests {
     /// turns by `turn` there (column 0); its corners crease, so no column
     /// is a reference and the reference is 0.
     fn pushed_square(turn: f64, rule: Fade) -> bool {
-        let e = (turn / 2.0).tan();
+        let e = trig::tan(turn / 2.0);
         let ring = move |z: f64| {
             vec![
                 Point3::new(1.0 + e, 0.0, z),
@@ -704,13 +706,13 @@ mod tests {
         let step = std::f64::consts::TAU / k as f64;
         // The sides from vertex 0 to its neighbors at ±step meet at an
         // interior angle π − turn: tan(turn / 2) = (r0 − cos step) / sin step.
-        let r0 = step.cos() + step.sin() * (turn / 2.0).tan();
+        let r0 = trig::cos(step) + trig::sin(step) * trig::tan(turn / 2.0);
         let ring = move |z: f64| -> Vec<Point3> {
             (0..k)
                 .map(|v| {
                     let a = step * v as f64;
                     let r = if v == 0 { r0 } else { 1.0 };
-                    Point3::new(r * a.cos(), r * a.sin(), z)
+                    Point3::new(r * trig::cos(a), r * trig::sin(a), z)
                 })
                 .collect()
         };
@@ -780,7 +782,7 @@ mod tests {
     /// measures folds; the comparison is of the angles).
     #[test]
     fn a_fold_stands_out_over_its_reference_plus_a_degree_and_twice_it() {
-        let f = |deg: f64| 2.0 * (deg.to_radians() / 2.0).sin();
+        let f = |deg: f64| 2.0 * trig::sin(deg.to_radians() / 2.0);
         let t = tol::LOFT_CREASE_FOLD;
         assert!(!stands_out(f(41.0), f(33.0), t), "41 beside 33: soft");
         assert!(
@@ -811,7 +813,7 @@ mod tests {
     /// even beside a steeper reference.
     #[test]
     fn a_corner_folding_most_of_its_turn_creases_beside_a_steep_skirt() {
-        let f = |deg: f64| 2.0 * (deg.to_radians() / 2.0).sin();
+        let f = |deg: f64| 2.0 * trig::sin(deg.to_radians() / 2.0);
         let t = tol::LOFT_CREASE_FOLD;
         let deg = |d: f64| d.to_radians();
         assert!(

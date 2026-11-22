@@ -3,6 +3,7 @@
 //! logical edges (with tangent-chain propagation), and the sharp edges of a
 //! face's loop.
 
+use crate::trig;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::Convexity;
@@ -117,7 +118,7 @@ impl Object {
         self.edge_convexity(edge)?;
         let (a, _) = self.edge_faces(edge)?;
         let f = self.edge_frame(edge, a)?;
-        Some(f.t_a.dot(f.t_b).clamp(-1.0, 1.0).acos())
+        Some(trig::acos(f.t_a.dot(f.t_b).clamp(-1.0, 1.0)))
     }
 
     /// Every sharp interior edge (one with a convexity), in slot order.
@@ -547,7 +548,7 @@ impl Object {
                 ) else {
                     return false;
                 };
-                if d_in.dot(d_out) < SCAN_SEAM_TURN.cos() {
+                if d_in.dot(d_out) < trig::cos(SCAN_SEAM_TURN) {
                     return false;
                 }
                 let (Ok(e_in), Ok(e_out)) = (
@@ -559,7 +560,7 @@ impl Object {
                 let short = len(i).min(len(j));
                 let comparable = short >= SCAN_SEAM_SLIVER * len(i).max(len(j))
                     && short >= SCAN_SEAM_FEATURE * total;
-                !(comparable && e_in.dot(e_out) < SCAN_SEAM_STEP.cos())
+                !(comparable && e_in.dot(e_out) < trig::cos(SCAN_SEAM_STEP))
             };
             let me = chain.iter().position(|&(e, _)| e == edge)?;
             if closed && (0..n).all(|i| like(i) && through(i)) {

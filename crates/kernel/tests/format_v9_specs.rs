@@ -6,6 +6,7 @@
 //! smooth-chain marker.
 
 use crate::common;
+use kernel::trig;
 
 use std::io::{Cursor, Read as _};
 
@@ -550,7 +551,7 @@ fn doc_with_smooth_chain() -> Document {
         for i in 0..6 {
             let a = |k: usize| {
                 let t = std::f64::consts::PI * k as f64 / 6.0;
-                p3(2.0 * t.cos(), t.sin(), 0.0)
+                p3(2.0 * trig::cos(t), trig::sin(t), 0.0)
             };
             sk.add_segment(a(i), a(i + 1)).unwrap();
         }

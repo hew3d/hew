@@ -7,6 +7,7 @@
 //! deliberately looser than `kernel::tol::PLANE_DIST`, deliberately far
 //! tighter than any real feature size.
 
+use kernel::trig;
 use kernel::{Plane, Point3, Vec3};
 
 /// How close a client-supplied point must be to a surface (or edge) to
@@ -425,7 +426,7 @@ pub fn draw_segments_per_turn(radius: f64) -> u32 {
     if ratio >= 1.0 {
         return DRAW_MIN_SEGMENTS_PER_TURN;
     }
-    let exact = std::f64::consts::PI / (1.0 - ratio).acos();
+    let exact = std::f64::consts::PI / trig::acos(1.0 - ratio);
     let ceil4 = (exact / 4.0).ceil() * 4.0;
     (ceil4 as u32).clamp(DRAW_MIN_SEGMENTS_PER_TURN, DRAW_MAX_SEGMENTS_PER_TURN)
 }

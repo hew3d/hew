@@ -53,7 +53,7 @@ use dicts::HewDict;
 use kernel::{
     AttrTarget, CameraProjection, ComponentId, Document, EntityRef, GroupId, Guide, GuideId,
     InstanceId, MaterialId, NodeId, Object, ObjectId, Point3, SectionPlaneState, SketchId,
-    Transform,
+    Transform, trig,
 };
 use skpwright::{
     Definition, DefinitionKind, Dictionary, GeometryRun, GuidePoint, Instance, Layer, Material,
@@ -1977,7 +1977,7 @@ impl<'d> Author<'d> {
                         site.arc.y_axis_m[2],
                     );
                     let d = anchor.point - c;
-                    let angle = d.dot(ya).atan2(d.dot(xa));
+                    let angle = trig::atan2(d.dot(ya), d.dot(xa));
                     let out = leader_dir.dot(d) >= 0.0;
                     let off = inches(curve.radius * 0.25) * if out { -1.0 } else { 1.0 };
                     let (map, edge) = (site.map, site.edge_pid);
@@ -2098,7 +2098,7 @@ fn radial_arc(arcs: &[&skpwright::Arc], point: Point3) -> Option<usize> {
         // Measured from the arc's start, so a point a hair before its first
         // vertex reads as just below zero rather than wrapping to a full
         // turn.
-        let angle = d.dot(v(a.y_axis_m)).atan2(d.dot(v(a.x_axis_m))) - a.start_rad;
+        let angle = trig::atan2(d.dot(v(a.y_axis_m)), d.dot(v(a.x_axis_m))) - a.start_rad;
         let angle = angle.rem_euclid(std::f64::consts::TAU);
         let angle = if std::f64::consts::TAU - angle < 1e-9 {
             0.0
@@ -2556,9 +2556,7 @@ fn camera(c: &kernel::CameraState) -> skpwright::Camera {
 fn frame_fov_deg(vertical_deg: f64, aspect_ratio: Option<f64>) -> f64 {
     match aspect_ratio {
         Some(a) if a > 0.0 && vertical_deg > 0.0 && vertical_deg < 180.0 => {
-            2.0 * ((vertical_deg.to_radians() / 2.0).tan() * a)
-                .atan()
-                .to_degrees()
+            2.0 * trig::atan(trig::tan(vertical_deg.to_radians() / 2.0) * a).to_degrees()
         }
         _ => vertical_deg,
     }
@@ -2568,9 +2566,7 @@ fn frame_fov_deg(vertical_deg: f64, aspect_ratio: Option<f64>) -> f64 {
 fn vertical_fov_deg(c: &skpwright::Camera) -> f64 {
     let a = c.aspect_ratio;
     if a > 0.0 && c.fov_deg > 0.0 && c.fov_deg < 180.0 {
-        2.0 * ((c.fov_deg.to_radians() / 2.0).tan() / a)
-            .atan()
-            .to_degrees()
+        2.0 * trig::atan(trig::tan(c.fov_deg.to_radians() / 2.0) / a).to_degrees()
     } else {
         c.fov_deg
     }
@@ -2857,8 +2853,8 @@ mod tests {
             skpwright::Arc {
                 center_m: [0.0; 3],
                 normal: [0.0, 0.0, 1.0],
-                x_axis_m: [t.cos(), t.sin(), 0.0],
-                y_axis_m: [-t.sin(), t.cos(), 0.0],
+                x_axis_m: [trig::cos(t), trig::sin(t), 0.0],
+                y_axis_m: [-trig::sin(t), trig::cos(t), 0.0],
                 radius_m: 1.0,
                 start_rad: 0.0,
                 end_rad: sweep_deg.to_radians(),
@@ -2867,7 +2863,7 @@ mod tests {
         let (a, b) = (arc(0.0, 90.0), arc(90.0, 270.0));
         let at = |deg: f64| {
             let t = f64::to_radians(deg);
-            Point3::new(t.cos(), t.sin(), 0.0)
+            Point3::new(trig::cos(t), trig::sin(t), 0.0)
         };
         assert_eq!(radial_arc(&[&b, &a], at(45.0)), Some(1));
         assert_eq!(radial_arc(&[&a, &b], at(200.0)), Some(1));
@@ -2878,7 +2874,7 @@ mod tests {
         // noise, is still on that arc.
         let (e, f) = (arc(0.0, 120.0), arc(180.0, 90.0));
         let t = 180f64.to_radians() - 1e-12;
-        let p = Point3::new(t.cos(), t.sin(), 0.0);
+        let p = Point3::new(trig::cos(t), trig::sin(t), 0.0);
         assert_eq!(radial_arc(&[&e, &f], p), Some(1));
     }
 

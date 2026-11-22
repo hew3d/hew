@@ -1,0 +1,24 @@
+{
+  "title": "A square swept along an open arc with a half turn of twist and a taper",
+  "from": "Sweep: follow-me along a curved rail with twist and end scale.",
+  "build": [
+    {
+      "method": "hew.sketch.draw_line",
+      "as": "profile",
+      "params": {
+        "plane": {"origin": [0, 0, 0], "normal": [0, -1, 0]},
+        "points": [[0, 0, 0], [0.2, 0, 0], [0.2, 0, 0.2], [0, 0, 0.2], [0, 0, 0]]
+      }
+    },
+    {
+      "method": "hew.sketch.draw_arc",
+      "as": "rail",
+      "params": {"plane": {"ground": true}, "center": [2.1, 0, 0], "radius": 2.0, "start_angle": 3.141592653589793, "end_angle": 3.641592653589793}
+    },
+    {
+      "method": "hew.solid.follow_me",
+      "as": "sweep",
+      "params": {"profile": {"$ref": "profile#/region_id"}, "path": {"curve": {"$ref": "rail#/curve_id"}}, "twist": 0.5, "end_scale": 0.5}
+    }
+  ]
+}

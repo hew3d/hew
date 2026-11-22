@@ -6,6 +6,7 @@
 //! unit tests inside `src/triangulate.rs`.
 
 use kernel::triangulate::{Pt5, bridge_holes, ear_clip, ear_clip_reference, triangulate_face};
+use kernel::trig;
 use kernel::{Point3, Vec3};
 use proptest::prelude::*;
 
@@ -55,8 +56,8 @@ fn arb_star_polygon() -> impl Strategy<Value = Vec<[f64; 5]>> {
         let mut angle = 0.0f64;
         pts.iter()
             .map(|&(gap, radius)| {
-                let x = radius * angle.cos();
-                let y = radius * angle.sin();
+                let x = radius * trig::cos(angle);
+                let y = radius * trig::sin(angle);
                 angle += std::f64::consts::TAU * gap / total;
                 [x, y, 0.0, x, y]
             })
@@ -260,7 +261,7 @@ fn arb_face_case() -> impl Strategy<Value = FaceCase> {
             let outer: Vec<Point3> = (0..n)
                 .map(|i| {
                     let a = rot + std::f64::consts::TAU * i as f64 / n as f64;
-                    Point3::new(radius * a.cos(), radius * a.sin(), 0.0)
+                    Point3::new(radius * trig::cos(a), radius * trig::sin(a), 0.0)
                 })
                 .collect();
             // Hole A on the -x side; hole B mirrors B's x-range to +x.

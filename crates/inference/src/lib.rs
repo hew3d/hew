@@ -160,6 +160,7 @@
 //! to back and at most [`MEETING_PAIR_CAP`] pairs a query, and the snap
 //! carries both faces and the line's ends ([`Snap::meeting_line`]).
 
+use kernel::trig;
 use std::cell::{Cell, OnceCell, Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1268,7 +1269,9 @@ impl SceneRim {
 
     /// The rim point at `angle` in the (u, v) frame.
     fn point_at(&self, angle: f64) -> Point3 {
-        self.center + self.u * (self.radius * angle.cos()) + self.v * (self.radius * angle.sin())
+        self.center
+            + self.u * (self.radius * trig::cos(angle))
+            + self.v * (self.radius * trig::sin(angle))
     }
 }
 
@@ -2747,7 +2750,7 @@ impl InferenceScene {
         let prune_tolerance = match mode {
             ApertureMode::Cone => {
                 let tan_aperture = (prune_aperture < std::f64::consts::FRAC_PI_2 - tol::CONE_SLACK)
-                    .then(|| prune_aperture.tan());
+                    .then(|| trig::tan(prune_aperture));
                 PruneTolerance::Cone(tan_aperture)
             }
             ApertureMode::Cylinder => PruneTolerance::Cylinder(Some(prune_aperture)),
@@ -2981,8 +2984,8 @@ impl InferenceScene {
                         continue;
                     }
                     let pos = rim.center
-                        + rim.basis_u * (rim.radius * angle.cos())
-                        + rim.basis_v * (rim.radius * angle.sin());
+                        + rim.basis_u * (rim.radius * trig::cos(angle))
+                        + rim.basis_v * (rim.radius * trig::sin(angle));
                     if let Some((ang, depth)) = wcone(pos, SnapKind::Tangent) {
                         candidates.push((
                             SnapKind::Tangent,
@@ -4934,7 +4937,7 @@ fn cone_test(
             }
             // cos(angle) = depth / dist; angle = acos(depth / dist).
             let cos_angle = (depth / dist_sq.sqrt()).min(1.0);
-            let angle = cos_angle.acos();
+            let angle = trig::acos(cos_angle);
             if angle <= aperture {
                 Some((angle, depth))
             } else {
@@ -4974,8 +4977,8 @@ fn tangent_angles(
     if dist <= radius + tol::POINT_MERGE {
         return None;
     }
-    let phi = in_plane.dot(v).atan2(in_plane.dot(u));
-    let alpha = (radius / dist).acos();
+    let phi = trig::atan2(in_plane.dot(v), in_plane.dot(u));
+    let alpha = trig::acos(radius / dist);
     Some([phi + alpha, phi - alpha])
 }
 
@@ -6157,7 +6160,7 @@ fn closest_point_on_line_to_ray(
 /// already be unit vectors; the comparison is orientation-free (an axis
 /// sighted from either end is equally edge-on).
 fn axis_is_edge_on(ray_dir: Vec3, axis_dir: Vec3) -> bool {
-    let cos_edge_on = (SOFT_AXIS_EDGE_ON_DEG * std::f64::consts::PI / 180.0).cos();
+    let cos_edge_on = trig::cos(SOFT_AXIS_EDGE_ON_DEG * std::f64::consts::PI / 180.0);
     ray_dir.dot(axis_dir).abs() >= cos_edge_on
 }
 
@@ -6265,7 +6268,7 @@ fn soft_axis_deviation(
     let offset = q - anchor;
     let along = offset.dot(axis_dir);
     let perp = (offset - axis_dir * along).length();
-    let angle = perp.atan2(along.abs());
+    let angle = trig::atan2(perp, along.abs());
     (angle <= soft_axis_aperture).then_some(angle)
 }
 
@@ -7225,7 +7228,7 @@ mod tests {
                         .enumerate()
                         .map(|(i, &r)| {
                             let a = phase + std::f64::consts::TAU * i as f64 / radii.len() as f64;
-                            c + u * (r * a.cos()) + v * (r * a.sin())
+                            c + u * (r * trig::cos(a)) + v * (r * trig::sin(a))
                         })
                         .collect()
                 };
@@ -8293,7 +8296,7 @@ mod tests {
         let ray_origin = Point3::new(-20.0, 20.0, 20.0);
         let ref_dist = (line_origin - ray_origin).length();
         let theta = 3.0_f64.to_radians();
-        let ray_dir = Vec3::new(theta.cos(), theta.sin(), 0.0)
+        let ray_dir = Vec3::new(trig::cos(theta), trig::sin(theta), 0.0)
             .normalized()
             .unwrap();
 
@@ -8340,7 +8343,7 @@ mod tests {
     fn axis_is_edge_on_true_when_nearly_parallel_either_direction() {
         let axis_dir = Vec3::new(0.0, 0.0, 1.0);
         let two_deg = (2.0_f64).to_radians();
-        let nearly_parallel = Vec3::new(two_deg.sin(), 0.0, two_deg.cos())
+        let nearly_parallel = Vec3::new(trig::sin(two_deg), 0.0, trig::cos(two_deg))
             .normalized()
             .unwrap();
         assert!(axis_is_edge_on(nearly_parallel, axis_dir));
@@ -8354,7 +8357,7 @@ mod tests {
     fn axis_is_edge_on_false_just_past_the_threshold() {
         let axis_dir = Vec3::new(0.0, 0.0, 1.0);
         let ten_deg = (10.0_f64).to_radians();
-        let mostly_parallel = Vec3::new(ten_deg.sin(), 0.0, ten_deg.cos())
+        let mostly_parallel = Vec3::new(trig::sin(ten_deg), 0.0, trig::cos(ten_deg))
             .normalized()
             .unwrap();
         assert!(!axis_is_edge_on(mostly_parallel, axis_dir));
@@ -8387,10 +8390,13 @@ mod tests {
     /// distance changes.
     fn matrix_camera_directions() -> Vec<(&'static str, Vec3)> {
         let five_deg = 5.0_f64.to_radians();
-        let near_edge_on_dir =
-            Vec3::new(five_deg.cos(), five_deg.sin() * 0.6, five_deg.sin() * 0.8)
-                .normalized()
-                .unwrap();
+        let near_edge_on_dir = Vec3::new(
+            trig::cos(five_deg),
+            trig::sin(five_deg) * 0.6,
+            trig::sin(five_deg) * 0.8,
+        )
+        .normalized()
+        .unwrap();
         vec![
             ("overhead", Vec3::new(0.0, 0.0, 1.0)),
             (
@@ -8539,8 +8545,9 @@ mod tests {
                 // `soft_axis_admission_does_not_widen_with_an_oblique_camera`'s
                 // requirement but swept over camera x length instead of one
                 // fixed pair.
-                let off_axis =
-                    anchor + axis_dir * (len * theta_off.cos()) + perp * (len * theta_off.sin());
+                let off_axis = anchor
+                    + axis_dir * (len * trig::cos(theta_off))
+                    + perp * (len * trig::sin(theta_off));
                 let dir_off = (off_axis - eye).normalized().unwrap();
                 let angle_off =
                     soft_axis_deviation(anchor, axis_dir, eye, dir_off, SOFT_AXIS_APERTURE);
@@ -8671,8 +8678,9 @@ mod tests {
                     "{name} at {len}m dead-on: expected ~0 deviation (admitted), got {angle:?}"
                 );
 
-                let off_axis =
-                    anchor + axis_dir * (len * theta_off.cos()) + perp * (len * theta_off.sin());
+                let off_axis = anchor
+                    + axis_dir * (len * trig::cos(theta_off))
+                    + perp * (len * trig::sin(theta_off));
                 let dir_off = (off_axis - eye).normalized().unwrap();
                 let angle_off =
                     soft_axis_deviation(anchor, axis_dir, eye, dir_off, SOFT_AXIS_APERTURE);
@@ -8736,8 +8744,9 @@ mod tests {
                     "{name} at {len}m dead-on: expected ~0 deviation (admitted), got {angle:?}"
                 );
 
-                let off_axis =
-                    anchor + axis_dir * (len * theta_off.cos()) + perp * (len * theta_off.sin());
+                let off_axis = anchor
+                    + axis_dir * (len * trig::cos(theta_off))
+                    + perp * (len * trig::sin(theta_off));
                 let dir_off = (off_axis - eye).normalized().unwrap();
                 let angle_off =
                     soft_axis_deviation(anchor, axis_dir, eye, dir_off, SOFT_AXIS_APERTURE);
@@ -8776,7 +8785,7 @@ mod tests {
         // Off-axis toward +Z — in the SAME (x, z) plane as `eye` and the
         // axis, which is exactly the degenerate alignment.
         let perp = Vec3::new(0.0, 0.0, 1.0);
-        let target = anchor + axis_dir * (len * theta.cos()) + perp * (len * theta.sin());
+        let target = anchor + axis_dir * (len * trig::cos(theta)) + perp * (len * trig::sin(theta));
         let dir = (target - eye).normalized().unwrap();
         let angle = soft_axis_deviation(anchor, axis_dir, eye, dir, SOFT_AXIS_APERTURE);
         assert!(
@@ -9210,7 +9219,7 @@ mod tests {
         // at axis-relative reach 5 — so the perpendicular separation is
         // exactly `h` and the resulting angle is exactly `atan(h / 5)`.
         let seven_deg: f64 = 7.0_f64.to_radians();
-        let h = seven_deg.tan() * 5.0;
+        let h = trig::tan(seven_deg) * 5.0;
         let ray = PickRay {
             origin: Point3::new(5.0, 3.0, 1.0 + h),
             direction: Vec3::new(0.0, -1.0, 0.0),
@@ -9280,7 +9289,7 @@ mod tests {
     fn long_drag_screen_angle(a: Point3, b: Point3) -> f64 {
         let da = (a - LONG_DRAG_EYE).normalized().unwrap();
         let db = (b - LONG_DRAG_EYE).normalized().unwrap();
-        da.dot(db).clamp(-1.0, 1.0).acos()
+        trig::acos(da.dot(db).clamp(-1.0, 1.0))
     }
 
     /// Near the end of a 3 m drag along an axis, a cursor 20 cm off the axis

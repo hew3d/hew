@@ -19,6 +19,7 @@
 //! whose cross-section is a triangle about `h` across, so every face the
 //! cut makes there scales with `h`.
 
+use kernel::trig;
 use kernel::{
     BooleanError, BooleanOp, BooleanTidy, Document, ImportNode, ImportScene, MeshRecipe, Object,
     Plane, Point3, Transform, Vec3, WatertightState, tol,
@@ -76,7 +77,7 @@ fn tet_corners(h: f64, apex_xy: (f64, f64), t: &Transform) -> Vec<Point3> {
         .iter()
         .map(|a| {
             let a = a.to_radians();
-            Point3::new(cx + r * a.cos(), cy + r * a.sin(), z)
+            Point3::new(cx + r * trig::cos(a), cy + r * trig::sin(a), z)
         })
         .collect();
     pts.push(Point3::new(apex_xy.0, apex_xy.1, BOX + h));
@@ -575,7 +576,7 @@ fn tet_toward(apex: Point3, base: Point3, r: f64) -> Object {
         .iter()
         .map(|d| {
             let t = d.to_radians();
-            base + u * (r * t.cos()) + v * (r * t.sin())
+            base + u * (r * trig::cos(t)) + v * (r * trig::sin(t))
         })
         .collect();
     pts.push(apex);
@@ -807,7 +808,7 @@ proptest! {
     ) {
         // A triangle in a random plane: base along `u`, apex `height` along
         // `v`, the apex foot `skew` of the way along the base.
-        let n = Vec3::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos());
+        let n = Vec3::new(trig::sin(phi) * trig::cos(theta), trig::sin(phi) * trig::sin(theta), trig::cos(phi));
         let helper = if n.x.abs() < 0.9 { Vec3::new(1.0, 0.0, 0.0) } else { Vec3::new(0.0, 1.0, 0.0) };
         let u = n.cross(helper).normalized().unwrap();
         let v = n.cross(u);

@@ -712,6 +712,7 @@ impl Object {
 pub(crate) mod tests {
     use super::*;
     use crate::topo::Vertex;
+    use crate::trig;
     use crate::{HalfEdgeId, Point3};
 
     #[test]
@@ -1429,7 +1430,7 @@ pub(crate) mod tests {
         (0..n)
             .map(|i| {
                 let a = -std::f64::consts::TAU * (i as f64 / n as f64 + phase);
-                (cx + r * a.cos(), cy + r * a.sin())
+                (cx + r * trig::cos(a), cy + r * trig::sin(a))
             })
             .collect()
     }

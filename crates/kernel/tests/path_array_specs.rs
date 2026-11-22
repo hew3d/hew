@@ -2,6 +2,7 @@
 //! copies at even arc-length stations of a sketch path, turned to follow it,
 //! with an optional uniform scale ramp, all as one undo step.
 
+use kernel::trig;
 use std::f64::consts::FRAC_PI_2;
 use std::num::NonZeroU32;
 
@@ -168,11 +169,11 @@ fn arc_path_aligned_rotates() {
         .flat_map(|i| (0..before.len()).map(move |j| (i, j)))
         .find(|&(i, j)| {
             let d = before[j] - before[i];
-            d.x.hypot(d.y) > 0.5
+            trig::hypot(d.x, d.y) > 0.5
         })
         .unwrap();
     let (d0, d1) = (before[j] - before[i], after[j] - after[i]);
-    let angle = d0.cross(d1).z.atan2(d0.dot(d1));
+    let angle = trig::atan2(d0.cross(d1).z, d0.dot(d1));
     let facet = FRAC_PI_2 / f64::from(n);
     assert!((angle - (f64::from(n) - 1.0) * facet).abs() < 1e-9);
     assert!(

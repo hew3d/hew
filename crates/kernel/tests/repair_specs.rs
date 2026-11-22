@@ -6,6 +6,7 @@
 
 use kernel::health::Verdict;
 use kernel::repair::RepairError;
+use kernel::trig;
 use kernel::{
     DefRecipe, Document, DocumentError, FaceId, ImportNode, ImportScene, KernelOp, MeshRecipe,
     NodeId, ObjectId, Point3, Transform, Vec3, WatertightState,
@@ -554,8 +555,8 @@ proptest! {
         drop in 0usize..6,
         inside_out in proptest::bool::ANY,
     ) {
-        let (sy, cy) = yaw.sin_cos();
-        let (sp, cp) = pitch.sin_cos();
+        let (sy, cy) = trig::sin_cos(yaw);
+        let (sp, cp) = trig::sin_cos(pitch);
         let turn = |p: Point3| {
             let (x, y, z) = (p.x * cy - p.y * sy, p.x * sy + p.y * cy, p.z);
             Point3::new(x, y * cp - z * sp, y * sp + z * cp)
@@ -804,8 +805,8 @@ proptest! {
         yaw in 0.0f64..std::f64::consts::TAU,
         pitch in 0.0f64..std::f64::consts::TAU,
     ) {
-        let (sy, cy) = yaw.sin_cos();
-        let (sp, cp) = pitch.sin_cos();
+        let (sy, cy) = trig::sin_cos(yaw);
+        let (sp, cp) = trig::sin_cos(pitch);
         let turn = |p: Point3| {
             let (x, y, z) = (p.x * cy - p.y * sy, p.x * sy + p.y * cy, p.z);
             Point3::new(x, y * cp - z * sp, y * sp + z * cp)

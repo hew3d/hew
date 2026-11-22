@@ -38,6 +38,7 @@
 //!
 //! The executable contract lives in `crates/kernel/tests/op_specs.rs`.
 
+use crate::trig;
 use slotmap::{SlotMap, new_key_type};
 
 use crate::geom2d::{
@@ -118,11 +119,11 @@ impl CurveGeom {
         let f = self.center - a;
         let apothem = (f - d * f.dot(d)).length();
         let ratio = (apothem / r).clamp(-1.0, 1.0);
-        let n = (std::f64::consts::PI / ratio.acos()).round();
+        let n = (std::f64::consts::PI / trig::acos(ratio)).round();
         if !(3.0..=100_000.0).contains(&n) {
             return None;
         }
-        ((apothem - r * (std::f64::consts::PI / n).cos()).abs() <= tol).then_some(n as u32)
+        ((apothem - r * trig::cos(std::f64::consts::PI / n)).abs() <= tol).then_some(n as u32)
     }
 }
 
@@ -209,8 +210,8 @@ impl SketchCurveRim {
             .filter(|&q| self.covers(q))
             .map(|q| {
                 self.center
-                    + self.basis_u * (self.radius * q.cos())
-                    + self.basis_v * (self.radius * q.sin())
+                    + self.basis_u * (self.radius * trig::cos(q))
+                    + self.basis_v * (self.radius * trig::sin(q))
             })
             .collect()
     }
@@ -1110,7 +1111,7 @@ impl Sketch {
                     if radial.length() <= tol::NORMALIZE_MIN_LENGTH {
                         None
                     } else {
-                        Some(radial.dot(v).atan2(radial.dot(u)))
+                        Some(trig::atan2(radial.dot(v), radial.dot(u)))
                     }
                 };
                 if let (Some(a), Some(b)) = (angle_of(e.from), angle_of(e.to)) {
@@ -1173,10 +1174,10 @@ impl Sketch {
             let lu = pose.apply_vector(rim.basis_u) * rim.radius;
             let lv = pose.apply_vector(rim.basis_v) * rim.radius;
             for (a, b) in [(lu.x, lv.x), (lu.y, lv.y), (lu.z, lv.z)] {
-                let peak = b.atan2(a);
+                let peak = trig::atan2(b, a);
                 for theta in [peak, peak + std::f64::consts::PI] {
                     if rim.covers(theta) {
-                        grow(c + lu * theta.cos() + lv * theta.sin());
+                        grow(c + lu * trig::cos(theta) + lv * trig::sin(theta));
                     }
                 }
             }
@@ -2519,7 +2520,7 @@ impl Sketch {
             if radial.length() <= tol::NORMALIZE_MIN_LENGTH {
                 return None;
             }
-            Some(radial.dot(v).atan2(radial.dot(u)))
+            Some(trig::atan2(radial.dot(v), radial.dot(u)))
         };
         let mut intervals: Vec<[f64; 2]> = Vec::with_capacity(members.len());
         for &eid in &members {
@@ -2570,7 +2571,7 @@ impl Sketch {
         let ring: Vec<Point3> = (0..segments)
             .map(|k| {
                 let a = start + std::f64::consts::TAU * (k as f64) / (segments as f64);
-                geom.center + u * (geom.radius * a.cos()) + v * (geom.radius * a.sin())
+                geom.center + u * (geom.radius * trig::cos(a)) + v * (geom.radius * trig::sin(a))
             })
             .collect();
 
@@ -4082,8 +4083,8 @@ impl Sketch {
             neighbors.sort_by(|&a, &b| {
                 let pa = proj(self.vertices[a].position);
                 let pb = proj(self.vertices[b].position);
-                let angle_a = (pa.1 - fp.1).atan2(pa.0 - fp.0);
-                let angle_b = (pb.1 - fp.1).atan2(pb.0 - fp.0);
+                let angle_a = trig::atan2(pa.1 - fp.1, pa.0 - fp.0);
+                let angle_b = trig::atan2(pb.1 - fp.1, pb.0 - fp.0);
                 angle_a.partial_cmp(&angle_b).unwrap()
             });
         }
@@ -5122,7 +5123,7 @@ mod tests {
                 (0..n)
                     .map(|i| {
                         let a = std::f64::consts::TAU * (i as f64) / (n as f64);
-                        Point3::new(r * a.cos(), r * a.sin(), 0.0)
+                        Point3::new(r * trig::cos(a), r * trig::sin(a), 0.0)
                     })
                     .collect()
             };

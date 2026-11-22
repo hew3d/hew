@@ -9,6 +9,7 @@
 //! moves it onto the offset claims exactly (decision I-25), so the offset
 //! faces' claims verify.
 
+use crate::trig;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ids::{FaceId, HalfEdgeId, VertexId};
@@ -83,7 +84,7 @@ fn corner_angle(obj: &Object, h: HalfEdgeId) -> f64 {
     if la <= tol::POINT_MERGE || lb <= tol::POINT_MERGE {
         return 0.0;
     }
-    (a.dot(b) / (la * lb)).clamp(-1.0, 1.0).acos()
+    trig::acos((a.dot(b) / (la * lb)).clamp(-1.0, 1.0))
 }
 
 /// `s` of a claimed face: +1 when the face's outward normal at its
@@ -452,7 +453,7 @@ pub(crate) fn offset_claim(obj: &Object, face: FaceId, distance: f64) -> Option<
             axis,
             half_angle,
         } => SurfaceRef::Cone {
-            apex: apex + axis * (s * distance / half_angle.sin()),
+            apex: apex + axis * (s * distance / trig::sin(half_angle)),
             axis,
             half_angle,
         },

@@ -22,6 +22,7 @@
 //! undo/redo with byte-identical saves, I6 the face group equals the
 //! ground's regions for the same lines, I7 the saved document reopens.
 
+use kernel::trig;
 use std::f64::consts::PI;
 
 use kernel::{CurveGeom, DraftReport, EdgeId, FaceId, KernelOp, Object, Point3, StickyError, tol};
@@ -47,7 +48,7 @@ fn in_closed_polygon(p: (f64, f64), ring: &[(f64, f64)], tol: f64) -> bool {
         let len2 = ex * ex + ey * ey;
         let t = (((p.0 - a.0) * ex + (p.1 - a.1) * ey) / len2).clamp(0.0, 1.0);
         let (qx, qy) = (a.0 + ex * t, a.1 + ey * t);
-        if (p.0 - qx).hypot(p.1 - qy) <= tol {
+        if trig::hypot(p.0 - qx, p.1 - qy) <= tol {
             return true;
         }
         if (a.1 > p.1) != (b.1 > p.1) && p.0 < a.0 + (p.1 - a.1) * ex / ey {
@@ -352,7 +353,7 @@ fn an_inscribed_circle_overshooting_a_short_rectangle_by_microns_matches_the_gro
             for wall in [front_wall as fn() -> Wall, tilted_wall] {
                 let (mut w, s, ring, g) = overshoot_case(wall(), short, centered);
                 let h = if centered { short / 2.0 } else { short };
-                let base = 2.0 * h / (PI / 24.0).tan();
+                let base = 2.0 * h / trig::tan(PI / 24.0);
                 let twice_area = base * h;
                 let width = twice_area / ((base + 2.0 * (base * base / 4.0 + h * h).sqrt()) / 2.0);
                 if twice_area < 1e-12 && width < tol::MIN_FACE_WIDTH {
@@ -989,7 +990,7 @@ fn micron_offset_crossings_match_the_ground_or_stay_drawing_as_predicted() {
     for draw in 0..2100 {
         // An offset of 0.1–30 µm, log-uniform, either sign.
         let off = |u: &mut dyn FnMut() -> f64| {
-            let m = 1e-7 * 300f64.powf(u());
+            let m = 1e-7 * trig::powf(300f64, u());
             if u() < 0.5 { -m } else { m }
         };
         let mut w = front_wall();
@@ -1022,8 +1023,8 @@ fn micron_offset_crossings_match_the_ground_or_stay_drawing_as_predicted() {
                     (0.3 + 0.9 * unit()) * MM
                 };
                 let ring = w.ring(
-                    11.25 * MM + dist * a.cos(),
-                    3.0 * MM + dist * a.sin(),
+                    11.25 * MM + dist * trig::cos(a),
+                    3.0 * MM + dist * trig::sin(a),
                     0.5 * MM,
                     n2,
                     p2,
@@ -1070,7 +1071,7 @@ fn micron_offset_crossings_match_the_ground_or_stay_drawing_as_predicted() {
                 let perimeter: f64 = (0..ring.len())
                     .map(|i| {
                         let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
-                        (b.0 - a.0).hypot(b.1 - a.1)
+                        trig::hypot(b.0 - a.0, b.1 - a.1)
                     })
                     .sum();
                 (a2, a2 / (perimeter / 2.0))

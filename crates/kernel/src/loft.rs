@@ -11,6 +11,7 @@ use crate::sketch::CurveGeom;
 use crate::station::{ColumnFade, Fade, Side, SkinSpec, area_centroid, build_skin, rotate_about};
 use crate::tol;
 use crate::topo::{Object, SurfaceRef};
+use crate::trig;
 
 /// Two perimeter parameters closer than this are the same sample. A
 /// parameter is a dimensionless fraction of a perimeter, so this is not a
@@ -140,7 +141,7 @@ impl Prepared {
         {
             let e2 = self.normal.cross(e1);
             let th = sweep * t;
-            return g.center + (e1 * th.cos() + e2 * th.sin()) * g.radius;
+            return g.center + (e1 * trig::cos(th) + e2 * trig::sin(th)) * g.radius;
         }
         a + (b - a) * t
     }
@@ -187,7 +188,7 @@ fn corner_at(
     if keyed(prev) || keyed(v) {
         let chord = |e: usize| (points[(e + 1) % n] - points[e]).normalized().ok();
         let turn = |x: Option<Vec3>, y: Option<Vec3>| match (x, y) {
-            (Some(x), Some(y)) => x.dot(y).clamp(-1.0, 1.0).acos(),
+            (Some(x), Some(y)) => trig::acos(x.dot(y).clamp(-1.0, 1.0)),
             _ => 0.0,
         };
         let mut allowance = 0.0_f64;
@@ -203,7 +204,7 @@ fn corner_at(
         }
         // In the dot space the plain test uses (so collinear chords in
         // any direction read alike), the allowance as an angle.
-        return a.dot(b) < allowance.cos() - tol::NORMAL_DIRECTION;
+        return a.dot(b) < trig::cos(allowance) - tol::NORMAL_DIRECTION;
     }
     a.dot(b) < 1.0 - tol::NORMAL_DIRECTION
 }
@@ -239,7 +240,7 @@ fn facet_turn(
         (tangent(prev, points[v]), tangent(v, points[v]))
     };
     match (a, b) {
-        (Some(a), Some(b)) => a.dot(b).clamp(-1.0, 1.0).acos(),
+        (Some(a), Some(b)) => trig::acos(a.dot(b).clamp(-1.0, 1.0)),
         _ => 0.0,
     }
 }
@@ -529,7 +530,7 @@ fn limited_tangents(
                 }
                 let (al, be) = (parts[i][c] / d, parts[i + 1][c] / d);
                 if !monotone_span(al, be) {
-                    let tau = 3.0 / al.hypot(be);
+                    let tau = 3.0 / trig::hypot(al, be);
                     let (p0, p1) = (parts[i][c] * tau, parts[i + 1][c] * tau);
                     set(&mut parts[i][c], p0);
                     set(&mut parts[i + 1][c], p1);
@@ -590,7 +591,7 @@ fn arc_sweeps(
         let (ra, rb) = (points[e] - g.center, points[(e + 1) % n] - g.center);
         let e1 = ra.normalized().map_err(|_| bad)?;
         let e2 = normal.cross(e1);
-        ccw.push(Some(rb.dot(e2).atan2(rb.dot(e1)).rem_euclid(TAU)));
+        ccw.push(Some(trig::atan2(rb.dot(e2), rb.dot(e1)).rem_euclid(TAU)));
     }
     let same = |a: usize, b: usize| same_geom(curves[a], curves[b]) && curves[a].is_some();
     // Points the caller gave on arcs (D-130): each on its edge's circle
@@ -608,7 +609,7 @@ fn arc_sweeps(
         let e1 = (points[e] - g.center).normalized().map_err(|_| bad)?;
         let e2 = normal.cross(e1);
         let rt = t - g.center;
-        let at = rt.dot(e2).atan2(rt.dot(e1)).rem_euclid(TAU);
+        let at = trig::atan2(rt.dot(e2), rt.dot(e1)).rem_euclid(TAU);
         // Within tolerance of either endpoint, on either side of it (a
         // point just short of the start reads as nearly a full turn).
         let near = |x: f64| x.min(TAU - x) <= tol::NORMAL_DIRECTION;
@@ -1016,7 +1017,8 @@ fn prepare(spec: &LoftSpec) -> Result<Vec<Prepared>, ShapeError> {
                 let e1 = d;
                 let e2 = o.normal.cross(e1);
                 let w = o.points[cand[best]] - center;
-                let ahead = (w.dot(e2).atan2(w.dot(e1)) / std::f64::consts::TAU).rem_euclid(1.0);
+                let ahead =
+                    (trig::atan2(w.dot(e2), w.dot(e1)) / std::f64::consts::TAU).rem_euclid(1.0);
                 Start {
                     candidate: best,
                     dir: d,
@@ -1178,7 +1180,7 @@ fn align_coaxial(prepared: &mut [Prepared]) -> Option<(Point3, Vec3)> {
     let e2 = n0.cross(e1);
     let turns = |p: Point3, c: Point3| {
         let d = p - c;
-        d.dot(e2).atan2(d.dot(e1)) / std::f64::consts::TAU
+        trig::atan2(d.dot(e2), d.dot(e1)) / std::f64::consts::TAU
     };
     for (p, g) in prepared.iter_mut().zip(&gs) {
         // How far this profile's automatic start sits past the first
@@ -1580,7 +1582,7 @@ impl Object {
                             return Err(bad);
                         }
                         let scale = lb / la;
-                        let angle = a.cross(b).dot(normal).atan2(a.dot(b));
+                        let angle = trig::atan2(a.cross(b).dot(normal), a.dot(b));
                         let pivot = ring[c1];
                         for p in ring.iter_mut() {
                             let r = rotate_about(*p, pivot, normal, angle);
@@ -1628,7 +1630,7 @@ impl Object {
                     SurfaceRef::Cone {
                         apex,
                         axis: toward,
-                        half_angle: ((g0.radius - g1.radius).abs() / h.abs()).atan(),
+                        half_angle: trig::atan((g0.radius - g1.radius).abs() / h.abs()),
                     }
                 };
                 for band in &mut claims[r * per..(r + 1) * per] {
@@ -1688,7 +1690,7 @@ impl Object {
                     .map(|s| {
                         let span = s / per;
                         let at = |r: usize| if r < k { floor_of[r] } else { 0.0 };
-                        2.0 * (at(span).max(at(span + 1)) / 2.0).sin()
+                        2.0 * trig::sin(at(span).max(at(span + 1)) / 2.0)
                     })
                     .collect(),
             }),

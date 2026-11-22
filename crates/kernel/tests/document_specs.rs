@@ -10,6 +10,7 @@
 //! document undo log is an identity on visible state and keeps `ObjectId`s
 //! stable across undo/redo.
 
+use kernel::trig;
 use kernel::{
     Anchor, Annotation, AxesFrame, AxesFrameError, BooleanError, BooleanOp, CapturedCurve,
     Document, DocumentError, FaceId, GroupId, Guide, ImageFormat, ImportNode, ImportScene,
@@ -4668,8 +4669,8 @@ fn draw_circle_curve(
     let pt = |i: usize| {
         let a = (i % n) as f64 / n as f64 * std::f64::consts::TAU;
         Point3::new(
-            center.x + radius * a.cos(),
-            center.y + radius * a.sin(),
+            center.x + radius * trig::cos(a),
+            center.y + radius * trig::sin(a),
             0.0,
         )
     };
@@ -8332,7 +8333,7 @@ fn follow_me_makes_a_sphere_from_perpendicular_circles() {
         let n = 32;
         let pt = |i: usize| {
             let a = (i % n) as f64 / n as f64 * std::f64::consts::TAU;
-            Point3::new(0.0, 0.1 * a.cos(), 0.1 + 0.1 * a.sin())
+            Point3::new(0.0, 0.1 * trig::cos(a), 0.1 + 0.1 * trig::sin(a))
         };
         for i in 0..n {
             sk.add_segment(pt(i), pt(i + 1)).unwrap();

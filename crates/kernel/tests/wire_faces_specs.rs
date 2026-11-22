@@ -20,6 +20,7 @@
 //! - every edit and everything it caused is ONE undo step, undo restores the
 //!   document exactly, and every state saves and reopens unchanged.
 
+use kernel::trig;
 use std::f64::consts::PI;
 
 use kernel::{Document, DraftReport, Plane, Point3, SketchId, Transform, Vec3};
@@ -896,7 +897,11 @@ fn close_faces_through_closes_what_old_lines_close() {
 
 /// A random plane through the origin region, and an orthonormal basis of it.
 fn random_frame(theta: f64, phi: f64, off: f64) -> (Point3, Vec3, Vec3, Vec3) {
-    let n = Vec3::new(phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos());
+    let n = Vec3::new(
+        trig::sin(phi) * trig::cos(theta),
+        trig::sin(phi) * trig::sin(theta),
+        trig::cos(phi),
+    );
     let helper = if n.z.abs() < 0.9 {
         Vec3::new(0., 0., 1.)
     } else {
@@ -928,7 +933,7 @@ proptest! {
         let pts2: Vec<(f64, f64)> = (0..n)
             .map(|i| {
                 let a = 2.0 * PI * (i as f64) / (n as f64);
-                (radii[0] * a.cos(), radii[0] * a.sin() * (0.5 + radii[i] / 4.0))
+                (radii[0] * trig::cos(a), radii[0] * trig::sin(a) * (0.5 + radii[i] / 4.0))
             })
             .collect();
         let pts: Vec<Point3> = pts2.iter().map(|&(x, y)| o + u * x + v * y).collect();
@@ -948,7 +953,7 @@ proptest! {
             // edge by `tilts[i]` (never the polygon's plane itself).
             let d = (b - a).normalized().unwrap();
             let side = d.cross(normal);
-            let hn = normal * tilts[i].cos() + side * tilts[i].sin();
+            let hn = normal * trig::cos(tilts[i]) + side * trig::sin(tilts[i]);
             let r = draw(&mut doc, plane(a, hn), &[(a, b)]);
             closed.extend(r.faces_closed);
         }

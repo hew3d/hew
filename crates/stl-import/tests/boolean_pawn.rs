@@ -22,6 +22,7 @@
 //! a known limit of the arrangement, not of the tidy (see the attempt
 //! loop).
 
+use kernel::trig;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -93,7 +94,7 @@ fn add_disc(doc: &mut Document, cx: f64, cy: f64, r: f64, n: usize, z0: f64, z1:
     let pts: Vec<(f64, f64)> = (0..n)
         .map(|k| {
             let a = std::f64::consts::TAU * k as f64 / n as f64;
-            (cx + r * a.cos(), cy + r * a.sin())
+            (cx + r * trig::cos(a), cy + r * trig::sin(a))
         })
         .collect();
     add_prism(doc, &pts, z0, z1)

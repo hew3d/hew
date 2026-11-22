@@ -879,6 +879,7 @@ fn offset(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kernel::trig;
 
     fn seg(a: [f64; 2], b: [f64; 2]) -> Seg {
         Seg { a, b, circle: None }
@@ -901,7 +902,7 @@ mod tests {
     #[test]
     fn consecutive_facets_of_one_circle_merge_into_one_arc() {
         let c = Some(([0.0, 0.0], 1.0));
-        let pt = |t: f64| [t.cos(), t.sin()];
+        let pt = |t: f64| [trig::cos(t), trig::sin(t)];
         let mut segs = vec![seg([1.0, -1.0], [1.0, 0.0])];
         for k in 0..4 {
             let (t0, t1) = (k as f64 * 0.25, (k + 1) as f64 * 0.25);

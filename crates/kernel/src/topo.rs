@@ -4,6 +4,7 @@
 //! apply inside it, never across Objects. Its watertightness is tracked
 //! explicitly and kept honest by the validator.
 
+use crate::trig;
 use std::collections::BTreeMap;
 
 use slotmap::SlotMap;
@@ -312,8 +313,8 @@ impl SurfaceRef {
             ) => {
                 same_dir(ax_a, ax_b)
                     && near(p_a, p_b)
-                    && (h_a.cos() - h_b.cos()).abs() <= NORMAL_DIRECTION
-                    && (h_a.sin() - h_b.sin()).abs() <= NORMAL_DIRECTION
+                    && (trig::cos(h_a) - trig::cos(h_b)).abs() <= NORMAL_DIRECTION
+                    && (trig::sin(h_a) - trig::sin(h_b)).abs() <= NORMAL_DIRECTION
             }
             _ => false,
         }
@@ -931,7 +932,7 @@ impl Object {
                 if radial.length() <= crate::tol::NORMALIZE_MIN_LENGTH {
                     (t, None)
                 } else {
-                    (t, Some(radial.dot(g.v).atan2(radial.dot(g.u))))
+                    (t, Some(trig::atan2(radial.dot(g.v), radial.dot(g.u))))
                 }
             };
             let positions: Vec<Point3> = self.loop_positions(face.outer_loop).collect();
@@ -1101,7 +1102,7 @@ impl Object {
                 let d = p - center;
                 let radial = d - axis * d.dot(axis);
                 (radial.length() > crate::tol::NORMALIZE_MIN_LENGTH)
-                    .then(|| radial.dot(v).atan2(radial.dot(u)))
+                    .then(|| trig::atan2(radial.dot(v), radial.dot(u)))
             };
             let a = self.vertices[he.origin].position;
             let b = self.vertices[self.half_edges[he.next].origin].position;
@@ -1194,8 +1195,8 @@ impl AnalyticRim {
             .filter(|&q| self.covers(q))
             .map(|q| {
                 self.center
-                    + self.basis_u * (self.radius * q.cos())
-                    + self.basis_v * (self.radius * q.sin())
+                    + self.basis_u * (self.radius * trig::cos(q))
+                    + self.basis_v * (self.radius * trig::sin(q))
             })
             .collect()
     }

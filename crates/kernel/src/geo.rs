@@ -13,6 +13,8 @@
 //! ([`GeoReference::map_unit`]); `map_unit_metres` says what one of those
 //! is in meters when the file records it.
 
+use crate::trig;
+
 /// Why a candidate [`GeoReference`] was refused (DEVELOPMENT.md rule 4:
 /// nothing is clamped or repaired).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +84,7 @@ impl GeoReference {
     /// zero vector (no orientation recorded).
     pub fn x_axis_angle(&self) -> Option<f64> {
         let [x, y] = self.x_axis;
-        (x != 0.0 || y != 0.0).then(|| y.atan2(x))
+        (x != 0.0 || y != 0.0).then(|| trig::atan2(y, x))
     }
 
     /// Checks the record's numbers.

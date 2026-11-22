@@ -12,6 +12,7 @@
 //! The operand here is a unit box built through the import builder with its
 //! top corner `(1, 1, 1)` raised by `d`, which bends only the top quad.
 
+use kernel::trig;
 use kernel::{BooleanError, BooleanOp, Object, Point3, Transform, WatertightState, tol};
 use proptest::prelude::*;
 
@@ -333,7 +334,7 @@ fn prism(
     for z in [z0, z1] {
         for k in 0..n {
             let a = turn + std::f64::consts::TAU * k as f64 / n as f64;
-            pts.push(Point3::new(cx + r * a.cos(), cy + r * a.sin(), z));
+            pts.push(Point3::new(cx + r * trig::cos(a), cy + r * trig::sin(a), z));
         }
     }
     let mut faces = vec![(0..n).rev().collect::<Vec<_>>(), (n..2 * n).collect()];

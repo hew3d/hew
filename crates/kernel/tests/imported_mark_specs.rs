@@ -20,6 +20,7 @@
 //! - any drawing on an imported object clears its mark, a dangling line
 //!   kept as the object's own sketch included.
 
+use kernel::trig;
 use kernel::{
     Document, DraftReport, ImportNode, ImportScene, ImportSceneExtra, ImportSketch, MeshRecipe,
     NodeId, ObjectId, Plane, Point3, SketchId, Transform, Vec3,
@@ -434,7 +435,7 @@ fn imported_ring_doc() -> (Document, SketchId) {
     let pts: Vec<Point3> = (0..n)
         .map(|i| {
             let a = std::f64::consts::TAU * f64::from(i) / f64::from(n);
-            p(10. + 0.5 * a.cos(), 0.5 * a.sin(), 0.)
+            p(10. + 0.5 * trig::cos(a), 0.5 * trig::sin(a), 0.)
         })
         .collect();
     let mut sc = scene(false);

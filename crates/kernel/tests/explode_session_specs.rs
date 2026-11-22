@@ -27,6 +27,7 @@
 //! - the cycle and depth gates on placing a definition mid-session read the
 //!   whole frame stack, not just the innermost frame.
 
+use kernel::trig;
 use kernel::{
     ComponentId, Document, DocumentError, InstanceId, KernelOp, NodeId, ObjectId, Plane, Point3,
     Transform, Vec3,
@@ -547,8 +548,8 @@ fn analytic_cylinder_metadata_survives_a_session_round_trip() {
         let pt = |i: usize| {
             let a = (i % n) as f64 / n as f64 * std::f64::consts::TAU;
             Point3::new(
-                center.x + radius * a.cos(),
-                center.y + radius * a.sin(),
+                center.x + radius * trig::cos(a),
+                center.y + radius * trig::sin(a),
                 0.0,
             )
         };

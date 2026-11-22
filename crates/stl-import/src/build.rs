@@ -89,6 +89,7 @@
 //! non-manifold seam a single physical part may still contain (a fin, an
 //! internal partition) — exactly its documented job.
 
+use kernel::trig;
 use kernel::{ImportNode, ImportScene, MeshRecipe, NO_MATERIAL, Point3};
 use mesh_heal::split::{MeshPiece, split_non_manifold};
 
@@ -623,7 +624,7 @@ fn winding_number(p: Point3, faces: &[Vec<usize>], positions: &[Point3]) -> f64 
             let (la, lb, lc) = (a.length(), b.length(), c.length());
             let det = a.dot(b.cross(c));
             let denom = la * lb * lc + a.dot(b) * lc + b.dot(c) * la + c.dot(a) * lb;
-            total += 2.0 * det.atan2(denom);
+            total += 2.0 * trig::atan2(det, denom);
         }
     }
     total / (4.0 * std::f64::consts::PI)

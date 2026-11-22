@@ -2,6 +2,7 @@
 //! bullnoses, router profiles, stopped and variable-radius fillets.
 
 use crate::common;
+use kernel::trig;
 
 use std::collections::BTreeSet;
 use std::f64::consts::{FRAC_PI_2, PI};
@@ -104,7 +105,7 @@ fn cove_on_box_edge() {
         }
     }
     let removed = signed_volume(&obj) - signed_volume(&after);
-    let want = (n as f64 / 2.0) * r * r * (FRAC_PI_2 / n as f64).sin();
+    let want = (n as f64 / 2.0) * r * r * trig::sin(FRAC_PI_2 / n as f64);
     assert!((removed - want).abs() < 1e-12, "{removed} vs {want}");
 }
 
@@ -270,7 +271,7 @@ fn profile_from_chain() {
     let points: Vec<Point3> = (0..=n)
         .map(|k| {
             let a = FRAC_PI_2 * k as f64 / n as f64;
-            p3(r * a.cos(), r * a.sin(), 0.0)
+            p3(r * trig::cos(a), r * trig::sin(a), 0.0)
         })
         .collect();
     let curves = vec![
@@ -574,8 +575,8 @@ fn a_fillet_ending_on_a_nearly_flat_side_keeps_its_end_crease() {
         &[
             (0.0, 0.0),
             (1.0, 0.0),
-            (1.0 + c.cos(), c.sin()),
-            (1.0 + c.cos(), 1.5),
+            (1.0 + trig::cos(c), trig::sin(c)),
+            (1.0 + trig::cos(c), 1.5),
             (0.0, 1.5),
         ],
         1.0,
@@ -710,9 +711,12 @@ fn swept_rail_crosses_seams() {
     // pipe axes than the pipes' radii.
     for &f in &report.new_faces {
         for p in after.loop_positions(after.faces()[f].outer_loop) {
-            assert!(p.x.hypot(p.y) >= 0.1 * (PI / 48.0).cos() - 1e-9, "{p:?}");
             assert!(
-                p.x.hypot(p.z) >= 0.07 * (PI / 48.0).cos() - 1e-9 || p.y < 0.0,
+                trig::hypot(p.x, p.y) >= 0.1 * trig::cos(PI / 48.0) - 1e-9,
+                "{p:?}"
+            );
+            assert!(
+                trig::hypot(p.x, p.z) >= 0.07 * trig::cos(PI / 48.0) - 1e-9 || p.y < 0.0,
                 "{p:?}"
             );
         }
@@ -1196,7 +1200,7 @@ fn swept_imported_sphere_edge() {
         .filter(|&e| {
             let (x, y) = u.edge_faces_for_test(e).unwrap();
             let (p, q) = u.edge_endpoints(e).unwrap();
-            (x == top) != (y == top) && p.x.hypot(p.y) < 0.35 && q.x.hypot(q.y) < 0.35
+            (x == top) != (y == top) && trig::hypot(p.x, p.y) < 0.35 && trig::hypot(q.x, q.y) < 0.35
         })
         .collect();
     assert!(edges.len() > 20);
@@ -1288,7 +1292,7 @@ fn a_circle_to_square_cap_rim_refuses_with_a_typed_error() {
         points: (0..n)
             .map(|k| {
                 let a = std::f64::consts::TAU * k as f64 / n as f64;
-                p3(0.5 * a.cos(), 0.5 * a.sin(), 1.0)
+                p3(0.5 * trig::cos(a), 0.5 * trig::sin(a), 1.0)
             })
             .collect(),
         curves: vec![
@@ -1930,7 +1934,7 @@ fn loft_circle(r: f64, z: f64, n: usize, phase: f64) -> kernel::loft::LoftProfil
         points: (0..n)
             .map(|k| {
                 let a = phase + std::f64::consts::TAU * k as f64 / n as f64;
-                p3(r * a.cos(), r * a.sin(), z)
+                p3(r * trig::cos(a), r * trig::sin(a), z)
             })
             .collect(),
         curves: vec![
@@ -1989,7 +1993,7 @@ fn a_lofted_coaxial_rim_rounds_as_a_torus() {
                 match t {
                     SurfaceRef::Torus { center, axis, .. } => {
                         assert!(axis.z.abs() > 1.0 - 1e-9, "{axis:?}");
-                        assert!(center.x.hypot(center.y) < 1e-9, "{center:?}");
+                        assert!(trig::hypot(center.x, center.y) < 1e-9, "{center:?}");
                     }
                     other => panic!("hull {h} z {z}: {other:?}"),
                 }
@@ -2181,7 +2185,7 @@ fn shade_at(obj: &Object, face: kernel::FaceId, p: Point3) -> Option<Vec3> {
 }
 
 fn angle_deg(a: Vec3, b: Vec3) -> f64 {
-    a.dot(b).clamp(-1.0, 1.0).acos().to_degrees()
+    trig::acos(a.dot(b).clamp(-1.0, 1.0)).to_degrees()
 }
 
 #[test]

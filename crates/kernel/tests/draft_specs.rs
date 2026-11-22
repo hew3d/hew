@@ -20,6 +20,7 @@
 //! The scene specs follow `docs/design/unified-drafting/draft_scenes.py`
 //! (scene numbers in the doc comments), drawn on a 10 x 6 box top.
 
+use kernel::trig;
 use std::f64::consts::TAU;
 
 use kernel::{
@@ -121,7 +122,7 @@ fn circle_ring(cx: f64, cy: f64, r: f64, n: usize) -> Vec<Point3> {
     (0..n)
         .map(|i| {
             let a = TAU * i as f64 / n as f64;
-            z3(cx + r * a.cos(), cy + r * a.sin())
+            z3(cx + r * trig::cos(a), cy + r * trig::sin(a))
         })
         .collect()
 }
@@ -2707,7 +2708,7 @@ fn units_list_curve_runs_a_click_selects() {
             let ring: Vec<Point3> = (0..6)
                 .map(|i| {
                     let a = TAU * i as f64 / 6.;
-                    p(a.cos(), a.sin(), 0.)
+                    p(trig::cos(a), trig::sin(a), 0.)
                 })
                 .collect();
             let r = draw_ring(w, &ring);
@@ -2793,7 +2794,7 @@ fn a_polygon_on_a_face_stays_a_polygon() {
     let ring: Vec<Point3> = (0..6)
         .map(|i| {
             let a = TAU * i as f64 / 6.;
-            z3(5. + a.cos(), 3. + a.sin())
+            z3(5. + trig::cos(a), 3. + trig::sin(a))
         })
         .collect();
     draft_top(&mut doc, o, "Polygon", |w| {
@@ -2866,7 +2867,7 @@ fn draw_polygon_on_top(doc: &mut Document, o: ObjectId, n: usize, phase: f64) {
     let ring: Vec<Point3> = (0..n)
         .map(|i| {
             let a = phase + TAU * i as f64 / n as f64;
-            z3(5. + a.cos(), 3. + a.sin())
+            z3(5. + trig::cos(a), 3. + trig::sin(a))
         })
         .collect();
     draft_top(doc, o, "Polygon", |w| {
@@ -2951,7 +2952,7 @@ fn a_star_drawn_off_grid_stays_two_polygons() {
         let ring: Vec<Point3> = (0..3)
             .map(|i| {
                 let a = phase + TAU * i as f64 / 3.0;
-                z3(cx + r * a.cos(), cy + r * a.sin())
+                z3(cx + r * trig::cos(a), cy + r * trig::sin(a))
             })
             .collect();
         draft_top(doc, o, "Polygon", |w| {
@@ -3040,7 +3041,7 @@ fn lines_to_a_circles_quadrants_close_regions() {
             (0..32)
                 .map(|i| {
                     let a = -0.0103 + TAU * i as f64 / 32.0;
-                    at(cx + 0.5 * a.cos(), cy + 0.5 * a.sin())
+                    at(cx + 0.5 * trig::cos(a), cy + 0.5 * trig::sin(a))
                 })
                 .collect()
         };
@@ -3575,8 +3576,8 @@ fn drawing_away_from_imported_drawing_leaves_it_as_it_was() {
             for i in 0..n {
                 let (t0, t1) = (TAU * f64::from(i) / 24.0, TAU * f64::from(i + 1) / 24.0);
                 w.add_segment(
-                    p(c.x + t0.cos(), c.y + t0.sin(), 0.0),
-                    p(c.x + t1.cos(), c.y + t1.sin(), 0.0),
+                    p(c.x + trig::cos(t0), c.y + trig::sin(t0), 0.0),
+                    p(c.x + trig::cos(t1), c.y + trig::sin(t1), 0.0),
                 )?;
             }
             w.end_curve();

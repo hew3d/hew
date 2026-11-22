@@ -7,6 +7,7 @@ use crate::math::{Point3, Vec3};
 use crate::surface::EdgeSmoothness;
 use crate::tol;
 use crate::topo::{Object, WatertightState};
+use crate::trig;
 
 /// The catalogue of edge neighborhoods the engine blends.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,7 +60,7 @@ pub(crate) struct EdgeInfo {
 /// Classifies one edge with side A = `a`.
 pub(crate) fn info_for(obj: &Object, edge: EdgeId, a: FaceId) -> Result<EdgeInfo, BlendError> {
     let f = obj.edge_frame(edge, a).ok_or(BlendError::UnknownEdge)?;
-    let theta = f.t_a.dot(f.t_b).clamp(-1.0, 1.0).acos();
+    let theta = trig::acos(f.t_a.dot(f.t_b).clamp(-1.0, 1.0));
     if std::f64::consts::PI - theta <= tol::NORMAL_DIRECTION {
         return Err(BlendError::EdgeIsSmooth);
     }

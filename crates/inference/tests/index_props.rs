@@ -12,6 +12,7 @@ use inference::{
     ApertureMode, Axis, FacePolicy, InferenceScene, PickRay, PickScope, SnapKind, SnapLock,
     SnapQuery, SnapWeights,
 };
+use kernel::trig;
 use kernel::{Guide, InstanceId, Object, ObjectId, Plane, Point3, SketchId, Transform, Vec3};
 use proptest::prelude::*;
 
@@ -280,7 +281,7 @@ fn arb_query() -> impl Strategy<Value = QuerySpec> {
         // as a world-radius range when `aperture_mode` draws `Cylinder` —
         // the same tiny-to-huge spread is exactly what stresses a radius
         // prune too (near-zero radius through radii dwarfing the scene).
-        (LOG10_APERTURE_MIN..LOG10_APERTURE_MAX).prop_map(|e| 10f64.powf(e)),
+        (LOG10_APERTURE_MIN..LOG10_APERTURE_MAX).prop_map(|e| trig::powf(10f64, e)),
         prop_oneof![Just(ApertureMode::Cone), Just(ApertureMode::Cylinder)],
         prop::option::of(arb_point(30.0)),
         prop::option::of(prop_oneof![

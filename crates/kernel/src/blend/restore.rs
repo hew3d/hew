@@ -3,6 +3,7 @@
 //! the blend consumed, and accept the result only when re-blending the
 //! restored edges reproduces the blend.
 
+use crate::trig;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::BlendError;
@@ -458,7 +459,7 @@ fn consumed_faces(
             .iter()
             .map(|&f| {
                 let c = centroid(f) - center;
-                (c.dot(w).atan2(c.dot(u)), f)
+                (trig::atan2(c.dot(w), c.dot(u)), f)
             })
             .collect();
         walls.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -580,7 +581,7 @@ fn dpost_facets(
     let (u, w) = crate::triangulate::plane_basis(axis);
     let angle = |p: Point3| {
         let r = (p - axis_point) - axis * (p - axis_point).dot(axis);
-        r.dot(w).atan2(r.dot(u))
+        trig::atan2(r.dot(w), r.dot(u))
     };
     // The trimmed facet's far seam (not against the region), and the next
     // facet across it, whose other seam gives the spacing.
@@ -618,7 +619,7 @@ fn dpost_facets(
         .filter(|d| d.abs() > tol::BLEND_SEAM_ANGLE)
         .max_by(|a, b| a.abs().total_cmp(&b.abs()))?;
     // Seams back from the far seam, away from `next`.
-    let seam = |phi: f64| axis_point + (u * phi.cos() + w * phi.sin()) * radius;
+    let seam = |phi: f64| axis_point + (u * trig::cos(phi) + w * trig::sin(phi)) * radius;
     let mut seams: Vec<f64> = vec![phi_far, phi_far - step];
     for _ in 0..1024 {
         let last = *seams.last().expect("seams");

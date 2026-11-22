@@ -21,6 +21,7 @@
 //!   component), a printable terracotta pen cup resting on top, and
 //!   construction guides on the leg axes.
 
+use kernel::trig;
 use kernel::{
     CurveGeom, Document, FaceId, ImageFormat, KernelOp, KernelOpReport, Material, MaterialId,
     NodeId, ObjectId, Plane, Point3, Rgba8, SketchId, Texture, Transform, Vec3,
@@ -46,7 +47,7 @@ fn segments_per_turn(radius: f64) -> usize {
     if ratio >= 1.0 {
         return 24;
     }
-    let exact = std::f64::consts::PI / (1.0 - ratio).acos();
+    let exact = std::f64::consts::PI / trig::acos(1.0 - ratio);
     let ceil4 = ((exact / 4.0).ceil() as usize) * 4;
     ceil4.clamp(24, 96)
 }
@@ -56,7 +57,7 @@ fn circle_points(cx: f64, cy: f64, r: f64, n: usize, z: f64) -> Vec<Point3> {
     (0..n)
         .map(|i| {
             let a = std::f64::consts::TAU * i as f64 / n as f64;
-            Point3::new(cx + r * a.cos(), cy + r * a.sin(), z)
+            Point3::new(cx + r * trig::cos(a), cy + r * trig::sin(a), z)
         })
         .collect()
 }
@@ -496,7 +497,7 @@ fn build_cafe_table() -> Document {
     for angle in [0.0, std::f64::consts::FRAC_PI_2] {
         doc.add_guide_line(
             Point3::new(0.0, 0.0, 0.0),
-            Vec3::new(angle.cos(), angle.sin(), 0.0),
+            Vec3::new(trig::cos(angle), trig::sin(angle), 0.0),
         )
         .expect("guide lines are finite");
     }

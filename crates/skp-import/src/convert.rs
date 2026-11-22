@@ -81,6 +81,7 @@
 //! lists in step with the tree to recover each node's pid. A pid of 0 (the
 //! 2017 legacy byte-scan path, which cannot resolve them) yields no key.
 
+use kernel::trig;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
@@ -2090,7 +2091,7 @@ impl Converter {
                 let n = world.apply_vector(v3(arc.normal)).normalized().ok()?;
                 let radius = world.apply_vector(v3(arc.x_axis_m)).length() * arc.radius_m
                     / v3(arc.x_axis_m).length().max(f64::MIN_POSITIVE);
-                let radial = xa * r.leader[0].cos() + ya * r.leader[0].sin();
+                let radial = xa * trig::cos(r.leader[0]) + ya * trig::sin(r.leader[0]);
                 let a = kernel::Annotation::RadialDimension {
                     anchor: free(c + radial * radius),
                     kind: if r.diameter {
@@ -3433,7 +3434,7 @@ fn camera_state(c: &skpwright::Camera, hew: &HewModel) -> CameraState {
 fn vertical_fov_deg(fov_deg: f64, aspect_ratio: Option<f64>) -> f64 {
     match aspect_ratio {
         Some(a) if fov_deg > 0.0 && fov_deg < 180.0 => {
-            2.0 * ((fov_deg.to_radians() / 2.0).tan() / a).atan().to_degrees()
+            2.0 * trig::atan(trig::tan(fov_deg.to_radians() / 2.0) / a).to_degrees()
         }
         _ => fov_deg,
     }
@@ -3847,7 +3848,7 @@ mod tests {
         let mut mesh = skpwright::Mesh::default();
         for i in 0..sides {
             let t = i as f64 / sides as f64 * std::f64::consts::TAU;
-            let p = Point3::ORIGIN + x * (r * t.cos()) + y * (r * t.sin());
+            let p = Point3::ORIGIN + x * (r * trig::cos(t)) + y * (r * trig::sin(t));
             mesh.vertices.push([p.x, p.y, p.z]);
         }
         for i in 0..sides as u32 {
@@ -4429,10 +4430,7 @@ mod tests {
         c.fov_deg = 83.97;
         c.aspect_ratio = 2.0;
         let s = camera_state(&c, &HewModel::default());
-        let want = 2.0
-            * ((83.97f64.to_radians() / 2.0).tan() / 2.0)
-                .atan()
-                .to_degrees();
+        let want = 2.0 * trig::atan(trig::tan(83.97f64.to_radians() / 2.0) / 2.0).to_degrees();
         assert!((s.fov_deg - want).abs() < 1e-9, "{}", s.fov_deg);
         assert!((s.fov_deg - 48.4).abs() < 0.1, "{}", s.fov_deg);
         // The framing height follows the vertical angle.
@@ -4464,7 +4462,7 @@ mod tests {
             fov_across: true,
             ..HewModel::default()
         };
-        let want = 2.0 * ((35f64.to_radians() / 2.0).tan() / 1.5).atan().to_degrees();
+        let want = 2.0 * trig::atan(trig::tan(35f64.to_radians() / 2.0) / 1.5).to_degrees();
         assert!((camera_state(&c, &new).fov_deg - want).abs() < 1e-9);
         // A file Hew did not write is across the frame, mark or none.
         assert!((camera_state(&c, &HewModel::default()).fov_deg - want).abs() < 1e-9);

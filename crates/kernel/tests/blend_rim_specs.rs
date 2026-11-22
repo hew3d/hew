@@ -3,6 +3,7 @@
 //! crossing on a faceted cylinder.
 
 use crate::common;
+use kernel::trig;
 
 use std::collections::BTreeSet;
 
@@ -48,7 +49,8 @@ fn blend_ok(obj: &Object, s: &BlendSpec) -> (Object, BlendReport) {
 /// Every edge of `obj` whose endpoints both lie at height `z` and at
 /// distance `r` from the vertical axis through `(cx, cy)`.
 fn circle_edges(obj: &Object, cx: f64, cy: f64, z: f64, r: f64) -> Vec<EdgeId> {
-    let on = |p: Point3| (p.z - z).abs() < 1e-9 && ((p.x - cx).hypot(p.y - cy) - r).abs() < 1e-9;
+    let on =
+        |p: Point3| (p.z - z).abs() < 1e-9 && (trig::hypot(p.x - cx, p.y - cy) - r).abs() < 1e-9;
     obj.edges()
         .keys()
         .filter(|&e| {
@@ -95,7 +97,10 @@ fn cylinder_top_rim_torus() {
         .loop_positions(after.faces()[cap].outer_loop)
         .collect();
     assert_eq!(ring.len(), 48);
-    assert!(ring.iter().all(|p| (p.x.hypot(p.y) - 0.4).abs() < 1e-12));
+    assert!(
+        ring.iter()
+            .all(|p| (trig::hypot(p.x, p.y) - 0.4).abs() < 1e-12)
+    );
     // Every rail is an arc of a circle about the axis.
     let rails_with_curves = after
         .edges()
@@ -403,7 +408,9 @@ fn revolved_dome_rim_is_a_torus_rim_from_one_click() {
         .keys()
         .filter(|&e| {
             let (a, b) = after.edge_endpoints(e).unwrap();
-            a.z.abs() < 1e-9 && b.z.abs() < 1e-9 && (a.x.hypot(a.y) < 1e-9 || b.x.hypot(b.y) < 1e-9)
+            a.z.abs() < 1e-9
+                && b.z.abs() < 1e-9
+                && (trig::hypot(a.x, a.y) < 1e-9 || trig::hypot(b.x, b.y) < 1e-9)
         })
         .collect();
     assert_eq!(spokes.len(), 24);
@@ -450,7 +457,7 @@ fn cylinder_with_cap_chord(a: usize, b: usize) -> Object {
         let want = std::f64::consts::TAU * k as f64 / 24.0;
         ring.iter()
             .position(|&i| {
-                let d = pts[i].y.atan2(pts[i].x) - want + std::f64::consts::PI;
+                let d = trig::atan2(pts[i].y, pts[i].x) - want + std::f64::consts::PI;
                 (d.rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI).abs() < 1e-9
             })
             .unwrap()
@@ -537,7 +544,7 @@ fn a_chord_across_a_rim_cap_rounds_as_the_plain_rim() {
             // radially at each vertex), along the chord it was.
             let corner = |k: usize| {
                 let t = std::f64::consts::TAU * k as f64 / 24.0;
-                (t.cos(), t.sin())
+                (trig::cos(t), trig::sin(t))
             };
             let (ca, cb) = (corner(a), corner(b));
             let on_chord = |p: Point3| {

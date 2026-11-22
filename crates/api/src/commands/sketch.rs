@@ -66,6 +66,7 @@ use super::{CmdError, Ctx, Handler};
 use crate::ids;
 use crate::locate::{self, PlaneTarget};
 use crate::refusal::Refusal;
+use kernel::trig;
 use kernel::{
     CurveGeom, EntityRef, Plane, Point3, SketchCurveId, SketchCurveKind, SketchId, SketchRegionId,
     Vec3,
@@ -255,7 +256,7 @@ fn ring_points(plane: &Plane, center: Point3, radius: f64, n: usize) -> Vec<Poin
     (0..n)
         .map(|i| {
             let a = std::f64::consts::TAU * i as f64 / n as f64;
-            center + u * (radius * a.cos()) + v * (radius * a.sin())
+            center + u * (radius * trig::cos(a)) + v * (radius * trig::sin(a))
         })
         .collect()
 }
@@ -275,7 +276,7 @@ fn arc_points(
     (0..=n)
         .map(|i| {
             let a = start_angle + sweep * i as f64 / n as f64;
-            center + u * (radius * a.cos()) + v * (radius * a.sin())
+            center + u * (radius * trig::cos(a)) + v * (radius * trig::sin(a))
         })
         .collect()
 }

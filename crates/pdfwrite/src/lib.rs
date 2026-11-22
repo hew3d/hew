@@ -1,3 +1,9 @@
+// Outside the determinism-critical kernel scope (kernel / inference /
+// tessellate / mesh-heal). Transcendentals here only place rotated text in
+// the written PDF; nothing computed here reaches a document. The workspace
+// clippy.toml ban is suppressed here deliberately.
+#![allow(clippy::disallowed_methods)]
+
 //! A small, dependency-light PDF 1.4 writer (docs/design/printing.md §9b).
 //!
 //! Scope is exactly what a Hew page needs: images (JPEG passthrough, raw

@@ -29,6 +29,7 @@
 //!   from its center. A patch that would cross the object is left out and
 //!   reported, never committed.
 
+use crate::trig;
 use std::collections::{BTreeMap, BTreeSet};
 
 use slotmap::SecondaryMap;
@@ -778,7 +779,7 @@ fn pair_around(
         .map(|&(_, _, fwd, c)| {
             let dir = if fwd { t } else { -t };
             let w = soup.normal(uses.corners[c].f).cross(dir);
-            (w.dot(e2).atan2(w.dot(e1)), fwd, c)
+            (trig::atan2(w.dot(e2), w.dot(e1)), fwd, c)
         })
         .collect();
     // `true` (closing) sorts after `false`; closing goes first at a tie.

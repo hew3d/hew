@@ -13,6 +13,7 @@
 //! `tol::POINT_MERGE`. Handles are allowed to differ — ops may rebuild
 //! elements — but topology and geometry are not.
 
+use kernel::trig;
 use kernel::{
     BooleanError, BooleanOp, FaceId, History, HistoryError, KernelOp, KernelOpReport, Object,
     Plane, Point3, Profile, PushPullError, SurfaceRef, Transform, TransformError, Vec3,
@@ -279,7 +280,7 @@ fn circle_profile_yz(cy: f64, cz: f64, radius: f64) -> Profile {
     let n = 24;
     let pt = |i: usize| {
         let a = (i % n) as f64 / n as f64 * std::f64::consts::TAU;
-        Point3::new(0.0, cy + radius * a.cos(), cz + radius * a.sin())
+        Point3::new(0.0, cy + radius * trig::cos(a), cz + radius * trig::sin(a))
     };
     for i in 0..n {
         sketch.add_segment(pt(i), pt(i + 1)).unwrap();
@@ -390,7 +391,7 @@ fn follow_me_lathe_loop_volume_follows_pappus() {
     let path: Vec<Point3> = (0..n)
         .map(|i| {
             let a = (i as f64 - 0.5) * step;
-            Point3::new(r * a.cos(), r * a.sin(), 0.0)
+            Point3::new(r * trig::cos(a), r * trig::sin(a), 0.0)
         })
         .collect();
     // The y = 0 plane with normal +y (z cross x); outer ring CCW seen
@@ -419,7 +420,7 @@ fn follow_me_lathe_loop_volume_follows_pappus() {
     assert_eq!(euler_poincare(&solid), 0);
     let area = 0.6 * 0.5;
     let x_bar = 2.0;
-    let expected = 48.0 * (std::f64::consts::PI / 24.0).tan() * x_bar * area;
+    let expected = 48.0 * trig::tan(std::f64::consts::PI / 24.0) * x_bar * area;
     let volume = signed_volume(&solid);
     assert!(
         (volume - expected).abs() <= VOLUME_TOL,
@@ -441,7 +442,7 @@ fn circle_path(radius: f64, n: usize) -> (Vec<Point3>, Vec<Option<kernel::CurveG
     let pts = (0..n)
         .map(|i| {
             let a = i as f64 / n as f64 * std::f64::consts::TAU;
-            Point3::new(radius * a.cos(), radius * a.sin(), 0.0)
+            Point3::new(radius * trig::cos(a), radius * trig::sin(a), 0.0)
         })
         .collect();
     (pts, vec![Some(geom); n])
@@ -452,7 +453,7 @@ fn circle_path(radius: f64, n: usize) -> (Vec<Point3>, Vec<Option<kernel::CurveG
 /// angle `phi`, profile centered at radial distance 2 (matching the Pappus
 /// spec's profile at phi = 0).
 fn radial_profile(phi: f64) -> Profile {
-    let radial = Vec3::new(phi.cos(), phi.sin(), 0.0);
+    let radial = Vec3::new(trig::cos(phi), trig::sin(phi), 0.0);
     let up = Vec3::new(0.0, 0.0, 1.0);
     let corner = |u: f64, w: f64| Point3::ORIGIN + radial * (2.0 + u) + up * w;
     Profile::new(
@@ -487,7 +488,7 @@ fn axis_circle_profile(cz: f64, r: f64, n: usize, phase: f64) -> Profile {
         .unwrap();
     let pt = |i: usize| {
         let a = ((i % n) as f64 + phase) / n as f64 * std::f64::consts::TAU;
-        Point3::new(0.0, r * a.cos(), cz + r * a.sin())
+        Point3::new(0.0, r * trig::cos(a), cz + r * trig::sin(a))
     };
     for i in 0..n {
         sketch.add_segment(pt(i), pt((i + 1) % n)).unwrap();
@@ -516,7 +517,7 @@ fn attributed_ground_circle(
     let pts = (0..n)
         .map(|i| {
             let a = (i as f64 + phase) / n as f64 * std::f64::consts::TAU;
-            Point3::new(radius * a.cos(), radius * a.sin(), 0.0)
+            Point3::new(radius * trig::cos(a), radius * trig::sin(a), 0.0)
         })
         .collect();
     (pts, vec![Some(geom); n])
@@ -763,7 +764,7 @@ fn follow_me_mislabeled_circle_crossing_refuses_typed() {
         .unwrap();
     let pt = |i: usize| {
         let a = (i % n) as f64 / n as f64 * std::f64::consts::TAU;
-        Point3::new(0.0, r * a.cos(), cz + r * a.sin())
+        Point3::new(0.0, r * trig::cos(a), cz + r * trig::sin(a))
     };
     // A genuine axis-centered circle EXCEPT facet 0, which detours out to an
     // off-circle lump and back — every segment attributed to the open bracket.
@@ -821,7 +822,7 @@ fn follow_me_lathe_accepts_radial_profiles_on_a_drawn_circle() {
     assert_eq!(at_vertex.faces().len(), 96);
     assert_eq!(euler_poincare(&at_vertex), 0);
     let vol_vertex = signed_volume(&at_vertex);
-    let expected_vertex = 48.0 * (step / 2.0).sin() * (step / 2.0).cos() * x_bar * area;
+    let expected_vertex = 48.0 * trig::sin(step / 2.0) * trig::cos(step / 2.0) * x_bar * area;
     assert!(
         (vol_vertex - expected_vertex).abs() <= VOLUME_TOL,
         "vertex-seam volume {vol_vertex}, expected {expected_vertex}"
@@ -836,7 +837,7 @@ fn follow_me_lathe_accepts_radial_profiles_on_a_drawn_circle() {
     assert_eq!(at_mid.faces().len(), 100);
     assert_eq!(euler_poincare(&at_mid), 0);
     let vol_mid = signed_volume(&at_mid);
-    let expected_mid = 48.0 * (step / 2.0).tan() * x_bar * area;
+    let expected_mid = 48.0 * trig::tan(step / 2.0) * x_bar * area;
     assert!(
         (vol_mid - expected_mid).abs() <= VOLUME_TOL,
         "mid-facet volume {vol_mid}, expected {expected_mid}"
@@ -879,7 +880,7 @@ fn follow_me_lathe_anchors_at_the_near_crossing_not_the_antipode() {
     assert_eq!(euler_poincare(&solid), 0);
     let area = 0.6 * 0.5;
     let x_bar = 2.0;
-    let expected = 48.0 * (step / 2.0).sin() * (step / 2.0).cos() * x_bar * area;
+    let expected = 48.0 * trig::sin(step / 2.0) * trig::cos(step / 2.0) * x_bar * area;
     let volume = signed_volume(&solid);
     assert!(
         (volume - expected).abs() <= VOLUME_TOL,
@@ -901,8 +902,8 @@ fn follow_me_lathe_accepts_radial_profiles_all_the_way_around() {
     let (path, curves) = circle_path(2.0, n);
     let area = 0.6 * 0.5;
     let x_bar = 2.0;
-    let vol_vertex = 48.0 * (step / 2.0).sin() * (step / 2.0).cos() * x_bar * area;
-    let vol_mid = 48.0 * (step / 2.0).tan() * x_bar * area;
+    let vol_vertex = 48.0 * trig::sin(step / 2.0) * trig::cos(step / 2.0) * x_bar * area;
+    let vol_mid = 48.0 * trig::tan(step / 2.0) * x_bar * area;
 
     for h in 0..(2 * n) {
         let phi = h as f64 * step / 2.0;
@@ -1090,7 +1091,7 @@ fn follow_me_open_arc_end_uses_the_analytic_tangent() {
     let path: Vec<Point3> = (0..=n)
         .map(|i| {
             let a = i as f64 / n as f64 * std::f64::consts::FRAC_PI_2;
-            Point3::new(2.0 * a.cos(), 2.0 * a.sin(), 0.0)
+            Point3::new(2.0 * trig::cos(a), 2.0 * trig::sin(a), 0.0)
         })
         .collect();
     let curves = vec![Some(geom); n];
@@ -1391,7 +1392,7 @@ fn follow_me_miter_limit_refuses_near_reversals_and_admits_ordinary_bends() {
         [
             Point3::ORIGIN,
             Point3::new(4.0, 0.0, 0.0),
-            Point3::new(4.0 + 4.0 * turn.cos(), 4.0 * turn.sin(), 0.0),
+            Point3::new(4.0 + 4.0 * trig::cos(turn), 4.0 * trig::sin(turn), 0.0),
         ]
     };
 
@@ -1444,7 +1445,7 @@ fn follow_me_chained_sharp_joints_do_not_compound_the_miter() {
     let profile = yz_profile(-0.05, 0.1, 0.05, 0.2);
     let d_a = Vec3::new(1.0, 0.0, 0.0);
     let turn = 150.0f64.to_radians();
-    let d_b = Vec3::new(turn.cos(), turn.sin(), 0.0);
+    let d_b = Vec3::new(trig::cos(turn), trig::sin(turn), 0.0);
     let mut pts = vec![Point3::ORIGIN];
     for i in 0..5 {
         let last = *pts.last().unwrap();
@@ -1502,7 +1503,7 @@ fn follow_me_refuses_lathe_profile_touching_the_axis() {
     let path: Vec<Point3> = (0..n)
         .map(|i| {
             let a = (i as f64 - 0.5) * step;
-            Point3::new(2.0 * a.cos(), 2.0 * a.sin(), 0.0)
+            Point3::new(2.0 * trig::cos(a), 2.0 * trig::sin(a), 0.0)
         })
         .collect();
     // The y = 0 plane with normal -y (x cross z); outer ring CCW seen
@@ -2443,13 +2444,13 @@ fn push_pull_cylinder_facet_pull_unbounded_push_bounded() {
     let pts: Vec<Point3> = (0..24)
         .map(|k| {
             let a = std::f64::consts::TAU * k as f64 / 24.0;
-            Point3::new(a.cos(), a.sin(), 0.0)
+            Point3::new(trig::cos(a), trig::sin(a), 0.0)
         })
         .collect();
     let profile = Profile::new(xy_plane(), pts, vec![]).unwrap();
     let cyl = Object::from_extrusion(&profile, 1.0).unwrap();
     let th = 7.5f64.to_radians();
-    let n = Vec3::new(th.cos(), th.sin(), 0.0);
+    let n = Vec3::new(trig::cos(th), trig::sin(th), 0.0);
     let facet = face_with_normal(&cyl, n);
 
     // 24 side facets + 2 caps = 26 faces; a two-walled pad makes 28.
@@ -3348,19 +3349,19 @@ proptest! {
             .map(|k| {
                 let a = step * (k as f64 + jitter[k]);
                 let rk = r * radii[k];
-                Point3::new(rk * a.cos(), rk * a.sin(), 0.0)
+                Point3::new(rk * trig::cos(a), rk * trig::sin(a), 0.0)
             })
             .collect();
         // Optional near-collinear spike on edge 0→1: insert the edge
         // midpoint displaced outward so the two half-facets meet at angle
         // θ = 10^spike radians.
-        let spike_theta = spike.map(|exp| 10.0f64.powf(exp));
+        let spike_theta = spike.map(|exp| trig::powf(10.0f64, exp));
         if let Some(theta) = spike_theta {
             let (p0, p1) = (pts[0], pts[1]);
             let edge = p1 - p0;
             let len = edge.length();
             let out = Vec3::new(edge.y, -edge.x, 0.0).normalized().unwrap();
-            let mid = p0 + edge * 0.5 + out * (len * 0.25 * (theta * 0.5).tan());
+            let mid = p0 + edge * 0.5 + out * (len * 0.25 * trig::tan(theta * 0.5));
             pts.insert(1, mid);
         }
         let holes: Vec<Vec<Point3>> = if with_hole {
@@ -3439,14 +3440,14 @@ fn hex_prism_and_facet() -> (Object, FaceId, Vec3) {
     let pts: Vec<Point3> = (0..6)
         .map(|k| {
             let a = std::f64::consts::FRAC_PI_3 * k as f64;
-            Point3::new(a.cos(), a.sin(), 0.0)
+            Point3::new(trig::cos(a), trig::sin(a), 0.0)
         })
         .collect();
     let profile = Profile::new(xy_plane(), pts, vec![]).unwrap();
     let hex = Object::from_extrusion(&profile, 1.0).unwrap();
     assert_eq!(hex.faces().len(), 8, "6 facets + 2 caps");
 
-    let n = Vec3::new(std::f64::consts::FRAC_PI_6.cos(), 0.5, 0.0);
+    let n = Vec3::new(trig::cos(std::f64::consts::FRAC_PI_6), 0.5, 0.0);
     let facet = face_with_normal(&hex, n);
     (hex, facet, n)
 }
@@ -4772,7 +4773,7 @@ fn push_through_a_circle_imprint_through_a_faceted_cylinder() {
         (0..n)
             .map(|i| {
                 let a = std::f64::consts::TAU * (i as f64) / (n as f64);
-                Point3::new(r * a.cos(), r * a.sin(), z)
+                Point3::new(r * trig::cos(a), r * trig::sin(a), z)
             })
             .collect()
     };
@@ -5164,7 +5165,7 @@ proptest! {
         // covers the full path — the swept volume is the perpendicular
         // reference's, independent of tilt (design §2c).
         let reference = yz_profile(-0.2, 0.1, 0.2, 0.5);
-        let (s, c) = tilt.sin_cos();
+        let (s, c) = trig::sin_cos(tilt);
         // Rotate about the y axis through the origin: x' = c·x + s·z,
         // z' = -s·x + c·z (points start at x = 0).
         let tilted_pts: Vec<Point3> = reference
@@ -5449,7 +5450,7 @@ fn follow_me_negative_stop_sweeps_the_other_way_regardless_of_path_winding() {
         let path: Vec<Point3> = (0..n)
             .map(|i| {
                 let a = -(i as f64) / n as f64 * std::f64::consts::TAU;
-                Point3::new(radius * a.cos(), radius * a.sin(), 0.0)
+                Point3::new(radius * trig::cos(a), radius * trig::sin(a), 0.0)
             })
             .collect();
         let curves = vec![Some(geom); n];

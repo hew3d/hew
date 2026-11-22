@@ -4,6 +4,7 @@
 //! chamfering the vertex where exactly two straight sketch segments meet,
 //! in world sketches and in face drawings (imprints).
 
+use kernel::trig;
 use std::f64::consts::PI;
 
 use kernel::{
@@ -187,8 +188,8 @@ fn obtuse_and_acute_corners() {
         .blend_corner(obtuse, round(r, 4))
         .expect("120 degree corner");
 
-    let setback_60 = r / (PI / 6.0).tan();
-    let setback_120 = r / (PI / 3.0).tan();
+    let setback_60 = r / trig::tan(PI / 6.0);
+    let setback_120 = r / trig::tan(PI / 3.0);
     // The shared bottom edge lost one setback at each end.
     assert!(has_edge(
         &s,
@@ -199,8 +200,8 @@ fn obtuse_and_acute_corners() {
     // the corner: center at r / sin(theta/2) along the bisector.
     let ca = s.curve_analytic(ra.curve.unwrap()).unwrap().geom;
     let co = s.curve_analytic(ro.curve.unwrap()).unwrap().geom;
-    assert!(((ca.center - p3(0.0, 0.0, 0.0)).length() - r / (PI / 6.0).sin()).abs() < EPS);
-    assert!(((co.center - p3(2.0, 0.0, 0.0)).length() - r / (PI / 3.0).sin()).abs() < EPS);
+    assert!(((ca.center - p3(0.0, 0.0, 0.0)).length() - r / trig::sin(PI / 6.0)).abs() < EPS);
+    assert!(((co.center - p3(2.0, 0.0, 0.0)).length() - r / trig::sin(PI / 3.0)).abs() < EPS);
     assert!((ca.center.y - r).abs() < EPS, "tangent to the bottom edge");
     assert!((co.center.y - r).abs() < EPS, "tangent to the bottom edge");
     assert_eq!(s.regions().len(), 1);
@@ -337,7 +338,7 @@ fn curve_vertex_refused() {
     // An interior arc vertex too, and a free end (one edge).
     let inner = vertex_at(&s, {
         let a = PI / 2.0 / 8.0;
-        p3(a.cos(), a.sin(), 0.0)
+        p3(trig::cos(a), trig::sin(a), 0.0)
     });
     assert_eq!(
         s.blend_corner(inner, round(0.01, 4)).unwrap_err(),

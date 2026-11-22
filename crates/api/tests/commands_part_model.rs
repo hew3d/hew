@@ -9,6 +9,7 @@ use api::{
     Connection, DispatchOutcome, Grant, Host, LineDrawingParams, LineDrawingResult, NoHost,
     Refusal, Request, RequestId, SnapshotParams, SnapshotResult,
 };
+use kernel::trig;
 use kernel::{
     AttrTarget, AttrValue, Document, EntityRef, ImportNode, ImportScene, MeshRecipe, NodeId,
     ObjectId, Plane, Point3, Transform, Vec3,
@@ -970,7 +971,7 @@ fn star(radii: &[f64]) -> Vec<(f64, f64)> {
         .enumerate()
         .map(|(k, r)| {
             let t = std::f64::consts::TAU * k as f64 / n;
-            (r * t.cos(), r * t.sin())
+            (r * trig::cos(t), r * trig::sin(t))
         })
         .collect()
 }
@@ -1764,7 +1765,11 @@ fn ringed_cuboid(doc: &mut Document, x: f64, kind: Option<kernel::SketchCurveKin
         }
         let at = |k: usize| {
             let a = std::f64::consts::TAU * k as f64 / n as f64;
-            Point3::new(center.x + r * a.cos(), center.y + r * a.sin(), center.z)
+            Point3::new(
+                center.x + r * trig::cos(a),
+                center.y + r * trig::sin(a),
+                center.z,
+            )
         };
         for k in 0..n {
             w.add_segment(at(k), at(k + 1))?;

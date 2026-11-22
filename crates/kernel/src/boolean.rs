@@ -2851,6 +2851,7 @@ impl Interner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trig;
 
     fn unit_square() -> Region {
         Region {
@@ -3462,7 +3463,7 @@ mod tests {
         .unwrap();
         let pt = |k: usize| {
             let a = phase + std::f64::consts::TAU * (k as f64) / (n as f64);
-            Point3::new(cx + r * a.cos(), cy + r * a.sin(), 0.0)
+            Point3::new(cx + r * trig::cos(a), cy + r * trig::sin(a), 0.0)
         };
         for i in 0..n {
             s.add_segment(pt(i), pt(i + 1)).unwrap();
@@ -3921,7 +3922,11 @@ mod tests {
             .iter()
             .map(|d| {
                 let t = d.to_radians();
-                Point3::new(side / 2.0 + r * t.cos(), side / 2.0 + r * t.sin(), 5.0 * mm)
+                Point3::new(
+                    side / 2.0 + r * trig::cos(t),
+                    side / 2.0 + r * trig::sin(t),
+                    5.0 * mm,
+                )
             })
             .collect();
         pts.push(Point3::new(side / 2.0, side / 2.0, side + h));
@@ -4136,7 +4141,11 @@ mod tests {
         let s = Object::from_polygons_import_for_test(&pts, &faces).unwrap();
         let (lat, lon) = (31.5f64.to_radians(), 179f64.to_radians());
         let target = SPHERE_CENTER
-            + Vec3::new(lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin()) * SPHERE_RADIUS;
+            + Vec3::new(
+                trig::cos(lat) * trig::cos(lon),
+                trig::cos(lat) * trig::sin(lon),
+                trig::sin(lat),
+            ) * SPHERE_RADIUS;
         let v = s
             .vertices()
             .values()

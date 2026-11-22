@@ -926,6 +926,7 @@ fn degenerate_finding(obj: &Object) -> Option<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trig;
 
     fn p(x: f64, y: f64, z: f64) -> Point3 {
         Point3::new(x, y, z)
@@ -1023,7 +1024,7 @@ mod tests {
         // One quad tilted 30° about x: its axis-aligned box has height, but
         // it is a single plane.
         let t = 30f64.to_radians();
-        let tilt = |v: Vec3| Vec3::new(v.x, v.y * t.cos(), v.y * t.sin());
+        let tilt = |v: Vec3| Vec3::new(v.x, v.y * trig::cos(t), v.y * trig::sin(t));
         let q = [
             p(0.0, 0.0, 0.0),
             p(2.0, 0.0, 0.0),
@@ -1440,8 +1441,8 @@ mod tests {
             // Right at the threshold the rounding of a rotated box decides.
             proptest::prop_assume!((ratio - OUTER_RIM_FRACTION).abs() > 1e-6);
             let rot = move |v: Vec3| {
-                let (sy, cy) = yaw.sin_cos();
-                let (sp, cp) = pitch.sin_cos();
+                let (sy, cy) = trig::sin_cos(yaw);
+                let (sp, cp) = trig::sin_cos(pitch);
                 let v = Vec3::new(v.x * cy - v.y * sy, v.x * sy + v.y * cy, v.z);
                 Vec3::new(v.x, v.y * cp - v.z * sp, v.y * sp + v.z * cp)
             };

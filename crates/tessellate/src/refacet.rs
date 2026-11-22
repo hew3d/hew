@@ -28,6 +28,7 @@
 //! qualifies and re-facets exactly, or every one of its faces falls back to
 //! stored facets (rule 4 in spirit — the fallback is the honest carrier).
 
+use kernel::trig;
 use std::collections::{BTreeMap, BTreeSet};
 
 use kernel::{EdgeId, FaceId, Object, Point3, SurfaceRef, Vec3, VertexId, WatertightState};
@@ -743,7 +744,7 @@ fn build_group_bands(
                 let d = object.vertices()[w].position - axis_point;
                 let x = d.dot(u);
                 let y = d.dot(v);
-                y.atan2(x)
+                trig::atan2(y, x)
             };
             let mut rim_angle: Vec<f64> = Vec::with_capacity(rim_lo.len());
             for (k, &w) in rim_lo.iter().enumerate() {
@@ -874,7 +875,7 @@ fn build_stations(object: &Object, band: &Band, step: f64) -> Option<Vec<Station
     let pos = |w: VertexId| object.vertices()[w].position;
     let angle_of = |p: Point3| -> f64 {
         let d = p - band.axis_point;
-        d.dot(band.v).atan2(d.dot(band.u))
+        trig::atan2(d.dot(band.v), d.dot(band.u))
     };
 
     // Anchor positions in chain order: chain ends, and every rim index
@@ -942,7 +943,7 @@ fn build_stations(object: &Object, band: &Band, step: f64) -> Option<Vec<Station
         let mut pts: Vec<Point3> = (1..count)
             .map(|j| {
                 let angle = a0 + sweep * (j as f64) / (count as f64);
-                foot + band.u * (rho * angle.cos()) + band.v * (rho * angle.sin())
+                foot + band.u * (rho * trig::cos(angle)) + band.v * (rho * trig::sin(angle))
             })
             .collect();
         if dir < 0.0 {

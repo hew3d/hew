@@ -9,6 +9,7 @@ use crate::math::{Plane, Point3, Vec3};
 use crate::tol;
 use crate::topo::SurfaceRef;
 use crate::transform::Transform;
+use crate::trig;
 
 /// Unit vector, or `None` when `v` is too short to normalize
 /// ([`tol::NORMALIZE_MIN_LENGTH`]).
@@ -108,7 +109,7 @@ impl SurfaceRef {
                 half_angle,
             } => {
                 let u = unit(axial_radial(p, apex, axis).1)?;
-                unit(u * half_angle.cos() - axis * half_angle.sin())
+                unit(u * trig::cos(half_angle) - axis * trig::sin(half_angle))
             }
         }
     }
@@ -144,7 +145,7 @@ impl SurfaceRef {
                 half_angle,
             } => {
                 let (t, radial) = axial_radial(p, apex, axis);
-                radial.length() * half_angle.cos() - t * half_angle.sin()
+                radial.length() * trig::cos(half_angle) - t * trig::sin(half_angle)
             }
         }
     }
@@ -302,7 +303,7 @@ pub(crate) fn validate_face_claim(
             // from the chord point's own (smaller) radius ρ that is at most
             // ρ·(sec α − 1).
             let sag = 1.0
-                / (std::f64::consts::PI / crate::sketch::MIN_CIRCLE_SEGMENTS as f64).cos()
+                / trig::cos(std::f64::consts::PI / crate::sketch::MIN_CIRCLE_SEGMENTS as f64)
                 - 1.0;
             points.iter().all(|&p| {
                 let (t, radial) = axial_radial(p, center, axis);
@@ -316,7 +317,7 @@ pub(crate) fn validate_face_claim(
             axis,
             half_angle,
         } => {
-            let tan = half_angle.tan();
+            let tan = trig::tan(half_angle);
             points.iter().all(|&p| {
                 let (t, radial) = axial_radial(p, apex, axis);
                 t >= -tol && radial.length() <= t * tan + tol

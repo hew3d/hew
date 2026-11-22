@@ -3,6 +3,7 @@
 //! in-instance form.
 
 use crate::common;
+use kernel::trig;
 
 use common::curves::*;
 use kernel::{
@@ -193,7 +194,7 @@ fn push_pull_grows_and_removes() {
     let mid = report.new_faces[2];
     let n = obj.faces()[mid].plane.normal();
     let theta = std::f64::consts::FRAC_PI_2;
-    let gap = 1.0 / (theta / 2.0).sin() - 1.0;
+    let gap = 1.0 / trig::sin(theta / 2.0) - 1.0;
     let delta = 0.01;
     doc.push_pull_blend(o, mid, -delta).unwrap();
     let feats = doc.blend_features(o).unwrap();
