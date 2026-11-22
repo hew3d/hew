@@ -765,3 +765,136 @@ pub fn app_pipe_tee_sized(
     let picked = obj.logical_edge(junction, false);
     (doc, tee, picked)
 }
+
+/// The scoreboard's grooved knob (`corpus/curves/grooved-knob.json`) as the
+/// API builds it: a 20 mm x 25 mm rectangle in the y = 0 plane revolved a
+/// full turn about z in 24 steps, then twelve 3 mm, 48-sided circles on the
+/// 20 mm circle, at 3.75 degrees and every 30 degrees on from there, each
+/// pushed 29 mm up from z = -2 mm, subtracted in one operation; then the
+/// whole knob turned by `turn` radians about z. Returns the knob and its
+/// twelve outer top-rim chains (the outer wall's top edges between the
+/// grooves, two edges each), in order of angle.
+pub fn grooved_knob(turn: f64) -> (Object, Vec<Vec<EdgeId>>) {
+    use kernel::NodeId;
+    use kernel::document::{RevolveProfile, RevolveSpec};
+    let xz = Plane::from_point_normal(p3(0.0, 0.0, 0.0), Vec3::new(0.0, -1.0, 0.0)).unwrap();
+    let mut doc = kernel::Document::new();
+    let s = doc.add_sketch(xz);
+    doc.begin_sketch_gesture(s).unwrap();
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        let ring = [
+            p3(0.0, 0.0, 0.0),
+            p3(0.02, 0.0, 0.0),
+            p3(0.02, 0.0, 0.025),
+            p3(0.0, 0.0, 0.025),
+        ];
+        for i in 0..4 {
+            sk.add_segment(ring[i], ring[(i + 1) % 4]).unwrap();
+        }
+    }
+    doc.end_sketch_gesture(s).unwrap();
+    let region = doc.sketch(s).unwrap().regions().keys().next().unwrap();
+    let (knob, _) = doc
+        .revolve(
+            RevolveProfile::Region { sketch: s, region },
+            &RevolveSpec {
+                axis_point: p3(0.0, 0.0, 0.0),
+                axis: Vec3::new(0.0, 0.0, 1.0),
+                angle: TAU,
+                segments: 24,
+            },
+        )
+        .unwrap();
+    let mut operands = vec![NodeId::Object(knob)];
+    for k in 0..12 {
+        let a = (3.75 + 30.0 * k as f64).to_radians();
+        let c = p3(0.02 * a.cos(), 0.02 * a.sin(), -0.002);
+        let plane = Plane::from_point_normal(c, Vec3::new(0.0, 0.0, 1.0)).unwrap();
+        let g = doc.add_sketch(plane);
+        doc.begin_sketch_gesture(g).unwrap();
+        {
+            let sk = doc.sketch_mut(g).unwrap();
+            sk.begin_curve_with(CurveGeom {
+                center: c,
+                radius: 0.003,
+            })
+            .unwrap();
+            let at = |i: usize| {
+                let b = TAU * (i % 48) as f64 / 48.0;
+                p3(c.x + 0.003 * b.cos(), c.y + 0.003 * b.sin(), c.z)
+            };
+            for i in 0..48 {
+                sk.add_segment(at(i), at(i + 1)).unwrap();
+            }
+            sk.end_curve();
+        }
+        doc.end_sketch_gesture(g).unwrap();
+        let regions = doc.extrudable_regions(g).unwrap();
+        let (groove, _) = doc.extrude_region(g, regions[0], 0.029).unwrap();
+        operands.push(NodeId::Object(groove));
+    }
+    let (grooved, _) = doc
+        .boolean_nodes_many(BooleanOp::Subtract, &operands)
+        .unwrap();
+    let NodeId::Object(grooved) = grooved else {
+        panic!("the subtraction makes an object");
+    };
+    if turn != 0.0 {
+        doc.transform_object(
+            grooved,
+            &Transform::rotation(Vec3::new(0.0, 0.0, 1.0), turn).unwrap(),
+        )
+        .unwrap();
+    }
+    let obj = doc.object(grooved).unwrap().clone();
+    // The outer wall's top edges: on a chord of the revolved 24-gon at the
+    // top, turned with the knob.
+    let corner = |k: i32| {
+        let a = (15.0 * k as f64).to_radians() + turn;
+        p3(0.02 * a.cos(), 0.02 * a.sin(), 0.025)
+    };
+    let off = |p: Point3, a: Point3, b: Point3| {
+        let d = b - a;
+        let t = ((p - a).dot(d) / d.dot(d)).clamp(0.0, 1.0);
+        (p - (a + d * t)).length()
+    };
+    let mut rim: Vec<(EdgeId, Point3, Point3)> = obj
+        .edges()
+        .keys()
+        .filter_map(|e| {
+            let (a, b) = obj.edge_endpoints(e)?;
+            (0..24)
+                .any(|k| {
+                    off(a, corner(k), corner(k + 1)) <= LOOKUP_EPS
+                        && off(b, corner(k), corner(k + 1)) <= LOOKUP_EPS
+                })
+                .then_some((e, a, b))
+        })
+        .collect();
+    // Two rim edges are one chain where they share an end.
+    let mut chains: Vec<Vec<(EdgeId, Point3, Point3)>> = Vec::new();
+    while let Some(seed) = rim.pop() {
+        let mut chain = vec![seed];
+        while let Some(i) = rim.iter().position(|&(_, a, b)| {
+            chain.iter().any(|&(_, p, q)| {
+                [p, q]
+                    .iter()
+                    .any(|x| x.approx_eq(a, LOOKUP_EPS) || x.approx_eq(b, LOOKUP_EPS))
+            })
+        }) {
+            chain.push(rim.remove(i));
+        }
+        chains.push(chain);
+    }
+    let angle = |c: &[(EdgeId, Point3, Point3)]| {
+        let (_, a, b) = c[0];
+        (a.y + b.y).atan2(a.x + b.x)
+    };
+    chains.sort_by(|x, y| angle(x).total_cmp(&angle(y)));
+    let chains = chains
+        .into_iter()
+        .map(|c| c.into_iter().map(|(e, _, _)| e).collect())
+        .collect();
+    (obj, chains)
+}

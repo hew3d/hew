@@ -1073,8 +1073,11 @@ impl Solver<'_> {
             };
             let rail = q + sec.offsets[if x == 0 { 0 } else { n }];
             let (a, b) = obj.edge_endpoints(e).ok_or_else(|| unsupported(q))?;
-            // The bisection that found this seam stops where the rail is
-            // just past the on-seam slack, so the pin takes twice it.
+            // A seam station the bisection already found riding the seam
+            // is taken as it was solved (see `refine`) and never reaches
+            // here; a pinned solve does, and its rail must land on the
+            // seam. Twice the on-seam slack, as a rail just past that slack
+            // still belongs to the seam.
             if super::query::point_segment_distance(rail, a, b) > 2.0 * tol::SWEPT_SLACK {
                 return Err(unsupported(q));
             }
@@ -1230,7 +1233,8 @@ fn refine(
         }
     }
     let next = at(hi, None, [None, None])?.feet[x];
-    let lo_foot = at(lo, None, [None, None])?.feet[x];
+    let lo_st = at(lo, None, [None, None])?;
+    let lo_foot = lo_st.feet[x];
     let lam = 0.5 * (lo + hi);
     let seam = match (lo_foot, next) {
         (Foot::Face(f), Foot::Face(g)) => common_edge(obj, f, g),
@@ -1281,6 +1285,19 @@ fn refine(
         out.push(corner);
         out.push(after.clone());
         return refine(sv, at, lam, &after, lb, sb, out, depth + 1);
+    }
+    if lo > la && lo_foot == Foot::Seam(seam) && share(obj, lo_foot, next) {
+        // The bracket's near station already rides the seam, and the foot
+        // beyond shares a facet with it: the rail is on the seam there by
+        // construction, so that station is the seam station. Solving again
+        // at the bracket's midpoint would decide afresh whatever test the
+        // bisection drove to its threshold (the on-seam slack, or a trace
+        // grazing a facet corner, whose crossing test is then decided by
+        // rounding), and the stations either side of such a change can be
+        // micrometers apart.
+        refine(sv, at, la, sa, lo, &lo_st, out, depth + 1)?;
+        out.push(lo_st.clone());
+        return refine(sv, at, lo, &lo_st, lb, sb, out, depth + 1);
     }
     let mut pin = [None, None];
     pin[x] = Some(Foot::Seam(seam));

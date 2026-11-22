@@ -1,6 +1,6 @@
 # The curves scoreboard. Written by scripts/scoreboard.sh; do not edit.
-# 644 cases: 426 correct, 162 limit, 46 generic, 10 wrong.
-# Open: 15 refused or wrong at a size that must build; 121 limits where nothing larger can exist.
+# 644 cases: 426 correct, 168 limit, 40 generic, 10 wrong.
+# Open: 15 refused or wrong at a size that must build; 122 limits where nothing larger can exist.
 model	case	size	expect	class	detail
 box	one-edge-round	0.1mm	fits	correct	
 box	one-edge-round	1mm	fits	correct	
@@ -337,13 +337,13 @@ grooved-knob	outer-top-rim-round	6mm		generic	unsupported_vertex
 grooved-knob	outer-top-rim-round	10mm		generic	unsupported_vertex
 grooved-knob	outer-top-rim-round	26mm	over	generic	unsupported_vertex
 grooved-knob	outer-top-rim-chamfer	0.1mm		correct	
-grooved-knob	outer-top-rim-chamfer	1mm		generic	radius_too_large max=0mm by=unknown
-grooved-knob	outer-top-rim-chamfer	2mm		generic	unsupported_vertex
-grooved-knob	outer-top-rim-chamfer	3mm		generic	unsupported_vertex
-grooved-knob	outer-top-rim-chamfer	4mm		generic	unsupported_vertex
-grooved-knob	outer-top-rim-chamfer	6mm		generic	unsupported_vertex
-grooved-knob	outer-top-rim-chamfer	10mm		limit	radius_too_large max=0.214mm by=facet_width
-grooved-knob	outer-top-rim-chamfer	26mm	over	generic	unsupported_vertex
+grooved-knob	outer-top-rim-chamfer	1mm		limit	radius_too_large max=0.221mm by=facet_width
+grooved-knob	outer-top-rim-chamfer	2mm		limit	radius_too_large max=0.221mm by=facet_width
+grooved-knob	outer-top-rim-chamfer	3mm		limit	radius_too_large max=0.221mm by=facet_width
+grooved-knob	outer-top-rim-chamfer	4mm		limit	radius_too_large max=0.221mm by=facet_width
+grooved-knob	outer-top-rim-chamfer	6mm		limit	radius_too_large max=0.221mm by=facet_width
+grooved-knob	outer-top-rim-chamfer	10mm		limit	radius_too_large max=0.221mm by=facet_width
+grooved-knob	outer-top-rim-chamfer	26mm	over	limit	radius_too_large max=0.221mm by=facet_width
 prism-08-sides	top-rim-round	0.1mm	fits	correct	
 prism-08-sides	top-rim-round	1mm	fits	correct	
 prism-08-sides	top-rim-round	5mm	fits	correct	

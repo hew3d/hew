@@ -46,6 +46,8 @@ mod blend_record_specs;
 mod blend_rim_specs;
 mod blend_specs;
 mod blend_swept_edit_specs;
+mod blend_swept_limit_specs;
+mod blend_swept_symmetry_specs;
 mod boolean_imported_planarity_specs;
 mod boolean_many_specs;
 mod boolean_near_coplanar_repro;

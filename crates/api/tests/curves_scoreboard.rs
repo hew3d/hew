@@ -904,6 +904,8 @@ fn run_model(name: &str, model: &Model, rows: &mut Vec<Row>) {
             .never_above
             .as_deref()
             .map(|s| length(name, "never_above", s));
+        let first = rows.len();
+        let mut sweep_said: Vec<(f64, Option<f64>)> = Vec::new();
         for size_label in &case.sizes {
             let size = length(name, "size", size_label);
             let expect = if never_above.is_some_and(|m| size > m * (1.0 + 1e-9)) {
@@ -923,8 +925,8 @@ fn run_model(name: &str, model: &Model, rows: &mut Vec<Row>) {
                     .spawn(move || run_case(session, name, case, sweep, size))
                     .join()
             });
-            let (mut class, mut detail, panicked) = match ran {
-                Ok((class, detail)) => (class, detail, false),
+            let (mut class, mut detail, max, panicked) = match ran {
+                Ok((class, detail, max)) => (class, detail, max, false),
                 Err(payload) => {
                     if let Some(RowDefect(message)) = payload.downcast_ref::<RowDefect>() {
                         panic!("{message}");
@@ -938,7 +940,7 @@ fn run_model(name: &str, model: &Model, rows: &mut Vec<Row>) {
                         .unwrap_or("no message");
                     let line = message.lines().next().unwrap_or_default();
                     let short: String = line.chars().take(120).collect();
-                    (Class::Wrong, format!("panic: {short}"), true)
+                    (Class::Wrong, format!("panic: {short}"), None, true)
                 }
             };
             if class == Class::Correct && expect == "over" {
@@ -959,6 +961,7 @@ fn run_model(name: &str, model: &Model, rows: &mut Vec<Row>) {
                 );
             }
             session.labels = labels.clone();
+            sweep_said.push((size, max));
             rows.push(Row {
                 model: name.to_string(),
                 case: case.id.clone(),
@@ -968,10 +971,48 @@ fn run_model(name: &str, model: &Model, rows: &mut Vec<Row>) {
                 detail,
             });
         }
+        below_a_build(&mut rows[first..], &sweep_said);
     }
 }
 
-fn run_case(s: &mut Session, name: &str, case: &Case, sweep: &str, size: f64) -> (Class, String) {
+/// A `radius_too_large` that names a largest size below a smaller size its
+/// own sweep built (and passed every check) contradicts itself as surely as one that
+/// names a size above the one refused: those rows of one case's sweep are
+/// `wrong`. `said` holds each row's size and the `max` its refusal named.
+fn below_a_build(rows: &mut [Row], said: &[(f64, Option<f64>)]) {
+    let built: Vec<(f64, String)> = rows
+        .iter()
+        .zip(said)
+        .filter(|(r, _)| r.class == Class::Correct)
+        .map(|(r, &(size, _))| (size, r.size.clone()))
+        .collect();
+    for (row, &(asked, max)) in rows.iter_mut().zip(said) {
+        let Some(max) = max else { continue };
+        if row.class == Class::Wrong {
+            continue;
+        }
+        // The limit is the largest size below the one refused, to within
+        // the search's own precision.
+        if let Some((_, label)) = built
+            .iter()
+            .filter(|&&(size, _)| size < asked && size > max * (1.0 + 1e-6) + 2e-9)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+        {
+            row.class = Class::Wrong;
+            row.detail = format!("{}, below {label}, which builds", row.detail);
+        }
+    }
+}
+
+/// One run: its class and detail, and the `max` a `radius_too_large`
+/// refusal of the swept call named.
+fn run_case(
+    s: &mut Session,
+    name: &str,
+    case: &Case,
+    sweep: &str,
+    size: f64,
+) -> (Class, String, Option<f64>) {
     for (i, frame) in case.before.iter().enumerate() {
         match s.frame(frame) {
             Called::Ok(_) => {}
@@ -980,7 +1021,7 @@ fn run_case(s: &mut Session, name: &str, case: &Case, sweep: &str, size: f64) ->
                     row_defect(format!("{name}/{}: before[{i}]: {code} {detail}", case.id));
                 }
                 let (class, text) = class_of_refusal(&code, &detail, None);
-                return (class, format!("before[{i}]: {text}"));
+                return (class, format!("before[{i}]: {text}"), None);
             }
             Called::Broken(why) => {
                 row_defect(format!("{name}/{}: before[{i}] failed: {why}", case.id))
@@ -1009,11 +1050,15 @@ fn run_case(s: &mut Session, name: &str, case: &Case, sweep: &str, size: f64) ->
             if is_row_defect(&code) {
                 row_defect(format!("{name}/{}: {code} {detail}", case.id));
             }
-            class_of_refusal(&code, &detail, Some(size))
+            let (class, text) = class_of_refusal(&code, &detail, Some(size));
+            let max = (code == "radius_too_large")
+                .then(|| detail["max"].as_f64())
+                .flatten();
+            (class, text, max)
         }
         Called::Ok(result) => {
             let Some(id) = result["object_id"].as_str().and_then(|p| s.object(p)) else {
-                return (Class::Wrong, "the result names no object".into());
+                return (Class::Wrong, "the result names no object".into(), None);
             };
             // The engine says what size it built. Only the plain forms
             // report the swept number back.
@@ -1029,6 +1074,7 @@ fn run_case(s: &mut Session, name: &str, case: &Case, sweep: &str, size: f64) ->
                         "built at {}, not the size asked for",
                         sig(built * 1e3, "mm")
                     ),
+                    None,
                 );
             }
             match check_result(
@@ -1038,8 +1084,8 @@ fn run_case(s: &mut Session, name: &str, case: &Case, sweep: &str, size: f64) ->
                 size,
                 case.volume.as_deref(),
             ) {
-                Some(why) => (Class::Wrong, why),
-                None => (Class::Correct, String::new()),
+                Some(why) => (Class::Wrong, why, None),
+                None => (Class::Correct, String::new(), None),
             }
         }
     }
@@ -1333,6 +1379,58 @@ fn a_refusal_that_contradicts_itself_is_wrong() {
     );
     assert!(is_row_defect("ambiguous_locator"));
     assert!(!is_row_defect("radius_too_large"));
+}
+
+#[test]
+fn a_limit_below_a_size_its_sweep_built_is_wrong() {
+    let at = |size: &str, class: Class, detail: &str| Row {
+        model: "knob".into(),
+        case: "rim".into(),
+        size: size.into(),
+        expect: String::new(),
+        class,
+        detail: detail.into(),
+    };
+    let mut rows = vec![
+        at("0.1mm", Class::Correct, ""),
+        at("1mm", Class::Generic, "radius_too_large max=0mm by=unknown"),
+        at(
+            "2mm",
+            Class::Limit,
+            "radius_too_large max=0.1mm by=facet_width",
+        ),
+        at(
+            "3mm",
+            Class::Limit,
+            "radius_too_large max=0.05mm by=facet_width",
+        ),
+        at("4mm", Class::Generic, "unsupported_vertex"),
+    ];
+    let said = [
+        (0.0001, None),
+        (0.001, Some(0.0)),
+        (0.002, Some(0.0001)),
+        (0.003, Some(0.00005)),
+        (0.004, None),
+    ];
+    below_a_build(&mut rows, &said);
+    let classes: Vec<Class> = rows.iter().map(|r| r.class).collect();
+    // 0.1 mm built: a maximum of 0 or 0.05 mm contradicts it; 0.1 mm
+    // itself, and a refusal that names no size, do not.
+    assert_eq!(
+        classes,
+        [
+            Class::Correct,
+            Class::Wrong,
+            Class::Limit,
+            Class::Wrong,
+            Class::Generic
+        ]
+    );
+    assert_eq!(
+        rows[1].detail,
+        "radius_too_large max=0mm by=unknown, below 0.1mm, which builds"
+    );
 }
 
 #[test]

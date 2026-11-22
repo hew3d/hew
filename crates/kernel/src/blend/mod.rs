@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 
 pub use edit::{BlendFeature, same_geometry_for_test};
 pub use error::{BlendError, LimitFeature};
-pub use limit::{limit_probes_for_test, limit_searches_for_test};
+pub use limit::{limit_attempts_for_test, limit_probes_for_test, limit_searches_for_test};
 pub use profile::{ProfileSample, bundled};
 pub use record::{BlendRecord, LoopEdit, StoredFace, StoredMark, StoredSpec};
 
@@ -160,8 +160,9 @@ fn as_preview_with_rounds<T>(rounds: usize, f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// How close [`Object::largest_that_rolls`] brings its limit, as a fraction
-/// of the size.
+/// How close [`Object::largest_that_rolls`], and the limit search's scan
+/// under a refusal on an imported mesh, bring their limit, as a fraction of
+/// the size.
 const SWEPT_LIMIT_PRECISION: f64 = 0.1;
 
 /// One blend request: the edges and the profile. Ids are kernel handles
@@ -823,6 +824,30 @@ impl Object {
         spec: &BlendSpec,
     ) -> Result<(Object, BlendReport), BlendError> {
         swept::without_surface_fallback(|| self.blend_edges(spec))
+    }
+
+    /// One attempt at `spec` (plan, apply, guard) with every swept chain run as
+    /// attempt `attempt` of the geometric starts and directions it offers
+    /// (an open chain: 0 from its end first in x, then y, then z order, 1
+    /// from the other end), no other attempt tried after it and no limit
+    /// searched. A size refusal reads as `RadiusTooLarge` with `max` 0 and
+    /// the feature that limits it. Test support only.
+    #[doc(hidden)]
+    pub fn blend_swept_attempt_for_test(
+        &self,
+        spec: &BlendSpec,
+        attempt: usize,
+    ) -> Result<(), BlendError> {
+        let (out, _) = chain::with_swept_attempt(attempt, || self.blend_single_way(spec));
+        match out {
+            Ok(_) => Ok(()),
+            Err(plan::PlanFail::Hard(e)) => Err(e),
+            Err(plan::PlanFail::Size(limited_by)) => Err(BlendError::RadiusTooLarge {
+                max: 0.0,
+                limited_by,
+            }),
+            Err(plan::PlanFail::Obstructed(at)) => Err(BlendError::Obstructed { at }),
+        }
     }
 
     /// Whether `spec` plans (checks C1–C5 pass), without applying it. Test

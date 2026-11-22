@@ -791,7 +791,8 @@ round or chamfer must also report the size that was asked for. That
 catches a broken or badly oversized result. It does not measure the
 surface: a round that is valid but slightly off its true shape still reads
 `correct` here. A refusal that says a larger size would fit than the one it
-refused is `wrong`.
+refused is `wrong`, and so is one that names a largest size below a
+smaller size the same case's sweep built `correct`.
 
 Every edge of a `correct` result, and of every model as built, must also
 read the way its geometry says (`check_edge_classes`): a facet seam of one
