@@ -866,7 +866,8 @@ test.describe('Fillet responsive dock acceptance', () => {
       expect(db.x + db.width).toBeLessThan(tb.x)
       expect(cb.y).toBeGreaterThanOrEqual(0)
       const actions = dock.getByRole('button')
-      expect(await actions.count()).toBe(8)
+      expect(await actions.count()).toBe(9)
+      await expect(dock.getByRole('button', { name: 'Lock', exact: true })).toBeVisible()
       for (const button of await actions.all()) {
         const r = (await button.boundingBox())!
         expect(r.x).toBeGreaterThanOrEqual(db.x)
@@ -994,6 +995,22 @@ test.describe('More Shapes integrated menu', () => {
       const card = page.getByRole('region', { name: 'Fillet options' })
       const trigger = card.getByRole('button', { name: /^More shapes/ })
       const before = (await card.boundingBox())!
+      const mainControls = [
+        card.getByRole('group', { name: 'Quick edge shape' }),
+        card.getByRole('textbox', { name: 'Facets' }),
+        card.getByRole('radiogroup', { name: 'Corners' }),
+        card.getByRole('button', { name: 'Save profile…' }),
+      ]
+      const mainBounds = await Promise.all(mainControls.map(control => control.boundingBox()))
+      const expectMainControlsFixed = async (): Promise<void> => {
+        for (const [index, control] of mainControls.entries()) {
+          const bounds = (await control.boundingBox())!
+          expect(bounds.x).toBeCloseTo(mainBounds[index]!.x, 0)
+          expect(bounds.y).toBeCloseTo(mainBounds[index]!.y, 0)
+          expect(bounds.width).toBeCloseTo(mainBounds[index]!.width, 0)
+          expect(bounds.height).toBeCloseTo(mainBounds[index]!.height, 0)
+        }
+      }
       await shot(page, info, 'menu-closed')
       await trigger.press('ArrowDown')
       const menu = page.getByRole('menu', { name: 'Additional edge profiles' })
@@ -1006,6 +1023,7 @@ test.describe('More Shapes integrated menu', () => {
       expect(after.y + after.height).toBeCloseTo(before.y + before.height, 0)
       expect(after.y).toBeLessThan(before.y)
       expect(after.width).toBe(240)
+      if (height >= 720) await expectMainControlsFixed()
       const viewport = await card.evaluate(el => (el as HTMLElement).offsetParent!.getBoundingClientRect().toJSON() as { left: number; right: number; top: number; bottom: number })
       expect(after.y).toBeGreaterThanOrEqual(viewport.top + 16)
       expect(after.y + after.height).toBeLessThanOrEqual(viewport.bottom - 16)
@@ -1039,6 +1057,17 @@ test.describe('More Shapes integrated menu', () => {
       await expect(menu.getByRole('menuitemradio', { name: 'Cavetto', exact: true })).toBeInViewport({ ratio: 0.99 })
       await page.keyboard.press('Home')
       await expect(ogee).toBeFocused()
+      if (height >= 720) {
+        // Compare opening and closing with the same profile and armed pick.
+        // Selecting a different profile may legitimately change conditional rows.
+        await page.keyboard.press('Escape')
+        await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getBoundingClientRect().height)).toBe(0)
+        await expectMainControlsFixed()
+        await trigger.press('ArrowDown')
+        await expect(ogee).toBeFocused()
+        await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getAnimations().length)).toBe(0)
+        await expectMainControlsFixed()
+      }
       await page.keyboard.press('Enter')
       await expect(menu).toHaveCount(0)
       await expect(trigger).toBeFocused()
@@ -1064,23 +1093,34 @@ test.describe('More Shapes integrated menu', () => {
   test('opening, closing, interrupted dismissal and reduced motion', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 720 })
     await setup(page)
+    const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+    await page.evaluate(id => window.__hew_test!.selectObjects([id]), id)
+    await expect(page.getByText('1 object')).toBeVisible()
     await page.keyboard.press('Shift+F')
     const card = page.getByRole('region', { name: 'Fillet options' })
+    await expect(card.getByRole('radiogroup', { name: 'Corners' })).toBeVisible()
     const trigger = card.getByRole('button', { name: /^More shapes/ })
     const expansion = card.locator('.fillet-profile-expansion')
     await expect(expansion.locator('[role="menuitemradio"]')).toHaveCount(7)
     await expect.poll(() => expansion.evaluate(el => getComputedStyle(el).transitionDuration.split(',')[0])).toBe('0.22s')
+    const fixedTops = await card.evaluate(root => Array.from(root.querySelectorAll<HTMLElement>(
+      '.fillet-primary-choices, .fillet-main-settings > div, .fillet-persistent-profiles',
+    ), element => element.getBoundingClientRect().top))
     const sample = async () => trigger.evaluate(async button => {
       const root = button.closest('[data-testid="tool-options-card"]')!
       const expansion = root.querySelector<HTMLElement>('.fillet-profile-expansion')!
       const wasOpen = expansion.dataset.open
       ;(button as HTMLButtonElement).click()
-      const frames: Array<{ height: number; bottom: number }> = []
+      const mainControls = Array.from(root.querySelectorAll<HTMLElement>(
+        '.fillet-primary-choices, .fillet-main-settings > div, .fillet-persistent-profiles',
+      ))
+      const frames: Array<{ height: number; bottom: number; mainTops: number[] }> = []
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error('Menu transition did not finish')), 5000)
         const frame = () => {
           const rect = root.getBoundingClientRect()
-          frames.push({ height: rect.height, bottom: rect.bottom })
+          frames.push({ height: rect.height, bottom: rect.bottom,
+            mainTops: mainControls.map(element => element.getBoundingClientRect().top) })
           // Wait for the actual transition, rather than assuming the browser
           // paints its first frame immediately on a busy software renderer.
           if (expansion.dataset.open !== wasOpen && expansion.getAnimations().length === 0 && frames.length > 1) {
@@ -1099,7 +1139,10 @@ test.describe('More Shapes integrated menu', () => {
     expect(high).toBeGreaterThan(low)
     for (const frames of [opening, closing]) {
       expect(frames.some(frame => frame.height > low + 1 && frame.height < high - 1)).toBe(true)
-      for (const frame of frames) expect(frame.bottom).toBeCloseTo(opening[0].bottom, 0)
+      for (const frame of frames) {
+        expect(frame.bottom).toBeCloseTo(opening[0].bottom, 0)
+        for (const [index, top] of frame.mainTops.entries()) expect(top).toBeCloseTo(fixedTops[index], 0)
+      }
     }
     // Dismiss during opening, then reopen during closing. Hidden content is
     // immediately inert; CSS reverses the current transition without timers.

@@ -23,15 +23,19 @@
 /* The menu grows the same card upward; hidden rows stay mounted for closing. */
 .fillet-profile-expansion {
   display: grid;
+  flex-shrink: 1;
   grid-template-rows: 0fr;
   min-height: 0;
   visibility: hidden;
-  transition: grid-template-rows 220ms ease-out, visibility 220ms;
+  transition: grid-template-rows 220ms ease-out, min-height 220ms ease-out, visibility 220ms;
 }
 .fillet-profile-expansion[data-open="true"] {
   grid-template-rows: 1fr;
+  /* Let the menu absorb height pressure before the main settings move.
+     Keep a usable scroller when a short viewport needs whole-card scrolling. */
+  min-height: min(6lh, 45vh);
   visibility: visible;
-  transition: grid-template-rows 220ms ease-out, visibility 0s;
+  transition: grid-template-rows 220ms ease-out, min-height 220ms ease-out, visibility 0s;
 }
 .fillet-profile-menu {
   min-height: 0;
@@ -70,5 +74,4 @@
 }
 .tool-options-rows, .fillet-options, .fillet-shapes { flex: 1 1 auto; }
 .fillet-options > :not(.fillet-shapes), .fillet-shapes > :not(.fillet-profile-expansion) { flex-shrink: 0; }
-.fillet-profile-expansion { flex-shrink: 0; }
 .fillet-main-settings { display: flex; flex-direction: column; gap: 10px; }
