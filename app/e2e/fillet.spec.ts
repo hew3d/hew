@@ -999,7 +999,6 @@ test.describe('More Shapes integrated menu', () => {
         card.getByRole('group', { name: 'Quick edge shape' }),
         card.getByRole('textbox', { name: 'Facets' }),
         card.getByRole('radiogroup', { name: 'Corners' }),
-        card.getByRole('button', { name: 'Save profile…' }),
       ]
       const mainBounds = await Promise.all(mainControls.map(control => control.boundingBox()))
       const expectMainControlsFixed = async (): Promise<void> => {
@@ -1072,10 +1071,11 @@ test.describe('More Shapes integrated menu', () => {
       await expect(menu).toHaveCount(0)
       await expect(trigger).toBeFocused()
       await expect(trigger).toContainText('Ogee')
-      // Saving remains available outside the expansion after picking a built-in.
-      await expect(card.getByRole('button', { name: 'Save profile…' })).toBeEnabled()
+      // The saving action stays hidden until the menu reopens, then joins its navigation.
+      await expect(card.getByRole('menuitem', { name: 'Save profile…' })).toHaveCount(0)
       await trigger.press('ArrowUp')
-      await expect(menu.getByRole('menuitemradio', { name: 'Cavetto', exact: true })).toBeFocused()
+      await expect(menu.getByRole('menuitem', { name: 'Save profile…' })).toBeFocused()
+      await expect(menu.getByRole('menuitem', { name: 'Save profile…' })).toBeEnabled()
       await page.keyboard.press('Escape')
       await expect(menu).toHaveCount(0)
       await expect(trigger).toBeFocused()
@@ -1104,7 +1104,7 @@ test.describe('More Shapes integrated menu', () => {
     await expect(expansion.locator('[role="menuitemradio"]')).toHaveCount(7)
     await expect.poll(() => expansion.evaluate(el => getComputedStyle(el).transitionDuration.split(',')[0])).toBe('0.22s')
     const fixedTops = await card.evaluate(root => Array.from(root.querySelectorAll<HTMLElement>(
-      '.fillet-primary-choices, .fillet-main-settings > div, .fillet-persistent-profiles',
+      '.fillet-primary-choices, .fillet-main-settings > div',
     ), element => element.getBoundingClientRect().top))
     const sample = async () => trigger.evaluate(async button => {
       const root = button.closest('[data-testid="tool-options-card"]')!
@@ -1112,7 +1112,7 @@ test.describe('More Shapes integrated menu', () => {
       const wasOpen = expansion.dataset.open
       ;(button as HTMLButtonElement).click()
       const mainControls = Array.from(root.querySelectorAll<HTMLElement>(
-        '.fillet-primary-choices, .fillet-main-settings > div, .fillet-persistent-profiles',
+        '.fillet-primary-choices, .fillet-main-settings > div',
       ))
       const frames: Array<{ height: number; bottom: number; mainTops: number[] }> = []
       await new Promise<void>((resolve, reject) => {
@@ -1172,14 +1172,15 @@ test('More Shapes preserves the existing Save Profile workflow', async ({ page }
   const card = page.getByRole('region', { name: 'Fillet options' })
   const trigger = card.getByRole('button', { name: /^More shapes/ })
   const menu = card.getByRole('menu', { name: 'Additional edge profiles' })
-  await expect(card.getByRole('button', { name: 'Save profile…' })).toBeVisible()
-  await expect(card.getByRole('button', { name: 'Save profile…' })).toBeDisabled()
+  await expect(card.getByRole('menuitem', { name: 'Save profile…' })).toHaveCount(0)
   await trigger.press('ArrowDown')
+  await expect(menu.getByRole('menuitem', { name: 'Save profile…' })).toBeDisabled()
   await page.getByRole('menuitemradio', { name: 'Ogee', exact: true }).press('Enter')
   await expect(menu).toHaveCount(0)
-  const save = card.getByRole('button', { name: 'Save profile…' })
+  const save = menu.getByRole('menuitem', { name: 'Save profile…' })
+  await expect(save).toHaveCount(0)
+  await trigger.press('ArrowUp')
   await expect(save).toBeEnabled()
-  await save.focus()
   await expect(save).toBeFocused()
   await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getAnimations().length)).toBe(0)
   await shot(page, info, 'save-profile-enabled')
@@ -1191,6 +1192,10 @@ test('More Shapes preserves the existing Save Profile workflow', async ({ page }
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
   await expect(trigger).toContainText('Ogee')
+  await expect(save).toHaveCount(0)
+  // Preserve the existing dialog's focus lifecycle: closing it frees tool shortcuts.
+  await page.keyboard.press('l')
+  await expect(card).toHaveCount(0)
 })
 
 test('More Shapes falls back to one column with a reserved scrollbar and Tab reaches Shape help', async ({ page }, info) => {
@@ -1239,8 +1244,7 @@ test.describe('Fillet shape selector consistency', () => {
         const t = await box(more), sh = await box(card.getByText('Shape', { exact: true })), p = await box(primary)
         const f = await box(card.getByRole('textbox', { name: 'Facets' })), c = await box(corners)
         const saved = card.getByRole('group', { name: 'My profiles' })
-        const save = card.getByRole('button', { name: 'Save profile…' })
-        const action = await box(save)
+        const save = menu.getByRole('menuitem', { name: 'Save profile…' })
         expect(h.y + h.height).toBeLessThanOrEqual(t.y)
         if (expanded) {
           const m = await box(menu)
@@ -1254,19 +1258,23 @@ test.describe('Fillet shape selector consistency', () => {
           expect(builtin.y + builtin.height).toBeLessThanOrEqual(my.y)
           await expect(saved).toHaveCount(1)
           await expect(saved.getByText('No saved profiles yet.')).toBeVisible()
-          expect(await menu.locator('[data-profile-section=actions]').count()).toBe(0)
+          const actions = menu.locator('[data-profile-section=actions]')
+          await expect(actions).toHaveCount(1)
+          expect(await saved.evaluate(el => el.nextElementSibling?.getAttribute('data-profile-section'))).toBe('actions')
+          const action = await box(save)
+          expect(my.y + my.height).toBeLessThanOrEqual(action.y)
+          await expect(save).toHaveCount(1)
+          await expect(save).toBeVisible()
         } else {
           await expect(menu).toHaveCount(0)
           expect(t.y + t.height).toBeLessThanOrEqual(sh.y)
           await expect(saved).toHaveCount(0)
           await expect(card.getByText('No saved profiles yet.')).toBeHidden()
+          await expect(save).toHaveCount(0)
         }
         expect(sh.y + sh.height).toBeLessThanOrEqual(p.y)
         expect(p.y + p.height).toBeLessThanOrEqual(f.y)
         expect(f.y + f.height).toBeLessThanOrEqual(c.y)
-        expect(c.y + c.height).toBeLessThanOrEqual(action.y)
-        await expect(save).toHaveCount(1)
-        await expect(save).toBeVisible()
         for (const name of ['Round', 'Chamfer', 'Cove', 'Bullnose']) {
           const button = primary.getByRole('button', { name, exact: true })
           await expect(button.locator('svg')).toBeVisible()
@@ -1313,7 +1321,10 @@ test('Fillet main settings and combined profile menu keep their order when optio
   const fb = (await facets.boundingBox())!, mb = (await menu.boundingBox())!, tb = (await more.boundingBox())!
   expect(tb.y + tb.height).toBeLessThanOrEqual(mb.y)
   expect(mb.y + mb.height).toBeLessThanOrEqual((await card.getByRole('group', { name: 'Quick edge shape' }).boundingBox())!.y)
-  expect(fb.y + fb.height).toBeLessThanOrEqual((await card.getByRole('button', { name: 'Save profile…' }).boundingBox())!.y)
+  const save = menu.getByRole('menuitem', { name: 'Save profile…' })
+  const saveBounds = (await save.boundingBox())!
+  expect(saveBounds.y + saveBounds.height).toBeLessThanOrEqual((await card.getByRole('group', { name: 'Quick edge shape' }).boundingBox())!.y)
+  expect((await card.getByRole('group', { name: 'Quick edge shape' }).boundingBox())!.y).toBeLessThan(fb.y)
   await page.keyboard.press('Escape')
   await card.getByRole('button', { name: 'Chamfer', exact: true }).focus()
   await page.keyboard.press('Enter')

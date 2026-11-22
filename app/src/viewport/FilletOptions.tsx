@@ -209,6 +209,7 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
                         }
                         else {
                           setOpen(false)
+                          triggerRef.current?.focus({ preventScroll: true })
                           it.onSelect?.()
                         }
                       }}
@@ -306,7 +307,7 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
             }
           }}
         >
-          {renderSections(sections.filter(section => section.id !== 'actions'), true)}
+          {renderSections(sections, true)}
         </div>
       </div>
       <OptionHeading label="Shape" info="Choose the shape of the edge." marginBottom={0} />
@@ -330,10 +331,6 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
         })}
       </div>
       {children}
-      <div className="fillet-persistent-profiles">
-        {renderSections(sections.filter(section => section.id === 'actions'), false)}
-      </div>
-
     </div>
   )
 }

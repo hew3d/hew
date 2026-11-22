@@ -80,7 +80,7 @@ describe('FilletOptions', () => {
       expect(row.disabled).toBe(true)
       expect(row.title).toBe('Drawn corners can be rounded or chamfered.')
     }
-    expect((screen.getByRole('button', { name: 'Save profile…' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('menuitem', { name: 'Save profile…' }) as HTMLButtonElement).disabled).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Cove' }))
     expect(getFilletSettings().profile.kind).toBe('round')
     fireEvent.click(screen.getByRole('button', { name: 'Chamfer' }))
@@ -124,10 +124,10 @@ describe('FilletOptions', () => {
     fireEvent.click(screen.getByRole('menuitemradio', { name: /Ogee/ }))
     expect(getFilletSettings().profile).toMatchObject({ kind: 'shape', id: 'builtin:ogee' })
     fireEvent.click(screen.getByRole('button', { name: /Ogee/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Save profile…' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Save profile…' }))
     expect(onSave).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('button', { name: /Ogee/ }))
-    expect((screen.getByRole('button', { name: 'Nope' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('menuitem', { name: 'Nope' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('a disabled row carries its reason, and an empty section shows its hint', () => {
@@ -146,7 +146,7 @@ describe('FilletOptions', () => {
     fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
     expect(screen.getByText('No saved profiles yet.')).toBeTruthy()
     expect(screen.queryByText('Nothing')).toBeNull()
-    const save = screen.getByRole('button', { name: 'Save profile…' }) as HTMLButtonElement
+    const save = screen.getByRole('menuitem', { name: 'Save profile…' }) as HTMLButtonElement
     expect(save.disabled).toBe(true)
     expect(save.title).toBe('Select a chain first.')
   })
@@ -412,19 +412,26 @@ it('navigates built-in profiles, skipping disabled items and restoring trigger f
   fireEvent.keyDown(last, { key: 'Home' })
   expect(first).toHaveFocus()
   fireEvent.keyDown(first, { key: 'End' })
-  expect(last).toHaveFocus()
-  fireEvent.keyDown(last, { key: 'Escape' })
+  const saveAction = screen.getByRole('menuitem', { name: 'Save profile…' })
+  expect(saveAction).toHaveFocus()
+  fireEvent.keyDown(saveAction, { key: 'ArrowDown' })
+  expect(first).toHaveFocus()
+  fireEvent.keyDown(first, { key: 'Escape' })
   expect(screen.queryByRole('menu')).toBeNull()
   expect(trigger).toHaveFocus()
   fireEvent.keyDown(trigger, { key: 'ArrowUp' })
-  expect(screen.getByRole('menuitemradio', { name: 'Other' })).toHaveFocus()
+  expect(screen.getByRole('menuitem', { name: 'Save profile…' })).toHaveFocus()
   fireEvent.click(screen.getByRole('menuitemradio', { name: 'Curve' }), { detail: 0 })
   expect(getFilletSettings().profile).toEqual(curve)
   expect(trigger).toHaveFocus()
   expect(screen.queryByRole('menu')).toBeNull()
   expect(save).not.toHaveBeenCalled()
-  fireEvent.click(screen.getByRole('button', { name: 'Save profile…' }))
+  expect(screen.queryByRole('menuitem', { name: 'Save profile…' })).toBeNull()
+  fireEvent.keyDown(trigger, { key: 'ArrowUp' })
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Save profile…' }))
   expect(save).toHaveBeenCalledOnce()
+  expect(screen.queryByRole('menu')).toBeNull()
+  expect(trigger).toHaveFocus()
 })
 
 it('keeps closing content mounted but inaccessible, and can reopen without losing profile identity', () => {
@@ -462,7 +469,7 @@ it('unmounting an open menu removes its Escape listener', () => {
   expect(event.defaultPrevented).toBe(false)
 })
 
-it('keeps Built-in and My profiles in More Shapes while saving stays below the main settings', () => {
+it('groups built-in, saved profiles and saving in More Shapes without duplicating actions', () => {
   const profile = { kind: 'shape' as const, id: 'saved', name: 'Saved profile', shape: {} }
   const builtIn = { ...profile, id: 'builtin:ogee', name: 'Ogee' }
   const save = vi.fn()
@@ -479,22 +486,27 @@ it('keeps Built-in and My profiles in More Shapes while saving stays below the m
     const primary = screen.getByRole('group', { name: 'Quick edge shape' })
     const facets = screen.getByRole('textbox', { name: 'Facets' })
     const corners = screen.getByRole('radiogroup', { name: 'Corners' })
-    const saveButton = screen.getByRole('button', { name: 'Save profile…' })
-    before(more, primary); before(primary, facets); before(facets, corners); before(corners, saveButton)
+    before(more, primary); before(primary, facets); before(facets, corners)
     expect(more.nextElementSibling).toBe(container.querySelector('.fillet-profile-expansion'))
     expect(more).toHaveAttribute('aria-expanded', String(open))
-    expect(screen.getAllByRole('button', { name: 'Save profile…' })).toHaveLength(1)
+    expect(container.querySelectorAll('[data-profile-section=actions]')).toHaveLength(1)
     if (open) {
       const menu = screen.getByRole('menu')
       const builtinGroup = screen.getByRole('group', { name: 'Built-in' })
       const savedGroup = screen.getByRole('group', { name: 'My profiles' })
       before(more, menu); before(menu, primary); before(builtinGroup, savedGroup)
       expect(menu.contains(savedGroup)).toBe(true)
-      expect(menu.contains(saveButton)).toBe(false)
+      const saveButton = screen.getByRole('menuitem', { name: 'Save profile…' })
+      const actions = menu.querySelector('[data-profile-section=actions]')!
+      expect(savedGroup.nextElementSibling).toBe(actions)
+      before(savedGroup, saveButton)
+      expect(menu.contains(saveButton)).toBe(true)
+      expect(screen.getAllByRole('menuitem', { name: 'Save profile…' })).toHaveLength(1)
       expect(screen.getAllByRole('menuitemradio', { name: 'Saved profile' })).toHaveLength(1)
     } else {
       expect(screen.queryByRole('menu')).toBeNull()
       expect(screen.queryByRole('group', { name: 'My profiles' })).toBeNull()
+      expect(screen.queryByRole('menuitem', { name: 'Save profile…' })).toBeNull()
     }
     for (const name of ['Round', 'Chamfer', 'Cove', 'Bullnose']) {
       expect(screen.getByRole('button', { name }).querySelector('svg')).toHaveAttribute('data-profile-kind', name.toLowerCase())
@@ -515,8 +527,34 @@ it('keeps Built-in and My profiles in More Shapes while saving stays below the m
   fireEvent.click(screen.getByRole('button', { name: 'Chamfer' }))
   expect(screen.getByRole('radio', { name: 'Flat' })).toBeTruthy()
   expect(screen.queryByRole('radio', { name: 'Rolled' })).toBeNull()
-  fireEvent.click(screen.getByRole('button', { name: 'Save profile…' }))
+  expect(screen.queryByRole('menuitem', { name: 'Save profile…' })).toBeNull()
+  fireEvent.click(more)
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Save profile…' }))
   expect(save).toHaveBeenCalledOnce()
+})
+
+it('keeps saving keyboard reachable when drawn-corner restrictions disable extra profiles', () => {
+  const save = vi.fn(() => expect(trigger).toHaveFocus())
+  setFilletCornerOnly(true)
+  const before = getFilletSettings()
+  render(<FilletOptions sections={[
+    { id: 'builtin', items: [{ id: 'ogee', label: 'Ogee', profile: {
+      kind: 'shape', id: 'builtin:ogee', name: 'Ogee', shape: {},
+    } }] },
+    { id: 'library', heading: 'My profiles', items: [], emptyHint: 'No saved profiles yet.' },
+    { id: 'actions', items: [{ id: 'save', label: 'Save profile…', onSelect: save }] },
+  ]} />)
+  const trigger = screen.getByRole('button', { name: 'More shapes' })
+  fireEvent.keyDown(trigger, { key: 'ArrowDown' })
+  expect(screen.getByRole('menuitemradio', { name: 'Ogee' })).toBeDisabled()
+  const action = screen.getByRole('menuitem', { name: 'Save profile…' })
+  expect(action).toHaveFocus()
+  fireEvent.click(action)
+  expect(save).toHaveBeenCalledOnce()
+  expect(getFilletSettings()).toEqual(before)
+  expect(screen.queryByRole('menu')).toBeNull()
+  expect(screen.queryByRole('menuitem', { name: 'Save profile…' })).toBeNull()
+  expect(trigger).toHaveFocus()
 })
 
 it('displays the canonical built-in name without renaming a saved profile', () => {
