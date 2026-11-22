@@ -1,5 +1,5 @@
 /* oxlint-disable lingui/no-unlocalized-strings -- True Curves strings are not yet wrapped for translation: this file is English-only until they are */
-import { useContext, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useContext, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { useLingui } from '@lingui/react/macro'
 import {
   getFilletCornerOnly,
@@ -26,7 +26,7 @@ import { ProfileMenuIcon } from './ProfileMenuIcon'
 import { isComposingKey } from '../input/keyboard'
 import { ToolOptionsInfo, ToolOptionsExpandedContext } from './ToolOptionsCard'
 
-/** One row of the menu beyond the four basic kinds. */
+/** A profile choice or action supplied by the existing library adapter. */
 export interface ProfileOptionItem {
   /** Stable key. */
   id: string
@@ -45,6 +45,7 @@ export interface ProfileOptionItem {
 }
 
 export interface ProfileOptionSection {
+  /** Profile sections expand together; saving actions stay visible. */
   id: string
   heading?: string
   items: ProfileOptionItem[]
@@ -54,11 +55,11 @@ export interface ProfileOptionSection {
 }
 
 export interface FilletOptionsProps {
-  /** Further sections below the four basics, each set off by a separator. */
+  /** Built-in menu, saved-profile and saving-action sections. */
   sections?: ProfileOptionSection[]
 }
 
-const BASICS: Array<{ label: string; profile: FilletProfile }> = [
+const BASICS: Array<{ label: string; profile: Exclude<FilletProfile, { kind: 'shape' }> }> = [
   { label: 'Round', profile: { kind: 'round' } },
   { label: 'Chamfer', profile: { kind: 'chamfer' } },
   { label: 'Cove', profile: { kind: 'cove' } },
@@ -90,7 +91,7 @@ export function profileLabel(p: FilletProfile): string {
     case 'bullnose':
       return 'Bullnose'
     case 'shape':
-      return p.name
+      return p.id === 'builtin:roman-ogee' ? 'Roman Ogee' : p.name
   }
 }
 /** The tooltip on a profile a drawn corner can't take. */
@@ -111,18 +112,18 @@ const itemStyle = (active: boolean, disabled: boolean): React.CSSProperties => (
   color: disabled ? 'var(--text-faint)' : active ? 'var(--text-on-accent, #fff)' : 'var(--text-primary)',
   fontFamily: 'var(--font-family-ui)',
   fontSize: 12.5,
+  fontWeight: active ? 600 : 400,
   textAlign: 'left',
   cursor: disabled ? 'default' : 'pointer',
 })
 
-function ShapeOptions({ sections = [] }: FilletOptionsProps) {
+function ShapeOptions({ sections = [], children }: FilletOptionsProps & { children?: ReactNode }) {
   const { t } = useLingui()
   const settings = useSyncExternalStore(subscribeFilletSettings, getFilletSettings, getFilletSettings)
   const cornerOnly = useSyncExternalStore(subscribeFilletCornerOnly, getFilletCornerOnly, getFilletCornerOnly)
   const [open, setOpen] = useState(false)
   const expanded = useContext(ToolOptionsExpandedContext)
   useEffect(() => { if (!expanded) setOpen(false) }, [expanded])
-  const rootRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
   const pendingFocus = useRef<'first' | 'last' | null>(null)
@@ -143,7 +144,8 @@ function ShapeOptions({ sections = [] }: FilletOptionsProps) {
   useEffect(() => {
     if (!open) return
     const onDown = (ev: PointerEvent): void => {
-      if (rootRef.current !== null && !rootRef.current.contains(ev.target as Node)) setOpen(false)
+      const target = ev.target as Node
+      if (!menuRef.current?.contains(target) && !triggerRef.current?.contains(target)) setOpen(false)
     }
     const onKey = (ev: KeyboardEvent): void => {
       if (ev.key === 'Escape' && !isComposingKey(ev)) {
@@ -171,30 +173,67 @@ function ShapeOptions({ sections = [] }: FilletOptionsProps) {
   const isCurrent = (p: FilletProfile): boolean =>
     p.kind === current.kind && (p.kind !== 'shape' || (current.kind === 'shape' && current.id === p.id))
 
+  const renderSections = (profileSections: ProfileOptionSection[], inMenu: boolean) => (<>
+          {profileSections
+            .filter((s) => s.items.length > 0 || s.emptyHint !== undefined)
+            .map((s) => (
+              <div key={s.id} data-profile-section={s.id} role="group" aria-label={s.heading}>
+                <div style={{ height: 1, margin: '4px 0', background: 'var(--border-hairline)' }} />
+                {s.heading !== undefined && (
+                  <div style={{ padding: '2px 12px', fontSize: 10.5, color: 'var(--text-faint)' }}>{s.heading}</div>
+                )}
+                {s.items.length === 0 && (
+                  <div style={{ padding: '4px 12px 6px', fontSize: 12, color: 'var(--text-faint)' }}>{s.emptyHint}</div>
+                )}
+                <div className={s.items.some(it => it.profile !== undefined) ? 'fillet-profile-choices' : undefined}>
+                {s.items.map((it) => {
+                  const active = it.profile !== undefined && isCurrent(it.profile)
+                  const cornerOff = cornerOnly && it.profile !== undefined && !cornerTakes(it.profile)
+                  const off = it.disabled === true || cornerOff
+                  return (
+                    <button
+                      key={it.id}
+                      className="fillet-profile-choice"
+                      type="button"
+                      tabIndex={inMenu ? -1 : undefined}
+                      role={inMenu ? (it.profile !== undefined ? 'menuitemradio' : 'menuitem') : undefined}
+                      aria-checked={inMenu && it.profile !== undefined ? active : undefined}
+                      aria-pressed={!inMenu && it.profile !== undefined ? active : undefined}
+                      disabled={off}
+                      title={cornerOff ? CORNER_ONLY_TITLE : it.title}
+                      onClick={event => {
+                        if (off) return
+                        if (it.profile !== undefined) {
+                          pick(it.profile)
+                          if (inMenu && event.detail === 0) triggerRef.current?.focus()
+                        }
+                        else {
+                          setOpen(false)
+                          it.onSelect?.()
+                        }
+                      }}
+                      style={{ ...itemStyle(active, off), minWidth: 0, padding: '6px 4px', gap: 5, borderRadius: 5, fontSize: 12,
+                        ...(it.profile === undefined ? { color: off ? 'var(--text-faint)' : 'var(--text-secondary)', fontSize: 11, padding: '6px 12px' } : {}) }}
+                    >
+                      {it.profile?.kind === 'shape' && <ProfileMenuIcon shape={it.profile.shape} thumbnail={it.thumbnail} />}
+                      <span className="fillet-profile-label">{it.label}</span>
+                      {it.badge !== undefined && it.badge !== s.heading && (
+                        <span style={{ fontSize: 10, color: 'var(--text-faint)' }}>{it.badge}</span>
+                      )}
+                    </button>
+                  )
+                })}
+                </div>
+              </div>
+            ))}
+  </>)
+
   return (
     <div
-      ref={rootRef}
+      className="fillet-shapes"
       style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 6 }}
       data-testid="fillet-shape-options"
     >
-      <div role="group" aria-label="Quick edge shape" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
-        {BASICS.map((b) => {
-          const active = current.kind === b.profile.kind
-          return (
-            <button
-              key={b.label}
-              type="button"
-              aria-pressed={active}
-              disabled={cornerOnly && !cornerTakes(b.profile)}
-              title={cornerOnly && !cornerTakes(b.profile) ? CORNER_ONLY_TITLE : undefined}
-              onClick={() => pick(b.profile)}
-              style={{ ...pillStyle(active), color: cornerOnly && !cornerTakes(b.profile) ? 'var(--text-faint)' : pillStyle(active).color }}
-            >
-              {b.label}
-            </button>
-          )
-        })}
-      </div>
       <button
         ref={triggerRef}
         type="button"
@@ -232,8 +271,8 @@ function ShapeOptions({ sections = [] }: FilletOptionsProps) {
         }}
       >
         <span>More shapes</span>
-        {current.kind === 'shape' && <span style={{ flex: 1, textAlign: 'right', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{current.name}</span>}
-        <svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" style={{ flexShrink: 0 }}>
+        {current.kind === 'shape' && <span style={{ flex: 1, textAlign: 'right', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{profileLabel(current)}</span>}
+        <svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" style={{ flexShrink: 0, transform: open ? 'rotate(180deg)' : undefined }}>
           <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
@@ -267,57 +306,32 @@ function ShapeOptions({ sections = [] }: FilletOptionsProps) {
             }
           }}
         >
-          {sections
-            .filter((s) => s.items.length > 0 || s.emptyHint !== undefined)
-            .map((s) => (
-              <div key={s.id} role="group" aria-label={s.heading}>
-                <div style={{ height: 1, margin: '4px 0', background: 'var(--border-hairline)' }} />
-                {s.heading !== undefined && (
-                  <div style={{ padding: '2px 12px', fontSize: 10.5, color: 'var(--text-faint)' }}>{s.heading}</div>
-                )}
-                {s.items.length === 0 && (
-                  <div style={{ padding: '4px 12px 6px', fontSize: 12, color: 'var(--text-faint)' }}>{s.emptyHint}</div>
-                )}
-                <div className={s.items.some(it => it.profile !== undefined) ? 'fillet-profile-choices' : undefined}>
-                {s.items.map((it) => {
-                  const active = it.profile !== undefined && isCurrent(it.profile)
-                  const cornerOff = cornerOnly && it.profile !== undefined && !cornerTakes(it.profile)
-                  const off = it.disabled === true || cornerOff
-                  return (
-                    <button
-                      key={it.id}
-                      type="button"
-                      tabIndex={-1}
-                      role={it.profile !== undefined ? 'menuitemradio' : 'menuitem'}
-                      aria-checked={it.profile !== undefined ? active : undefined}
-                      disabled={off}
-                      title={cornerOff ? CORNER_ONLY_TITLE : it.title}
-                      onClick={event => {
-                        if (off) return
-                        if (it.profile !== undefined) {
-                          pick(it.profile)
-                          if (event.detail === 0) triggerRef.current?.focus()
-                        }
-                        else {
-                          setOpen(false)
-                          it.onSelect?.()
-                        }
-                      }}
-                      style={{ ...itemStyle(active, off), minWidth: 0, padding: '6px 4px', gap: 5, borderRadius: 5, fontSize: 12,
-                        ...(it.profile === undefined ? { color: off ? 'var(--text-faint)' : 'var(--text-secondary)', fontSize: 11, padding: '6px 12px' } : {}) }}
-                    >
-                      {it.profile?.kind === 'shape' && <ProfileMenuIcon shape={it.profile.shape} thumbnail={it.thumbnail} />}
-                      <span className="fillet-profile-label">{it.label}</span>
-                      {it.badge !== undefined && it.badge !== s.heading && (
-                        <span style={{ fontSize: 10, color: 'var(--text-faint)' }}>{it.badge}</span>
-                      )}
-                    </button>
-                  )
-                })}
-                </div>
-              </div>
-            ))}
+          {renderSections(sections.filter(section => section.id !== 'actions'), true)}
         </div>
+      </div>
+      <OptionHeading label="Shape" info="Choose the shape of the edge." marginBottom={0} />
+      <div className="fillet-primary-choices" role="group" aria-label="Quick edge shape" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+        {BASICS.map((b) => {
+          const active = current.kind === b.profile.kind
+          return (
+            <button
+              key={b.label}
+              className="fillet-profile-choice"
+              type="button"
+              aria-pressed={active}
+              disabled={cornerOnly && !cornerTakes(b.profile)}
+              title={cornerOnly && !cornerTakes(b.profile) ? CORNER_ONLY_TITLE : undefined}
+              onClick={() => pick(b.profile)}
+              style={{ ...pillStyle(active), display: 'flex', alignItems: 'center', gap: 5, padding: '6px 4px', fontSize: 12, minWidth: 0, textAlign: 'left', color: cornerOnly && !cornerTakes(b.profile) ? 'var(--text-faint)' : pillStyle(active).color }}
+            >
+              <ProfileMenuIcon kind={b.profile.kind} /><span className="fillet-profile-label">{b.label}</span>
+            </button>
+          )
+        })}
+      </div>
+      {children}
+      <div className="fillet-persistent-profiles">
+        {renderSections(sections.filter(section => section.id === 'actions'), false)}
       </div>
 
     </div>
@@ -325,8 +339,8 @@ function ShapeOptions({ sections = [] }: FilletOptionsProps) {
 }
 
 
-function OptionHeading({ label, info }: { label: string; info: string }) {
-  return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 5, fontSize: 12 }}>
+function OptionHeading({ label, info, marginBottom = 5 }: { label: string; info: string; marginBottom?: number }) {
+  return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom, fontSize: 12 }}>
     <span>{label}</span><ToolOptionsInfo label={label}>{info}</ToolOptionsInfo>
   </div>
 }
@@ -394,22 +408,22 @@ export function FilletOptions({ sections = [] }: FilletOptionsProps) {
   const cornerOnly = useSyncExternalStore(subscribeFilletCornerOnly, getFilletCornerOnly, getFilletCornerOnly)
   const corners = useSyncExternalStore(subscribeFilletThreeWayCorners, getFilletThreeWayCorners, getFilletThreeWayCorners)
   const chamfer = settings.profile.kind === 'chamfer'
-  return <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-    <div>
-      <OptionHeading label="Shape" info="Choose the shape of the edge." />
-      <ShapeOptions sections={sections} />
-    </div>
-    {!chamfer && <div>
-      <OptionHeading label="Facets" info="Choose how many flat faces make the curve, or leave it on Auto and Hew picks." />
-      <FacetsField cornerOnly={cornerOnly} value={settings.segmentsOverride} />
-    </div>}
-    {corners > 0 && <div>
-      <OptionHeading label="Corners" info="Choose how three rounded or chamfered edges meet." />
-      <div role="radiogroup" aria-label="Corners" style={{ display: 'flex', gap: 4 }}>
-        {cornerChoices(chamfer).map((c) => <button key={c.value} type="button" role="radio"
-          aria-checked={settings.corners === c.value} onClick={() => setFilletCorners(c.value)}
-          style={{ ...pillStyle(settings.corners === c.value), flex: 1 }}>{c.label}</button>)}
+  return <div className="fillet-options">
+    <ShapeOptions sections={sections}>
+      <div className="fillet-main-settings">
+        {!chamfer && <div>
+          <OptionHeading label="Facets" info="Choose how many flat faces make the curve, or leave it on Auto and Hew picks." />
+          <FacetsField cornerOnly={cornerOnly} value={settings.segmentsOverride} />
+        </div>}
+        {corners > 0 && <div>
+          <OptionHeading label="Corners" info="Choose how three rounded or chamfered edges meet." />
+          <div role="radiogroup" aria-label="Corners" style={{ display: 'flex', gap: 4 }}>
+            {cornerChoices(chamfer).map((c) => <button key={c.value} type="button" role="radio"
+              aria-checked={settings.corners === c.value} onClick={() => setFilletCorners(c.value)}
+              style={{ ...pillStyle(settings.corners === c.value), flex: 1 }}>{c.label}</button>)}
+          </div>
+        </div>}
       </div>
-    </div>}
+    </ShapeOptions>
   </div>
 }

@@ -1,5 +1,5 @@
 /* oxlint-disable lingui/no-unlocalized-strings -- SVG path data for Preview-only profile artwork */
-import type { ProfileShapeJson } from "../tools/filletMath"
+import type { ProfileShapeJson } from '../tools/filletMath'
 
 /** SVG serialization only: retain the supplied line/arc geometry, including
  * major arcs. These display bounds never participate in model operations. */
@@ -44,11 +44,20 @@ export function profileOutline(shape: unknown): { path: string; transform: strin
   return { path, transform: `translate(${tx} ${ty}) scale(${-scale} ${scale})` }
 }
 
+/** Static cross-sections are artwork only, using the same 3..21 display bounds
+ * as the supplied decorative profiles. No operation geometry is derived here. */
+const primaryOutlines = {
+  round: 'M3 21V3H9A12 12 0 0 1 21 15V21Z',
+  chamfer: 'M3 21V3H9L21 15V21Z',
+  cove: 'M3 21V3H9A12 12 0 0 0 21 15V21Z',
+  bullnose: 'M3 21V3H12A9 9 0 0 1 12 21Z',
+} as const
+
 /** Decorative cross-section; the adjacent menu label supplies its accessible name. */
-export function ProfileMenuIcon({ shape, thumbnail }: { shape: unknown; thumbnail?: string }) {
-  const outline = profileOutline(shape)
-  if (outline === null) return thumbnail === undefined ? null : <img src={thumbnail} width={32} height={32} alt="" style={{ flexShrink: 0, borderRadius: 4 }} />
-  return <svg aria-hidden="true" viewBox="0 0 24 24" width="24" height="24" style={{ flexShrink: 0 }}>
+export function ProfileMenuIcon({ kind, shape, thumbnail }: { kind?: keyof typeof primaryOutlines; shape?: unknown; thumbnail?: string }) {
+  const outline = kind === undefined ? profileOutline(shape) : { path: primaryOutlines[kind], transform: undefined }
+  if (outline === null) return thumbnail === undefined ? null : <img src={thumbnail} width={24} height={24} alt="" style={{ flexShrink: 0, borderRadius: 4 }} />
+  return <svg aria-hidden="true" data-profile-kind={kind ?? 'shape'} viewBox="0 0 24 24" width="24" height="24" style={{ flexShrink: 0 }}>
     <path d={outline.path} transform={outline.transform} fill="none" stroke="currentColor" strokeWidth="1.25" vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
   </svg>
 }

@@ -80,7 +80,7 @@ describe('FilletOptions', () => {
       expect(row.disabled).toBe(true)
       expect(row.title).toBe('Drawn corners can be rounded or chamfered.')
     }
-    expect((screen.getByRole('menuitem', { name: 'Save profile…' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: 'Save profile…' }) as HTMLButtonElement).disabled).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Cove' }))
     expect(getFilletSettings().profile.kind).toBe('round')
     fireEvent.click(screen.getByRole('button', { name: 'Chamfer' }))
@@ -124,10 +124,10 @@ describe('FilletOptions', () => {
     fireEvent.click(screen.getByRole('menuitemradio', { name: /Ogee/ }))
     expect(getFilletSettings().profile).toMatchObject({ kind: 'shape', id: 'builtin:ogee' })
     fireEvent.click(screen.getByRole('button', { name: /Ogee/ }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Save profile…' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save profile…' }))
     expect(onSave).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('button', { name: /Ogee/ }))
-    expect((screen.getByRole('menuitem', { name: 'Nope' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Nope' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('a disabled row carries its reason, and an empty section shows its hint', () => {
@@ -146,7 +146,7 @@ describe('FilletOptions', () => {
     fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
     expect(screen.getByText('No saved profiles yet.')).toBeTruthy()
     expect(screen.queryByText('Nothing')).toBeNull()
-    const save = screen.getByRole('menuitem', { name: 'Save profile…' }) as HTMLButtonElement
+    const save = screen.getByRole('button', { name: 'Save profile…' }) as HTMLButtonElement
     expect(save.disabled).toBe(true)
     expect(save.title).toBe('Select a chain first.')
   })
@@ -361,7 +361,7 @@ describe('FilletOptions rows and field editing', () => {
     fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
     const row = screen.getByRole('menuitemradio', { name: 'My curve' })
     expect(row).toHaveAttribute('aria-checked', 'true')
-    expect(row.querySelector('img')).toHaveAttribute('width', '32')
+    expect(row.querySelector('img')).toHaveAttribute('width', '24')
     fireEvent.click(screen.getByRole('button', { name: 'About Shape' }))
     expect(screen.getByRole('note')).toHaveTextContent('Choose the shape of the edge.')
   })
@@ -390,41 +390,46 @@ it('closing the card also closes its menu, including keyboard-only collapse', ()
   expect(screen.queryByRole('menu')).toBeNull()
 })
 
-it('navigates additional profiles and actions, skipping disabled items and restoring trigger focus', () => {
-  const profile = { kind: 'shape' as const, id: 'curve', name: 'Curve', shape: {} }
+it('navigates built-in profiles, skipping disabled items and restoring trigger focus', () => {
+  const curve = { kind: 'shape' as const, id: 'builtin:curve', name: 'Curve', shape: {} }
+  const other = { ...curve, id: 'builtin:other', name: 'Other' }
   const save = vi.fn()
-  render(<FilletOptions sections={[{ id: 'library', items: [
-    { id: 'curve', label: 'Curve', profile },
-    { id: 'off', label: 'Unavailable', profile, disabled: true },
-    { id: 'save', label: 'Save profile…', onSelect: save },
-  ] }]} />)
+  render(<FilletOptions sections={[
+    { id: 'builtin', items: [
+      { id: 'curve', label: 'Curve', profile: curve },
+      { id: 'off', label: 'Unavailable', profile: curve, disabled: true },
+      { id: 'other', label: 'Other', profile: other },
+    ] },
+    { id: 'actions', items: [{ id: 'save-profile', label: 'Save profile…', onSelect: save }] },
+  ]} />)
   const trigger = screen.getByRole('button', { name: 'More shapes' })
   fireEvent.keyDown(trigger, { key: 'ArrowDown' })
-  const curve = screen.getByRole('menuitemradio', { name: 'Curve' })
-  const action = screen.getByRole('menuitem', { name: 'Save profile…' })
-  expect(curve).toHaveFocus()
-  fireEvent.keyDown(curve, { key: 'ArrowDown' })
-  expect(action).toHaveFocus()
-  fireEvent.keyDown(action, { key: 'Home' })
-  expect(curve).toHaveFocus()
-  fireEvent.keyDown(curve, { key: 'End' })
-  expect(action).toHaveFocus()
-  fireEvent.keyDown(action, { key: 'Escape' })
+  const first = screen.getByRole('menuitemradio', { name: 'Curve' })
+  const last = screen.getByRole('menuitemradio', { name: 'Other' })
+  expect(first).toHaveFocus()
+  fireEvent.keyDown(first, { key: 'ArrowDown' })
+  expect(last).toHaveFocus()
+  fireEvent.keyDown(last, { key: 'Home' })
+  expect(first).toHaveFocus()
+  fireEvent.keyDown(first, { key: 'End' })
+  expect(last).toHaveFocus()
+  fireEvent.keyDown(last, { key: 'Escape' })
   expect(screen.queryByRole('menu')).toBeNull()
   expect(trigger).toHaveFocus()
   fireEvent.keyDown(trigger, { key: 'ArrowUp' })
-  expect(screen.getByRole('menuitem', { name: 'Save profile…' })).toHaveFocus()
-  fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Save profile…' }), { key: 'Home' })
+  expect(screen.getByRole('menuitemradio', { name: 'Other' })).toHaveFocus()
   fireEvent.click(screen.getByRole('menuitemradio', { name: 'Curve' }), { detail: 0 })
-  expect(getFilletSettings().profile).toEqual(profile)
+  expect(getFilletSettings().profile).toEqual(curve)
   expect(trigger).toHaveFocus()
   expect(screen.queryByRole('menu')).toBeNull()
   expect(save).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Save profile…' }))
+  expect(save).toHaveBeenCalledOnce()
 })
 
 it('keeps closing content mounted but inaccessible, and can reopen without losing profile identity', () => {
-  const profile = { kind: 'shape' as const, id: 'saved', name: 'A long saved profile name', shape: {} }
-  const { container } = render(<FilletOptions sections={[{ id: 'saved', heading: 'My profiles', items: [
+  const profile = { kind: 'shape' as const, id: 'builtin:curve', name: 'A long built-in profile name', shape: {} }
+  const { container } = render(<FilletOptions sections={[{ id: 'builtin', heading: 'Built-in', items: [
     { id: 'saved', label: profile.name, profile },
   ] }]} />)
   const trigger = screen.getByRole('button', { name: 'More shapes' })
@@ -455,4 +460,78 @@ it('unmounting an open menu removes its Escape listener', () => {
   const event = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true, bubbles: true })
   window.dispatchEvent(event)
   expect(event.defaultPrevented).toBe(false)
+})
+
+it('keeps Built-in and My profiles in More Shapes while saving stays below the main settings', () => {
+  const profile = { kind: 'shape' as const, id: 'saved', name: 'Saved profile', shape: {} }
+  const builtIn = { ...profile, id: 'builtin:ogee', name: 'Ogee' }
+  const save = vi.fn()
+  setFilletThreeWayCorners(1)
+  const { container } = render(<FilletOptions sections={[
+    { id: 'builtin', heading: 'Built-in', items: [{ id: 'ogee', label: 'Ogee', profile: builtIn }] },
+    { id: 'library', heading: 'My profiles', items: [{ id: 'saved', label: profile.name, profile }] },
+    { id: 'actions', items: [{ id: 'save-profile', label: 'Save profile…', onSelect: save }] },
+  ]} />)
+  const more = screen.getByRole('button', { name: /^More shapes/ })
+  const before = (a: Element, b: Element) => expect(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  for (const open of [false, true]) {
+    if (open) fireEvent.click(more)
+    const primary = screen.getByRole('group', { name: 'Quick edge shape' })
+    const facets = screen.getByRole('textbox', { name: 'Facets' })
+    const corners = screen.getByRole('radiogroup', { name: 'Corners' })
+    const saveButton = screen.getByRole('button', { name: 'Save profile…' })
+    before(more, primary); before(primary, facets); before(facets, corners); before(corners, saveButton)
+    expect(more.nextElementSibling).toBe(container.querySelector('.fillet-profile-expansion'))
+    expect(more).toHaveAttribute('aria-expanded', String(open))
+    expect(screen.getAllByRole('button', { name: 'Save profile…' })).toHaveLength(1)
+    if (open) {
+      const menu = screen.getByRole('menu')
+      const builtinGroup = screen.getByRole('group', { name: 'Built-in' })
+      const savedGroup = screen.getByRole('group', { name: 'My profiles' })
+      before(more, menu); before(menu, primary); before(builtinGroup, savedGroup)
+      expect(menu.contains(savedGroup)).toBe(true)
+      expect(menu.contains(saveButton)).toBe(false)
+      expect(screen.getAllByRole('menuitemradio', { name: 'Saved profile' })).toHaveLength(1)
+    } else {
+      expect(screen.queryByRole('menu')).toBeNull()
+      expect(screen.queryByRole('group', { name: 'My profiles' })).toBeNull()
+    }
+    for (const name of ['Round', 'Chamfer', 'Cove', 'Bullnose']) {
+      expect(screen.getByRole('button', { name }).querySelector('svg')).toHaveAttribute('data-profile-kind', name.toLowerCase())
+    }
+    expect(screen.getByRole('radio', { name: 'Rolled' })).toBeTruthy()
+    expect(screen.getByRole('radio', { name: 'Mitered' })).toBeTruthy()
+  }
+  const saved = screen.getByRole('menuitemradio', { name: 'Saved profile' })
+  fireEvent.keyDown(screen.getByRole('menuitemradio', { name: 'Ogee' }), { key: 'ArrowDown' })
+  expect(saved).toHaveFocus()
+  fireEvent.click(saved, { detail: 0 })
+  expect(getFilletSettings().profile).toEqual(profile)
+  expect(more).toHaveFocus()
+  expect(screen.queryByRole('menu')).toBeNull()
+  expect(screen.queryByRole('group', { name: 'My profiles' })).toBeNull()
+  fireEvent.click(more)
+  expect(screen.getByRole('menuitemradio', { name: 'Saved profile' })).toHaveAttribute('aria-checked', 'true')
+  fireEvent.click(screen.getByRole('button', { name: 'Chamfer' }))
+  expect(screen.getByRole('radio', { name: 'Flat' })).toBeTruthy()
+  expect(screen.queryByRole('radio', { name: 'Rolled' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Save profile…' }))
+  expect(save).toHaveBeenCalledOnce()
+})
+
+it('displays the canonical built-in name without renaming a saved profile', () => {
+  expect(profileLabel({ kind: 'shape', id: 'builtin:roman-ogee', name: 'Roman ogee', shape: {} })).toBe('Roman Ogee')
+  expect(profileLabel({ kind: 'shape', id: 'saved:mine', name: 'Roman ogee', shape: {} })).toBe('Roman ogee')
+})
+
+
+it('dismisses the menu when interacting with the main settings above it', () => {
+  render(<FilletOptions />)
+  fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
+  const field = screen.getByRole('textbox', { name: 'Facets' })
+  fireEvent.pointerDown(field)
+  expect(screen.queryByRole('menu')).toBeNull()
+  fireEvent.focus(field)
+  fireEvent.change(field, { target: { value: '12' } })
+  expect(getFilletSettings().segmentsOverride).toBe(12)
 })

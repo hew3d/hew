@@ -42,7 +42,7 @@
 .fillet-profile-menu button:not(:disabled):not([aria-checked="true"]):hover {
   background: var(--surface-hover);
 }
-.fillet-profile-menu button:focus-visible {
+.fillet-profile-choice:focus-visible {
   outline: 2px solid var(--accent-base);
   outline-offset: -2px;
 }
@@ -51,7 +51,7 @@
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 100px), 1fr));
   gap: 4px;
 }
-.fillet-profile-choices button { min-height: 44px; }
+.fillet-profile-choices button, .fillet-primary-choices button { min-height: 36px; }
 .fillet-profile-label {
   flex: 1;
   min-width: 0;
@@ -61,3 +61,14 @@
 @media (prefers-reduced-motion: reduce) {
   .fillet-profile-expansion, .fillet-profile-expansion[data-open="true"] { transition: none; }
 }
+
+/* Keep section order in normal flow; the card body scrolls on short viewports. */
+.tool-options-scroll, .tool-options-rows, .fillet-options, .fillet-shapes {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.tool-options-rows, .fillet-options, .fillet-shapes { flex: 1 1 auto; }
+.fillet-options > :not(.fillet-shapes), .fillet-shapes > :not(.fillet-profile-expansion) { flex-shrink: 0; }
+.fillet-profile-expansion { flex-shrink: 0; }
+.fillet-main-settings { display: flex; flex-direction: column; gap: 10px; }

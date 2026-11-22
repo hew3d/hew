@@ -118,7 +118,7 @@ export function ToolOptionsCard({ tool, info, children }: ToolOptionsCardProps) 
       <div className="tool-options-content" data-collapsed={collapsed} aria-hidden={collapsed} inert={collapsed}>
         <div className="tool-options-scroll">
           <ToolOptionsExpandedContext.Provider value={!collapsed}>
-            <div id={rowsId} style={{ padding: '0 12px 12px' }}>{children}</div>
+            <div id={rowsId} className="tool-options-rows" style={{ padding: '0 12px 12px' }}>{children}</div>
           </ToolOptionsExpandedContext.Provider>
         </div>
       </div>
