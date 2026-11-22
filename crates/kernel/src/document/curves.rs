@@ -236,8 +236,68 @@ pub struct BlendPreview {
     pub clamped: Option<BlendLimit>,
 }
 
+/// One remembered [`Document::blend_features`] answer: the object, the
+/// stamp of its state when the answer was found, and the answer.
+struct BlendFeaturesEntry {
+    object: ObjectId,
+    stamp: crate::topo::ObjectStamp,
+    features: Vec<crate::blend::BlendFeature>,
+}
+
+/// [`Document::blend_features`]'s memory: its last answer, served again
+/// while the object still has the stamp it had then. The answer is a pure
+/// function of the object's state, and the stamp proves that state
+/// unchanged (an edit, an undo or redo, a rolled-back bracket and a
+/// replaced object all leave a different one), so a served answer is the
+/// one a fresh call would find. One entry: the feature list of one object
+/// and the stamp, which holds no table's contents. A clone (an undo
+/// snapshot, a bracket, a rehearsal) starts empty.
+#[derive(Default)]
+pub(super) struct BlendFeaturesMemo(std::sync::Mutex<Option<BlendFeaturesEntry>>);
+
+impl Clone for BlendFeaturesMemo {
+    fn clone(&self) -> BlendFeaturesMemo {
+        BlendFeaturesMemo::default()
+    }
+}
+
+impl std::fmt::Debug for BlendFeaturesMemo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BlendFeaturesMemo")
+    }
+}
+
+impl BlendFeaturesMemo {
+    /// The entry, a poisoned lock taken as it stands: the entry is only
+    /// ever replaced whole, so a panic elsewhere cannot leave it torn.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<BlendFeaturesEntry>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn features(&self, object: ObjectId, obj: &Object) -> Vec<crate::blend::BlendFeature> {
+        if let Some(e) = self.lock().as_ref()
+            && e.object == object
+            && obj.has_stamp(&e.stamp)
+        {
+            return e.features.clone();
+        }
+        let stamp = obj.stamp();
+        let features = obj.blend_features();
+        *self.lock() = Some(BlendFeaturesEntry {
+            object,
+            stamp,
+            features: features.clone(),
+        });
+        features
+    }
+}
+
 impl Document {
-    /// The blends on `object` (WP08 §1), each verified.
+    /// The blends on `object` (WP08 §1), each verified. A repeat call on an
+    /// object that has not changed answers from memory
+    /// ([`BlendFeaturesMemo`]).
     ///
     /// # Errors
     /// The reshape gate's errors.
@@ -246,7 +306,9 @@ impl Document {
         object: ObjectId,
     ) -> Result<Vec<crate::blend::BlendFeature>, DocumentError> {
         self.reshape_target(object)?;
-        Ok(self.objects[object].object.blend_features())
+        Ok(self
+            .blend_features_memo
+            .features(object, &self.objects[object].object))
     }
 
     /// Removes blend `id` from `object`, restoring its sharp edges, as one

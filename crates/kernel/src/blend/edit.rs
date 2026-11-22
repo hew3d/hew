@@ -16,6 +16,20 @@ use crate::patch::PVert;
 use crate::tol;
 use crate::topo::{BlendId, BlendKind, BlendRole, Object, SurfaceRef};
 
+thread_local! {
+    /// How many times [`Object::blend_features`] has run on this thread
+    /// (test support).
+    static FEATURE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times [`Object::blend_features`] has run on the calling thread:
+/// a [`crate::Document::blend_features`] answered from memory does not run
+/// it. Test support only.
+#[doc(hidden)]
+pub fn blend_feature_scans_for_test() -> usize {
+    FEATURE_SCANS.with(std::cell::Cell::get)
+}
+
 /// One blend on an object, as derived from its tagged faces.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlendFeature {
@@ -283,6 +297,7 @@ impl Object {
     /// Every blend on the object, ascending id, each verified (pure; its
     /// cost grows with the blend count, so callers cache it).
     pub fn blend_features(&self) -> Vec<BlendFeature> {
+        FEATURE_SCANS.with(|c| c.set(c.get() + 1));
         let mut by_id: BTreeMap<BlendId, (BlendKind, Vec<FaceId>)> = BTreeMap::new();
         for (fid, f) in self.faces() {
             if let Some(t) = f.blend {

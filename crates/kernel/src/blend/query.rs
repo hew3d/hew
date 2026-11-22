@@ -5,13 +5,14 @@
 
 use crate::trig;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use super::Convexity;
 use crate::ids::{EdgeId, FaceId, VertexId};
 use crate::math::{Point3, Vec3};
 use crate::surface::EdgeSmoothness;
 use crate::tol;
-use crate::topo::Object;
+use crate::topo::{Object, SurfaceRef};
 
 /// The geometry of one interior edge as the blend engine reads it, with
 /// side A the face of `edge.half_edge`.
@@ -40,6 +41,73 @@ const SCAN_SEAM_SLIVER: f64 = 0.05;
 /// next to it to end a scan's seam: a scan's facets are far smaller than
 /// its seams.
 const SCAN_SEAM_FEATURE: f64 = 0.01;
+
+thread_local! {
+    /// How many vertex-to-edge adjacency maps ([`Object::vertex_edges`])
+    /// this thread has built (test support).
+    static ADJACENCY_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The work the logical-edge queries have done on this thread: the
+    /// edges each chain step examined and the faces and half-edges each
+    /// logical face took to find (test support).
+    static CHAIN_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts chain work in a build with debug assertions, which is where the
+/// specs that read the counter run; an optimized build counts nothing, so
+/// the queries do not pay for it.
+#[inline]
+fn add_chain_work(n: usize) {
+    if cfg!(debug_assertions) {
+        CHAIN_WORK.with(|c| c.set(c.get() + n));
+    }
+}
+
+/// A key whose every comparison counts as chain work: the membership sets
+/// and maps of the logical-edge queries hold these, so the work counter
+/// sees each comparison a lookup makes, whatever kind of set makes it (a
+/// sorted set's few, or every element of a linear search). Orders and
+/// compares exactly as `K`.
+#[derive(Clone, Copy, Debug)]
+struct Tally<K>(K);
+
+impl<K: PartialEq> PartialEq for Tally<K> {
+    fn eq(&self, other: &Self) -> bool {
+        add_chain_work(1);
+        self.0 == other.0
+    }
+}
+
+impl<K: Eq> Eq for Tally<K> {}
+
+impl<K: Ord> PartialOrd for Tally<K> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<K: Ord> Ord for Tally<K> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        add_chain_work(1);
+        self.0.cmp(&other.0)
+    }
+}
+
+/// How many vertex-to-edge adjacency maps the calling thread has built.
+/// Test support only.
+#[doc(hidden)]
+pub fn adjacency_builds_for_test() -> usize {
+    ADJACENCY_BUILDS.with(std::cell::Cell::get)
+}
+
+/// The work the logical-edge queries ([`Object::logical_edge`],
+/// [`Object::picked_edge`], [`Object::face_loop_edges`]) and
+/// [`Object::logical_face`] have done on the calling thread, counted in
+/// elements examined; always zero in a build without debug assertions.
+/// Test support only.
+#[doc(hidden)]
+pub fn chain_query_work_for_test() -> usize {
+    CHAIN_WORK.with(std::cell::Cell::get)
+}
 
 impl Object {
     /// The two faces of an edge: the face of its `half_edge`, then its twin's.
@@ -140,6 +208,7 @@ impl Object {
             return Vec::new();
         };
         if let Some(t) = f.blend {
+            add_chain_work(self.faces().len());
             return self
                 .faces()
                 .iter()
@@ -148,6 +217,7 @@ impl Object {
                 .collect();
         }
         if let Some(s) = f.surface {
+            add_chain_work(self.faces().len());
             return self
                 .faces()
                 .iter()
@@ -161,11 +231,12 @@ impl Object {
                 .get(g)
                 .is_some_and(|x| x.surface.is_none() && x.blend.is_none())
         };
-        let mut seen: BTreeSet<FaceId> = BTreeSet::from([face]);
+        let mut seen: BTreeSet<Tally<FaceId>> = BTreeSet::from([Tally(face)]);
         let mut stack = vec![face];
         while let Some(g) = stack.pop() {
             for l in self.face_loops(g) {
                 for h in self.loop_half_edges(l) {
+                    add_chain_work(1);
                     let e = self.half_edges()[h].edge;
                     if self.edge_smoothness(e) == EdgeSmoothness::Hard {
                         continue;
@@ -174,14 +245,14 @@ impl Object {
                         continue;
                     };
                     let other = if x == g { y } else { x };
-                    if !seen.contains(&other) && plain(other) {
-                        seen.insert(other);
+                    if !seen.contains(&Tally(other)) && plain(other) {
+                        seen.insert(Tally(other));
                         stack.push(other);
                     }
                 }
             }
         }
-        seen.into_iter().collect()
+        seen.into_iter().map(|t| t.0).collect()
     }
 
     /// The edges incident to `v` (either endpoint), slot order: the entry
@@ -200,6 +271,11 @@ impl Object {
 
     /// Every edge incident to each vertex (both endpoints), slot order.
     pub(crate) fn vertex_edges(&self) -> BTreeMap<VertexId, Vec<EdgeId>> {
+        ADJACENCY_BUILDS.with(|c| c.set(c.get() + 1));
+        self.vertex_edges_map()
+    }
+
+    fn vertex_edges_map(&self) -> BTreeMap<VertexId, Vec<EdgeId>> {
         let mut m: BTreeMap<VertexId, Vec<EdgeId>> = BTreeMap::new();
         for (eid, e) in self.edges().iter() {
             let he = self.half_edges()[e.half_edge];
@@ -228,138 +304,7 @@ impl Object {
         if self.edge_convexity(edge).is_none() {
             return Vec::new();
         }
-        let ve = self.vertex_edges();
-        // Each face's logical face, shared rather than copied. A blend
-        // face's (one blend id) and a plain face's (one smooth surface
-        // reached across soft edges) is the same set for every member, so it
-        // is filed under all of them at once: a softened import is one
-        // logical face of hundreds of thousands of facets, and flooding it
-        // again for every facet along a seam took minutes. A claimed face's
-        // is filed under itself only, since claims match within a tolerance.
-        let mut cache: BTreeMap<FaceId, std::rc::Rc<BTreeSet<FaceId>>> = BTreeMap::new();
-        let mut lf = |f: FaceId| -> std::rc::Rc<BTreeSet<FaceId>> {
-            if let Some(set) = cache.get(&f) {
-                return set.clone();
-            }
-            let set = std::rc::Rc::new(self.logical_face(f).into_iter().collect::<BTreeSet<_>>());
-            if self
-                .faces()
-                .get(f)
-                .is_some_and(|x| x.blend.is_some() || x.surface.is_none())
-            {
-                for &g in set.iter() {
-                    cache.insert(g, set.clone());
-                }
-            }
-            cache.insert(f, set.clone());
-            set
-        };
-        let ends = |e: EdgeId| -> (VertexId, VertexId) {
-            let he = self.half_edges()[self.edges()[e].half_edge];
-            (he.origin, self.half_edges()[he.next].origin)
-        };
-        // One step from `cur` through vertex `v`, or None at a stop.
-        let mut step = |cur: EdgeId, v: VertexId| -> Option<EdgeId> {
-            let (fa, fb) = self.edge_faces(cur)?;
-            let (l1, l2) = (lf(fa), lf(fb));
-            let others: Vec<EdgeId> = ve
-                .get(&v)
-                .map(|v| v.iter().copied().filter(|&o| o != cur).collect())
-                .unwrap_or_default();
-            let sharp: Vec<EdgeId> = others
-                .iter()
-                .copied()
-                .filter(|&o| self.edge_convexity(o).is_some())
-                .collect();
-            let same: Vec<EdgeId> = sharp
-                .iter()
-                .copied()
-                .filter(|&o| {
-                    self.edge_faces(o).is_some_and(|(ga, gb)| {
-                        (l1.contains(&ga) && l2.contains(&gb))
-                            || (l1.contains(&gb) && l2.contains(&ga))
-                    })
-                })
-                .collect();
-            if same.len() == 1 {
-                return Some(same[0]);
-            }
-            if !propagate || !same.is_empty() {
-                return None;
-            }
-            // Tangent propagation.
-            let sharing: Vec<EdgeId> = sharp
-                .iter()
-                .copied()
-                .filter(|&o| {
-                    self.edge_faces(o).is_some_and(|(ga, gb)| {
-                        l1.contains(&ga) || l1.contains(&gb) || l2.contains(&ga) || l2.contains(&gb)
-                    })
-                })
-                .collect();
-            if sharing.len() != 1 || sharp.len() != 1 {
-                return None;
-            }
-            let next = sharing[0];
-            let (ga, gb) = self.edge_faces(next)?;
-            // The logical face the two edges share, and the side face of
-            // each that is not it.
-            let (side_cur, side_next) = if l1.contains(&ga) || l1.contains(&gb) {
-                (fb, if l1.contains(&ga) { gb } else { ga })
-            } else {
-                (fa, if l2.contains(&ga) { gb } else { ga })
-            };
-            if lf(side_cur).contains(&side_next) {
-                return Some(next);
-            }
-            let smooth_between = others.iter().any(|&o| {
-                matches!(
-                    self.edge_smoothness(o),
-                    EdgeSmoothness::Tangent | EdgeSmoothness::Seam
-                ) && self.edge_faces(o).is_some_and(|(x, y)| {
-                    (x == side_cur && y == side_next) || (x == side_next && y == side_cur)
-                })
-            });
-            smooth_between.then_some(next)
-        };
-        let bound = self.edges().len();
-        let walk = |from: EdgeId,
-                    through: VertexId,
-                    step: &mut dyn FnMut(EdgeId, VertexId) -> Option<EdgeId>|
-         -> (Vec<EdgeId>, bool) {
-            let mut out = Vec::new();
-            let (mut cur, mut v) = (from, through);
-            for _ in 0..bound {
-                let Some(next) = step(cur, v) else {
-                    return (out, false);
-                };
-                if next == edge {
-                    return (out, true);
-                }
-                if out.contains(&next) {
-                    return (out, false);
-                }
-                out.push(next);
-                let (a, b) = ends(next);
-                v = if a == v { b } else { a };
-                cur = next;
-            }
-            (out, false)
-        };
-        let (p, q) = ends(edge);
-        let (fwd, closed) = walk(edge, q, &mut step);
-        if closed {
-            let mut ring = vec![edge];
-            ring.extend(fwd);
-            let k = (0..ring.len()).min_by_key(|&i| ring[i]).unwrap_or(0);
-            ring.rotate_left(k);
-            return ring;
-        }
-        let (back, _) = walk(edge, p, &mut step);
-        let mut out: Vec<EdgeId> = back.into_iter().rev().collect();
-        out.push(edge);
-        out.extend(fwd);
-        out
+        ChainQuery::new(self).logical_edge(edge, propagate)
     }
 
     /// The edges a click on `edge` picks: its [`Object::logical_edge`],
@@ -368,11 +313,15 @@ impl Object {
     /// is longer (see `scan_seam`). For the pick only: the kernel's own
     /// re-expansions of edge sets it already holds keep `logical_edge`.
     pub fn picked_edge(&self, edge: EdgeId, propagate: bool) -> Vec<EdgeId> {
-        let out = self.logical_edge(edge, propagate);
+        if self.edge_convexity(edge).is_none() {
+            return Vec::new();
+        }
+        let mut query = ChainQuery::new(self);
+        let out = query.logical_edge(edge, propagate);
         if !propagate || self.planarity_tol <= crate::tol::PLANE_DIST || out.is_empty() {
             return out;
         }
-        let ve = self.vertex_edges();
+        let ve = &query.ve;
         let mut cache: BTreeMap<FaceId, std::rc::Rc<BTreeSet<FaceId>>> = BTreeMap::new();
         let mut lf = |f: FaceId| -> std::rc::Rc<BTreeSet<FaceId>> {
             if let Some(set) = cache.get(&f) {
@@ -391,7 +340,7 @@ impl Object {
             cache.insert(f, set.clone());
             set
         };
-        match self.scan_seam(edge, &ve, &mut lf) {
+        match self.scan_seam(edge, ve, &mut lf) {
             Some(arc) if arc.len() > out.len() => arc,
             _ => out,
         }
@@ -410,7 +359,7 @@ impl Object {
     fn scan_seam(
         &self,
         edge: EdgeId,
-        ve: &BTreeMap<VertexId, Vec<EdgeId>>,
+        ve: &VertexEdges,
         lf: &mut dyn FnMut(FaceId) -> std::rc::Rc<BTreeSet<FaceId>>,
     ) -> Option<Vec<EdgeId>> {
         let (fa, fb) = self.edge_faces(edge)?;
@@ -432,7 +381,7 @@ impl Object {
                 let (mut cur, mut v) = (from, through);
                 for _ in 0..self.edges().len() {
                     let next: Vec<EdgeId> = ve
-                        .get(&v)
+                        .get(v)
                         .into_iter()
                         .flatten()
                         .copied()
@@ -636,19 +585,19 @@ impl Object {
         let Some(&best) = loops.iter().min_by(|&&x, &&y| dist(x).total_cmp(&dist(y))) else {
             return Vec::new();
         };
-        let mut out: Vec<EdgeId> = Vec::new();
+        let mut query = None;
+        let mut out = Ordered::default();
         for h in self.loop_half_edges(best) {
             let e = self.half_edges()[h].edge;
-            if out.contains(&e) || self.edge_convexity(e).is_none() {
+            if out.contains(e) || self.edge_convexity(e).is_none() {
                 continue;
             }
-            for x in self.logical_edge(e, true) {
-                if !out.contains(&x) {
-                    out.push(x);
-                }
+            let q = query.get_or_insert_with(|| ChainQuery::new(self));
+            for x in q.logical_edge(e, true) {
+                out.push(x);
             }
         }
-        out
+        out.list
     }
 }
 
@@ -657,21 +606,22 @@ impl Object {
     /// boundary edges (those whose other face lies outside it), grouped into
     /// loops by shared vertices; the loop nearest `near`.
     fn logical_face_loop_edges(&self, logical: &[FaceId], near: Point3) -> Vec<EdgeId> {
-        let inside: BTreeSet<FaceId> = logical.iter().copied().collect();
-        let mut boundary: Vec<EdgeId> = Vec::new();
+        let inside: BTreeSet<Tally<FaceId>> = logical.iter().copied().map(Tally).collect();
+        let mut boundary = Ordered::default();
         for &g in logical {
             for l in self.face_loops(g) {
                 for h in self.loop_half_edges(l) {
                     let e = self.half_edges()[h].edge;
-                    let outside = self
-                        .edge_faces(e)
-                        .is_none_or(|(a, b)| !(inside.contains(&a) && inside.contains(&b)));
-                    if outside && !boundary.contains(&e) {
+                    let outside = self.edge_faces(e).is_none_or(|(a, b)| {
+                        !(inside.contains(&Tally(a)) && inside.contains(&Tally(b)))
+                    });
+                    if outside {
                         boundary.push(e);
                     }
                 }
             }
         }
+        let boundary = boundary.list;
         // Loops: boundary edges joined through shared vertices.
         let ends = |e: EdgeId| self.edge_vertex_ids(e);
         let mut group: Vec<usize> = (0..boundary.len()).collect();
@@ -683,17 +633,17 @@ impl Object {
             group[i] = r;
             r
         }
-        let mut at: BTreeMap<VertexId, usize> = BTreeMap::new();
+        let mut at: BTreeMap<Tally<VertexId>, usize> = BTreeMap::new();
         for (i, &e) in boundary.iter().enumerate() {
             let Some((a, b)) = ends(e) else { continue };
             for v in [a, b] {
-                match at.get(&v) {
+                match at.get(&Tally(v)) {
                     Some(&j) => {
                         let (ri, rj) = (root(&mut group, i), root(&mut group, j));
                         group[ri.max(rj)] = ri.min(rj);
                     }
                     None => {
-                        at.insert(v, i);
+                        at.insert(Tally(v), i);
                     }
                 }
             }
@@ -708,18 +658,283 @@ impl Object {
             return Vec::new();
         };
         let want = root(&mut group, nearest);
-        let mut out: Vec<EdgeId> = Vec::new();
+        let mut query = None;
+        let mut out = Ordered::default();
         for (i, &e) in boundary.iter().enumerate() {
-            if root(&mut group, i) != want || out.contains(&e) || self.edge_convexity(e).is_none() {
+            if root(&mut group, i) != want || out.contains(e) || self.edge_convexity(e).is_none() {
                 continue;
             }
-            for x in self.logical_edge(e, true) {
-                if !out.contains(&x) {
-                    out.push(x);
-                }
+            let q = query.get_or_insert_with(|| ChainQuery::new(self));
+            for x in q.logical_edge(e, true) {
+                out.push(x);
             }
         }
+        out.list
+    }
+}
+
+/// A face's logical face as a chain walk asks it: whether a face is a
+/// member. A blend face's and a plain face's are the set itself; a claimed
+/// face's is every face whose claim is `same_surface` with its own, asked
+/// of the face in question rather than gathered from every face up front
+/// (the same answer as [`Object::logical_face`]'s list).
+#[derive(Clone)]
+enum LogicalSide<'a> {
+    Set(Rc<BTreeSet<Tally<FaceId>>>),
+    Claimed(&'a Object, SurfaceRef),
+}
+
+impl LogicalSide<'_> {
+    fn contains(&self, g: &FaceId) -> bool {
+        match self {
+            LogicalSide::Set(set) => set.contains(&Tally(*g)),
+            LogicalSide::Claimed(obj, s) => {
+                add_chain_work(1);
+                obj.faces()
+                    .get(*g)
+                    .is_some_and(|x| x.surface.is_some_and(|u| u.same_surface(s)))
+            }
+        }
+    }
+}
+
+/// The state one hover query shares across every chain it walks: the
+/// vertex-to-edge adjacency, built once, and each face's logical face,
+/// found once. Every answer is the object's own, so sharing it changes
+/// nothing but the cost.
+pub(crate) struct ChainQuery<'a> {
+    obj: &'a Object,
+    /// [`Object::vertex_edges`].
+    pub(crate) ve: VertexEdges,
+    /// Each face's logical face. A blend face's (one blend id) and a plain
+    /// face's (one smooth surface reached across soft edges) is the same
+    /// set for every member, so it is filed under all of them at once: a
+    /// softened import is one logical face of hundreds of thousands of
+    /// facets, and flooding it again for every facet along a seam took
+    /// minutes. A claimed face's is filed under itself only, since claims
+    /// match within a tolerance.
+    sides: BTreeMap<Tally<FaceId>, LogicalSide<'a>>,
+}
+
+impl<'a> ChainQuery<'a> {
+    pub(crate) fn new(obj: &'a Object) -> ChainQuery<'a> {
+        ChainQuery {
+            obj,
+            ve: VertexEdges::of(obj),
+            sides: BTreeMap::new(),
+        }
+    }
+
+    fn side(&mut self, f: FaceId) -> LogicalSide<'a> {
+        if let Some(side) = self.sides.get(&Tally(f)) {
+            return side.clone();
+        }
+        let obj = self.obj;
+        let face = obj.faces().get(f);
+        if let Some(s) = face.filter(|x| x.blend.is_none()).and_then(|x| x.surface) {
+            let side = LogicalSide::Claimed(obj, s);
+            self.sides.insert(Tally(f), side.clone());
+            return side;
+        }
+        let set = Rc::new(
+            obj.logical_face(f)
+                .into_iter()
+                .map(Tally)
+                .collect::<BTreeSet<_>>(),
+        );
+        if face.is_some_and(|x| x.blend.is_some() || x.surface.is_none()) {
+            for &g in set.iter() {
+                self.sides.insert(g, LogicalSide::Set(set.clone()));
+            }
+        }
+        self.sides.insert(Tally(f), LogicalSide::Set(set.clone()));
+        LogicalSide::Set(set)
+    }
+
+    fn ends(&self, e: EdgeId) -> (VertexId, VertexId) {
+        let obj = self.obj;
+        let he = obj.half_edges()[obj.edges()[e].half_edge];
+        (he.origin, obj.half_edges()[he.next].origin)
+    }
+
+    /// One step of [`Object::logical_edge`]'s walk from `cur` through
+    /// vertex `v`, or None at a stop.
+    fn step(&mut self, cur: EdgeId, v: VertexId, propagate: bool) -> Option<EdgeId> {
+        let obj = self.obj;
+        let (fa, fb) = obj.edge_faces(cur)?;
+        let (l1, l2) = (self.side(fa), self.side(fb));
+        let others: Vec<EdgeId> = self
+            .ve
+            .get(v)
+            .map(|v| v.iter().copied().filter(|&o| o != cur).collect())
+            .unwrap_or_default();
+        add_chain_work(others.len() + 1);
+        let sharp: Vec<EdgeId> = others
+            .iter()
+            .copied()
+            .filter(|&o| obj.edge_convexity(o).is_some())
+            .collect();
+        let same: Vec<EdgeId> = sharp
+            .iter()
+            .copied()
+            .filter(|&o| {
+                obj.edge_faces(o).is_some_and(|(ga, gb)| {
+                    (l1.contains(&ga) && l2.contains(&gb)) || (l1.contains(&gb) && l2.contains(&ga))
+                })
+            })
+            .collect();
+        if same.len() == 1 {
+            return Some(same[0]);
+        }
+        if !propagate || !same.is_empty() {
+            return None;
+        }
+        // Tangent propagation.
+        let sharing: Vec<EdgeId> = sharp
+            .iter()
+            .copied()
+            .filter(|&o| {
+                obj.edge_faces(o).is_some_and(|(ga, gb)| {
+                    l1.contains(&ga) || l1.contains(&gb) || l2.contains(&ga) || l2.contains(&gb)
+                })
+            })
+            .collect();
+        if sharing.len() != 1 || sharp.len() != 1 {
+            return None;
+        }
+        let next = sharing[0];
+        let (ga, gb) = obj.edge_faces(next)?;
+        // The logical face the two edges share, and the side face of
+        // each that is not it.
+        let (side_cur, side_next) = if l1.contains(&ga) || l1.contains(&gb) {
+            (fb, if l1.contains(&ga) { gb } else { ga })
+        } else {
+            (fa, if l2.contains(&ga) { gb } else { ga })
+        };
+        if self.side(side_cur).contains(&side_next) {
+            return Some(next);
+        }
+        let smooth_between = others.iter().any(|&o| {
+            matches!(
+                obj.edge_smoothness(o),
+                EdgeSmoothness::Tangent | EdgeSmoothness::Seam
+            ) && obj.edge_faces(o).is_some_and(|(x, y)| {
+                (x == side_cur && y == side_next) || (x == side_next && y == side_cur)
+            })
+        });
+        smooth_between.then_some(next)
+    }
+
+    /// The walk from `from` through vertex `through`: the edges it took,
+    /// and whether it came back round to `edge`.
+    fn walk(
+        &mut self,
+        edge: EdgeId,
+        from: EdgeId,
+        through: VertexId,
+        propagate: bool,
+    ) -> (Vec<EdgeId>, bool) {
+        let bound = self.obj.edges().len();
+        let mut out = Vec::new();
+        let mut taken: BTreeSet<Tally<EdgeId>> = BTreeSet::new();
+        let (mut cur, mut v) = (from, through);
+        for _ in 0..bound {
+            let Some(next) = self.step(cur, v, propagate) else {
+                return (out, false);
+            };
+            if next == edge {
+                return (out, true);
+            }
+            if !taken.insert(Tally(next)) {
+                return (out, false);
+            }
+            out.push(next);
+            let (a, b) = self.ends(next);
+            v = if a == v { b } else { a };
+            cur = next;
+        }
+        (out, false)
+    }
+
+    /// [`Object::logical_edge`] on this query's shared state.
+    pub(crate) fn logical_edge(&mut self, edge: EdgeId, propagate: bool) -> Vec<EdgeId> {
+        if self.obj.edge_convexity(edge).is_none() {
+            return Vec::new();
+        }
+        let (p, q) = self.ends(edge);
+        let (fwd, closed) = self.walk(edge, edge, q, propagate);
+        if closed {
+            let mut ring = vec![edge];
+            ring.extend(fwd);
+            let k = (0..ring.len()).min_by_key(|&i| ring[i]).unwrap_or(0);
+            ring.rotate_left(k);
+            return ring;
+        }
+        let (back, _) = self.walk(edge, edge, p, propagate);
+        let mut out: Vec<EdgeId> = back.into_iter().rev().collect();
+        out.push(edge);
+        out.extend(fwd);
         out
+    }
+}
+
+/// [`Object::vertex_edges`], read by vertex: for each vertex the same
+/// edges in the same (slot) order, and none for a vertex no edge has. Kept
+/// by the vertex's slot rather than in a sorted map, which is most of a
+/// small query's cost on a large object. An object with an edge whose end
+/// is not a live vertex (which validation never passes) keeps the map.
+pub(crate) enum VertexEdges {
+    Slots(slotmap::SecondaryMap<VertexId, Vec<EdgeId>>),
+    Map(BTreeMap<VertexId, Vec<EdgeId>>),
+}
+
+impl VertexEdges {
+    pub(crate) fn of(obj: &Object) -> VertexEdges {
+        ADJACENCY_BUILDS.with(|c| c.set(c.get() + 1));
+        let mut slots: slotmap::SecondaryMap<VertexId, Vec<EdgeId>> =
+            slotmap::SecondaryMap::with_capacity(obj.vertices().capacity());
+        for (eid, e) in obj.edges().iter() {
+            let he = obj.half_edges()[e.half_edge];
+            for v in [he.origin, obj.half_edges()[he.next].origin] {
+                let entry = obj
+                    .vertices()
+                    .contains_key(v)
+                    .then(|| slots.entry(v))
+                    .flatten();
+                let Some(entry) = entry else {
+                    return VertexEdges::Map(obj.vertex_edges_map());
+                };
+                entry.or_default().push(eid);
+            }
+        }
+        VertexEdges::Slots(slots)
+    }
+
+    /// The edges at `v`, as [`Object::vertex_edges`] has them.
+    pub(crate) fn get(&self, v: VertexId) -> Option<&Vec<EdgeId>> {
+        match self {
+            VertexEdges::Slots(slots) => slots.get(v),
+            VertexEdges::Map(map) => map.get(&v),
+        }
+    }
+}
+
+/// Edges in the order first pushed, each once.
+#[derive(Default)]
+struct Ordered {
+    list: Vec<EdgeId>,
+    seen: BTreeSet<Tally<EdgeId>>,
+}
+
+impl Ordered {
+    fn contains(&self, e: EdgeId) -> bool {
+        self.seen.contains(&Tally(e))
+    }
+
+    fn push(&mut self, e: EdgeId) {
+        if self.seen.insert(Tally(e)) {
+            self.list.push(e);
+        }
     }
 }
 

@@ -31,10 +31,11 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub use edit::{BlendFeature, same_geometry_for_test};
+pub use edit::{BlendFeature, blend_feature_scans_for_test, same_geometry_for_test};
 pub use error::{BlendError, LimitFeature};
 pub use limit::{limit_attempts_for_test, limit_probes_for_test, limit_searches_for_test};
 pub use profile::{ProfileSample, bundled};
+pub use query::{adjacency_builds_for_test, chain_query_work_for_test};
 pub use record::{BlendRecord, LoopEdit, StoredFace, StoredMark, StoredSpec};
 
 use crate::ids::{EdgeId, FaceId};

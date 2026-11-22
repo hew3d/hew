@@ -5029,6 +5029,10 @@ pub struct Document {
     /// open, or a compound is, the ring does not trim, so children never
     /// push older history out. Session-only; a snapshot restore keeps it.
     ring_holds: RingHolds,
+    /// The last answer of [`Document::blend_features`], kept against the
+    /// object's [`crate::topo::ObjectStamp`]. Session-only, never
+    /// serialized or hashed; a clone starts without it.
+    blend_features_memo: curves::BlendFeaturesMemo,
 }
 
 /// [`Document::ring_holds`]'s counter: an atomic so `begin_transaction(&self)`

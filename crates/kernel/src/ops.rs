@@ -1401,7 +1401,11 @@ impl Object {
         }
         self.default_material = self.default_material.map(f);
         // The paint of faces a blend consumed lives in its record until the
-        // blend is removed.
+        // blend is removed. The record table is copy-on-write: an empty
+        // one is not written.
+        if self.blend_records.is_empty() {
+            return;
+        }
         for rec in self.blend_records.values_mut() {
             for face in &mut rec.consumed {
                 face.attrs.material = face.attrs.material.map(f);
@@ -1425,6 +1429,16 @@ impl Object {
     /// comes back unpainted): how many record faces changed.
     pub(crate) fn clear_blend_record_material(&mut self, id: MaterialId) -> usize {
         let mut n = 0;
+        // The record table is copy-on-write: write it only when some record
+        // carries `id`.
+        let carries = self.blend_records.values().any(|r| {
+            r.consumed
+                .iter()
+                .any(|f| f.attrs.material == Some(id) || f.attrs.back_material == Some(id))
+        });
+        if !carries {
+            return 0;
+        }
         for rec in self.blend_records.values_mut() {
             for face in &mut rec.consumed {
                 if face.attrs.material == Some(id) {
@@ -7308,7 +7322,7 @@ impl Object {
         obj.default_material = self.default_material;
         obj.planarity_tol = self.planarity_tol;
         // The records of the blends this piece carries.
-        obj.set_blend_records(self.blend_records.clone());
+        obj.set_blend_records(self.blend_records().clone());
         obj.check_invariants();
         obj
     }

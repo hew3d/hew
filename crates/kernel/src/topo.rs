@@ -13,7 +13,7 @@ use crate::attr::AttrDict;
 use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, ShellId, VertexId};
 use crate::material::{FaceMaterial, UvFrame};
 use crate::math::{Plane, Point3, Vec3};
-use crate::shared::Shared;
+use crate::shared::{Shared, Watch};
 
 /// An index into an [`Object`]'s interned attribute dictionaries
 /// (docs/agents/HEW_API.md §8, face and edge targets), or
@@ -518,15 +518,102 @@ pub struct Object {
     /// What each blend on this object replaced, by blend id
     /// ([`crate::blend::BlendRecord`]): Remove and Resize replay it. A
     /// blend without one (from a file older than the records) restores by
-    /// derivation instead.
-    pub(crate) blend_records: BTreeMap<BlendId, crate::blend::BlendRecord>,
+    /// derivation instead. Copy-on-write like the element tables, so a
+    /// [`ObjectStamp`] can tell it unchanged.
+    pub(crate) blend_records: Shared<BTreeMap<BlendId, crate::blend::BlendRecord>>,
     /// Interned attribute dictionaries that faces and edges point into
     /// ([`Face::attrs`], [`Edge::attrs`]). Append-only while the Object
     /// lives: a dictionary nothing references any more stays until the
     /// Object is saved (the writer emits only referenced ones) or rebuilt,
     /// so every recorded [`AttrSlot`] stays valid. Never holds an empty
-    /// dictionary (an empty one is [`AttrSlot::NONE`]).
-    pub(crate) attr_dicts: Vec<AttrDict>,
+    /// dictionary (an empty one is [`AttrSlot::NONE`]). Copy-on-write like
+    /// the element tables.
+    pub(crate) attr_dicts: Shared<Vec<AttrDict>>,
+}
+
+/// Proof that an Object is unchanged since the stamp was taken
+/// ([`Object::stamp`], [`Object::has_stamp`]): a [`Watch`] on each of its
+/// copy-on-write tables and a copy of its plain fields. A write to a
+/// watched table always moves the writer to a table of its own, and the
+/// watched one's address stays reserved while the stamp lives, so a table
+/// that is still the watched one has not changed. What an Object answers
+/// from its own state (its blends, say) can be kept against a stamp and
+/// served again while the Object still has it. Holds no table's contents.
+pub(crate) struct ObjectStamp {
+    vertices: Watch<SlotMap<VertexId, Vertex>>,
+    half_edges: Watch<SlotMap<HalfEdgeId, HalfEdge>>,
+    edges: Watch<SlotMap<EdgeId, Edge>>,
+    loops: Watch<SlotMap<LoopId, Loop>>,
+    faces: Watch<SlotMap<FaceId, Face>>,
+    shells: Watch<SlotMap<ShellId, Shell>>,
+    watertight: WatertightState,
+    default_material: FaceMaterial,
+    planarity_tol: u64,
+    blend_records: Watch<BTreeMap<BlendId, crate::blend::BlendRecord>>,
+    attr_dicts: Watch<Vec<AttrDict>>,
+}
+
+impl Object {
+    /// This Object's [`ObjectStamp`].
+    pub(crate) fn stamp(&self) -> ObjectStamp {
+        // Every field, by name: a field added to Object fails to compile
+        // here until the stamp covers it.
+        let Object {
+            vertices,
+            half_edges,
+            edges,
+            loops,
+            faces,
+            shells,
+            watertight,
+            default_material,
+            planarity_tol,
+            blend_records,
+            attr_dicts,
+        } = self;
+        ObjectStamp {
+            vertices: vertices.watch(),
+            half_edges: half_edges.watch(),
+            edges: edges.watch(),
+            loops: loops.watch(),
+            faces: faces.watch(),
+            shells: shells.watch(),
+            watertight: *watertight,
+            default_material: *default_material,
+            planarity_tol: planarity_tol.to_bits(),
+            blend_records: blend_records.watch(),
+            attr_dicts: attr_dicts.watch(),
+        }
+    }
+
+    /// Whether this Object is, field for field, the one `stamp` was taken
+    /// of, unchanged since (or a clone of it that has not been written).
+    pub(crate) fn has_stamp(&self, stamp: &ObjectStamp) -> bool {
+        let Object {
+            vertices,
+            half_edges,
+            edges,
+            loops,
+            faces,
+            shells,
+            watertight,
+            default_material,
+            planarity_tol,
+            blend_records,
+            attr_dicts,
+        } = self;
+        vertices.is_watched_by(&stamp.vertices)
+            && half_edges.is_watched_by(&stamp.half_edges)
+            && edges.is_watched_by(&stamp.edges)
+            && loops.is_watched_by(&stamp.loops)
+            && faces.is_watched_by(&stamp.faces)
+            && shells.is_watched_by(&stamp.shells)
+            && *watertight == stamp.watertight
+            && *default_material == stamp.default_material
+            && planarity_tol.to_bits() == stamp.planarity_tol
+            && blend_records.is_watched_by(&stamp.blend_records)
+            && attr_dicts.is_watched_by(&stamp.attr_dicts)
+    }
 }
 
 impl Object {
@@ -543,8 +630,8 @@ impl Object {
             watertight: WatertightState::Open,
             default_material: None,
             planarity_tol: crate::tol::PLANE_DIST,
-            blend_records: BTreeMap::new(),
-            attr_dicts: Vec::new(),
+            blend_records: Shared::new(BTreeMap::new()),
+            attr_dicts: Shared::new(Vec::new()),
         }
     }
 

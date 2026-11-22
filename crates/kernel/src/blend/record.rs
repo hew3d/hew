@@ -837,7 +837,7 @@ impl Object {
 
     /// Replaces the stored records.
     pub(crate) fn set_blend_records(&mut self, records: BTreeMap<BlendId, BlendRecord>) {
-        self.blend_records = records;
+        self.blend_records = crate::shared::Shared::new(records);
         self.prune_blend_records();
     }
 
@@ -848,7 +848,11 @@ impl Object {
             .values()
             .filter_map(|f| f.blend.map(|t| t.id))
             .collect();
-        self.blend_records.retain(|id, _| present.contains(id));
+        // The table is copy-on-write: write it only when a record goes, so a
+        // prune that keeps everything does not copy a shared table.
+        if self.blend_records.keys().any(|id| !present.contains(id)) {
+            self.blend_records.retain(|id, _| present.contains(id));
+        }
     }
 
     /// Records on `after`, the result of blending `self` with `spec`, what
@@ -857,7 +861,9 @@ impl Object {
     pub(crate) fn record_blend(&self, after: &mut Object, id: BlendId, spec: &BlendSpec) {
         // A record left by an earlier blend under this id (its tags dropped
         // by some later op) must not stand in for this one.
-        after.blend_records.remove(&id);
+        if after.blend_records.contains_key(&id) {
+            after.blend_records.remove(&id);
+        }
         if let Some(rec) = capture(self, after, id, spec) {
             after.blend_records.insert(id, rec);
         }
@@ -867,12 +873,18 @@ impl Object {
     /// similarity (`scale`), dropped under anything else, like the tags.
     pub(crate) fn transform_blend_records(&mut self, t: &Transform, scale: Option<f64>) {
         match scale {
+            // The table is copy-on-write: an empty one is left alone, and
+            // a shared one is replaced rather than copied and then rewritten.
+            Some(_) | None if self.blend_records.is_empty() => {}
             Some(k) => {
-                for rec in self.blend_records.values_mut() {
-                    *rec = rec.transformed(t, k);
-                }
+                let mapped: BTreeMap<BlendId, BlendRecord> = self
+                    .blend_records
+                    .iter()
+                    .map(|(&id, rec)| (id, rec.transformed(t, k)))
+                    .collect();
+                self.blend_records = crate::shared::Shared::new(mapped);
             }
-            None => self.blend_records.clear(),
+            None => self.blend_records = crate::shared::Shared::new(BTreeMap::new()),
         }
     }
 

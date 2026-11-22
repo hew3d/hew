@@ -39,6 +39,31 @@ impl<T> Shared<T> {
     }
 }
 
+impl<T> Shared<T> {
+    /// A [`Watch`] on this table.
+    pub(crate) fn watch(&self) -> Watch<T> {
+        Watch(Arc::downgrade(&self.0))
+    }
+
+    /// Whether this is still the very table `watch` was taken on, and so
+    /// unchanged since: while a watch lives, a write never lands in the
+    /// watched table (see [`Watch`]).
+    pub(crate) fn is_watched_by(&self, watch: &Watch<T>) -> bool {
+        std::ptr::eq(Arc::as_ptr(&self.0), watch.0.as_ptr())
+    }
+}
+
+/// A weak hold on a [`Shared`] table that proves it unchanged. While any
+/// watch on a table lives, `Arc::make_mut` (the only write path, through
+/// `DerefMut` and the mutable iterator) never writes that table in place:
+/// with other copies it clones, and as the last copy it moves the value to
+/// a new allocation, leaving the watch behind. The watched allocation
+/// itself is not freed while the watch lives, so no other table can come
+/// to have its address. A table still at the watched address is therefore
+/// the watched table, unwritten. Keeps the allocation's header, not the
+/// table's contents.
+pub(crate) struct Watch<T>(std::sync::Weak<T>);
+
 impl<T> Clone for Shared<T> {
     fn clone(&self) -> Shared<T> {
         Shared(Arc::clone(&self.0))
