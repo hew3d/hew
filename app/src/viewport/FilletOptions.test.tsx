@@ -124,10 +124,11 @@ describe('FilletOptions', () => {
     fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
     fireEvent.click(screen.getByRole('menuitemradio', { name: /Ogee/ }))
     expect(getFilletSettings().profile).toMatchObject({ kind: 'shape', id: 'builtin:ogee' })
-    expect(screen.getByRole('menu')).toBeVisible()
+    expect(screen.queryByRole('menu')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Save profile…' }))
     expect(onSave).toHaveBeenCalledTimes(1)
-    fireEvent.click(screen.getByRole('button', { name: /Ogee/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
     expect((screen.getByRole('menuitem', { name: 'Nope' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
@@ -354,7 +355,7 @@ describe('FilletOptions rows and field editing', () => {
     expect(screen.queryByRole('menu')).toBeNull()
   })
 
-  it('falls back to the Library thumbnail when a shape has no drawable outline, and keeps selected identity and row help', () => {
+  it('shows the kernel thumbnail on a profile row, and keeps selected identity and row help', () => {
     const profile = { kind: 'shape' as const, id: 'mine', name: 'My curve', shape: {} }
     setFilletProfile(profile)
     render(<FilletOptions sections={[{ id: 'library', heading: 'My profiles', items: [
@@ -363,7 +364,9 @@ describe('FilletOptions rows and field editing', () => {
     fireEvent.click(screen.getByRole('button', { name: /^More shapes/ }))
     const row = screen.getByRole('menuitemradio', { name: 'My curve' })
     expect(row).toHaveAttribute('aria-checked', 'true')
-    expect(row.querySelector('img')).toHaveAttribute('width', '24')
+    expect(row.querySelector('img')).toHaveAttribute('width', '32')
+    expect(row.querySelector('img')).toHaveAttribute('src', 'data:image/png;base64,AA==')
+    expect(row.querySelector('svg')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'About Shape' }))
     expect(screen.getByRole('note')).toHaveTextContent('Choose the shape of the edge.')
   })
@@ -427,12 +430,14 @@ it('navigates built-in profiles, skipping disabled items, and releases focus on 
   expect(screen.getByRole('menuitem', { name: 'Save profile…' })).toHaveFocus()
   fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Save profile…' }), { key: 'Home' })
   fireEvent.click(first, { detail: 0 })
-  expect(first).toHaveFocus()
+  // Choosing a profile closes the menu and hands the keyboard to the tool.
   expect(getFilletSettings().profile).toEqual(curve)
-  expect(screen.getByRole('menu')).toBeVisible()
-  expect(first).toHaveAttribute('aria-checked', 'true')
+  expect(screen.queryByRole('menu')).toBeNull()
+  expect(trigger).not.toHaveFocus()
+  expect(document.activeElement).toBe(document.body)
   expect(save).not.toHaveBeenCalled()
-  fireEvent.keyDown(first, { key: 'End' })
+  fireEvent.keyDown(trigger, { key: 'ArrowDown' })
+  fireEvent.keyDown(screen.getByRole('menuitemradio', { name: 'Curve' }), { key: 'End' })
   fireEvent.click(screen.getByRole('menuitem', { name: 'Save profile…' }))
   expect(save).toHaveBeenCalledOnce()
   expect(screen.queryByRole('menu')).toBeNull()
@@ -452,12 +457,11 @@ it('keeps closing content mounted but inaccessible, and can reopen without losin
   const row = screen.getByRole('menuitemradio', { name: profile.name })
   expect(row).toHaveFocus()
   expect(trigger.getAttribute('aria-controls')).toBe(screen.getByRole('menu').id)
+  // Choosing the row closes the menu but keeps the row mounted and checked.
   fireEvent.click(row, { detail: 0 })
-  expect(expansion).toHaveAttribute('data-open', 'true')
-  expect(row).toHaveFocus()
-  expect(row).toHaveAttribute('aria-checked', 'true')
-  fireEvent.keyDown(row, { key: 'Escape' })
   expect(expansion).toHaveAttribute('data-open', 'false')
+  expect(row).not.toHaveFocus()
+  expect(row).toHaveAttribute('aria-checked', 'true')
   expect(expansion).toHaveAttribute('aria-hidden', 'true')
   expect(expansion).toHaveAttribute('inert')
   expect(container.querySelector('[role="menuitemradio"]')).toBe(row)
@@ -524,24 +528,19 @@ it('groups built-in, saved profiles and saving in More Shapes without duplicatin
     expect(screen.getByRole('radio', { name: 'Rolled' })).toBeTruthy()
     expect(screen.getByRole('radio', { name: 'Mitered' })).toBeTruthy()
   }
-  const saved = screen.getByRole('menuitemradio', { name: 'Saved profile' })
   const builtin = screen.getByRole('menuitemradio', { name: 'Ogee' })
   builtin.focus()
   fireEvent.click(builtin, { detail: 0 })
   expect(getFilletSettings().profile).toEqual(builtIn)
-  expect(screen.getByRole('menu')).toBeVisible()
-  expect(builtin).toHaveFocus()
-  fireEvent.keyDown(builtin, { key: 'ArrowDown' })
-  expect(saved).toHaveFocus()
+  expect(screen.queryByRole('menu')).toBeNull()
+  expect(document.activeElement).toBe(document.body)
+  fireEvent.click(more)
+  const saved = screen.getByRole('menuitemradio', { name: 'Saved profile' })
+  expect(saved).toHaveAttribute('aria-checked', 'false')
   fireEvent.click(saved, { detail: 0 })
   expect(getFilletSettings().profile).toEqual(profile)
-  expect(saved).toHaveFocus()
-  expect(builtin).toHaveAttribute('aria-checked', 'false')
-  expect(saved).toHaveAttribute('aria-checked', 'true')
-  expect(screen.getByRole('menu')).toBeVisible()
-  expect(screen.getByRole('group', { name: 'My profiles' })).toBeVisible()
-  fireEvent.click(more)
   expect(screen.queryByRole('menu')).toBeNull()
+  expect(document.activeElement).toBe(document.body)
   fireEvent.click(more)
   expect(screen.getByRole('menuitemradio', { name: 'Saved profile' })).toHaveAttribute('aria-checked', 'true')
   fireEvent.click(screen.getByRole('button', { name: 'Chamfer' }))
@@ -578,9 +577,9 @@ it('keeps saving keyboard reachable when drawn-corner restrictions disable extra
   expect(trigger).not.toHaveFocus()
 })
 
-it('displays the canonical built-in name without renaming a saved profile', () => {
-  expect(profileLabel({ kind: 'shape', id: 'builtin:roman-ogee', name: 'Roman ogee', shape: {} })).toBe('Roman Ogee')
-  expect(profileLabel({ kind: 'shape', id: 'saved:mine', name: 'Roman ogee', shape: {} })).toBe('Roman ogee')
+it('labels a shape profile with the name it carries', () => {
+  expect(profileLabel({ kind: 'shape', id: 'builtin:roman-ogee', name: 'Roman ogee', shape: {} })).toBe('Roman ogee')
+  expect(profileLabel({ kind: 'shape', id: 'saved:mine', name: 'Mine', shape: {} })).toBe('Mine')
 })
 
 
@@ -626,6 +625,46 @@ describe('keyboard hand-back to the tool', () => {
     expect(outer).not.toHaveBeenCalled()
     expect(screen.queryByRole('menu')).toBeNull()
     expectKeysReachTool(outer)
+  })
+
+  it('choosing a profile releases focus too, so a typed size and Enter reach the tool', () => {
+    const { outer, trigger } = setup()
+    act(() => trigger.focus())
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' })
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Curve' }), { detail: 0 })
+    expect(getFilletSettings().profile).toMatchObject({ id: 'builtin:a' })
+    expect(screen.queryByRole('menu')).toBeNull()
+    expectKeysReachTool(outer)
+  })
+
+  it('a keyboard pick of a primary shape releases focus so Enter and typing reach the tool', () => {
+    const { outer } = setup()
+    const chamfer = screen.getByRole('button', { name: 'Chamfer' })
+    act(() => chamfer.focus())
+    expect(chamfer).toHaveFocus()
+    fireEvent.click(chamfer, { detail: 0 })
+    expect(getFilletSettings().profile.kind).toBe('chamfer')
+    expect(chamfer).not.toHaveFocus()
+    expectKeysReachTool(outer)
+  })
+
+  it('a held Enter that chose a shape does not auto-repeat into the tool', () => {
+    const { outer } = setup()
+    const chamfer = screen.getByRole('button', { name: 'Chamfer' })
+    act(() => chamfer.focus())
+    fireEvent.keyDown(chamfer, { key: 'Enter' })
+    fireEvent.click(chamfer, { detail: 0 })
+    expect(chamfer).not.toHaveFocus()
+    outer.mockClear()
+    // The key is still down: its auto-repeats land on the body.
+    fireEvent.keyDown(document.body, { key: 'Enter', repeat: true })
+    fireEvent.keyDown(document.body, { key: 'Enter', repeat: true })
+    expect(outer).not.toHaveBeenCalled()
+    fireEvent.keyUp(document.body, { key: 'Enter' })
+    // A fresh press, and a repeat of an Enter that began outside the card, still reach the tool.
+    fireEvent.keyDown(document.body, { key: 'Enter' })
+    fireEvent.keyDown(document.body, { key: 'Enter', repeat: true })
+    expect(outer).toHaveBeenCalledTimes(2)
   })
 
   it('choosing an action row releases focus too', () => {

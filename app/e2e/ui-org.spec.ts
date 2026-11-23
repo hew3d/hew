@@ -127,6 +127,28 @@ test('Object > Smooth does nothing with nothing selected', async ({ page }) => {
   expect(await page.evaluate((id) => window.__hew_test!.getSmoothLevel(id), id)).toBe(2)
 })
 
+for (const [width, height] of [[1024, 700], [1280, 720], [1600, 1000]]) {
+  test(`dock is centered in the viewport and on one row at ${width}x${height}`, async ({ page }) => {
+    await page.setViewportSize({ width, height })
+    await aim(page, CAMERA)
+    await page.evaluate(() => {
+      const h = window.__hew_test!
+      h.selectObjects([h.drawBox([0, 0, 0], [1, 1, 0], 1)])
+    })
+    await expect(dock(page)).toHaveAttribute('data-dock-context', 'object')
+    const g = await dock(page).evaluate((el) => {
+      const parent = (el as HTMLElement).offsetParent!.getBoundingClientRect()
+      const r = el.getBoundingClientRect()
+      return {
+        centerDelta: r.left + r.width / 2 - (parent.left + parent.width / 2),
+        rows: new Set(Array.from(el.children).map((c) => Math.round(c.getBoundingClientRect().top))).size,
+      }
+    })
+    expect(Math.abs(g.centerDelta)).toBeLessThanOrEqual(1)
+    expect(g.rows).toBe(1)
+  })
+}
+
 test('dock, object row: Push/Pull, Fillet, Move, Paint, Shell, Make Component, Save to Library, Lock, Erase', async ({ page }) => {
   await aim(page, CAMERA)
   await page.evaluate(() => {

@@ -67,7 +67,9 @@ test('profiles: the Ogee in the card, a saved profile in the card and the Librar
   await moreShapes(page).click()
   await page.getByRole('menuitemradio', { name: 'Ogee', exact: true }).click()
   await expect(moreShapes(page)).toContainText('Ogee')
-  // The menu stays open after a choice; close it with its trigger before picking an edge.
+  // The menu closes on the choice, ready for an edge pick; reopening shows it checked.
+  await expect(page.getByRole('menu')).toHaveCount(0)
+  await moreShapes(page).click()
   await expect(page.getByRole('menuitemradio', { name: 'Ogee', exact: true })).toHaveAttribute('aria-checked', 'true')
   await moreShapes(page).click()
   await expect(page.getByRole('menu')).toHaveCount(0)

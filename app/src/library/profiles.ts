@@ -39,12 +39,7 @@ let bundledCache: BundledProfile[] | null = null
 export async function bundledProfiles(): Promise<BundledProfile[]> {
   if (bundledCache === null) {
     await ready()
-    // Profile names are data labels (not catalog keys). Normalize this built-in
-    // presentation name here so Library and tool choices agree; ids and shapes
-    // remain exactly as supplied by the kernel, and saved names are untouched.
-    bundledCache = (JSON.parse(bundled_profiles_json()) as BundledProfile[]).map(profile =>
-      profile.id === 'builtin:roman-ogee' ? { ...profile, name: 'Roman Ogee' } : profile,
-    )
+    bundledCache = JSON.parse(bundled_profiles_json()) as BundledProfile[]
   }
   return bundledCache
 }

@@ -91,7 +91,7 @@ export function profileLabel(p: FilletProfile): string {
     case 'bullnose':
       return 'Bullnose'
     case 'shape':
-      return p.id === 'builtin:roman-ogee' ? 'Roman Ogee' : p.name
+      return p.name
   }
 }
 /** The tooltip on a profile a drawn corner can't take. */
@@ -133,6 +133,27 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
     const focused = document.activeElement
     if (focused instanceof HTMLElement && shapesRef.current?.contains(focused)) focused.blur()
   }
+  // An Enter that chose something is still down when focus is released, and its
+  // auto-repeat would then reach the tool as a fresh Enter and commit. Swallow
+  // repeats of an Enter that began inside the card until it is released.
+  useEffect(() => {
+    let heldFromCard = false
+    const onDown = (ev: KeyboardEvent): void => {
+      if (ev.key !== 'Enter') return
+      if (!ev.repeat) heldFromCard = ev.target instanceof Node && shapesRef.current?.contains(ev.target) === true
+      else if (heldFromCard && !(ev.target instanceof Node && shapesRef.current?.contains(ev.target))) {
+        ev.preventDefault()
+        ev.stopImmediatePropagation()
+      }
+    }
+    const onUp = (ev: KeyboardEvent): void => { if (ev.key === 'Enter') heldFromCard = false }
+    window.addEventListener('keydown', onDown, true)
+    window.addEventListener('keyup', onUp, true)
+    return () => {
+      window.removeEventListener('keydown', onDown, true)
+      window.removeEventListener('keyup', onUp, true)
+    }
+  }, [])
   const menuRef = useRef<HTMLDivElement | null>(null)
   const pendingFocus = useRef<'first' | 'last' | null>(null)
   const focusItem = (last = false): boolean => {
@@ -177,6 +198,9 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
   const pick = (p: FilletProfile): void => {
     setFilletProfile(p)
     setOpen(false)
+    // A keyboard pick must not leave focus on the button: it would contain the
+    // next Enter, so a typed size would not commit.
+    releaseFocus()
   }
   const isCurrent = (p: FilletProfile): boolean =>
     p.kind === current.kind && (p.kind !== 'shape' || (current.kind === 'shape' && current.id === p.id))
@@ -210,19 +234,19 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
                       title={cornerOff ? CORNER_ONLY_TITLE : it.title}
                       onClick={() => {
                         if (off) return
-                        if (it.profile !== undefined) {
-                          setFilletProfile(it.profile)
-                        }
-                        else {
-                          setOpen(false)
-                          releaseFocus()
-                          it.onSelect?.()
-                        }
+                        // Choosing a profile or an action closes the menu and hands
+                        // the keyboard back to the tool (a typed size + Enter still commits).
+                        setOpen(false)
+                        releaseFocus()
+                        if (it.profile !== undefined) setFilletProfile(it.profile)
+                        else it.onSelect?.()
                       }}
                       style={{ ...itemStyle(active, off), minWidth: 0, padding: '6px 4px', gap: 5, borderRadius: 5, fontSize: 'var(--font-size-body)',
                         ...(it.profile === undefined ? { color: off ? 'var(--text-faint)' : 'var(--text-secondary)', fontSize: 11, padding: '6px 12px' } : {}) }}
                     >
-                      {it.profile?.kind === 'shape' && <ProfileMenuIcon shape={it.profile.shape} thumbnail={it.thumbnail} />}
+                      {it.thumbnail !== undefined && (
+                        <img src={it.thumbnail} width={32} height={32} alt="" style={{ flexShrink: 0, borderRadius: 4 }} />
+                      )}
                       <span className="fillet-profile-label">{it.label}</span>
                       {it.badge !== undefined && it.badge !== s.heading && (
                         <span style={{ fontSize: 10, color: 'var(--text-faint)' }}>{it.badge}</span>

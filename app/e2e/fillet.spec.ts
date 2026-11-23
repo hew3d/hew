@@ -495,6 +495,73 @@ test('Fillet: Escape from More shapes leaves the pick armed and a typed size sti
   expect((await features(page, id)).filter((r) => r.kind === 'fillet').length).toBeGreaterThan(0)
 })
 
+test('Fillet options card: row help popovers are not clipped by the card body', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await setup(page)
+  const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+  await page.evaluate((id) => window.__hew_test!.selectObjects([id]), id)
+  await expect(page.getByText('1 object')).toBeVisible()
+  await page.keyboard.press('Shift+F')
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  for (const name of ['About Shape', 'About Facets']) {
+    await card.getByRole('button', { name }).click()
+    const note = page.getByRole('note')
+    await expect(note).toBeVisible()
+    const fit = await note.evaluate((el) => {
+      const n = el.getBoundingClientRect(), c = el.closest('.tool-options-scroll')!.getBoundingClientRect()
+      return { top: n.top - c.top, left: n.left - c.left, right: c.right - n.right, bottom: c.bottom - n.bottom }
+    })
+    expect(fit.top).toBeGreaterThanOrEqual(0)
+    expect(fit.left).toBeGreaterThanOrEqual(0)
+    expect(fit.right).toBeGreaterThanOrEqual(0)
+    await page.keyboard.press('Escape')
+    await expect(note).toHaveCount(0)
+  }
+})
+
+test('Fillet: a keyboard pick of a primary shape leaves the pick armed and a typed size still commits', async ({ page }) => {
+  await setup(page)
+  const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+  await page.evaluate((id) => window.__hew_test!.selectObjects([id]), id)
+  await expect(page.getByText('1 object')).toBeVisible()
+  await page.keyboard.press('Shift+F')
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  const chamfer = card.getByRole('button', { name: 'Chamfer', exact: true })
+  await chamfer.focus()
+  await page.keyboard.press('Enter')
+  await expect(chamfer).toHaveAttribute('aria-pressed', 'true')
+  await expectNoCardFocus(card)
+  expect(await activeTool(page)).toContain('Fillet')
+  await page.keyboard.type('10')
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(200)
+  expect((await features(page, id)).length).toBeGreaterThan(0)
+})
+
+test('Fillet: a held Enter that chose a primary shape does not auto-repeat into a commit', async ({ page }) => {
+  await setup(page)
+  const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+  await page.evaluate((id) => window.__hew_test!.selectObjects([id]), id)
+  await expect(page.getByText('1 object')).toBeVisible()
+  await page.keyboard.press('Shift+F')
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  const chamfer = card.getByRole('button', { name: 'Chamfer', exact: true })
+  await chamfer.focus()
+  // Playwright marks a second down of a held key as an auto-repeat.
+  await page.keyboard.down('Enter')
+  await expect(chamfer).toHaveAttribute('aria-pressed', 'true')
+  await page.keyboard.down('Enter')
+  await page.keyboard.down('Enter')
+  await page.keyboard.up('Enter')
+  await page.waitForTimeout(200)
+  expect(await features(page, id)).toHaveLength(0)
+  expect(await activeTool(page)).toContain('Fillet')
+  // A fresh press afterwards still commits.
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(200)
+  expect((await features(page, id)).length).toBeGreaterThan(0)
+})
+
 test('Fillet: a refused commit leaves the tool armed but not the keyboard', async ({ page }) => {
   await setup(page)
   await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
@@ -825,7 +892,7 @@ test('Fillet options card: field keys leave the pick armed and pointer-over-card
   await expect.poll(async () => (await features(page, id)).length).toBeGreaterThan(0)
 })
 
-test('Fillet options card: collapse, rail positioning and dock clearance at 1280 pixels', async ({ page }) => {
+test('Fillet options card: collapse, rail positioning and dock centering at 1280 pixels', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 })
   await setup(page)
   await page.keyboard.press('Shift+F')
@@ -833,9 +900,13 @@ test('Fillet options card: collapse, rail positioning and dock clearance at 1280
   const dock = page.getByTestId('contextual-dock')
   const before = await card.boundingBox()
   expect(before).not.toBeNull()
-  const bounds = await dock.boundingBox()
-  expect(bounds).not.toBeNull()
-  expect(before!.x + before!.width).toBeLessThan(bounds!.x)
+  // The dock stays centered in the viewport while the card is showing.
+  const withCard = await dock.evaluate((el) => {
+    const viewport = (el as HTMLElement).offsetParent!.getBoundingClientRect()
+    const rect = el.getBoundingClientRect()
+    return rect.x + rect.width / 2 - (viewport.x + viewport.width / 2)
+  })
+  expect(Math.abs(withCard)).toBeLessThanOrEqual(1)
   await page.getByRole('button', { name: 'Compact tool rail', exact: true }).click()
   const narrow = await card.boundingBox()
   expect(narrow!.x).toBeLessThan(before!.x)
@@ -856,25 +927,67 @@ test('Fillet options card: collapse, rail positioning and dock clearance at 1280
 })
 
 
-test('Fillet options card: selected-object dock clearance at 1280 pixels', async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 900 })
+/** The dock's geometry relative to the viewport container it is centered in. */
+async function dockGeometry(page: Page) {
+  return page.getByTestId('contextual-dock').evaluate(el => {
+    const parent = (el as HTMLElement).offsetParent!.getBoundingClientRect()
+    const r = el.getBoundingClientRect()
+    const tops = Array.from(el.children).map(child => Math.round(child.getBoundingClientRect().top))
+    return { left: r.left, right: r.right, top: r.top, width: r.width, height: r.height,
+      centerDelta: r.left + r.width / 2 - (parent.left + parent.width / 2), rows: new Set(tops).size }
+  })
+}
+
+for (const [width, height] of [[1024, 700], [1280, 720], [1600, 1000]]) {
+  test(`Fillet options card: the dock stays centered, one row and unmoved at ${width}x${height}`, async ({ page }) => {
+    await page.setViewportSize({ width, height })
+    await setup(page)
+    const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+    await page.evaluate((id) => window.__hew_test!.selectObjects([id]), id)
+    await expect(page.getByText('1 object')).toBeVisible()
+    await expect(page.getByTestId('contextual-dock')).toHaveAttribute('data-dock-context', 'object')
+    await expect(page.getByRole('region', { name: 'Fillet options' })).toHaveCount(0)
+    const without = await dockGeometry(page)
+    expect(Math.abs(without.centerDelta)).toBeLessThanOrEqual(1)
+    expect(without.rows).toBe(1)
+    await page.keyboard.press('Shift+F')
+    await expect(page.getByRole('region', { name: 'Fillet options' })).toBeVisible()
+    const withCard = await dockGeometry(page)
+    expect(Math.abs(withCard.centerDelta)).toBeLessThanOrEqual(1)
+    expect(withCard.rows).toBe(1)
+    for (const key of ['left', 'right', 'top', 'width', 'height'] as const) {
+      expect(withCard[key]).toBeCloseTo(without[key], 0)
+    }
+  })
+}
+
+test('Fillet options card: where it overlaps the dock, the card is on top and takes the pointer', async ({ page }, info) => {
+  await page.setViewportSize({ width: 1024, height: 700 })
   await setup(page)
   const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
   await page.evaluate((id) => window.__hew_test!.selectObjects([id]), id)
   await expect(page.getByText('1 object')).toBeVisible()
   await page.keyboard.press('Shift+F')
-  await expect(page.getByRole('complementary', { name: 'Tray', exact: true })).toBeVisible()
-  const card = await page.getByRole('region', { name: 'Fillet options' }).boundingBox()
-  const dock = await page.getByTestId('contextual-dock').boundingBox()
-  expect(card).not.toBeNull()
-  expect(dock).not.toBeNull()
-  expect(card!.x + card!.width).toBeLessThan(dock!.x)
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  await expect(card).toBeVisible()
+  const cb = (await card.boundingBox())!, db = (await page.getByTestId('contextual-dock').boundingBox())!
+  // Narrow enough that the two collide; if this ever stops overlapping, the test must say so.
+  const left = Math.max(cb.x, db.x), right = Math.min(cb.x + cb.width, db.x + db.width)
+  const top = Math.max(cb.y, db.y), bottom = Math.min(cb.y + cb.height, db.y + db.height)
+  expect(right - left).toBeGreaterThan(8)
+  expect(bottom - top).toBeGreaterThan(8)
+  const hit = await page.evaluate(([x, y]) => {
+    const el = document.elementFromPoint(x, y)
+    return { inCard: el?.closest('[data-testid="tool-options-card"]') != null, inDock: el?.closest('[data-testid="contextual-dock"]') != null }
+  }, [(left + right) / 2, (top + bottom) / 2])
+  expect(hit).toEqual({ inCard: true, inDock: false })
+  await shot(page, info, 'card-over-dock')
 })
 
 test.describe('Fillet responsive dock acceptance', () => {
   test.use({ deviceScaleFactor: 1.8 })
   for (const [width, height] of [[1280, 720], [1600, 1000]]) {
-    test(`card/dock clearance, controls, measurement clearance and recentering at ${width}x${height}`, async ({ page }) => {
+    test(`controls, measurement clearance and recentering with the dock centered at ${width}x${height}`, async ({ page }) => {
       await page.setViewportSize({ width, height })
       await setup(page)
       const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
@@ -892,7 +1005,6 @@ test.describe('Fillet responsive dock acceptance', () => {
       expect(cb.x).toBeCloseTo(viewport.x + 16, 0)
       expect(cb.y + cb.height).toBeCloseTo(viewport.y + viewport.height - 16, 0)
       expect(cb.width).toBe(240)
-      expect(cb.x + cb.width).toBeLessThan(db.x)
       expect(db.x + db.width).toBeLessThan(tb.x)
       expect(cb.y).toBeGreaterThanOrEqual(0)
       const actions = dock.getByRole('button')
@@ -903,7 +1015,9 @@ test.describe('Fillet responsive dock acceptance', () => {
         expect(r.x).toBeGreaterThanOrEqual(db.x)
         expect(r.x + r.width).toBeLessThanOrEqual(db.x + db.width)
         expect(r.y + r.height).toBeLessThanOrEqual(db.y + db.height)
-        if (await button.isEnabled()) await button.click({ trial: true })
+        // Where the card overlaps the dock it is drawn over it, by design.
+        const underCard = r.x < cb.x + cb.width && r.x + r.width > cb.x && r.y < cb.y + cb.height && r.y + r.height > cb.y
+        if (!underCard && await button.isEnabled()) await button.click({ trial: true })
       }
       const measurement = page.getByTestId('measurement-box')
       await expect(measurement).toBeVisible()
@@ -959,7 +1073,9 @@ test('Fillet specification: original menu, collapse persistence and card-only se
   expect(rect.y).toBeGreaterThanOrEqual(0)
   await menu.getByRole('menuitemradio', { name: /^Ogee\b/ }).click()
   await expect(more).toContainText('Ogee')
-  await expect(menu).toBeVisible()
+  // Choosing a profile closes the menu.
+  await expect(menu).toHaveCount(0)
+  await more.click()
   await expect(menu.getByRole('menuitemradio', { name: /^Ogee\b/ })).toHaveAttribute('aria-checked', 'true')
   await card.getByRole('button', { name: 'Collapse Fillet options' }).click()
   await expect(card.getByText('Shape', { exact: true })).not.toBeVisible()
@@ -1015,7 +1131,7 @@ test('Fillet presentation: chevron animates upward, is height bounded, and respe
 test.describe('More Shapes integrated menu', () => {
   test.use({ deviceScaleFactor: 1.8 })
   for (const [width, height] of [[1280, 720], [1600, 900], [1280, 480]]) {
-    test(`bounds, readable profiles, focus and dock clearance at ${width}x${height}`, async ({ page }, info) => {
+    test(`bounds, readable profiles and focus at ${width}x${height}`, async ({ page }, info) => {
       await page.setViewportSize({ width, height })
       await page.addInitScript(() => localStorage.setItem('hew.settings.theme', 'dark'))
       await setup(page)
@@ -1072,8 +1188,6 @@ test.describe('More Shapes integrated menu', () => {
       expect(layout.noOverflow).toBe(true)
       expect(layout.labelsReadable).toBe(true)
       if (height === 480) expect(layout.scrolls).toBe(true)
-      const dock = (await page.getByTestId('contextual-dock').boundingBox())!
-      expect(after.x + after.width).toBeLessThan(dock.x)
       await card.getByRole('radiogroup', { name: 'Corners' }).scrollIntoViewIfNeeded()
       await expect(card.getByRole('radiogroup', { name: 'Corners' })).toBeInViewport({ ratio: 0.99 })
       await ogee.scrollIntoViewIfNeeded()
@@ -1081,7 +1195,7 @@ test.describe('More Shapes integrated menu', () => {
       expect((await ogee.boundingBox())!.y).toBeGreaterThanOrEqual((await menu.boundingBox())!.y)
       await shot(page, info, 'menu-open')
       await page.keyboard.press('ArrowRight')
-      await expect(menu.getByRole('menuitemradio', { name: 'Roman Ogee', exact: true })).toBeFocused()
+      await expect(menu.getByRole('menuitemradio', { name: 'Roman ogee', exact: true })).toBeFocused()
       await page.keyboard.press('End')
       await expect(menu.getByRole('menuitemradio', { name: 'Cavetto', exact: true })).toBeFocused()
       await expect(menu.getByRole('menuitemradio', { name: 'Cavetto', exact: true })).toBeInViewport({ ratio: 0.99 })
@@ -1098,11 +1212,14 @@ test.describe('More Shapes integrated menu', () => {
         await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getAnimations().length)).toBe(0)
         await expectMainControlsFixed()
       }
+      // Choosing a profile closes the menu and hands the keyboard back to the tool.
       await page.keyboard.press('Enter')
-      await expect(menu).toBeVisible()
+      await expect(menu).toHaveCount(0)
+      await expectNoCardFocus(card)
+      await expect(trigger).toContainText('Ogee')
+      await trigger.press('ArrowDown')
       await expect(ogee).toBeFocused()
       await expect(ogee).toHaveAttribute('aria-checked', 'true')
-      await expect(trigger).toContainText('Ogee')
       // Saving becomes available without reopening the profile library.
       await ogee.press('End')
       await expect(menu.getByRole('menuitem', { name: 'Save profile…' })).toBeFocused()
@@ -1197,7 +1314,7 @@ test.describe('More Shapes integrated menu', () => {
   })
 })
 
-test('More Shapes stays open while consecutive profile choices update the armed preview', async ({ page }) => {
+test('More Shapes closes after each choice, and consecutive choices update the armed preview', async ({ page }) => {
   await setup(page)
   const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
   await page.keyboard.press('Shift+F')
@@ -1227,28 +1344,32 @@ test('More Shapes stays open while consecutive profile choices update the armed 
   const card = page.getByRole('region', { name: 'Fillet options' })
   const trigger = card.getByRole('button', { name: /^More shapes/ })
   const menu = card.getByRole('menu', { name: 'Additional edge profiles' })
-  await trigger.press('ArrowDown')
-  await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getAnimations().length)).toBe(0)
+  const settled = () => expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getAnimations().length)).toBe(0)
   const controls = [card.getByRole('group', { name: 'Quick edge shape' }), card.getByRole('textbox', { name: 'Facets' })]
   const positions = await Promise.all(controls.map(control => control.boundingBox()))
   const choices = [
-    ['Ogee', 'builtin:ogee'], ['Roman Ogee', 'builtin:roman-ogee'], ['Bead', 'builtin:bead'],
+    ['Ogee', 'builtin:ogee'], ['Roman ogee', 'builtin:roman-ogee'], ['Bead', 'builtin:bead'],
   ] as const
   let previousShape: string | undefined
   for (const [index, [name, profileId]] of choices.entries()) {
     await page.evaluate(() => { window.__filletPreviewProfiles!.length = 0 })
     const choice = menu.getByRole('menuitemradio', { name, exact: true })
     if (index < 2) {
+      await trigger.press('ArrowDown')
       if (index === 1) await menu.getByRole('menuitemradio', { name: 'Ogee', exact: true }).press('ArrowRight')
       await expect(choice).toBeFocused()
       await choice.press('Enter')
-      await expect(choice).toBeFocused()
-    } else await choice.click()
-    await expect(trigger).toHaveAttribute('aria-expanded', 'true')
-    await expect(menu).toBeVisible()
-    await expect(choice).toHaveAttribute('aria-checked', 'true')
-    await expect(menu.locator('[aria-checked="true"]')).toHaveCount(1)
+      await expectNoCardFocus(card)
+    } else {
+      await trigger.click()
+      await choice.click()
+    }
+    // The menu closes on the choice; the pick stays armed.
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    await expect(menu).toHaveCount(0)
+    await settled()
     await expect(trigger).toContainText(name)
+    expect(await activeTool(page)).toContain('Fillet')
     await expect.poll(() => page.evaluate(() => window.__filletPreviewProfiles?.at(-1)?.id)).toBe(profileId)
     const shape = await page.evaluate(() => window.__filletPreviewProfiles!.at(-1)!.shape)
     expect(shape).not.toBe(previousShape)
@@ -1263,8 +1384,8 @@ test('More Shapes stays open while consecutive profile choices update the armed 
     expect(await depth(page)).toBe(beforeDepth)
   }
   await trigger.click()
-  await expect(trigger).toHaveAttribute('aria-expanded', 'false')
-  await expect(menu).toHaveCount(0)
+  await expect(menu.getByRole('menuitemradio', { name: 'Bead', exact: true })).toHaveAttribute('aria-checked', 'true')
+  await expect(menu.locator('[aria-checked="true"]')).toHaveCount(1)
 })
 
 test('More Shapes preserves the existing Save Profile workflow', async ({ page }, info) => {
@@ -1278,7 +1399,8 @@ test('More Shapes preserves the existing Save Profile workflow', async ({ page }
   await expect(menu.getByRole('menuitem', { name: 'Save profile…' })).toBeDisabled()
   const ogee = menu.getByRole('menuitemradio', { name: 'Ogee', exact: true })
   await ogee.press('Enter')
-  await expect(menu).toBeVisible()
+  await expect(menu).toHaveCount(0)
+  await trigger.press('ArrowDown')
   await expect(ogee).toBeFocused()
   const save = menu.getByRole('menuitem', { name: 'Save profile…' })
   await ogee.press('End')
@@ -1354,7 +1476,7 @@ test.describe('Fillet shape selector consistency', () => {
           expect(m.y - t.y - t.height).toBeLessThanOrEqual(7)
           expect(m.y + m.height).toBeLessThanOrEqual(sh.y)
           await expect(menu.getByRole('menuitemradio')).toHaveCount(7)
-          await expect(menu.getByRole('menuitemradio', { name: 'Roman Ogee', exact: true })).toHaveCount(1)
+          await expect(menu.getByRole('menuitemradio', { name: 'Roman ogee', exact: true })).toHaveCount(1)
           expect(await menu.locator('[data-profile-section=library]').count()).toBe(1)
           const builtin = await box(menu.getByRole('group', { name: 'Built-in' })), my = await box(saved)
           expect(builtin.y + builtin.height).toBeLessThanOrEqual(my.y)
@@ -1389,7 +1511,8 @@ test.describe('Fillet shape selector consistency', () => {
       await page.keyboard.press('Escape')
       const chamfer = primary.getByRole('button', { name: 'Chamfer', exact: true })
       await chamfer.focus(); await page.keyboard.press('Enter')
-      await expect(chamfer).toBeFocused()
+      // A keyboard pick hands the keyboard back to the tool.
+      await expectNoCardFocus(card)
       await expect(chamfer).toHaveAttribute('aria-pressed', 'true')
       await expect(card.getByRole('textbox', { name: 'Facets' })).toHaveCount(0)
       await expect(corners.getByRole('radio', { name: 'Flat', exact: true })).toBeVisible()

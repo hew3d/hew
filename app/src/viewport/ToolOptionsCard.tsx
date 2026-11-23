@@ -27,9 +27,19 @@ function containButtonKey(ev: ReactKeyboardEvent<HTMLDivElement>): void {
 /** Text-only help shared by the title and the option rows. */
 export function ToolOptionsInfo({ label, children }: { label: string; children: ReactNode }) {
   const [open, setOpen] = useState(false)
+  // Rows sit inside the card's scrolling body, which clips what pokes out above
+  // its top edge and cannot scroll to it: open downward there instead.
+  const [below, setBelow] = useState(false)
   const expanded = useContext(ToolOptionsExpandedContext)
   useEffect(() => { if (!expanded) setOpen(false) }, [expanded])
   const root = useRef<HTMLSpanElement>(null)
+  const note = useRef<HTMLSpanElement>(null)
+  useLayoutEffect(() => {
+    if (!open) { setBelow(false); return }
+    const clip = root.current?.closest('.tool-options-scroll')
+    const box = note.current
+    if (clip && box && !below && box.getBoundingClientRect().top < clip.getBoundingClientRect().top) setBelow(true)
+  }, [open, below])
   const id = useId()
   useEffect(() => {
     if (!open) return
@@ -60,8 +70,8 @@ export function ToolOptionsInfo({ label, children }: { label: string; children: 
     <span ref={root} style={{ position: 'relative', display: 'inline-flex' }}>
       <button type="button" aria-label={`About ${label}`} aria-expanded={open}
         aria-controls={open ? id : undefined} onClick={() => setOpen(!open)} style={iconStyle}>ⓘ</button>
-      {open && <span id={id} role="note" style={{
-        position: 'absolute', bottom: 'calc(100% + 6px)', right: 0, width: 208,
+      {open && <span ref={note} id={id} role="note" style={{
+        position: 'absolute', ...(below ? { top: 'calc(100% + 6px)' } : { bottom: 'calc(100% + 6px)' }), right: 0, width: 208, boxSizing: 'border-box',
         padding: 10, background: 'var(--surface-overlay)', border: '1px solid var(--border-strong)',
         borderRadius: 'var(--radius-panel-item)', boxShadow: 'var(--shadow-dock)',
         color: 'var(--text-primary)', fontSize: 'var(--font-size-body)', fontWeight: 400, lineHeight: 1.5,
@@ -82,18 +92,6 @@ export function ToolOptionsCard({ tool, info, children }: ToolOptionsCardProps) 
   const [collapsed, setCollapsed] = useState(() => collapsedTools.get(tool) ?? false)
   const root = useRef<HTMLDivElement>(null)
   const rowsId = useId()
-  useLayoutEffect(() => {
-    // Panels live below a display:contents wrapper. The positioned ancestor
-    // is the viewport container shared with the dock, not the DOM parent.
-    const viewport = root.current?.offsetParent
-    if (!(viewport instanceof HTMLElement)) return
-    const previous = viewport.style.getPropertyValue('--tool-card-inset')
-    viewport.style.setProperty('--tool-card-inset', '272px')
-    return () => {
-      if (previous) viewport.style.setProperty('--tool-card-inset', previous)
-      else viewport.style.removeProperty('--tool-card-inset')
-    }
-  }, [])
   return (
     <div ref={root} role="region" aria-label={`${tool} options`} data-testid="tool-options-card" className="tool-options-card"
       onKeyDown={containButtonKey} onKeyUp={containButtonKey}

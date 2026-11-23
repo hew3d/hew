@@ -20,6 +20,14 @@ describe('ContextualDock', () => {
     expect(screen.getByText('Arc')).toBeInTheDocument()
   })
 
+  it('is centered on the viewport and never wraps', () => {
+    render(<ContextualDock selectedIds={[obj(1n)]} onRun={vi.fn()} />)
+    const dock = screen.getByTestId('contextual-dock')
+    expect(dock.style.left).toBe('50%')
+    expect(dock.style.flexWrap).toBe('')
+    expect(dock.style.maxWidth).toBe('')
+  })
+
   it('shows the Object verb set for a single selected Object', () => {
     render(<ContextualDock selectedIds={[obj(1n)]} onRun={vi.fn()} />)
     expect(screen.getByText('OBJECT')).toBeInTheDocument()

@@ -31,16 +31,6 @@ it('keeps only the title when collapsed, remembers per tool, and expands again',
   expect(screen.getByText('Other rows')).toBeVisible()
 })
 
-it('reserves dock space on the positioned viewport and restores it on unmount', () => {
-  const viewport = document.createElement('div')
-  viewport.style.setProperty('--tool-card-inset', '8px')
-  vi.spyOn(HTMLElement.prototype, 'offsetParent', 'get').mockReturnValue(viewport)
-  const { unmount } = render(<ToolOptionsCard tool="Inset test" info="Help.">Rows</ToolOptionsCard>)
-  expect(viewport.style.getPropertyValue('--tool-card-inset')).toBe('272px')
-  unmount()
-  expect(viewport.style.getPropertyValue('--tool-card-inset')).toBe('8px')
-})
-
 it('opens text help and dismisses it with Escape or an outside press', () => {
   render(<ToolOptionsCard tool="Help test" info="One plain sentence.">Rows</ToolOptionsCard>)
   const button = screen.getByRole('button', { name: 'About Help test' })
