@@ -3159,7 +3159,7 @@ edits both, and Make Unique is the way to break the link. The insert
 strips the namespace from every copy it makes, and a paste under another
 origin (another window, or after the window opened another document)
 copies as an ordinary item would.
-The `profile` category holds the shapes the Fillet tool's profile chip
+The `profile` category holds the shapes the Fillet tool's More shapes menu
 offers: a Library item whose whole content is one open chain of drawn
 lines and arcs, filed under `Profiles/`. `hew.library.save` writes one
 from `profile_chain` (a sketch and its edges in order, from the profile's

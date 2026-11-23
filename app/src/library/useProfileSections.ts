@@ -1,6 +1,6 @@
 /* oxlint-disable lingui/no-unlocalized-strings -- True Curves strings are not yet wrapped for translation: this file is English-only until they are */
 /**
- * useProfileSections — what the Fillet tool's profile chip lists below its
+ * useProfileSections — what the Fillet tool's options card lists below its
  * four basic kinds: the built-in profiles, the user's Library profiles, and
  * the "Save profile…" action. Loaded when the Fillet tool becomes active and
  * kept fresh by the library store's own change subscription.
@@ -33,7 +33,7 @@ export async function listLibraryProfiles(): Promise<LibraryProfileRow[]> {
   if (!store.available()) return []
   const rows: LibraryProfileRow[] = []
   for (const file of await store.list()) {
-    // Only the Profiles folder is read: the chip must not open every item.
+    // Only the Profiles folder is read: the card must not open every item.
     if (!file.fileName.startsWith('Profiles/')) continue
     try {
       const bytes = await store.read(file.fileName)
@@ -42,7 +42,7 @@ export async function listLibraryProfiles(): Promise<LibraryProfileRow[]> {
       const item = buildLibraryItem(file, await readItemSummary(bytes), '')
       rows.push({ id: item.meta.id ?? file.fileName, name: item.displayName, shape: parsed.shape })
     } catch {
-      /* an unreadable file is the browser's concern, not the chip's */
+      /* an unreadable file is the browser's concern, not the card's */
     }
   }
   return rows.sort((a, b) => a.name.localeCompare(b.name))
@@ -79,7 +79,7 @@ export function useProfileSections({ active, canSave, onSave }: ProfileSectionsO
         setBuiltIns(b)
         setMine(m)
       } catch {
-        /* the chip still offers the four basic kinds */
+        /* the card still offers the four basic kinds */
       }
     }
     void load()

@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ToolOptionsCard } from './ToolOptionsCard'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
+import { ToolOptionsCard, resetToolOptionsCardForTest } from './ToolOptionsCard'
 import { FilletOptions, cornerChoices, profileLabel } from './FilletOptions'
 import {
   getFilletSettings,
@@ -14,6 +14,7 @@ import {
 } from '../tools/filletSettings'
 
 beforeEach(() => {
+  resetToolOptionsCardForTest()
   resetFilletSettingsForTest()
   setFilletThreeWayCorners(0)
 })
@@ -285,7 +286,7 @@ describe('FilletOptions rows and field editing', () => {
     expect(getFilletSettings().segmentsOverride).toBe(8)
   })
 
-  it.each(['-', '3.5', '12s', 'Auto', '1e2'])('reverts invalid/incomplete input %s on blur', (text) => {
+  it.each(['-', '3.5', '12s', 'Auto', '1e2'])('keeps the last valid live count when invalid/incomplete input %s ends on blur', (text) => {
     setFilletSegmentsOverride(8)
     render(<FilletOptions />)
     fireEvent.focus(facets())
@@ -293,11 +294,12 @@ describe('FilletOptions rows and field editing', () => {
     expect(getFilletSettings().segmentsOverride).toBe(16)
     fireEvent.change(facets(), { target: { value: text } })
     fireEvent.blur(facets())
-    expect(getFilletSettings().segmentsOverride).toBe(8)
-    expect(facets().value).toBe('8')
+    // The 16 was already applied live and shown in the preview; only Escape rolls back.
+    expect(getFilletSettings().segmentsOverride).toBe(16)
+    expect(facets().value).toBe('16')
   })
 
-  it('reverts an incomplete value on Enter instead of committing the last live preview', () => {
+  it('keeps the last live count when an incomplete value ends on Enter', () => {
     setFilletSegmentsOverride(8)
     render(<FilletOptions />)
     act(() => facets().focus())
@@ -305,8 +307,8 @@ describe('FilletOptions rows and field editing', () => {
     expect(getFilletSettings().segmentsOverride).toBe(12)
     fireEvent.change(facets(), { target: { value: '+' } })
     fireEvent.keyDown(facets(), { key: 'Enter' })
-    expect(getFilletSettings().segmentsOverride).toBe(8)
-    expect(facets().value).toBe('8')
+    expect(getFilletSettings().segmentsOverride).toBe(12)
+    expect(facets().value).toBe('12')
   })
 
   it('uses the approved Facets help text verbatim', () => {
@@ -352,7 +354,7 @@ describe('FilletOptions rows and field editing', () => {
     expect(screen.queryByRole('menu')).toBeNull()
   })
 
-  it('keeps Library thumbnails, selected identity, and one-sentence row help', () => {
+  it('falls back to the Library thumbnail when a shape has no drawable outline, and keeps selected identity and row help', () => {
     const profile = { kind: 'shape' as const, id: 'mine', name: 'My curve', shape: {} }
     setFilletProfile(profile)
     render(<FilletOptions sections={[{ id: 'library', heading: 'My profiles', items: [
@@ -390,7 +392,7 @@ it('closing the card also closes its menu, including keyboard-only collapse', ()
   expect(screen.queryByRole('menu')).toBeNull()
 })
 
-it('navigates built-in profiles, skipping disabled items and restoring trigger focus', () => {
+it('navigates built-in profiles, skipping disabled items, and releases focus on Escape', () => {
   const curve = { kind: 'shape' as const, id: 'builtin:curve', name: 'Curve', shape: {} }
   const other = { ...curve, id: 'builtin:other', name: 'Other' }
   const save = vi.fn()
@@ -418,7 +420,9 @@ it('navigates built-in profiles, skipping disabled items and restoring trigger f
   expect(first).toHaveFocus()
   fireEvent.keyDown(first, { key: 'Escape' })
   expect(screen.queryByRole('menu')).toBeNull()
-  expect(trigger).toHaveFocus()
+  // Escape releases focus to the tool instead of parking it on the trigger.
+  expect(trigger).not.toHaveFocus()
+  expect(document.activeElement).toBe(document.body)
   fireEvent.keyDown(trigger, { key: 'ArrowUp' })
   expect(screen.getByRole('menuitem', { name: 'Save profile…' })).toHaveFocus()
   fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Save profile…' }), { key: 'Home' })
@@ -432,7 +436,8 @@ it('navigates built-in profiles, skipping disabled items and restoring trigger f
   fireEvent.click(screen.getByRole('menuitem', { name: 'Save profile…' }))
   expect(save).toHaveBeenCalledOnce()
   expect(screen.queryByRole('menu')).toBeNull()
-  expect(trigger).toHaveFocus()
+  expect(trigger).not.toHaveFocus()
+  expect(document.activeElement).toBe(document.body)
 })
 
 it('keeps closing content mounted but inaccessible, and can reopen without losing profile identity', () => {
@@ -457,7 +462,7 @@ it('keeps closing content mounted but inaccessible, and can reopen without losin
   expect(expansion).toHaveAttribute('inert')
   expect(container.querySelector('[role="menuitemradio"]')).toBe(row)
   expect(screen.queryByRole('menu')).toBeNull()
-  expect(trigger).toHaveFocus()
+  expect(trigger).not.toHaveFocus()
   fireEvent.keyDown(trigger, { key: 'ArrowDown' })
   expect(screen.getByRole('menuitemradio', { name: profile.name })).toBe(row)
   expect(row).toHaveAttribute('aria-checked', 'true')
@@ -549,7 +554,8 @@ it('groups built-in, saved profiles and saving in More Shapes without duplicatin
 })
 
 it('keeps saving keyboard reachable when drawn-corner restrictions disable extra profiles', () => {
-  const save = vi.fn(() => expect(trigger).toHaveFocus())
+  // Focus is released to the tool, not parked on the trigger, when the action runs.
+  const save = vi.fn(() => expect(document.activeElement).toBe(document.body))
   setFilletCornerOnly(true)
   const before = getFilletSettings()
   render(<FilletOptions sections={[
@@ -569,7 +575,7 @@ it('keeps saving keyboard reachable when drawn-corner restrictions disable extra
   expect(getFilletSettings()).toEqual(before)
   expect(screen.queryByRole('menu')).toBeNull()
   expect(screen.queryByRole('menuitem', { name: 'Save profile…' })).toBeNull()
-  expect(trigger).toHaveFocus()
+  expect(trigger).not.toHaveFocus()
 })
 
 it('displays the canonical built-in name without renaming a saved profile', () => {
@@ -587,4 +593,129 @@ it('dismisses the menu when interacting with the main settings above it', () => 
   fireEvent.focus(field)
   fireEvent.change(field, { target: { value: '12' } })
   expect(getFilletSettings().segmentsOverride).toBe(12)
+})
+
+describe('keyboard hand-back to the tool', () => {
+  // The viewport's window keydown listeners stand in for "the tool".
+  const setup = () => {
+    const outer = vi.fn()
+    window.addEventListener('keydown', outer)
+    onTestFinished(() => window.removeEventListener('keydown', outer))
+    const save = vi.fn()
+    render(<div><ToolOptionsCard tool="Hand back" info="Help.">
+      <FilletOptions sections={[
+        { id: 'builtin', items: [{ id: 'a', label: 'Curve', profile: { kind: 'shape', id: 'builtin:a', name: 'Curve', shape: {} } }] },
+        { id: 'actions', items: [{ id: 'save', label: 'Save profile…', onSelect: save }] },
+      ]} />
+    </ToolOptionsCard></div>)
+    return { outer, save, trigger: screen.getByRole('button', { name: 'More shapes' }) }
+  }
+  const expectKeysReachTool = (outer: ReturnType<typeof vi.fn>) => {
+    outer.mockClear()
+    for (const key of ['5', 'Enter', ' ']) fireEvent.keyDown(document.activeElement ?? document.body, { key })
+    expect(outer).toHaveBeenCalledTimes(3)
+  }
+
+  it('Escape from More shapes releases focus so Enter and Space reach the tool, but Escape itself does not', () => {
+    const { outer, trigger } = setup()
+    act(() => trigger.focus())
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' })
+    expect(screen.getByRole('menuitemradio', { name: 'Curve' })).toHaveFocus()
+    outer.mockClear()
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(outer).not.toHaveBeenCalled()
+    expect(screen.queryByRole('menu')).toBeNull()
+    expectKeysReachTool(outer)
+  })
+
+  it('choosing an action row releases focus too', () => {
+    const { outer, save } = setup()
+    fireEvent.click(screen.getByRole('button', { name: 'More shapes' }), { detail: 0 })
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Save profile…' }))
+    expect(save).toHaveBeenCalledOnce()
+    expectKeysReachTool(outer)
+  })
+
+  it('Escape closing an info popover opened from the keyboard releases focus', () => {
+    const { outer } = setup()
+    const about = screen.getAllByRole('button', { name: /^About / })[0]
+    act(() => about.focus())
+    fireEvent.click(about, { detail: 0 })
+    expect(screen.getByRole('note')).toBeTruthy()
+    outer.mockClear()
+    fireEvent.keyDown(about, { key: 'Escape' })
+    expect(outer).not.toHaveBeenCalled()
+    expect(screen.queryByRole('note')).toBeNull()
+    expectKeysReachTool(outer)
+  })
+})
+
+describe('Facets display and commit', () => {
+  const facets = () => screen.getByRole('textbox', { name: 'Facets' }) as HTMLInputElement
+
+  it('shows a count stored over a drawn corner clamped for an ordinary edge, without writing the store', () => {
+    setFilletCornerOnly(true)
+    setFilletSegmentsOverride(500)
+    render(<FilletOptions />)
+    expect(facets().value).toBe('500')
+    const update = vi.fn()
+    const unsubscribe = subscribeFilletSettings(update)
+    try {
+      act(() => setFilletCornerOnly(false))
+      expect(facets().value).toBe('96')
+      expect(getFilletSettings().segmentsOverride).toBe(500)
+      act(() => setFilletCornerOnly(true))
+      expect(facets().value).toBe('500')
+      act(() => setFilletCornerOnly(false))
+      // Focus then blur without typing is not an edit.
+      act(() => facets().focus())
+      expect(facets().value).toBe('96')
+      act(() => facets().blur())
+      expect(update).not.toHaveBeenCalled()
+      expect(getFilletSettings().segmentsOverride).toBe(500)
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('focusing and blurring an in-range value does not publish a settings change', () => {
+    setFilletSegmentsOverride(8)
+    render(<FilletOptions />)
+    const update = vi.fn()
+    const unsubscribe = subscribeFilletSettings(update)
+    try {
+      act(() => facets().focus())
+      act(() => facets().blur())
+      expect(update).not.toHaveBeenCalled()
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('"6a" then Enter keeps the 6 already applied live; Escape still restores the pre-focus value', () => {
+    setFilletSegmentsOverride(8)
+    render(<FilletOptions />)
+    act(() => facets().focus())
+    fireEvent.change(facets(), { target: { value: '6' } })
+    fireEvent.change(facets(), { target: { value: '6a' } })
+    fireEvent.keyDown(facets(), { key: 'Enter' })
+    expect(getFilletSettings().segmentsOverride).toBe(6)
+    expect(facets().value).toBe('6')
+    act(() => facets().focus())
+    fireEvent.change(facets(), { target: { value: '9' } })
+    fireEvent.keyDown(facets(), { key: 'Escape' })
+    expect(getFilletSettings().segmentsOverride).toBe(6)
+  })
+
+  it('lets bare modifier keydowns reach the viewport but contains every other key', () => {
+    const outer = vi.fn()
+    render(<div onKeyDown={outer}><FilletOptions /></div>)
+    act(() => facets().focus())
+    for (const key of ['Shift', 'Alt', 'Control', 'Meta']) fireEvent.keyDown(facets(), { key })
+    expect(outer).toHaveBeenCalledTimes(4)
+    outer.mockClear()
+    for (const key of ['5', 'Enter', 'a']) fireEvent.keyDown(facets(), { key })
+    fireEvent.keyDown(facets(), { key: 'z', ctrlKey: true })
+    expect(outer).not.toHaveBeenCalled()
+  })
 })

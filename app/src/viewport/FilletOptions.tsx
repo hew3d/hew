@@ -74,7 +74,7 @@ const pillStyle = (active: boolean): React.CSSProperties => ({
   boxShadow: 'var(--shadow-chip, none)',
   color: active ? 'var(--text-on-accent, #fff)' : 'var(--text-primary)',
   fontFamily: 'var(--font-family-ui)',
-  fontSize: 12.5,
+  fontSize: 'var(--font-size-menu-item)',
   fontWeight: active ? 600 : 400,
   cursor: 'pointer',
 })
@@ -111,7 +111,7 @@ const itemStyle = (active: boolean, disabled: boolean): React.CSSProperties => (
   background: active ? 'var(--accent-base)' : 'transparent',
   color: disabled ? 'var(--text-faint)' : active ? 'var(--text-on-accent, #fff)' : 'var(--text-primary)',
   fontFamily: 'var(--font-family-ui)',
-  fontSize: 12.5,
+  fontSize: 'var(--font-size-menu-item)',
   fontWeight: active ? 600 : 400,
   textAlign: 'left',
   cursor: disabled ? 'default' : 'pointer',
@@ -125,6 +125,14 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
   const expanded = useContext(ToolOptionsExpandedContext)
   useEffect(() => { if (!expanded) setOpen(false) }, [expanded])
   const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const shapesRef = useRef<HTMLDivElement | null>(null)
+  // Leaving the menu by Escape or an action row hands the keyboard back to the
+  // tool: parking focus on the trigger would make the card swallow the next
+  // Enter, Space or digit meant for the viewport.
+  const releaseFocus = (): void => {
+    const focused = document.activeElement
+    if (focused instanceof HTMLElement && shapesRef.current?.contains(focused)) focused.blur()
+  }
   const menuRef = useRef<HTMLDivElement | null>(null)
   const pendingFocus = useRef<'first' | 'last' | null>(null)
   const focusItem = (last = false): boolean => {
@@ -152,7 +160,7 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
         setOpen(false)
         // A focused field owns its rollback even while the menu is open.
         if (ev.target instanceof Element && ev.target.closest('input, textarea, [contenteditable="true"]')) return
-        triggerRef.current?.focus()
+        releaseFocus()
         ev.preventDefault()
         ev.stopPropagation()
       }
@@ -173,7 +181,7 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
   const isCurrent = (p: FilletProfile): boolean =>
     p.kind === current.kind && (p.kind !== 'shape' || (current.kind === 'shape' && current.id === p.id))
 
-  const renderSections = (profileSections: ProfileOptionSection[], inMenu: boolean) => (<>
+  const renderSections = (profileSections: ProfileOptionSection[]) => (<>
           {profileSections
             .filter((s) => s.items.length > 0 || s.emptyHint !== undefined)
             .map((s) => (
@@ -183,7 +191,7 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
                   <div style={{ padding: '2px 12px', fontSize: 10.5, color: 'var(--text-faint)' }}>{s.heading}</div>
                 )}
                 {s.items.length === 0 && (
-                  <div style={{ padding: '4px 12px 6px', fontSize: 12, color: 'var(--text-faint)' }}>{s.emptyHint}</div>
+                  <div style={{ padding: '4px 12px 6px', fontSize: 'var(--font-size-body)', color: 'var(--text-faint)' }}>{s.emptyHint}</div>
                 )}
                 <div className={s.items.some(it => it.profile !== undefined) ? 'fillet-profile-choices' : undefined}>
                 {s.items.map((it) => {
@@ -195,10 +203,9 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
                       key={it.id}
                       className="fillet-profile-choice"
                       type="button"
-                      tabIndex={inMenu ? -1 : undefined}
-                      role={inMenu ? (it.profile !== undefined ? 'menuitemradio' : 'menuitem') : undefined}
-                      aria-checked={inMenu && it.profile !== undefined ? active : undefined}
-                      aria-pressed={!inMenu && it.profile !== undefined ? active : undefined}
+                      tabIndex={-1}
+                      role={it.profile !== undefined ? 'menuitemradio' : 'menuitem'}
+                      aria-checked={it.profile !== undefined ? active : undefined}
                       disabled={off}
                       title={cornerOff ? CORNER_ONLY_TITLE : it.title}
                       onClick={() => {
@@ -208,11 +215,11 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
                         }
                         else {
                           setOpen(false)
-                          triggerRef.current?.focus({ preventScroll: true })
+                          releaseFocus()
                           it.onSelect?.()
                         }
                       }}
-                      style={{ ...itemStyle(active, off), minWidth: 0, padding: '6px 4px', gap: 5, borderRadius: 5, fontSize: 12,
+                      style={{ ...itemStyle(active, off), minWidth: 0, padding: '6px 4px', gap: 5, borderRadius: 5, fontSize: 'var(--font-size-body)',
                         ...(it.profile === undefined ? { color: off ? 'var(--text-faint)' : 'var(--text-secondary)', fontSize: 11, padding: '6px 12px' } : {}) }}
                     >
                       {it.profile?.kind === 'shape' && <ProfileMenuIcon shape={it.profile.shape} thumbnail={it.thumbnail} />}
@@ -230,6 +237,7 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
 
   return (
     <div
+      ref={shapesRef}
       className="fillet-shapes"
       style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 6 }}
       data-testid="fillet-shape-options"
@@ -266,7 +274,7 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
           boxShadow: 'var(--shadow-chip, none)',
           color: 'var(--text-primary)',
           fontFamily: 'var(--font-family-ui)',
-          fontSize: 12.5,
+          fontSize: 'var(--font-size-menu-item)',
           cursor: 'pointer',
         }}
       >
@@ -306,7 +314,7 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
             }
           }}
         >
-          {renderSections(sections, true)}
+          {renderSections(sections)}
         </div>
       </div>
       <OptionHeading label="Shape" info="Choose the shape of the edge." marginBottom={0} />
@@ -322,7 +330,7 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
               disabled={cornerOnly && !cornerTakes(b.profile)}
               title={cornerOnly && !cornerTakes(b.profile) ? CORNER_ONLY_TITLE : undefined}
               onClick={() => pick(b.profile)}
-              style={{ ...pillStyle(active), display: 'flex', alignItems: 'center', gap: 5, padding: '6px 4px', fontSize: 12, minWidth: 0, textAlign: 'left', color: cornerOnly && !cornerTakes(b.profile) ? 'var(--text-faint)' : pillStyle(active).color }}
+              style={{ ...pillStyle(active), display: 'flex', alignItems: 'center', gap: 5, padding: '6px 4px', fontSize: 'var(--font-size-body)', minWidth: 0, textAlign: 'left', color: cornerOnly && !cornerTakes(b.profile) ? 'var(--text-faint)' : pillStyle(active).color }}
             >
               <ProfileMenuIcon kind={b.profile.kind} /><span className="fillet-profile-label">{b.label}</span>
             </button>
@@ -336,19 +344,25 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
 
 
 function OptionHeading({ label, info, marginBottom = 5 }: { label: string; info: string; marginBottom?: number }) {
-  return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom, fontSize: 12 }}>
+  return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom, fontSize: 'var(--font-size-body)' }}>
     <span>{label}</span><ToolOptionsInfo label={label}>{info}</ToolOptionsInfo>
   </div>
 }
+
+const MODIFIER_KEYS = ['Shift', 'Alt', 'Control', 'Meta']
 
 /** Facets owns a draft while focused; every accepted value still uses the tool's store. */
 function FacetsField({ cornerOnly, value }: { cornerOnly: boolean; value: number | null }) {
   const [draft, setDraft] = useState<string | null>(null)
   const before = useRef<number | null>(value)
   const cancelled = useRef(false)
+  const edited = useRef(false)
   const clamp = cornerOnly ? clampCornerSegments : clampBlendSegments
   const min = cornerOnly ? MIN_CORNER_SEGMENTS : MIN_BLEND_SEGMENTS
   const max = cornerOnly ? MAX_CORNER_SEGMENTS : MAX_BLEND_SEGMENTS
+  // Shown for the current pick: a count stored over a drawn corner can exceed
+  // what an ordinary edge takes. Display only; the store is not rewritten.
+  const shown = value === null ? '' : String(clamp(value))
   const parse = (text: string): number | null | undefined => {
     if (text.trim() === '') return null
     if (!/^[+-]?\d+$/.test(text.trim())) return undefined
@@ -356,18 +370,23 @@ function FacetsField({ cornerOnly, value }: { cornerOnly: boolean; value: number
     return Number.isFinite(n) ? n : undefined
   }
   const finish = (): void => {
-    if (!cancelled.current && draft !== null) {
+    if (!cancelled.current && edited.current && draft !== null) {
       const n = parse(draft)
-      setFilletSegmentsOverride(n === undefined ? before.current : n === null ? null : clamp(n))
+      // An unparsable draft keeps the last valid count already applied live.
+      if (n !== undefined) setFilletSegmentsOverride(n === null ? null : clamp(n))
     }
     cancelled.current = false
+    edited.current = false
     setDraft(null)
   }
   return <input aria-label="Facets" type="text" inputMode="numeric" placeholder="Auto"
-    value={draft ?? (value === null ? '' : String(value))}
-    onFocus={() => { before.current = value; cancelled.current = false; setDraft(value === null ? '' : String(value)) }}
+    value={draft ?? shown}
+    // The draft starts at the first keystroke: until then the field keeps
+    // following the pick, which can change under a focused field.
+    onFocus={() => { before.current = value; cancelled.current = false; edited.current = false }}
     onChange={(ev) => {
       const text = ev.target.value
+      edited.current = true
       setDraft(text)
       const n = parse(text)
       // Intermediate digits can be outside the range (1 on the way to 12).
@@ -376,6 +395,9 @@ function FacetsField({ cornerOnly, value }: { cornerOnly: boolean; value: number
     }}
     onBlur={finish}
     onKeyDown={(ev) => {
+      // A bare modifier must still reach the viewport's held-modifier tracking
+      // (its keyup does); the tool ignores keys while a field has focus.
+      if (MODIFIER_KEYS.includes(ev.key)) return
       ev.stopPropagation()
       if (isComposingKey(ev)) return
       if (ev.key === 'Escape') {
@@ -390,7 +412,7 @@ function FacetsField({ cornerOnly, value }: { cornerOnly: boolean; value: number
     }}
     style={{ width: '100%', boxSizing: 'border-box', padding: '5px 8px',
       background: 'var(--surface-input)', border: '1px solid var(--border-strong)',
-      borderRadius: 'var(--radius-control, 7px)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12.5 }} />
+      borderRadius: 'var(--radius-control, 7px)', color: 'var(--text-primary)', font: 'inherit', fontSize: 'var(--font-size-menu-item)' }} />
 }
 
 export function cornerChoices(chamferFamily: boolean): Array<{ label: string; value: FilletCorners }> {

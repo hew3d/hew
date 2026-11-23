@@ -710,9 +710,9 @@ below.
   convex edge and adds it to a concave one. Where new edges meet an
   existing fillet, the corner is solved again with both, larger first. A
   size that does not fit clamps to the largest the commit takes, and the
-  status bar names what limits it. The profile chip chooses Round,
+  status bar names what limits it. The options card chooses Round,
   Chamfer, Cove, Bullnose, a built-in router profile or a Library
-  profile; the Corners chip chooses rolled or mitered corners (rounds)
+  profile; its Corners row chooses rolled or mitered corners (rounds)
   and mitered or flat ones (chamfers). Rims and hole mouths become tori
   and cones, a cube with all twelve edges rounded gets sphere corners,
   and mixed convex and concave corners solve in two passes. Stopped
@@ -747,7 +747,7 @@ below.
   their geometry alone, so a resize builds what a fresh blend at that size
   builds (D-228).
 - **Profiles** are a Library category: draw an open chain of lines and arcs
-  on a plane, **Save profile…** from the profile chip, and use it on any
+  on a plane, **Save profile…** under More shapes, and use it on any
   edge; a Profiles filter, Use, Open for editing and Replace complete the
   loop, and seven router profiles ship built in (Ogee, Roman ogee, Bead,
   Thumbnail, Cove and bead, Chamfer and bead, Cavetto)

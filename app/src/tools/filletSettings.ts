@@ -1,8 +1,8 @@
 /* oxlint-disable lingui/no-unlocalized-strings -- True Curves strings are not yet wrapped for translation: this file is English-only until they are */
 /**
  * filletSettings — the Fillet tool's session-sticky choices, shared between
- * the tool (which reads them on every preview and commit) and the two chips
- * floating above the viewport (which set them).
+ * the tool (which reads them on every preview and commit) and the Fillet Tool Options
+ * card floating above the viewport (which sets them).
  *
  * A tiny external store: `subscribe` / `getSnapshot` match React's
  * `useSyncExternalStore`, and the tool reads the same snapshot without React.
@@ -10,7 +10,7 @@
  * what "sticky for the session" means in the design.
  */
 
-/** A profile the user picked from the chip. */
+/** A profile the user picked from the card. */
 export type FilletProfile =
   | { kind: 'round' }
   | { kind: 'chamfer' }
@@ -19,7 +19,7 @@ export type FilletProfile =
   | {
       /** A drawn or built-in shape. `shape` is the kernel's normalized
        *  `ProfileShape` JSON; `id` is the built-in id or the Library item id
-       *  and `name` the label shown on the chip. */
+       *  and `name` the label shown on the card. */
       kind: 'shape'
       id: string
       name: string
@@ -31,7 +31,7 @@ export type FilletCorners = 'default' | 'mitered' | 'flat'
 
 export interface FilletSettings {
   profile: FilletProfile
-  /** Corner style for the current profile family (see `CornersChip`). */
+  /** Corner style for the current profile family (shown by the Corners row of the card). */
   corners: FilletCorners
   /** A segment count typed as `8s`, sticky until reload; null = automatic. */
   segmentsOverride: number | null
@@ -102,10 +102,10 @@ export function resetFilletSettingsForTest(): void {
   setFilletMeasurementLabelOverride(null)
 }
 
-// ── Chip support ────────────────────────────────────────────────────────────
+// ── Card support ────────────────────────────────────────────────────────────
 
-/** How many three-way corners the armed pick forms: the Corners chip shows
- *  while this is above zero. Written by the tool, read by the chip. */
+/** How many three-way corners the armed pick forms: the Corners row shows
+ *  while this is above zero. Written by the tool, read by the card. */
 let threeWayCorners = 0
 const cornerListeners = new Set<() => void>()
 
@@ -127,8 +127,8 @@ export function subscribeFilletThreeWayCorners(listener: () => void): () => void
 }
 
 /** Whether the pointer is on (or the tool is armed on) a drawn corner, which
- *  takes only Round and Chamfer: the Profile chip disables the rest while
- *  this is set. Written by the tool, read by the chip. */
+ *  takes only Round and Chamfer: the card disables the rest while
+ *  this is set. Written by the tool, read by the card. */
 let cornerOnly = false
 const cornerOnlyListeners = new Set<() => void>()
 

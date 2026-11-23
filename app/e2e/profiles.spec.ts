@@ -12,10 +12,10 @@ declare global {
 }
 
 /**
- * Profiles in the Library and the Fillet tool's profile chip, driven with real
- * pointer and keyboard events: pick a built-in Ogee in the chip and cut a box
+ * Profiles in the Library and the Fillet tool's options card, driven with real
+ * pointer and keyboard events: pick a built-in Ogee in the card and cut a box
  * edge with it; save a drawn arc-and-line chain as a profile; find it in the
- * chip and in Library > Profiles; use it from the browser.
+ * card and in Library > Profiles; use it from the browser.
  *
  * Set HEW_E2E_SHOTS to a directory to keep the screenshots there.
  */
@@ -47,7 +47,10 @@ async function shot(page: Page, info: TestInfo, name: string): Promise<void> {
   await page.screenshot({ path: dir ? `${dir}/${name}.png` : info.outputPath(`${name}.png`) })
 }
 
-test('profiles: the Ogee in the chip, a saved profile in the chip and the Library', async ({ page }, info) => {
+/** The card's More shapes trigger; it names the active custom shape beside the label. */
+const moreShapes = (page: Page) => page.getByTestId('fillet-shape-options').getByRole('button', { name: /^More shapes/ })
+
+test('profiles: the Ogee in the card, a saved profile in the card and the Library', async ({ page }, info) => {
   await page.goto('/')
   await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, { timeout: 15_000 })
   const id = await page.evaluate((cam) => {
@@ -59,11 +62,15 @@ test('profiles: the Ogee in the chip, a saved profile in the chip and the Librar
   }, CAMERA)
   await page.waitForTimeout(150)
 
-  // 1. Fillet, then Ogee from the chip.
+  // 1. Fillet, then Ogee from the card.
   await page.keyboard.press('Shift+F')
-  await page.getByRole('button', { name: /Edge/ }).click()
-  await page.getByRole('menuitemradio', { name: /Ogee/ }).click()
-  await expect(page.getByRole('button', { name: /Edge\s*Ogee/ })).toBeVisible()
+  await moreShapes(page).click()
+  await page.getByRole('menuitemradio', { name: 'Ogee', exact: true }).click()
+  await expect(moreShapes(page)).toContainText('Ogee')
+  // The menu stays open after a choice; close it with its trigger before picking an edge.
+  await expect(page.getByRole('menuitemradio', { name: 'Ogee', exact: true })).toHaveAttribute('aria-checked', 'true')
+  await moreShapes(page).click()
+  await expect(page.getByRole('menu')).toHaveCount(0)
 
   // 2. Click a box edge, type 10, Enter: an ogee cut (a profile blend, 10 mm wide).
   await clickWorld(page, [1, 0.03, 1])
@@ -76,7 +83,7 @@ test('profiles: the Ogee in the chip, a saved profile in the chip and the Librar
   expect(rows[0].size!).toBeCloseTo(0.01, 6)
   await shot(page, info, 'profiles-1-ogee')
 
-  // 3. A drawn arc-and-line chain, selected, saved from the chip.
+  // 3. A drawn arc-and-line chain, selected, saved from the card.
   const sketch = await page.evaluate(() => {
     const h = window.__hew_test!
     const a = h.drawArc([0, 0.1, 0], [-0.06, 0.04, 0], 0.012)
@@ -84,7 +91,7 @@ test('profiles: the Ogee in the chip, a saved profile in the chip and the Librar
     return a.sketch
   })
   await page.evaluate((sketch) => window.__hew_test!.selectNodes([{ kind: 'sketch', id: sketch }]), sketch)
-  await page.getByRole('button', { name: /Edge/ }).click()
+  await moreShapes(page).click()
   await page.getByRole('menuitem', { name: 'Save profile…' }).click()
   const prompt = page.getByRole('dialog', { name: 'Save profile' })
   await expect(prompt).toBeVisible()
@@ -94,21 +101,21 @@ test('profiles: the Ogee in the chip, a saved profile in the chip and the Librar
   await prompt.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(page.getByText('Saved profile "Quarter edge"')).toBeVisible()
 
-  // 4. It is in the chip, and under Library > Profiles.
-  await page.getByRole('button', { name: /Edge/ }).click()
+  // 4. It is in the card, and under Library > Profiles.
+  await moreShapes(page).click()
   await expect(page.getByRole('menuitemradio', { name: /Quarter edge/ })).toBeVisible()
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: 'Library' }).click()
   const dialog = page.getByRole('dialog', { name: 'Library' })
   await dialog.getByRole('tab', { name: /Profiles/ }).click()
   await expect(dialog.getByRole('option', { name: /Quarter edge/ })).toBeVisible()
-  await expect(dialog.getByRole('option', { name: /Ogee/ })).toBeVisible()
+  await expect(dialog.getByRole('option', { name: /^Use Ogee/ })).toBeVisible()
   await shot(page, info, 'profiles-4-library')
 
-  // 5. Use it from the browser: the dialog closes and the chip names it.
+  // 5. Use it from the browser: the dialog closes and the card names it.
   await dialog.getByRole('option', { name: /Quarter edge/ }).dblclick()
   await expect(dialog).toBeHidden()
-  await expect(page.getByRole('button', { name: /Edge\s*Quarter edge/ })).toBeVisible()
+  await expect(moreShapes(page)).toContainText('Quarter edge')
   await shot(page, info, 'profiles-5-used')
 })
 
@@ -125,7 +132,7 @@ test('profiles: a closed shape says what to select first; a drawing that is not 
   // A closed rectangle, selected: Save profile… says what to pick instead.
   const rect = await page.evaluate(() => window.__hew_test!.drawRectangle([0, 0, 0], [0.2, 0.1, 0]))
   await page.evaluate((s) => window.__hew_test!.selectNodes([{ kind: 'sketch', id: s }]), rect.sketch)
-  await page.getByRole('button', { name: /Edge/ }).click()
+  await moreShapes(page).click()
   await page.getByRole('menuitem', { name: 'Save profile…' }).click()
   await expect(page.getByText('That shape is closed. Select an open line or arc')).toBeVisible()
   await shot(page, info, 'profiles-closed-shape')
@@ -135,7 +142,7 @@ test('profiles: a closed shape says what to select first; a drawing that is not 
     window.__hew_test!.drawLineChain([[0.5, 0.5, 0], [0.44, 0.53, 0], [0.4, 0.6, 0], [0.47, 0.57, 0]]),
   )
   await page.evaluate((s) => window.__hew_test!.selectNodes([{ kind: 'sketch', id: s }]), chain.sketch)
-  await page.getByRole('button', { name: /Edge/ }).click()
+  await moreShapes(page).click()
   await page.getByRole('menuitem', { name: 'Save profile…' }).click()
   await expect(page.getByText(/isn't a profile Hew can use\. Draw one open line or arc that runs from one side to the other without doubling back\./)).toBeVisible()
   await expect(page.getByRole('dialog', { name: 'Save profile' })).toHaveCount(0)

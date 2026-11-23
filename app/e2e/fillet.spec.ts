@@ -1,4 +1,4 @@
-import { test, expect, type Page, type TestInfo } from '@playwright/test'
+import { test, expect, type Locator, type Page, type TestInfo } from '@playwright/test'
 import { settleFrame } from './helpers/render'
 import { MULTI_CLICK_MS } from '../src/viewport/multiClick'
 import { requiresPreview } from './helpers/preview'
@@ -93,6 +93,12 @@ async function dragHandle(
   await moveToWorld(page, to)
   await page.mouse.up()
   await page.waitForTimeout(100)
+}
+
+/** Escape and the Save profile… row hand the keyboard back to the tool: no
+ *  control inside the card keeps focus. */
+async function expectNoCardFocus(card: Locator): Promise<void> {
+  await expect.poll(() => card.evaluate(el => el.contains(document.activeElement))).toBe(false)
 }
 
 const hash = (page: Page): Promise<string> => page.evaluate(() => window.__hew_test!.getModelStateHash())
@@ -464,6 +470,29 @@ test('Fillet: after a click commit and after a typed commit the keyboard is free
   await page.keyboard.press('Enter')
   await page.waitForTimeout(150)
   await expectKeyboardFree(page, 'after a typed commit')
+})
+
+test('Fillet: Escape from More shapes leaves the pick armed and a typed size still commits', async ({ page }) => {
+  await setup(page)
+  const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+  await page.evaluate((id) => window.__hew_test!.selectObjects([id]), id)
+  await expect(page.getByText('1 object')).toBeVisible()
+  await page.keyboard.press('Shift+F')
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  const trigger = card.getByRole('button', { name: /^More shapes/ })
+  const menu = card.getByRole('menu', { name: 'Additional edge profiles' })
+  await trigger.press('ArrowDown')
+  await expect(menu).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(menu).toHaveCount(0)
+  await expectNoCardFocus(card)
+  // Esc closed only the menu: the pick is still armed, and the next keys reach the tool.
+  expect(await activeTool(page)).toContain('Fillet')
+  await page.keyboard.type('10')
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(200)
+  await expect(menu).toHaveCount(0)
+  expect((await features(page, id)).filter((r) => r.kind === 'fillet').length).toBeGreaterThan(0)
 })
 
 test('Fillet: a refused commit leaves the tool armed but not the keyboard', async ({ page }) => {
@@ -1080,7 +1109,7 @@ test.describe('More Shapes integrated menu', () => {
       await expect(menu.getByRole('menuitem', { name: 'Save profile…' })).toBeEnabled()
       await page.keyboard.press('Escape')
       await expect(menu).toHaveCount(0)
-      await expect(trigger).toBeFocused()
+      await expectNoCardFocus(card)
       await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getBoundingClientRect().height)).toBe(0)
       await trigger.press('ArrowDown')
       await card.getByRole('button', { name: 'About Fillet' }).click()
@@ -1152,7 +1181,7 @@ test.describe('More Shapes integrated menu', () => {
     await expect.poll(() => expansion.evaluate(el => el.getAnimations().length)).toBeGreaterThan(0)
     await page.keyboard.press('Escape')
     await expect(expansion).toHaveAttribute('inert', '')
-    await expect(trigger).toBeFocused()
+    await expectNoCardFocus(card)
     await trigger.press('ArrowDown')
     await expect(page.getByRole('menuitemradio', { name: 'Ogee', exact: true })).toBeFocused()
     await page.keyboard.press('Escape')
@@ -1367,7 +1396,7 @@ test.describe('Fillet shape selector consistency', () => {
       await more.press('ArrowDown')
       await expect(corners.getByRole('radio', { name: 'Mitered', exact: true })).toBeVisible()
       await page.keyboard.press('Escape')
-      await expect(more).toBeFocused()
+      await expectNoCardFocus(card)
       // Native primary-button clicks still only change preview settings.
       await more.press('ArrowDown')
       await primary.getByRole('button', { name: 'Round', exact: true }).click()
@@ -1411,5 +1440,5 @@ test('Fillet main settings and combined profile menu keep their order when optio
   await expect(card.getByRole('radiogroup', { name: 'Corners' })).toHaveCount(0)
   await shot(page, info, 'optional-settings-hidden-expanded')
   await page.keyboard.press('Escape')
-  await expect(more).toBeFocused()
+  await expectNoCardFocus(card)
 })

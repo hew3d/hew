@@ -8,6 +8,11 @@ export const ToolOptionsExpandedContext = createContext(true)
 // A card unmounts when its tool ends; only its collapsed state survives.
 const collapsedTools = new Map<string, boolean>()
 
+/** Test-only: forget every tool's remembered collapsed state. */
+export function resetToolOptionsCardForTest(): void {
+  collapsedTools.clear()
+}
+
 const iconStyle: CSSProperties = {
   border: 'none', background: 'transparent', color: 'var(--text-secondary)',
   font: 'inherit', cursor: 'pointer', padding: '2px 5px',
@@ -37,6 +42,10 @@ export function ToolOptionsInfo({ label, children }: { label: string; children: 
       // A field owns its own Escape (including restoring its draft).
       const target = ev.target
       if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]')) return
+      // Hand the keyboard back to the tool: a focused card button would
+      // swallow the next Enter, Space or digit meant for the viewport.
+      const focused = document.activeElement
+      if (focused instanceof HTMLElement && root.current?.contains(focused)) focused.blur()
       ev.preventDefault()
       ev.stopPropagation()
     }
@@ -55,7 +64,7 @@ export function ToolOptionsInfo({ label, children }: { label: string; children: 
         position: 'absolute', bottom: 'calc(100% + 6px)', right: 0, width: 208,
         padding: 10, background: 'var(--surface-overlay)', border: '1px solid var(--border-strong)',
         borderRadius: 'var(--radius-panel-item)', boxShadow: 'var(--shadow-dock)',
-        color: 'var(--text-primary)', fontSize: 12, fontWeight: 400, lineHeight: 1.5,
+        color: 'var(--text-primary)', fontSize: 'var(--font-size-body)', fontWeight: 400, lineHeight: 1.5,
         letterSpacing: 'normal', textTransform: 'none', zIndex: 40,
       }}>{children}</span>}
     </span>

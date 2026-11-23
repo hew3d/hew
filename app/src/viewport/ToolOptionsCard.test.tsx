@@ -1,7 +1,8 @@
 import { fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, expect, it, vi } from 'vitest'
-import { ToolOptionsCard } from './ToolOptionsCard'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { ToolOptionsCard, resetToolOptionsCardForTest } from './ToolOptionsCard'
 
+beforeEach(() => resetToolOptionsCardForTest())
 afterEach(() => vi.restoreAllMocks())
 
 it('mounts without taking focus and pointer choices leave typed sizes in the viewport', () => {
@@ -61,4 +62,13 @@ it('contains native button keys but preserves global CAD shortcuts', () => {
   expect(key).not.toHaveBeenCalled()
   fireEvent.keyDown(choice, { key: 'z', ctrlKey: true })
   expect(key).toHaveBeenCalledTimes(1)
+})
+
+it('forgets every remembered collapsed state when reset', () => {
+  const first = render(<ToolOptionsCard tool="Reset test" info="Help."><span>Rows</span></ToolOptionsCard>)
+  fireEvent.click(screen.getByRole('button', { name: 'Collapse Reset test options' }))
+  first.unmount()
+  resetToolOptionsCardForTest()
+  render(<ToolOptionsCard tool="Reset test" info="Help."><span>Rows</span></ToolOptionsCard>)
+  expect(screen.getByText('Rows').closest('.tool-options-content')).toHaveAttribute('aria-hidden', 'false')
 })

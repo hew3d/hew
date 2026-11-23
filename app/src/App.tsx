@@ -106,8 +106,8 @@ import {
   subscribeFilletSettings,
   getFilletMeasurementLabelOverride,
   subscribeFilletMeasurementLabel,
+  profileSizeLabel,
 } from './tools/filletSettings'
-import { profileSizeLabel } from './tools/filletSettings'
 import { panelsForTool } from './tools/toolPanels'
 import { outlinerDrawing, resolveDraft, setKernelHidden, type OutlinerDrawing, type PlaneUnitsScene } from './tools/planeUnits'
 import { setDeformMode, getDeformMode, subscribeDeformMode } from './tools/deformMode'
@@ -5366,7 +5366,7 @@ export default function App() {
     | { kind: 'selection'; nodeKinds: Uint8Array; nodeIds: BigUint64Array; defaultName: string }
     | { kind: 'document'; defaultName: string }
     | {
-        /** A profile item (Fillet's profile chip, a built-in's copy, or an
+        /** A profile item (Fillet's More shapes menu, a built-in's copy, or an
          *  edited profile document). `build` makes the item bytes for the
          *  `hew.library` metadata the save mints. */
         kind: 'profile'
@@ -6328,7 +6328,7 @@ export default function App() {
     return parsed === null ? [] : [{ label: t`Detected width`, value: formatLength(parsed.width) }]
   }, [t])
 
-  /** Library ▸ Save a copy on a built-in profile, and the profile chip's
+  /** Library ▸ Save a copy on a built-in profile, and the Fillet card's
    *  "Save profile…" with a built-in chosen. */
   const openSaveBuiltInCopy = useCallback(
     (id: string, name: string) => {
@@ -6353,7 +6353,7 @@ export default function App() {
     [openSaveBuiltInCopy],
   )
 
-  /** The profile chip's "Save profile…": the selected drawn chain, else a
+  /** The Fillet card's "Save profile…" (under More shapes): the selected drawn chain, else a
    *  copy of the built-in profile that is current. */
   const openSaveProfile = useCallback(() => {
     const scene = sceneRef.current

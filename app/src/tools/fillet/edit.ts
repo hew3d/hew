@@ -84,7 +84,7 @@ export class EditStageOps {
     const json = editProfileJson(s, atLimit ? limit.max / k : size, k, size)
     if (json === null) {
       this.c.preview.clearPreviewDrawing()
-      this.c.statusLine = 'Pick the profile in the profile chip first.'
+      this.c.statusLine = 'Pick the profile under More shapes first.'
       this.refreshEditMarkers()
       return
     }
@@ -186,7 +186,7 @@ export class EditStageOps {
     }
     const json = editProfileJson(s, size, 1 / s.frame.scale)
     if (json === null) {
-      this.c.hooks.onToast('Pick the profile in the profile chip first.')
+      this.c.hooks.onToast('Pick the profile under More shapes first.')
       return
     }
     try {
