@@ -553,11 +553,12 @@ fn class_of_refusal(code: &str, detail: &Value, asked: Option<f64>) -> (Class, S
         | "stop_out_of_range"
         | "segments_out_of_range"
         | "blend_needs_solid" => (Class::Limit, code.to_string()),
-        // Which corner is named first is not steady across platforms: the
-        // refusal comes out of a size search that lands within rounding of
-        // a seam threshold, so identical corners build or refuse by the last
-        // bit. The class is what the board judges.
-        "unsupported_vertex" => (Class::Generic, code.to_string()),
+        // The corner named is part of the row: a refusal that moves to
+        // another corner is a change the board should show.
+        "unsupported_vertex" => (
+            Class::Generic,
+            format!("{code} at={}", point(&detail["at"])),
+        ),
         _ => (Class::Generic, code.to_string()),
     }
 }
