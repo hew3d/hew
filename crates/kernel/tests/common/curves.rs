@@ -699,6 +699,39 @@ pub fn lofted_hull() -> Object {
     .unwrap()
 }
 
+/// A cylinder of `n` claimed wall facets built straight from its polygons
+/// (a sketch's circle costs the square of `n` to build), its walls claiming
+/// the cylinder [`cylinder`] claims: the same faces, edges and chains.
+pub fn claimed_cylinder(n: usize) -> Object {
+    let claim = {
+        let c = cylinder(0.1, 0.1, 24);
+        c.faces().values().find_map(|f| f.surface).unwrap()
+    };
+    let ring = |z: f64| {
+        (0..n).map(move |i| {
+            let a = std::f64::consts::TAU * i as f64 / n as f64;
+            p3(0.1 * kernel::trig::cos(a), 0.1 * kernel::trig::sin(a), z)
+        })
+    };
+    let points: Vec<Point3> = ring(0.0).chain(ring(0.1)).collect();
+    let mut faces: Vec<Vec<usize>> = vec![(0..n).collect(), (n..2 * n).collect()];
+    for i in 0..n {
+        let j = (i + 1) % n;
+        faces.push(vec![i, j, n + j, n + i]);
+    }
+    let mut obj = convex_solid(&points, &faces);
+    let walls: Vec<kernel::FaceId> = obj
+        .faces()
+        .iter()
+        .filter(|(_, f)| f.plane.normal().z.abs() < 0.5)
+        .map(|(id, _)| id)
+        .collect();
+    for w in walls {
+        obj.set_face_surface_for_test(w, Some(claim));
+    }
+    obj
+}
+
 /// The sharp edges of `obj` with both ends at height `z`.
 pub fn sharp_edges_at_height(obj: &Object, z: f64) -> Vec<EdgeId> {
     obj.sharp_edges()

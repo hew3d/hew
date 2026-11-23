@@ -1243,24 +1243,341 @@ pub(crate) type Segment = (Point3, Point3);
 
 /// The edges of `obj` lying along `seg` and overlapping it.
 pub(crate) fn edges_on(obj: &Object, seg: Segment) -> Vec<EdgeId> {
-    let (a, b) = seg;
-    let Ok(d) = (b - a).normalized() else {
+    let Some(test) = SegmentTest::new(seg) else {
         return Vec::new();
     };
-    let len = (b - a).length();
-    let on_line = |p: Point3| ((p - a) - d * (p - a).dot(d)).length() <= tol::BLEND_VERIFY;
+    add_locate_work(obj.edges().len());
     obj.edges()
         .keys()
-        .filter(|&e| {
-            obj.edge_endpoints(e).is_some_and(|(p, q)| {
-                if !(on_line(p) && on_line(q)) {
-                    return false;
-                }
-                let (tp, tq) = ((p - a).dot(d), (q - a).dot(d));
-                tp.max(tq) > tol::POINT_MERGE && tp.min(tq) < len - tol::POINT_MERGE
-            })
-        })
+        .filter(|&e| obj.edge_endpoints(e).is_some_and(|(p, q)| test.holds(p, q)))
         .collect()
+}
+
+/// Whether an edge lies along a segment and overlaps it: both ends within
+/// [`tol::BLEND_VERIFY`] of the segment's line, and the stretch between
+/// them reaching more than [`tol::POINT_MERGE`] past each end of the
+/// segment toward the other.
+struct SegmentTest {
+    a: Point3,
+    d: Vec3,
+    len: f64,
+}
+
+impl SegmentTest {
+    /// `None` for a segment too short to have a direction.
+    fn new((a, b): Segment) -> Option<SegmentTest> {
+        let d = (b - a).normalized().ok()?;
+        Some(SegmentTest {
+            a,
+            d,
+            len: (b - a).length(),
+        })
+    }
+
+    fn holds(&self, p: Point3, q: Point3) -> bool {
+        let (a, d) = (self.a, self.d);
+        let on_line = |x: Point3| ((x - a) - d * (x - a).dot(d)).length() <= tol::BLEND_VERIFY;
+        if !(on_line(p) && on_line(q)) {
+            return false;
+        }
+        let (tp, tq) = ((p - a).dot(d), (q - a).dot(d));
+        tp.max(tq) > tol::POINT_MERGE && tp.min(tq) < self.len - tol::POINT_MERGE
+    }
+}
+
+/// The edges of one object near a set of segments, by the cells of a grid
+/// they pass through, so the edges along each of many segments
+/// ([`StoredSpec::locate`]) are found among the few near the segment rather
+/// than by testing every edge of the object for every segment.
+/// [`EdgeCells::edges_on`] answers exactly as [`edges_on`]: the same edges
+/// in the same (slot) order.
+///
+/// The grid covers the box of the segments it is built for, grown by twice
+/// `BLEND_VERIFY` (the reach) and one cell more. Each edge is cut to that
+/// box and entered in the cell of each of a row of points along the piece,
+/// at most a cell apart and including both ends. Why no edge is missed: an
+/// edge [`SegmentTest`] accepts has both ends within `BLEND_VERIFY` of the
+/// segment's line, so every point of it is (the distance to a line is
+/// convex along a straight edge), and it overlaps the segment along the
+/// line, so one of its points lies within `BLEND_VERIFY` of a point of the
+/// segment: inside the segment's box grown by the reach, so inside the
+/// piece. A sample lies within half a cell of that point, so in a cell at
+/// most one step from the box's cells on each axis, and the query reads
+/// those cells and one more each way. The reach is twice what the test
+/// allows and the cut box a cell larger, so rounding has no say.
+///
+/// Everything the grid cannot answer cheaply goes to the full scan: a
+/// segment whose grown box leaves the grid's box or spans too many cells,
+/// and every segment once the grid would take more samples than
+/// [`EdgeCells::budget`] allows (tiny segments spread over a large box: a
+/// damaged record). An edge piece that would take too many samples is kept
+/// in a list every query reads.
+///
+/// [`StoredSpec::locate`]: super::record::StoredSpec
+pub(crate) struct EdgeCells<'a> {
+    obj: &'a Object,
+    cell: f64,
+    /// The segments' box grown by the reach: queries inside it read the
+    /// grid. `None` when there is no grid (no segments, or abandoned).
+    inside: Option<(Point3, Point3)>,
+    cells: BTreeMap<[i64; 3], Vec<EdgeId>>,
+    /// Edges too long for the grid, read by every query.
+    wide: Vec<EdgeId>,
+    /// The grid went over its budget: every query scans.
+    abandoned: bool,
+}
+
+/// The most points an edge is sampled at; a longer piece goes to
+/// [`EdgeCells::wide`].
+const EDGE_SAMPLES_MAX: f64 = 4096.0;
+/// The most cells a query reads; a larger segment scans every edge.
+const QUERY_CELLS_MAX: i64 = 4096;
+/// The samples a grid may take, per edge of the object and in all
+/// ([`EdgeCells::budget`]).
+const GRID_SAMPLES_PER_EDGE: usize = 32;
+const GRID_SAMPLES_BASE: usize = 65_536;
+
+/// The box of `pts` grown by `grow`; `None` for no points.
+fn grown_box(pts: impl Iterator<Item = Point3>, grow: f64) -> Option<(Point3, Point3)> {
+    let mut out: Option<(Point3, Point3)> = None;
+    for p in pts {
+        out = Some(match out {
+            None => (p, p),
+            Some((lo, hi)) => (
+                Point3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z)),
+                Point3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z)),
+            ),
+        });
+    }
+    out.map(|(lo, hi)| {
+        (
+            Point3::new(lo.x - grow, lo.y - grow, lo.z - grow),
+            Point3::new(hi.x + grow, hi.y + grow, hi.z + grow),
+        )
+    })
+}
+
+/// The part of the edge `p`–`q` inside the box (Liang–Barsky), as its end
+/// parameters; `None` when it misses the box.
+fn clip(p: Point3, q: Point3, (lo, hi): (Point3, Point3)) -> Option<(f64, f64)> {
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for (a, b, l, h) in [
+        (p.x, q.x, lo.x, hi.x),
+        (p.y, q.y, lo.y, hi.y),
+        (p.z, q.z, lo.z, hi.z),
+    ] {
+        let d = b - a;
+        if d == 0.0 {
+            if a < l || a > h {
+                return None;
+            }
+            continue;
+        }
+        let (u, v) = ((l - a) / d, (h - a) / d);
+        let (u, v) = (u.min(v), u.max(v));
+        t0 = t0.max(u);
+        t1 = t1.min(v);
+        if t0 > t1 {
+            return None;
+        }
+    }
+    Some((t0, t1))
+}
+
+fn contains_box((lo, hi): (Point3, Point3), (a, b): (Point3, Point3)) -> bool {
+    lo.x <= a.x && lo.y <= a.y && lo.z <= a.z && b.x <= hi.x && b.y <= hi.y && b.z <= hi.z
+}
+
+impl<'a> EdgeCells<'a> {
+    /// The grid for `obj` about `segs` (the segments it will be asked
+    /// about), its cell their mean length, so a query reads a few cells.
+    pub(crate) fn new(obj: &'a Object, segs: &[Segment]) -> EdgeCells<'a> {
+        let total: f64 = segs.iter().map(|(a, b)| (*b - *a).length()).sum();
+        let mean = total / segs.len().max(1) as f64;
+        let cell = mean.max(4.0 * tol::BLEND_VERIFY);
+        let reach = 2.0 * tol::BLEND_VERIFY;
+        let mut inside = grown_box(segs.iter().flat_map(|&(a, b)| [a, b]), reach);
+        let mut cells: BTreeMap<[i64; 3], Vec<EdgeId>> = BTreeMap::new();
+        let mut wide = Vec::new();
+        let mut abandoned = false;
+        if let Some(bx) = inside {
+            let cut = grown_box([bx.0, bx.1].into_iter(), cell).expect("two points");
+            let mut left = Self::budget(obj);
+            'edges: for e in obj.edges().keys() {
+                add_locate_work(1);
+                let Some((p, q)) = obj.edge_endpoints(e) else {
+                    continue;
+                };
+                let Some((t0, t1)) = clip(p, q, cut) else {
+                    continue;
+                };
+                let (a, b) = (p + (q - p) * t0, p + (q - p) * t1);
+                let steps = ((b - a).length() / cell).ceil();
+                if steps.is_nan() || steps > EDGE_SAMPLES_MAX {
+                    wide.push(e);
+                    continue;
+                }
+                let steps = steps.max(1.0) as usize;
+                let mut last: Option<[i64; 3]> = None;
+                for i in 0..=steps {
+                    if left == 0 {
+                        abandoned = true;
+                        break 'edges;
+                    }
+                    left -= 1;
+                    add_locate_work(1);
+                    let k = cell_key(cell, a + (b - a) * (i as f64 / steps as f64));
+                    if last != Some(k) {
+                        let list = cells.entry(k).or_default();
+                        if list.last() != Some(&e) {
+                            list.push(e);
+                        }
+                        last = Some(k);
+                    }
+                }
+            }
+        }
+        if abandoned {
+            inside = None;
+            cells.clear();
+            wide.clear();
+        }
+        EdgeCells {
+            obj,
+            cell,
+            inside,
+            cells,
+            wide,
+            abandoned,
+        }
+    }
+
+    /// The most samples the grid of `obj` may take before it is abandoned:
+    /// [`GRID_SAMPLES_PER_EDGE`] per edge and [`GRID_SAMPLES_BASE`] more.
+    /// A filleted rim's grid takes under two per edge of the object.
+    fn budget(obj: &Object) -> usize {
+        GRID_SAMPLES_PER_EDGE
+            .saturating_mul(obj.edges().len())
+            .saturating_add(GRID_SAMPLES_BASE)
+    }
+
+    /// [`edges_on`]`(obj, seg)`.
+    pub(crate) fn edges_on(&self, seg: Segment) -> Vec<EdgeId> {
+        let Some(test) = SegmentTest::new(seg) else {
+            return Vec::new();
+        };
+        let reach = 2.0 * tol::BLEND_VERIFY;
+        let query = grown_box([seg.0, seg.1].into_iter(), reach).expect("two points");
+        if !self.inside.is_some_and(|b| contains_box(b, query)) {
+            note_path(if self.abandoned {
+                Path::Abandoned
+            } else {
+                Path::Outside
+            });
+            return edges_on(self.obj, seg);
+        }
+        let lo = cell_key(self.cell, query.0).map(|k| k.saturating_sub(1));
+        let hi = cell_key(self.cell, query.1).map(|k| k.saturating_add(1));
+        let count = (0..3).fold(1i64, |n, i| {
+            n.saturating_mul(hi[i].saturating_sub(lo[i]).saturating_add(1))
+        });
+        if count > QUERY_CELLS_MAX {
+            note_path(Path::TooManyCells);
+            return edges_on(self.obj, seg);
+        }
+        note_path(if self.wide.is_empty() {
+            Path::Grid
+        } else {
+            Path::GridWithWide
+        });
+        add_locate_work(usize::try_from(count).unwrap_or(usize::MAX));
+        let mut near: Vec<EdgeId> = self.wide.clone();
+        for x in lo[0]..=hi[0] {
+            for y in lo[1]..=hi[1] {
+                for z in lo[2]..=hi[2] {
+                    if let Some(es) = self.cells.get(&[x, y, z]) {
+                        near.extend(es);
+                    }
+                }
+            }
+        }
+        near.sort_unstable();
+        near.dedup();
+        add_locate_work(near.len());
+        near.retain(|&e| {
+            self.obj
+                .edge_endpoints(e)
+                .is_some_and(|(p, q)| test.holds(p, q))
+        });
+        near
+    }
+}
+
+/// The grid cell of `p`.
+fn cell_key(cell: f64, p: Point3) -> [i64; 3] {
+    [
+        (p.x / cell).floor() as i64,
+        (p.y / cell).floor() as i64,
+        (p.z / cell).floor() as i64,
+    ]
+}
+
+/// The way an [`EdgeCells::edges_on`] query was answered (test support).
+#[derive(Clone, Copy)]
+enum Path {
+    /// The grid, with no wide edges.
+    Grid,
+    /// The grid and its wide edges.
+    GridWithWide,
+    /// The scan: the segment leaves the grid's box.
+    Outside,
+    /// The scan: the segment spans too many cells.
+    TooManyCells,
+    /// The scan: the grid went over its budget.
+    Abandoned,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The queries answered each [`Path`] on this thread.
+    static PATHS: std::cell::Cell<[usize; 5]> = const { std::cell::Cell::new([0; 5]) };
+}
+
+#[inline]
+fn note_path(path: Path) {
+    #[cfg(test)]
+    PATHS.with(|c| {
+        let mut n = c.get();
+        n[path as usize] += 1;
+        c.set(n);
+    });
+    #[cfg(not(test))]
+    let _ = path;
+}
+
+thread_local! {
+    /// The locate work done on this thread (test support): see
+    /// [`locate_work_for_test`].
+    static LOCATE_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts locate work in a build with debug assertions, where the specs
+/// that read it run.
+#[inline]
+fn add_locate_work(n: usize) {
+    if cfg!(debug_assertions) {
+        LOCATE_WORK.with(|c| c.set(c.get().saturating_add(n)));
+    }
+}
+
+/// The work finding edges along segments has done on the calling thread:
+/// for [`edges_on`], every edge tested; for [`EdgeCells`], every edge its
+/// build visits and every sample it takes, and per query the cells read
+/// and the edges tested. Always zero in a build without debug assertions.
+/// Test support only.
+#[doc(hidden)]
+pub fn locate_work_for_test() -> usize {
+    LOCATE_WORK.with(std::cell::Cell::get)
 }
 
 /// (segments, spec, id, may merge): one blend of a corner re-solve, its
@@ -1427,5 +1744,480 @@ impl CornerResolve {
                 edge_map: BTreeMap::new(),
             },
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::math::Plane;
+    use proptest::prelude::*;
+
+    /// A convex solid from its polygons, each turned to face away from
+    /// the vertex centroid.
+    fn convex(points: &[Point3], faces: &[Vec<usize>]) -> Object {
+        let c = points
+            .iter()
+            .fold(Vec3::new(0.0, 0.0, 0.0), |a, p| a + p.to_vec())
+            / points.len() as f64;
+        let oriented: Vec<Vec<usize>> = faces
+            .iter()
+            .map(|f| {
+                let ring: Vec<Point3> = f.iter().map(|&i| points[i]).collect();
+                let n = Plane::from_polygon(&ring).unwrap().normal();
+                let fc = ring
+                    .iter()
+                    .fold(Vec3::new(0.0, 0.0, 0.0), |a, p| a + p.to_vec())
+                    / ring.len() as f64;
+                if n.dot(fc - c) < 0.0 {
+                    f.iter().rev().copied().collect()
+                } else {
+                    f.clone()
+                }
+            })
+            .collect();
+        Object::from_polygons(points, &oriented).unwrap()
+    }
+
+    fn unit_box() -> Object {
+        let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+        convex(
+            &[
+                p(0.0, 0.0, 0.0),
+                p(1.0, 0.0, 0.0),
+                p(1.0, 1.0, 0.0),
+                p(0.0, 1.0, 0.0),
+                p(0.0, 0.0, 1.0),
+                p(1.0, 0.0, 1.0),
+                p(1.0, 1.0, 1.0),
+                p(0.0, 1.0, 1.0),
+            ],
+            &[
+                vec![0, 3, 2, 1],
+                vec![4, 5, 6, 7],
+                vec![0, 1, 5, 4],
+                vec![1, 2, 6, 5],
+                vec![2, 3, 7, 6],
+                vec![3, 0, 4, 7],
+            ],
+        )
+    }
+
+    /// A cylinder of radius 0.1 and height 0.1 with `n` wall facets that
+    /// claim it.
+    fn cylinder(n: usize) -> Object {
+        let ring = |z: f64| {
+            (0..n).map(move |i| {
+                let a = std::f64::consts::TAU * i as f64 / n as f64;
+                Point3::new(0.1 * trig::cos(a), 0.1 * trig::sin(a), z)
+            })
+        };
+        let points: Vec<Point3> = ring(0.0).chain(ring(0.1)).collect();
+        let mut faces: Vec<Vec<usize>> = vec![(0..n).collect(), (n..2 * n).collect()];
+        for i in 0..n {
+            let j = (i + 1) % n;
+            faces.push(vec![i, j, n + j, n + i]);
+        }
+        let mut obj = convex(&points, &faces);
+        let walls: Vec<FaceId> = obj
+            .faces()
+            .iter()
+            .filter(|(_, f)| f.plane.normal().z.abs() < 0.5)
+            .map(|(id, _)| id)
+            .collect();
+        for w in walls {
+            obj.set_face_surface_for_test(
+                w,
+                Some(SurfaceRef::Cylinder {
+                    axis_point: Point3::new(0.0, 0.0, 0.0),
+                    axis: Vec3::new(0.0, 0.0, 1.0),
+                    radius: 0.1,
+                }),
+            );
+        }
+        obj
+    }
+
+    fn round(edges: Vec<EdgeId>, radius: f64) -> BlendSpec {
+        BlendSpec {
+            edges,
+            profile: BlendProfile::Round {
+                radius,
+                segments: 4,
+            },
+            primary: None,
+            corners: CornerStyle::Default,
+            stops: None,
+            handles: Vec::new(),
+        }
+    }
+
+    fn edges_at_height(obj: &Object, z: f64) -> Vec<EdgeId> {
+        obj.edges()
+            .keys()
+            .filter(|&e| {
+                obj.edge_endpoints(e).is_some_and(|(p, q)| {
+                    (p.z - z).abs() <= tol::POINT_MERGE && (q.z - z).abs() <= tol::POINT_MERGE
+                })
+            })
+            .collect()
+    }
+
+    /// Objects with the blends and restorations the record replay locates
+    /// segments on, and the segments their records hold.
+    fn corpus() -> Vec<(Object, Vec<Segment>)> {
+        let mut objs: Vec<Object> = Vec::new();
+        let b = unit_box();
+        let top = edges_at_height(&b, 1.0);
+        let (one, _) = b.blend_edges(&round(vec![top[0]], 0.1)).unwrap();
+        let (rim, _) = b.blend_edges(&round(top.clone(), 0.1)).unwrap();
+        let c = cylinder(48);
+        let (crim, _) = c
+            .blend_edges(&round(edges_at_height(&c, 0.1), 0.01))
+            .unwrap();
+        let (both, _) = crim
+            .blend_edges(&round(edges_at_height(&crim, 0.0), 0.01))
+            .unwrap();
+        objs.extend([b, one, rim, c, crim, both]);
+        let mut out = Vec::new();
+        for o in &objs {
+            let mut stored: Vec<Segment> = Vec::new();
+            for (&id, rec) in o.blend_records() {
+                stored.extend(rec.spec.edges.iter().copied());
+                if let Ok(r) = o.restore_blend(id) {
+                    out.push((r.object, rec.spec.edges.clone()));
+                }
+            }
+            out.push((o.clone(), stored));
+        }
+        out
+    }
+
+    /// A segment `len` long along every edge of `obj`, off its middle.
+    fn pieces(obj: &Object, len: f64) -> Vec<Segment> {
+        obj.edges()
+            .keys()
+            .filter_map(|e| {
+                let (p, q) = obj.edge_endpoints(e)?;
+                let u = (q - p).normalized().ok()?;
+                let m = p + (q - p) * 0.37;
+                Some((m, m + u * len))
+            })
+            .collect()
+    }
+
+    /// A segment a micrometer long along every edge of `obj`.
+    fn micro(obj: &Object) -> Vec<Segment> {
+        pieces(obj, 1e-6)
+    }
+
+    /// Micrometer segments along every edge of `obj` at 19 places from end
+    /// to end, so some fall near every kind of cell boundary.
+    fn micro_along(obj: &Object) -> Vec<Segment> {
+        let mut out = Vec::new();
+        for e in obj.edges().keys() {
+            let Some((p, q)) = obj.edge_endpoints(e) else {
+                continue;
+            };
+            let Ok(u) = (q - p).normalized() else {
+                continue;
+            };
+            for k in 1..20 {
+                let m = p + (q - p) * (k as f64 / 20.0);
+                out.push((m, m + u * 1e-6));
+            }
+        }
+        out
+    }
+
+    /// Segments about every edge of `obj`: the edge, reversed, its middle,
+    /// grown past both ends, one end only, beside it within and past
+    /// `BLEND_VERIFY`, along its line beyond it, and micrometers of it.
+    fn probes(obj: &Object) -> Vec<Segment> {
+        let mut out = Vec::new();
+        for e in obj.edges().keys() {
+            let (p, q) = obj.edge_endpoints(e).unwrap();
+            let d = q - p;
+            let side = {
+                let n = d.cross(Vec3::new(0.3, 0.5, 0.8));
+                n.normalized().unwrap_or(Vec3::new(1.0, 0.0, 0.0))
+            };
+            let at = |t: f64| p + d * t;
+            out.extend([
+                (p, q),
+                (q, p),
+                (at(0.25), at(0.75)),
+                (at(-1.0), at(2.0)),
+                (at(0.5), at(3.0)),
+                (at(1.0), at(2.0)),
+                (at(1.5), at(2.5)),
+                (
+                    p + side * (0.5 * tol::BLEND_VERIFY),
+                    q + side * (0.5 * tol::BLEND_VERIFY),
+                ),
+                (
+                    p + side * (3.0 * tol::BLEND_VERIFY),
+                    q + side * (3.0 * tol::BLEND_VERIFY),
+                ),
+                (p, p),
+            ]);
+        }
+        out.extend(micro(obj));
+        out.extend(micro_along(obj));
+        out
+    }
+
+    /// The queries answered each [`Path`] and the locate work done while
+    /// `f` ran.
+    fn traced<R>(f: impl FnOnce() -> R) -> ([usize; 5], usize, R) {
+        let (p0, w0) = (PATHS.with(std::cell::Cell::get), locate_work_for_test());
+        let out = f();
+        let p1 = PATHS.with(std::cell::Cell::get);
+        let mut d = [0; 5];
+        for i in 0..5 {
+            d[i] = p1[i] - p0[i];
+        }
+        (d, locate_work_for_test() - w0, out)
+    }
+
+    const GRID: usize = Path::Grid as usize;
+    const WIDE: usize = Path::GridWithWide as usize;
+    const OUTSIDE: usize = Path::Outside as usize;
+    const TOO_MANY: usize = Path::TooManyCells as usize;
+    const ABANDONED: usize = Path::Abandoned as usize;
+
+    /// [`EdgeCells::edges_on`] answers as [`edges_on`], the scan of every
+    /// edge kept as its reference, for every segment the records hold and
+    /// every probe about every edge, with the grid built for the stored
+    /// segments, for all of them, for micrometer segments along every edge
+    /// (cells so small the long edges go to the wide list), for one short
+    /// and one long segment elsewhere (queries outside the grid), and for
+    /// millimeter segments along every edge (cells small enough that edges
+    /// take many samples, so the micrometer probes all along them test their
+    /// spacing). Each sizing is held to the way it must answer: built for
+    /// all the segments, the grid answers most of them at under a quarter of
+    /// the scan's work (measured: about an eighth, the long probes reading
+    /// many cells); the micrometer grid of a box reads its wide edges and
+    /// sends whole edges to the scan as too many cells; a grid elsewhere
+    /// sends them out.
+    #[test]
+    fn edge_cells_answer_as_the_scan() {
+        let mut checked = 0;
+        let mut by_sizing = [[0usize; 5]; 6];
+        // Over the objects of 300 edges or more, built for all segments: the
+        // grid's work on the queries it answers, and the scan's for them.
+        let (mut grid_work, mut scan_work) = (0usize, 0usize);
+        for (obj, stored) in corpus() {
+            let mut segs = stored.clone();
+            segs.extend(probes(&obj));
+            let sizes: [Vec<Segment>; 6] = [
+                stored.clone(),
+                segs.clone(),
+                micro(&obj),
+                vec![(Point3::new(0.0, 0.0, 0.0), Point3::new(1e-6, 0.0, 0.0))],
+                vec![(Point3::new(0.0, 0.0, 0.0), Point3::new(10.0, 0.0, 0.0))],
+                pieces(&obj, 1e-3),
+            ];
+            for (i, sized) in sizes.iter().enumerate() {
+                let cells = EdgeCells::new(&obj, sized);
+                // Micrometer cells over a filleted rim go over the budget.
+                assert!(i == 2 || !cells.abandoned, "sizing {i}: within the budget");
+                if i == 2 && !cells.abandoned {
+                    assert!(
+                        !cells.wide.is_empty(),
+                        "micrometer cells leave long edges wide"
+                    );
+                }
+                for &s in &segs {
+                    let (paths, work, got) = traced(|| cells.edges_on(s));
+                    assert_eq!(got, edges_on(&obj, s), "sizing {i}, segment {s:?}");
+                    for k in 0..5 {
+                        by_sizing[i][k] += paths[k];
+                    }
+                    if i == 1 && obj.edges().len() >= 300 && paths[GRID] + paths[WIDE] == 1 {
+                        grid_work += work;
+                        scan_work += obj.edges().len();
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 10_000, "{checked}");
+        let all = |n: [usize; 5]| n.iter().sum::<usize>();
+        let on_grid = |n: [usize; 5]| n[GRID] + n[WIDE];
+        assert!(
+            on_grid(by_sizing[1]) * 10 >= all(by_sizing[1]) * 8,
+            "built for all segments, the grid answers most: {:?}",
+            by_sizing[1]
+        );
+        assert!(
+            scan_work > 0 && grid_work * 4 <= scan_work,
+            "grid work {grid_work} against the scan's {scan_work}"
+        );
+        assert!(
+            by_sizing[2][WIDE] > 0,
+            "the wide list is read: {:?}",
+            by_sizing[2]
+        );
+        assert!(
+            on_grid(by_sizing[5]) * 2 >= all(by_sizing[5]),
+            "millimeter cells answer on the grid: {:?}",
+            by_sizing[5]
+        );
+        assert!(
+            by_sizing[2][TOO_MANY] > 0,
+            "too many cells scan: {:?}",
+            by_sizing[2]
+        );
+        assert!(
+            by_sizing[3][OUTSIDE] == all(by_sizing[3]) - by_sizing[3][TOO_MANY]
+                && by_sizing[3][OUTSIDE] > 0,
+            "a grid elsewhere sends queries out: {:?}",
+            by_sizing[3]
+        );
+        assert!(
+            by_sizing
+                .iter()
+                .enumerate()
+                .all(|(i, n)| i == 2 || n[ABANDONED] == 0)
+        );
+    }
+
+    /// A record of micrometer segments spread over a large box (a damaged
+    /// file) would sample every edge thousands of times: past its budget
+    /// the grid is abandoned and every query takes the scan, answering as
+    /// it does.
+    #[test]
+    fn a_grid_over_its_budget_is_abandoned_for_the_scan() {
+        let c = cylinder(48);
+        let (obj, _) = c
+            .blend_edges(&round(edges_at_height(&c, 0.1), 0.01))
+            .unwrap();
+        // Two micrometer segments at opposite corners well outside the
+        // object: one box over all of it, cells a micrometer wide.
+        let far = |x: f64| (Point3::new(x, x, x), Point3::new(x + 1e-6, x, x));
+        let sized = vec![far(-1.0), far(1.0)];
+        let (_, work, cells) = traced(|| EdgeCells::new(&obj, &sized));
+        assert!(cells.abandoned);
+        assert!(cells.cells.is_empty() && cells.wide.is_empty());
+        assert!(
+            work <= EdgeCells::budget(&obj) + obj.edges().len() + 1,
+            "the build stops at its budget: {work}"
+        );
+        let mut segs = probes(&obj);
+        segs.extend(sized);
+        let mut paths = [0usize; 5];
+        for &s in &segs {
+            let (p, _, got) = traced(|| cells.edges_on(s));
+            assert_eq!(got, edges_on(&obj, s), "segment {s:?}");
+            for k in 0..5 {
+                paths[k] += p[k];
+            }
+        }
+        assert_eq!(paths[ABANDONED], paths.iter().sum::<usize>(), "{paths:?}");
+    }
+
+    /// Random segments about random edges of a filleted cylinder and a
+    /// filleted box: stretches along an edge's line, nudged off it by up to
+    /// about twice `BLEND_VERIFY`, one in three a micrometer long. The grid
+    /// is built about the segments themselves, about them with cells of a
+    /// millimeter or of a tenth of one (the box's long edges go wide), or
+    /// about them and the object's whole diagonal, so every query falls
+    /// inside it. At least one answer in 20
+    /// must find edges (measured: one in ten), half the queries must be
+    /// answered by the grid (measured: three in four; the rest span too many
+    /// tenth-of-a-millimeter cells), and some must read the wide list.
+    #[test]
+    fn edge_cells_answer_as_the_scan_for_random_segments() {
+        use proptest::test_runner::{Config, TestRunner};
+        let objects: Vec<Object> = {
+            let c = cylinder(24);
+            let b = unit_box();
+            let top = edges_at_height(&b, 1.0);
+            vec![
+                c.blend_edges(&round(edges_at_height(&c, 0.1), 0.01))
+                    .unwrap()
+                    .0,
+                b.blend_edges(&round(top, 0.1)).unwrap().0,
+            ]
+        };
+        let strategy = (
+            proptest::collection::vec(
+                (
+                    0usize..10_000,
+                    -1.5f64..2.5,
+                    -1.5f64..2.5,
+                    -1.5f64..1.5,
+                    -1.5f64..1.5,
+                ),
+                1..40,
+            ),
+            0usize..4,
+            0usize..2,
+        );
+        let tally = std::cell::Cell::new((0usize, 0usize, 0usize, 0usize));
+        let mut runner = TestRunner::new(Config {
+            cases: 96,
+            failure_persistence: None,
+            ..Config::default()
+        });
+        runner
+            .run(&strategy, |(picks, sizing, which)| {
+                let obj = &objects[which];
+                let edges: Vec<EdgeId> = obj.edges().keys().collect();
+                let segs: Vec<Segment> = picks
+                    .iter()
+                    .map(|&(k, t0, t1, u, v)| {
+                        let (p, q) = obj.edge_endpoints(edges[k % edges.len()]).unwrap();
+                        let d = q - p;
+                        let off = Vec3::new(u, v, 0.5 * u - v) * tol::BLEND_VERIFY;
+                        let a = p + d * t0 + off;
+                        // One pick in three is a micrometer piece of the
+                        // edge's line from `a`.
+                        let b = match (k / 7) % 3 {
+                            0 => a + d.normalized().unwrap() * (1e-6 * (1.0 + t1.abs())),
+                            _ => p + d * t1 + off,
+                        };
+                        (a, b)
+                    })
+                    .collect();
+                let mut sized = segs.clone();
+                match sizing {
+                    0 => {}
+                    1 | 2 => {
+                        // Enough short segments to bring the mean, so the
+                        // cell, down to a millimeter (every edge sampled many
+                        // times) or a tenth of one (the box's long edges go
+                        // wide).
+                        let len = if sizing == 1 { 1e-3 } else { 1e-4 };
+                        let total: f64 = segs.iter().map(|(a, b)| (*b - *a).length()).sum();
+                        let n = (total / len).ceil() as usize;
+                        let a = segs[0].0;
+                        sized.extend(std::iter::repeat_n((a, a + Vec3::new(len, 0.0, 0.0)), n));
+                    }
+                    _ => {
+                        let bx =
+                            grown_box(obj.vertices().values().map(|v| v.position), 0.0).unwrap();
+                        sized.push(bx);
+                    }
+                }
+                let cells = EdgeCells::new(obj, &sized);
+                let (mut n, mut found, mut grid, mut wide) = tally.get();
+                for &s in &segs {
+                    let (paths, _, got) = traced(|| cells.edges_on(s));
+                    prop_assert_eq!(&got, &edges_on(obj, s), "segment {:?}", s);
+                    n += 1;
+                    found += usize::from(!got.is_empty());
+                    grid += paths[GRID] + paths[WIDE];
+                    wide += paths[WIDE];
+                }
+                tally.set((n, found, grid, wide));
+                Ok(())
+            })
+            .unwrap();
+        let (n, found, grid, wide) = tally.get();
+        assert!(found * 20 >= n, "{found} of {n} queries find an edge");
+        assert!(grid * 2 >= n, "{grid} of {n} queries on the grid");
+        assert!(wide > 0, "no query read the wide list");
     }
 }

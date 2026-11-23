@@ -44,6 +44,7 @@ mod blend_ext_specs;
 mod blend_features_memo_specs;
 mod blend_props;
 mod blend_record_specs;
+mod blend_restore_cost_specs;
 mod blend_rim_specs;
 mod blend_specs;
 mod blend_swept_edit_specs;

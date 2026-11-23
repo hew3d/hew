@@ -126,7 +126,7 @@ impl Object {
     /// - `DegenerateFace { face }`: a loop under 3 entries, two consecutive
     ///   entries resolving to one vertex or coinciding within `POINT_MERGE`,
     ///   or a plane that cannot be fitted.
-    /// - `DanglingHandle`: a `remove` id that is not live.
+    /// - `DanglingHandle`: a `remove` id that is not live, or listed twice.
     /// - `NonManifoldEdge { from, to }` (patch vertex indices): a directed
     ///   edge traversed twice, or more than one reverse candidate.
     /// - `NonPlanarFace { face }`: an added face with a vertex off its plane.
@@ -178,6 +178,11 @@ impl Object {
                 });
             }
         }
+        if removing.len() != patch.remove.len() {
+            return Err(TopologyError::DanglingHandle {
+                context: "patch removes a face twice",
+            });
+        }
 
         // 2. Clone.
         let mut o = self.clone();
@@ -227,10 +232,10 @@ impl Object {
                 o.loops.remove(lid);
             }
             o.faces.remove(f);
-            for shell in o.shells.values_mut() {
-                shell.faces.retain(|&x| x != f);
-            }
         }
+        // The shells are not edited here: step 11 rebuilds them all from the
+        // result's twins (editing them per removed face cost the removed
+        // count times the object's faces, for nothing).
 
         // 5. Create vertices.
         let mut vertex_of: Vec<VertexId> = Vec::with_capacity(patch.verts.len());
@@ -588,6 +593,11 @@ impl Object {
             }
             removing.insert(f, ());
         }
+        if removing.len() != remove.len() {
+            return Err(TopologyError::DanglingHandle {
+                context: "patch removes a face twice",
+            });
+        }
 
         // 2. Clone (tables are shared until written).
         let mut o = self.clone();
@@ -631,11 +641,8 @@ impl Object {
             }
             o.faces.remove(f);
         }
-        if !remove.is_empty() {
-            for shell in o.shells.values_mut() {
-                shell.faces.retain(|&x| !removing.contains_key(x));
-            }
-        }
+        // The shells are not edited here: step 9 rebuilds them all from the
+        // result's twins.
 
         // 4. Vertices.
         let mut vertex_of: Vec<VertexId> = Vec::with_capacity(verts.len());
@@ -1584,4 +1591,59 @@ pub fn plane_shortcut_census_for_test(obj: &Object) -> (usize, usize) {
 #[doc(hidden)]
 pub fn self_intersection_for_test(obj: &Object) -> Option<(FaceId, FaceId)> {
     self_intersection(obj)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`Object::splice_closed`] refuses a face listed twice in `remove`,
+    /// typed, as [`Object::apply_patch`] does, and splices it once.
+    #[test]
+    fn splice_closed_refuses_a_face_removed_twice() {
+        let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+        let pts = [
+            p(0.0, 0.0, 0.0),
+            p(1.0, 0.0, 0.0),
+            p(1.0, 1.0, 0.0),
+            p(0.0, 1.0, 0.0),
+            p(0.0, 0.0, 1.0),
+            p(1.0, 0.0, 1.0),
+            p(1.0, 1.0, 1.0),
+            p(0.0, 1.0, 1.0),
+        ];
+        let quads = vec![
+            vec![0, 3, 2, 1],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ];
+        let o = Object::from_polygons(&pts, &quads).unwrap();
+        let top = o
+            .faces()
+            .keys()
+            .find(|&f| o.faces()[f].plane.normal().z > 0.5)
+            .unwrap();
+        let ring: Vec<VertexId> = o
+            .loop_half_edges(o.faces()[top].outer_loop)
+            .map(|h| o.half_edges()[h].origin)
+            .collect();
+        let verts: Vec<PVert> = ring.iter().map(|&v| PVert::Existing(v)).collect();
+        let add = vec![PatchFace {
+            outer: (0..ring.len()).collect(),
+            holes: Vec::new(),
+            attrs: o.faces()[top].attrs(),
+            plane: Some(o.faces()[top].plane),
+        }];
+        assert!(matches!(
+            o.splice_closed(&[top, top], &verts, &add, crate::tol::PLANE_DIST),
+            Err(TopologyError::DanglingHandle { .. })
+        ));
+        assert!(
+            o.splice_closed(&[top], &verts, &add, crate::tol::PLANE_DIST)
+                .is_ok()
+        );
+    }
 }

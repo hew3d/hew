@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::edit::{CentroidGrid, edges_on};
+use super::edit::{CentroidGrid, EdgeCells};
 use super::{BlendError, BlendProfile, BlendSpec, BlendStops, CornerStyle, RadiusHandle};
 use crate::ids::{EdgeId, FaceId, VertexId};
 use crate::math::{Plane, Point3};
@@ -401,11 +401,15 @@ impl StoredSpec {
     /// # Errors
     /// `BlendModified` when no edge lies along any segment.
     pub(crate) fn locate(&self, obj: &Object) -> Result<BlendSpec, BlendError> {
+        // One grid of the object's edges for every segment, and a set
+        // beside the list for membership: the list keeps the order found.
+        let cells = EdgeCells::new(obj, &self.edges);
         let mut edges: Vec<EdgeId> = Vec::new();
+        let mut found: BTreeSet<EdgeId> = BTreeSet::new();
         let mut seed_segment: Option<(Point3, Point3)> = None;
         for &seg in &self.edges {
-            for e in edges_on(obj, seg) {
-                if !edges.contains(&e) {
+            for e in cells.edges_on(seg) {
+                if found.insert(e) {
                     if edges.is_empty() {
                         seed_segment = Some(seg);
                     }

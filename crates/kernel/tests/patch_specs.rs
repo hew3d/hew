@@ -287,6 +287,23 @@ fn degenerate_and_out_of_range_input_refused() {
     ));
 }
 
+/// A face the patch lists twice in `remove` is refused, typed, as a face
+/// that is not live is, and the object is left as it was.
+#[test]
+fn a_face_removed_twice_is_refused() {
+    let o = unit_box();
+    let before = fingerprint(&o);
+    let (mut patch, top) = split_top(&o, EdgeMeta::default());
+    patch.remove = vec![top, top];
+    assert!(matches!(
+        o.apply_patch_for_test(&patch),
+        Err(TopologyError::DanglingHandle { .. })
+    ));
+    assert_eq!(fingerprint(&o), before);
+    patch.remove = vec![top];
+    assert!(o.apply_patch_for_test(&patch).is_ok());
+}
+
 // ------------------------------------------------- property test
 
 proptest! {
