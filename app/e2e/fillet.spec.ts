@@ -9,6 +9,7 @@ requiresPreview('fillet')
 declare global {
   interface Window {
     __hew_test?: import('../src/test/harness').HewTestHarness
+    __filletPreviewProfiles?: Array<{ id: string; shape: string }>
   }
 }
 
@@ -140,7 +141,7 @@ test('Fillet: pick, size, retype, clamp, collect, repeat, chamfer, resize, delet
   // At this zoom the handle sits within a few pixels of the pointer, so the
   // line may already read as the over-the-handle hint.
   await expect(page.getByText(/Drag (the|this) handle/)).toBeVisible()
-  await expect(page.getByText('Radius', { exact: true })).toBeVisible()
+  await expect(page.getByTestId('measurement-box').getByText('Radius', { exact: true })).toBeVisible()
   expect(await features(page, id)).toHaveLength(0)
   await shot(page, info, '02-armed-gizmo')
   const armedPx = await page.evaluate((w) => window.__hew_test!.pixelColorAt(w), topFrontHandle(0.2))
@@ -733,4 +734,682 @@ test('Fillet: clicking a whole loop arms it without a refusal message first', as
   await page.keyboard.press('Enter')
   await page.waitForTimeout(400)
   expect(await features(page, tee)).toHaveLength(1)
+})
+
+test('Fillet options card: activation, untouched commit, Alt and switching tools', async ({ page }, info) => {
+  await setup(page)
+  const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+  await page.evaluate((id) => window.__hew_test!.selectObjects([id]), id)
+  await expect(page.getByText('1 object')).toBeVisible()
+  await page.keyboard.press('Shift+F')
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  await expect(card).toBeVisible()
+  await expect(card.getByRole('radiogroup', { name: 'Corners' })).toBeVisible()
+  await page.keyboard.type('10')
+  await page.keyboard.press('Enter')
+  await expect.poll(async () => (await features(page, id)).length).toBeGreaterThan(0)
+  await page.keyboard.press('Alt')
+  await expect(card.getByRole('button', { name: 'Chamfer', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  await expect(card.getByRole('textbox', { name: 'Facets' })).toHaveCount(0)
+  await page.keyboard.press('Alt')
+  await expect(card.getByRole('textbox', { name: 'Facets' })).toBeVisible()
+  await shot(page, info, 'tool-options-card')
+  await page.getByRole('radio', { name: 'Line', exact: true }).click()
+  await expect(card).toHaveCount(0)
+})
+
+test('Fillet options card: field keys leave the pick armed and pointer-over-card typing sizes it', async ({ page }) => {
+  await setup(page)
+  const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+  await page.evaluate((id) => window.__hew_test!.selectObjects([id]), id)
+  await expect(page.getByText('1 object')).toBeVisible()
+  await page.keyboard.press('Shift+F')
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  const field = card.getByRole('textbox', { name: 'Facets' })
+  await field.click()
+  await page.keyboard.type('12')
+  await expect(field).toHaveValue('12')
+  expect(await features(page, id)).toHaveLength(0)
+  await page.keyboard.press('Escape')
+  await expect(field).toHaveValue('')
+  await expect(field).not.toBeFocused()
+  // The pick is still armed: its three-way options remain visible.
+  await expect(card.getByRole('radiogroup', { name: 'Corners' })).toBeVisible()
+  await card.getByRole('radio', { name: 'Mitered', exact: true }).click()
+  await card.getByRole('button', { name: 'Chamfer', exact: true }).click()
+  await expect(card.getByRole('radio', { name: 'Flat' })).toBeVisible()
+  await card.getByRole('radio', { name: 'Flat' }).click()
+  await card.getByRole('button', { name: 'Round', exact: true }).click()
+  await field.click()
+  await field.fill('8')
+  await page.keyboard.press('Enter')
+  await expect(field).not.toBeFocused()
+  await field.click()
+  await field.fill('16')
+  await card.getByRole('button', { name: 'Round', exact: true }).click()
+  await expect(field).toHaveValue('16')
+  await expect(field).not.toBeFocused()
+  await card.hover()
+  await page.keyboard.type('10')
+  await expect(page.getByTestId('measurement-box')).toContainText('10')
+  await page.keyboard.press('Enter')
+  await expect.poll(async () => (await features(page, id)).length).toBeGreaterThan(0)
+})
+
+test('Fillet options card: collapse, rail positioning and dock clearance at 1280 pixels', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await setup(page)
+  await page.keyboard.press('Shift+F')
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  const dock = page.getByTestId('contextual-dock')
+  const before = await card.boundingBox()
+  expect(before).not.toBeNull()
+  const bounds = await dock.boundingBox()
+  expect(bounds).not.toBeNull()
+  expect(before!.x + before!.width).toBeLessThan(bounds!.x)
+  await page.getByRole('button', { name: 'Compact tool rail', exact: true }).click()
+  const narrow = await card.boundingBox()
+  expect(narrow!.x).toBeLessThan(before!.x)
+  await card.getByRole('button', { name: 'Collapse Fillet options' }).click()
+  await expect(card.getByText('Shape', { exact: true })).not.toBeVisible()
+  await page.getByRole('radio', { name: 'Line', exact: true }).click()
+  await expect(card).toHaveCount(0)
+  const centered = await dock.evaluate((el) => {
+    const viewport = (el as HTMLElement).offsetParent!.getBoundingClientRect()
+    const rect = el.getBoundingClientRect()
+    return { actual: rect.x + rect.width / 2, expected: viewport.x + viewport.width / 2 }
+  })
+  expect(centered.actual).toBeCloseTo(centered.expected, 0)
+  await page.keyboard.press('Shift+F')
+  await expect(card.getByRole('button', { name: 'Expand Fillet options' })).toBeVisible()
+  await card.getByRole('button', { name: 'Expand Fillet options' }).click()
+  await expect(card.getByText('Shape', { exact: true })).toBeVisible()
+})
+
+
+test('Fillet options card: selected-object dock clearance at 1280 pixels', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await setup(page)
+  const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+  await page.evaluate((id) => window.__hew_test!.selectObjects([id]), id)
+  await expect(page.getByText('1 object')).toBeVisible()
+  await page.keyboard.press('Shift+F')
+  await expect(page.getByRole('complementary', { name: 'Tray', exact: true })).toBeVisible()
+  const card = await page.getByRole('region', { name: 'Fillet options' }).boundingBox()
+  const dock = await page.getByTestId('contextual-dock').boundingBox()
+  expect(card).not.toBeNull()
+  expect(dock).not.toBeNull()
+  expect(card!.x + card!.width).toBeLessThan(dock!.x)
+})
+
+test.describe('Fillet responsive dock acceptance', () => {
+  test.use({ deviceScaleFactor: 1.8 })
+  for (const [width, height] of [[1280, 720], [1600, 1000]]) {
+    test(`card/dock clearance, controls, measurement clearance and recentering at ${width}x${height}`, async ({ page }) => {
+      await page.setViewportSize({ width, height })
+      await setup(page)
+      const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+      await page.evaluate((id) => window.__hew_test!.selectObjects([id]), id)
+      await expect(page.getByText('1 object')).toBeVisible()
+      await page.keyboard.press('Shift+F')
+      const card = page.getByRole('region', { name: 'Fillet options' })
+      const dock = page.getByTestId('contextual-dock')
+      const tray = page.getByRole('complementary', { name: 'Tray', exact: true })
+      await expect(tray).toBeVisible()
+      await page.keyboard.type('10')
+      await expect(page.getByTestId('measurement-box')).toBeVisible()
+      const cb = (await card.boundingBox())!, db = (await dock.boundingBox())!, tb = (await tray.boundingBox())!
+      const viewport = await dock.evaluate(el => (el as HTMLElement).offsetParent!.getBoundingClientRect().toJSON())
+      expect(cb.x).toBeCloseTo(viewport.x + 16, 0)
+      expect(cb.y + cb.height).toBeCloseTo(viewport.y + viewport.height - 16, 0)
+      expect(cb.width).toBe(240)
+      expect(cb.x + cb.width).toBeLessThan(db.x)
+      expect(db.x + db.width).toBeLessThan(tb.x)
+      expect(cb.y).toBeGreaterThanOrEqual(0)
+      const actions = dock.getByRole('button')
+      expect(await actions.count()).toBe(9)
+      await expect(dock.getByRole('button', { name: 'Lock', exact: true })).toBeVisible()
+      for (const button of await actions.all()) {
+        const r = (await button.boundingBox())!
+        expect(r.x).toBeGreaterThanOrEqual(db.x)
+        expect(r.x + r.width).toBeLessThanOrEqual(db.x + db.width)
+        expect(r.y + r.height).toBeLessThanOrEqual(db.y + db.height)
+        if (await button.isEnabled()) await button.click({ trial: true })
+      }
+      const measurement = page.getByTestId('measurement-box')
+      await expect(measurement).toBeVisible()
+      await expect.poll(async () => {
+        const m = (await measurement.boundingBox())!, d = (await dock.boundingBox())!
+        return Math.max(m.x - (d.x + d.width), d.y - (m.y + m.height))
+      }).toBeGreaterThanOrEqual(11)
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      await expect.poll(() => dock.evaluate(el => getComputedStyle(el).transitionDuration)).toBe('0s')
+      await expect(card.getByRole('button', { name: 'Collapse Fillet options' })).toBeVisible()
+      await page.getByRole('radio', { name: 'Line', exact: true }).click()
+      await expect(card).toHaveCount(0)
+      const center = await dock.evaluate(el => {
+        const p = (el as HTMLElement).offsetParent!.getBoundingClientRect(), r = el.getBoundingClientRect()
+        return { actual: r.x + r.width / 2, expected: p.x + p.width / 2 }
+      })
+      expect(center.actual).toBeCloseTo(center.expected, 0)
+    })
+  }
+})
+
+
+test('Fillet acceptance: keyboard profile choices leave the operation armed', async ({ page }) => {
+  await setup(page)
+  const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+  await page.evaluate((id) => window.__hew_test!.selectObjects([id]), id)
+  await expect(page.getByText('1 object')).toBeVisible()
+  await page.keyboard.press('Shift+F')
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  const chamfer = card.getByRole('button', { name: 'Chamfer', exact: true })
+  await chamfer.focus()
+  await page.keyboard.press('Enter')
+  await expect(chamfer).toHaveAttribute('aria-pressed', 'true')
+  expect(await features(page, id)).toHaveLength(0)
+  await expect(card.getByRole('radiogroup', { name: 'Corners' })).toBeVisible()
+})
+
+test('Fillet specification: original menu, collapse persistence and card-only settings', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await setup(page)
+  await page.keyboard.press('Shift+F')
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  await expect(card.getByRole('slider')).toHaveCount(0)
+  await expect(card.getByRole('button', { name: 'Apply Fillet', exact: true })).toHaveCount(0)
+  await expect(card.getByRole('button', { name: 'Cancel', exact: true })).toHaveCount(0)
+  await expect(card.getByRole('textbox')).toHaveCount(1)
+  const more = card.getByRole('button', { name: /^More shapes/ })
+  await more.focus()
+  await page.keyboard.press('Enter')
+  const menu = card.getByRole('menu')
+  await expect(menu).toBeVisible()
+  const rect = (await menu.boundingBox())!
+  expect(rect.y).toBeGreaterThanOrEqual(0)
+  await menu.getByRole('menuitemradio', { name: /^Ogee\b/ }).click()
+  await expect(more).toContainText('Ogee')
+  await expect(menu).toBeVisible()
+  await expect(menu.getByRole('menuitemradio', { name: /^Ogee\b/ })).toHaveAttribute('aria-checked', 'true')
+  await card.getByRole('button', { name: 'Collapse Fillet options' }).click()
+  await expect(card.getByText('Shape', { exact: true })).not.toBeVisible()
+  await expect(card.getByRole('button', { name: 'About Fillet' })).toBeVisible()
+  await page.getByRole('radio', { name: 'Line', exact: true }).click()
+  await expect(card).toHaveCount(0)
+  await page.keyboard.press('Shift+F')
+  await expect(card.getByRole('button', { name: 'Expand Fillet options' })).toBeVisible()
+  await card.getByRole('button', { name: 'Expand Fillet options' }).click()
+  await expect(card.getByText('Shape', { exact: true })).toBeVisible()
+  // The existing Shift+F command explicitly prepares Round (toolActions.ts).
+  await expect(card.getByRole('button', { name: 'Round', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  await expect(more).toHaveText('More shapes')
+  // Keyboard collapse must also close an open menu, without leaving hidden key listeners.
+  await more.focus()
+  await page.keyboard.press('Enter')
+  await expect(menu).toBeVisible()
+  await card.getByRole('button', { name: 'Collapse Fillet options' }).focus()
+  await page.keyboard.press('Enter')
+  await card.getByRole('button', { name: 'Expand Fillet options' }).focus()
+  await page.keyboard.press('Enter')
+  await expect(menu).toHaveCount(0)
+})
+
+test('Fillet presentation: chevron animates upward, is height bounded, and respects reduced motion', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await setup(page)
+  await page.keyboard.press('Shift+F')
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  const content = card.locator('.tool-options-content')
+  const expanded = (await card.boundingBox())!
+  const transition = await content.evaluate(el => getComputedStyle(el).transitionDuration.split(',')[0])
+  expect(transition).toBe('0.22s')
+  await card.getByRole('button', { name: 'Collapse Fillet options' }).click()
+  await expect(content).toHaveAttribute('aria-hidden', 'true')
+  await expect(card.getByText('Shape', { exact: true })).not.toBeVisible()
+  const collapsed = (await card.boundingBox())!
+  expect(collapsed.height).toBeLessThan(expanded.height)
+  expect(collapsed.y + collapsed.height).toBeCloseTo(expanded.y + expanded.height, 0)
+  await card.getByRole('button', { name: 'Expand Fillet options' }).click()
+  await expect.poll(async () => (await card.boundingBox())!.height).toBeCloseTo(expanded.height, 0)
+  await page.setViewportSize({ width: 1280, height: 320 })
+  const body = card.locator('.tool-options-scroll')
+  const bounds = (await card.boundingBox())!
+  expect(bounds.y).toBeGreaterThanOrEqual(0)
+  expect(await body.evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true)
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await expect.poll(() => content.evaluate(el => getComputedStyle(el).transitionDuration)).toBe('0s')
+  await card.getByRole('button', { name: 'Collapse Fillet options' }).click()
+  await expect(card.getByText('Shape', { exact: true })).not.toBeVisible()
+})
+
+test.describe('More Shapes integrated menu', () => {
+  test.use({ deviceScaleFactor: 1.8 })
+  for (const [width, height] of [[1280, 720], [1600, 900], [1280, 480]]) {
+    test(`bounds, readable profiles, focus and dock clearance at ${width}x${height}`, async ({ page }, info) => {
+      await page.setViewportSize({ width, height })
+      await page.addInitScript(() => localStorage.setItem('hew.settings.theme', 'dark'))
+      await setup(page)
+      const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+      await page.evaluate(id => window.__hew_test!.selectObjects([id]), id)
+      await expect(page.getByText('1 object')).toBeVisible()
+      await page.keyboard.press('Shift+F')
+      const card = page.getByRole('region', { name: 'Fillet options' })
+      const trigger = card.getByRole('button', { name: /^More shapes/ })
+      const before = (await card.boundingBox())!
+      const mainControls = [
+        card.getByRole('group', { name: 'Quick edge shape' }),
+        card.getByRole('textbox', { name: 'Facets' }),
+        card.getByRole('radiogroup', { name: 'Corners' }),
+      ]
+      const mainBounds = await Promise.all(mainControls.map(control => control.boundingBox()))
+      const expectMainControlsFixed = async (): Promise<void> => {
+        for (const [index, control] of mainControls.entries()) {
+          const bounds = (await control.boundingBox())!
+          expect(bounds.x).toBeCloseTo(mainBounds[index]!.x, 0)
+          expect(bounds.y).toBeCloseTo(mainBounds[index]!.y, 0)
+          expect(bounds.width).toBeCloseTo(mainBounds[index]!.width, 0)
+          expect(bounds.height).toBeCloseTo(mainBounds[index]!.height, 0)
+        }
+      }
+      await shot(page, info, 'menu-closed')
+      await trigger.press('ArrowDown')
+      const menu = page.getByRole('menu', { name: 'Additional edge profiles' })
+      const ogee = menu.getByRole('menuitemradio', { name: 'Ogee', exact: true })
+      await expect(ogee).toBeFocused()
+      await expect(menu.getByRole('menuitemradio')).toHaveCount(7)
+      // Wait for the real CSS transition before checking its final bounds.
+      await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getAnimations().length)).toBe(0)
+      const after = (await card.boundingBox())!
+      expect(after.y + after.height).toBeCloseTo(before.y + before.height, 0)
+      expect(after.y).toBeLessThan(before.y)
+      expect(after.width).toBe(240)
+      if (height >= 720) await expectMainControlsFixed()
+      const viewport = await card.evaluate(el => (el as HTMLElement).offsetParent!.getBoundingClientRect().toJSON() as { left: number; right: number; top: number; bottom: number })
+      expect(after.y).toBeGreaterThanOrEqual(viewport.top + 16)
+      expect(after.y + after.height).toBeLessThanOrEqual(viewport.bottom - 16)
+      expect(await card.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
+      const layout = await menu.evaluate(el => {
+        const grid = el.querySelector<HTMLElement>('.fillet-profile-choices')!
+        return {
+          columns: getComputedStyle(grid).gridTemplateColumns.split(' ').length,
+          available: grid.clientWidth,
+          noOverflow: el.scrollWidth <= el.clientWidth,
+          labelsReadable: Array.from(el.querySelectorAll<HTMLElement>('.fillet-profile-label')).every(label => label.scrollWidth <= label.clientWidth && getComputedStyle(label).textOverflow !== 'ellipsis'),
+          scrolls: el.scrollHeight > el.clientHeight || (() => { const body = el.closest('[data-testid="tool-options-card"]')!.querySelector('.tool-options-scroll')!; return body.scrollHeight > body.clientHeight })(),
+        }
+      })
+      expect(layout.columns).toBe(layout.available >= 204 ? 2 : 1)
+      expect(layout.noOverflow).toBe(true)
+      expect(layout.labelsReadable).toBe(true)
+      if (height === 480) expect(layout.scrolls).toBe(true)
+      const dock = (await page.getByTestId('contextual-dock').boundingBox())!
+      expect(after.x + after.width).toBeLessThan(dock.x)
+      await card.getByRole('radiogroup', { name: 'Corners' }).scrollIntoViewIfNeeded()
+      await expect(card.getByRole('radiogroup', { name: 'Corners' })).toBeInViewport({ ratio: 0.99 })
+      await ogee.scrollIntoViewIfNeeded()
+      await expect(ogee).toBeInViewport({ ratio: 0.99 })
+      expect((await ogee.boundingBox())!.y).toBeGreaterThanOrEqual((await menu.boundingBox())!.y)
+      await shot(page, info, 'menu-open')
+      await page.keyboard.press('ArrowRight')
+      await expect(menu.getByRole('menuitemradio', { name: 'Roman Ogee', exact: true })).toBeFocused()
+      await page.keyboard.press('End')
+      await expect(menu.getByRole('menuitemradio', { name: 'Cavetto', exact: true })).toBeFocused()
+      await expect(menu.getByRole('menuitemradio', { name: 'Cavetto', exact: true })).toBeInViewport({ ratio: 0.99 })
+      await page.keyboard.press('Home')
+      await expect(ogee).toBeFocused()
+      if (height >= 720) {
+        // Compare opening and closing with the same profile and armed pick.
+        // Selecting a different profile may legitimately change conditional rows.
+        await page.keyboard.press('Escape')
+        await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getBoundingClientRect().height)).toBe(0)
+        await expectMainControlsFixed()
+        await trigger.press('ArrowDown')
+        await expect(ogee).toBeFocused()
+        await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getAnimations().length)).toBe(0)
+        await expectMainControlsFixed()
+      }
+      await page.keyboard.press('Enter')
+      await expect(menu).toBeVisible()
+      await expect(ogee).toBeFocused()
+      await expect(ogee).toHaveAttribute('aria-checked', 'true')
+      await expect(trigger).toContainText('Ogee')
+      // Saving becomes available without reopening the profile library.
+      await ogee.press('End')
+      await expect(menu.getByRole('menuitem', { name: 'Save profile…' })).toBeFocused()
+      await expect(menu.getByRole('menuitem', { name: 'Save profile…' })).toBeEnabled()
+      await page.keyboard.press('Escape')
+      await expect(menu).toHaveCount(0)
+      await expect(trigger).toBeFocused()
+      await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getBoundingClientRect().height)).toBe(0)
+      await trigger.press('ArrowDown')
+      await card.getByRole('button', { name: 'About Fillet' }).click()
+      await expect(menu).toHaveCount(0)
+      await card.getByRole('button', { name: 'About Fillet' }).click()
+      await trigger.press('ArrowDown')
+      await page.getByRole('radio', { name: 'Line', exact: true }).click()
+      await expect(card).toHaveCount(0)
+    })
+  }
+
+  test('opening, closing, interrupted dismissal and reduced motion', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 720 })
+    await setup(page)
+    const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+    await page.evaluate(id => window.__hew_test!.selectObjects([id]), id)
+    await expect(page.getByText('1 object')).toBeVisible()
+    await page.keyboard.press('Shift+F')
+    const card = page.getByRole('region', { name: 'Fillet options' })
+    await expect(card.getByRole('radiogroup', { name: 'Corners' })).toBeVisible()
+    const trigger = card.getByRole('button', { name: /^More shapes/ })
+    const expansion = card.locator('.fillet-profile-expansion')
+    await expect(expansion.locator('[role="menuitemradio"]')).toHaveCount(7)
+    await expect.poll(() => expansion.evaluate(el => getComputedStyle(el).transitionDuration.split(',')[0])).toBe('0.22s')
+    const fixedTops = await card.evaluate(root => Array.from(root.querySelectorAll<HTMLElement>(
+      '.fillet-primary-choices, .fillet-main-settings > div',
+    ), element => element.getBoundingClientRect().top))
+    const sample = async () => trigger.evaluate(async button => {
+      const root = button.closest('[data-testid="tool-options-card"]')!
+      const expansion = root.querySelector<HTMLElement>('.fillet-profile-expansion')!
+      const wasOpen = expansion.dataset.open
+      ;(button as HTMLButtonElement).click()
+      const mainControls = Array.from(root.querySelectorAll<HTMLElement>(
+        '.fillet-primary-choices, .fillet-main-settings > div',
+      ))
+      const frames: Array<{ height: number; bottom: number; mainTops: number[] }> = []
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Menu transition did not finish')), 5000)
+        const frame = () => {
+          const rect = root.getBoundingClientRect()
+          frames.push({ height: rect.height, bottom: rect.bottom,
+            mainTops: mainControls.map(element => element.getBoundingClientRect().top) })
+          // Wait for the actual transition, rather than assuming the browser
+          // paints its first frame immediately on a busy software renderer.
+          if (expansion.dataset.open !== wasOpen && expansion.getAnimations().length === 0 && frames.length > 1) {
+            clearTimeout(timeout)
+            resolve()
+          } else requestAnimationFrame(frame)
+        }
+        requestAnimationFrame(frame)
+      })
+      return frames
+    })
+    const opening = await sample()
+    const closing = await sample()
+    const low = closing.at(-1)!.height
+    const high = opening.at(-1)!.height
+    expect(high).toBeGreaterThan(low)
+    for (const frames of [opening, closing]) {
+      expect(frames.some(frame => frame.height > low + 1 && frame.height < high - 1)).toBe(true)
+      for (const frame of frames) {
+        expect(frame.bottom).toBeCloseTo(opening[0].bottom, 0)
+        for (const [index, top] of frame.mainTops.entries()) expect(top).toBeCloseTo(fixedTops[index], 0)
+      }
+    }
+    // Dismiss during opening, then reopen during closing. Hidden content is
+    // immediately inert; CSS reverses the current transition without timers.
+    await trigger.evaluate(button => (button as HTMLButtonElement).click())
+    await expect.poll(() => expansion.evaluate(el => el.getAnimations().length)).toBeGreaterThan(0)
+    await page.keyboard.press('Escape')
+    await expect(expansion).toHaveAttribute('inert', '')
+    await expect(trigger).toBeFocused()
+    await trigger.press('ArrowDown')
+    await expect(page.getByRole('menuitemradio', { name: 'Ogee', exact: true })).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect.poll(() => expansion.evaluate(el => el.getBoundingClientRect().height)).toBe(0)
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await expect.poll(() => expansion.evaluate(el => getComputedStyle(el).transitionDuration)).toBe('0s')
+    await trigger.press('ArrowDown')
+    await expect(expansion).toHaveAttribute('data-open', 'true')
+    expect(await expansion.evaluate(el => el.getAnimations().length)).toBe(0)
+    await page.keyboard.press('Escape')
+    await expect(expansion).toHaveAttribute('data-open', 'false')
+    expect(await expansion.evaluate(el => el.getBoundingClientRect().height)).toBe(0)
+  })
+})
+
+test('More Shapes stays open while consecutive profile choices update the armed preview', async ({ page }) => {
+  await setup(page)
+  const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+  await page.keyboard.press('Shift+F')
+  await clickWorld(page, [1, 0.03, 1])
+  await expect(page.getByTestId('measurement-box')).toBeVisible()
+  await page.keyboard.type('20')
+  const beforeHash = await hash(page), beforeDepth = await depth(page)
+  // Observe successful real previews without changing their requests or results.
+  // The Preview E2E server exposes the same module graph the app imports.
+  await page.evaluate(async () => {
+    const { Scene } = await import(/* @vite-ignore */ '/src/wasm/pkg/wasm_api.js')
+    const { getFilletSettings } = await import(/* @vite-ignore */ '/src/tools/filletSettings.ts')
+    const preview = Scene.prototype.blend_preview_typed
+    const seen: Array<{ id: string; shape: string }> = []
+    window.__filletPreviewProfiles = seen
+    Scene.prototype.blend_preview_typed = function (this: InstanceType<typeof Scene>, object: bigint, spec: string) {
+      const result = preview.call(this, object, spec)
+      const request = JSON.parse(spec).profile
+      const profile = getFilletSettings().profile
+      if (profile.kind === 'shape' && request.kind === 'custom'
+        && JSON.stringify(request.shape) === JSON.stringify(profile.shape)) {
+        seen.push({ id: profile.id, shape: JSON.stringify(request.shape) })
+      }
+      return result
+    }
+  })
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  const trigger = card.getByRole('button', { name: /^More shapes/ })
+  const menu = card.getByRole('menu', { name: 'Additional edge profiles' })
+  await trigger.press('ArrowDown')
+  await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getAnimations().length)).toBe(0)
+  const controls = [card.getByRole('group', { name: 'Quick edge shape' }), card.getByRole('textbox', { name: 'Facets' })]
+  const positions = await Promise.all(controls.map(control => control.boundingBox()))
+  const choices = [
+    ['Ogee', 'builtin:ogee'], ['Roman Ogee', 'builtin:roman-ogee'], ['Bead', 'builtin:bead'],
+  ] as const
+  let previousShape: string | undefined
+  for (const [index, [name, profileId]] of choices.entries()) {
+    await page.evaluate(() => { window.__filletPreviewProfiles!.length = 0 })
+    const choice = menu.getByRole('menuitemradio', { name, exact: true })
+    if (index < 2) {
+      if (index === 1) await menu.getByRole('menuitemradio', { name: 'Ogee', exact: true }).press('ArrowRight')
+      await expect(choice).toBeFocused()
+      await choice.press('Enter')
+      await expect(choice).toBeFocused()
+    } else await choice.click()
+    await expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    await expect(menu).toBeVisible()
+    await expect(choice).toHaveAttribute('aria-checked', 'true')
+    await expect(menu.locator('[aria-checked="true"]')).toHaveCount(1)
+    await expect(trigger).toContainText(name)
+    await expect.poll(() => page.evaluate(() => window.__filletPreviewProfiles?.at(-1)?.id)).toBe(profileId)
+    const shape = await page.evaluate(() => window.__filletPreviewProfiles!.at(-1)!.shape)
+    expect(shape).not.toBe(previousShape)
+    previousShape = shape
+    for (const [index, control] of controls.entries()) {
+      const bounds = (await control.boundingBox())!
+      expect(bounds.x).toBeCloseTo(positions[index]!.x, 0)
+      expect(bounds.y).toBeCloseTo(positions[index]!.y, 0)
+    }
+    expect(await features(page, id)).toHaveLength(0)
+    expect(await hash(page)).toBe(beforeHash)
+    expect(await depth(page)).toBe(beforeDepth)
+  }
+  await trigger.click()
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+  await expect(menu).toHaveCount(0)
+})
+
+test('More Shapes preserves the existing Save Profile workflow', async ({ page }, info) => {
+  await setup(page)
+  await page.keyboard.press('Shift+F')
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  const trigger = card.getByRole('button', { name: /^More shapes/ })
+  const menu = card.getByRole('menu', { name: 'Additional edge profiles' })
+  await expect(card.getByRole('menuitem', { name: 'Save profile…' })).toHaveCount(0)
+  await trigger.press('ArrowDown')
+  await expect(menu.getByRole('menuitem', { name: 'Save profile…' })).toBeDisabled()
+  const ogee = menu.getByRole('menuitemradio', { name: 'Ogee', exact: true })
+  await ogee.press('Enter')
+  await expect(menu).toBeVisible()
+  await expect(ogee).toBeFocused()
+  const save = menu.getByRole('menuitem', { name: 'Save profile…' })
+  await ogee.press('End')
+  await expect(save).toBeEnabled()
+  await expect(save).toBeFocused()
+  await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getAnimations().length)).toBe(0)
+  await shot(page, info, 'save-profile-enabled')
+  await save.press('Enter')
+  const dialog = page.getByRole('dialog', { name: 'Save profile', exact: true })
+  await expect(dialog).toBeVisible()
+  await expect(menu).toHaveCount(0)
+  // Open and dismiss the existing prompt; do not write a Library file.
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  await expect(trigger).toContainText('Ogee')
+  await expect(save).toHaveCount(0)
+  // Preserve the existing dialog's focus lifecycle: closing it frees tool shortcuts.
+  await page.keyboard.press('l')
+  await expect(card).toHaveCount(0)
+})
+
+test('More Shapes falls back to one column with a reserved scrollbar and Tab reaches Shape help', async ({ page }, info) => {
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await setup(page)
+  await page.keyboard.press('Shift+F')
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  const trigger = card.getByRole('button', { name: /^More shapes/ })
+  await trigger.press('ArrowDown')
+  const menu = card.getByRole('menu', { name: 'Additional edge profiles' })
+  await expect(menu.getByRole('menuitemradio')).toHaveCount(7)
+  // Represent a platform that reserves scrollbar width instead of overlaying it.
+  await menu.evaluate(el => { (el as HTMLElement).style.scrollbarGutter = 'stable' })
+  await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getAnimations().length)).toBe(0)
+  expect(await menu.locator('.fillet-profile-choices').first().evaluate(el => getComputedStyle(el).gridTemplateColumns.split(' ').length)).toBe(1)
+  expect(await menu.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
+  await shot(page, info, 'menu-one-column')
+  await page.keyboard.press('End')
+  await expect(menu.getByRole('menuitemradio', { name: 'Cavetto', exact: true })).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(menu).toHaveCount(0)
+  await expect(card.getByRole('button', { name: 'About Shape' })).toBeFocused()
+})
+
+test.describe('Fillet shape selector consistency', () => {
+  for (const theme of ['light', 'dark'] as const) {
+    test(`mockup hierarchy, combined profile menu and corner modes in ${theme}`, async ({ page }, info) => {
+      await page.setViewportSize({ width: 1280, height: 900 })
+      await page.addInitScript(theme => localStorage.setItem('hew.settings.theme', theme), theme)
+      await setup(page)
+      const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+      await page.evaluate(id => window.__hew_test!.selectObjects([id]), id)
+      await expect(page.getByText('1 object')).toBeVisible()
+      await page.keyboard.press('Shift+F')
+      const card = page.getByRole('region', { name: 'Fillet options' })
+      const more = card.getByRole('button', { name: /^More shapes/ })
+      const menu = card.getByRole('menu', { name: 'Additional edge profiles' })
+      const primary = card.getByRole('group', { name: 'Quick edge shape' })
+      const corners = card.getByRole('radiogroup', { name: 'Corners' })
+      await expect(corners).toBeVisible()
+      for (const expanded of [false, true]) {
+        if (expanded) await more.press('ArrowDown')
+        await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getAnimations().length)).toBe(0)
+        const box = async (locator: typeof more) => (await locator.boundingBox())!
+        const h = await box(card.getByRole('button', { name: 'About Fillet' }))
+        const t = await box(more), sh = await box(card.getByText('Shape', { exact: true })), p = await box(primary)
+        const f = await box(card.getByRole('textbox', { name: 'Facets' })), c = await box(corners)
+        const saved = card.getByRole('group', { name: 'My profiles' })
+        const save = menu.getByRole('menuitem', { name: 'Save profile…' })
+        expect(h.y + h.height).toBeLessThanOrEqual(t.y)
+        if (expanded) {
+          const m = await box(menu)
+          expect(t.y + t.height).toBeLessThanOrEqual(m.y)
+          expect(m.y - t.y - t.height).toBeLessThanOrEqual(7)
+          expect(m.y + m.height).toBeLessThanOrEqual(sh.y)
+          await expect(menu.getByRole('menuitemradio')).toHaveCount(7)
+          await expect(menu.getByRole('menuitemradio', { name: 'Roman Ogee', exact: true })).toHaveCount(1)
+          expect(await menu.locator('[data-profile-section=library]').count()).toBe(1)
+          const builtin = await box(menu.getByRole('group', { name: 'Built-in' })), my = await box(saved)
+          expect(builtin.y + builtin.height).toBeLessThanOrEqual(my.y)
+          await expect(saved).toHaveCount(1)
+          await expect(saved.getByText('No saved profiles yet.')).toBeVisible()
+          const actions = menu.locator('[data-profile-section=actions]')
+          await expect(actions).toHaveCount(1)
+          expect(await saved.evaluate(el => el.nextElementSibling?.getAttribute('data-profile-section'))).toBe('actions')
+          const action = await box(save)
+          expect(my.y + my.height).toBeLessThanOrEqual(action.y)
+          await expect(save).toHaveCount(1)
+          await expect(save).toBeVisible()
+        } else {
+          await expect(menu).toHaveCount(0)
+          expect(t.y + t.height).toBeLessThanOrEqual(sh.y)
+          await expect(saved).toHaveCount(0)
+          await expect(card.getByText('No saved profiles yet.')).toBeHidden()
+          await expect(save).toHaveCount(0)
+        }
+        expect(sh.y + sh.height).toBeLessThanOrEqual(p.y)
+        expect(p.y + p.height).toBeLessThanOrEqual(f.y)
+        expect(f.y + f.height).toBeLessThanOrEqual(c.y)
+        for (const name of ['Round', 'Chamfer', 'Cove', 'Bullnose']) {
+          const button = primary.getByRole('button', { name, exact: true })
+          await expect(button.locator('svg')).toBeVisible()
+          expect(await button.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
+        }
+        const state = expanded ? 'expanded' : 'closed'
+        await shot(page, info, `${theme}-${state}`)
+        await card.screenshot({ path: info.outputPath(`${theme}-card-${state}.png`) })
+      }
+      await page.keyboard.press('Escape')
+      const chamfer = primary.getByRole('button', { name: 'Chamfer', exact: true })
+      await chamfer.focus(); await page.keyboard.press('Enter')
+      await expect(chamfer).toBeFocused()
+      await expect(chamfer).toHaveAttribute('aria-pressed', 'true')
+      await expect(card.getByRole('textbox', { name: 'Facets' })).toHaveCount(0)
+      await expect(corners.getByRole('radio', { name: 'Flat', exact: true })).toBeVisible()
+      await more.press('ArrowDown')
+      await expect(corners.getByRole('radio', { name: 'Mitered', exact: true })).toBeVisible()
+      await page.keyboard.press('Escape')
+      await expect(more).toBeFocused()
+      // Native primary-button clicks still only change preview settings.
+      await more.press('ArrowDown')
+      await primary.getByRole('button', { name: 'Round', exact: true }).click()
+      await expect(menu).toHaveCount(0)
+      await expect(primary.getByRole('button', { name: 'Round', exact: true })).toHaveAttribute('aria-pressed', 'true')
+      expect(await features(page, id)).toHaveLength(0)
+    })
+  }
+})
+
+test('Fillet main settings and combined profile menu keep their order when optional rows are hidden', async ({ page }, info) => {
+  await page.setViewportSize({ width: 1280, height: 720 })
+  await setup(page)
+  await page.keyboard.press('Shift+F')
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  const more = card.getByRole('button', { name: /^More shapes/ })
+  const facets = card.getByRole('textbox', { name: 'Facets' })
+  const menu = card.getByRole('menu', { name: 'Additional edge profiles' })
+  await expect(facets).toBeVisible()
+  await expect(card.getByRole('radiogroup', { name: 'Corners' })).toHaveCount(0)
+  await more.press('ArrowDown')
+  await expect(menu.getByRole('menuitemradio')).toHaveCount(7)
+  await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getAnimations().length)).toBe(0)
+  const fb = (await facets.boundingBox())!, mb = (await menu.boundingBox())!, tb = (await more.boundingBox())!
+  expect(tb.y + tb.height).toBeLessThanOrEqual(mb.y)
+  expect(mb.y + mb.height).toBeLessThanOrEqual((await card.getByRole('group', { name: 'Quick edge shape' }).boundingBox())!.y)
+  const save = menu.getByRole('menuitem', { name: 'Save profile…' })
+  const saveBounds = (await save.boundingBox())!
+  expect(saveBounds.y + saveBounds.height).toBeLessThanOrEqual((await card.getByRole('group', { name: 'Quick edge shape' }).boundingBox())!.y)
+  expect((await card.getByRole('group', { name: 'Quick edge shape' }).boundingBox())!.y).toBeLessThan(fb.y)
+  await page.keyboard.press('Escape')
+  await card.getByRole('button', { name: 'Chamfer', exact: true }).focus()
+  await page.keyboard.press('Enter')
+  await expect(facets).toHaveCount(0)
+  await expect(card.getByRole('radiogroup', { name: 'Corners' })).toHaveCount(0)
+  await shot(page, info, 'optional-settings-hidden-closed')
+  await more.press('ArrowDown')
+  await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getAnimations().length)).toBe(0)
+  await expect(menu).toBeVisible()
+  await expect(facets).toHaveCount(0)
+  await expect(card.getByRole('radiogroup', { name: 'Corners' })).toHaveCount(0)
+  await shot(page, info, 'optional-settings-hidden-expanded')
+  await page.keyboard.press('Escape')
+  await expect(more).toBeFocused()
 })

@@ -16,7 +16,7 @@ import { BUSY_REFUSED } from '../busyCard'
 import { arcSegments } from './arcMath'
 import { resolveHover } from './filletPick'
 import { clampBlendSegments } from './filletMath'
-import { resetFilletSettingsForTest, getFilletCornerOnly, getFilletMeasurementLabelOverride, getFilletSettings, setFilletProfile } from './filletSettings'
+import { resetFilletSettingsForTest, getFilletCornerOnly, getFilletMeasurementLabelOverride, getFilletSettings, setFilletProfile, setFilletCorners, setFilletSegmentsOverride } from './filletSettings'
 import type { Ray } from '../viewport/math'
 import { setLengthUnit, typedReadout } from '../settings/units'
 
@@ -1950,6 +1950,31 @@ describe('FilletTool through the real kernel', () => {
     expect(JSON.parse(h.scene.blend_features_json(box)).length).toBeGreaterThanOrEqual(1)
   })
 
+  it.each(['INPUT', 'TEXTAREA', 'contenteditable'])('a focused %s owns keys while armed, including Escape', (tag) => {
+    const h = setup()
+    makeBox(h.scene, 1, 1, 0.5)
+    click(h, down(0.5, 0.5), [100, 100])
+    expect(h.tool.hasArmedGesture()).toBe(true)
+    const hint = h.tool.statusHint()
+    h.hooks.onMeasurement.mockClear()
+    vi.stubGlobal('document', { activeElement: { tagName: tag, isContentEditable: tag === 'contenteditable' } })
+    try {
+      for (const k of ['5', 'Enter', 'Escape', 'Delete', 'Tab']) {
+        expect(h.tool.capturesKey(k)).toBe(false)
+        h.tool.onKey(key(k))
+      }
+      expect(h.tool.hasArmedGesture()).toBe(true)
+      expect(h.tool.statusHint()).toBe(hint)
+      expect(h.hooks.onMeasurement).not.toHaveBeenCalled()
+      expect(h.hooks.onCommit).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+    expect(h.tool.capturesKey('5')).toBe(true)
+    h.tool.onKey(key('Escape'))
+    expect(h.tool.hasArmedGesture()).toBe(false)
+  })
+
   it('while armed, Space and tool letters go to the app; digits and a size in progress stay here', () => {
     const h = setup()
     makeBox(h.scene, 1, 1, 0.5)
@@ -2098,4 +2123,28 @@ describe('Fillet on a whole loop (F-A9)', () => {
     expect(h.tool.statusHint()).not.toBe('')
     expect(h.tool.statusHint()).toMatch(/solid/i)
   })
+})
+
+it('card settings redraw the armed kernel preview immediately without a viewport click', () => {
+  const h = setup()
+  makeBox(h.scene, 0.6, 0.1, 0.1)
+  click(h, down(0.3, 0.002), [100, 100])
+  for (const k of ['2', '0']) h.tool.onKey(key(k))
+  const preview = vi.spyOn(h.scene, 'blend_preview_typed')
+  setFilletProfile({ kind: 'chamfer' })
+  expect(preview).toHaveBeenCalled()
+  expect(JSON.parse(preview.mock.calls.at(-1)![1]).profile.kind).toBe('chamfer')
+  preview.mockClear()
+  setFilletProfile({ kind: 'round' })
+  expect(JSON.parse(preview.mock.calls.at(-1)![1]).profile.kind).toBe('round')
+  preview.mockClear()
+  setFilletSegmentsOverride(12)
+  expect(preview).toHaveBeenCalled()
+  expect(JSON.parse(preview.mock.calls.at(-1)![1]).profile.segments).toBe(12)
+  preview.mockClear()
+  setFilletCorners('mitered')
+  expect(preview).toHaveBeenCalled()
+  expect(JSON.parse(preview.mock.calls.at(-1)![1]).corners).toBe('mitered')
+  expect(h.tool.hasArmedGesture()).toBe(true)
+  expect(h.hooks.onCommit).not.toHaveBeenCalled()
 })

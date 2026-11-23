@@ -2111,7 +2111,7 @@ msgstr "Choose for each item"
 msgid "Choose Library Folder"
 msgstr "Choose Library Folder"
 
-#: src/viewport/ProfileChip.tsx
+#: src/viewport/FilletOptions.tsx
 msgid "Choose the shape of the edge"
 msgstr "Choose the shape of the edge"
 

@@ -107,7 +107,7 @@ import {
   getFilletMeasurementLabelOverride,
   subscribeFilletMeasurementLabel,
 } from './tools/filletSettings'
-import { profileSizeLabel } from './viewport/ProfileChip'
+import { profileSizeLabel } from './tools/filletSettings'
 import { panelsForTool } from './tools/toolPanels'
 import { outlinerDrawing, resolveDraft, setKernelHidden, type OutlinerDrawing, type PlaneUnitsScene } from './tools/planeUnits'
 import { setDeformMode, getDeformMode, subscribeDeformMode } from './tools/deformMode'
