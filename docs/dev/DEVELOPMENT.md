@@ -904,7 +904,9 @@ preview build and prints every row that differs from the table, expected and
 actual. `scripts/determinism.sh` rewrites the table (commit it with any
 change that moves geometry on purpose), `--check` fails on a difference, and
 `--out <file>` writes this machine's table and exits 0, to diff against the
-checked-in one. The table is generated on Linux x86_64.
+checked-in one. The table is generated on Linux x86_64. The gate checks it
+on Linux, and CI checks it and the curves scoreboard on macOS and Windows
+on every push to main.
 `node tools/replay-runner/determinism.mjs` runs the same rows through the
 WASM kernel (after `scripts/wasm-flavors.sh build preview nodejs` and
 `use-node preview`) and lists every row that differs; it exits 0 unless given

@@ -85,6 +85,33 @@ jobs:
       - name: Rust gate
         run: scripts/verify.sh rust
 
+  # The determinism golden and the curves scoreboard on the other desktop
+  # platforms. The `rust` job checks both on Linux through the gate and
+  # `replay` checks the golden in the wasm build; this job is what notices
+  # geometry that comes out differently on macOS or Windows. Pushes to main
+  # only: it follows the work rather than gating a pull request.
+  determinism-platforms:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: ". -> target/preview"
+      - name: Determinism golden
+        run: scripts/determinism.sh --check
+      - name: Curves scoreboard
+        run: scripts/scoreboard.sh --check
+
   # Web app: typecheck, lint, i18n, Vitest, app + site builds. The app build
   # reuses the downloaded kernel package.
   web:
