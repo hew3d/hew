@@ -227,7 +227,8 @@ LIBRARY
 hew_query serves hew.library.list (browse, filtered by category/query/
 collection), hew.library.describe (one item's full metadata and
 manifest summary), hew.library.remove, and hew.library.update_meta —
-none of them touch the document, so they need no undo bracket.
+none of them touch the document, so they need no undo bracket. An item
+fetched from a source carries a `remote` object; an item without one has none.
 hew_transact serves hew.library.insert (place a saved item into the
 document — re-inserting the same item reuses its existing definition
 instead of duplicating it) and hew.library.save (save a selection, or

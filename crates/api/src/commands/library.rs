@@ -105,6 +105,24 @@ pub(super) fn resolve_entry(ctx: &Ctx, item: &str) -> Result<LibraryItemEntry, C
 
 // --------------------------------------------------------- shared shaping
 
+/// The remote note (`hew.library` / `remote`, shared-library-sources design
+/// 6.5) out of an item's `hew.library` attribute dictionary. Shaped like
+/// `crates/library`'s `parse_item_meta` reads it: an object carrying string
+/// `source` and `sha256`; anything else reads as no note.
+fn remote_note_of(hew_library: &Value) -> Option<Value> {
+    let note = hew_library.get("remote")?;
+    let ok = note.as_object().is_some_and(|o| {
+        o.get("source").is_some_and(Value::is_string)
+            && o.get("sha256").is_some_and(Value::is_string)
+    });
+    ok.then(|| note.clone())
+}
+
+/// The remote note an entry's item carries, from its manifest summary.
+fn entry_remote_note(e: &LibraryItemEntry) -> Option<Value> {
+    remote_note_of(e.summary.as_ref()?.doc_attrs.get("hew.library")?)
+}
+
 fn entry_to_json(e: &LibraryItemEntry) -> Value {
     let mut v = serde_json::json!({
         "path": e.path,
@@ -115,6 +133,9 @@ fn entry_to_json(e: &LibraryItemEntry) -> Value {
         "mtime_ms": e.mtime_ms,
     });
     let obj = v.as_object_mut().expect("built as an object above");
+    if let Some(note) = entry_remote_note(e) {
+        obj.insert("remote".to_string(), note);
+    }
     if let Some(id) = &e.id {
         obj.insert("id".to_string(), Value::String(id.clone()));
     }
@@ -698,6 +719,26 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         set("sourceDoc", AttrValue::Text(source_doc))?;
     }
     set("savedAt", AttrValue::Text(iso_now(ctx.host.unix_time_ms())))?;
+    // The remote note (design 7.2) stays only on the item it was stamped
+    // on: a new item carries none, and a replace takes the note of the
+    // item it writes over, marked edited (it no longer matches the source).
+    let carried = item_doc
+        .attr_get(&AttrTarget::Document)
+        .ok()
+        .flatten()
+        .and_then(|d| d.get("hew.library"))
+        .is_some_and(|lib| lib.get("remote").is_some());
+    if carried {
+        item_doc.attr_delete(AttrTarget::Document, "hew.library", Some("remote"))?;
+    }
+    if let Some(mut note) = replaced.as_ref().and_then(entry_remote_note) {
+        note["edited"] = Value::Bool(true);
+        // A note read back from a valid item always loads; one that does
+        // not is simply not carried.
+        if let Ok(value) = AttrValue::from_json(&note) {
+            item_doc.attr_set(AttrTarget::Document, "hew.library", "remote", value)?;
+        }
+    }
     // Every save to the Library writes the item's content prints (OW-2): a
     // replace writes the new ones, so models using the item can tell it
     // changed.

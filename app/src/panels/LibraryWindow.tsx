@@ -25,6 +25,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { readItemSummary } from '../library/itemFiles'
 import type { LibraryItem } from '../library/types'
 import type { MarkedState } from '../library/libraryUpdates'
+import { defaultSourcesBinding } from '../library/sourcesDeps'
 import { LibraryDialog } from './LibraryDialog'
 import { useTextFieldMenuActions } from '../clipboard/useTextFieldMenuActions'
 
@@ -133,6 +134,7 @@ export function LibraryWindow() {
     <LibraryDialog
       open
       variant="window"
+      sources={defaultSourcesBinding()}
       onClose={() => {
         void getCurrentWindow().close()
       }}

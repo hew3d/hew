@@ -40,6 +40,11 @@ export interface LibraryMenuProps {
   /** Components and models (not materials, profiles or built-ins) can be
    * opened in place for editing. */
   canEdit: boolean
+  /** The item came from a source (it carries a note). `canUpdate` is true
+   * when a newer version can be taken now. Absent for an item with no note. */
+  fromSource?: { name: string; canUpdate: boolean } | undefined
+  onUpdateFromSource?: (() => void) | undefined
+  onUnlinkFromSource?: (() => void) | undefined
   onClose: () => void
   onEdit: () => void
   onOpenAsDocument: () => void
@@ -60,6 +65,9 @@ export function LibraryMenu({
   canDownload,
   hasSourceInfo,
   canEdit,
+  fromSource,
+  onUpdateFromSource,
+  onUnlinkFromSource,
   onClose,
   onEdit,
   onOpenAsDocument,
@@ -72,12 +80,13 @@ export function LibraryMenu({
   onDeleteRequest,
 }: LibraryMenuProps) {
   const { t, i18n } = useLingui()
+  const sourceName = fromSource?.name ?? ''
   // Popover pinned just under the anchor button, left-aligned; both axes
   // are clamped to the viewport so a bottom-row (or right-click-anywhere)
   // anchor can't push the menu off-screen (adversarial review S14). The
   // height estimate errs high, which only pulls the menu up a little
   // early — never off the top (floor at 8).
-  const estimatedHeight = errored ? 96 : 264 + (hasSourceInfo ? 32 : 0) + (canEdit ? 32 : 0)
+  const estimatedHeight = errored ? 96 : 264 + (hasSourceInfo ? 32 : 0) + (canEdit ? 32 : 0) + (fromSource !== undefined ? 64 : 0)
   const style: React.CSSProperties = {
     position: 'fixed',
     top: Math.max(8, Math.min(anchor.bottom + 4, window.innerHeight - estimatedHeight)),
@@ -116,6 +125,13 @@ export function LibraryMenu({
             <div className="hwlib__menu-divider" />
             {item(t`Re-render thumbnail`, onRerenderThumbnail)}
             {hasSourceInfo && item(t`Remove Source Info`, onRemoveSourceInfo)}
+            {fromSource !== undefined && (
+              <>
+                <div className="hwlib__menu-divider" />
+                {fromSource.canUpdate && onUpdateFromSource !== undefined && item(t`Update from source`, onUpdateFromSource)}
+                {onUnlinkFromSource !== undefined && item(t`Unlink from ${sourceName}`, onUnlinkFromSource)}
+              </>
+            )}
           </>
         )}
         {canReveal && item(i18n._(revealLabel), onReveal)}

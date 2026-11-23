@@ -22,6 +22,9 @@ plugin-manifest.workspace = true
 # empty in a production build and this crate uses it only under
 # `cfg(hew_preview)`.
 plugin-host.workspace = true
+# Shared Library sources: the index/reference/URL rules the app runs through
+# three exports (docs/design/shared-library-sources.md 6.4). Pure Rust.
+sources = { path = "../sources" }
 kernel.workspace = true
 inference.workspace = true
 tessellate.workspace = true
@@ -53,6 +56,8 @@ serde_json.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
+url.workspace = true
 # Stored `.hewplugin` fixtures for the plugin install exports' tests; the
 # version the kernel already uses.
 zip.workspace = true

@@ -455,7 +455,8 @@ fn library_item_meta_schema() -> serde_json::Value {
             "category": { "type": "string", "enum": ["component", "material", "model", "profile"] },
             "keywords": { "type": "array", "items": { "type": "string" } },
             "collection": { "type": "string" },
-            "saved_at": { "type": "string" }
+            "saved_at": { "type": "string" },
+            "remote": { "type": "object", "description": "the remote note of an item fetched from a source (source, name, path, sha256, commit?, license?, fetchedAt, edited); absent when the item has none" }
         },
         "required": ["name", "category", "keywords"]
     })
@@ -474,6 +475,7 @@ fn library_item_schema() -> serde_json::Value {
             "keywords": { "type": "array", "items": { "type": "string" } },
             "collection": { "type": "string" },
             "saved_at": { "type": "string" },
+            "remote": { "type": "object", "description": "the remote note of an item fetched from a source (source, name, path, sha256, commit?, license?, fetchedAt, edited); absent when the item has none" },
             "size": { "type": "integer" },
             "mtime_ms": { "type": "integer" },
             "summary": { "type": "object", "description": "manifest counts (objects, materials, components, ...); absent when error is present" },

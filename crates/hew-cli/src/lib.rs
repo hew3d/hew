@@ -10,7 +10,9 @@
 //! touches a filesystem-backed document at all — every envelope goes to
 //! the running app instead.
 
+pub mod catalog;
 pub mod host;
+pub mod library_index;
 pub mod live;
 mod live_library;
 pub mod mcp;

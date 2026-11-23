@@ -33,6 +33,7 @@ mod log;
 mod plugins_api;
 mod recording;
 mod scenes_api;
+mod sources_api;
 
 use dae_import::ImageMap;
 use inference::{
@@ -900,6 +901,19 @@ fn insert_report_to_js(report: &kernel::InsertReport) -> JsValue {
 /// written before a failing one do remain on this fresh item document,
 /// which the caller then discards.
 fn apply_library_meta(item: &mut Document, meta_json: Option<&str>) -> Result<(), ApiError> {
+    // The remote note (design 7.2) stays only on the item it was stamped
+    // on: a document carrying one (opened from a noted item) gives it up
+    // here unless the caller's metadata passes a note of its own.
+    if item
+        .attr_get(&kernel::AttrTarget::Document)
+        .ok()
+        .flatten()
+        .and_then(|d| d.get("hew.library"))
+        .is_some_and(|lib| lib.get("remote").is_some())
+    {
+        item.attr_delete(kernel::AttrTarget::Document, "hew.library", Some("remote"))
+            .map_err(doc_err)?;
+    }
     let Some(raw) = meta_json.filter(|m| !m.trim().is_empty()) else {
         return Ok(());
     };
@@ -30910,5 +30924,84 @@ mod imported_mark_tests {
             !scene.sketch_is_imported(sketch),
             "drawing made it the user's"
         );
+    }
+
+    // ---- The remote note (docs/design/shared-library-sources.md 7.2, B3)
+
+    fn remote_note_json(edited: bool) -> serde_json::Value {
+        serde_json::json!({
+            "source": "github:hew3d/example",
+            "name": "Example",
+            "path": "Components/chair.hew",
+            "sha256": "ab".repeat(32),
+            "commit": "c0ffee",
+            "license": "CC0-1.0",
+            "fetchedAt": "2026-11-01T00:00:00.000Z",
+            "edited": edited,
+        })
+    }
+
+    fn set_note(doc: &mut kernel::Document, note: &serde_json::Value) {
+        doc.attr_set(
+            kernel::AttrTarget::Document,
+            "hew.library",
+            "remote",
+            kernel::AttrValue::from_json(note).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn note_in(doc: &kernel::Document) -> Option<serde_json::Value> {
+        let dict = doc.attr_get(&kernel::AttrTarget::Document).unwrap()?;
+        dict.get("hew.library")?.get("remote").map(|v| v.to_json())
+    }
+
+    /// `apply_library_meta` removes a `remote` the item document already
+    /// carries (a document opened from a noted item) unless the caller's
+    /// metadata passes one. Covers `extract_item`, `extract_document_item`
+    /// and the profile/chain saves, which all go through it.
+    #[test]
+    fn apply_library_meta_drops_a_carried_note_unless_the_caller_passes_one() {
+        let mut item = kernel::Document::new();
+        set_note(&mut item, &remote_note_json(true));
+        super::apply_library_meta(&mut item, Some(r#"{"id":"x","name":"Copy"}"#)).unwrap();
+        assert_eq!(note_in(&item), None, "no note was passed, so none is kept");
+
+        let mut item = kernel::Document::new();
+        set_note(&mut item, &remote_note_json(true));
+        let meta = serde_json::json!({ "id": "x", "remote": remote_note_json(false) });
+        super::apply_library_meta(&mut item, Some(&meta.to_string())).unwrap();
+        assert_eq!(
+            note_in(&item),
+            Some(remote_note_json(false)),
+            "the caller's note wins"
+        );
+    }
+
+    /// With no metadata at all (`None`) a carried note must not survive
+    /// either: the item is a new one.
+    #[test]
+    fn apply_library_meta_with_no_metadata_still_drops_a_carried_note() {
+        let mut item = kernel::Document::new();
+        set_note(&mut item, &remote_note_json(false));
+        super::apply_library_meta(&mut item, None).unwrap();
+        assert_eq!(note_in(&item), None);
+    }
+
+    /// `update_item_meta` (rename, keywords, collection) keeps the note and
+    /// leaves `edited` as it was.
+    #[test]
+    fn update_item_meta_keeps_the_note_and_leaves_edited_alone() {
+        for edited in [false, true] {
+            let mut item = kernel::Document::new();
+            set_note(&mut item, &remote_note_json(edited));
+            let out = super::update_item_meta(
+                &item.save(),
+                r#"{"name":"Dining Chair","collection":"Furniture"}"#,
+            )
+            .unwrap_or_else(|_| panic!("update_item_meta succeeds"));
+            let reloaded = kernel::Document::load(&out).unwrap();
+            assert_eq!(note_in(&reloaded), Some(remote_note_json(edited)));
+        }
     }
 }

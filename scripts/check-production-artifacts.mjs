@@ -11,8 +11,9 @@
 //   --dts    the production kernel module's generated types. Default
 //            target/wasm-flavors/production/web/wasm_api.d.ts.
 //   --web-dist  a built web shell (shells/web/dist), when there is one: its
-//            page must carry the production policy. The release workflow
-//            passes it for a production tag.
+//            page must carry the production policy or the strict one
+//            (HEW_WEB_SOURCES=off). The release workflow passes it for a
+//            production tag.
 //
 // Checks, each of which fails the run:
 //
@@ -78,10 +79,14 @@ const loaders = registry.filter((f) => f.loader)
 
 // ---------------------------------------------------------------- policy
 {
-  const baseline = (shell) => read(at(`shells/csp/baseline/${shell}.production.csp`)).replace(/\n$/, '')
+  const baseline = (name) => read(at(`shells/csp/baseline/${name}.csp`)).replace(/\n$/, '')
+  // web.strict (HEW_WEB_SOURCES=off) is a second pinned web tier, against its own baseline.
+  if (policy('web', 'strict') !== baseline('web.strict')) {
+    problem('policy', 'web.strict in shells/csp/policies.json differs from shells/csp/baseline/web.strict.csp. A strict policy change edits both, on purpose.')
+  }
   for (const shell of ['web', 'desktop']) {
     const current = policy(shell, 'production')
-    if (current !== baseline(shell)) {
+    if (current !== baseline(`${shell}.production`)) {
       problem('policy', `${shell}.production in shells/csp/policies.json differs from shells/csp/baseline/${shell}.production.csp. A production policy change edits both, on purpose.`)
     }
     const script = current.split('; ').find((d) => d.startsWith('script-src ')) ?? ''
@@ -203,6 +208,9 @@ const loaders = registry.filter((f) => f.loader)
       problem('policy', `the web injector does not serve web.production for HEW_PREVIEW=${JSON.stringify(env.HEW_PREVIEW)}`)
     }
   }
+  if (cspMetaOf(withCspMeta(page, policyForBuild('web', { HEW_WEB_SOURCES: 'off' }))) !== policy('web', 'strict')) {
+    problem('policy', 'the web injector does not serve web.strict for HEW_WEB_SOURCES=off')
+  }
   if (cspMetaOf(withCspMeta(page, policyForBuild('web', { HEW_PREVIEW: '1' }))) !== policy('web', 'preview')) {
     problem('policy', 'the web injector does not serve web.preview for HEW_PREVIEW=1')
   }
@@ -211,8 +219,9 @@ const loaders = registry.filter((f) => f.loader)
   if (webDist !== null) {
     const index = join(webDist, 'index.html')
     if (!existsSync(index)) fail(`${relative(ROOT, webDist)} holds no built web shell`)
-    if (cspMetaOf(read(index)) !== policy('web', 'production')) {
-      problem('policy', `${relative(ROOT, index)} does not carry web.production`)
+    const built = cspMetaOf(read(index))
+    if (built !== policy('web', 'production') && built !== policy('web', 'strict')) {
+      problem('policy', `${relative(ROOT, index)} carries neither web.production nor web.strict`)
     }
   }
 

@@ -2034,9 +2034,13 @@ script, run in strict mode after the runtime: bundle to a plain script
 or an IIFE; `import` and `export` at the top level are not allowed. The
 page's policy has no `blob:` in `script-src`, so inside the Worker
 `importScripts` and `import()` of a blob are refused; nested Workers
-from `blob:` work (see "The Worker's scope" below). The realm has no network (`connect-src 'none'`), no
-storage of the page's origin, no DOM of Hew's, and no way to call the
-desktop shell.
+from `blob:` work (see "The Worker's scope" below). The realm has no
+network: its own policy says `connect-src 'none'`. A `srcdoc` frame also
+inherits the page's policy, and a request must pass both, so the
+`https:` that the web page's `connect-src` allows for Library sources
+never reaches the realm; the page's policy can only narrow what the
+frame may do. The realm also has no storage of the page's origin, no DOM
+of Hew's, and no way to call the desktop shell.
 
 **The Worker's scope.** Before `main` runs, the runtime removes from the
 Worker's global scope (from the global, every object on its prototype

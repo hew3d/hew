@@ -2084,3 +2084,240 @@ mod update_fuzz {
         }
     }
 }
+
+// =============================================== the remote note (7.2, B3)
+//
+// docs/design/shared-library-sources.md 5.2 / 6.5 / 7.2: the note under
+// `hew.library` / `remote` stays only on the item it was stamped on.
+
+/// A note as 6.5 shows it, with `edited` as given.
+fn remote_note(edited: bool) -> Value {
+    json!({
+        "source": "github:hew3d/example",
+        "name": "Example",
+        "path": "Components/chair.hew",
+        "sha256": "ab".repeat(32),
+        "commit": "c0ffee",
+        "license": "CC0-1.0",
+        "fetchedAt": "2026-11-01T00:00:00.000Z",
+        "edited": edited,
+    })
+}
+
+/// `bare_item_bytes` plus a `remote` note.
+fn noted_item_bytes(id: &str, name: &str, category: &str, note: &Value) -> Vec<u8> {
+    let mut doc = Document::load(&bare_item_bytes(id, name, category)).unwrap();
+    doc.attr_set(
+        AttrTarget::Document,
+        "hew.library",
+        "remote",
+        kernel::AttrValue::from_json(note).unwrap(),
+    )
+    .unwrap();
+    doc.save()
+}
+
+/// The `hew.library` / `remote` note of item bytes, as JSON, if any.
+fn note_of(bytes: &[u8]) -> Option<Value> {
+    let item = Document::load(bytes).expect("item bytes load");
+    let dict = item.attr_get(&AttrTarget::Document).unwrap()?;
+    let lib = dict.get("hew.library")?;
+    lib.get("remote").map(|v| v.to_json())
+}
+
+fn last_written(host: &FakeHost) -> &[u8] {
+    &host.write_log.last().expect("something was written").1
+}
+
+/// 7.2 "keep the note, set `edited`": `hew.library.save {replace}` reads
+/// the note from the item it replaces.
+#[test]
+fn save_replace_keeps_the_note_of_the_replaced_item_and_sets_edited() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    host.seed(
+        "Components/chair.hew",
+        noted_item_bytes("id-chair", "Chair", "component", &remote_note(false)),
+    );
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let root = build_box(&mut conn, &mut doc);
+    let public_id = api::IdResolver::new(&doc)
+        .public_of(&doc, &EntityRef::Object(root))
+        .unwrap();
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.save",
+        json!({"selection": [public_id], "name": "Chair", "replace": "id-chair"}),
+    );
+    let mut expected = remote_note(false);
+    expected["edited"] = json!(true);
+    assert_eq!(note_of(last_written(&host)), Some(expected));
+}
+
+/// The note comes from the replaced item, not from the document being
+/// saved: a whole-document replace whose document carries a stale note of
+/// its own (it was opened from another item) writes the replaced item's.
+#[test]
+fn save_replace_takes_the_note_from_the_replaced_item_not_the_document() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    host.seed(
+        "Models/house.hew",
+        noted_item_bytes("id-house", "House", "model", &remote_note(false)),
+    );
+    hello_attach(&mut conn, &mut doc, &mut host);
+    build_box(&mut conn, &mut doc);
+    let mut stale = remote_note(true);
+    stale["source"] = json!("github:someone/else");
+    doc.attr_set(
+        AttrTarget::Document,
+        "hew.library",
+        "remote",
+        kernel::AttrValue::from_json(&stale).unwrap(),
+    )
+    .unwrap();
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.save",
+        json!({"name": "House", "replace": "id-house"}),
+    );
+    let mut expected = remote_note(false);
+    expected["edited"] = json!(true);
+    assert_eq!(note_of(last_written(&host)), Some(expected));
+}
+
+/// Replacing an item that has no note must not invent one.
+#[test]
+fn save_replace_of_an_item_without_a_note_writes_none() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    host.seed(
+        "Components/chair.hew",
+        bare_item_bytes("id-chair", "Chair", "component"),
+    );
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let root = build_box(&mut conn, &mut doc);
+    let public_id = api::IdResolver::new(&doc)
+        .public_of(&doc, &EntityRef::Object(root))
+        .unwrap();
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.save",
+        json!({"selection": [public_id], "name": "Chair", "replace": "id-chair"}),
+    );
+    assert_eq!(note_of(last_written(&host)), None);
+}
+
+/// 7.2 "drop the note": `hew.library.save` without `replace`. A whole
+/// document opened from a noted item carries the note at document level;
+/// saving it as a new item gets a new id and no note.
+#[test]
+fn save_without_replace_drops_a_note_the_document_carries() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    build_box(&mut conn, &mut doc);
+    doc.attr_set(
+        AttrTarget::Document,
+        "hew.library",
+        "remote",
+        kernel::AttrValue::from_json(&remote_note(false)).unwrap(),
+    )
+    .unwrap();
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.save",
+        json!({"name": "Copy"}),
+    );
+    assert_eq!(note_of(last_written(&host)), None);
+}
+
+/// 7.2 "keep the note, leave `edited`": `hew.library.update_meta`. Seeded
+/// with `edited: true` so a clearing or a setting both show.
+#[test]
+fn update_meta_keeps_the_note_and_leaves_edited_alone() {
+    for edited in [false, true] {
+        let mut conn = new_conn();
+        let mut doc = Document::new();
+        let mut host = FakeHost::default();
+        host.seed(
+            "Components/chair.hew",
+            noted_item_bytes("id-chair", "Chair", "component", &remote_note(edited)),
+        );
+        hello_attach(&mut conn, &mut doc, &mut host);
+        call_ok(
+            &mut conn,
+            &mut doc,
+            &mut host,
+            2,
+            "hew.library.update_meta",
+            json!({"item": "id-chair", "name": "Dining Chair", "collection": "Furniture"}),
+        );
+        assert_eq!(
+            note_of(last_written(&host)),
+            Some(remote_note(edited)),
+            "edited = {edited}"
+        );
+    }
+}
+
+/// 5.2 / 7.2: `hew.library.list` and `describe` gain a `remote` object
+/// (additive), and an item without a note has none.
+#[test]
+fn list_and_describe_report_the_remote_note() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    host.seed(
+        "Components/chair.hew",
+        noted_item_bytes("id-chair", "Chair", "component", &remote_note(true)),
+    );
+    host.seed(
+        "Components/plain.hew",
+        bare_item_bytes("id-plain", "Plain", "component"),
+    );
+    hello_attach(&mut conn, &mut doc, &mut host);
+
+    let list = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.library.list",
+        json!({}),
+    );
+    let items = list["items"].as_array().unwrap();
+    let chair = items.iter().find(|i| i["id"] == "id-chair").unwrap();
+    let plain = items.iter().find(|i| i["id"] == "id-plain").unwrap();
+    assert_eq!(chair["remote"], remote_note(true));
+    assert!(plain.get("remote").is_none_or(Value::is_null), "{plain}");
+
+    let described = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.describe",
+        json!({"item": "id-chair"}),
+    );
+    assert_eq!(described["remote"], remote_note(true));
+}

@@ -483,8 +483,10 @@ tier's least generous quota (100k/day account-wide):
   same rule.
 
 Turnstile is out of scope here — see `docs/design/report-bug.md` §4 for why
-(the desktop path can't run a browser challenge; the web path would need to
-loosen the app's `connect-src 'self'` CSP).
+(the desktop path can't run a browser challenge; the web path would need
+`challenges.cloudflare.com` in the app's `script-src` and `frame-src`,
+both of which admit `'self'` only. The `https:` that `connect-src` allows
+for Library sources does not change that).
 
 ## Notification email
 

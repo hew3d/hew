@@ -1209,6 +1209,53 @@ below.
   Library panel shows the same state per item (a mark on the tile, a line and
   **Review…** in the detail pane). An edit-triggered check is one kernel pass
   and does not list the folder
+- Sources: shared Library items read from a git host (GitHub, GitLab,
+  Forgejo/Codeberg/Gitea) or any `https` web host. A source is a folder
+  of `.hew` items with an index, `hew.json`, that names every file with
+  its SHA-256 and size. No git client and no login: every read is one
+  file over HTTPS, a git source resolved to a commit first. The Hew
+  project hosts no items; the curated list is the `hew3d/catalog`
+  repository, whose generated `catalog.json` feeds the catalog view only
+- Sources UI, all in the Library dialog (one sidebar block, so the
+  desktop window and the web modal share it): Browse the catalog, Add a
+  source by address, a per-source view with search, **Add to my
+  Library**, **Insert** (adds, then places), **Add all**, and **Follow**
+  (adds everything once, then offers new and changed items after each
+  check). An added item keeps its `hew.library.id`, lands in a collection
+  named for the source, and carries a `remote` note (HEW_API.md §8.1)
+- Source updates never apply without a click: a bar in the Library
+  dialog with Update all / Review… / Later, **Update from source** per
+  item, and **Unlink**. An update takes the source's file and keeps the
+  local collection. An item whose contents were changed locally is never
+  replaced in bulk; Review asks **Keep mine** or **Replace your
+  changes**, and a kept version is not offered again until the source
+  changes it. A source the catalog removed stops adding and updating and
+  shows the reason; its items stay
+- Source state lives in the Library folder: `.sources.json` (the added
+  sources, per-source follow, skip and kept records) and the `.sources/`
+  cache (last good listings and source thumbnails), in `crates/library`
+  and both web stores, so a moved or synced Library keeps its sources
+  (HEW_API.md §8.1). A check runs when the Library opens, at most
+  every 6 hours per source, and only while **Settings ▸ Folders ▸ Check
+  sources for new and changed items** is on; Refresh always checks
+- Source network path: the desktop reads through one Rust command,
+  `remote_fetch` (https only on every hop, no credentials, at most 5
+  redirects, size caps), and its CSP is unchanged. The web build's
+  `connect-src` gains `https:`; a `HEW_WEB_SOURCES=off` build keeps
+  `'self' blob:` and the app turns Sources off when it sees that policy.
+  Source addresses never reach the app log
+- `crates/sources` holds the index and catalog formats, source
+  references, request URLs and the public-host check, pure, used by
+  `hew-cli` natively and by the app through four wasm exports.
+  `hew-cli library index <folder> [--check]` writes or verifies a
+  source's `hew.json` and thumbnails; `hew-cli catalog check <reference>`
+  runs the listing checks on one source; `hew-cli catalog build
+  <checkout> --out <dir>` generates the catalog files
+- Not built: no API, CLI or MCP command adds a source or takes an item
+  from one (`hew.library.list` and `describe` report the `remote` note,
+  read-only); private repositories and logins; search across sources;
+  item signing. Plugins published through a source's `plugins` array are
+  designed and parsed for shape only
 
 ### Annotations
 

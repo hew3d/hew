@@ -47,12 +47,20 @@ msgstr ""
 msgid "\"{matDeleteName}\" — used on {matDeleteUsage, plural, one {# face} other {# faces}} — delete and unpaint them?"
 msgstr ""
 
+#: src/panels/library/SourceConfirm.tsx
+msgid "“{name}” has a newer version at its source. Taking it replaces the changes you made."
+msgstr ""
+
 #: src/library/libraryUpdates.ts
 msgid "“{name}” is locked and was not updated. Unlock it first."
 msgstr ""
 
 #: src/library/libraryUpdates.ts
 msgid "“{name}” is open for editing and was not updated. Close the open group or component first."
+msgstr ""
+
+#: src/panels/library/SourceConfirm.tsx
+msgid "“{name}” leaves your list. Items you already added stay in your Library."
 msgstr ""
 
 #: src/library/libraryUpdates.ts
@@ -112,6 +120,11 @@ msgstr ""
 msgid "“{name}” was not updated."
 msgstr ""
 
+#. placeholder {0}: l.changed
+#: src/library/sourceModel.ts
+msgid "{0, plural, one {# changed item} other {# changed items}}"
+msgstr ""
+
 #. placeholder {0}: r.frameDiffered
 #: src/linkSimilar.ts
 msgid "{0, plural, one {# copy had its own axes; the first copy’s axes now apply} other {# copies had their own axes; the first copy’s axes now apply}}"
@@ -122,9 +135,21 @@ msgstr ""
 msgid "{0, plural, one {# copy in this model} other {# copies in this model}}"
 msgstr ""
 
+#. placeholder {0}: s.items
+#. placeholder {0}: summary.itemCount
+#: src/panels/library/AddSourceDialog.tsx
+#: src/panels/library/CatalogView.tsx
+msgid "{0, plural, one {# item} other {# items}}"
+msgstr ""
+
 #. placeholder {0}: item.summary.materials
 #: src/library/libraryModel.ts
 msgid "{0, plural, one {# material} other {# materials}}"
+msgstr ""
+
+#. placeholder {0}: l.fresh
+#: src/library/sourceModel.ts
+msgid "{0, plural, one {# new item} other {# new items}}"
 msgstr ""
 
 #. placeholder {0}: r.skipped
@@ -181,6 +206,14 @@ msgstr ""
 #: src/linkSimilar.ts
 msgid "{0, plural, one {paint on the faces of # copy was dropped} other {paint on the faces of # copies was dropped}}"
 msgstr ""
+
+#: src/panels/library/SourceBrowser.tsx
+msgid "{added} added, {failed} failed"
+msgstr ""
+
+#: src/library/sourceModel.ts
+#~ msgid "{base} · changed here"
+#~ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "{base}. The distance you typed is used where it fits; other objects use their own."
@@ -286,6 +319,10 @@ msgstr ""
 
 #: src/panels/SelectionPathStrip.tsx
 msgid "{crumbLabel} (part of the component)"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "{days, plural, one {Checked # day ago} other {Checked # days ago}}"
 msgstr ""
 
 #: src/viewport/fovReadout.ts
@@ -418,6 +455,26 @@ msgstr ""
 msgid "{holding, plural, one {# group that holds something locked was left alone.} other {# groups that hold something locked were left alone.}}"
 msgstr ""
 
+#: src/library/sourceMessages.ts
+msgid "{host} answered with an error ({status}). Try again later."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "{host} answered with an error. Try again later."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "{host} is limiting requests right now. Try again later."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "{host} keeps sending Hew somewhere else. Check the address and try again."
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "{hours, plural, one {Checked # hour ago} other {Checked # hours ago}}"
+msgstr ""
+
 #: src/App.tsx
 msgid "{inModel, plural, one {# in this model} other {# in this model}}"
 msgstr ""
@@ -508,6 +565,10 @@ msgstr ""
 msgid "{mendable, plural, one {# shape needs} other {# shapes need}}"
 msgstr ""
 
+#: src/library/sourceModel.ts
+msgid "{minutes, plural, one {Checked # minute ago} other {Checked # minutes ago}}"
+msgstr ""
+
 #: src/panels/LibraryUpdateReview.tsx
 msgid "{more, plural, one {+ # more part} other {+ # more parts}}"
 msgstr ""
@@ -562,6 +623,10 @@ msgstr ""
 
 #: src/panels/selectionCounts.ts
 msgid "{n, plural, one {# instance} other {# instances}}"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "{n, plural, one {# item has a newer version at its source.} other {# items have newer versions at their sources.}}"
 msgstr ""
 
 #: src/panels/LibraryDialog.tsx
@@ -710,6 +775,18 @@ msgstr ""
 #. A list label made unique: the imported name, then which one of several with that name this is
 #: src/health/healthCopy.ts
 msgid "{name} ({copy})"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "{name} has {fresh} new and {changed} changed items"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "{name} has {what}"
+msgstr ""
+
+#: src/panels/library/CatalogView.tsx
+msgid "{name} is added"
 msgstr ""
 
 #: src/panels/BusyNotice.tsx
@@ -1429,8 +1506,18 @@ msgstr ""
 msgid "add"
 msgstr ""
 
+#: src/panels/library/AddSourceDialog.tsx
+#: src/panels/library/CatalogView.tsx
+msgid "Add"
+msgstr ""
+
 #: src/App.tsx
 msgid "Add \"{displayName}\" to palette"
+msgstr ""
+
+#: src/panels/library/CatalogView.tsx
+#: src/panels/SourceUpdateReview.tsx
+msgid "Add {name}"
 msgstr ""
 
 #: src/scenes/scenesModel.ts
@@ -1443,6 +1530,19 @@ msgstr ""
 
 #: src/settings/ControlsPane.tsx
 msgid "Add a shortcut to {label}"
+msgstr ""
+
+#: src/panels/library/AddSourceDialog.tsx
+msgid "Add a source"
+msgstr ""
+
+#: src/panels/library/CatalogView.tsx
+#: src/panels/library/SourcesBlock.tsx
+msgid "Add a source…"
+msgstr ""
+
+#: src/panels/library/SourceBrowser.tsx
+msgid "Add all"
 msgstr ""
 
 #: src/panels/MaterialPalette.tsx
@@ -1485,12 +1585,20 @@ msgstr ""
 msgid "Add thickness…"
 msgstr ""
 
+#: src/panels/library/SourceBrowser.tsx
+msgid "Add this source"
+msgstr ""
+
 #: src/panels/library/LibraryMenu.tsx
 msgid "Add to collection"
 msgstr ""
 
 #: src/panels/LibraryDialog.tsx
 msgid "Add to Collection"
+msgstr ""
+
+#: src/panels/library/SourceItemDetail.tsx
+msgid "Add to my Library"
 msgstr ""
 
 #: src/panels/library/LibraryDetailPane.tsx
@@ -1501,8 +1609,21 @@ msgstr ""
 msgid "Add to Palette"
 msgstr ""
 
+#: src/panels/library/CatalogView.tsx
+#: src/panels/SourceUpdateReview.tsx
+msgid "Added"
+msgstr ""
+
 #: src/App.tsx
 msgid "Added \"{name}\" to palette."
+msgstr ""
+
+#: src/panels/library/SourceBrowser.tsx
+msgid "Adding {done} of {total}…"
+msgstr ""
+
+#: src/panels/library/AddSourceDialog.tsx
+msgid "Address of the source"
 msgstr ""
 
 #: src/settings/AdvancedPane.tsx
@@ -1574,6 +1695,10 @@ msgstr ""
 msgid "An arc stays on its drawing plane. Move the cursor along the plane, or press an arrow key to change it, then type the length."
 msgstr ""
 
+#: src/library/sourceMessages.ts
+msgid "An item with the same file name is already in your Library."
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "angle"
 msgstr ""
@@ -1608,6 +1733,10 @@ msgstr ""
 
 #: src/App.tsx
 msgid "Another file is still opening; try again in a moment."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "Another window is already working on this source."
 msgstr ""
 
 #: src/panels/ChangesPanel.tsx
@@ -1723,6 +1852,10 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "Attribute numbers can't be NaN or infinity. Use a finite number and try again."
+msgstr ""
+
+#: src/panels/library/AddSourceDialog.tsx
+msgid "Author"
 msgstr ""
 
 #: src/panels/PrintDialog.tsx
@@ -1898,6 +2031,10 @@ msgstr ""
 msgid "Browse and insert saved components, materials, and models"
 msgstr ""
 
+#: src/panels/library/SourcesBlock.tsx
+msgid "Browse the catalog"
+msgstr ""
+
 #: src/io/webLibraryStore.ts
 msgid "Browser storage"
 msgstr ""
@@ -1924,6 +2061,10 @@ msgstr ""
 
 #: src/panels/TextDialog.tsx
 msgid "Bundled"
+msgstr ""
+
+#: src/panels/library/SourceBrowser.tsx
+msgid "by {author}"
 msgstr ""
 
 #: src/panels/WelcomeScreen.tsx
@@ -1962,7 +2103,10 @@ msgstr ""
 #: src/panels/ConfirmDialog.tsx
 #: src/panels/CutScopeStrip.tsx
 #: src/panels/ExportDialog.tsx
+#: src/panels/library/AddSourceDialog.tsx
 #: src/panels/library/LibraryDetailPane.tsx
+#: src/panels/library/SourceBrowser.tsx
+#: src/panels/library/SourceConfirm.tsx
 #: src/panels/LibraryUpdateReview.tsx
 #: src/panels/PrintDialog.tsx
 #: src/panels/ReportBugDialog.tsx
@@ -1971,6 +2115,7 @@ msgstr ""
 #: src/panels/SaveToLibraryPopover.tsx
 #: src/panels/ScenesPanel.tsx
 #: src/panels/SentReportsDialog.tsx
+#: src/panels/SourceUpdateReview.tsx
 #: src/panels/StlUnitsDialog.tsx
 #: src/panels/TextDialog.tsx
 #: src/panels/UnsavedChangesDialog.tsx
@@ -1986,6 +2131,10 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "carve"
+msgstr ""
+
+#: src/panels/library/CatalogView.tsx
+msgid "Catalog"
 msgstr ""
 
 #: src/panels/LibraryDialog.tsx
@@ -2047,6 +2196,7 @@ msgid "Changed from the default"
 msgstr ""
 
 #: src/library/libraryUpdates.ts
+#: src/library/sourceModel.ts
 msgid "Changed here"
 msgstr ""
 
@@ -2074,6 +2224,11 @@ msgstr ""
 msgid "Check now"
 msgstr ""
 
+#: src/settings/FluentSettingsPage.tsx
+#: src/settings/FoldersPane.tsx
+msgid "Check sources for new and changed items"
+msgstr ""
+
 #: src/viewport/gpuCapability.ts
 msgid "Check that 'Use graphics acceleration when available' is turned on in the browser's system settings, then relaunch it."
 msgstr ""
@@ -2085,6 +2240,18 @@ msgstr ""
 #: src/settings/FluentSettingsPage.tsx
 #: src/settings/FoldersPane.tsx
 msgid "Check the Library for newer parts"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "Checked {date}"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "Checked just now"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "Checked yesterday"
 msgstr ""
 
 #: src/panels/ImportingOverlay.tsx
@@ -2590,6 +2757,10 @@ msgstr ""
 
 #: src/panels/library/LibraryDetailPane.tsx
 msgid "Collection"
+msgstr ""
+
+#: src/panels/library/SourceItemDetail.tsx
+msgid "Collection: {collection}"
 msgstr ""
 
 #: src/panels/LibraryDialog.tsx
@@ -3600,8 +3771,11 @@ msgid "Don’t Save"
 msgstr ""
 
 #: src/health/healthCopy.ts
+#: src/panels/library/AddSourceDialog.tsx
+#: src/panels/library/SourceBrowser.tsx
 #: src/panels/LibraryUpdateReview.tsx
 #: src/panels/PrintDialog.tsx
+#: src/panels/SourceUpdateReview.tsx
 msgid "Done"
 msgstr ""
 
@@ -4000,6 +4174,10 @@ msgstr ""
 
 #: src/panels/LibraryUpdateReview.tsx
 msgid "Every part from the Library matches it."
+msgstr ""
+
+#: src/panels/SourceUpdateReview.tsx
+msgid "Everything from your sources is up to date."
 msgstr ""
 
 #: src/settings/units.ts
@@ -4421,6 +4599,10 @@ msgstr ""
 msgid "Folders"
 msgstr ""
 
+#: src/panels/library/SourceBrowser.tsx
+msgid "Follow"
+msgstr ""
+
 #: src/i18n/historyLabels.ts
 #: src/i18n/nativeMenu.ts
 #: src/tools/toolRegistry.ts
@@ -4433,6 +4615,11 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "follow path copies"
+msgstr ""
+
+#: src/panels/library/SourceBrowser.tsx
+#: src/panels/library/SourcesBlock.tsx
+msgid "Following"
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -4504,8 +4691,20 @@ msgstr ""
 msgid "freeze"
 msgstr ""
 
+#: src/library/sourceModel.ts
+msgid "From {name} · {license}"
+msgstr ""
+
 #: src/panels/library/LibraryDetailPane.tsx
 msgid "from {sourceDoc}"
+msgstr ""
+
+#: src/panels/SourceUpdateReview.tsx
+msgid "From {sourceName}"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "From a source that is not in your list"
 msgstr ""
 
 #: src/viewport/InferenceTooltip.tsx
@@ -4621,6 +4820,7 @@ msgstr ""
 msgid "Grid & axes"
 msgstr ""
 
+#: src/panels/library/SourceBrowser.tsx
 #: src/panels/LibraryDialog.tsx
 msgid "Grid view"
 msgstr ""
@@ -4846,6 +5046,38 @@ msgstr ""
 msgid "Hew cloud ({cloudHost})"
 msgstr ""
 
+#: src/panels/library/AddSourceDialog.tsx
+msgid "Hew could not check whether this source is in the Hew catalog."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "Hew could not find this item."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "Hew could not reach {host}. Check your connection and try again."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "Hew could not reach this site. Check your connection and try again."
+msgstr ""
+
+#: src/panels/library/SourcesBlock.tsx
+msgid "Hew could not reach this source the last time it checked."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "Hew could not read the catalog right now."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "Hew could not read this site from the browser. The site may be down, or it may not allow web apps to read it. The desktop app can read it either way."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "Hew could not save to your Library. Check that the folder is available and try again."
+msgstr ""
+
 #: src/App.tsx
 msgid "Hew couldn't check this drawing, so \"{replacingName}\" was left as it was. Try again; if it keeps happening, use Report Bug."
 msgstr ""
@@ -4896,6 +5128,10 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Hew found nothing to mend in these."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "Hew has not read this source yet. Press Refresh to check it."
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
@@ -5185,6 +5421,14 @@ msgstr ""
 msgid "Home view"
 msgstr ""
 
+#: src/panels/library/SourceBrowser.tsx
+msgid "Homepage"
+msgstr ""
+
+#: src/panels/library/AddSourceDialog.tsx
+msgid "Host"
+msgstr ""
+
 #: src/tools/SliceTool.ts
 msgid "Hover a solid's face before slicing"
 msgstr ""
@@ -5199,6 +5443,10 @@ msgstr ""
 
 #: src/panels/ObjectInfoPanel.tsx
 msgid "How many straight facets this circle is drawn with (minimum {MIN_CIRCLE_SEGMENTS}). Changing it rebuilds the circle."
+msgstr ""
+
+#: src/panels/library/CatalogView.tsx
+msgid "How to publish a source"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -5313,6 +5561,30 @@ msgstr ""
 msgid "In this model"
 msgstr ""
 
+#: src/library/sourceModel.ts
+msgid "In your Library"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "In your Library · changed here"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "In your Library from {from}"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "In your Library from {from} · changed here"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "In your Library from another source"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "In your Library from another source · changed here"
+msgstr ""
+
 #: src/settings/stlImportUnit.ts
 msgid "Inches"
 msgstr ""
@@ -5340,6 +5612,7 @@ msgid "insert"
 msgstr ""
 
 #: src/panels/library/LibraryDetailPane.tsx
+#: src/panels/library/SourceItemDetail.tsx
 #: src/panels/LibraryDialog.tsx
 msgid "Insert"
 msgstr ""
@@ -5491,6 +5764,10 @@ msgstr ""
 msgid "It is solid."
 msgstr ""
 
+#: src/library/sourceModel.ts
+msgid "It matches the source."
+msgstr ""
+
 #: src/health/healthCopy.ts
 msgid "It was left open."
 msgstr ""
@@ -5512,6 +5789,10 @@ msgstr ""
 msgid "Item name"
 msgstr ""
 
+#: src/panels/library/AddSourceDialog.tsx
+msgid "Items"
+msgstr ""
+
 #: src/settings/FoldersPane.tsx
 msgid "Items are stored by this browser on this device. Brave ships with the folder-picker API turned off — enable \"File System Access API\" at brave://flags to keep items as ordinary .hew files in a folder instead."
 msgstr ""
@@ -5522,6 +5803,10 @@ msgstr ""
 
 #: src/settings/FoldersPane.tsx
 msgid "Items are stored by this browser on this device. This browser doesn’t offer the folder-picker API needed to keep them on disk (Chrome and Edge do)."
+msgstr ""
+
+#: src/panels/library/SourceBrowser.tsx
+msgid "Items in {headName}"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -5552,6 +5837,11 @@ msgstr ""
 msgid "Keep as is"
 msgstr ""
 
+#: src/panels/library/SourceConfirm.tsx
+#: src/panels/SourceUpdateReview.tsx
+msgid "Keep mine"
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "Keep only the volume all the selected solids share (boolean intersection)."
 msgstr ""
@@ -5576,11 +5866,16 @@ msgstr ""
 msgid "Keeps everything Hew stores."
 msgstr ""
 
+#: src/panels/SourceUpdateReview.tsx
+msgid "Kept yours"
+msgstr ""
+
 #: src/settings/ControlsPane.tsx
 msgid "Keyboard shortcuts"
 msgstr ""
 
 #: src/panels/library/LibraryDetailPane.tsx
+#: src/panels/library/SourceItemDetail.tsx
 msgid "Keywords"
 msgstr ""
 
@@ -5635,6 +5930,7 @@ msgstr ""
 
 #: src/panels/FollowNoticeBar.tsx
 #: src/panels/LibraryUpdateBar.tsx
+#: src/panels/SourceUpdateBar.tsx
 #: src/updater/UpdateReadyBar.tsx
 #: src/updater/UpdateWindow.tsx
 msgid "Later"
@@ -5656,6 +5952,7 @@ msgstr ""
 msgid "learn"
 msgstr ""
 
+#: src/panels/library/SourceBrowser.tsx
 #: src/panels/ReportBugDialog.tsx
 msgid "Learn more"
 msgstr ""
@@ -5781,6 +6078,15 @@ msgstr ""
 msgid "Library updates"
 msgstr ""
 
+#: src/panels/library/AddSourceDialog.tsx
+msgid "License"
+msgstr ""
+
+#: src/panels/library/SourceBrowser.tsx
+#: src/panels/library/SourceItemDetail.tsx
+msgid "License: {license}"
+msgstr ""
+
 #: src/settings/FluentSettingsPage.tsx
 #: src/settings/ThemePane.tsx
 #: src/shop/SettingsMenu.tsx
@@ -5868,6 +6174,7 @@ msgstr ""
 msgid "List this again"
 msgstr ""
 
+#: src/panels/library/SourceBrowser.tsx
 #: src/panels/LibraryDialog.tsx
 msgid "List view"
 msgstr ""
@@ -5888,6 +6195,8 @@ msgstr ""
 msgid "Loading system fonts…"
 msgstr ""
 
+#: src/panels/library/CatalogView.tsx
+#: src/panels/library/SourceBrowser.tsx
 #: src/panels/LibraryDialog.tsx
 #: src/settings/FluentSettingsPage.tsx
 msgid "Loading…"
@@ -6018,8 +6327,16 @@ msgstr ""
 msgid "Look straight up at the model."
 msgstr ""
 
+#: src/panels/library/AddSourceDialog.tsx
+msgid "Look up"
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "look-alike"
+msgstr ""
+
+#: src/panels/library/AddSourceDialog.tsx
+msgid "Looking…"
 msgstr ""
 
 #: src/tools/MoveTool.ts
@@ -6571,6 +6888,7 @@ msgid "n-gon"
 msgstr ""
 
 #. Library list column header
+#: src/panels/library/AddSourceDialog.tsx
 #: src/panels/library/LibraryListHead.tsx
 #: src/panels/ObjectInfoPanel.tsx
 #: src/settings/view.ts
@@ -6636,6 +6954,10 @@ msgstr ""
 msgid "New"
 msgstr ""
 
+#: src/panels/SourceUpdateReview.tsx
+msgid "New at {sourceName}"
+msgstr ""
+
 #: src/panels/LibraryDialog.tsx
 msgid "New collection name"
 msgstr ""
@@ -6650,6 +6972,15 @@ msgstr ""
 
 #: src/panels/ObjectInfoPanel.tsx
 msgid "New tag for all selected"
+msgstr ""
+
+#: src/library/sourceModel.ts
+#: src/panels/SourceMark.tsx
+msgid "Newer at the source"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "Newer at the source · changed here"
 msgstr ""
 
 #: src/library/libraryUpdates.ts
@@ -6673,6 +7004,10 @@ msgstr ""
 #: src/shop/ScenePill.tsx
 msgctxt "scene"
 msgid "Next Scene"
+msgstr ""
+
+#: src/panels/library/SourceConfirm.tsx
+msgid "No"
 msgstr ""
 
 #: src/shop/ScanSheet.tsx
@@ -6732,8 +7067,16 @@ msgstr ""
 msgid "No items here yet."
 msgstr ""
 
+#: src/panels/library/SourceBrowser.tsx
 #: src/panels/LibraryDialog.tsx
 msgid "No items match your search."
+msgstr ""
+
+#: src/library/sourceModel.ts
+#: src/panels/library/AddSourceDialog.tsx
+#: src/panels/library/CatalogView.tsx
+#: src/panels/library/SourceBrowser.tsx
+msgid "No license stated"
 msgstr ""
 
 #: src/log/LogPanel.tsx
@@ -6805,6 +7148,10 @@ msgstr ""
 msgid "No Scenes yet. Add Scene saves the current camera, visibility, and section cut."
 msgstr ""
 
+#: src/panels/library/CatalogView.tsx
+msgid "No sources are listed yet."
+msgstr ""
+
 #: src/panels/TextDialog.tsx
 msgid "No system fonts were found — your browser may have blocked access without asking."
 msgstr ""
@@ -6848,12 +7195,20 @@ msgstr ""
 msgid "Not available in the browser build yet."
 msgstr ""
 
+#: src/library/sourceModel.ts
+msgid "Not checked yet"
+msgstr ""
+
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Not closed"
 msgstr ""
 
 #: src/library/libraryUpdates.ts
 msgid "Not in the Library any more"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "Not in your Library"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -6997,6 +7352,10 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Nothing will change. Go back to make a choice, or close this window."
+msgstr ""
+
+#: src/panels/SourceUpdateReview.tsx
+msgid "Now named “{localName}”. It will take the source’s name."
 msgstr ""
 
 #: src/shop/PrintSheet.tsx
@@ -7337,6 +7696,10 @@ msgstr ""
 
 #: src/panels/LibraryDialog.tsx
 msgid "Open for Editing"
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "Open for editing. Close it and update again."
 msgstr ""
 
 #: src/shop/DocumentMenu.tsx
@@ -7727,6 +8090,10 @@ msgstr ""
 msgid "Paste"
 msgstr ""
 
+#: src/panels/library/AddSourceDialog.tsx
+msgid "Paste a web address"
+msgstr ""
+
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
 #: src/panels/MenuBar.tsx
@@ -7984,6 +8351,10 @@ msgstr ""
 msgid "Press Enter to resize the model to the typed distance — Esc to keep the measurement as it is."
 msgstr ""
 
+#: src/panels/library/CatalogView.tsx
+msgid "Preview {name}"
+msgstr ""
+
 #: src/health/healthCopy.ts
 msgid "Previous opening"
 msgstr ""
@@ -8035,6 +8406,10 @@ msgstr ""
 
 #: src/panels/LibraryDialog.tsx
 msgid "Profiles"
+msgstr ""
+
+#: src/panels/library/SourceBrowser.tsx
+msgid "Progress"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -8350,6 +8725,10 @@ msgstr ""
 msgid "reference"
 msgstr ""
 
+#: src/panels/library/SourceBrowser.tsx
+msgid "Refresh"
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "refresh scene"
 msgstr ""
@@ -8465,6 +8844,11 @@ msgstr ""
 msgid "Remove paper-thin overlaps"
 msgstr ""
 
+#: src/panels/library/SourceBrowser.tsx
+#: src/panels/library/SourceConfirm.tsx
+msgid "Remove source"
+msgstr ""
+
 #: src/panels/library/LibraryDetailPane.tsx
 #: src/panels/library/LibraryMenu.tsx
 #: src/panels/LibraryDialog.tsx
@@ -8485,6 +8869,10 @@ msgstr ""
 
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Remove tag failed: {errorText}"
+msgstr ""
+
+#: src/panels/library/SourceConfirm.tsx
+msgid "Remove this source?"
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -8579,8 +8967,21 @@ msgstr ""
 msgid "Replace it"
 msgstr ""
 
+#: src/panels/library/SourceConfirm.tsx
+msgid "Replace the item in your Library?"
+msgstr ""
+
+#: src/panels/library/SourceConfirm.tsx
+#: src/panels/SourceUpdateReview.tsx
+msgid "Replace your changes"
+msgstr ""
+
 #: src/App.tsx
 msgid "Replaced profile \"{name}\"."
+msgstr ""
+
+#: src/panels/SourceUpdateReview.tsx
+msgid "Replaced with the source’s version"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -8679,6 +9080,7 @@ msgstr ""
 msgid "Resize {scopeLabel}?"
 msgstr ""
 
+#: src/panels/library/SourceBrowser.tsx
 #: src/panels/LibraryDialog.tsx
 msgid "Resize detail pane"
 msgstr ""
@@ -8732,6 +9134,10 @@ msgstr ""
 msgid "Restore"
 msgstr ""
 
+#: src/panels/library/SourceBrowser.tsx
+msgid "Retry"
+msgstr ""
+
 #: src/panels/library/LibraryMenu.tsx
 msgid "Reveal in Finder"
 msgstr ""
@@ -8776,6 +9182,7 @@ msgstr ""
 
 #: src/panels/library/LibraryDetailPane.tsx
 #: src/panels/LibraryUpdateBar.tsx
+#: src/panels/SourceUpdateBar.tsx
 msgid "Review…"
 msgstr ""
 
@@ -9234,6 +9641,14 @@ msgstr ""
 msgid "Search the library"
 msgstr ""
 
+#: src/panels/library/SourceBrowser.tsx
+msgid "Search this source"
+msgstr ""
+
+#: src/panels/library/SourceBrowser.tsx
+msgid "Search this source…"
+msgstr ""
+
 #: src/panels/ToolRail.tsx
 msgid "Search tools, actions, help"
 msgstr ""
@@ -9334,6 +9749,7 @@ msgid "Select all copies"
 msgstr ""
 
 #: src/panels/library/LibraryDetailPane.tsx
+#: src/panels/library/SourceItemDetail.tsx
 msgid "Select an item to see its details."
 msgstr ""
 
@@ -9996,6 +10412,23 @@ msgstr ""
 msgid "Sort outliner"
 msgstr ""
 
+#: src/panels/SourceUpdateReview.tsx
+msgid "Source updates"
+msgstr ""
+
+#: src/panels/library/SourcesBlock.tsx
+msgid "Sources"
+msgstr ""
+
+#: src/library/sourceMessages.ts
+#: src/library/sourceModel.ts
+msgid "Sources are turned off on this server."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "Sources must use https."
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "spectator"
 msgstr ""
@@ -10108,6 +10541,10 @@ msgstr ""
 
 #: src/log/reportImports.ts
 msgid "STL model (.stl)"
+msgstr ""
+
+#: src/panels/library/SourceBrowser.tsx
+msgid "Stopped."
 msgstr ""
 
 #. Example tag path shown as placeholder text
@@ -10684,6 +11121,10 @@ msgstr ""
 msgid "The camera needs a secure (https) connection — open the installed Hew app rather than a local preview."
 msgstr ""
 
+#: src/library/sourceMessages.ts
+msgid "The catalog is not available."
+msgstr ""
+
 #: src/tools/draftCommit.ts
 msgid "The closed shape is now a solid of its own. It could not be joined to the one it touches."
 msgstr ""
@@ -10744,6 +11185,23 @@ msgstr ""
 msgid "The guide needs a definite direction. Drag a little further before dropping it."
 msgstr ""
 
+#: src/library/sourceMessages.ts
+#: src/library/sourceModel.ts
+msgid "The Hew catalog removed this source: {reason}"
+msgstr ""
+
+#: src/panels/library/SourceBrowser.tsx
+#: src/panels/library/SourcesBlock.tsx
+msgid "The Hew catalog removed this source: {removedReason}"
+msgstr ""
+
+#: src/library/sourceMessages.ts
+#: src/library/sourceModel.ts
+#: src/panels/library/SourceBrowser.tsx
+#: src/panels/library/SourcesBlock.tsx
+msgid "The Hew catalog removed this source."
+msgstr ""
+
 #: src/health/healthCopy.ts
 msgid "The highlighted edges are open. Several openings run together or stop short, so Hew can't tell where each one ends."
 msgstr ""
@@ -10762,6 +11220,10 @@ msgstr ""
 
 #: src/panels/WelcomeScreen.tsx
 msgid "The intuitive, Open Source, cross-platform, solids-first 3D modeler."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "The item was updated, but Hew could not remove the old copy. Delete the old copy from your Library by hand."
 msgstr ""
 
 #: src/panels/SaveToLibraryPopover.tsx
@@ -10799,6 +11261,10 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "The line's two ends are the same point. Click a second, different point."
+msgstr ""
+
+#: src/panels/library/SourceBrowser.tsx
+msgid "The list below is from the last time Hew could read this source."
 msgstr ""
 
 #: src/panels/RescaleConfirmDialog.tsx
@@ -10982,6 +11448,14 @@ msgstr ""
 msgid "The share server isn’t answering as a Hew relay — try again later."
 msgstr ""
 
+#: src/library/sourceMessages.ts
+msgid "The site answered with an error ({status}). Try again later."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "The site answered with an error. Try again later."
+msgstr ""
+
 #: src/panels/SkpLossNotice.tsx
 msgid "The SketchUp file can’t hold everything exactly"
 msgstr ""
@@ -10992,6 +11466,22 @@ msgstr ""
 
 #: src/tools/FollowMeTool.ts
 msgid "The solid has a face that isn't flat enough to join the sweep to — left as a separate object."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "The source lists this item incorrectly. Hew did not add it."
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "The source no longer has this item"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "The source no longer has this item · changed here"
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "The source no longer has this item."
 msgstr ""
 
 #: src/tools/FollowMeTool.ts
@@ -11135,6 +11625,14 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Thickness"
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "This address does not have a Hew source."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "This address keeps sending Hew somewhere else. Check the address and try again."
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -11326,8 +11824,32 @@ msgstr ""
 msgid "This is already solid, so there's nothing to close. Use Push/Pull to change its shape."
 msgstr ""
 
+#: src/library/sourceMessages.ts
+msgid "This is bigger than Hew allows for a source."
+msgstr ""
+
 #: src/kernelErrors.ts
 msgid "This is the component's only member — deleting it would leave every instance empty. Delete the instances instead, or add another member first."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "This item cannot be updated from this source."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "This item changed while Hew was reading it. Try again in a few minutes."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "This item is already in your Library from {other}."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "This item is already in your Library from another source."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "This item is already in your Library."
 msgstr ""
 
 #: src/App.tsx
@@ -11360,6 +11882,10 @@ msgstr ""
 
 #: src/kernelErrorCopy/shapeCommon.ts
 msgid "This needs a solid. This object has gaps."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "This needs your answer first."
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -11519,6 +12045,10 @@ msgstr ""
 msgid "This shape touches another shape at a point, so it can't be pulled as one piece. Pull the shape inside it instead, or move them a hair apart."
 msgstr ""
 
+#: src/library/sourceMessages.ts
+msgid "This site is limiting requests right now. Try again later."
+msgstr ""
+
 #: src/panels/SkpLossNotice.tsx
 msgid "This SketchUp format left out:"
 msgstr ""
@@ -11526,6 +12056,38 @@ msgstr ""
 #: src/panels/SkpLossNotice.tsx
 #~ msgid "This SketchUp version’s format left out:"
 #~ msgstr ""
+
+#: src/panels/library/SourceBrowser.tsx
+msgid "This source has no items."
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "This source has not been checked yet."
+msgstr ""
+
+#: src/panels/library/AddSourceDialog.tsx
+msgid "This source is already in your list."
+msgstr ""
+
+#: src/panels/library/AddSourceDialog.tsx
+msgid "This source is not in the Hew catalog. Hew has not checked it."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "This source is not in your list."
+msgstr ""
+
+#: src/library/sourceModel.ts
+msgid "This source is not in your list. Add it again to get updates."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "This source needs {needed}. Your browser has {free} free."
+msgstr ""
+
+#: src/library/sourceMessages.ts
+msgid "This source needs a newer version of Hew."
+msgstr ""
 
 #: src/kernelErrors.ts
 msgid "This step couldn't be undone or redone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
@@ -12057,6 +12619,15 @@ msgstr ""
 msgid "Unlink all"
 msgstr ""
 
+#: src/panels/library/LibraryDetailPane.tsx
+#: src/panels/LibraryDialog.tsx
+msgid "Unlink from {name}"
+msgstr ""
+
+#: src/panels/library/LibraryMenu.tsx
+msgid "Unlink from {sourceName}"
+msgstr ""
+
 #: src/linkedCopyCopy.ts
 msgid "Unlinked this copy and cut it"
 msgstr ""
@@ -12126,7 +12697,12 @@ msgid "Update “{updateName}” in the Library"
 msgstr ""
 
 #: src/panels/LibraryUpdateReview.tsx
+#: src/panels/SourceUpdateReview.tsx
 msgid "Update {name}"
+msgstr ""
+
+#: src/panels/SourceUpdateBar.tsx
+msgid "Update all"
 msgstr ""
 
 #: src/panels/LibraryUpdateBar.tsx
@@ -12143,6 +12719,13 @@ msgstr ""
 
 #: src/i18n/historyLabels.ts
 msgid "Update from Library"
+msgstr ""
+
+#: src/panels/library/LibraryDetailPane.tsx
+#: src/panels/library/LibraryMenu.tsx
+#: src/panels/library/SourceItemDetail.tsx
+#: src/panels/LibraryDialog.tsx
+msgid "Update from source"
 msgstr ""
 
 #: src/updater/UpdateWindow.tsx
@@ -12175,12 +12758,20 @@ msgstr ""
 msgid "Update Scene failed: {reason}"
 msgstr ""
 
+#: src/panels/SourceUpdateReview.tsx
+msgid "Update selected"
+msgstr ""
+
 #: src/panels/LibraryUpdateReview.tsx
 msgid "Update Selected"
 msgstr ""
 
 #: src/viewport/gpuCapability.ts
 msgid "Update your graphics drivers first — that fixes most cases. Then check that hardware acceleration is turned on in Firefox's Performance settings, and that webgl.disabled hasn't been switched on in about:config."
+msgstr ""
+
+#: src/panels/SourceUpdateReview.tsx
+msgid "Updated"
 msgstr ""
 
 #: src/App.tsx
@@ -12276,6 +12867,7 @@ msgstr ""
 #: src/io/savePanel.ts
 #: src/panels/ExportDialog.tsx
 #: src/panels/FollowNoticeBar.tsx
+#: src/panels/library/SourceBrowser.tsx
 #: src/panels/LibraryDialog.tsx
 #: src/panels/MenuBar.tsx
 #: src/panels/PrintDialog.tsx
@@ -12420,6 +13012,11 @@ msgstr ""
 msgid "When a part you inserted from the Library has a newer version there, Hew says so under the menu bar. It never changes anything until you choose to update. With this off, Hew stops checking by itself and never shows that note, but it still checks when you open the Components panel or the Library, or save a part to the Library."
 msgstr ""
 
+#: src/settings/FluentSettingsPage.tsx
+#: src/settings/FoldersPane.tsx
+msgid "When you open the Library, Hew looks at the sources you added and says when they have new or changed items. It never changes anything until you choose to. Turn this off and Hew checks only when you press Refresh on a source."
+msgstr ""
+
 #: src/settings/ViewPane.tsx
 msgid "Where the box that shows the number you are typing sits. The fly speed readout moves with it."
 msgstr ""
@@ -12511,12 +13108,28 @@ msgstr ""
 msgid "Y-up, meters, for AR Quick Look and USD pipelines"
 msgstr ""
 
+#: src/panels/library/SourceConfirm.tsx
+msgid "Yes"
+msgstr ""
+
 #: src/panels/SentReportsDialog.tsx
 msgid "You"
 msgstr ""
 
+#: src/library/sourceMessages.ts
+msgid "You are offline. Your Library still works."
+msgstr ""
+
 #: src/updater/UpdateWindow.tsx
 msgid "You can download the new version from the Download page instead."
+msgstr ""
+
+#: src/panels/library/SourceConfirm.tsx
+msgid "You changed this item here"
+msgstr ""
+
+#: src/panels/SourceUpdateReview.tsx
+msgid "You changed this item here. Taking the newer version replaces your changes."
 msgstr ""
 
 #: src/library/libraryUpdates.ts
@@ -12562,6 +13175,10 @@ msgstr ""
 
 #: src/updater/UpdateWindow.tsx
 msgid "Your computer will ask for your password to install it."
+msgstr ""
+
+#: src/panels/library/SourceConfirm.tsx
+msgid "Your Library already has “{name}”. Replacing it with the one from the source links the two."
 msgstr ""
 
 #: src/panels/LibraryDialog.tsx

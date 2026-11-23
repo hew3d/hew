@@ -148,6 +148,11 @@ crates/hew-relay/     self-hostable "Open on Phone" relay binary (axum;
 crates/library/       the Hew Library's on-disk layout (folder resolution,
                       item naming, atomic list/read/write/remove), shared
                       by hew-cli's hew.library.* and the desktop shell
+crates/sources/       Library sources: the hew.json index and catalog.json
+                      formats, source references, request URLs, the
+                      public-host check; pure (no I/O, clock or network),
+                      used by hew-cli natively and by the app through
+                      crates/wasm-api/src/sources_api.rs
 crates/plugin-manifest/ the plugin manifest (hew-plugin.json) parser and
                       validator; pure, shared by every host and crates/api
 crates/vendor/        vendored third-party code (dae-parser)
@@ -651,10 +656,18 @@ with a fake app socket that records what it is sent.
 
 Both shells' content security policies live in
 `shells/csp/policies.json`: a `production` and a `preview` policy for
-each shell, and the `probe` policy the realm probe is measured under,
-which no release serves. `shells/web/inject-csp.mjs` picks the web one by
-the flag; `tauri.conf.json` holds the desktop production policy, and
-`shells/csp/tauri-overlay.mjs` writes a `--config` overlay for any other.
+each shell, a `web.strict` policy, and the `probe` policy the realm
+probe is measured under, which no release serves. The web `production`
+and `preview` policies have `connect-src 'self' blob: https:`, because
+the Library reads sources from any `https:` host; `web.strict` is the
+web production policy with `connect-src 'self' blob:`.
+`HEW_WEB_SOURCES=off` (exactly that value) builds the web page with
+`web.strict`, and combined with `HEW_PREVIEW=1` it is a build error. The
+desktop shell ignores the flag and its policy does not change.
+`shells/web/inject-csp.mjs` picks the web policy by the flags;
+`tauri.conf.json` holds the desktop production policy, and
+`shells/csp/tauri-overlay.mjs` writes a `--config` overlay for any
+other.
 A Preview feature that needs a wider policy widens the preview one. The
 desktop shell's `dev`, `build` and `e2e:build` scripts run the Tauri CLI
 through `shells/tauri/scripts/tauri-policy.mjs`, which adds the
@@ -664,9 +677,37 @@ workflow passes the same overlay for a `-pre.` tag and no other, and
 after the build `scripts/check-desktop-binary.mjs` checks that the
 shell binary allows the boot script for a `-pre.` tag and does not for
 any other; the check below holds the wiring to that. The
-production policies and the desktop capability files are pinned to copies
+production and strict policies and the desktop capability files are pinned to copies
 under `shells/csp/baseline/`, so changing one takes an edit in both
 places. Hew sets no cross-origin isolation header on any tier.
+
+Library sources are the one feature that makes outside requests from
+the page. The app never reads `HEW_WEB_SOURCES`: at run time
+`webSourcesOff` in `app/src/library/remoteFetcher.ts` reads the page's
+own CSP `<meta>` and turns Sources off when `connect-src` allows neither
+`https:` nor `*`. A page with no CSP `<meta>` (the dev server, the E2E
+servers) is not Off. On the web the fetch is the browser's; on the
+desktop it is the Tauri command `remote_fetch`
+(`shells/tauri/src-tauri/src/remote_fetch.rs`), and the webview itself
+still has no network. Neither writes a source address to the log. The
+catalog address is `DEFAULT_CATALOG_URL` in
+`app/src/library/catalogUrl.ts`; the build-time variable
+`VITE_HEW_CATALOG_URL` replaces it, and an empty value hides the catalog
+view. `crates/sources` is on the `CRATES` list of
+`crates/wasm-api/tests/no_wasm_panics.rs`. The `hew-cli` subcommands
+`library index`, `catalog check` and `catalog build` (production, not
+Preview) live in `crates/hew-cli/src/library_index.rs` and `catalog.rs`;
+their tests run against a loopback server, and the loopback allowance
+sits behind the `test-loopback` feature, which only the crate's own
+tests enable.
+
+A debug build of the desktop shell reads `HEW_EXTRA_CA_PEM`. Set it to
+the path of a PEM file and `remote_fetch` trusts the certificates in
+that file in addition to the platform's roots, so a test can read
+sources from a local `https` fixture without touching the system
+keychain. A file that cannot be read or parsed fails every fetch with
+`network`. The code is compiled out of release builds, which ignore the
+variable.
 
 The plugin realm's boot script is built from `sdk/plugin` (the
 `@hew3d/plugin` workspace package) and committed as

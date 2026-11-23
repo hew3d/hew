@@ -41,6 +41,15 @@ if (!PARENT_CSP.includes(`'sha256-${BOOT_HASH}'`)) {
   throw new Error('shells/csp/policies.json web.probe does not pin the probe boot script; update its hash')
 }
 
+// The `connect-src` of the web preview build's policy (web.preview). Package S7
+// widens it to any https host (docs/design/shared-library-sources.md 7.1); the
+// plugin realm must still have no network. The probe's parent policy is
+// swapped to it by the one test that asks (`parentConnectSrc`).
+const PREVIEW_CONNECT_SRC =
+  (JSON.parse(readFileSync(new URL('../../../shells/csp/policies.json', import.meta.url), 'utf8')) as { web: { preview: string } }).web.preview
+    .split('; ')
+    .find((d) => d.startsWith('connect-src ')) ?? ''
+
 const here = dirname(fileURLToPath(import.meta.url))
 const RESULTS_DIR = join(here, 'results')
 
@@ -74,11 +83,14 @@ test.describe.configure({ timeout: 60_000 })
 
 /** Set by a test that wants the host document served cross-origin isolated. */
 let isolateHost = false
+/** Set by a test that wants the parent page's connect-src to be the web preview build's. */
+let parentConnectSrc: string | null = null
 
 test.beforeEach(async ({ page, baseURL }) => {
   exampleHits = 0
   requests = []
   isolateHost = false
+  parentConnectSrc = null
   // The Plugins switch is off until asked for; the wall reads it once, at load.
   await page.addInitScript(() => {
     try {
@@ -124,7 +136,8 @@ test.beforeEach(async ({ page, baseURL }) => {
       const hashes = [...body.matchAll(/<script(?![^>]*\ssrc=)[^>]*>([\s\S]*?)<\/script>/g)].map(
         (m) => `'sha256-${createHash('sha256').update(m[1]).digest('base64')}'`,
       )
-      const csp = PARENT_CSP.replace("'self' 'wasm-unsafe-eval' blob:", `'self' 'wasm-unsafe-eval' blob: ${hashes.join(' ')}`)
+      let csp = PARENT_CSP.replace("'self' 'wasm-unsafe-eval' blob:", `'self' 'wasm-unsafe-eval' blob: ${hashes.join(' ')}`)
+      if (parentConnectSrc !== null) csp = csp.replace(/connect-src [^;]*/, parentConnectSrc)
       delete headers['content-length']
       return route.fulfill({ response: res, body, headers: { ...headers, 'content-security-policy': csp } }).catch(gone)
     }
@@ -198,6 +211,40 @@ for (const id of simple) {
     await runRow(page, ti.project.name, id)
   })
 }
+
+// S7 (docs/design/shared-library-sources.md 7.1): the page may now connect to
+// any https host, and the plugin realm must not inherit that. The realm is a
+// sandboxed frame with a policy of its own (`connect-src 'none'`,
+// src/plugins/probe/realm.ts), which a srcdoc frame combines with its parent's
+// by intersection. This runs the worker-denials row under a parent whose
+// connect-src is the preview build's and asks that no https request reaches
+// the network. If it FAILS, the realm inherits the page's connect-src: S7 must
+// stop and ask for a design answer, not widen anything.
+// The worker-denials row's data is an array on some engines and an object
+// { results, blockedCount, ... } on WebKit. Read the results from either shape.
+function denialEntries(data: unknown): { name: string; outcome: string; detail: string }[] {
+  const list = Array.isArray(data) ? data : (data as { results?: unknown } | null)?.results
+  return Array.isArray(list) ? (list as { name: string; outcome: string; detail: string }[]) : []
+}
+
+test('worker-denials-any-https', async ({ page }) => {
+  parentConnectSrc = PREVIEW_CONNECT_SRC
+  // Control: the parent really allows any https host, so a refusal below is the realm's doing.
+  expect(PREVIEW_CONNECT_SRC).toMatch(/(^|\s)https:(\s|$)/)
+  await load(page, 'worker-denials')
+  const results = await finish(page)
+  const row = results.rows[0]
+  expect(row?.row).toBe('worker-denials')
+  expect(row.status, row.detail).not.toBe('fail')
+  const entries = denialEntries(row.data)
+  const remote = entries.filter((e) => e.name.includes('example.com'))
+  // fetch, WebSocket and the two Cache.add entries name the arbitrary host.
+  expect(remote.length).toBeGreaterThanOrEqual(2)
+  for (const e of remote) expect(e.outcome, `${e.name}: ${e.detail}`).not.toBe('allowed')
+  const fetched = remote.find((e) => e.name.startsWith('fetch('))
+  expect(fetched?.outcome, 'the realm fetch of an arbitrary https host').toBe('blocked')
+  expect(exampleHits, 'a request to the arbitrary host reached the network').toBe(0)
+})
 
 test('surface-navigate-remote', async ({ page }, ti) => {
   // The surface frame is removed when the row ends, so its URL is read while it lives.

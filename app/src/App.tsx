@@ -1,3 +1,4 @@
+import { noteDroppedFor } from './library/openPathInLibrary'
 import { Fragment, useEffect, useState, useCallback, useRef, useMemo, useSyncExternalStore } from 'react'
 import { useSelectionViews } from './useSelectionViews'
 import { useClearSelectionOnDrawTool } from './useClearSelectionOnDrawTool'
@@ -181,15 +182,22 @@ import type { TagReveal } from './panels/TagsPanel'
 import { LibraryDialog } from './panels/LibraryDialog'
 import { SaveToLibraryPopover } from './panels/SaveToLibraryPopover'
 import { libraryStore } from './io/libraryStore'
+import { useLibraryEditRegistration } from './library/editRegistration'
 import { buildItemGhost } from './library/ghostBuilder'
-import { readItemSummary, renderItemThumbnail, sha256Hex } from './library/itemFiles'
+import { readItemSummary, renderItemThumbnail, sha256Hex, withoutRemoteNote, withoutRemoteNoteIfAny } from './library/itemFiles'
 import { loadThumbnails as loadSceneThumbnails, saveThumbnails as saveSceneThumbnails } from './scenes/sceneThumbnails'
-import { buildLibraryItem, builtInProfileItem, metaForEditSave } from './library/libraryModel'
+import {
+  buildLibraryItem,
+  builtInProfileItem,
+  metaForEditSave,
+  metaForLibrarySave,
+  metaForProfileReplace,
+} from './library/libraryModel'
 import { builtInFilletProfile, builtInItemBytes, bundledProfiles, chainFirstFix, chainItemBytes, profileShapeOfBytes, shapeProfile } from './library/profiles'
 import { selectionChain } from './library/profileSelection'
 import { useProfileSections } from './library/useProfileSections'
 import { itemFileName } from './library/fileNaming'
-import type { LibraryCategory, LibraryItem } from './library/types'
+import type { LibraryCategory, LibraryItem, LibraryItemMeta } from './library/types'
 import type { LibraryPlacement } from './tools/LibraryPlaceTool'
 import { parseInsertResult } from './tools/LibraryPlaceTool'
 import { childPopupOpen } from './settingsEscape'
@@ -228,6 +236,7 @@ import { FollowNoticeBar, useFollowedReports } from './panels/FollowNoticeBar'
 import { LibraryUpdateBar } from './panels/LibraryUpdateBar'
 import { LibraryUpdateReview } from './panels/LibraryUpdateReview'
 import { useLibraryLinks } from './library/useLibraryLinks'
+import { defaultSourcesBinding } from './library/sourcesDeps'
 import {
   canUpdateLibraryFrom,
   needsLibraryConfirm,
@@ -1256,6 +1265,8 @@ export default function App() {
   // Counts document loads, so an answer that lands after another load is dropped.
   const loadSeqRef = useRef(0)
   const [libraryEdit, setLibraryEditState] = useState<LibraryEditBinding | null>(null)
+  // Desktop: tell the shell which item this window edits, so a source update skips it.
+  useLibraryEditRegistration(isTauri && libraryEdit !== null ? libraryEdit.fileName : null)
   // Web: releases the Web Lock that keeps a second tab off the same item.
   const libraryEditLockRef = useRef<(() => void) | null>(null)
   // Web: this tab was opened by Library ▸ Edit (`?libraryEdit=`), so it must
@@ -4409,7 +4420,8 @@ export default function App() {
           }
           bytes = new Uint8Array(scene.extract_document_item(JSON.stringify(metaForEditSave(current, new Date().toISOString()))))
         } else {
-          bytes = new Uint8Array(scene.save())
+          // An ordinary document file never carries a Library item's remote note.
+          bytes = await withoutRemoteNoteIfAny(new Uint8Array(scene.save()))
         }
         let newRef: FileRef | null
         if (libEdit !== null) {
@@ -4531,7 +4543,9 @@ export default function App() {
         simplified = out.simplified
         writerNotes = out.writer_notes
       } else {
-        bytes = new Uint8Array(scene.save())
+        // Save As makes an ordinary document: the note of the Library item
+        // this one was opened from stays behind (design 7.2).
+        bytes = await withoutRemoteNoteIfAny(new Uint8Array(scene.save()))
       }
       const host = fileHostRef.current
       const newRef =
@@ -4579,9 +4593,9 @@ export default function App() {
     pushCameraStateToScene(scene)
     scene.ensure_document_id()
     void reportDocumentId()
-    const bytes = new Uint8Array(scene.save())
     const suggestedName = nameForFormat(documentName(docSessionRef.current), 'hew')
     try {
+      const bytes = await withoutRemoteNoteIfAny(new Uint8Array(scene.save()))
       const copy = await fileHostRef.current.saveAs(bytes, suggestedName, 'hew')
       if (copy !== null) {
         setSkpNotice(null)
@@ -4627,6 +4641,21 @@ export default function App() {
     [handleToast, setLibraryEdit],
   )
   bindLibraryItemRef.current = bindLibraryItemForPath
+  /** A Library item's bytes without its remote note, for opening it as an
+   * ordinary document (design 7.2). When that cannot be done the open fails
+   * the way any open does (a refusal toast), and `null` comes back: the
+   * document is never opened with the note. */
+  const withoutNoteOrReport = useCallback(
+    async (bytes: Uint8Array): Promise<Uint8Array | null> => {
+      try {
+        return await withoutRemoteNote(bytes)
+      } catch (err) {
+        toastOpenFailure(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`, isKernelRefusal(err), parseKernelErrorCode(err))
+        return null
+      }
+    },
+    [toastOpenFailure],
+  )
   // ---------------------------------------------------------------- open by path (Tauri only)
   // Reads the file at `path` and applies it to the CURRENT window
   // unconditionally — no pristine check, no discard guard. Callers must have
@@ -4655,7 +4684,9 @@ export default function App() {
         const buf = await invoke<ArrayBuffer>('read_file', { path })
         const bytes = new Uint8Array(buf)
         const discardsUnsaved = docSessionRef.current.dirty
-        if (applyLoadedBytes(bytes, { name: basenameOf(path), label: OPEN_FILE_LABELS.hew, path })) {
+        // A Library item opened as a document gives up its remote note (design 7.2).
+        const opened = (await noteDroppedFor(path, (p) => libraryStore().nameForPath(p))) ? await withoutNoteOrReport(bytes) : bytes
+        if (opened !== null && applyLoadedBytes(opened, { name: basenameOf(path), label: OPEN_FILE_LABELS.hew, path })) {
           landed = true
           const openedRef: FileRef = { name: basenameOf(path), format: 'hew', handle: path }
           setDocSession(afterOpen(openedRef, Date.now()))
@@ -4705,7 +4736,7 @@ export default function App() {
     }
     await runImportPick(scene, pick)
     return true
-  }, [applyLoadedBytes, clearRecoverySnapshot, runImportPick, runOpenSkp, toastOpenFailure, bindLibraryItemForPath])
+  }, [applyLoadedBytes, clearRecoverySnapshot, runImportPick, runOpenSkp, toastOpenFailure, bindLibraryItemForPath, withoutNoteOrReport])
 
   // File ▸ Revert to Saved, after its confirmation (and the live API's
   // `hew.doc.revert`, which asks none): read the saved file again, load it
@@ -4832,7 +4863,8 @@ export default function App() {
         const { invoke } = await import('@tauri-apps/api/core')
         const buf = await invoke<ArrayBuffer>('read_file', { path })
         const bytes = new Uint8Array(buf)
-        const ok = applyLoadedBytes(bytes, { name: basenameOf(path), label: OPEN_FILE_LABELS.hew })
+        // A Library item opened as a copy gives up its remote note (design 7.2, decision 36).
+        const ok = applyLoadedBytes(await withoutRemoteNote(bytes), { name: basenameOf(path), label: OPEN_FILE_LABELS.hew })
         if (ok) setDocSession(afterImport(name ?? t`Library Item`, Date.now()))
       } catch (err) {
         const message = t`Couldn't open the library item: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`
@@ -5374,13 +5406,13 @@ export default function App() {
         build: (meta: Record<string, unknown>) => Promise<Uint8Array | null> | Uint8Array | null
         rows: Array<{ label: string; value: string }>
         /** The item an edited profile was opened from, to overwrite. */
-        replace?: { fileName: string; id: string; name: string }
+        replace?: { fileName: string; id: string; name: string; meta: LibraryItemMeta }
       }
     | null
   >(null)
   /** The profile item this window's document was opened from ("Open for
    *  editing"), for Library ▸ Save's "Replace" offer. Cleared on any load. */
-  const profileSourceRef = useRef<{ fileName: string; id: string; name: string } | null>(null)
+  const profileSourceRef = useRef<{ fileName: string; id: string; name: string; meta: LibraryItemMeta } | null>(null)
 
   /** The linked copy being promoted to a component (Make component), awaiting
    * its name. `null` = prompt closed. */
@@ -5716,15 +5748,30 @@ export default function App() {
         void (async () => {
           const replacing = opts?.replace === true && target.replace !== undefined ? target.replace : null
           const id = replacing?.id ?? crypto.randomUUID()
+          // The item's metadata as the Library holds it NOW, not as it was
+          // when the profile was opened: only its remote note is carried over.
+          let current: unknown
+          if (replacing !== null) {
+            try {
+              current = (await readItemSummary(await libraryStore().read(replacing.fileName))).doc_attrs?.['hew.library']
+            } catch {
+              current = undefined // the item is gone: it is written back as a plain profile
+            }
+          }
           let bytes: Uint8Array | null
           try {
-            bytes = await target.build({
-              id,
-              name,
-              category: 'profile',
-              savedAt: new Date().toISOString(),
-              sourceDoc: documentName(docSessionRef.current),
-            })
+            bytes = await target.build(
+              metaForProfileReplace(
+                {
+                  id,
+                  name,
+                  category: 'profile',
+                  savedAt: new Date().toISOString(),
+                  sourceDoc: documentName(docSessionRef.current),
+                },
+                current,
+              ),
+            )
           } catch (err) {
             const code = parseKernelErrorCode(err)
             handleToast(kernelErrorMessage(code ?? 'Unknown', err instanceof Error ? err.message : String(err)), code ?? undefined)
@@ -5774,14 +5821,16 @@ export default function App() {
       }
       const updating = opts?.update
       const id = updating?.id ?? crypto.randomUUID()
-      const meta = {
-        ...(updating?.meta ?? {}),
-        id,
-        name,
-        category: updating?.meta.category ?? (target.kind === 'document' ? 'model' : 'component'),
-        savedAt: new Date().toISOString(),
-        sourceDoc: documentName(docSessionRef.current),
-      }
+      const meta = metaForLibrarySave(
+        {
+          id,
+          name,
+          category: updating?.meta.category ?? (target.kind === 'document' ? 'model' : 'component'),
+          savedAt: new Date().toISOString(),
+          sourceDoc: documentName(docSessionRef.current),
+        },
+        updating?.meta,
+      )
       let bytes: Uint8Array
       let promotedAt: bigint | null = null
       try {
@@ -6061,13 +6110,15 @@ export default function App() {
         if (scene === null) return
         const pristine = isPristineDocument(docSessionRef.current, scene)
         if (pristine) {
-          const ok = applyLoadedBytes(bytes, { name: `${item.displayName}.hew`, label: OPEN_FILE_LABELS.hew })
+          const opened = await withoutNoteOrReport(bytes)
+          if (opened === null) return
+          const ok = applyLoadedBytes(opened, { name: `${item.displayName}.hew`, label: OPEN_FILE_LABELS.hew })
           if (ok) {
             setDocSession(afterImport(item.displayName, Date.now()))
-            // An edited profile can replace the item it came from.
+            // An edited profile can replace the item it came from (and keeps its note).
             profileSourceRef.current =
               item.category === 'profile'
-                ? { fileName: item.file.fileName, id: item.meta.id ?? '', name: item.displayName }
+                ? { fileName: item.file.fileName, id: item.meta.id ?? '', name: item.displayName, meta: item.meta }
                 : null
           }
           return
@@ -6095,7 +6146,7 @@ export default function App() {
         }
       })()
     },
-    [applyLoadedBytes, handleToast],
+    [applyLoadedBytes, handleToast, withoutNoteOrReport],
   )
 
   // Library ▸ Edit: open the Library's own file for editing. The desktop
@@ -10707,6 +10758,8 @@ export default function App() {
           onLibraryAddToPalette / handleSaveToLibraryCommit callbacks above). */}
       <LibraryDialog
         open={showLibrary}
+        // Library sources: built the first time the Library opens, never before.
+        {...(showLibrary ? { sources: defaultSourcesBinding() } : {})}
         onClose={() => setShowLibrary(false)}
         placements={libraryPlacements}
         linkStates={libraryItemStates}

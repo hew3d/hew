@@ -10,6 +10,10 @@
 //   <shell>.preview      what a preview build (HEW_PREVIEW=1) serves. A Preview
 //                        feature that needs a wider policy widens this one, never
 //                        the production one.
+//   web.strict          the web policy with no https: in connect-src: what
+//                        `HEW_WEB_SOURCES=off` builds serve, keeping the old
+//                        own-origin-only promise. Pinned like production, by
+//                        baseline/web.strict.csp. The desktop shell has none.
 //   <shell>.probe        the policy the realm probe is measured under. No release
 //                        of either kind serves it; only the probe's own test
 //                        build and its browser spec apply it.
@@ -39,9 +43,17 @@ export function policy(shell, name) {
 }
 
 /** The policy a build of `shell` serves, from the build environment. A
- *  build is a production build unless HEW_PREVIEW is exactly 1. */
+ *  build is a production build unless HEW_PREVIEW is exactly 1. A web build
+ *  with HEW_WEB_SOURCES exactly `off` serves web.strict (any other value
+ *  behaves as unset); that beside HEW_PREVIEW=1 is an error. The desktop
+ *  shell ignores HEW_WEB_SOURCES. */
 export function policyForBuild(shell, env = process.env) {
-  return policy(shell, previewFlag(env.HEW_PREVIEW, false) ? 'preview' : 'production')
+  const preview = previewFlag(env.HEW_PREVIEW, false)
+  if (shell === 'web' && env.HEW_WEB_SOURCES === 'off') {
+    if (preview) throw new Error('HEW_WEB_SOURCES=off cannot be combined with HEW_PREVIEW=1: a preview build always allows https: sources.')
+    return policy('web', 'strict')
+  }
+  return policy(shell, preview ? 'preview' : 'production')
 }
 
 /** `html` with the policy as a <meta> right after the charset meta, so it

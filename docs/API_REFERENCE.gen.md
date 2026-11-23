@@ -7167,6 +7167,10 @@ One library item's full metadata, manifest summary, and document attributes.
     "path": {
       "type": "string"
     },
+    "remote": {
+      "description": "the remote note of an item fetched from a source (source, name, path, sha256, commit?, license?, fetchedAt, edited); absent when the item has none",
+      "type": "object"
+    },
     "saved_at": {
       "type": "string"
     },
@@ -7402,6 +7406,10 @@ List items in the Hew Library, optionally filtered by category, collection, or a
           },
           "path": {
             "type": "string"
+          },
+          "remote": {
+            "description": "the remote note of an item fetched from a source (source, name, path, sha256, commit?, license?, fetchedAt, edited); absent when the item has none",
+            "type": "object"
           },
           "saved_at": {
             "type": "string"
@@ -7915,6 +7923,10 @@ Edit a library item's name, keywords, or collection in place.
     },
     "name": {
       "type": "string"
+    },
+    "remote": {
+      "description": "the remote note of an item fetched from a source (source, name, path, sha256, commit?, license?, fetchedAt, edited); absent when the item has none",
+      "type": "object"
     },
     "saved_at": {
       "type": "string"

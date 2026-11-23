@@ -62,6 +62,7 @@ mod save_panel;
 // live in Rust rather than behind an HTTP plugin scope.
 mod follow;
 mod relay_client;
+mod remote_fetch;
 mod report_client;
 
 // The in-app updater and its update window: see the module doc in
@@ -3025,12 +3026,12 @@ fn library_write(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Res
         }
     };
     let dir = library::LibraryDir::resolve(None);
-    library::write(&dir, &name, contents)
-        .map_err(|e| format!("library_write failed for {name:?}: {e}"))?;
     // Content changed: every window's listing (an open Library window, the
-    // command palette's index in other document windows) refreshes off this.
-    let _ = app.emit("library-changed", ());
-    Ok(())
+    // command palette's index in other document windows) refreshes off the
+    // notice the helper raises on success.
+    library_write_to(&dir, &name, contents, &mut |event| {
+        let _ = app.emit(event, ());
+    })
 }
 
 /// Delete a library item. Deleting an already-absent file is not an error —
@@ -3126,6 +3127,166 @@ fn library_thumb_write(key: String, contents: Vec<u8>) -> Result<(), String> {
     let dir = library::LibraryDir::resolve(None);
     library::write_thumbnail(&dir, &key, &contents)
         .map_err(|e| format!("library_thumb_write failed for {key:?}: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Sources file, source cache, notices and the edit registry
+// (docs/design/shared-library-sources.md 7.3).
+// ---------------------------------------------------------------------------
+
+/// App-wide event raised by an item write or delete.
+const LIBRARY_CHANGED_EVENT: &str = "library-changed";
+/// App-wide event raised by a `.sources.json` write (and by nothing else).
+const LIBRARY_SOURCES_CHANGED_EVENT: &str = "library-sources-changed";
+
+/// Raw bytes of `.sources.json`; `Err("not_found")` when absent (the same
+/// sentinel as `library_thumb_read`).
+#[tauri::command]
+fn library_sources_read() -> Result<tauri::ipc::Response, String> {
+    let dir = library::LibraryDir::resolve(None);
+    match library::read_sources(&dir) {
+        Ok(Some(bytes)) => Ok(tauri::ipc::Response::new(bytes)),
+        Ok(None) => Err("not_found".to_string()),
+        Err(e) => Err(format!("library_sources_read failed: {e}")),
+    }
+}
+
+/// The body of `library_sources_write`: `library::write_sources`, then
+/// `emit(LIBRARY_SOURCES_CHANGED_EVENT)` and never `library-changed`.
+/// A failed write emits nothing.
+fn library_sources_write_to(
+    dir: &library::LibraryDir,
+    source: &str,
+    entry: Option<&serde_json::Value>,
+    emit: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    library::write_sources(dir, source, entry)
+        .map_err(|e| format!("library_sources_write failed: {e}"))?;
+    emit(LIBRARY_SOURCES_CHANGED_EVENT);
+    Ok(())
+}
+
+/// Merge one source's entry into `.sources.json` (`entry: null` removes it).
+#[tauri::command]
+fn library_sources_write(
+    app: tauri::AppHandle,
+    source: String,
+    entry: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let dir = library::LibraryDir::resolve(None);
+    library_sources_write_to(&dir, &source, entry.as_ref(), &mut |event| {
+        let _ = app.emit(event, ());
+    })
+}
+
+/// `.sources/<key>` bytes; `Err("not_found")` when absent.
+#[tauri::command]
+fn library_source_cache_read(key: String) -> Result<tauri::ipc::Response, String> {
+    let dir = library::LibraryDir::resolve(None);
+    match library::read_source_cache(&dir, &key) {
+        Ok(Some(bytes)) => Ok(tauri::ipc::Response::new(bytes)),
+        Ok(None) => Err("not_found".to_string()),
+        Err(e) => Err(format!("library_source_cache_read failed for {key:?}: {e}")),
+    }
+}
+
+/// Cache write; never emits any event.
+#[tauri::command]
+fn library_source_cache_write(key: String, contents: Vec<u8>) -> Result<(), String> {
+    let dir = library::LibraryDir::resolve(None);
+    library::write_source_cache(&dir, &key, &contents)
+        .map_err(|e| format!("library_source_cache_write failed for {key:?}: {e}"))
+}
+
+/// Delete one `.sources/<key>` cache entry (absent is fine); never emits any
+/// event.
+#[tauri::command]
+fn library_source_cache_remove(key: String) -> Result<(), String> {
+    let dir = library::LibraryDir::resolve(None);
+    library::remove_source_cache(&dir, &key)
+        .map_err(|e| format!("library_source_cache_remove failed for {key:?}: {e}"))
+}
+
+/// The body of `library_write`: `library::write` then
+/// `emit(LIBRARY_CHANGED_EVENT)` and nothing else; a failed write emits
+/// nothing.
+fn library_write_to(
+    dir: &library::LibraryDir,
+    name: &str,
+    bytes: &[u8],
+    emit: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    library::write(dir, name, bytes)
+        .map_err(|e| format!("library_write failed for {name:?}: {e}"))?;
+    emit(LIBRARY_CHANGED_EVENT);
+    Ok(())
+}
+
+/// The set of Library item names open for editing, per window. Registered
+/// by the window that opens an item; dropped when that window closes.
+#[derive(Default)]
+struct LibraryEditRegistry {
+    inner: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl LibraryEditRegistry {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<(String, String)>> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Record that window `window` has item `name` open. Errs when `name`
+    /// is not a valid item name. Idempotent per (window, name).
+    fn register(&self, window: &str, name: &str) -> Result<(), String> {
+        if !library::valid_item_name(name) {
+            return Err(format!("library_edit_register: invalid item name {name:?}"));
+        }
+        let mut inner = self.lock();
+        let key = (window.to_string(), name.to_string());
+        if !inner.contains(&key) {
+            inner.push(key);
+        }
+        Ok(())
+    }
+    /// Remove one (window, name) registration; absent is not an error.
+    fn unregister(&self, window: &str, name: &str) {
+        self.lock().retain(|(w, n)| !(w == window && n == name));
+    }
+    /// Every name registered by any window: sorted, no duplicates.
+    fn names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.lock().iter().map(|(_, n)| n.clone()).collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+    /// Drop every registration made by `window` (called when it closes).
+    fn drop_window(&self, window: &str) {
+        self.lock().retain(|(w, _)| w != window);
+    }
+}
+
+/// `library_edit_register(name)`: registry.register(window.label(), name).
+#[tauri::command]
+fn library_edit_register(
+    window: tauri::Window,
+    registry: tauri::State<'_, LibraryEditRegistry>,
+    name: String,
+) -> Result<(), String> {
+    registry.register(window.label(), &name)
+}
+
+/// `library_edit_unregister(name)`.
+#[tauri::command]
+fn library_edit_unregister(
+    window: tauri::Window,
+    registry: tauri::State<'_, LibraryEditRegistry>,
+    name: String,
+) {
+    registry.unregister(window.label(), &name);
+}
+
+/// `library_edit_list()`: `registry.names()`.
+#[tauri::command]
+fn library_edit_list(registry: tauri::State<'_, LibraryEditRegistry>) -> Vec<String> {
+    registry.names()
 }
 
 // ---------------------------------------------------------------------------
@@ -3306,6 +3467,7 @@ fn main() {
         // fire before `setup` runs and needs somewhere to land (see
         // `deliver_open`). `setup` seeds it from argv on Windows/Linux.
         .manage(Mutex::new(PendingOpen(None)))
+        .manage(LibraryEditRegistry::default())
         // Single-instance guard, registered first (its docs require it): a
         // second launch — a Windows/Linux file-association double-click —
         // joins the running instance instead of spawning a second process
@@ -3407,6 +3569,14 @@ fn main() {
             library_name_for_path,
             library_thumb_read,
             library_thumb_write,
+            library_sources_read,
+            library_sources_write,
+            library_source_cache_read,
+            library_source_cache_write,
+            library_source_cache_remove,
+            library_edit_register,
+            library_edit_unregister,
+            library_edit_list,
             recovery_write,
             recovery_list,
             recovery_claim,
@@ -3432,6 +3602,7 @@ fn main() {
             relay_client::relay_put,
             relay_client::relay_peek,
             relay_client::relay_delete,
+            remote_fetch::remote_fetch,
             report_client::report_submit,
             follow::follow_list,
             follow::follow_check,
@@ -5329,6 +5500,9 @@ fn main() {
                 }
                 tauri::WindowEvent::Destroyed => {
                     fly_cursor::unlock_if_locked(app, window);
+                    // A closed window no longer has any Library item open.
+                    app.state::<LibraryEditRegistry>()
+                        .drop_window(window.label());
                     // The window's plugin host is gone with it.
                     #[cfg(hew_preview)]
                     preview_only::plugins::window_gone(app, window.label());
@@ -5924,6 +6098,70 @@ mod tests {
         let _ = std::fs::remove_dir_all(&outside);
     }
 
+    #[test]
+    fn library_name_within_follows_the_shells_rules_for_odd_paths() {
+        let root = library_scratch_dir("name-odd");
+        std::fs::create_dir_all(root.join("Components/deep")).unwrap();
+        std::fs::create_dir_all(root.join(".hidden")).unwrap();
+        for f in [
+            "Components/table.hew",
+            "Components/deep/leg.hew",
+            ".hidden/a.hew",
+            "notes.txt",
+        ] {
+            std::fs::write(root.join(f), b"x").unwrap();
+        }
+        // A `..` path resolves before the prefix check, both ways.
+        assert_eq!(
+            library_name_within(&root, &root.join("Components/../Components/table.hew")).as_deref(),
+            Some("Components/table.hew")
+        );
+        assert_eq!(
+            library_name_within(&root, &root.join("Components/../../outside.hew")),
+            None
+        );
+        // Three segments are refused (an item is at most category/file).
+        assert_eq!(
+            library_name_within(&root, &root.join("Components/deep/leg.hew")),
+            None
+        );
+        // A dot-leading folder and a non-.hew file are not items.
+        assert_eq!(
+            library_name_within(&root, &root.join(".hidden/a.hew")),
+            None
+        );
+        assert_eq!(library_name_within(&root, &root.join("notes.txt")), None);
+        // The folder itself is not an item.
+        assert_eq!(library_name_within(&root, &root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn library_name_within_accepts_a_symlinked_library_folder() {
+        let real = library_scratch_dir("name-symlink-real");
+        let holder = library_scratch_dir("name-symlink-holder");
+        std::fs::create_dir_all(real.join("Components")).unwrap();
+        std::fs::write(real.join("Components/table.hew"), b"x").unwrap();
+        let link = holder.join("Library");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        // Root given as the link, path given by the real folder, and back.
+        assert_eq!(
+            library_name_within(&link, &real.join("Components/table.hew")).as_deref(),
+            Some("Components/table.hew")
+        );
+        assert_eq!(
+            library_name_within(&link, &link.join("Components/table.hew")).as_deref(),
+            Some("Components/table.hew")
+        );
+        assert_eq!(
+            library_name_within(&real, &link.join("Components/table.hew")).as_deref(),
+            Some("Components/table.hew")
+        );
+        let _ = std::fs::remove_dir_all(&real);
+        let _ = std::fs::remove_dir_all(&holder);
+    }
+
     /// `library_list`/`library_read`/`library_write` (`main.rs`, above)
     /// are thin wrappers over `library::list`/`library::read`/
     /// `library::write` — this exercises the SAME crate-level calls those
@@ -6011,6 +6249,192 @@ mod tests {
             std::env::remove_var("HEW_LIBRARY_DIR");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- S9 oracle: sources file, source cache, notices, edit registry ----
+
+    fn sources_entry(source: &str) -> serde_json::Value {
+        serde_json::json!({
+            "source": source, "kind": "github", "name": "N", "followed": false,
+            "addedAt": "2026-11-23T00:00:00Z",
+            "lastCheck": { "at": "2026-11-23T00:00:00Z", "ok": true, "code": null },
+            "skipped": [], "kept": {}
+        })
+    }
+
+    /// `library_sources_read`/`library_source_cache_read`/`..._write`
+    /// delegate to the crate over `HEW_LIBRARY_DIR`, keep the `not_found`
+    /// sentinel, and refuse a bad cache key.
+    #[test]
+    fn library_sources_and_cache_commands_delegate_and_keep_the_not_found_sentinel() {
+        let _env = LIBRARY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = library_scratch_dir("sources-cmds");
+        unsafe {
+            std::env::set_var("HEW_LIBRARY_DIR", &dir);
+        }
+
+        assert_eq!(library_sources_read().err().unwrap(), "not_found");
+        assert_eq!(
+            library_source_cache_read("catalog".into()).err().unwrap(),
+            "not_found"
+        );
+
+        // The command's body is `library::write_sources` through
+        // `library_sources_write_to`; the file lands in the folder root.
+        let lib_dir = library::LibraryDir::resolve(None);
+        library_sources_write_to(
+            &lib_dir,
+            "github:a/a",
+            Some(&sources_entry("github:a/a")),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(dir.join(".sources.json").is_file());
+        assert!(library_sources_read().is_ok());
+
+        library_source_cache_write("catalog".into(), vec![1, 2, 3]).unwrap();
+        assert!(library_source_cache_read("catalog".into()).is_ok());
+        assert_eq!(
+            std::fs::read(dir.join(".sources/catalog")).unwrap(),
+            vec![1, 2, 3]
+        );
+
+        library_source_cache_remove("catalog".into()).unwrap();
+        assert!(!dir.join(".sources/catalog").exists());
+        // Absent is fine; a bad key is not.
+        library_source_cache_remove("catalog".into()).unwrap();
+        assert!(library_source_cache_remove("../escape".into()).is_err());
+
+        assert!(library_source_cache_write("../escape".into(), vec![]).is_err());
+        assert!(library_source_cache_read("a/b".into()).is_err());
+
+        unsafe {
+            std::env::remove_var("HEW_LIBRARY_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sources write raises `library-sources-changed` once and never
+    /// `library-changed`; a failed one raises nothing.
+    #[test]
+    fn a_sources_write_emits_library_sources_changed_and_not_library_changed() {
+        let dir = library_scratch_dir("sources-notice");
+        let lib_dir = library::LibraryDir::at(dir.clone());
+        let mut emitted: Vec<String> = Vec::new();
+        library_sources_write_to(
+            &lib_dir,
+            "github:a/a",
+            Some(&sources_entry("github:a/a")),
+            &mut |e| emitted.push(e.to_string()),
+        )
+        .unwrap();
+        assert_eq!(emitted, vec!["library-sources-changed".to_string()]);
+        assert_eq!(LIBRARY_SOURCES_CHANGED_EVENT, "library-sources-changed");
+
+        // Removing an entry is also a sources change.
+        emitted.clear();
+        library_sources_write_to(&lib_dir, "github:a/a", None, &mut |e| {
+            emitted.push(e.to_string())
+        })
+        .unwrap();
+        assert_eq!(emitted, vec!["library-sources-changed".to_string()]);
+
+        // A write that fails (corrupt file) emits nothing.
+        std::fs::write(dir.join(".sources.json"), b"{broken").unwrap();
+        emitted.clear();
+        let r = library_sources_write_to(
+            &lib_dir,
+            "github:b/b",
+            Some(&sources_entry("github:b/b")),
+            &mut |e| emitted.push(e.to_string()),
+        );
+        assert!(r.is_err());
+        assert!(emitted.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An item write still raises only `library-changed`.
+    #[test]
+    fn an_item_write_still_emits_only_library_changed() {
+        let dir = library_scratch_dir("item-notice");
+        let lib_dir = library::LibraryDir::at(dir.clone());
+        let mut emitted: Vec<String> = Vec::new();
+        library_write_to(&lib_dir, "Models/x-abcdef.hew", b"bytes", &mut |e| {
+            emitted.push(e.to_string())
+        })
+        .unwrap();
+        assert_eq!(emitted, vec!["library-changed".to_string()]);
+        assert_eq!(LIBRARY_CHANGED_EVENT, "library-changed");
+        assert!(dir.join("Models/x-abcdef.hew").is_file());
+
+        // A refused name writes nothing and emits nothing.
+        emitted.clear();
+        assert!(
+            library_write_to(&lib_dir, ".sources.json", b"x", &mut |e| emitted
+                .push(e.to_string()))
+            .is_err()
+        );
+        assert!(emitted.is_empty());
+        assert!(!dir.join(".sources.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_edit_registry_lists_every_windows_names_sorted_without_duplicates() {
+        let reg = LibraryEditRegistry::default();
+        assert!(reg.names().is_empty());
+        reg.register("w1", "Models/b-000001.hew").unwrap();
+        reg.register("w2", "Components/a-000002.hew").unwrap();
+        reg.register("w1", "Models/b-000001.hew").unwrap(); // idempotent
+        reg.register("w2", "Models/b-000001.hew").unwrap(); // same item, second window
+        assert_eq!(
+            reg.names(),
+            vec![
+                "Components/a-000002.hew".to_string(),
+                "Models/b-000001.hew".to_string()
+            ]
+        );
+        reg.unregister("w1", "Models/b-000001.hew");
+        // w2 still has it open.
+        assert!(reg.names().contains(&"Models/b-000001.hew".to_string()));
+        reg.unregister("w2", "Models/b-000001.hew");
+        reg.unregister("w2", "Models/b-000001.hew"); // absent is fine
+        assert_eq!(reg.names(), vec!["Components/a-000002.hew".to_string()]);
+    }
+
+    #[test]
+    fn the_edit_registry_refuses_an_invalid_item_name() {
+        let reg = LibraryEditRegistry::default();
+        for bad in [
+            "../x.hew",
+            ".sources.json",
+            "NotACategory/x.hew",
+            "x.txt",
+            "",
+        ] {
+            assert!(reg.register("w1", bad).is_err(), "{bad}");
+        }
+        assert!(reg.names().is_empty());
+    }
+
+    #[test]
+    fn closing_a_window_drops_only_its_registrations() {
+        let reg = LibraryEditRegistry::default();
+        reg.register("w1", "Models/only-w1-000001.hew").unwrap();
+        reg.register("w1", "Models/shared-000002.hew").unwrap();
+        reg.register("w2", "Models/shared-000002.hew").unwrap();
+        reg.register("w2", "Models/only-w2-000003.hew").unwrap();
+        reg.drop_window("w1");
+        assert_eq!(
+            reg.names(),
+            vec![
+                "Models/only-w2-000003.hew".to_string(),
+                "Models/shared-000002.hew".to_string()
+            ]
+        );
+        reg.drop_window("w2");
+        assert!(reg.names().is_empty());
+        reg.drop_window("never-registered"); // harmless
     }
 
     // `valid_library_item_name` itself moved to `crates/library`

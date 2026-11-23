@@ -70,6 +70,12 @@ pub struct ItemMeta {
     /// definitions against. `None` for an item saved before prints existed
     /// (or a malformed map): its prints are computed from the file.
     pub prints: Option<std::collections::BTreeMap<u64, String>>,
+    /// The remote note (`hew.library` / `remote`, shared-library-sources
+    /// design 6.5): the source an item was fetched from, carried whole as
+    /// the JSON object it was stored as. `None` for an item with no note,
+    /// or whose `remote` is not an object with string `source` and
+    /// `sha256` fields.
+    pub remote: Option<serde_json::Value>,
 }
 
 /// Parses a `hew.library` attribute-dictionary value (as JSON — e.g.
@@ -123,6 +129,16 @@ pub fn parse_item_meta(raw: &serde_json::Value) -> ItemMeta {
             .iter()
             .map(|(sid, p)| Some((sid.parse::<u64>().ok()?, p.as_str()?.to_string())))
             .collect();
+    }
+    // The note is kept only when it is shaped like one (an object carrying
+    // string `source` and `sha256`); anything else reads as no note.
+    if let Some(remote) = obj.get("remote").filter(|v| {
+        v.as_object().is_some_and(|note| {
+            note.get("source").is_some_and(serde_json::Value::is_string)
+                && note.get("sha256").is_some_and(serde_json::Value::is_string)
+        })
+    }) {
+        meta.remote = Some(remote.clone());
     }
     meta
 }
@@ -234,6 +250,29 @@ mod tests {
         assert_eq!(meta.source_doc.as_deref(), Some("house.hew"));
         // Saved before Library updates: no prints.
         assert_eq!(meta.prints, None);
+    }
+
+    /// 7.2 (B3): `remote` is surfaced on `ItemMeta` as the note object
+    /// (6.5), carried whole; a non-object `remote` reads as none, and an
+    /// item with no note has none (Option<serde_json::Value>).
+    #[test]
+    fn parse_item_meta_surfaces_the_remote_note() {
+        let note = serde_json::json!({
+            "source": "github:hew3d/example",
+            "name": "Example",
+            "path": "Components/chair.hew",
+            "sha256": "ab".repeat(32),
+            "commit": "c0ffee",
+            "license": "CC0-1.0",
+            "fetchedAt": "2026-11-01T00:00:00.000Z",
+            "edited": false,
+        });
+        let raw = serde_json::json!({ "id": "abc", "remote": note });
+        assert_eq!(parse_item_meta(&raw).remote, Some(note));
+        let none = serde_json::json!({ "id": "abc" });
+        assert_eq!(parse_item_meta(&none).remote, None);
+        let bad = serde_json::json!({ "id": "abc", "remote": "not an object" });
+        assert_eq!(parse_item_meta(&bad).remote, None);
     }
 
     #[test]

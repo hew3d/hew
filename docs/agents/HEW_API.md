@@ -3106,8 +3106,8 @@ writable only by first-party code):
   metadata, written when the item is saved and edited by the library's
   manage flows: `id` (the item's stable library identity, a UUID string),
   `name`, `category` (`"component"` | `"material"` | `"model"` | `"profile"`),
-  `keywords` (list of strings), `collection`, `saved_at` /
-  `sourceDoc`-style bookkeeping keys, and `prints` (written by every
+  `keywords` (list of strings), `collection`, the bookkeeping keys
+  `savedAt` and `sourceDoc`, and `prints` (written by every
   save since 1.5): an object mapping each definition's stable id in the
   item file, as a decimal string, to its content print. The library
   browser derives everything it lists from this dictionary plus the
@@ -3173,6 +3173,52 @@ are not Library items: they are named `builtin:<name>` and only
 `hew.solid.fillet`'s `profile` parameter takes them. An older reader that
 does not know the category derives `model` for these items, since it
 reads them as a document.
+
+An item added from a source (a shared folder of Library items on a git
+host or a web host) also carries `remote` in its document dictionary,
+the note of where it came from:
+
+```json
+{ "source": "github:owner/repo", "name": "Shop Hardware",
+  "path": "Components/butt-hinge-0b6f1c.hew",
+  "sha256": "<64 hex: the file as the source published it>",
+  "commit": "<the commit it was read at>",
+  "license": "CC-BY-4.0",
+  "fetchedAt": "2026-11-23T10:15:00.000Z", "edited": false }
+```
+
+`source` is the canonical source reference and `path` the item's path in
+the source's index. `commit` is present only for a git source whose
+check resolved one. `license` is the license shown when the item was
+taken. `sha256` is the published file's hash, not the hash of the file
+on disk: stamping the note changes the file. A `remote` that is not an
+object with string `source` and `sha256` reads as no note.
+
+`hew.library.list` and `describe` report the note verbatim as a `remote`
+object on the item and omit the key for an item without one. No command
+sets or clears it. `update_meta` keeps it and leaves `edited` alone. A
+`hew.library.save` with `replace` carries the replaced item's note onto
+the new file with `edited` set to `true`. A save of a new item never
+carries a note, whatever it was made from. `hew.library.remove` deletes
+the item and writes nothing else.
+
+Only the app adds a source, takes an item from one, updates an item from
+its source, or unlinks one (which deletes the note). No API, CLI or MCP
+command does any of these. The app keeps its sources state in two
+dot-names at the root of the Library folder, which `crates/library`
+never lists as items and no `hew.library.*` command reads or writes:
+
+- `.sources.json`: `{ "hew": 1, "sources": [ … ] }`, one entry per added
+  source: `source` (canonical reference), `kind`, `name`, `followed`,
+  `addedAt`, `lastCheck` (`{ at, ok, code }`), `skipped` (ids deleted
+  from a followed source, not offered again), `kept` (id → the `sha256`
+  of a newer version the user declined), `lastGoodAt` and `commit` (the
+  time and commit of the cached listing). Every write re-reads the file
+  and changes one entry; other entries and unknown top-level keys
+  survive, and a file that does not parse is refused, not repaired.
+- `.sources/`: a cache of the last good listing of each added source and
+  of the catalog, and thumbnails fetched for source views. Deleting it
+  loses only offline listings.
 
 Clients may read these dictionaries freely; external writes through
 `hew.attr.set` remain refused like every `hew.*` namespace. The wire-level `.hew` encoding is specified in

@@ -25,6 +25,10 @@ COMMANDS
     dispatch <method>     Send one command
     documents             List the app's open documents (--live)
     events                Print the app's events as they happen (--live)
+    library index <dir>   Write hew.json and thumbnails for a folder of Library
+                          items, or --check that they are up to date
+    catalog check <ref>   Run the listing checks on one source
+    catalog build <dir>   Build the catalog's generated files (--out <dir>)
     mcp                   Serve MCP on stdio, for an AI client
 "#;
 
@@ -316,9 +320,26 @@ fn usage_error(message: &str) -> ! {
 /// Distance 2 or less, so a genuinely different word suggests nothing.
 fn unknown_subcommand(typed: &str) -> String {
     #[cfg(hew_preview)]
-    const COMMANDS: [&str; 6] = ["run", "dispatch", "documents", "events", "mcp", "plugin"];
+    const COMMANDS: [&str; 8] = [
+        "run",
+        "dispatch",
+        "documents",
+        "events",
+        "library",
+        "catalog",
+        "mcp",
+        "plugin",
+    ];
     #[cfg(not(hew_preview))]
-    const COMMANDS: [&str; 5] = ["run", "dispatch", "documents", "events", "mcp"];
+    const COMMANDS: [&str; 7] = [
+        "run",
+        "dispatch",
+        "documents",
+        "events",
+        "library",
+        "catalog",
+        "mcp",
+    ];
     // An MCP client configured with `"args": ["mcp --live"]` hands over the
     // whole string as one argument; the client then only shows a closed
     // connection, so say what is wrong and show the fix.
@@ -462,6 +483,8 @@ fn main() {
         "mcp" => mcp_subcommand(&args[1..]),
         "documents" => documents_subcommand(&args[1..]),
         "events" => events_subcommand(&args[1..]),
+        "library" => library_subcommand(&args[1..]),
+        "catalog" => catalog_subcommand(&args[1..]),
         #[cfg(hew_preview)]
         "plugin" => plugin_subcommand(&args[1..]),
         // A help page is what the user asked for, so it goes to stdout
@@ -589,6 +612,231 @@ fn documents_subcommand(args: &[String]) -> i32 {
         usage_error("hew-cli documents: --live is required — there is nothing to list otherwise");
     };
     hew_cli::run::list_documents_live(&opts).exit_code
+}
+
+/// `hew-cli library index --help`.
+const USAGE_LIBRARY_INDEX: &str = r#"hew-cli library index — write the index of a folder of Library items.
+
+USAGE
+    hew-cli library index <folder> [--check] [--name <text>] [--description <text>]
+                          [--author <text>] [--homepage <url>] [--license <spdx>]
+                          [--license-url <url>]
+
+Writes <folder>/hew.json with one entry per .hew file under the folder (any
+layout; names starting with a dot are skipped), and a thumbnail for each in
+<folder>/thumbnails/. Every file must be a Library item: one saved from Hew,
+carrying a Library id and a category. A file that is not is named and nothing
+is written. A symbolic link at hew.json, thumbnails/ or a thumbnail is refused.
+
+An existing hew.json keeps its name, description, author, homepage and license;
+a flag replaces just its own field. With no hew.json yet, --name is required.
+
+OPTIONS
+    --check             Write nothing. Exit non-zero and name every file that is
+                        missing, added or changed since hew.json was written.
+    --name <text>       The source's name.
+    --description <text>
+    --author <text>
+    --homepage <url>    An https URL.
+    --license <spdx>    An SPDX identifier, or LicenseRef-<name> with --license-url.
+    --license-url <url>
+
+EXAMPLE
+    hew-cli library index ./parts --name "Shop Hardware" --license CC-BY-4.0
+    hew-cli library index ./parts --check
+"#;
+
+fn library_subcommand(args: &[String]) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("index") => {
+            let rest = &args[1..];
+            if help_requested(rest, USAGE_LIBRARY_INDEX) {
+                return 0;
+            }
+            match hew_cli::library_index::run(rest) {
+                Ok(()) => 0,
+                Err(message) => {
+                    eprintln!("hew-cli library index: {message}");
+                    1
+                }
+            }
+        }
+        Some("-h" | "--help") => {
+            print!("{USAGE_LIBRARY_INDEX}");
+            0
+        }
+        Some(other) => usage_error(&format!(
+            "hew-cli library: unknown subcommand \"{other}\" (the one there is: index)"
+        )),
+        None => usage_error("hew-cli library: missing subcommand (library index <folder>)"),
+    }
+}
+
+/// `hew-cli catalog --help`.
+const USAGE_CATALOG: &str = r#"hew-cli catalog — check a source for listing, or build the catalog files.
+
+USAGE
+    hew-cli catalog check [--] <source reference>
+    hew-cli catalog build <catalog checkout> --out <dir> [--previous <dir>]
+
+check runs every listing check on one source and prints one line per failed
+check, "<code>: <message>". It exits non-zero when any check fails. The codes:
+reference, index_invalid, license_missing, license_format, file_integrity,
+item_mismatch, ids_unique, public_https, cors, rate_limited, unreachable.
+A reference is never a flag: after `--`, or without it, one that begins with
+"-" or holds whitespace is a `reference` failure. Only a lone --help prints
+this page.
+
+build reads library.json, plugins.json and removed.json in the checkout and
+writes catalog.json and sources/<slug>.json into --out. A source that fails
+its checks keeps its snapshot from --previous (default: --out, when it
+exists) and is marked stale; with none to keep it is left out and named. A
+removed source is never requested.
+
+Requests carry an Origin header as the web app's do, wait between requests to
+one host, and use https only. GITHUB_TOKEN, when set, is sent to
+api.github.com and nowhere else.
+
+ENVIRONMENT
+    GITHUB_TOKEN          Raises GitHub's API rate limit.
+
+EXAMPLE
+    hew-cli catalog check github:owner/repo
+    hew-cli catalog build ./catalog --out ./data
+"#;
+
+/// Spacing between two requests to one host, and the time one request may take.
+const CATALOG_REQUEST_GAP: std::time::Duration = std::time::Duration::from_millis(250);
+const CATALOG_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The current UTC time as `YYYY-MM-DDTHH:MM:SSZ`.
+fn iso_utc_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let (days, rem) = ((secs / 86_400) as i64, secs % 86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60
+    )
+}
+
+fn catalog_subcommand(args: &[String]) -> i32 {
+    use hew_cli::catalog;
+    let policy = catalog::FetchPolicy::new(CATALOG_REQUEST_GAP, CATALOG_REQUEST_TIMEOUT);
+    match args.first().map(String::as_str) {
+        Some("check") => {
+            let mut rest = &args[1..];
+            // Only a lone --help asks for help. Anything else after `check`
+            // is a reference, so a list line such as `-h` is refused by the
+            // check rather than read as a flag; `--` ends flag parsing.
+            if rest.len() == 1 && rest[0] == "--help" {
+                print!("{USAGE_CATALOG}");
+                return 0;
+            }
+            if rest.first().map(String::as_str) == Some("--") {
+                rest = &rest[1..];
+            }
+            let token = std::env::var("GITHUB_TOKEN").ok();
+            let fetcher = catalog::HttpFetcher::new(&policy, token);
+            let code = catalog::run_check(rest, &fetcher, &policy, &mut std::io::stdout());
+            if code == 2 {
+                usage_error("hew-cli catalog check: give exactly one source reference");
+            }
+            code
+        }
+        Some("build") => {
+            let rest = &args[1..];
+            if help_requested(rest, USAGE_CATALOG) {
+                return 0;
+            }
+            let mut checkout: Option<PathBuf> = None;
+            let mut out: Option<PathBuf> = None;
+            let mut previous: Option<PathBuf> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    flag @ ("--out" | "--previous") => {
+                        let Some(value) = rest.get(i + 1) else {
+                            usage_error(&format!("hew-cli catalog build: {flag} needs a folder"));
+                        };
+                        let slot = if flag == "--out" {
+                            &mut out
+                        } else {
+                            &mut previous
+                        };
+                        *slot = Some(PathBuf::from(value));
+                        i += 2;
+                    }
+                    other if other.starts_with("--") => usage_error(&format!(
+                        "hew-cli catalog build: unrecognized argument \"{other}\""
+                    )),
+                    other if checkout.is_none() => {
+                        checkout = Some(PathBuf::from(other));
+                        i += 1;
+                    }
+                    other => usage_error(&format!(
+                        "hew-cli catalog build: unexpected extra argument \"{other}\""
+                    )),
+                }
+            }
+            let (Some(checkout), Some(out)) = (checkout, out) else {
+                usage_error("hew-cli catalog build: needs <catalog checkout> and --out <dir>");
+            };
+            let previous = catalog::resolve_previous(previous.as_deref(), &out);
+            let token = std::env::var("GITHUB_TOKEN").ok();
+            let fetcher = catalog::HttpFetcher::new(&policy, token);
+            match catalog::build_catalog(
+                &checkout,
+                &out,
+                &fetcher,
+                &policy,
+                previous.as_deref(),
+                &iso_utc_now(),
+            ) {
+                Ok(report) => {
+                    println!(
+                        "built {} fresh, {} stale, {} removed, {} failed",
+                        report.fresh.len(),
+                        report.stale.len(),
+                        report.removed.len(),
+                        report.failed.len()
+                    );
+                    for s in &report.stale {
+                        eprintln!("stale (kept the last snapshot): {s}");
+                    }
+                    for s in &report.failed {
+                        eprintln!("failed (left out, no earlier snapshot): {s}");
+                    }
+                    0
+                }
+                Err(e) => {
+                    eprintln!("hew-cli catalog build: {e:?}");
+                    1
+                }
+            }
+        }
+        Some("-h" | "--help") => {
+            print!("{USAGE_CATALOG}");
+            0
+        }
+        Some(other) => usage_error(&format!(
+            "hew-cli catalog: unknown subcommand \"{other}\" (check or build)"
+        )),
+        None => usage_error("hew-cli catalog: missing subcommand (check or build)"),
+    }
 }
 
 fn events_subcommand(args: &[String]) -> i32 {

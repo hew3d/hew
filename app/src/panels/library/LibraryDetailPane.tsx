@@ -14,6 +14,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { isBuiltInItem, materialSubline, metadataLine, type CollectionNode, normalizeCollectionPath, savedLine } from '../../library/libraryModel'
 import type { LibraryCategory, LibraryItem } from '../../library/types'
 import { markTooltip, type MarkedState } from '../../library/libraryUpdates'
+import type { LocalSourceInfo } from '../../library/sourceModel'
 import { CubeGlyph, RerenderGlyph, WarningGlyph } from './icons'
 import { i18n } from '@lingui/core'
 import { plural, t as tCore } from '@lingui/core/macro'
@@ -58,6 +59,10 @@ export interface LibraryDetailPaneProps {
   linkState?: MarkedState | undefined
   /** Open Review for the parts that differ; absent where it cannot. */
   onReview?: (() => void) | undefined
+  /** Where this item came from, when it carries a note (design 7.5). */
+  sourceInfo?: LocalSourceInfo | undefined
+  onUpdateFromSource?: (() => void) | undefined
+  onUnlinkFromSource?: (() => void) | undefined
   canReveal: boolean
   /** Web: browser storage has no Reveal — offer a plain file download of
    * the item's `.hew` bytes instead (the data's escape hatch). */
@@ -103,6 +108,9 @@ export function LibraryDetailPane({
   placementCount,
   linkState,
   onReview,
+  sourceInfo,
+  onUpdateFromSource,
+  onUnlinkFromSource,
   canReveal,
   canDownload,
   inPalette,
@@ -440,6 +448,26 @@ export function LibraryDetailPane({
           )}
         </div>
       )}
+      {sourceInfo !== undefined && (
+        <div className="hwlib__inmodel" data-testid="library-item-source" data-state={sourceInfo.state}>
+          <div className="hwlib__src-from">{sourceInfo.fromLine}</div>
+          {sourceInfo.stateLines.map((line) => (
+            <div key={line} className={`hwlib__src-state${sourceInfo.state === 'gone' || sourceInfo.state === 'orphan' ? ' hwlib__src-state--warn' : ''}`}>
+              {line}
+            </div>
+          ))}
+          {sourceInfo.canUpdate && onUpdateFromSource !== undefined && (
+            <button type="button" className="hwlib__btn-link" onClick={onUpdateFromSource}>
+              <Trans>Update from source</Trans>
+            </button>
+          )}
+          {onUnlinkFromSource !== undefined && (
+            <button type="button" className="hwlib__btn-link" onClick={onUnlinkFromSource}>
+              {sourceUnlinkLabel(sourceInfo.sourceName)}
+            </button>
+          )}
+        </div>
+      )}
       {/* Materials aren't "placed" as instances, so there's no count — same
           "in this model" wording as components, just without one. */}
       {isMaterial && inPalette && <div className="hwlib__inmodel"><Trans>In this model</Trans></div>}
@@ -488,6 +516,10 @@ export function LibraryDetailPane({
       {deleteArmed && <DeleteConfirm onConfirm={onConfirmDelete} onCancel={onCancelDelete} name={item.displayName} />}
     </div>
   )
+}
+
+function sourceUnlinkLabel(name: string): string {
+  return tCore`Unlink from ${name}`
 }
 
 function DeleteConfirm({ onConfirm, onCancel, name }: { onConfirm: () => void; onCancel: () => void; name: string }) {

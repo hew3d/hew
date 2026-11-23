@@ -231,7 +231,7 @@ fn check_name(rel_path: &str) -> io::Result<()> {
 /// Write `bytes` to `path` atomically: temp file in the same directory,
 /// then rename — mirrors `write_atomic` in
 /// `shells/tauri/src-tauri/src/main.rs`.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // Unique per writer, not just per target path: two concurrent saves to
     // the SAME item name (two `hew-cli` processes, or a `--live` save
     // racing a Tauri-window save) previously shared one `<name>.tmp`
@@ -251,7 +251,11 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         None => format!("{unique}.tmp"),
     });
     std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

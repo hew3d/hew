@@ -32,6 +32,13 @@ function unavailableStore(): LibraryStore {
     itemPath: () => Promise.resolve(null),
     nameForPath: () => Promise.resolve(null),
     capabilities: () => ({ canReveal: false, canChooseFolder: false, canDownload: false }),
+    readSources: () => Promise.resolve(null),
+    writeSources: fail,
+    readSourceCache: () => Promise.resolve(null),
+    writeSourceCache: fail,
+    removeSourceCache: fail,
+    subscribeSources: () => () => {},
+    editingNames: () => Promise.resolve([]),
     subscribe: () => () => {},
   }
 }
@@ -51,6 +58,13 @@ function availableStore(overrides: Partial<LibraryStore> = {}): LibraryStore {
     itemPath: () => Promise.resolve(null),
     nameForPath: () => Promise.resolve(null),
     capabilities: () => ({ canReveal: true, canChooseFolder: true, canDownload: false }),
+    readSources: () => Promise.resolve(null),
+    writeSources: () => Promise.resolve(),
+    readSourceCache: () => Promise.resolve(null),
+    writeSourceCache: () => Promise.resolve(),
+    removeSourceCache: () => Promise.resolve(),
+    subscribeSources: () => () => {},
+    editingNames: () => Promise.resolve([]),
     subscribe: () => () => {},
     ...overrides,
   }

@@ -21,9 +21,14 @@ wrong by default. The `nginx.conf` that ships with the release tarball
 handles all this, but here's the list if you go your own way:
 
 - **Security headers.** The build's CSP is shipped as a `<meta>` tag, which
-  is the portable floor for hosts you don't control — but it can't express
-  `frame-ancestors` (clickjacking protection). Where you control the host
-  (you do, here), send it as a real HTTP header instead.
+  is the portable floor for hosts you don't control. Its `connect-src` is
+  `'self' blob: https:`: the page may connect to its own origin and to any
+  `https:` host, which is how the Library reads sources. Scripts still load
+  from the page's own origin only. [Library sources](#library-sources)
+  covers the strict policy that keeps connections to your own origin. A
+  `<meta>` policy can't express `frame-ancestors` (clickjacking
+  protection). Where you control the host (you do, here), send it as a
+  real HTTP header instead.
 - **No SPA history-fallback rewrite.** Hew routes on `location.hash`, not
   the path — every real URL is a real file. The common "rewrite unknown
   paths to `index.html`" SPA convention is *wrong* for this app: it turns a
@@ -730,6 +735,64 @@ version of `hew-web.sh` newer than what's staged, and never needs the
 mirror's server to be anything other than reachable. If it isn't (the mirror
 host is off, or the port isn't serving), `update` falls back to the copy
 saved at install time, same as always.
+
+## Library sources
+
+The Library can read shared items from other sites: GitHub, GitLab,
+Codeberg, or any `https` host a user names (the user guide's Library
+chapter describes the feature). The browser makes those requests
+directly from the user's machine. Nothing passes through your server,
+and there is nothing to run for it.
+
+A request is made only after a user opens the catalog, adds a source, or
+opens the Library with sources already added. It carries no cookies and
+no credentials, and it tells the other host the user's IP address.
+
+### Turn sources off
+
+Two ways give you a page whose policy allows connections to your own
+origin only. The app reads its own policy at startup; when `connect-src`
+allows neither `https:` nor `*`, the Library's Sources block shows
+"Sources are turned off on this server." and the app makes no outside
+request. Items already in a user's Library keep working.
+
+- **Rebuild with the flag.** `HEW_WEB_SOURCES=off pnpm --dir shells/web build`
+  injects the strict policy, whose `connect-src` is `'self' blob:`. The
+  value must be exactly `off`; anything else builds the default. The
+  flag cannot be combined with `HEW_PREVIEW=1`, and the build stops with
+  an error if both are set.
+- **Edit the tarball.** In the extracted `index.html`, find the
+  `Content-Security-Policy` `<meta>` and change `connect-src 'self' blob: https:`
+  to `connect-src 'self' blob:`. Do it before the first visitor arrives,
+  and again after each update: a browser that has already installed the
+  service worker keeps its cached `index.html` until the next release.
+
+The shipped `nginx.conf` sends only `frame-ancestors 'none'` as a CSP
+header, so the `<meta>` alone decides `connect-src`. If you add a
+`connect-src` to that header, the browser enforces both policies and the
+narrower one wins.
+
+The desktop app is not affected by any of this. It reads sources through
+its own process and its policy has no `https:` entry.
+
+### Point the catalog elsewhere
+
+"Browse the catalog" reads one file,
+`https://raw.githubusercontent.com/hew3d/catalog/data/catalog.json`. The
+build-time variable `VITE_HEW_CATALOG_URL` replaces that address:
+
+```sh
+VITE_HEW_CATALOG_URL=https://parts.example.org/catalog.json pnpm --dir shells/web build
+```
+
+Set it to an empty value to hide "Browse the catalog"; users can still
+add a source by its address. The variable is read when the app is
+built, so the release tarball always uses the default.
+
+A catalog of your own is a checkout with the same three list files as
+`hew3d/catalog`, built with `hew-cli catalog build <checkout> --out <dir>`.
+Serve the output over `https` with `Access-Control-Allow-Origin: *`, or
+the browser cannot read it.
 
 ## HTTPS and certificates
 

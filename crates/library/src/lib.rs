@@ -22,11 +22,18 @@ pub mod dir;
 pub mod meta;
 pub mod naming;
 pub mod ops;
+pub mod sources;
 
 pub use dir::{LibraryDir, config_path};
 pub use meta::{Category, ItemMeta, derive_category, display_name, parse_item_meta};
-pub use naming::{CATEGORY_DIRS, item_file_name, valid_item_name, valid_thumb_key};
+pub use naming::{
+    CATEGORY_DIRS, item_file_name, valid_item_name, valid_source_cache_key, valid_thumb_key,
+};
 pub use ops::{
     ListedItem, list, read, read_thumbnail, remove, sha256_hex, thumbnail_path, write,
     write_thumbnail,
+};
+pub use sources::{
+    SOURCES_CACHE_DIR, SOURCES_FILE, merge_source_entry, read_source_cache, read_sources,
+    remove_source_cache, source_cache_path, write_source_cache, write_sources,
 };

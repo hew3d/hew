@@ -14,6 +14,7 @@ import { isBuiltInItem, materialSubline } from '../../library/libraryModel'
 import type { LibraryItem } from '../../library/types'
 import type { MarkedState } from '../../library/libraryUpdates'
 import { LibraryMark } from '../LibraryMark'
+import { SourceMark } from '../SourceMark'
 import { CubeGlyph, WarningGlyph } from './icons'
 
 /** Stable DOM id for a tile, shared with the grid's `aria-activedescendant`
@@ -38,6 +39,13 @@ export interface LibraryTileProps {
   linkState?: MarkedState | undefined
   /** Label for the hover-revealed primary action button (category default). */
   defaultActionLabel: string
+  /** A newer version of this item exists at the source it came from. */
+  sourceNewer?: boolean | undefined
+  /** Replaces the line under the name (a source view's state label). */
+  subText?: string | undefined
+  /** No hover action row and no menu: a source view's tile, whose actions
+   * live in the detail pane. */
+  noActions?: boolean | undefined
   onSelect: () => void
   onActivateDefault: () => void
   onOpenMenu: (anchor: HTMLElement) => void
@@ -52,6 +60,9 @@ export function LibraryTile({
   inPalette,
   linkState,
   defaultActionLabel,
+  sourceNewer = false,
+  subText,
+  noActions = false,
   onSelect,
   onActivateDefault,
   onOpenMenu,
@@ -112,7 +123,7 @@ export function LibraryTile({
         </div>
       )}
 
-      {!item.error && (
+      {!item.error && !noActions && (
         <div className="hwlib__tile-actions">
           <button
             type="button"
@@ -144,9 +155,12 @@ export function LibraryTile({
       <div className="hwlib__tile-name">
         {item.displayName}
         {linkState !== undefined && <span style={{ marginLeft: 4 }}><LibraryMark state={linkState} /></span>}
+        {sourceNewer && <span style={{ marginLeft: 4 }}><SourceMark /></span>}
       </div>
       <div className="hwlib__tile-sub">
-        {item.error
+        {subText !== undefined
+          ? subText
+          : item.error
           ? t`Failed to load`
           : isBuiltInItem(item)
             ? t`Built-in`

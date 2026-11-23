@@ -23,6 +23,7 @@ import { useEffect, useState, type CSSProperties } from 'react'
 import { Trans, useLingui } from '@lingui/react/macro'
 import { libraryStore } from '../io/libraryStore'
 import { setCheckLibraryUpdates, useCheckLibraryUpdates } from './libraryUpdates'
+import { setCheckSources, useCheckSources } from './checkSources'
 
 /** Brave with File System Access disabled (its default) simply doesn't
  * define showDirectoryPicker, but it does identify itself — so the note
@@ -74,6 +75,7 @@ export function FoldersPane() {
   const [path, setPath] = useState<string | null>(null)
   const [webMode, setWebMode] = useState<'browser' | 'folder' | null>(null)
   const checkUpdates = useCheckLibraryUpdates()
+  const checkSources = useCheckSources()
 
   useEffect(() => {
     if (!available) return
@@ -157,6 +159,26 @@ export function FoldersPane() {
           never changes anything until you choose to update. With this off, Hew stops checking by itself and never
           shows that note, but it still checks when you open the Components panel or the Library, or save a part to
           the Library.
+        </Trans>
+      </SettingsNote>
+
+      <SettingsRow label="" alignTop>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', fontFamily: 'var(--font-family-ui, system-ui, sans-serif)' }}>
+          <input
+            type="checkbox"
+            data-testid="settings-check-sources"
+            checked={checkSources}
+            onChange={(e) => setCheckSources(e.target.checked)}
+            style={{ accentColor: 'var(--accent-base, #5b8cff)', margin: 0 }}
+          />
+          <Trans>Check sources for new and changed items</Trans>
+        </label>
+      </SettingsRow>
+      <SettingsNote>
+        <Trans>
+          When you open the Library, Hew looks at the sources you added and says when they have new or changed
+          items. It never changes anything until you choose to. Turn this off and Hew checks only when you press
+          Refresh on a source.
         </Trans>
       </SettingsNote>
 

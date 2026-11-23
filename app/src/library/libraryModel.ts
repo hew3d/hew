@@ -22,6 +22,7 @@ import type {
   LibraryItemMeta,
   LibraryItemSummary,
   LibraryMaterialSummary,
+  LibraryRemoteNote,
 } from './types'
 
 // ---------------------------------------------------------------------------
@@ -36,6 +37,32 @@ function isValidCategory(v: unknown): v is LibraryCategory {
 
 function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((e) => typeof e === 'string')
+}
+
+/** Reads the remote note (design 6.5) out of a `remote` value. Only an
+ * object with string `source` and `sha256` is a note; the other fields
+ * default when absent (`edited` to false, the strings to empty). Mirrors
+ * `remote_note_of` in `crates/api`, so the two readers agree. */
+function isRemoteNote(v: unknown): v is Record<string, unknown> & { source: string; sha256: string } {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return false
+  const o = v as Record<string, unknown>
+  return typeof o.source === 'string' && typeof o.sha256 === 'string'
+}
+
+function parseRemoteNote(v: unknown): LibraryRemoteNote | undefined {
+  if (!isRemoteNote(v)) return undefined
+  const o = v
+  const note: LibraryRemoteNote = {
+    source: o.source,
+    name: typeof o.name === 'string' ? o.name : '',
+    path: typeof o.path === 'string' ? o.path : '',
+    sha256: o.sha256,
+    fetchedAt: typeof o.fetchedAt === 'string' ? o.fetchedAt : '',
+    edited: o.edited === true,
+  }
+  if (typeof o.commit === 'string') note.commit = o.commit
+  if (typeof o.license === 'string') note.license = o.license
+  return note
 }
 
 /** Parses a `hew.library` attribute-dictionary value into a `LibraryItemMeta`.
@@ -53,6 +80,8 @@ export function parseLibraryMeta(raw: unknown): LibraryItemMeta {
   if (typeof obj.collection === 'string') meta.collection = obj.collection
   if (typeof obj.savedAt === 'string') meta.savedAt = obj.savedAt
   if (typeof obj.sourceDoc === 'string') meta.sourceDoc = obj.sourceDoc
+  const remote = parseRemoteNote(obj.remote)
+  if (remote !== undefined) meta.remote = remote
   return meta
 }
 
@@ -66,12 +95,49 @@ export function metaForEditSave(currentRaw: unknown, savedAt: string): Record<st
   const out: Record<string, unknown> = {}
   if (currentRaw !== null && typeof currentRaw === 'object' && !Array.isArray(currentRaw)) {
     for (const [key, value] of Object.entries(currentRaw as Record<string, unknown>)) {
-      if (key === 'prints' || value === null || value === undefined) continue
+      if (key === 'prints' || key === 'remote' || value === null || value === undefined) continue
       out[key] = value
     }
   }
+  const note = withEditedNote(currentRaw)
+  if (note !== undefined) out.remote = note
   out.savedAt = savedAt
   return out
+}
+
+/** The item's remote note with `edited` set, as a fresh object (the input
+ * is not touched); `undefined` when the item carries no note. An edit
+ * makes the item no longer match its source (design 7.2). */
+function withEditedNote(currentRaw: unknown): Record<string, unknown> | undefined {
+  const raw = currentRaw !== null && typeof currentRaw === 'object' ? (currentRaw as Record<string, unknown>).remote : undefined
+  return isRemoteNote(raw) ? { ...raw, edited: true } : undefined
+}
+
+/** The metadata a save to the Library writes (design 7.2): `fresh` (id,
+ * name, category, savedAt, sourceDoc) over `updating`, the Library's
+ * current meta of the item being written over (absent for a new item).
+ * The remote note is kept only when there is an item to write over, and
+ * then it is marked edited; a new item carries none, whatever `fresh`
+ * held. */
+export function metaForLibrarySave(
+  fresh: Record<string, unknown>,
+  updating?: Record<string, unknown> | LibraryItemMeta,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(updating ?? {}), ...fresh }
+  delete out.remote
+  const note = updating === undefined ? undefined : withEditedNote(updating)
+  if (note !== undefined) out.remote = note
+  return out
+}
+
+/** The metadata a profile Replace writes: `fresh` plus ONLY the replaced
+ * item's remote note, taken from `current`, the item's `hew.library` as the
+ * Library holds it when the write happens. Whatever collection, keywords or
+ * note the window captured when the profile was opened is not used, so a
+ * change made in the Library meanwhile is not written over. */
+export function metaForProfileReplace(fresh: Record<string, unknown>, current: unknown): Record<string, unknown> {
+  const raw = current !== null && typeof current === 'object' ? (current as Record<string, unknown>).remote : undefined
+  return metaForLibrarySave(fresh, isRemoteNote(raw) ? { remote: raw } : undefined)
 }
 
 /** The bare file name minus any category subfolder (`Components/`,

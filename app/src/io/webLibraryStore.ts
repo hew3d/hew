@@ -50,6 +50,18 @@ const CATEGORY_DIRS = ['Components', 'Materials', 'Models', 'Profiles'] as const
 
 const THUMB_DIR = '.thumbnails'
 
+/** The sources list beside the items, and its cache directory (design
+ * 6.5). Neither is an item; both are dot-names. */
+const SOURCES_FILE = '.sources.json'
+const SOURCES_CACHE_DIR = '.sources'
+
+/** Web Lock name prefix held by a window editing a Library item. */
+const EDIT_LOCK_PREFIX = 'hew-library-edit:'
+
+/** BroadcastChannel message for a sources-file change. Any other message
+ * is the item/root notice. */
+const SOURCES_NOTICE = 'library-sources-changed'
+
 /** OPFS directory holding the browser-storage library. */
 const OPFS_LIBRARY_DIR = 'library'
 
@@ -81,11 +93,14 @@ export function webLibrarySupported(): boolean {
  * as the shell, which rejects rather than sanitizes.
  */
 function validateItemName(name: string): { dir: string | null; base: string } {
-  if (name.includes('\\') || name.includes('..')) {
+  if (name.includes('\\') || name.includes('..') || name.includes(':')) {
     throw new Error(`invalid library item name: ${name}`)
   }
   const segments = name.split('/')
-  if (segments.some((s) => s === '')) {
+  if (segments.some((s) => s === '' || s.startsWith('.'))) {
+    throw new Error(`invalid library item name: ${name}`)
+  }
+  if (!segments[segments.length - 1].toLowerCase().endsWith('.hew')) {
     throw new Error(`invalid library item name: ${name}`)
   }
   if (segments.length === 1) return { dir: null, base: segments[0] }
@@ -95,9 +110,60 @@ function validateItemName(name: string): { dir: string | null; base: string } {
   throw new Error(`invalid library item name: ${name}`)
 }
 
-/** Thumbnail keys are content hashes — hex only, no path characters. */
+/** Source-cache keys: 1-96 chars of lowercase letters, digits, `-` and `_`,
+ * never starting with `-` or `_` (the Rust `valid_source_cache_key`). */
+function validateSourceCacheKey(key: string): void {
+  if (!/^[a-z0-9][a-z0-9_-]{0,95}$/.test(key)) {
+    throw new Error(`invalid source cache key: ${key}`)
+  }
+}
+
+/** The pure merge rule (the Rust `merge_source_entry`): change only the
+ * entry whose `source` equals `source`; replace in place, append, or remove
+ * on null. Throws on a corrupt file, a non-array `sources`, or an entry
+ * naming a different source. Never repairs silently. */
+function mergeSourceEntry(
+  current: Uint8Array | null,
+  source: string,
+  entry: Record<string, unknown> | null,
+): Uint8Array {
+  let doc: Record<string, unknown>
+  if (current === null || current.length === 0) {
+    doc = { hew: 1, sources: [] }
+  } else {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(current))
+    } catch {
+      throw new Error('the sources file is not valid JSON')
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('the sources file is not a JSON object')
+    }
+    doc = parsed as Record<string, unknown>
+  }
+  if (entry !== null && (typeof entry !== 'object' || entry.source !== source)) {
+    throw new Error(`a source entry must name the source ${source}`)
+  }
+  const list = doc.sources === undefined ? [] : doc.sources
+  if (!Array.isArray(list)) throw new Error('the sources file has a non-list "sources"')
+  const at = list.findIndex((e) => (e as { source?: unknown } | null)?.source === source)
+  if (entry === null) {
+    if (at >= 0) list.splice(at, 1)
+  } else if (at >= 0) {
+    list[at] = entry
+  } else {
+    list.push(entry)
+  }
+  doc.sources = list
+  if (doc.hew === undefined) doc.hew = 1
+  return new TextEncoder().encode(JSON.stringify(doc, null, 2))
+}
+
+/** Thumbnail keys are content hashes — lowercase hex, 8-64 characters, no
+ * path characters (the same rule as `valid_thumb_key` in crates/library). */
 function validateThumbKey(key: string): void {
-  if (!/^[0-9a-f]{8,128}$/.test(key)) {
+  if (!/^[0-9a-f]{8,64}$/.test(key)) {
     throw new Error(`invalid thumbnail key: ${key}`)
   }
 }
@@ -187,7 +253,7 @@ async function listHewIn(
 ): Promise<LibraryFileEntry[]> {
   const out: LibraryFileEntry[] = []
   for await (const [name, handle] of dir.entries()) {
-    if (handle.kind !== 'file' || !name.toLowerCase().endsWith('.hew')) continue
+    if (handle.kind !== 'file' || name.startsWith('.') || !name.toLowerCase().endsWith('.hew')) continue
     try {
       const file = await (handle as unknown as FileSystemFileHandle).getFile()
       out.push({ fileName: prefix + name, size: file.size, mtimeMs: file.lastModified })
@@ -270,12 +336,20 @@ export function makeWebLibraryStore(overrides: WebLibraryDeps = {}): LibraryStor
   // --- change notification ----------------------------------------------
   const listeners = new Set<() => void>()
   const notifyLocal = (): void => listeners.forEach((l) => l())
+  const sourceListeners = new Set<() => void>()
+  const notifySourcesLocal = (): void => sourceListeners.forEach((l) => l())
   // A message from another tab may mean a CONTENT change or a ROOT change
   // (folder bound/unbound there) — drop the memoized config so the next
   // operation re-reads mode + handle from IndexedDB, then re-render. One
   // extra IndexedDB get per external change is the price of two windows
   // never silently writing to different roots.
-  deps.channel?.addEventListener?.('message', () => {
+  // The sources file has its own notice: it never touches the config or the
+  // item listeners.
+  deps.channel?.addEventListener?.('message', (event?: MessageEvent) => {
+    if (event?.data === SOURCES_NOTICE) {
+      notifySourcesLocal()
+      return
+    }
     configLoaded = null
     notifyLocal()
   })
@@ -287,6 +361,18 @@ export function makeWebLibraryStore(overrides: WebLibraryDeps = {}): LibraryStor
       /* a closed channel must never break a write */
     }
   }
+
+  const notifySourcesAll = (): void => {
+    notifySourcesLocal()
+    try {
+      deps.channel?.postMessage(SOURCES_NOTICE)
+    } catch {
+      /* a closed channel must never break a write */
+    }
+  }
+  // Writes to the sources file run one at a time inside this tab, so two
+  // quick writes cannot interleave their re-read and write.
+  let sourcesWrites: Promise<unknown> = Promise.resolve()
 
   // --- durable-storage request: once, after the first successful write ---
   let persistRequested = false
@@ -411,6 +497,35 @@ export function makeWebLibraryStore(overrides: WebLibraryDeps = {}): LibraryStor
           }
         }
       }
+      // The sources list and its cache travel with the items; what the
+      // target already has wins.
+      try {
+        await readFileIn(target, SOURCES_FILE)
+      } catch {
+        try {
+          await writeFileIn(target, SOURCES_FILE, await readFileIn(source, SOURCES_FILE))
+        } catch {
+          /* no sources file to carry over */
+        }
+      }
+      const srcCache = await subdir(source, SOURCES_CACHE_DIR, false)
+      if (srcCache !== null) {
+        const dstCache = await subdir(target, SOURCES_CACHE_DIR, true)
+        if (dstCache !== null) {
+          for await (const [name, handle] of srcCache.entries()) {
+            if (handle.kind !== 'file') continue
+            try {
+              await dstCache.getFileHandle(name)
+            } catch {
+              try {
+                await writeFileIn(dstCache, name, await readFileIn(srcCache, name))
+              } catch {
+                /* the cache only buys offline listings */
+              }
+            }
+          }
+        }
+      }
     } catch {
       /* no source library yet — nothing to migrate */
     }
@@ -503,6 +618,83 @@ export function makeWebLibraryStore(overrides: WebLibraryDeps = {}): LibraryStor
       const thumbs = await subdir(r, THUMB_DIR, true)
       if (thumbs === null) throw new Error('cannot create thumbnail cache')
       await writeFileIn(thumbs, `${key}.png`, png)
+    },
+
+    readSources: async () => {
+      const r = await root()
+      if (r === null) return null
+      try {
+        return await readFileIn(r, SOURCES_FILE)
+      } catch (err) {
+        if (isNotFound(err)) return null
+        throw err
+      }
+    },
+
+    writeSources: (source, entry) => {
+      const run = async (): Promise<void> => {
+        const r = await rootOrThrow()
+        let current: Uint8Array | null = null
+        try {
+          current = await readFileIn(r, SOURCES_FILE)
+        } catch (err) {
+          if (!isNotFound(err)) throw err
+        }
+        await writeFileIn(r, SOURCES_FILE, mergeSourceEntry(current, source, entry))
+        notifySourcesAll()
+      }
+      const next = sourcesWrites.then(run, run)
+      sourcesWrites = next.catch(() => {})
+      return next
+    },
+
+    readSourceCache: async (key) => {
+      validateSourceCacheKey(key)
+      const r = await root()
+      if (r === null) return null
+      const cache = await subdir(r, SOURCES_CACHE_DIR, false)
+      if (cache === null) return null
+      try {
+        return await readFileIn(cache, key)
+      } catch {
+        return null // absent = cache miss, never an error
+      }
+    },
+
+    writeSourceCache: async (key, bytes) => {
+      validateSourceCacheKey(key)
+      const r = await rootOrThrow()
+      const cache = await subdir(r, SOURCES_CACHE_DIR, true)
+      if (cache === null) throw new Error('cannot create the source cache')
+      await writeFileIn(cache, key, bytes)
+    },
+
+    removeSourceCache: async (key) => {
+      validateSourceCacheKey(key)
+      const r = await root()
+      if (r === null) return
+      const cache = await subdir(r, SOURCES_CACHE_DIR, false)
+      if (cache === null) return
+      try {
+        await cache.removeEntry(key)
+      } catch (err) {
+        if (!isNotFound(err)) throw err
+      }
+    },
+
+    subscribeSources: (l) => {
+      sourceListeners.add(l)
+      return () => sourceListeners.delete(l)
+    },
+
+    editingNames: async () => {
+      const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined
+      if (!locks || typeof locks.query !== 'function') return []
+      const state = await locks.query()
+      return (state.held ?? [])
+        .map((h) => h.name ?? '')
+        .filter((n) => n.startsWith(EDIT_LOCK_PREFIX))
+        .map((n) => n.slice(EDIT_LOCK_PREFIX.length))
     },
 
     reveal: () => Promise.reject(new Error('reveal is not available in the browser')),

@@ -131,6 +131,14 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[dev-dependencies]
+# Test-only: mints the throwaway CA and the 30-day loopback leaf for the
+# https tests in src/remote_fetch.rs, so no openssl binary is needed. `ring`
+# is the provider rustls already uses here; never a runtime dependency.
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+# Already in the tree through tauri; named here for the leaf validity dates.
+time = "0.3"
+
 [features]
 # The in-app updater: a check on launch plus a manual "Check for Updates"
 # menu item, talking to the signed `latest.json` published on GitHub

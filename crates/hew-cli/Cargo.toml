@@ -12,6 +12,12 @@ license.workspace = true
 name = "hew-cli"
 path = "src/main.rs"
 
+[features]
+# The loopback allowance of `catalog::FetchPolicy` (a loopback `https`
+# reference is read over plain `http` and counts as public). Off in every
+# normal build; enabled for tests only, by the self dev-dependency below.
+test-loopback = []
+
 [dependencies]
 api = { workspace = true }
 kernel = { workspace = true }
@@ -33,7 +39,19 @@ skp-export = { workspace = true }
 # docs/design/v1.1-cycle.md's Lane B): folder resolution, file naming, and
 # atomic list/read/write/remove, shared with the Tauri shell.
 library = { workspace = true }
+# The hew.json index types and `build_index` behind `hew-cli library index`
+# (docs/design/shared-library-sources.md 6.4). A pure in-repo crate.
+sources = { path = "../sources" }
 serde_json = { workspace = true }
+# `catalog check` / `catalog build` fetch sources over HTTPS
+# (docs/design/shared-library-sources.md 7.6). Same version and features as
+# shells/tauri/src-tauri, plus `blocking`: the CLI is plain std::thread, no
+# async runtime.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "system-proxy", "blocking"] }
+# reqwest is built with `rustls-no-provider`, so one crypto provider is
+# compiled in and installed by `catalog::HttpFetcher::new`. Same version and
+# features as shells/tauri/src-tauri.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # OS randomness for minting a document id on save (HEW_FILE_FORMAT.md §2
 # `document_id`): the same version `hew-relay` already uses, so the lock
 # gains no new crate.
@@ -57,8 +75,13 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+# Enables `test-loopback` for this package's own tests and nothing else.
+hew-cli = { path = ".", features = ["test-loopback"] }
 # Plugin command declarations for the MCP provider-labeling tests.
 plugin-manifest = { workspace = true }
 # Inflates a snapshot PNG so the stability pin hashes pixels, not the
 # encoder's compressed bytes. The version softrender already pins.
 miniz_oxide = "0.9.0"
+# `hew-cli library index` specs (docs/design/shared-library-sources.md 6.4):
+# hash the item files independently of the code under test.
+sha2 = { workspace = true }

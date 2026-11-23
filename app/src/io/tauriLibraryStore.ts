@@ -47,6 +47,7 @@ function isThumbNotFound(err: unknown): boolean {
 
 export function makeTauriLibraryStore(): LibraryStore {
   const listeners = new Set<() => void>()
+  const sourceListeners = new Set<() => void>()
 
   // Cross-window sync: the Rust side broadcasts the Tauri global event
   // 'settings-changed' with payload `{ key: 'libraryFolder' }` whenever
@@ -70,6 +71,11 @@ export function makeTauriLibraryStore(): LibraryStore {
       // window that performed the write.
       void listen('library-changed', () => {
         listeners.forEach((l) => l())
+      })
+      // A `.sources.json` write has its own notice; it never raises the
+      // item one.
+      void listen('library-sources-changed', () => {
+        sourceListeners.forEach((l) => l())
       })
     })
     .catch(() => {
@@ -154,6 +160,61 @@ export function makeTauriLibraryStore(): LibraryStore {
       } catch {
         return null
       }
+    },
+
+    async readSources(): Promise<Uint8Array | null> {
+      const { invoke } = await import('@tauri-apps/api/core')
+      try {
+        return new Uint8Array(await invoke<ArrayBuffer>('library_sources_read'))
+      } catch (err) {
+        if (isThumbNotFound(err)) return null
+        throw err
+      }
+    },
+
+    async writeSources(source: string, entry: Record<string, unknown> | null): Promise<void> {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('library_sources_write', { source, entry })
+    },
+
+    async readSourceCache(key: string): Promise<Uint8Array | null> {
+      const { invoke } = await import('@tauri-apps/api/core')
+      try {
+        return new Uint8Array(await invoke<ArrayBuffer>('library_source_cache_read', { key }))
+      } catch (err) {
+        if (isThumbNotFound(err)) return null
+        throw err
+      }
+    },
+
+    async writeSourceCache(key: string, bytes: Uint8Array): Promise<void> {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('library_source_cache_write', { key, contents: Array.from(bytes) })
+    },
+
+    async removeSourceCache(key: string): Promise<void> {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('library_source_cache_remove', { key })
+    },
+
+    subscribeSources(listener: () => void): () => void {
+      sourceListeners.add(listener)
+      return () => sourceListeners.delete(listener)
+    },
+
+    async editingNames(): Promise<string[]> {
+      const { invoke } = await import('@tauri-apps/api/core')
+      return invoke<string[]>('library_edit_list')
+    },
+
+    async registerEdit(name: string): Promise<void> {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('library_edit_register', { name })
+    },
+
+    async unregisterEdit(name: string): Promise<void> {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('library_edit_unregister', { name })
     },
 
     capabilities: () => ({ canReveal: true, canChooseFolder: true, canDownload: false }),

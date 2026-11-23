@@ -50,7 +50,10 @@ the Tape Measure, and trace over it.
 **Organization.** Nested groups, components that edit once and update
 everywhere, tags with per-tag visibility, saved Scenes, an outliner on
 every platform, and a personal Library of your components, materials,
-and models — each item an ordinary `.hew` file.
+and models — each item an ordinary `.hew` file. The Library also takes
+shared items from sources other people publish on GitHub, GitLab,
+Codeberg, or any website, and tells you when a source has something
+newer.
 
 **Materials.** Flat colors and image textures at real-world scale,
 painted per face or per object, with opacity and drag-the-pins texture

@@ -67,6 +67,18 @@ pub fn valid_thumb_key(key: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Source-cache key charset: 1-96 chars, lowercase ASCII letters, digits,
+/// `-` and `_`, never starting with `-`/`_`. No dots (so no `..`, no hidden
+/// names), no separators.
+pub fn valid_source_cache_key(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    (1..=96).contains(&bytes.len())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-' || *b == b'_')
+        && !matches!(bytes[0], b'-' | b'_')
+}
+
 /// Slugify `name`, append a 6-hex-char suffix from `id`, and prefix with
 /// `category`'s subfolder. Pure — no I/O, no randomness of its own (the
 /// suffix comes entirely from the caller's `id`), so the same `(name, id,

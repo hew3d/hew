@@ -1069,6 +1069,8 @@ export interface LibraryDescribeResult {
   mtime_ms: number
   name: string
   path: string
+  /** the remote note of an item fetched from a source (source, name, path, sha256, commit?, license?, fetchedAt, edited); absent when the item has none */
+  remote?: UnspecifiedShape
   saved_at?: string
   size: number
   /** manifest counts (objects, materials, components, ...); absent when error is present */
@@ -1122,7 +1124,7 @@ export interface LibraryListParams {
 
 export interface LibraryListResult {
   folder: string
-  items: ({ category: "component" | "material" | "model" | "profile"; collection?: string; error?: string; id?: string; keywords: string[]; mtime_ms: number; name: string; path: string; saved_at?: string; size: number; summary?: UnspecifiedShape })[]
+  items: ({ category: "component" | "material" | "model" | "profile"; collection?: string; error?: string; id?: string; keywords: string[]; mtime_ms: number; name: string; path: string; remote?: UnspecifiedShape; saved_at?: string; size: number; summary?: UnspecifiedShape })[]
 }
 
 /**
@@ -1230,6 +1232,8 @@ export interface LibraryUpdateMetaResult {
   id?: string
   keywords: string[]
   name: string
+  /** the remote note of an item fetched from a source (source, name, path, sha256, commit?, license?, fetchedAt, edited); absent when the item has none */
+  remote?: UnspecifiedShape
   saved_at?: string
 }
 

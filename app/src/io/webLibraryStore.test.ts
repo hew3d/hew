@@ -136,6 +136,14 @@ describe('browser-storage mode round-trips', () => {
     await expect(store.writeThumbnail('../sneaky', bytes(1))).rejects.toThrow(/invalid thumbnail key/)
   })
 
+  it('thumbnail keys are 8-64 lowercase hex characters, as in the desktop store', async () => {
+    const { deps } = makeDeps()
+    const store = makeWebLibraryStore(deps)
+    await store.writeThumbnail('a'.repeat(64), bytes(1))
+    await expect(store.writeThumbnail('a'.repeat(65), bytes(1))).rejects.toThrow(/invalid thumbnail key/)
+    await expect(store.writeThumbnail('abcdef1', bytes(1))).rejects.toThrow(/invalid thumbnail key/)
+  })
+
   it('requests durable storage once, after the first successful write', async () => {
     const requestPersist = vi.fn(async () => true)
     const { deps } = makeDeps({ requestPersist })

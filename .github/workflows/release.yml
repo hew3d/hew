@@ -10,6 +10,11 @@
 #              Windows, /usr/bin/hew-cli on Linux .deb/.rpm (on PATH), and
 #              inside the AppImage (not independently runnable there without
 #              --appimage-extract; the .deb/.rpm are what puts it on PATH)
+#   Standalone hew-cli-vX.Y.Z-<os>-<arch>.tar.gz (.zip on Windows) + .sha256,
+#              one per desktop leg: macos-universal, linux-{x86_64,aarch64},
+#              windows-{x64,arm64}. The very binary the leg staged as its
+#              sidecar (already version-checked), packed alone for CI and
+#              scripts that want the CLI without installing the app
 #   Web        hew-web-vX.Y.Z.tar.gz self-hosting tarball (the built app plus
 #              a deploy/ directory: nginx.conf, the relay proxy stanza, the
 #              relay systemd unit — so a deployment is version-locked to the
@@ -394,6 +399,60 @@ jobs:
             BIN="$(ls shells/tauri/src-tauri/binaries/hew-cli-* | head -n 1)"
           fi
           [[ "$("$BIN" --version)" == "hew-cli ${TAG#v}" ]]
+
+      # The standalone hew-cli archive: the sidecar binary the previous step
+      # just version-checked, packed alone (no new compile), with a .sha256
+      # beside it ("<hex>  <filename>"), uploaded like the relay tarballs.
+      # Names: hew-cli-$TAG-<os>-<arch>.tar.gz, .zip on Windows.
+      #
+      # On a preview (-pre.) tag only the Linux x86_64 archive is required, since
+      # that is the one the catalog's CI downloads; a failure packing the others
+      # is reported but does not fail the job. A release tag requires all five.
+      - name: Pack and upload standalone hew-cli
+        continue-on-error: ${{ matrix.name != 'linux-x64' && contains(github.ref_name, '-pre.') }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          BIN_DIR=shells/tauri/src-tauri/binaries
+          case "${{ matrix.name }}" in
+            macos-universal)
+              PLAT=macos-universal; EXT=tar.gz
+              SRC="$BIN_DIR/hew-cli-universal-apple-darwin"; EXE=hew-cli ;;
+            windows-x64)   PLAT=windows-x64;     EXT=zip;    SRC="$BIN_DIR/hew-cli-x86_64-pc-windows-msvc.exe";  EXE=hew-cli.exe ;;
+            windows-arm64) PLAT=windows-arm64;   EXT=zip;    SRC="$BIN_DIR/hew-cli-aarch64-pc-windows-msvc.exe"; EXE=hew-cli.exe ;;
+            linux-x64)     PLAT=linux-x86_64;    EXT=tar.gz; SRC="$BIN_DIR/hew-cli-x86_64-unknown-linux-gnu";    EXE=hew-cli ;;
+            linux-arm64)   PLAT=linux-aarch64;   EXT=tar.gz; SRC="$BIN_DIR/hew-cli-aarch64-unknown-linux-gnu";   EXE=hew-cli ;;
+            *) echo "::error::No standalone hew-cli mapping for ${{ matrix.name }}"; exit 1 ;;
+          esac
+          [ -f "$SRC" ] || { echo "::error::Staged sidecar $SRC not found"; ls "$BIN_DIR"; exit 1; }
+          NAME="hew-cli-$TAG-$PLAT.$EXT"
+          rm -rf cli-stage && mkdir cli-stage
+          cp "$SRC" "cli-stage/$EXE"
+          chmod +x "cli-stage/$EXE"
+          if [ "$EXT" = zip ]; then
+            powershell -NoProfile -Command "Compress-Archive -Path 'cli-stage/$EXE' -DestinationPath '$NAME' -Force"
+          else
+            tar -czf "$NAME" -C cli-stage "$EXE"
+          fi
+          if command -v sha256sum >/dev/null; then
+            echo "$(sha256sum "$NAME" | cut -d' ' -f1)  $NAME" > "$NAME.sha256"
+          else
+            echo "$(shasum -a 256 "$NAME" | cut -d' ' -f1)  $NAME" > "$NAME.sha256"
+          fi
+          cat "$NAME.sha256"
+          upload() { # <file> <content type>
+            existing="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
+              --jq ".[] | select(.name == \"$1\") | .id")"
+            [ -z "$existing" ] || gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$existing"
+            gh api --method POST -H "Content-Type: $2" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$1" \
+              --input "$1"
+          }
+          if [ "$EXT" = zip ]; then upload "$NAME" application/zip; else upload "$NAME" application/gzip; fi
+          upload "$NAME.sha256" text/plain
 
       # tauri-action runs beforeBuildCommand (app build, which builds the
       # WASM kernel via build-wasm.mjs), bundles, and uploads the artifacts
@@ -956,6 +1015,31 @@ jobs:
           WEB="hew-web-v${VERSION}.tar.gz";          need "$WEB"
           RELAY_X64="hew-relay-v${VERSION}-linux-x86_64.tar.gz";   need "$RELAY_X64"
           RELAY_ARM="hew-relay-v${VERSION}-linux-aarch64.tar.gz";  need "$RELAY_ARM"
+          # The Linux x86_64 archive is always required (the catalog's CI uses
+          # it). The other four are required on a release tag; on a preview tag
+          # one that is missing is a warning and its table cell says so.
+          CLI_MAC="hew-cli-v${VERSION}-macos-universal.tar.gz"
+          CLI_WIN_X64="hew-cli-v${VERSION}-windows-x64.zip"
+          CLI_WIN_ARM="hew-cli-v${VERSION}-windows-arm64.zip"
+          CLI_LIN_X64="hew-cli-v${VERSION}-linux-x86_64.tar.gz"
+          CLI_LIN_ARM="hew-cli-v${VERSION}-linux-aarch64.tar.gz"
+          need "$CLI_LIN_X64"; need "$CLI_LIN_X64.sha256"
+          for f in "$CLI_MAC" "$CLI_WIN_X64" "$CLI_WIN_ARM" "$CLI_LIN_ARM"; do
+            if [[ "$TAG" == *-pre.* ]]; then
+              { grep -qxF "$f" assets.txt && grep -qxF "$f.sha256" assets.txt; } \
+                || echo "::warning::Standalone '$f' is missing from this preview build."
+            else
+              need "$f"; need "$f.sha256"
+            fi
+          done
+          # A table cell: the link when the archive and its checksum are there.
+          cli_cell() { # <file> <label> <reference>
+            if grep -qxF "$1" assets.txt && grep -qxF "$1.sha256" assets.txt; then
+              echo "[$2][$3]"
+            else
+              echo "not in this build"
+            fi
+          }
 
           url() { echo "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$1"; }
 
@@ -988,11 +1072,17 @@ jobs:
           | **Linux** — Fedora/openSUSE | [.rpm][rpm-x64] | [.rpm][rpm-arm64] |
           | **Web** — self-hosting tarball | [.tar.gz][web] | [.tar.gz][web] |
           | **Relay** — self-hosted Open on Phone (Linux) | [.tar.gz][relay-x64] | [.tar.gz][relay-arm64] |
+          | **hew-cli** — standalone, macOS | $(cli_cell "$CLI_MAC" 'universal .tar.gz' cli-mac) | $(cli_cell "$CLI_MAC" 'universal .tar.gz' cli-mac) |
+          | **hew-cli** — standalone, Windows | $(cli_cell "$CLI_WIN_X64" '.zip' cli-win-x64) | $(cli_cell "$CLI_WIN_ARM" '.zip' cli-win-arm64) |
+          | **hew-cli** — standalone, Linux | $(cli_cell "$CLI_LIN_X64" '.tar.gz' cli-lin-x64) | $(cli_cell "$CLI_LIN_ARM" '.tar.gz' cli-lin-arm64) |
 
           - $MAC_NOTE
             covers Apple Silicon and Intel. Homebrew users can
             \`brew install --cask hew3d/tap/hew\` instead, which also puts
             \`hew-cli\` on the PATH.
+          - The standalone \`hew-cli\` archives hold just the command-line
+            tool, for scripts and CI; each has a \`.sha256\` file beside it
+            (\`sha256sum -c\`). The desktop installers already include it.
           - Windows installers are not code-signed yet, so SmartScreen may
             warn on first run — choose **More info**, then **Run anyway**.
           - On Linux, mark the AppImage executable (\`chmod +x\`) before
@@ -1022,6 +1112,11 @@ jobs:
           [web]: $(url "$WEB")
           [relay-x64]: $(url "$RELAY_X64")
           [relay-arm64]: $(url "$RELAY_ARM")
+          [cli-mac]: $(url "$CLI_MAC")
+          [cli-win-x64]: $(url "$CLI_WIN_X64")
+          [cli-win-arm64]: $(url "$CLI_WIN_ARM")
+          [cli-lin-x64]: $(url "$CLI_LIN_X64")
+          [cli-lin-arm64]: $(url "$CLI_LIN_ARM")
           EOF
 
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \

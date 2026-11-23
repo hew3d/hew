@@ -287,6 +287,16 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   `savedAt`, `sourceDoc`) and, written by every save to the Library since
   1.5, `prints`: an object mapping each component definition's `sid` in
   the item file (a decimal string) to that definition's **content print**.
+  An item added from a Library source also holds `remote`, the note of
+  where it came from: an object with `source` (the canonical source
+  reference), `name` (the source's name), `path` (the item's path in the
+  source's index), `sha256` (the hash of the file as the source published
+  it, 64 lowercase hex digits), `commit` (git sources, when the read
+  resolved one), `license`, `fetchedAt` (an ISO 8601 time) and `edited`
+  (a boolean: the item's contents were saved over since it was taken).
+  A reader treats a `remote` without string `source` and `sha256` as
+  absent. HEW_API.md §8.1 has which saves keep the note and which drop
+  it.
   On a component definition placed from (or saved to) the Library it holds
   the link: `source_id` (the item's `id`), `content_hash` (a fingerprint
   of the item file's bytes, still written so older readers keep working,

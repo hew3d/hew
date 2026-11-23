@@ -8,8 +8,9 @@
 //
 // The policy text lives in ../csp/policies.json with the desktop shell's; this
 // script injects `web.production`, or `web.preview` when the build is a preview
-// build (HEW_PREVIEW=1, the same variable the app build reads). The production
-// policy is pinned by scripts/check-production-artifacts.mjs.
+// build (HEW_PREVIEW=1, the same variable the app build reads), or `web.strict`
+// when HEW_WEB_SOURCES=off (an error beside HEW_PREVIEW=1). The production and
+// strict policies are pinned by scripts/check-production-artifacts.mjs.
 //
 // This is the WEB policy: same allowlist as the desktop one MINUS the Tauri
 // `ipc:` sources (no invoke bridge in a browser), PLUS `manifest-src` for the
@@ -22,12 +23,13 @@
 //   img-src    data: blob:         — SVG cursors (data:) + texture/thumbnail URLs
 //   connect-src/worker-src/media-src blob: — object-URL blobs + service worker
 //
-// connect-src is 'self' (plus blob:) and nothing else — the "Open on Phone"
-// relay is served from THIS origin under /relay/ (app/src/io/shareRelay.ts;
-// workers/share-relay/README.md), so 'self' already admits it, and no
-// third-party host belongs in this policy. Keep it that way: any hostname
-// added here is a hostname every self-hoster's deployment would also have to
-// trust.
+// connect-src is 'self', blob: and any https: host in the default policy: the
+// page reads Library sources from arbitrary https hosts. No NAMED third-party
+// host belongs here (every self-hoster's deployment would also have to trust
+// it). The "Open on Phone" relay is served from THIS origin under /relay/
+// (app/src/io/shareRelay.ts; workers/share-relay/README.md), so 'self' admits
+// it. The strict policy (HEW_WEB_SOURCES=off) keeps connect-src to 'self' and
+// blob: only, the old own-origin promise.
 //
 // The script fails loudly if the expected anchor is missing, so a future Vite
 // change can't silently ship an un-CSP'd build.

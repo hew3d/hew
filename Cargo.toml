@@ -19,6 +19,7 @@ members = [
     "crates/stl-import",
     "crates/image-import",
     "crates/library",
+    "crates/sources",
     "crates/hew-cli",
     "crates/hew-relay",
     "crates/plugin-manifest",
@@ -79,6 +80,9 @@ libm = "=0.2.16"
 # feature lets `Manifest` derive its own (de)serialization.
 semver = { version = "1", features = ["serde"] }
 proptest = "1"
+# Source-reference and request-URL parsing in crates/sources (shared library
+# sources, docs/design/shared-library-sources.md 6.2).
+url = "2"
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 serde = { version = "1", features = ["derive"] }
