@@ -201,11 +201,10 @@ function ShapeOptions({ sections = [], children }: FilletOptionsProps & { childr
                       aria-pressed={!inMenu && it.profile !== undefined ? active : undefined}
                       disabled={off}
                       title={cornerOff ? CORNER_ONLY_TITLE : it.title}
-                      onClick={event => {
+                      onClick={() => {
                         if (off) return
                         if (it.profile !== undefined) {
-                          pick(it.profile)
-                          if (inMenu && event.detail === 0) triggerRef.current?.focus()
+                          setFilletProfile(it.profile)
                         }
                         else {
                           setOpen(false)

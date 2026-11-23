@@ -9,6 +9,7 @@ requiresPreview('fillet')
 declare global {
   interface Window {
     __hew_test?: import('../src/test/harness').HewTestHarness
+    __filletPreviewProfiles?: Array<{ id: string; shape: string }>
   }
 }
 
@@ -929,7 +930,8 @@ test('Fillet specification: original menu, collapse persistence and card-only se
   expect(rect.y).toBeGreaterThanOrEqual(0)
   await menu.getByRole('menuitemradio', { name: /^Ogee\b/ }).click()
   await expect(more).toContainText('Ogee')
-  await expect(menu).toHaveCount(0)
+  await expect(menu).toBeVisible()
+  await expect(menu.getByRole('menuitemradio', { name: /^Ogee\b/ })).toHaveAttribute('aria-checked', 'true')
   await card.getByRole('button', { name: 'Collapse Fillet options' }).click()
   await expect(card.getByText('Shape', { exact: true })).not.toBeVisible()
   await expect(card.getByRole('button', { name: 'About Fillet' })).toBeVisible()
@@ -1068,12 +1070,12 @@ test.describe('More Shapes integrated menu', () => {
         await expectMainControlsFixed()
       }
       await page.keyboard.press('Enter')
-      await expect(menu).toHaveCount(0)
-      await expect(trigger).toBeFocused()
+      await expect(menu).toBeVisible()
+      await expect(ogee).toBeFocused()
+      await expect(ogee).toHaveAttribute('aria-checked', 'true')
       await expect(trigger).toContainText('Ogee')
-      // The saving action stays hidden until the menu reopens, then joins its navigation.
-      await expect(card.getByRole('menuitem', { name: 'Save profile…' })).toHaveCount(0)
-      await trigger.press('ArrowUp')
+      // Saving becomes available without reopening the profile library.
+      await ogee.press('End')
       await expect(menu.getByRole('menuitem', { name: 'Save profile…' })).toBeFocused()
       await expect(menu.getByRole('menuitem', { name: 'Save profile…' })).toBeEnabled()
       await page.keyboard.press('Escape')
@@ -1166,6 +1168,76 @@ test.describe('More Shapes integrated menu', () => {
   })
 })
 
+test('More Shapes stays open while consecutive profile choices update the armed preview', async ({ page }) => {
+  await setup(page)
+  const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+  await page.keyboard.press('Shift+F')
+  await clickWorld(page, [1, 0.03, 1])
+  await expect(page.getByTestId('measurement-box')).toBeVisible()
+  await page.keyboard.type('20')
+  const beforeHash = await hash(page), beforeDepth = await depth(page)
+  // Observe successful real previews without changing their requests or results.
+  // The Preview E2E server exposes the same module graph the app imports.
+  await page.evaluate(async () => {
+    const { Scene } = await import(/* @vite-ignore */ '/src/wasm/pkg/wasm_api.js')
+    const { getFilletSettings } = await import(/* @vite-ignore */ '/src/tools/filletSettings.ts')
+    const preview = Scene.prototype.blend_preview_typed
+    const seen: Array<{ id: string; shape: string }> = []
+    window.__filletPreviewProfiles = seen
+    Scene.prototype.blend_preview_typed = function (this: InstanceType<typeof Scene>, object: bigint, spec: string) {
+      const result = preview.call(this, object, spec)
+      const request = JSON.parse(spec).profile
+      const profile = getFilletSettings().profile
+      if (profile.kind === 'shape' && request.kind === 'custom'
+        && JSON.stringify(request.shape) === JSON.stringify(profile.shape)) {
+        seen.push({ id: profile.id, shape: JSON.stringify(request.shape) })
+      }
+      return result
+    }
+  })
+  const card = page.getByRole('region', { name: 'Fillet options' })
+  const trigger = card.getByRole('button', { name: /^More shapes/ })
+  const menu = card.getByRole('menu', { name: 'Additional edge profiles' })
+  await trigger.press('ArrowDown')
+  await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getAnimations().length)).toBe(0)
+  const controls = [card.getByRole('group', { name: 'Quick edge shape' }), card.getByRole('textbox', { name: 'Facets' })]
+  const positions = await Promise.all(controls.map(control => control.boundingBox()))
+  const choices = [
+    ['Ogee', 'builtin:ogee'], ['Roman Ogee', 'builtin:roman-ogee'], ['Bead', 'builtin:bead'],
+  ] as const
+  let previousShape: string | undefined
+  for (const [index, [name, profileId]] of choices.entries()) {
+    await page.evaluate(() => { window.__filletPreviewProfiles!.length = 0 })
+    const choice = menu.getByRole('menuitemradio', { name, exact: true })
+    if (index < 2) {
+      if (index === 1) await menu.getByRole('menuitemradio', { name: 'Ogee', exact: true }).press('ArrowRight')
+      await expect(choice).toBeFocused()
+      await choice.press('Enter')
+      await expect(choice).toBeFocused()
+    } else await choice.click()
+    await expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    await expect(menu).toBeVisible()
+    await expect(choice).toHaveAttribute('aria-checked', 'true')
+    await expect(menu.locator('[aria-checked="true"]')).toHaveCount(1)
+    await expect(trigger).toContainText(name)
+    await expect.poll(() => page.evaluate(() => window.__filletPreviewProfiles?.at(-1)?.id)).toBe(profileId)
+    const shape = await page.evaluate(() => window.__filletPreviewProfiles!.at(-1)!.shape)
+    expect(shape).not.toBe(previousShape)
+    previousShape = shape
+    for (const [index, control] of controls.entries()) {
+      const bounds = (await control.boundingBox())!
+      expect(bounds.x).toBeCloseTo(positions[index]!.x, 0)
+      expect(bounds.y).toBeCloseTo(positions[index]!.y, 0)
+    }
+    expect(await features(page, id)).toHaveLength(0)
+    expect(await hash(page)).toBe(beforeHash)
+    expect(await depth(page)).toBe(beforeDepth)
+  }
+  await trigger.click()
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+  await expect(menu).toHaveCount(0)
+})
+
 test('More Shapes preserves the existing Save Profile workflow', async ({ page }, info) => {
   await setup(page)
   await page.keyboard.press('Shift+F')
@@ -1175,11 +1247,12 @@ test('More Shapes preserves the existing Save Profile workflow', async ({ page }
   await expect(card.getByRole('menuitem', { name: 'Save profile…' })).toHaveCount(0)
   await trigger.press('ArrowDown')
   await expect(menu.getByRole('menuitem', { name: 'Save profile…' })).toBeDisabled()
-  await page.getByRole('menuitemradio', { name: 'Ogee', exact: true }).press('Enter')
-  await expect(menu).toHaveCount(0)
+  const ogee = menu.getByRole('menuitemradio', { name: 'Ogee', exact: true })
+  await ogee.press('Enter')
+  await expect(menu).toBeVisible()
+  await expect(ogee).toBeFocused()
   const save = menu.getByRole('menuitem', { name: 'Save profile…' })
-  await expect(save).toHaveCount(0)
-  await trigger.press('ArrowUp')
+  await ogee.press('End')
   await expect(save).toBeEnabled()
   await expect(save).toBeFocused()
   await expect.poll(() => card.locator('.fillet-profile-expansion').evaluate(el => el.getAnimations().length)).toBe(0)
