@@ -75,6 +75,13 @@
  * takes a guide over the object beneath. A guide taken that way is
  * selected only for the gesture (guideTarget.ts): afterwards the selection
  * is what it was before the click.
+ *
+ * Guides selected with nodes, or several guides alone, are carried instead
+ * (`setCarriedGuides`): they preview and move with the nodes in the same
+ * undo step (`transform_mixed_selection`), and a copy or an ×N / /N array
+ * copies them beside the nodes (`duplicate_mixed_selection_array`, or
+ * `duplicate_mixed_selection_placements` for a grid), every copy joining
+ * the new selection. With guides alone the click is their base point.
  * On commit: one kernel transform call, then handleSceneRefresh + onDocumentChanged.
  */
 
@@ -122,7 +129,9 @@ import { getCopiesLinked } from '../settings/editing'
 import { parseLinkedResult, type LinkedWrapRef } from '../viewport/linkedWraps'
 import { DashedLink } from './dashedLink'
 
-export type OnMoveCommit = (nodes: NodeRef[]) => void
+/** A move or copy landed on `nodes`, and on `guides` when guides were
+ *  carried (the moved ones, or their copies); both become the selection. */
+export type OnMoveCommit = (nodes: NodeRef[], guides: readonly bigint[]) => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
 export type { OnCopyModeChange } from './copyMode'
@@ -144,6 +153,8 @@ type Stage =
       nodes: NodeRef[]
       /** The construction guide being moved instead of `nodes` (then empty). */
       guide: bigint | null
+      /** The guides carried with `nodes` (`setCarriedGuides`). */
+      guides: bigint[]
       base: [number, number, number]
       previewMesh: THREE.Object3D | null
       /** Last snapped/computed destination (updated every pointer move). */
@@ -159,10 +170,14 @@ type Stage =
  * both — a buffer that parses as an array spec (`3x`, `/3`) resolves the
  * array, anything else that parses as a length retypes the distance.
  */
-/** What an array resolve placed: node copies, or a guide's (the last one). */
-type ArrayLanding = { nodes: NodeRef[] } | { guide: bigint }
+/** What an array resolve placed: node copies with the carried guides'
+ *  copies, or a lone guide's (the last one). */
+type ArrayLanding = { nodes: NodeRef[]; guides: bigint[] } | { guide: bigint }
 
-type RetypeSpec = { nodes: NodeRef[]; guide: bigint | null; vector: [number, number, number]; copyState: CopyState; linked: boolean }
+type RetypeSpec = { nodes: NodeRef[]; guide: bigint | null; guides: bigint[]; vector: [number, number, number]; copyState: CopyState; linked: boolean }
+
+/** A node copy's kernel result: the node copies and the carried guides'. */
+type CopyResult = { nodes: NodeRef[]; guides: bigint[] }
 
 export class MoveTool implements Tool {
   readonly name = 'Move'
@@ -175,7 +190,7 @@ export class MoveTool implements Tool {
    * with no guide under the click is moved from there — nothing to highlight
    * but the guide already selected. */
   clickAcquire(): ClickAcquire | null {
-    if (this.stage.kind !== 'idle' || this.selection.length > 0) return null
+    if (this.stage.kind !== 'idle' || this.selection.length > 0 || this.carriedGuides.length > 0) return null
     const guides = this.guides.canAcquire
     const nodes = this.guides.selected === null && this.acquireSelection !== null
     return guides || nodes ? { guides, nodes } : null
@@ -192,7 +207,7 @@ export class MoveTool implements Tool {
       if (this.arrayHot !== null) {
         return this._armedArrayHint()
       }
-      if (this.selection.length === 0 && this.guides.selected === null) {
+      if (this.selection.length === 0 && this.guides.selected === null && this.carriedGuides.length === 0) {
         return t`Click the object you want to move.`
       }
       const kind = this._copyKindLabel()
@@ -276,6 +291,8 @@ export class MoveTool implements Tool {
     sketchSources: NodeRef[]
     /** The ORIGINAL guide (`duplicate_guide_array`), when a guide was copied. */
     guide: bigint | null
+    /** The ORIGINAL carried guides, copied beside `sources`. */
+    guides: bigint[]
     vector: [number, number, number]
     historyGen: string
     /** Whether the copy this window follows was linked; the array repeats it. */
@@ -338,6 +355,15 @@ export class MoveTool implements Tool {
   /** The app's selected guide, pushed by the Viewport like `setSelection`. */
   setGuideTarget(guide: bigint | null): void {
     this.guides.selected = guide
+  }
+  /** The guides carried with the node selection: every selected guide when
+   *  nodes are selected too, or when several guides are (never the lone
+   *  guide `setGuideTarget` names). */
+  private carriedGuides: bigint[] = []
+  /** Pushed by the Viewport like `setSelection`; an in-flight gesture keeps
+   *  the guides it started with. */
+  setCarriedGuides(guides: readonly bigint[]): void {
+    this.carriedGuides = [...guides]
   }
   /** The Viewport's guide click pick and post-commit refresh. */
   setGuideHooks(acquire: ((ray: Ray) => bigint | null) | null, onCommit: OnGuideCommit): void {
@@ -676,14 +702,15 @@ export class MoveTool implements Tool {
 
     if (this.stage.kind === 'idle') {
       let nodes = this.selection
+      const carried = this.carriedGuides
       // No nodes selected: a click on a guide takes THAT guide, whether
       // another one is selected or none — selecting and moving it in one
       // gesture. A click elsewhere moves the selected guide from there.
-      // With nodes selected the click is their base point, a guide's snap
-      // included.
-      const guide = this.guides.start(ray, nodes.length === 0, true)
+      // With nodes or carried guides selected the click is their base
+      // point, a guide's snap included.
+      const guide = this.guides.start(ray, nodes.length === 0 && carried.length === 0, true)
       this.nodesAcquired = false
-      if (nodes.length === 0 && guide === null && this.acquireSelection !== null) {
+      if (nodes.length === 0 && guide === null && carried.length === 0 && this.acquireSelection !== null) {
         // Empty selection: auto-select whatever the click landed on and
         // start the move on it in the same gesture (no separate Select step).
         const acquired = this.acquireSelection(ray)
@@ -693,7 +720,7 @@ export class MoveTool implements Tool {
           this.nodesAcquired = true
         }
       }
-      if (nodes.length === 0 && guide === null) {
+      if (nodes.length === 0 && guide === null && carried.length === 0) {
         this.onToast(t`Click an object to move it`)
         return
       }
@@ -702,7 +729,7 @@ export class MoveTool implements Tool {
       // the toast is the "Locked." line with Unlock.
       // A COPY of a locked thing is allowed (the original stays put): in
       // copy mode only a node frozen by what holds it is refused.
-      if (guide === null) {
+      if (guide === null && nodes.length > 0) {
         const go = this.copyMode
           ? gateCopyOperands(this.wasmScene, nodes, this.onToast)
           : leaveBehind(this.wasmScene, nodes, this.onToast, { descendants: true })
@@ -720,18 +747,18 @@ export class MoveTool implements Tool {
       this.arrayHot = null
       this.arrayTyped = ''
 
-      const previewMesh = guide !== null ? buildGuidePreview(this.wasmScene, guide) : this._buildPreview(nodes)
+      const previewMesh = guide !== null ? buildGuidePreview(this.wasmScene, guide) : this._buildPreview(nodes, carried)
       const base: [number, number, number] = [snap.x, snap.y, snap.z]
       if (previewMesh !== null) {
         previewMesh.position.set(0, 0, 0)
         this.preview.add(previewMesh)
       }
 
-      this.stage = { kind: 'base', nodes, guide, base, previewMesh, dest: [...base] }
+      this.stage = { kind: 'base', nodes, guide, guides: carried, base, previewMesh, dest: [...base] }
       this._setLink(base, base)
       this._updateGuideLine()
     } else if (this.stage.kind === 'base') {
-      const { nodes, guide, base } = this.stage
+      const { nodes, guide, guides, base } = this.stage
       const tx = snap.x - base[0]
       const ty = snap.y - base[1]
       const tz = snap.z - base[2]
@@ -758,7 +785,7 @@ export class MoveTool implements Tool {
         }
       }
 
-      this._commitAndReset(nodes, guide, tx, ty, tz)
+      this._commitAndReset(nodes, guide, guides, tx, ty, tz)
     }
   }
 
@@ -893,9 +920,9 @@ export class MoveTool implements Tool {
   // ── Private helpers ─────────────────────────────────────────────────────────
 
   /** Commit the move via translationAffine, then reset to idle. */
-  private _commitAndReset(nodes: NodeRef[], guide: bigint | null, tx: number, ty: number, tz: number): void {
+  private _commitAndReset(nodes: NodeRef[], guide: bigint | null, guides: bigint[], tx: number, ty: number, tz: number): void {
     this._resetToIdle()
-    this._commit(nodes, guide, tx, ty, tz)
+    this._commit(nodes, guide, guides, tx, ty, tz)
   }
 
   /**
@@ -905,7 +932,7 @@ export class MoveTool implements Tool {
    */
   private _commitFromTyped(dist: number): void {
     if (this.stage.kind !== 'base') return
-    const { nodes, guide, base, dest } = this.stage
+    const { nodes, guide, guides, base, dest } = this.stage
 
     let dir: [number, number, number]
     if (this.lockAxis !== null) {
@@ -939,7 +966,7 @@ export class MoveTool implements Tool {
       return
     }
 
-    this._commitAndReset(nodes, guide, tx, ty, tz)
+    this._commitAndReset(nodes, guide, guides, tx, ty, tz)
   }
 
   private _resetToIdle(): void {
@@ -956,14 +983,26 @@ export class MoveTool implements Tool {
     this.onMeasurementCb('')
   }
 
-  private _buildPreview(nodes: NodeRef[]): THREE.Object3D | null {
-    return buildSelectionPreview(this.wasmScene, this.objectsGroup, this.instanceGroupGetter, nodes)
+  /** The rubber-band clone of `nodes`, with an overlay line for each
+   *  carried guide. */
+  private _buildPreview(nodes: NodeRef[], guides: readonly bigint[]): THREE.Object3D | null {
+    const mesh = nodes.length > 0
+      ? buildSelectionPreview(this.wasmScene, this.objectsGroup, this.instanceGroupGetter, nodes)
+      : null
+    if (guides.length === 0) return mesh
+    const group = new THREE.Group()
+    if (mesh !== null) group.add(mesh)
+    for (const g of guides) {
+      const line = buildGuidePreview(this.wasmScene, g)
+      if (line !== null) group.add(line)
+    }
+    return group.children.length > 0 ? group : null
   }
 
   /** True when the kernel accepted the commit (false = refused, toasted).
    *  Opens the retype window on the result either way it commits — a plain
    *  move or a copy (whose array window opens alongside). */
-  private _commit(allNodes: NodeRef[], guide: bigint | null, tx: number, ty: number, tz: number): boolean {
+  private _commit(allNodes: NodeRef[], guide: bigint | null, guides: bigint[], tx: number, ty: number, tz: number): boolean {
     if (guide !== null) return this._commitGuide(guide, tx, ty, tz)
     try {
       // Drawn shapes on a selected object ride with it (see `dropRidingDrafts`).
@@ -974,7 +1013,7 @@ export class MoveTool implements Tool {
         (n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance',
       )
       const hasSketchNodes = nodes.some((n) => isSketchScopedKind(n.kind))
-      if (this.copyMode && (copyables.length > 0 || hasSketchNodes)) {
+      if (this.copyMode && (copyables.length > 0 || hasSketchNodes || guides.length > 0)) {
         // Copy mode: duplicate at the offset instead of moving. Each copy is
         // the same kind as its source; the copies become the selection so a
         // follow-up move chains off them.
@@ -987,14 +1026,24 @@ export class MoveTool implements Tool {
         // exactly one step. A refusal changes nothing; the finally block only
         // reselects whatever did land.
         const committed: NodeRef[] = []
+        let guideCopies: bigint[] = []
         // The preference is read at the moment of the copy, not when the
         // tool was armed.
         const linked = this.retypeLinked ?? linkedFor(this.copyState, getCopiesLinked())
         try {
           const sketchSources = nodes.filter((n) => isSketchScopedKind(n.kind))
           committed.push(
-            ...copyOwnersAndDrawing(this.wasmScene, copyables, sketchSources, [affineF64], () =>
-              this._duplicateArray(copyables, affineF64, 1, linked),
+            ...copyOwnersAndDrawing(
+              this.wasmScene,
+              copyables,
+              sketchSources,
+              [affineF64],
+              () => {
+                const copies = this._duplicateArray(copyables, guides, affineF64, 1, linked)
+                guideCopies = copies.guides
+                return copies.nodes
+              },
+              guides.length > 0,
             ),
           )
           // The copy gesture is now "hot" for an ×N / /N array refinement,
@@ -1003,6 +1052,7 @@ export class MoveTool implements Tool {
             sources: copyables,
             sketchSources,
             guide: null,
+            guides,
             vector: [tx, ty, tz],
             historyGen: this.wasmScene.history_generation().toString(),
             linked,
@@ -1011,26 +1061,27 @@ export class MoveTool implements Tool {
           }
           this.arrayTyped = ''
         } finally {
-          if (committed.length > 0) {
+          if (committed.length > 0 || guideCopies.length > 0) {
             this.selection = committed
-            this.onCommit(committed)
+            this.carriedGuides = guideCopies
+            this.onCommit(committed, guideCopies)
             this._landedOnAcquired()
           }
         }
         surfaceSketchTransformReports((m) => this.onToast(m))
-        this.retype.arm({ nodes, guide: null, vector: [tx, ty, tz], copyState: this.copyState, linked })
+        this.retype.arm({ nodes, guide: null, guides, vector: [tx, ty, tz], copyState: this.copyState, linked })
       } else {
         // The whole selection: the planner leaves riding shapes to their
         // owner and hands them back re-found where they landed.
-        const committed = commitSelectionTransform(this.wasmScene, allNodes, affineF64, this._activeInstance)
-        this.onCommit(committed)
+        const committed = commitSelectionTransform(this.wasmScene, allNodes, affineF64, this._activeInstance, undefined, guides)
+        this.onCommit(committed, guides)
         surfaceSketchTransformReports((m) => this.onToast(m))
         this._landedOnAcquired()
         // The window is armed with the PRE-commit `nodes`, not `committed`:
         // its apply() undoes the commit first, which restores the drawing
         // with its ORIGINAL unit keys (they are geometry hashes), and an
         // arranging landing's re-resolved refs name the moved geometry.
-        this.retype.arm({ nodes: allNodes, guide: null, vector: [tx, ty, tz], copyState: 'off', linked: false })
+        this.retype.arm({ nodes: allNodes, guide: null, guides, vector: [tx, ty, tz], copyState: 'off', linked: false })
       }
       return true
     } catch (err) {
@@ -1059,6 +1110,7 @@ export class MoveTool implements Tool {
           sources: [],
           sketchSources: [],
           guide,
+          guides: [],
           vector: [tx, ty, tz],
           historyGen: this.wasmScene.history_generation().toString(),
           linked: false,
@@ -1067,11 +1119,11 @@ export class MoveTool implements Tool {
         }
         this.arrayTyped = ''
         this.guides.landed(copy)
-        this.retype.arm({ nodes: [], guide, vector: [tx, ty, tz], copyState: this.copyState, linked: false })
+        this.retype.arm({ nodes: [], guide, guides: [], vector: [tx, ty, tz], copyState: this.copyState, linked: false })
       } else {
         this.wasmScene.transform_guide(guide, affineF64)
         this.guides.landed(guide)
-        this.retype.arm({ nodes: [], guide, vector: [tx, ty, tz], copyState: 'off', linked: false })
+        this.retype.arm({ nodes: [], guide, guides: [], vector: [tx, ty, tz], copyState: 'off', linked: false })
       }
       return true
     } catch (err) {
@@ -1149,7 +1201,7 @@ export class MoveTool implements Tool {
     this.copyState = hot.copyState
     this.retypeLinked = hot.linked
     try {
-      return this._commit(hot.nodes, hot.guide, v[0], v[1], v[2])
+      return this._commit(hot.nodes, hot.guide, hot.guides, v[0], v[1], v[2])
     } finally {
       this.copyState = prev
       this.retypeLinked = null
@@ -1195,7 +1247,7 @@ export class MoveTool implements Tool {
       this.arrayHot = { ...hot, historyGen: this.wasmScene.history_generation().toString() }
       // The undo + redo moved the generation: re-arm the retype window on
       // the restored entry, or a distance typed next reports 'stale'.
-      this.retype.arm({ nodes: [...hot.sources, ...hot.sketchSources], guide: hot.guide, vector: hot.vector, copyState: hot.copyState, linked: hot.linked })
+      this.retype.arm({ nodes: [...hot.sources, ...hot.sketchSources], guide: hot.guide, guides: hot.guides, vector: hot.vector, copyState: hot.copyState, linked: hot.linked })
     } catch {
       this.arrayHot = null
     }
@@ -1287,7 +1339,8 @@ export class MoveTool implements Tool {
   /** Lay the array `spec` describes for the move `v` on the hot sources:
    *  the drawn shapes through the same translations, the objects through
    *  one call — `duplicate_selection_array` for a row, `duplicate_selection_placements`
-   *  for a grid — or a hot guide's copies through one `duplicate_guide_array` call. */
+   *  for a grid, their mixed twins when guides are carried — or a hot
+   *  guide's copies through one `duplicate_guide_array` call. */
   private _arrayAt(
     arr: NonNullable<MoveTool['arrayHot']>,
     v: [number, number, number],
@@ -1302,24 +1355,34 @@ export class MoveTool implements Tool {
     }
     const steps = this._placementSteps(arr, v, spec)
     const affines = steps.map((s) => affineToFloat64(translationAffine(s[0], s[1], s[2])))
-    return {
-      nodes: copyOwnersAndDrawing(this.wasmScene, arr.sources, arr.sketchSources, affines, () =>
-        spec.count2 === undefined
-          ? this._duplicateArray(arr.sources, affines[0], spec.count, arr.linked)
-          : this._duplicatePlacements(arr.sources, affines, arr.linked),
-      ),
-    }
+    let guides: bigint[] = []
+    const nodes = copyOwnersAndDrawing(
+      this.wasmScene,
+      arr.sources,
+      arr.sketchSources,
+      affines,
+      () => {
+        const copies = spec.count2 === undefined
+          ? this._duplicateArray(arr.sources, arr.guides, affines[0], spec.count, arr.linked)
+          : this._duplicatePlacements(arr.sources, arr.guides, affines, arr.linked)
+        guides = copies.guides
+        return copies.nodes
+      },
+      arr.guides.length > 0,
+    )
+    return { nodes, guides }
   }
 
-  /** Hand an array's copies to the host: node copies become the selection
-   *  (none when the click took the source, `_landedOnAcquired`),
-   *  a guide's last copy the selected guide. */
+  /** Hand an array's copies to the host: node and carried-guide copies
+   *  become the selection (none when the click took the source,
+   *  `_landedOnAcquired`), a lone guide's last copy the selected guide. */
   private _landArray(landed: ArrayLanding): void {
     if ('guide' in landed) {
       this.guides.landed(landed.guide)
     } else {
       this.selection = landed.nodes
-      this.onArrayCommit(landed.nodes)
+      this.carriedGuides = landed.guides
+      this.onArrayCommit(landed.nodes, landed.guides)
       surfaceSketchTransformReports((m) => this.onToast(m))
       this._landedOnAcquired()
     }
@@ -1327,46 +1390,59 @@ export class MoveTool implements Tool {
 
   /** One `duplicate_selection_array` call over `nodes`, mapped to NodeRefs.
    *  A linked copy goes through the call that reports its wraps; the
-   *  returned nodes are then placements. */
+   *  returned nodes are then placements. Carried `guides` take the mixed
+   *  call, which copies them in the same step and reports the wraps either
+   *  way. */
   private _duplicateArray(
     nodes: readonly NodeRef[],
+    guides: readonly bigint[],
     affineF64: Float64Array,
     count: number,
     linked: boolean,
-  ): NodeRef[] {
+  ): CopyResult {
     this.linkedWraps = []
     const kinds = new Uint8Array(nodes.map((n) => nodeKindToNumber(n.kind)))
     const ids = new BigUint64Array(nodes.map((n) => n.id))
-    if (linked) {
+    if (guides.length > 0 || linked) {
       const result = parseLinkedResult(
-        this.wasmScene.duplicate_selection_array_linked(kinds, ids, affineF64, count),
+        guides.length > 0
+          ? this.wasmScene.duplicate_mixed_selection_array(kinds, ids, new BigUint64Array(guides), affineF64, count, linked)
+          : this.wasmScene.duplicate_selection_array_linked(kinds, ids, affineF64, count),
       )
       this.linkedWraps = result.linked
-      return result.nodes
+      return { nodes: result.nodes, guides: result.guides }
     }
-    return this.wasmScene
+    const copies = this.wasmScene
       .duplicate_selection_array(kinds, ids, affineF64, count, false)
       .map(nodeRefFromJs)
+    return { nodes: copies, guides: [] }
   }
 
   /** One `duplicate_selection_placements` call over `nodes` (a grid), mapped
-   *  to NodeRefs; a linked grid reports its wraps as a linked row does. */
+   *  to NodeRefs; a linked grid reports its wraps as a linked row does, and
+   *  carried `guides` take the mixed call as `_duplicateArray`'s do. */
   private _duplicatePlacements(
     nodes: readonly NodeRef[],
+    guides: readonly bigint[],
     affines: readonly Float64Array[],
     linked: boolean,
-  ): NodeRef[] {
+  ): CopyResult {
     this.linkedWraps = []
     const kinds = new Uint8Array(nodes.map((n) => nodeKindToNumber(n.kind)))
     const ids = new BigUint64Array(nodes.map((n) => n.id))
     const flat = new Float64Array(affines.length * 12)
     affines.forEach((a, i) => flat.set(a, i * 12))
-    if (linked) {
-      const result = parseLinkedResult(this.wasmScene.duplicate_selection_placements_linked(kinds, ids, flat))
+    if (guides.length > 0 || linked) {
+      const result = parseLinkedResult(
+        guides.length > 0
+          ? this.wasmScene.duplicate_mixed_selection_placements(kinds, ids, new BigUint64Array(guides), flat, linked)
+          : this.wasmScene.duplicate_selection_placements_linked(kinds, ids, flat),
+      )
       this.linkedWraps = result.linked
-      return result.nodes
+      return { nodes: result.nodes, guides: result.guides }
     }
-    return this.wasmScene.duplicate_selection_placements(kinds, ids, flat, false).map(nodeRefFromJs)
+    const copies = this.wasmScene.duplicate_selection_placements(kinds, ids, flat, false).map(nodeRefFromJs)
+    return { nodes: copies, guides: [] }
   }
 
   /** The array buffer as a readout, with the display glyph for `x` (the
@@ -1404,8 +1480,14 @@ export class MoveTool implements Tool {
       )
       return
     }
+    // A grid of guides alone stacks the copies along each guide's own line;
+    // carried with nodes, a guide follows each node copy instead.
     if (spec.count2 !== undefined && hot.guide !== null) {
       this.onToast(t`A guide copies along one direction only — type a single count.`)
+      return
+    }
+    if (spec.count2 !== undefined && hot.sources.length === 0 && hot.sketchSources.length === 0 && hot.guides.length > 0) {
+      this.onToast(t`Guides copy along one direction only — type a single count.`)
       return
     }
 
@@ -1444,7 +1526,7 @@ export class MoveTool implements Tool {
     this.arrayLast = spec
     // A distance typed now re-spaces THIS array (see `_relayArray`); the
     // array is one undo step, so one undo retracts it.
-    this.retype.arm({ nodes: [...hot.sources, ...hot.sketchSources], guide: hot.guide, vector: hot.vector, copyState: hot.copyState, linked: hot.linked })
+    this.retype.arm({ nodes: [...hot.sources, ...hot.sketchSources], guide: hot.guide, guides: hot.guides, vector: hot.vector, copyState: hot.copyState, linked: hot.linked })
     this._landArray(created)
   }
 

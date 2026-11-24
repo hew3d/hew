@@ -52,7 +52,7 @@ import { DrawPlaneCueLayer, planeCueFor, type PlaneCueSpec } from './DrawPlaneCu
 import { FaceCueLayer, type FaceCueShown, type FaceCueSource } from './FaceCueLayer'
 import { mapThroughPose } from './faceCueGeometry'
 import { pipArrowKey, type DrawPlaneState, type PlanePip } from '../tools/drawPlane'
-import { soleGuideTarget } from '../tools/guideTarget'
+import { carriedGuides, soleGuideTarget } from '../tools/guideTarget'
 import { viewTurnEye, viewTurnRotation } from './viewTurn'
 import { PLANE_PIPS, cursorPlaneOf, pipClickAction, pipEnabledFor, pipWillReleaseFor, type PipContext } from './drawPlanePips'
 import { SnapService } from './snapService'
@@ -147,7 +147,7 @@ import { deleteStepLabel } from './deleteLabel'
 import { baseBindingFor, desiredDragState, switchDragTo, orbitDragState, setPreciseOrbit, forceBaseAfterPress, type SwitchableDrag } from './orbitDragSwitch'
 import { MarqueeProjector, WINDOW_COVERAGE_MIN, boundsCoverage, emptyScreenBounds, normalizedRect, type MarqueeMode, type MarqueeRect, type ScreenBounds } from './marquee'
 import { applyAffineToPoint, composeAffine, type Affine } from '../tools/transformMath'
-import { dragMoveTargets, exceedsDragThreshold } from './dragMove'
+import { dragMoveGuides, dragMoveTargets, exceedsDragThreshold } from './dragMove'
 import { DragCommitGate } from './dragCommit'
 import {
   loupePress,
@@ -2894,10 +2894,12 @@ export default function Viewport({
   // Latest selected ids, readable inside the stable event closures.
   const selectedIdsRef = useRef<NodeRef[]>(selectedIds)
   // The Move and Rotate guide target: the selected guide when it is the
-  // whole selection. Carrying several guides, or guides together with nodes
-  // or annotations, is not wired yet.
+  // whole selection. Any other selected guides are carried with the nodes
+  // (Move so far).
   const guideTarget = soleGuideTarget(selectedGuides, selectedIds.length, selectedAnnotations.length)
   const selectedGuideRef = useRef<bigint | null>(guideTarget)
+  const guidesCarried = carriedGuides(selectedGuides, selectedIds.length, selectedAnnotations.length)
+  const carriedGuidesRef = useRef<readonly bigint[]>(guidesCarried)
   // Latest selected guides and annotations, for Invert Selection.
   const selectedGuidesRef = useRef(selectedGuides)
   selectedGuidesRef.current = selectedGuides
@@ -4839,6 +4841,8 @@ export default function Viewport({
       /** What the drag moves: the whole selection when the pressed node was
        * already part of it, else just the pressed node (OS convention). */
       nodes: NodeRef[]
+      /** The selected guides the whole-selection drag carries (else none). */
+      guides: bigint[]
       active: boolean
       /** Top-level presses defer their click-pick to pointerup (mirrors the
        * marquee); in-context presses already dispatched it. */
@@ -8754,13 +8758,26 @@ export default function Viewport({
       }
     })
 
-    function makeMoveTool(selection?: NodeRef[]): MoveTool {
+    /** Select what a transform landed on: its nodes, and the guides it
+     *  carried (moved, or their copies), redrawn first. */
+    function selectLanded(nodes: NodeRef[], guides: readonly bigint[]): void {
+      if (guides.length > 0) {
+        sceneRenderer.refreshGuides()
+        onSelectManyRef.current?.([...nodes, ...guides.map((id) => ({ kind: 'guide' as const, id }))], 'replace')
+      } else if (nodes.length === 1) {
+        onSelectRef.current?.(nodes[0], 'replace')
+      } else {
+        onSelectManyRef.current?.(nodes, 'replace')
+      }
+    }
+
+    function makeMoveTool(selection?: NodeRef[], guides: readonly bigint[] = []): MoveTool {
       const tool = new MoveTool(
         wasmScene,
         previewGroup,
         sceneRenderer.objectsGroup,
         selection ?? [...selectedIdsRef.current],
-        (nodes) => {
+        (nodes, guides) => {
           // A linked copy wraps its loose source as a set, which removes a
           // world node: refresh everything, not just the copies.
           handleSceneRefresh(tool.takeLinkedWraps().length > 0 ? undefined : touchedForNodes(nodes))
@@ -8770,8 +8787,7 @@ export default function Viewport({
           sceneRenderer.refreshAllSketches()
           // Select the committed nodes — for a copy these are the fresh
           // clones, so a follow-up move chains off the new copies.
-          if (nodes.length === 1) onSelectRef.current?.(nodes[0], 'replace')
-          else onSelectManyRef.current?.(nodes, 'replace')
+          selectLanded(nodes, guides)
         },
         handleToast,
         (text: string) => { onMeasurementRef.current?.(text) },
@@ -8785,17 +8801,18 @@ export default function Viewport({
         // ×N / /N array re-resolve: the previous copies were scene-undone
         // before the new set landed, so a targeted refresh isn't enough —
         // rebuild fully so the retracted meshes vanish too.
-        (nodes) => {
+        (nodes, guides) => {
           handleSceneRefresh()
           sceneRenderer.refreshAllSketches()
-          if (nodes.length === 1) onSelectRef.current?.(nodes[0], 'replace')
-          else onSelectManyRef.current?.(nodes, 'replace')
+          selectLanded(nodes, guides)
         },
       )
       tool.setSelectionAcquirer(acquireTransformTargets, releaseTransformTargets)
-      // A guide is a Move target too. A drag-move hands over nodes, never
-      // a guide, so only a plain tool switch carries the selected one in.
+      // A guide is a Move target too. A drag-move hands over nodes and the
+      // guides they carry, never a lone guide, so only a plain tool switch
+      // carries the selected one in.
       if (selection === undefined) tool.setGuideTarget(selectedGuideRef.current)
+      tool.setCarriedGuides(selection === undefined ? carriedGuidesRef.current : guides)
       tool.setGuideHooks(acquireGuideTarget, landGuideTransform)
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
@@ -8811,14 +8828,19 @@ export default function Viewport({
      */
     function beginDragMove(dm: DragMove): void {
       // Select what's about to move so the highlight + dock follow the drag.
-      if (dm.nodes.length === 1) onSelectRef.current?.(dm.nodes[0], 'replace')
-      else onSelectManyRef.current?.(dm.nodes, 'replace')
+      if (dm.guides.length > 0) {
+        onSelectManyRef.current?.([...dm.nodes, ...dm.guides.map((id) => ({ kind: 'guide' as const, id }))], 'replace')
+      } else if (dm.nodes.length === 1) {
+        onSelectRef.current?.(dm.nodes[0], 'replace')
+      } else {
+        onSelectManyRef.current?.(dm.nodes, 'replace')
+      }
       // A tool switch that bypasses switchToolRef (this one) still needs the
       // same mid-hold-tap reset — see switchToolRef's comment above.
       ctrlTap.reset()
       modeModifierTap.reset()
       multiClick.reset()
-      const tool = makeMoveTool(dm.nodes)
+      const tool = makeMoveTool(dm.nodes, dm.guides)
       toolController.setTool(tool)
       // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
       renderer.domElement.style.cursor = cursorFor('Move')
@@ -11516,6 +11538,7 @@ export default function Viewport({
             startY: py,
             pressRay: ray,
             nodes: dragMoveTargets(pressedNode, selectedIdsRef.current),
+            guides: dragMoveGuides(pressedNode, selectedIdsRef.current, carriedGuidesRef.current),
             active: false,
             deferClick: topLevel,
           }
@@ -13337,6 +13360,17 @@ export default function Viewport({
     refreshAcquireHoverRef.current?.()
     scheduleRenderRef.current()
   }, [guideTarget])
+
+  // Reflect the carried guides into the active tool, as the guide target.
+  useEffect(() => {
+    carriedGuidesRef.current = guidesCarried
+    const activeTool = toolControllerRef.current?.activeTool
+    if (activeTool !== undefined && 'setCarriedGuides' in activeTool) {
+      (activeTool as { setCarriedGuides(guides: readonly bigint[]): void }).setCarriedGuides(guidesCarried)
+    }
+    refreshAcquireHoverRef.current?.()
+    scheduleRenderRef.current()
+  }, [guidesCarried])
 
   // Reflect the selected construction guides into the renderer highlight.
   useEffect(() => {

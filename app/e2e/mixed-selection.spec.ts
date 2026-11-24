@@ -258,3 +258,69 @@ test('Select All and Invert Selection take the shown guides and annotations at t
   expect(sel.nodes).toEqual([ids.box])
   expect(sel.annotations).toEqual([ids.dim])
 })
+
+/** A real drag between two world points (page pixels in between). */
+async function dragWorld(page: Page, ctx: Ctx, from: [number, number, number], to: [number, number, number]): Promise<void> {
+  const a = pagePx(ctx, from)
+  const b = pagePx(ctx, to)
+  await page.mouse.move(a.x, a.y)
+  await page.mouse.down()
+  await page.mouse.move(b.x, b.y, { steps: 12 })
+  await page.mouse.up()
+}
+
+/** A box and a point guide beside it, both selected. */
+async function boxAndGuideSelected(page: Page): Promise<{ box: string; guide: string }> {
+  const ids = await page.evaluate(() => {
+    const h = window.__hew_test!
+    return { box: h.drawBox([0, 0, 0], [1, 1, 0], 1), guide: h.addGuidePoint(4, 0, 0) }
+  })
+  await focusViewport(page)
+  await page.evaluate(
+    (o) =>
+      window.__hew_test!.selectNodes([
+        { kind: 'object', id: o.box },
+        { kind: 'guide', id: o.guide },
+      ]),
+    ids,
+  )
+  await page.waitForFunction(() => window.__hew_test!.getSelectedGuides().length === 1)
+  return ids
+}
+
+test('Move carries the selected guide with the box, in one undo step', async ({ page }) => {
+  const ctx = await setup(page)
+  const ids = await boxAndGuideSelected(page)
+
+  await page.keyboard.press('m')
+  await dragWorld(page, ctx, [1, 0, 0], [3, 0, 0])
+  // A typed distance redoes the move exactly, guide included.
+  await page.keyboard.type('4')
+  await page.keyboard.press('Enter')
+  await expect.poll(() => page.evaluate((id) => window.__hew_test!.getObjectBounds(id)[0], ids.box)).toBeCloseTo(4, 5)
+  const guide = await page.evaluate((id) => window.__hew_test!.getGuideGeometry(id), ids.guide)
+  expect(guide?.[0]).toBeCloseTo(8, 5)
+  expect(guide?.[1]).toBeCloseTo(0, 5)
+  // Both stay selected.
+  expect(await selectedKinds(page)).toEqual({ nodes: [ids.box], guides: [ids.guide], annotations: [] })
+
+  await expectUndoLabel(page, 'Undo Move 2 items')
+  await page.keyboard.press('ControlOrMeta+z')
+  await expect.poll(() => page.evaluate((id) => window.__hew_test!.getObjectBounds(id)[0], ids.box)).toBeCloseTo(0, 5)
+  expect((await page.evaluate((id) => window.__hew_test!.getGuideGeometry(id), ids.guide))?.[0]).toBeCloseTo(4, 5)
+})
+
+test('a Select drag on the selected box carries the selected guide too', async ({ page }) => {
+  const ctx = await setup(page)
+  const ids = await boxAndGuideSelected(page)
+
+  await dragWorld(page, ctx, [0.5, 0.5, 1], [0.5, 2.5, 1])
+  await expect.poll(() => page.evaluate((id) => window.__hew_test!.getObjectBounds(id)[1], ids.box)).toBeGreaterThan(0.5)
+  const box = await page.evaluate((id) => window.__hew_test!.getObjectBounds(id), ids.box)
+  const guide = await page.evaluate((id) => window.__hew_test!.getGuideGeometry(id), ids.guide)
+  // The guide moved by the box's own offset.
+  expect(guide?.[0]).toBeCloseTo(4 + box[0], 5)
+  expect(guide?.[1]).toBeCloseTo(box[1], 5)
+  expect(guide?.[2]).toBeCloseTo(box[2], 5)
+  expect(await selectedKinds(page)).toEqual({ nodes: [ids.box], guides: [ids.guide], annotations: [] })
+})

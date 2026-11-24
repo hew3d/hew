@@ -4620,6 +4620,10 @@ msgstr "Hilfspunkt"
 msgid "Guides"
 msgstr "Hilfslinien"
 
+#: src/tools/MoveTool.ts
+msgid "Guides copy along one direction only — type a single count."
+msgstr "Hilfslinien werden nur in einer Richtung kopiert – geben Sie eine einzelne Anzahl ein."
+
 #. One-letter label for the height of a part
 #. One-letter label for the height of a part
 #. One-letter label for the height of a part

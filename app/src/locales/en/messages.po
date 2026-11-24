@@ -4704,6 +4704,10 @@ msgstr "Guide point"
 msgid "Guides"
 msgstr "Guides"
 
+#: src/tools/MoveTool.ts
+msgid "Guides copy along one direction only — type a single count."
+msgstr "Guides copy along one direction only — type a single count."
+
 #. One-letter label for the height of a part
 #. One-letter label for the height of a part
 #. One-letter label for the height of a part
