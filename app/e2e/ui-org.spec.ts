@@ -149,6 +149,100 @@ for (const [width, height] of [[1024, 700], [1280, 720], [1600, 1000]]) {
   })
 }
 
+/** A popover opened from the dock, measured against the dock button that opened it. */
+async function popoverGeometry(page: Page, verb: string) {
+  return page.evaluate((v) => {
+    const b = document.querySelector(`[data-dock-verb="${v}"]`)!.getBoundingClientRect()
+    const d = document.querySelector('[data-testid="contextual-dock"]')!.getBoundingClientRect()
+    const r = document.querySelector('[role="dialog"][aria-modal="true"]')!.getBoundingClientRect()
+    return {
+      buttonX: b.left + b.width / 2,
+      dialogX: r.left + r.width / 2,
+      dialogLeft: r.left,
+      dialogRight: r.right,
+      dialogBottom: r.bottom,
+      dockTop: d.top,
+      winW: window.innerWidth,
+    }
+  }, verb)
+}
+
+/** None of the sizes below needs clamping, so the dialog is centered on the
+ * button; and the button is well off the window's center, so the old
+ * window-centered placement would fail. */
+function expectOverButton(m: Awaited<ReturnType<typeof popoverGeometry>>): void {
+  expect(m.dialogLeft).toBeGreaterThanOrEqual(0)
+  expect(m.dialogRight).toBeLessThanOrEqual(m.winW)
+  expect(m.dialogBottom).toBeLessThan(m.dockTop)
+  expect(Math.abs(m.dialogX - m.buttonX)).toBeLessThanOrEqual(1)
+  expect(Math.abs(m.buttonX - m.winW / 2)).toBeGreaterThan(10)
+}
+
+for (const [width, height] of [[1280, 720], [1600, 1000], [1024, 700]]) {
+  test(`Save to Library opens over its dock button at ${width}x${height}`, async ({ page }) => {
+    await page.setViewportSize({ width, height })
+    await aim(page, CAMERA)
+    await page.evaluate(() => {
+      const h = window.__hew_test!
+      h.selectObjects([h.drawBox([0, 0, 0], [1, 1, 0], 1)])
+    })
+    await expect(dock(page)).toHaveAttribute('data-dock-context', 'object')
+    const dialog = page.getByRole('dialog', { name: 'Save to Library' })
+    const open = async () => {
+      await dock(page).getByRole('button', { name: 'Save to Library' }).click()
+      await expect(dialog).toBeVisible()
+    }
+    await open()
+    const m = await popoverGeometry(page, 'save-to-library')
+    expectOverButton(m)
+
+    if (width === 1280) {
+      // Hiding the tray moves the dock; the overlay blocks pointer clicks on
+      // the tray's button, so activate it directly.
+      await page.evaluate(() => (document.querySelector('[aria-label="Hide tray"]') as HTMLElement).click())
+      await expect(page.getByRole('complementary', { name: 'Tray' })).toBeHidden()
+      await expect
+        .poll(async () => {
+          const n = await popoverGeometry(page, 'save-to-library')
+          return Math.abs(n.dialogX - n.buttonX)
+        })
+        .toBeLessThanOrEqual(1)
+      const moved = await popoverGeometry(page, 'save-to-library')
+      expect(Math.abs(moved.buttonX - m.buttonX)).toBeGreaterThan(20)
+    }
+
+    // Escape closes it; so does a click outside the dialog.
+    await page.keyboard.press('Escape')
+    await expect(dialog).toBeHidden()
+    await open()
+    await page.mouse.click(width / 2, 120)
+    await expect(dialog).toBeHidden()
+  })
+}
+
+test('Make component on a linked copy opens over its dock button at 1280x720', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 })
+  const ctx = await aim(page, CAMERA)
+  const board = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [1, 1, 0], 1))
+  await page.evaluate((id) => window.__hew_test!.selectObjects([id]), board)
+  // Move-copy it along +X: the copy is a linked instance.
+  await page.keyboard.press('m')
+  const mac = await page.evaluate(() => /Mac|iPod|iPhone|iPad/.test(navigator.platform))
+  await page.keyboard.press(mac ? 'Alt' : 'Control')
+  await clickAt(page, ctx, 0.5, 0.5, 0)
+  await page.keyboard.press('ArrowRight')
+  await moveTo(page, ctx, 3.5, 0.5, 0)
+  await page.keyboard.type('3')
+  await page.keyboard.press('Enter')
+  await expect(dock(page)).toHaveAttribute('data-dock-context', 'instance')
+  const dialog = page.getByRole('dialog', { name: 'Make component' })
+  await dock(page).getByRole('button', { name: 'Make component' }).click()
+  await expect(dialog).toBeVisible()
+  expectOverButton(await popoverGeometry(page, 'edit-make-component'))
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeHidden()
+})
+
 test('dock, object row: Push/Pull, Fillet, Move, Paint, Shell, Make Component, Save to Library, Lock, Erase', async ({ page }) => {
   await aim(page, CAMERA)
   await page.evaluate(() => {

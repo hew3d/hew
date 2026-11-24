@@ -45,7 +45,7 @@ test('View > Tangent Edges shows and hides the wall-to-corner lines', async ({ p
 
   // The label shares its span with the check mark, so match either state.
   const menuItem = () => page.getByTestId('menu-bar').getByText(/^✓?Tangent Edges$/)
-  await page.getByRole('button', { name: 'View' }).click()
+  await page.getByTestId('menu-bar').getByRole('button', { name: 'View' }).click()
   await expect(menuItem()).not.toContainText('✓')
   await menuItem().click()
   await page.waitForTimeout(200)
@@ -56,7 +56,7 @@ test('View > Tangent Edges shows and hides the wall-to-corner lines', async ({ p
   await page.screenshot({ path: testInfo.outputPath('tangent-edges-on.png') })
 
   // The menu check follows, and a second click turns the lines off again.
-  await page.getByRole('button', { name: 'View' }).click()
+  await page.getByTestId('menu-bar').getByRole('button', { name: 'View' }).click()
   await expect(menuItem()).toContainText('✓')
   await menuItem().click()
   await page.waitForTimeout(200)

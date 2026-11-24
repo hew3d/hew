@@ -91,6 +91,7 @@ function DockItem({ verb, selected, disabled, onRun }: { verb: DockVerb; selecte
   return (
     <button
       type="button"
+      data-dock-verb={verb.id}
       aria-pressed={selected}
       aria-disabled={isDisabled}
       disabled={isDisabled}

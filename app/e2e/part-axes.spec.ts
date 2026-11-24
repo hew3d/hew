@@ -20,7 +20,7 @@ async function setup(page: Page): Promise<void> {
 }
 
 async function togglePartAxes(page: Page): Promise<void> {
-  await page.getByRole('button', { name: 'View' }).click()
+  await page.getByTestId('menu-bar').getByRole('button', { name: 'View' }).click()
   await page.getByTestId('menu-bar').getByText(/^✓?Part Axes$/).click()
 }
 

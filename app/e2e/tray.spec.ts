@@ -77,7 +77,7 @@ test('tray: View > Scenes > Add Scene brings a hidden tray back with the rename 
   await page.getByRole('button', { name: 'Hide tray' }).click()
   await expect(page.getByRole('complementary', { name: 'Tray' })).toBeHidden()
 
-  await page.getByRole('button', { name: 'View' }).click()
+  await page.getByTestId('menu-bar').getByRole('button', { name: 'View' }).click()
   await page.getByText('Scenes', { exact: true }).last().hover()
   await page.getByText('Add Scene', { exact: true }).last().click()
 
@@ -91,7 +91,7 @@ test('tray: View > Scenes > Add Scene brings a hidden tray back with the rename 
 test('tray: View > Tray toggles it and the menu check mark follows', async ({ page }) => {
   const tray = page.getByRole('complementary', { name: 'Tray' })
   const trayItem = async () => {
-    await page.getByRole('button', { name: 'View' }).click()
+    await page.getByTestId('menu-bar').getByRole('button', { name: 'View' }).click()
     // The label shares its span with the check mark, so match either state.
     return page.getByTestId('menu-bar').getByText(/^✓?Tray$/)
   }
@@ -111,7 +111,7 @@ test('dock: View > Contextual Dock turns it off, and it stays off across a reloa
   const dock = page.locator('[data-dock-context]')
   await expect(dock).toBeVisible()
   const dockItem = async () => {
-    await page.getByRole('button', { name: 'View' }).click()
+    await page.getByTestId('menu-bar').getByRole('button', { name: 'View' }).click()
     return page.getByTestId('menu-bar').getByText(/^✓?Contextual Dock$/)
   }
 
@@ -138,7 +138,7 @@ test('tray: keyboard focus follows the hide and show controls', async ({ page })
 })
 
 test('dock: with it off, Object > Save Selection to Library… still saves a selection', async ({ page }) => {
-  await page.getByRole('button', { name: 'View' }).click()
+  await page.getByTestId('menu-bar').getByRole('button', { name: 'View' }).click()
   await page.getByTestId('menu-bar').getByText(/^✓?Contextual Dock$/).click()
   await expect(page.locator('[data-dock-context]')).toHaveCount(0)
 

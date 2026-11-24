@@ -1,6 +1,6 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
-import { SaveToLibraryPopover } from './SaveToLibraryPopover'
+import { SaveToLibraryPopover, dockPopoverPlacement } from './SaveToLibraryPopover'
 
 /** Every dialog's Escape handler must `stopPropagation()` alongside its
  * `preventDefault()` — see `dialogs.test.tsx`'s identical helper. */
@@ -177,5 +177,77 @@ describe('SaveToLibraryPopover', () => {
       expect(screen.queryByTestId('update-in-library')).not.toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
     })
+  })
+})
+
+describe('dockPopoverPlacement', () => {
+  const win = { width: 1280, height: 720 }
+
+  it('centers the dialog on the anchor and sits a gap above the dock', () => {
+    const p = dockPopoverPlacement({ left: 600, width: 80 }, 640, win, 310)
+    expect(p.left + 155).toBe(640)
+    expect(p.bottom).toBe(720 - 640 + 16)
+  })
+
+  it('shifts to keep an 8 px margin at the left and right window edges', () => {
+    expect(dockPopoverPlacement({ left: 10, width: 60 }, 640, win).left).toBe(8)
+    expect(dockPopoverPlacement({ left: 1200, width: 60 }, 640, win).left).toBe(1280 - 310 - 8)
+  })
+
+  it('stays at the left margin when the window is narrower than the dialog', () => {
+    expect(dockPopoverPlacement({ left: 100, width: 60 }, 640, { width: 200, height: 720 }).left).toBe(8)
+  })
+})
+
+describe('SaveToLibraryPopover placement over a dock button', () => {
+  function mountDock(left: number): () => void {
+    const dock = document.createElement('div')
+    dock.setAttribute('data-testid', 'contextual-dock')
+    const button = document.createElement('button')
+    button.setAttribute('data-dock-verb', 'save-to-library')
+    dock.append(button)
+    document.body.append(dock)
+    dock.getBoundingClientRect = () => ({ top: 600, left: 0, width: 400, height: 54, right: 400, bottom: 654, x: 0, y: 600, toJSON: () => ({}) })
+    button.getBoundingClientRect = () => ({ top: 608, left, width: 60, height: 38, right: left + 60, bottom: 646, x: left, y: 608, toJSON: () => ({}) })
+    return () => dock.remove()
+  }
+
+  it('anchors the dock variant to its button', () => {
+    const cleanup = mountDock(500)
+    try {
+      render(<SaveToLibraryPopover defaultName="Box" anchorVerb="save-to-library" onSave={vi.fn()} onClose={vi.fn()} />)
+      const dialog = screen.getByRole('dialog')
+      expect(dialog.style.position).toBe('absolute')
+      expect(dialog.style.left).toBe(`${530 - 155}px`)
+      expect(dialog.style.bottom).toBe(`${window.innerHeight - 600 + 16}px`)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('leaves the modal variant and an unanchored dock variant as they were', () => {
+    const cleanup = mountDock(500)
+    try {
+      const { unmount } = render(<SaveToLibraryPopover defaultName="Box" variant="modal" anchorVerb="save-to-library" onSave={vi.fn()} onClose={vi.fn()} />)
+      expect(screen.getByRole('dialog').style.position).toBe('')
+      unmount()
+      render(<SaveToLibraryPopover defaultName="Box" onSave={vi.fn()} onClose={vi.fn()} />)
+      expect(screen.getByRole('dialog').style.position).toBe('')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('still closes on a backdrop click and Escape when anchored', () => {
+    const cleanup = mountDock(500)
+    try {
+      const onClose = vi.fn()
+      const { container } = render(<SaveToLibraryPopover defaultName="Box" anchorVerb="save-to-library" onSave={vi.fn()} onClose={onClose} />)
+      fireEvent.click(container.firstChild as HTMLElement)
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(onClose).toHaveBeenCalledTimes(2)
+    } finally {
+      cleanup()
+    }
   })
 })

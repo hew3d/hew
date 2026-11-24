@@ -10728,6 +10728,7 @@ export default function App() {
         <SaveToLibraryPopover
           defaultName={promoteTarget.defaultName}
           variant="dock"
+          anchorVerb="edit-make-component"
           title={t`Make component`}
           inputLabel={t`Component name`}
           buttonLabel={t`Make component`}
@@ -10745,6 +10746,7 @@ export default function App() {
         <SaveToLibraryPopover
           defaultName={saveToLibraryTarget.defaultName}
           variant={saveToLibraryTarget.kind === 'selection' ? 'dock' : 'modal'}
+          anchorVerb="save-to-library"
           title={saveToLibraryTarget.kind === 'profile' ? t`Save profile` : undefined}
           rows={saveToLibraryTarget.kind === 'profile' ? saveToLibraryTarget.rows : undefined}
           hideOriginHint={saveToLibraryTarget.kind === 'profile'}

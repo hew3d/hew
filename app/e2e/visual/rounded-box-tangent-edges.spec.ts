@@ -47,7 +47,7 @@ test('a filleted box hides its tangent edges, then shows them (goldens)', async 
   await expect(canvas).toHaveScreenshot('rounded-box-tangent-edges-hidden.png')
 
   const menuItem = () => page.getByTestId('menu-bar').getByText(/^✓?Tangent Edges$/)
-  await page.getByRole('button', { name: 'View' }).click()
+  await page.getByTestId('menu-bar').getByRole('button', { name: 'View' }).click()
   await menuItem().click()
   await settleFrame(page)
   await expect(canvas).toHaveScreenshot('rounded-box-tangent-edges-shown.png')
