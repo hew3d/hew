@@ -494,7 +494,8 @@ below.
   draw the same dashed line, in the construction guides' gray or in the
   color of the drawing axis it lies on. Move, Rotate, and Scale all extend
   to a whole mixed selection — one Object, a Group, a component instance,
-  or any combination — as one shared transform and one undo step; a scaled
+  or any combination, with the selected construction guides — as one
+  shared transform and one undo step; a scaled
   component instance carries the (possibly non-uniform) scale in its own
   pose, leaving the shared definition and every sibling instance untouched
 - Flip: three colored axis planes through the selection's bounding-box center
@@ -503,10 +504,13 @@ below.
   step, with a hover ghost; objects and drawing bake the mirror, instances
   take a mirrored pose. The copy toggle makes a mirrored copy, linked by
   default (a placement with a reflected pose). Object ▸ Flip Along ▸ Red /
-  Green / Blue flips in place without a tool change. Kernel
+  Green / Blue flips in place without a tool change. Selected guides
+  mirror with the selection, or are copied beside a mirrored copy; the
+  mirror plane ignores them. Kernel
   `Transform::reflection`, `Document::world_bounds`, `flip_matrix`,
-  `flip_nodes`, `flip_copy`; wasm `flip_matrix`, `flip_selection`
-  (recorded). No shortcut, as in SketchUp
+  `flip_nodes`, `flip_copy`, `flip_mixed`, `flip_mixed_copy`; wasm
+  `flip_matrix`, `flip_selection`, `flip_mixed_selection` (recorded). No
+  shortcut, as in SketchUp
 - Part Axes (C12): View ▸ Part Axes draws the frame of the selected or edited
   component (an origin mark and red/green/blue arms of constant screen
   length) and, for a selected Object or group with a `hew.part.frame`
@@ -888,7 +892,16 @@ below.
   their copy toggle copies it, ×N / /N arrays (rows, fans) included,
   each transform or copy one undo step. With nothing else selected, a
   click on a guide starts transforming that guide; a guide taken that
-  way is selected only for the gesture. A guide, dimension or leader is
+  way is selected only for the gesture. Guides selected with nodes, or
+  several guides at once, are carried by Move, Rotate, Scale and Flip,
+  copies and ×N / /N arrays and grids included, in the nodes' undo step
+  (kernel `transform_mixed_selection`, `duplicate_mixed_array`,
+  `duplicate_mixed_placements`, `flip_mixed`, `flip_mixed_copy`; wasm
+  `transform_mixed_selection`, `duplicate_mixed_selection_array`,
+  `duplicate_mixed_selection_placements`, `flip_mixed_selection`), and
+  their copies join the new selection. A grid of guides alone is refused,
+  as for one guide. Scale's grips and Flip's mirror plane come from the
+  nodes alone, so guides alone are refused there. A guide, dimension or leader is
   picked only where it is drawn: a solid in front of it takes the click
   instead, while glass, dimmed or faded context, X-ray, Wireframe and
   cut-away section parts hide nothing
