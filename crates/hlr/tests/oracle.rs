@@ -30,7 +30,9 @@ fn triangles(mesh: &tessellate::RenderMesh, pose: &Transform) -> Vec<[Point3; 3]
         ))
     };
     mesh.indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|t| [pos(t[0] as usize), pos(t[1] as usize), pos(t[2] as usize)])
         .collect()
 }

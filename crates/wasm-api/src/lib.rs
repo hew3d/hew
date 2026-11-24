@@ -6988,9 +6988,11 @@ impl Scene {
             .map(|(&k, &i)| node_id(k, i))
             .collect::<Result<Vec<_>, _>>()?;
         let placements: Vec<Transform> = affines
-            .chunks_exact(12)
+            .as_chunks::<12>()
+            .0
+            .iter()
             .map(|c| {
-                let rows: &[f64; 12] = c.try_into().expect("chunks of 12");
+                let rows: &[f64; 12] = c;
                 Transform::from_affine(rows)
             })
             .collect();
@@ -21701,7 +21703,7 @@ mod tests {
             let name = scene.object_name(id).unwrap();
             let tris = scene.object_export_triangles(id, 0).unwrap();
             let mut b = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN];
-            for v in tris.chunks_exact(3) {
+            for v in tris.as_chunks::<3>().0 {
                 for a in 0..3 {
                     b[a] = b[a].min(v[a]);
                     b[a + 3] = b[a + 3].max(v[a]);

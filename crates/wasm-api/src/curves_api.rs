@@ -2900,12 +2900,14 @@ pub fn profile_item_bytes_from_polyline(
         return Err(bad());
     }
     let pts: Vec<Point3> = points
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|c| Point3::new(c[0], c[1], c[2]))
         .collect();
     let curves: Vec<Option<kernel::CurveGeom>> = curve_radii
         .iter()
-        .zip(curve_centers.chunks_exact(3))
+        .zip(curve_centers.as_chunks::<3>().0.iter())
         .map(|(&r, c)| {
             (r.is_finite() && r > 0.0).then(|| kernel::CurveGeom {
                 center: Point3::new(c[0], c[1], c[2]),

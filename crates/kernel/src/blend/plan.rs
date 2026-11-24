@@ -2216,10 +2216,10 @@ fn taper_onto_cone(
         let w = (v - u * cosphi)
             .normalized()
             .map_err(|_| BlendError::BlendDegenerate)?;
-        for k in 1..n {
+        for (k, off) in sec.offsets.iter_mut().enumerate().take(n).skip(1) {
             let a = phi * k as f64 / n as f64;
             let p = cc + (u * trig::cos(a) + w * trig::sin(a)) * rho;
-            sec.offsets[k] = p - q(i);
+            *off = p - q(i);
         }
     }
     Ok(Some(c0 - dc * (r0 / (r1 - r0))))

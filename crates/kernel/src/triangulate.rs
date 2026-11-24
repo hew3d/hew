@@ -446,12 +446,8 @@ fn segments_intersect_2d(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> 
     let d3 = cross2(a, b, c);
     let d4 = cross2(a, b, d);
     // Proper (non-degenerate) crossing: each segment straddles the line of the other.
-    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+    ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
         && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
-    {
-        return true;
-    }
-    false
 }
 
 /// Cross-product tolerance `point_on_segment_2d` accepts as "collinear with

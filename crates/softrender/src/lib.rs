@@ -461,7 +461,9 @@ pub fn render_with_background(
                 .material
                 .and_then(|m| item.textures.and_then(|t| t.get(m)));
             let tris = mesh.indices[group.start as usize..(group.start + group.count) as usize]
-                .chunks_exact(3);
+                .as_chunks::<3>()
+                .0
+                .iter();
             for tri in tris {
                 let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
                 let uv_of = |i: usize| -> [f64; 2] {
@@ -575,7 +577,7 @@ pub fn render_with_background(
 }
 
 fn item_edges(mesh: &tessellate::RenderMesh) -> impl Iterator<Item = (Point3, Point3)> + '_ {
-    mesh.edge_positions.chunks_exact(6).map(|s| {
+    mesh.edge_positions.as_chunks::<6>().0.iter().map(|s| {
         (
             Point3::new(s[0] as f64, s[1] as f64, s[2] as f64),
             Point3::new(s[3] as f64, s[4] as f64, s[5] as f64),
@@ -1039,7 +1041,7 @@ pub fn selection_items_hiding(
 pub fn items_bbox(items: &[DocumentItem]) -> Option<(Point3, Point3)> {
     let mut acc: Option<(Point3, Point3)> = None;
     for it in items {
-        for v in it.mesh.positions.chunks_exact(3) {
+        for v in it.mesh.positions.as_chunks::<3>().0 {
             let p = it.pose.apply_point(Point3::new(
                 f64::from(v[0]),
                 f64::from(v[1]),
@@ -1429,7 +1431,7 @@ mod tests {
         let r = render(&items, &ceiling_camera(), 128, 128).expect("renders");
         let ink = [EDGE_COLOR[0], EDGE_COLOR[1], EDGE_COLOR[2], 255];
         assert!(
-            r.rgba.chunks_exact(4).any(|px| px == ink),
+            r.rgba.as_chunks::<4>().0.contains(&ink),
             "the edge is drawn, not dropped with its behind-the-eye endpoint"
         );
     }
@@ -1529,7 +1531,9 @@ mod tests {
         );
         let mut distinct: Vec<[u8; 3]> = r
             .normals
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .zip(&r.depth)
             .filter(|(_, z)| z.is_finite())
             .map(|(n, _)| [n[0], n[1], n[2]])
@@ -1572,8 +1576,10 @@ mod tests {
         // Some pixel got edge ink.
         assert!(
             r.rgba
-                .chunks_exact(4)
-                .any(|px| px == [EDGE_COLOR[0], EDGE_COLOR[1], EDGE_COLOR[2], 255]),
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|px| *px == [EDGE_COLOR[0], EDGE_COLOR[1], EDGE_COLOR[2], 255]),
             "hard edges drawn"
         );
     }
@@ -1608,10 +1614,10 @@ mod tests {
         assert_eq!(clear.depth_image(8).png, opaque.depth_image(8).png);
         assert_eq!(clear.normals_png(), opaque.normals_png());
         // Every pixel the box touches is opaque; none is half-covered.
-        for (px, id) in clear.rgba.chunks_exact(4).zip(&clear.ids) {
+        for (px, id) in clear.rgba.as_chunks::<4>().0.iter().zip(&clear.ids) {
             assert_eq!(
                 px[3],
-                if *id == 0 && px == [0, 0, 0, 0] {
+                if *id == 0 && *px == [0, 0, 0, 0] {
                     0
                 } else {
                     255

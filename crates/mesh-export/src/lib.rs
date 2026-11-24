@@ -711,7 +711,7 @@ fn write_binary_stl(
     // this list, so closure is judged on the mesh as converted, slivers
     // included: omitting one covers no area, so it cannot open a solid.
     let mut converted: Vec<ConvertedTriangle> = Vec::with_capacity(soup.len() / 9);
-    for tri in soup.chunks_exact(9) {
+    for tri in soup.as_chunks::<9>().0 {
         let mm: [f64; 9] = std::array::from_fn(|i| tri[i] * METERS_TO_MM);
         let verts: [f32; 9] = std::array::from_fn(|i| mm[i] as f32);
         if mm.iter().any(|v| !v.is_finite()) || verts.iter().any(|v| !v.is_finite()) {
@@ -1070,7 +1070,8 @@ fn build_3mf_objects(solids: &[ExportSolid]) -> (Vec<Model3mfObject>, ColorPalet
             i
         };
 
-        for t in 0..tri_count {
+        // Slicing keeps the old indexing's panic when `colors` is short.
+        for (t, &src_color) in solid.colors[..tri_count].iter().enumerate() {
             let o = t * 9;
             let v1 = vertex_at(o);
             let v2 = vertex_at(o + 3);
@@ -1080,7 +1081,7 @@ fn build_3mf_objects(solids: &[ExportSolid]) -> (Vec<Model3mfObject>, ColorPalet
                 // repaired (rule 4 in spirit).
                 continue;
             }
-            let color = palette.index_of(solid.colors[t]);
+            let color = palette.index_of(src_color);
             let default = *default_color.get_or_insert(color);
             let p1 = if color == default {
                 String::new()
@@ -2368,7 +2369,7 @@ mod tests {
         assert_eq!(bytes.len(), 84 + count * 50);
         let mut edges = BTreeMap::new();
         let mut six_volume = 0.0;
-        for triangle in bytes[84..].chunks_exact(50) {
+        for triangle in bytes[84..].as_chunks::<50>().0 {
             let read = |i| f64::from(f32::from_le_bytes(triangle[i..i + 4].try_into().unwrap()));
             let point = |i| Point3::new(read(i), read(i + 4), read(i + 8));
             let normal = point(0).to_vec();

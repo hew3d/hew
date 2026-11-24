@@ -54,7 +54,9 @@ fn ids(r: &api::SnapshotResult) -> Vec<u16> {
     r.id_buffer
         .as_ref()
         .unwrap()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
         .collect()
 }

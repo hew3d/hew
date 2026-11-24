@@ -84,7 +84,7 @@ fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     match info.color_type {
         ::png::ColorType::Rgb => rgb = buf,
         ::png::ColorType::Rgba => {
-            for p in buf.chunks_exact(4) {
+            for p in buf.as_chunks::<4>().0 {
                 rgb.extend([
                     over_white(p[0], p[3]),
                     over_white(p[1], p[3]),
@@ -98,7 +98,7 @@ fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
             }
         }
         ::png::ColorType::GrayscaleAlpha => {
-            for p in buf.chunks_exact(2) {
+            for p in buf.as_chunks::<2>().0 {
                 let g = over_white(p[0], p[1]);
                 rgb.extend([g, g, g]);
             }

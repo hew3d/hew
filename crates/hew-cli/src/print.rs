@@ -309,7 +309,7 @@ pub fn print_pdf(
                     .map_err(|e| Refusal::api("too_many_objects", &e.to_string()))?;
                 // Paper is white: softrender's own background tint becomes white.
                 let mut rgb = Vec::with_capacity((rendered.width * rendered.height * 3) as usize);
-                for px in rendered.rgba.chunks_exact(4) {
+                for px in rendered.rgba.as_chunks::<4>().0 {
                     if px[..4] == softrender::BACKGROUND_RGBA {
                         rgb.extend_from_slice(&[255, 255, 255]);
                     } else {

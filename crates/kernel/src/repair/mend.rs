@@ -1497,12 +1497,12 @@ fn decompose(soup: &Soup, rim: &SoupRim) -> Option<Decomposed> {
         // loop up to it repeats nothing; the rest may.
         let mut first_at: BTreeMap<[u64; 3], usize> = BTreeMap::new();
         let mut found = None;
-        for j in 0..n {
-            if let Some(&i) = first_at.get(&key(rest.points[j])) {
+        for (j, &pt) in rest.points.iter().enumerate().take(n) {
+            if let Some(&i) = first_at.get(&key(pt)) {
                 found = Some((i, j));
                 break;
             }
-            first_at.insert(key(rest.points[j]), j);
+            first_at.insert(key(pt), j);
         }
         let Some((i, j)) = found else {
             parts.push(rest);

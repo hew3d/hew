@@ -2328,8 +2328,8 @@ fn a_user_crease_inside_a_blend_keeps_its_two_sides_apart() {
     let joined = (shade_at(&after, x, v).unwrap() - shade_at(&after, y, v).unwrap()).length();
     assert!(joined < 1e-12);
     after.set_edge_crease_for_test(ridge, true);
-    let apart = (shade_at(&after, x, v).map_or(after.faces()[x].plane.normal(), |n| n)
-        - shade_at(&after, y, v).map_or(after.faces()[y].plane.normal(), |n| n))
+    let apart = (shade_at(&after, x, v).unwrap_or(after.faces()[x].plane.normal())
+        - shade_at(&after, y, v).unwrap_or(after.faces()[y].plane.normal()))
     .length();
     assert!(apart > 0.1, "a crease keeps the sides apart: {apart}");
 }

@@ -144,7 +144,7 @@ fn pixel_box(r: &Value) -> [usize; 4] {
     let bytes = decode(r["id_buffer_base64"].as_str().unwrap());
     let w = r["width"].as_u64().unwrap() as usize;
     let mut b = [usize::MAX, usize::MAX, 0, 0];
-    for (k, px) in bytes.chunks_exact(2).enumerate() {
+    for (k, px) in bytes.as_chunks::<2>().0.iter().enumerate() {
         if u16::from_le_bytes([px[0], px[1]]) != 0 {
             let (x, y) = (k % w, k / w);
             b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];

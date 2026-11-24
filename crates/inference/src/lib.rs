@@ -5957,7 +5957,7 @@ fn meeting_segments_on(
         }
         ts.sort_by(f64::total_cmp);
         into.clear();
-        into.extend(ts.chunks_exact(2).map(|c| (c[0], c[1])));
+        into.extend(ts.as_chunks::<2>().0.iter().map(|c| (c[0], c[1])));
     };
     let interior = |face: FaceGeom<'_>,
                     ts: &mut Vec<f64>,

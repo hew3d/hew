@@ -424,9 +424,8 @@ impl ConvertJob {
         // as an Instance of that definition, keyed by its persistent id (a
         // scene hiding it names it). Images inside groups and components come
         // in with them (`image_children`).
-        for ri in 0..model.geometry.len() {
-            let is_def =
-                matches!(model.geometry[ri].def_index, Some(di) if def_indexes.contains(&di));
+        for (ri, geom) in model.geometry.iter().enumerate() {
+            let is_def = matches!(geom.def_index, Some(di) if def_indexes.contains(&di));
             if !is_def {
                 roots.extend(cv.image_children(ri, None));
             }

@@ -2039,8 +2039,8 @@ fn chain_stations(
         for &u in &fractions {
             let mut offsets = Vec::with_capacity(n + 1);
             let mut st_feet = feet;
-            for k in 0..=n {
-                let p = q + sec.offsets[k];
+            for (k, &off) in sec.offsets.iter().enumerate().take(n + 1) {
+                let p = q + off;
                 let side = if k == 0 {
                     Some(0)
                 } else {
@@ -3498,7 +3498,9 @@ fn region_point(plane: &Plane, outer: &[Point3], holes: &[Vec<Point3>]) -> Optio
     }
     xs.sort_by(f64::total_cmp);
     let x = xs
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .filter(|c| c[1] > c[0])
         .max_by(|a, b| (a[1] - a[0]).total_cmp(&(b[1] - b[0])))
         .map(|c| 0.5 * (c[0] + c[1]))?;

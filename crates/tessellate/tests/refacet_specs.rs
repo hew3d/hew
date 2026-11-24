@@ -110,7 +110,7 @@ fn assert_manifold(soup: &[f64]) {
     type Key = ([u64; 3], [u64; 3]);
     let bits = |x: f64, y: f64, z: f64| -> [u64; 3] { [x.to_bits(), y.to_bits(), z.to_bits()] };
     let mut directed: BTreeMap<Key, usize> = BTreeMap::new();
-    for tri in soup.chunks_exact(9) {
+    for tri in soup.as_chunks::<9>().0 {
         let v = [
             bits(tri[0], tri[1], tri[2]),
             bits(tri[3], tri[4], tri[5]),
@@ -138,7 +138,7 @@ fn assert_manifold(soup: &[f64]) {
 /// Signed volume of the (closed, outward-wound) soup.
 fn soup_volume(soup: &[f64]) -> f64 {
     let mut vol = 0.0;
-    for t in soup.chunks_exact(9) {
+    for t in soup.as_chunks::<9>().0 {
         let (ax, ay, az) = (t[0], t[1], t[2]);
         let (bx, by, bz) = (t[3], t[4], t[5]);
         let (cx, cy, cz) = (t[6], t[7], t[8]);
@@ -153,7 +153,7 @@ fn prism_volume(n: usize, r: f64, h: f64) -> f64 {
 }
 
 fn contains_point(soup: &[f64], p: Point3) -> bool {
-    soup.chunks_exact(3).any(|c| {
+    soup.as_chunks::<3>().0.iter().any(|c| {
         (c[0] - p.x).abs() == 0.0 && (c[1] - p.y).abs() == 0.0 && (c[2] - p.z).abs() == 0.0
     })
 }
@@ -429,8 +429,10 @@ fn stamped_walls_shade_with_true_cylinder_normals() {
     let mut wall_vertices = 0;
     for (p, n) in mesh
         .positions
-        .chunks_exact(3)
-        .zip(mesh.normals.chunks_exact(3))
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(mesh.normals.as_chunks::<3>().0.iter())
     {
         let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
         assert!((len - 1.0).abs() < 1e-5, "unit normal");
@@ -458,8 +460,10 @@ fn stamped_walls_shade_with_true_cylinder_normals() {
     let mut normal_at: BTreeMap<[u32; 3], Vec<[u32; 3]>> = BTreeMap::new();
     for (p, n) in mesh
         .positions
-        .chunks_exact(3)
-        .zip(mesh.normals.chunks_exact(3))
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(mesh.normals.as_chunks::<3>().0.iter())
     {
         if n[2].abs() < 0.5 {
             normal_at
@@ -481,8 +485,10 @@ fn hole_walls_shade_inward() {
     let mesh = tessellate(&obj, &MaterialPalette::default()).unwrap();
     for (p, n) in mesh
         .positions
-        .chunks_exact(3)
-        .zip(mesh.normals.chunks_exact(3))
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(mesh.normals.as_chunks::<3>().0.iter())
     {
         // Tunnel wall vertices: on the r=1 cylinder about the origin.
         let r = ((p[0] * p[0] + p[1] * p[1]) as f64).sqrt();
@@ -501,7 +507,7 @@ fn wall_seams_are_soft_and_rims_stay_hard() {
     assert_eq!(mesh.soft_edge_positions.len(), 24 * 6);
     assert_eq!(mesh.edge_positions.len(), 48 * 6);
     // Soft seams are the vertical ones.
-    for seg in mesh.soft_edge_positions.chunks_exact(6) {
+    for seg in mesh.soft_edge_positions.as_chunks::<6>().0 {
         assert!(
             (seg[0], seg[1]) == (seg[3], seg[4]),
             "soft seam is vertical"
@@ -570,7 +576,7 @@ fn unattributed_objects_are_unchanged_by_the_edge_split() {
     assert!(mesh.soft_edge_positions.is_empty());
     assert_eq!(mesh.edge_positions.len(), 12 * 6);
     // Flat normals only: every face's corners share the face normal.
-    for n in mesh.normals.chunks_exact(3) {
+    for n in mesh.normals.as_chunks::<3>().0 {
         assert!(n.iter().filter(|c| c.abs() > 0.5).count() == 1);
     }
 
@@ -1036,8 +1042,10 @@ fn sphere_and_torus_facets_shade_with_analytic_normals() {
             assert_eq!(mesh.positions.len(), 12, "one quad, four vertices");
             for (p, n) in mesh
                 .positions
-                .chunks_exact(3)
-                .zip(mesh.normals.chunks_exact(3))
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(mesh.normals.as_chunks::<3>().0.iter())
             {
                 let q = ring
                     .iter()
@@ -1127,7 +1135,9 @@ fn rounded_rect_prism() -> Object {
 }
 
 fn segments(buf: &[f32]) -> Vec<[f32; 6]> {
-    buf.chunks_exact(6)
+    buf.as_chunks::<6>()
+        .0
+        .iter()
         .map(|c| [c[0], c[1], c[2], c[3], c[4], c[5]])
         .collect()
 }

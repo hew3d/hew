@@ -155,7 +155,11 @@ impl RenderMesh {
     /// painted backs ([`MaterialGroup::back`]), which lie on them.
     pub fn front_triangles(&self) -> impl Iterator<Item = &[u32]> + '_ {
         self.groups.iter().filter(|g| !g.back).flat_map(|g| {
-            self.indices[g.start as usize..(g.start + g.count) as usize].chunks_exact(3)
+            self.indices[g.start as usize..(g.start + g.count) as usize]
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|t| t.as_slice())
         })
     }
 }
@@ -779,7 +783,7 @@ mod tests {
         let corners: usize = sub.faces.iter().map(Vec::len).sum();
         assert_eq!(mesh.positions.len(), corners * 3);
         assert_eq!(mesh.indices.len(), sub.faces.len() * 6);
-        for p in mesh.positions.chunks_exact(3) {
+        for p in mesh.positions.as_chunks::<3>().0 {
             let q = sub
                 .points
                 .iter()
@@ -796,7 +800,9 @@ mod tests {
         // Smooth shading: normals are unit and not all axis-aligned.
         assert!(
             mesh.normals
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .any(|n| n[0].abs() > 0.1 && n[1].abs() > 0.1)
         );
         // The flat path keeps the overlay empty.
@@ -1074,7 +1080,7 @@ mod tests {
     #[test]
     fn normals_are_unit_length() {
         let mesh = tessellate(&Object::tetrahedron(), &MaterialPalette::default()).unwrap();
-        for n in mesh.normals.chunks_exact(3) {
+        for n in mesh.normals.as_chunks::<3>().0 {
             let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
             assert!(
                 (len - 1.0).abs() < UNIT_LENGTH_TOL_F32,
@@ -1451,7 +1457,7 @@ mod tests {
         // Every unpainted face resolves to the base → one group, all red.
         assert_eq!(mesh.groups.len(), 1, "all faces share the base material");
         assert_eq!(mesh.groups[0].material, Some(red));
-        for c in mesh.colors.chunks_exact(3) {
+        for c in mesh.colors.as_chunks::<3>().0 {
             assert!(
                 (c[0] - 1.0).abs() < 1e-5 && c[1] < 1e-5 && c[2] < 1e-5,
                 "vertex color {c:?} is not the base red"

@@ -267,7 +267,7 @@ fn a_tilted_perspective_view_still_samples_the_image() {
         }
     };
     let mut seen = [false; 4];
-    for p in r.rgba.chunks_exact(4) {
+    for p in r.rgba.as_chunks::<4>().0 {
         if let Some(h) = hue(p) {
             seen[h] = true;
         }

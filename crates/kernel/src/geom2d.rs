@@ -357,7 +357,7 @@ pub(crate) fn interior_point_of_loops(
 
         // Even-odd: intervals (xs[0], xs[1]), (xs[2], xs[3]), … are material.
         let mut best: Option<(f64, f64)> = None; // (width, midpoint)
-        for pair in xs.chunks_exact(2) {
+        for pair in xs.as_chunks::<2>().0 {
             let width = pair[1] - pair[0];
             if width > tol::POINT_MERGE && best.is_none_or(|(g, _)| width > g) {
                 best = Some((width, (pair[0] + pair[1]) * 0.5));

@@ -5055,7 +5055,7 @@ impl RingHolds {
         self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     fn release(&self) {
-        let _ = self.0.fetch_update(
+        let _ = self.0.try_update(
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
             |n| Some(n.saturating_sub(1)),
