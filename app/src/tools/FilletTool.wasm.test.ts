@@ -14,6 +14,8 @@ import { FilletTool, SLOW_PREVIEW_HINT, SLOW_PREVIEW_MS, type FilletHooks } from
 import { i18n } from '@lingui/core'
 import { BUSY_REFUSED } from '../busyCard'
 import { arcSegments } from './arcMath'
+import { BLEND_CHANGED_HINT } from './fillet/hints'
+import { kernelErrorMessage } from '../kernelErrors'
 import { resolveHover } from './filletPick'
 import { clampBlendSegments } from './filletMath'
 import { resetFilletSettingsForTest, getFilletCornerOnly, getFilletMeasurementLabelOverride, getFilletSettings, setFilletProfile, setFilletCorners, setFilletSegmentsOverride } from './filletSettings'
@@ -60,6 +62,8 @@ function makeCylinder(scene: Scene, r: number, h: number): bigint {
   const regions = Array.from(scene.sketch_regions(sketch))
   return scene.extrude_region(sketch, regions[0], h)
 }
+
+const RESIZE_HINT = 'Click to resize this fillet. Delete to remove it.'
 
 /** A ray from straight above (x, y) looking down. */
 const down = (x: number, y: number): Ray => ({ origin: [x, y, 10], direction: [0, 0, -1] })
@@ -1647,7 +1651,7 @@ describe('FilletTool through the real kernel', () => {
     expect(h.scene.object_solid(box)).toBe(true)
   })
 
-  it('a fillet a face was pushed through says so on hover instead of offering Delete', () => {
+  it('a fillet a face was pushed through says so once a click or Delete finds it, never on hover', () => {
     const h = setup()
     const box = makeBox(h.scene, 1, 1, 1)
     // A 200 mm round on the front top edge, then the top face pushed down to
@@ -1662,12 +1666,68 @@ describe('FilletTool through the real kernel', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0].intact).toBe(false)
     h.tool.onKey(key('Escape'))
+    const list = vi.spyOn(h.scene, 'blend_features_json')
+    const one = vi.spyOn(h.scene, 'blend_feature_json')
     // The band now slants from the lowered top face down to the front face.
+    // Hovering it checks nothing: checking restores the blend, which is slow
+    // on a large object.
     h.tool.onPointerScreenMove(300, 300)
     h.tool.onPointerMove(null, down(0.5, 0.1))
-    expect(h.tool.statusHint()).toBe(
-      "A later edit changed this fillet, so it can't be resized or removed. Undo back past that edit to change it.",
-    )
+    h.tool.onPointerMove(null, down(0.52, 0.1))
+    expect(h.tool.statusHint()).toBe(RESIZE_HINT)
+    expect(list).not.toHaveBeenCalled()
+    expect(one).not.toHaveBeenCalled()
+    // The click checks this blend, alone, and refuses the edit.
+    h.tool.onPointerDown(null, down(0.5, 0.1))
+    h.tool.onPointerUp(null, down(0.5, 0.1))
+    expect(one).toHaveBeenCalledTimes(1)
+    expect(one).toHaveBeenLastCalledWith(box, rows[0].id)
+    expect(h.hooks.onToast).toHaveBeenLastCalledWith(kernelErrorMessage('BlendModified', ''))
+    expect(h.tool.statusHint()).toBe(BLEND_CHANGED_HINT)
+    // From then on its hover says why, still without asking.
+    h.tool.onPointerMove(null, down(0.48, 0.1))
+    expect(h.tool.statusHint()).toBe(BLEND_CHANGED_HINT)
+    expect(one).toHaveBeenCalledTimes(1)
+    // A history change drops what the click found; Delete then finds it
+    // again (the kernel refuses the remove) and the hover says so.
+    h.tool.onHistoryChanged()
+    h.tool.onPointerMove(null, down(0.5, 0.1))
+    expect(h.tool.statusHint()).toBe(RESIZE_HINT)
+    h.tool.onKey(key('Delete'))
+    expect(h.hooks.onToast).toHaveBeenLastCalledWith(expect.any(String), 'BlendModified')
+    expect(JSON.parse(h.scene.blend_features_json(box))).toHaveLength(1)
+    h.tool.onPointerMove(null, down(0.52, 0.1))
+    expect(h.tool.statusHint()).toBe(BLEND_CHANGED_HINT)
+    // Undoing the push changes the object: what was found no longer holds,
+    // and the fillet opens for editing again.
+    h.scene.scene_undo()
+    h.tool.onPointerMove(null, down(0.5, 0.1))
+    expect(h.tool.statusHint()).toBe(RESIZE_HINT)
+    h.tool.onPointerDown(null, down(0.5, 0.1))
+    h.tool.onPointerUp(null, down(0.5, 0.1))
+    expect(h.tool.statusHint()).toContain('Drag the handle or type a size')
+    expect(list).toHaveBeenCalledTimes(1) // the test's own read above, never the tool's
+  })
+
+  it('hovering a fillet asks the kernel nothing, and a click checks only that fillet', () => {
+    const h = setup()
+    makeBox(h.scene, 1, 1, 1)
+    click(h, down(0.5, 0.0005), [100, 100])
+    for (const k of ['1', '0', '0']) h.tool.onKey(key(k))
+    h.tool.onKey(key('Enter'))
+    h.tool.onKey(key('Escape'))
+    const list = vi.spyOn(h.scene, 'blend_features_json')
+    const one = vi.spyOn(h.scene, 'blend_feature_json')
+    h.tool.onPointerScreenMove(300, 300)
+    for (const x of [0.3, 0.4, 0.5, 0.6]) h.tool.onPointerMove(null, down(x, 0.03))
+    expect(h.tool.statusHint()).toBe(RESIZE_HINT)
+    expect(list).not.toHaveBeenCalled()
+    expect(one).not.toHaveBeenCalled()
+    h.tool.onPointerDown(null, down(0.5, 0.03))
+    h.tool.onPointerUp(null, down(0.5, 0.03))
+    expect(h.tool.statusHint()).toContain('Drag the handle or type a size')
+    expect(one).toHaveBeenCalledTimes(1)
+    expect(list).not.toHaveBeenCalled()
   })
 
   it('resizes a hovered blend by typing and keeps it as one blend', () => {

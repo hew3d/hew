@@ -20,6 +20,10 @@ thread_local! {
     /// How many times [`Object::blend_features`] has run on this thread
     /// (test support).
     static FEATURE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many blends [`Object::blend_features`] and
+    /// [`Object::blend_feature`] have verified on this thread (test
+    /// support).
+    static FEATURE_VERIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// How many times [`Object::blend_features`] has run on the calling thread:
@@ -28,6 +32,15 @@ thread_local! {
 #[doc(hidden)]
 pub fn blend_feature_scans_for_test() -> usize {
     FEATURE_SCANS.with(std::cell::Cell::get)
+}
+
+/// How many blends have been verified (restored to check that they are
+/// intact) on the calling thread, by a full list or a single query: a list
+/// verifies every blend on the object, [`Object::blend_feature`] one. Test
+/// support only.
+#[doc(hidden)]
+pub fn blend_verifications_for_test() -> usize {
+    FEATURE_VERIFICATIONS.with(std::cell::Cell::get)
 }
 
 /// One blend on an object, as derived from its tagged faces.
@@ -310,34 +323,60 @@ impl Object {
         }
         by_id
             .into_iter()
-            .map(|(id, (kind, faces))| {
-                // Intact means the whole edit works: the restoration and,
-                // with later blends taken off ahead of it, putting them back.
-                let restored = self.restore_blend(id).and_then(|r| {
-                    if r.dependents.is_empty() {
-                        Ok(r)
-                    } else {
-                        r.object.rewind_blends(&r.dependents).map(|_| r)
-                    }
-                });
-                let size = match &restored {
-                    Ok(r) => Some(r.size),
-                    Err(_) => faces.iter().find_map(|&f| match self.faces()[f].surface {
-                        Some(SurfaceRef::Cylinder { radius, .. }) => Some(radius),
-                        Some(SurfaceRef::Torus { minor_radius, .. }) => Some(minor_radius),
-                        Some(SurfaceRef::Sphere { radius, .. }) => Some(radius),
-                        _ => None,
-                    }),
-                };
-                BlendFeature {
-                    id,
-                    kind,
-                    faces,
-                    size,
-                    intact: restored.is_ok(),
-                }
-            })
+            .map(|(id, (kind, faces))| self.verified_feature(id, kind, faces))
             .collect()
+    }
+
+    /// Blend `id` alone, verified: exactly the row [`Object::blend_features`]
+    /// lists for it, at the cost of verifying this blend only (the later
+    /// blends its restoration takes off and puts back are part of that
+    /// verification, as they are in the list). `None` when no face carries
+    /// the id.
+    pub fn blend_feature(&self, id: BlendId) -> Option<BlendFeature> {
+        let mut kind = None;
+        let mut faces = Vec::new();
+        for (fid, f) in self.faces() {
+            if let Some(t) = f.blend
+                && t.id == id
+            {
+                // The list keeps the kind of the first face in slot order.
+                kind.get_or_insert(t.kind);
+                faces.push(fid);
+            }
+        }
+        kind.map(|kind| self.verified_feature(id, kind, faces))
+    }
+
+    /// One row of [`Object::blend_features`]: blend `id` (its kind and its
+    /// faces in slot order, as gathered by the caller) verified by restoring
+    /// it.
+    fn verified_feature(&self, id: BlendId, kind: BlendKind, faces: Vec<FaceId>) -> BlendFeature {
+        FEATURE_VERIFICATIONS.with(|c| c.set(c.get() + 1));
+        // Intact means the whole edit works: the restoration and, with
+        // later blends taken off ahead of it, putting them back.
+        let restored = self.restore_blend(id).and_then(|r| {
+            if r.dependents.is_empty() {
+                Ok(r)
+            } else {
+                r.object.rewind_blends(&r.dependents).map(|_| r)
+            }
+        });
+        let size = match &restored {
+            Ok(r) => Some(r.size),
+            Err(_) => faces.iter().find_map(|&f| match self.faces()[f].surface {
+                Some(SurfaceRef::Cylinder { radius, .. }) => Some(radius),
+                Some(SurfaceRef::Torus { minor_radius, .. }) => Some(minor_radius),
+                Some(SurfaceRef::Sphere { radius, .. }) => Some(radius),
+                _ => None,
+            }),
+        };
+        BlendFeature {
+            id,
+            kind,
+            faces,
+            size,
+            intact: restored.is_ok(),
+        }
     }
 
     /// Restores the sharp geometry under blend `id` (WP08 §2): by its

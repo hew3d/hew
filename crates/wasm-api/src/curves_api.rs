@@ -1987,6 +1987,18 @@ fn blend_kind_name(k: kernel::BlendKind) -> &'static str {
     }
 }
 
+/// One row of [`Scene::blend_features_json`] (and the whole answer of
+/// [`Scene::blend_feature_json`]).
+fn blend_feature_row(f: &kernel::BlendFeature) -> serde_json::Value {
+    serde_json::json!({
+        "id": f.id.0,
+        "kind": blend_kind_name(f.kind),
+        "faces": f.faces.iter().map(|x| x.data().as_ffi().to_string()).collect::<Vec<_>>(),
+        "size": f.size,
+        "intact": f.intact,
+    })
+}
+
 fn edge_id(handle: u64) -> kernel::EdgeId {
     kernel::EdgeId::from(slotmap::KeyData::from_ffi(handle))
 }
@@ -2436,19 +2448,27 @@ impl Scene {
             .doc
             .blend_features(crate::object_id(object))
             .map_err(doc_err)?;
-        let rows: Vec<serde_json::Value> = features
-            .iter()
-            .map(|f| {
-                serde_json::json!({
-                    "id": f.id.0,
-                    "kind": blend_kind_name(f.kind),
-                    "faces": f.faces.iter().map(|x| x.data().as_ffi().to_string()).collect::<Vec<_>>(),
-                    "size": f.size,
-                    "intact": f.intact,
-                })
-            })
-            .collect();
+        let rows: Vec<serde_json::Value> = features.iter().map(blend_feature_row).collect();
         Ok(serde_json::Value::Array(rows).to_string())
+    }
+
+    /// Blend `blend` on `object` as JSON: the row
+    /// [`Scene::blend_features_json`] lists for it, `{"id", "kind",
+    /// "faces", "size", "intact"}`, found by verifying this blend alone, or
+    /// `null` when the object has no such blend. Pure; answered from the
+    /// same memory as the list.
+    ///
+    /// # Errors
+    /// `UnknownObject`.
+    pub fn blend_feature_json(&self, object: u64, blend: u32) -> Result<String, ApiError> {
+        let feature = self
+            .doc
+            .blend_feature(crate::object_id(object), kernel::BlendId(blend))
+            .map_err(doc_err)?;
+        Ok(feature
+            .as_ref()
+            .map_or(serde_json::Value::Null, blend_feature_row)
+            .to_string())
     }
 
     /// Previews resizing blend `blend` to `profile_json` (a

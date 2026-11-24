@@ -747,6 +747,49 @@ test('Fillet: a swept junction round on a pipe tee resizes from its band and Del
   expect(rows[0].size!).toBeCloseTo(0.01, 9)
 })
 
+test('Fillet: a changed fillet offers the resize on hover, refuses on the click, and says why on the next hover', async ({ page }) => {
+  await setup(page)
+  const id = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
+  // A 200 mm round on the top front edge, then the top pushed down 900 mm:
+  // the round no longer fits the front face, so it is ordinary geometry now.
+  await page.evaluate((id) => {
+    const h = window.__hew_test!
+    h.filletEdges(id, [[1, 0, 1]], JSON.stringify({ kind: 'round', radius: 0.2, segments: 6 }))
+    const top = h.pickFace([1, 1, 10], [0, 0, -1])!
+    h.pushPull(top.object, top.face, -0.9)
+  }, id)
+  const rows = await features(page, id)
+  expect(rows).toHaveLength(1)
+  expect(rows[0].intact).toBe(false)
+  // Straight down onto the band, so a screen point is a vertical ray.
+  await page.evaluate(() => window.__hew_test!.setCamera({
+    position: [1, 0.1, 6], target: [1, 0.1, 0], up: [0, 1, 0], fovDeg: 30,
+  }))
+  await settleFrame(page)
+  await page.keyboard.press('Shift+F')
+  await moveToWorld(page, [1, 0.1, 0])
+  await page.waitForTimeout(150)
+  // The hover checks nothing, so it offers the edit.
+  await expect(page.getByText('Click to resize this fillet', { exact: false })).toBeVisible()
+  await page.mouse.down()
+  await page.mouse.up()
+  await expect(page.getByText("This fillet has been changed and can't be edited", { exact: false })).toBeVisible()
+  await expect(page.getByText('Drag the handle or type a size', { exact: false })).toHaveCount(0)
+  // The click found it changed: the hover now says so.
+  await moveToWorld(page, [1.1, 0.1, 0])
+  await page.waitForTimeout(150)
+  await expect(page.getByText('A later edit changed this fillet', { exact: false })).toBeVisible()
+  // Undo the push: the fillet is editable again, and a click opens it.
+  await page.evaluate(() => window.__hew_test!.undo())
+  expect((await page.evaluate((args) => window.__hew_test!.blendFeature(args.id, args.blend), { id, blend: rows[0].id }))!.intact).toBe(true)
+  await moveToWorld(page, [1, 0.1, 0])
+  await page.waitForTimeout(150)
+  await expect(page.getByText('Click to resize this fillet', { exact: false })).toBeVisible()
+  await page.mouse.down()
+  await page.mouse.up()
+  await expect(page.getByText('Drag the handle or type a size', { exact: false })).toBeVisible()
+})
+
 test('Fillet: an end-radius grip dragged with the mouse is placed on release and the round commits', async ({ page }, info) => {
   test.setTimeout(90_000)
   await setup(page)

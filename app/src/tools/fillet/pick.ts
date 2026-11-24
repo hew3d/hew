@@ -67,28 +67,10 @@ export class PickStage {
   updateHover(ray: Ray): void {
     this.c.hover = resolveHover(this.c.wasmScene, ray, this.c.pickOptions())
     this.c.statusLine = null
-    const h = this.c.hover
-    // A blend a later edit has changed cannot be resized or removed: say
-    // so on hover, not after the click. Read once per blend hovered.
-    if (h.kind === 'blend') {
-      const key = `${h.object}:${h.blendId}`
-      if (key !== this.c.hoverBlendKey) {
-        this.c.hoverBlendKey = key
-        this.c.hoverBlendIntact = this.blendIsIntact(h.object, h.blendId)
-      }
-    } else {
-      this.c.hoverBlendKey = null
-    }
+    // A blend under the pointer is not checked here: whether a later edit
+    // changed it is found when it is clicked or deleted (see
+    // `FilletContext.blendKnownChanged`).
     this.redrawHover()
-  }
-
-  blendIsIntact(object: bigint, blendId: number): boolean {
-    try {
-      const rows = JSON.parse(this.c.wasmScene.blend_features_json(object)) as Array<{ id: number; intact: boolean }>
-      return rows.find((r) => r.id === blendId)?.intact ?? true
-    } catch {
-      return true
-    }
   }
 
   /** A pick on an object with gaps is refused at the pick, not after a size

@@ -41,6 +41,7 @@ mod blend_corner_specs;
 mod blend_document_specs;
 mod blend_edit_specs;
 mod blend_ext_specs;
+mod blend_feature_specs;
 mod blend_features_memo_specs;
 mod blend_props;
 mod blend_record_specs;

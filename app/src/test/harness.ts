@@ -210,6 +210,9 @@ export interface HewTestHarness {
   filletEdges(object: string, points: Vec3[], profileJson: string): number[]
   /** The blends on `object`: `{id, kind, faces, size, intact}` rows. */
   blendFeatures(object: string): Array<{ id: number; kind: string; faces: string[]; size: number | null; intact: boolean }>
+  /** One blend's row of `blendFeatures`, checking that blend alone; null
+   *  when the object has no such blend. */
+  blendFeature(object: string, id: number): { id: number; kind: string; faces: string[]; size: number | null; intact: boolean } | null
   /** Removes blend `blendId` from `object` (one undo step). */
   removeBlend(object: string, blendId: number): void
   boolean(op: number, a: string, b: string): string
@@ -1766,6 +1769,7 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       }),
 
     blendFeatures: (object) => query((s) => JSON.parse(s.blend_features_json(BigInt(object)))),
+    blendFeature: (object, id) => query((s) => JSON.parse(s.blend_feature_json(BigInt(object), id))),
 
     removeBlend: (object, blendId) => {
       act((s) => s.remove_blend(BigInt(object), blendId))

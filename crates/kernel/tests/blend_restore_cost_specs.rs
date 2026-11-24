@@ -8,7 +8,9 @@
 //! a minute).
 //!
 //! `blend_features_first_call_times` (ignored) prints the time of a first
-//! call across object sizes; run it optimized:
+//! call across object sizes, and `one_blend_against_the_list_times`
+//! (ignored) the time of asking about one blend ([`Object::blend_feature`])
+//! against the whole list on a rim of 2,500 edges; run them optimized:
 //!
 //! ```text
 //! cargo test --release -p kernel --test all blend_restore_cost_specs -- --ignored --nocapture
@@ -172,6 +174,38 @@ fn blend_features_first_call_times() {
     for n in [80usize, 192, 384, 768, 1024, 1428] {
         for blends in [1, 2] {
             time(&format!("filleted rims n={n}"), &filleted_rims(n, blends));
+        }
+    }
+}
+
+/// Prints, on a claimed cylinder of 2,500 rim edges with one and with two
+/// filleted rims, the time of the whole list (each blend verified, what a
+/// hover once asked for) against asking about each blend alone (what a
+/// click on it asks for now).
+#[test]
+#[ignore = "a timing to read, not a check; run it optimized"]
+fn one_blend_against_the_list_times() {
+    for blends in [1usize, 2] {
+        let obj = filleted_rims(2500, blends);
+        let start = std::time::Instant::now();
+        let features = obj.blend_features();
+        let list_ms = start.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(features.len(), blends);
+        assert!(features.iter().all(|f| f.intact));
+        eprintln!(
+            "rims n=2500, {blends} blend(s), faces {:>6}: list {list_ms:>9.1} ms",
+            obj.faces().len()
+        );
+        for (i, row) in features.iter().enumerate() {
+            let start = std::time::Instant::now();
+            let one = obj.blend_feature(row.id);
+            let ms = start.elapsed().as_secs_f64() * 1e3;
+            assert_eq!(one.as_ref(), Some(row));
+            eprintln!(
+                "    blend {} alone ({}): {ms:>9.1} ms",
+                row.id.0,
+                if i == 0 { "first rim" } else { "second rim" }
+            );
         }
     }
 }

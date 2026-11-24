@@ -22,14 +22,16 @@ export class EditStageOps {
   constructor(private readonly c: FilletContext) {}
 
   enterEdit(h: Extract<Hover, { kind: 'blend' }>, ray: Ray, held = false): void {
-    let rows: Array<{ id: number; kind: string; size: number | null; intact: boolean }>
+    // The click is where the blend is checked (this blend alone): a hover
+    // never asks, as the check restores the blend.
+    let row: { id: number; kind: string; size: number | null; intact: boolean } | null
     try {
-      rows = JSON.parse(this.c.wasmScene.blend_features_json(h.object))
+      row = JSON.parse(this.c.wasmScene.blend_feature_json(h.object, h.blendId))
     } catch {
       return
     }
-    const row = rows.find((r) => r.id === h.blendId)
-    if (row === undefined) return
+    if (row === null) return
+    this.c.noteBlendIntact(h.object, h.blendId, row.intact)
     if (!row.intact) {
       this.c.hooks.onToast(kernelErrorMessage('BlendModified', ''))
       return
@@ -219,7 +221,10 @@ export class EditStageOps {
       if (frame.instance === null) this.c.wasmScene.remove_blend(object, blendId)
       else this.c.wasmScene.remove_blend_in_component(frame.instance, object, blendId)
     } catch (err) {
-      this.c.hooks.onToast(this.c.preview.refusalText(err), parseKernelErrorCode(err) ?? undefined)
+      const code = parseKernelErrorCode(err)
+      // The kernel's own check refused it: the hover says so from now on.
+      if (code === 'BlendModified') this.c.noteBlendIntact(object, blendId, false)
+      this.c.hooks.onToast(this.c.preview.refusalText(err), code ?? undefined)
       return
     }
     this.c.commit.clearAfterCommit()

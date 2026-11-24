@@ -124,8 +124,11 @@ export class FilletTool implements Tool {
       (this.c.hover.kind === 'edge' || (this.c.hover.kind === 'corner' && cornerProfileOk()))
     // A blend under the pointer says what a click or Delete does to it,
     // whether or not the last fillet is still retypeable.
+    // Only a click or Delete checks whether a later edit changed it.
     if (this.c.hover.kind === 'blend') {
-      return this.c.hoverBlendIntact ? 'Click to resize this fillet. Delete to remove it.' : BLEND_CHANGED_HINT
+      return this.c.blendKnownChanged(this.c.hover.object, this.c.hover.blendId)
+        ? BLEND_CHANGED_HINT
+        : 'Click to resize this fillet. Delete to remove it.'
     }
     if (this.c.retype.isOpen && !hoverTakesTyping) {
       // A round that varied (stops or radius points) repeats as its base
@@ -581,6 +584,7 @@ export class FilletTool implements Tool {
     this.c.retypeTyped = ''
     this.c.hover = { kind: 'none' }
     this.c.statusLine = null
+    this.c.dropBlendNotes()
     this.c.preview.clearHighlight()
     this.c.measure('')
     this.c.pick.syncCornerProfile()
@@ -677,7 +681,7 @@ export class FilletTool implements Tool {
   }
 
   onHistoryChanged(): void {
-    this.c.hoverBlendKey = null
+    this.c.dropBlendNotes()
     this.c.retype.close()
     this.c.retypeTyped = ''
     if (this.c.stage.kind !== 'idle') this.resetStage()

@@ -740,9 +740,11 @@ below.
   corner with another fillet is solved again (at the same size the two
   become one fillet), and it clamps the same way. A fillet is painted and
   picked as one face. A fillet that was cut or moved away from its
-  original shape is ordinary geometry and refuses edits. A swept blend (a
-  tee's junction, an oblique cut's rim, an imported mesh, a lofted deck)
-  is editable the same way: its record keeps every facet it cut whole with
+  original shape is ordinary geometry and refuses edits; that is checked
+  for the one blend a click or Delete acts on, never on hover (checking
+  restores the blend), and once found the hover over it says so. A swept
+  blend (a tee's junction, an oblique cut's rim, an imported mesh, a lofted
+  deck) is editable the same way: its record keeps every facet it cut whole with
   the pieces the cut left (in the v28 record), and its chains start and run by
   their geometry alone, so a resize builds what a fresh blend at that size
   builds (D-228).

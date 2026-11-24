@@ -35,10 +35,15 @@ export class FilletContext {
   note: string | null = null
   noteRay: Ray | null = null
 
-  /** The blend under the pointer (`object:id`) and whether it can still be
-   *  edited; read when the hover lands on it, dropped when history moves. */
-  hoverBlendKey: string | null = null
-  hoverBlendIntact = true
+  /** Blends (`object:id`) a click or Delete found a later edit had changed,
+   *  so the hover over them says so. Hover never asks the kernel: checking a
+   *  blend restores it, which can take seconds on a large object, so it is
+   *  checked only when the user acts on it. The notes hold for the document
+   *  state they were taken in (`changedBlendsAt`, its history generation and
+   *  epoch) and are dropped when history moves, the document is replaced,
+   *  or the tool is put away. */
+  private changedBlends = new Set<string>()
+  private changedBlendsAt: string | null = null
 
   lastRay: Ray | null = null
   lastSnap: Snap | null = null
@@ -148,6 +153,49 @@ export class FilletContext {
       case 'handleRadius':
         return 'Radius'
     }
+  }
+
+  /** The document state the notes on changed blends belong to: any commit,
+   *  undo, redo or replaced document gives another. Empty when the scene
+   *  cannot say (the notes then last until `dropBlendNotes`). */
+  private historyToken(): string {
+    try {
+      return `${this.wasmScene.history_generation()}:${this.wasmScene.document_epoch()}`
+    } catch {
+      return ''
+    }
+  }
+
+  /** Whether an action on blend `blendId` of `object` already found it
+   *  changed, in the document as it is now. Asks the kernel nothing. */
+  blendKnownChanged(object: bigint, blendId: number): boolean {
+    if (this.changedBlends.size === 0) return false
+    if (this.changedBlendsAt !== this.historyToken()) {
+      this.dropBlendNotes()
+      return false
+    }
+    return this.changedBlends.has(`${object}:${blendId}`)
+  }
+
+  /** Records what an action found of blend `blendId`: changed (not
+   *  intact) or not. */
+  noteBlendIntact(object: bigint, blendId: number, intact: boolean): void {
+    const key = `${object}:${blendId}`
+    if (intact) {
+      this.changedBlends.delete(key)
+      return
+    }
+    const at = this.historyToken()
+    if (at !== this.changedBlendsAt) {
+      this.changedBlends.clear()
+      this.changedBlendsAt = at
+    }
+    this.changedBlends.add(key)
+  }
+
+  dropBlendNotes(): void {
+    this.changedBlends.clear()
+    this.changedBlendsAt = null
   }
 
   pickOptions(): PickOptions {

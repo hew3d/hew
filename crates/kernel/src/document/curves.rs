@@ -236,22 +236,27 @@ pub struct BlendPreview {
     pub clamped: Option<BlendLimit>,
 }
 
-/// One remembered [`Document::blend_features`] answer: the object, the
-/// stamp of its state when the answer was found, and the answer.
+/// What is remembered of one object's blends: the object, the stamp of its
+/// state when the answers were found, the whole list once it has been
+/// asked for, and the single blends asked for since (a missing id
+/// included, as `None`).
 struct BlendFeaturesEntry {
     object: ObjectId,
     stamp: crate::topo::ObjectStamp,
-    features: Vec<crate::blend::BlendFeature>,
+    features: Option<Vec<crate::blend::BlendFeature>>,
+    single: BTreeMap<crate::topo::BlendId, Option<crate::blend::BlendFeature>>,
 }
 
-/// [`Document::blend_features`]'s memory: its last answer, served again
-/// while the object still has the stamp it had then. The answer is a pure
-/// function of the object's state, and the stamp proves that state
-/// unchanged (an edit, an undo or redo, a rolled-back bracket and a
-/// replaced object all leave a different one), so a served answer is the
-/// one a fresh call would find. One entry: the feature list of one object
-/// and the stamp, which holds no table's contents. A clone (an undo
-/// snapshot, a bracket, a rehearsal) starts empty.
+/// The memory behind [`Document::blend_features`] and
+/// [`Document::blend_feature`]: their answers, served again while the
+/// object still has the stamp it had then. Each answer is a pure function
+/// of the object's state, and the stamp proves that state unchanged (an
+/// edit, an undo or redo, a rolled-back bracket and a replaced object all
+/// leave a different one), so a served answer is the one a fresh call
+/// would find. A remembered list also answers a single blend, by its row.
+/// One entry: the answers about one object and the stamp, which holds no
+/// table's contents. A clone (an undo snapshot, a bracket, a rehearsal)
+/// starts empty.
 #[derive(Default)]
 pub(super) struct BlendFeaturesMemo(std::sync::Mutex<Option<BlendFeaturesEntry>>);
 
@@ -276,21 +281,65 @@ impl BlendFeaturesMemo {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// The entry for `object` in its current state: the remembered one when
+    /// it still holds, else a fresh, empty one in its place.
+    fn current<'a>(
+        entry: &'a mut Option<BlendFeaturesEntry>,
+        object: ObjectId,
+        obj: &Object,
+    ) -> &'a mut BlendFeaturesEntry {
+        let holds = entry
+            .as_ref()
+            .is_some_and(|e| e.object == object && obj.has_stamp(&e.stamp));
+        if !holds {
+            *entry = Some(BlendFeaturesEntry {
+                object,
+                stamp: obj.stamp(),
+                features: None,
+                single: BTreeMap::new(),
+            });
+        }
+        entry.as_mut().expect("the entry was just set")
+    }
+
     fn features(&self, object: ObjectId, obj: &Object) -> Vec<crate::blend::BlendFeature> {
         if let Some(e) = self.lock().as_ref()
             && e.object == object
             && obj.has_stamp(&e.stamp)
+            && let Some(features) = &e.features
         {
-            return e.features.clone();
+            return features.clone();
         }
-        let stamp = obj.stamp();
+        // Computed with the lock released: the list is the slow part.
         let features = obj.blend_features();
-        *self.lock() = Some(BlendFeaturesEntry {
-            object,
-            stamp,
-            features: features.clone(),
-        });
+        let mut guard = self.lock();
+        Self::current(&mut guard, object, obj).features = Some(features.clone());
         features
+    }
+
+    fn feature(
+        &self,
+        object: ObjectId,
+        obj: &Object,
+        id: crate::topo::BlendId,
+    ) -> Option<crate::blend::BlendFeature> {
+        if let Some(e) = self.lock().as_ref()
+            && e.object == object
+            && obj.has_stamp(&e.stamp)
+        {
+            if let Some(features) = &e.features {
+                return features.iter().find(|f| f.id == id).cloned();
+            }
+            if let Some(answer) = e.single.get(&id) {
+                return answer.clone();
+            }
+        }
+        let answer = obj.blend_feature(id);
+        let mut guard = self.lock();
+        Self::current(&mut guard, object, obj)
+            .single
+            .insert(id, answer.clone());
+        answer
     }
 }
 
@@ -309,6 +358,25 @@ impl Document {
         Ok(self
             .blend_features_memo
             .features(object, &self.objects[object].object))
+    }
+
+    /// Blend `id` on `object`, verified: the row [`Document::blend_features`]
+    /// lists for it, found by verifying this blend alone
+    /// ([`crate::Object::blend_feature`]); `None` when the object has no
+    /// such blend. Answers from the same memory as the list, which also
+    /// serves a single blend once the list has been found.
+    ///
+    /// # Errors
+    /// The reshape gate's errors.
+    pub fn blend_feature(
+        &self,
+        object: ObjectId,
+        id: crate::topo::BlendId,
+    ) -> Result<Option<crate::blend::BlendFeature>, DocumentError> {
+        self.reshape_target(object)?;
+        Ok(self
+            .blend_features_memo
+            .feature(object, &self.objects[object].object, id))
     }
 
     /// Removes blend `id` from `object`, restoring its sharp edges, as one

@@ -18222,6 +18222,26 @@ mod tests {
         assert_eq!(scene.blend_of_face(obj, report.faces()[0]), Some(blend));
         let features = scene.blend_features_json(obj).unwrap();
         assert!(features.contains("\"fillet\""), "{features}");
+        // One blend alone: exactly the list's row, `null` for an id the
+        // object does not carry, and the list's error for a bad object.
+        let rows = serde_json::from_str::<serde_json::Value>(&features).unwrap();
+        let one = serde_json::from_str::<serde_json::Value>(
+            &scene.blend_feature_json(obj, blend).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(one, rows[0]);
+        let mut keys: Vec<&str> = one
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["faces", "id", "intact", "kind", "size"]);
+        assert_eq!(scene.blend_feature_json(obj, blend + 1).unwrap(), "null");
+        let err = scene.blend_feature_json(obj + 999, blend).unwrap_err();
+        let list_err = scene.blend_features_json(obj + 999).unwrap_err();
+        assert_eq!(err.0, list_err.0);
 
         let resized = scene
             .resize_blend_preview(obj, blend, r#"{"kind":"round","radius":0.2,"segments":6}"#)
