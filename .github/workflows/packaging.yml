@@ -52,7 +52,7 @@ jobs:
     if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: packaging/scripts/render-templates.sh "$TAG"
@@ -154,7 +154,7 @@ jobs:
         with:
           name: flatpak-repo
           path: layout/flatpak-staged
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           sparse-checkout: packaging/pages
           path: source
@@ -197,7 +197,7 @@ jobs:
     continue-on-error: true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           sparse-checkout: packaging/scripts
       - name: Install Flatpak
