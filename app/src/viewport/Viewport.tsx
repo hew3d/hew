@@ -8855,7 +8855,7 @@ export default function Viewport({
         previewGroup,
         sceneRenderer.objectsGroup,
         [...selectedIdsRef.current],
-        (nodes) => {
+        (nodes, guides) => {
           handleSceneRefresh(tool.takeLinkedWraps().length > 0 ? undefined : touchedForNodes(nodes))
           // Rebuild sketch buffers so a rotated sketch's lines follow (see
           // makeMoveTool).
@@ -8863,8 +8863,7 @@ export default function Viewport({
           // Select the committed nodes — for a copy these are the fresh
           // clones, so a follow-up rotation chains off the new copies (see
           // makeMoveTool).
-          if (nodes.length === 1) onSelectRef.current?.(nodes[0], 'replace')
-          else onSelectManyRef.current?.(nodes, 'replace')
+          selectLanded(nodes, guides)
         },
         handleToast,
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
@@ -8877,15 +8876,15 @@ export default function Viewport({
         },
         // ×N / /N array re-resolve: full scene refresh, same reasoning as
         // makeMoveTool's onArrayCommit.
-        (nodes) => {
+        (nodes, guides) => {
           handleSceneRefresh()
           sceneRenderer.refreshAllSketches()
-          if (nodes.length === 1) onSelectRef.current?.(nodes[0], 'replace')
-          else onSelectManyRef.current?.(nodes, 'replace')
+          selectLanded(nodes, guides)
         },
       )
       tool.setSelectionAcquirer(acquireTransformTargets, releaseTransformTargets)
       tool.setGuideTarget(selectedGuideRef.current)
+      tool.setCarriedGuides(carriedGuidesRef.current)
       tool.setGuideHooks(acquireGuideTarget, landGuideTransform)
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool

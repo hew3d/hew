@@ -324,3 +324,28 @@ test('a Select drag on the selected box carries the selected guide too', async (
   expect(guide?.[2]).toBeCloseTo(box[2], 5)
   expect(await selectedKinds(page)).toEqual({ nodes: [ids.box], guides: [ids.guide], annotations: [] })
 })
+
+test('Rotate carries the selected guide with the box, in one undo step', async ({ page }) => {
+  const ctx = await setup(page)
+  const ids = await boxAndGuideSelected(page)
+
+  // A half turn about +Z through (2, 0, 0), on open ground (whichever way
+  // it sweeps): the box lands on x in [3, 4], the point guide at (4, 0, 0)
+  // on the origin.
+  await page.keyboard.press('q')
+  await page.keyboard.press('ArrowUp')
+  await clickWorld(page, ctx, [2, 0, 0])
+  await clickWorld(page, ctx, [3, 0, 0])
+  await page.keyboard.type('180')
+  await page.keyboard.press('Enter')
+  await expect.poll(() => page.evaluate((id) => window.__hew_test!.getObjectBounds(id)[0], ids.box)).toBeCloseTo(3, 5)
+  const guide = await page.evaluate((id) => window.__hew_test!.getGuideGeometry(id), ids.guide)
+  expect(guide?.[0]).toBeCloseTo(0, 5)
+  expect(guide?.[1]).toBeCloseTo(0, 5)
+  expect(await selectedKinds(page)).toEqual({ nodes: [ids.box], guides: [ids.guide], annotations: [] })
+
+  await expectUndoLabel(page, 'Undo Rotate 2 items')
+  await page.keyboard.press('ControlOrMeta+z')
+  await expect.poll(() => page.evaluate((id) => window.__hew_test!.getObjectBounds(id)[0], ids.box)).toBeCloseTo(0, 5)
+  expect((await page.evaluate((id) => window.__hew_test!.getGuideGeometry(id), ids.guide))?.[0]).toBeCloseTo(4, 5)
+})

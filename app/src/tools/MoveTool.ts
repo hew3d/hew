@@ -117,7 +117,7 @@ import {
   type ArraySpec,
 } from './moveInput'
 import { RetypeWindow, retypeStaleMessage } from './retypeWindow'
-import { buildGuidePreview } from './guidePreview'
+import { buildGuidePreview, withGuidePreviews } from './guidePreview'
 import { GuideTarget, type OnGuideCommit } from './guideTarget'
 import type { NodeRef } from '../panels/treeModel'
 import { isSketchScopedKind, nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
@@ -989,14 +989,7 @@ export class MoveTool implements Tool {
     const mesh = nodes.length > 0
       ? buildSelectionPreview(this.wasmScene, this.objectsGroup, this.instanceGroupGetter, nodes)
       : null
-    if (guides.length === 0) return mesh
-    const group = new THREE.Group()
-    if (mesh !== null) group.add(mesh)
-    for (const g of guides) {
-      const line = buildGuidePreview(this.wasmScene, g)
-      if (line !== null) group.add(line)
-    }
-    return group.children.length > 0 ? group : null
+    return withGuidePreviews(this.wasmScene, mesh, guides)
   }
 
   /** True when the kernel accepted the commit (false = refused, toasted).
