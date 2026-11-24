@@ -1159,6 +1159,8 @@ describe('PluginsPane: the detail page', () => {
       await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
       fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
       await screen.findByRole('dialog')
+      // The sheet's focus (and its Escape handling) arrive from a passive effect.
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus())
       fireEvent.keyDown(document, { key: 'Escape' })
       await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
       expect(setGrant).not.toHaveBeenCalled()
@@ -1172,6 +1174,7 @@ describe('PluginsPane: the detail page', () => {
       // Not asked through the page's own switch, as a running plugin would.
       const asked = requestGrant(inst, 'com.example.one', ['files'])
       await screen.findByRole('dialog')
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus())
       fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
       await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
       await expect(asked).resolves.toBe('declined')
@@ -1185,7 +1188,9 @@ describe('PluginsPane: the detail page', () => {
     it('writes the wider grant on Allow, and the switch shows what is stored', async () => {
       const { setGrant } = await openWeb()
       fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
-      fireEvent.click(await screen.findByRole('button', { name: 'Allow' }))
+      const allow = await screen.findByRole('button', { name: 'Allow' })
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus())
+      fireEvent.click(allow)
       await waitFor(() => expect(setGrant).toHaveBeenCalledWith('com.example.one', ['model.read'], ['files']))
       await waitFor(() => expect(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ })).toBeChecked())
     })
