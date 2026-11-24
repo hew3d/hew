@@ -16,10 +16,10 @@ All three transform tools show a live ghost preview of the result and a live rea
 
 A quick refresher:
 
-- **Click** an object, sketch, or guide to select it, replacing whatever was selected before. Clicking empty space clears the selection.
+- **Click** an object, sketch, guide, dimension, or text to select it, replacing whatever was selected before. Clicking empty space clears the selection.
 - **Triple-click** a line, or a drawn arc or circle, to select its whole connected shape instead of just the one line or curve run under the cursor. This works on the ground and on a solid's face alike.
 - **Drag an object** to move it (see above). `Esc` mid-drag cancels the move and puts everything back.
-- **Drag from empty space** to rubber-band a selection, SketchUp-style: dragging left→right draws a solid blue rectangle tagged Window and selects what falls **entirely inside** it, plus anything it covers at least 80% of on screen and touches; dragging right→left draws a dashed green rectangle tagged Crossing and selects everything the rectangle **touches**.
+- **Drag from empty space** to rubber-band a selection, SketchUp-style: dragging left→right draws a solid blue rectangle tagged Window and selects what falls **entirely inside** it, plus anything it covers at least 80% of on screen and touches; dragging right→left draws a dashed green rectangle tagged Crossing and selects everything the rectangle **touches**. Guides, dimensions, and text on screen are taken by the same rules: a guide point by its point, a dimension by its dimension line, a text by its leader. A guide line that runs on without end never fits inside a window, so only a crossing takes it.
 - **Double-click** a group, component, or object to enter its editing context (the rest of the scene dims); press `Esc` to step back out.
 
 ### Selecting more than one thing
@@ -30,9 +30,9 @@ A click or a drag replaces the selection by default. Add a modifier — to a cli
 - **`⌘` or `Option`** (Windows/Linux: `Ctrl` or `Alt`) always adds, never removing anything. On a Mac, `Ctrl`-click is a right-click, so it isn't one of these.
 - **`Shift` + `⌘`/`Option`** (Windows/Linux: `Shift` + `Ctrl`/`Alt`) always subtracts, never adding anything.
 
-The same three combinations work on a rubber-band drag, window or crossing.
+The same three combinations work on a rubber-band drag, window or crossing. A selection can mix any of these: objects, drawn shapes, guides, dimensions, and text, in any number. Object Info then counts it per kind ("1 object · 2 guides · 1 annotation"), and commands that only work on objects, such as Group or the booleans, act on the objects and leave the rest selected.
 
-Beyond clicking and dragging, **Edit ▸ Select All** (`⌘A` / `Ctrl+A`) selects every visible object, group, component, and drawn shape (on the ground or on a solid's face) — the whole model (inside a group's editing context, that group's contents instead); **Edit ▸ Select None** (`⇧⌘A` / `Ctrl+Shift+A`) clears the selection; and **Edit ▸ Invert Selection** swaps the two, selecting everything that wasn't selected and deselecting everything that was.
+Beyond clicking and dragging, **Edit ▸ Select All** (`⌘A` / `Ctrl+A`) selects every visible object, group, component, and drawn shape (on the ground or on a solid's face), with the guides, dimensions, and text on screen — the whole model (inside a group's editing context, that group's contents instead); **Edit ▸ Select None** (`⇧⌘A` / `Ctrl+Shift+A`) clears the selection; and **Edit ▸ Invert Selection** swaps the two, selecting everything that wasn't selected and deselecting everything that was.
 
 ## Move (`M`)
 
@@ -139,4 +139,4 @@ Pasted shapes behave as if you drew them where they land. Paste a rectangle onto
 
 ## Deleting
 
-`Delete` or `Backspace` removes the current selection with any tool active. The contextual dock's **Erase** button and **Edit ▸ Delete** do the same. Deleting is undoable, like everything else — `⌘Z` / `Ctrl+Z` undoes, `⇧⌘Z` / `Ctrl+Shift+Z` (or `Ctrl+Y`) redoes, across the entire document history.
+`Delete` or `Backspace` removes the current selection with any tool active: objects, drawn shapes, guides, dimensions, and text together, as one undo step named by what it took ("Delete 3 guides", "Delete 4 items"). The contextual dock's **Erase** button and **Edit ▸ Delete** do the same. Deleting is undoable, like everything else — `⌘Z` / `Ctrl+Z` undoes, `⇧⌘Z` / `Ctrl+Shift+Z` (or `Ctrl+Y`) redoes, across the entire document history.

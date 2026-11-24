@@ -521,7 +521,10 @@ below.
   has one placement; hidden nodes draw none. Limit: override frames of
   Objects inside an entered component are not drawn. App-only
   (`viewport/partAxes.ts`). No shortcut
-- Delete for objects, groups, instances, and guides
+- Delete for objects, groups, instances, guides, and annotations; a
+  mixed selection goes in one undo step (kernel `delete_selection`, wasm
+  `delete_mixed_selection`), named in the user's language by what it took
+  ("Delete 3 guides", "Delete 4 items")
 - Drawing directly on a solid's face splits it and supports bosses/recesses,
   following the same "sticky geometry" rules SketchUp users already know
 - Offset: copy a sketch region's or solid face's boundary inward or outward
@@ -1502,6 +1505,14 @@ below.
   one segment under the cursor. Edit ▸ Select None (⇧⌘A / Ctrl+Shift+A)
   and Edit ▸ Invert Selection round out Select All, mirrored on the native
   menu bar and the command palette
+- One ordered selection mixing nodes, construction guides, and
+  annotations in any count, primary first: every click modifier and the
+  marquee take guides and annotations as they take nodes (a guide line
+  without end only by a crossing), and Select All and Invert Selection add
+  the shown ones at the model level. Object Info counts a mixed selection
+  per kind; node-only commands act on its nodes and leave the rest
+  selected. A guide or annotation that is deleted, undone, or put on a
+  hidden tag leaves the selection
 - Stage-aware status-bar guidance: every tool tells you what to do next
   ("Click the opposite corner — or type exact dimensions"), updating live
   as the gesture advances
