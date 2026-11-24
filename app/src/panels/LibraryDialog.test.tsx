@@ -65,15 +65,11 @@ async function awaitDefaultSelection(): Promise<void> {
   )
 }
 
-// jsdom implements neither — the dialog creates an object URL per thumbnail
-// and per texture preview, so a no-op stub keeps the load effects from
-// throwing without pretending to model real blob semantics.
-if (typeof URL.createObjectURL !== 'function') {
-  URL.createObjectURL = () => 'blob:mock'
-}
-if (typeof URL.revokeObjectURL !== 'function') {
-  URL.revokeObjectURL = () => {}
-}
+// The dialog creates an object URL per thumbnail and per texture preview. Always
+// stub, even where jsdom has the API: jsdom 30.1.3 implements createObjectURL but
+// rejects the Node Blob these tests build, so the real one throws asynchronously.
+URL.createObjectURL = () => 'blob:mock'
+URL.revokeObjectURL = () => {}
 
 /** Every dialog's Escape handler must `stopPropagation()` alongside its
  * `preventDefault()` — see `panels/dialogs.test.tsx`'s identical helper,

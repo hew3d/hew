@@ -274,7 +274,7 @@ describe('DocumentTree — outliner placement by store', () => {
     )
     // Lit as a selected (non-primary) row: the selection is the edge, not the shape.
     const row = screen.getByText('Rectangle').closest('div')
-    expect(row).toHaveStyle({ background: 'var(--accent-tint-15)' })
+    expect((row as HTMLElement).style.background).toBe('var(--accent-tint-15)')
   })
 })
 

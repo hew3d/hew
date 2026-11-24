@@ -30,15 +30,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebFileHost, anchorDownload } from './webFileHost'
 import { FileReadError, UnsupportedFileError } from './fileHost'
 
-// jsdom doesn't implement the Blob URL APIs — stub them so anchorDownload's
-// tests below can run without a real browser, mirroring LibraryDialog.test.tsx's
-// identical guard.
-if (typeof URL.createObjectURL !== 'function') {
-  URL.createObjectURL = () => 'blob:mock'
-}
-if (typeof URL.revokeObjectURL !== 'function') {
-  URL.revokeObjectURL = () => { /* no-op */ }
-}
+// Stub the Blob URL APIs so anchorDownload's tests below run without a real
+// browser. Always stub, even where jsdom has them: jsdom 30.1.3 implements
+// createObjectURL but rejects the Node Blob these tests build.
+URL.createObjectURL = () => 'blob:mock'
+URL.revokeObjectURL = () => { /* no-op */ }
 
 /** Mock `window.matchMedia` to report `(pointer: coarse)` as matching (or not). */
 function mockPointer(coarse: boolean): void {

@@ -2364,7 +2364,7 @@ describe('DocumentTree', () => {
     const row = screen.getByText('Sketch 1').closest('div')
     // The primary-selection tint is applied via inline style — assert it isn't
     // the default transparent background a non-selected row would get.
-    expect(row).toHaveStyle({ background: 'var(--accent-tint-18)' })
+    expect((row as HTMLElement).style.background).toBe('var(--accent-tint-18)')
   })
 
   it('renders distinct type icons: solid object, leaky object, group, instance', () => {
