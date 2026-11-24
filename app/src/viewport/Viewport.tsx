@@ -6357,17 +6357,17 @@ export default function Viewport({
       const ctx = computeEditContext(wasmScene, activeContextRef.current)
       const activeInstance = ctx.kind === 'instance' ? ctx.id : null
       try {
-        const committed = flipAlongAxis(wasmScene, nodes, axis, activeInstance)
-        if (committed === null) {
+        // The selected guides mirror with the nodes, as in the Flip tool.
+        const flipped = flipAlongAxis(wasmScene, nodes, axis, activeInstance, selectedGuidesRef.current)
+        if (flipped === null) {
           handleToast(t`Nothing to flip`)
           return null
         }
-        handleSceneRefresh(touchedForNodes(committed))
+        handleSceneRefresh(touchedForNodes(flipped.nodes))
         sceneRenderer.refreshAllSketches()
-        if (committed.length === 1) onSelectRef.current?.(committed[0], 'replace')
-        else onSelectManyRef.current?.(committed, 'replace')
+        selectLanded(flipped.nodes, flipped.guides)
         scheduleRender()
-        return committed
+        return flipped.nodes
       } catch (err) {
         const code = parseKernelErrorCode(err)
         const rawMsg = err instanceof Error ? err.message : String(err)
@@ -8896,7 +8896,7 @@ export default function Viewport({
         previewGroup,
         sceneRenderer.objectsGroup,
         [...selectedIdsRef.current],
-        (nodes) => {
+        (nodes, guides) => {
           handleSceneRefresh(touchedForNodes(nodes))
           // Rebuild sketch buffers so a scaled sketch's lines follow (see
           // makeMoveTool).
@@ -8904,14 +8904,14 @@ export default function Viewport({
           // Select the committed nodes: a scaled drawn shape is re-found by
           // its new geometry, so the old ref no longer names it and the
           // selection would otherwise be pruned to nothing.
-          if (nodes.length === 1) onSelectRef.current?.(nodes[0], 'replace')
-          else if (nodes.length > 1) onSelectManyRef.current?.(nodes, 'replace')
+          if (nodes.length > 0 || guides.length > 0) selectLanded(nodes, guides)
         },
         handleToast,
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
         (text: string) => { onMeasurementRef.current?.(text) },
       )
       tool.setSelectionAcquirer(acquireTransformTargets, releaseTransformTargets)
+      tool.setSelectedGuides(selectedGuidesRef.current)
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
     }
@@ -8922,13 +8922,12 @@ export default function Viewport({
         previewGroup,
         sceneRenderer.objectsGroup,
         [...selectedIdsRef.current],
-        (nodes, fullRefresh) => {
+        (nodes, fullRefresh, guides) => {
           // A linked copy wraps its loose originals as sets, which removes
           // world nodes: rebuild everything, not just the flipped nodes.
           handleSceneRefresh(fullRefresh ? undefined : touchedForNodes(nodes))
           sceneRenderer.refreshAllSketches()
-          if (nodes.length === 1) onSelectRef.current?.(nodes[0], 'replace')
-          else onSelectManyRef.current?.(nodes, 'replace')
+          selectLanded(nodes, guides)
         },
         handleToast,
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
@@ -8938,6 +8937,7 @@ export default function Viewport({
         },
       )
       tool.setSelectionAcquirer(acquireTransformTargets)
+      tool.setSelectedGuides(selectedGuidesRef.current)
       tool.setFaceEligibility(flipFaceEligible)
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
@@ -13371,9 +13371,14 @@ export default function Viewport({
     scheduleRenderRef.current()
   }, [guidesCarried])
 
-  // Reflect the selected construction guides into the renderer highlight.
+  // Reflect the selected construction guides into the renderer highlight,
+  // and into the active tool that carries them all (Scale, Flip).
   useEffect(() => {
     sceneRendererRef.current?.setSelectedGuides(selectedGuides)
+    const activeTool = toolControllerRef.current?.activeTool
+    if (activeTool !== undefined && 'setSelectedGuides' in activeTool) {
+      (activeTool as { setSelectedGuides(guides: readonly bigint[]): void }).setSelectedGuides(selectedGuides)
+    }
     scheduleRenderRef.current()
   }, [selectedGuides])
 
