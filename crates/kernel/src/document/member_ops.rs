@@ -521,6 +521,8 @@ impl Document {
     /// - [`DocumentError::GroupedOperand`] — `host` sits in a member group,
     ///   or `tool` in a world group.
     /// - [`DocumentError::Transform`] — the path's pose does not invert.
+    /// - [`DocumentError::LockedNode`] — a lock freezes a placement on the
+    ///   path, the shape, `host` itself, or the consumed `tool` (OW-1).
     /// - [`DocumentError::Boolean`] — the engine refused (non-solid operand,
     ///   empty result, a subtract that removes nothing, …).
     ///
@@ -586,6 +588,8 @@ impl Document {
                     && matches!(r.owner, ObjectOwner::Definition { def, .. } if def == component)
             })
             .ok_or(DocumentError::UnknownObject)?;
+        // The host member is consumed too (OW-1).
+        self.refuse_frozen_object(host)?;
         let (tool_id, tool_object) = match tool {
             PlacementTool::Record(tool) => {
                 let rec_tool = self
@@ -740,6 +744,8 @@ impl Document {
     ///   — `path` is empty or does not resolve, or its definition is stale.
     /// - [`DocumentError::UnknownObject`] — `object` is not a live member.
     /// - [`DocumentError::GroupedOperand`] — `object` sits in a member group.
+    /// - [`DocumentError::LockedNode`] — a lock freezes a placement on the
+    ///   path, the shape, or `object` itself (OW-1).
     /// - [`DocumentError::Slice`] — the cut is degenerate or misses.
     ///
     /// On `Err` the document is untouched.

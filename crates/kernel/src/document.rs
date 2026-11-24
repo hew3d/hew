@@ -11064,6 +11064,9 @@ impl Document {
     /// - [`DocumentError::UnknownComponent`] — stale or hidden definition.
     /// - [`DocumentError::UnknownMaterial`] — `Some(id)` is not a live
     ///   palette material.
+    /// - [`DocumentError::LockedNode`] — a lock freezes the shape, or an
+    ///   object whose base would change (its own lock or a locked member
+    ///   group above it; OW-1).
     ///
     /// On `Err` the document is untouched.
     pub fn set_definition_material(
@@ -11101,6 +11104,15 @@ impl Document {
                 NodeId::Instance(_) => {}
             }
         }
+        // A member that carries its own lock, or sits in a locked member
+        // group, is frozen though the shape is not (OW-1): refuse before
+        // repainting anything.
+        let repainted: Vec<ObjectId> = owned
+            .iter()
+            .copied()
+            .filter(|&o| self.objects[o].object.default_material != material)
+            .collect();
+        self.refuse_frozen_objects(&repainted)?;
         let mut actions = Vec::new();
         for &o in &owned {
             let rec = &mut self.objects[o];
@@ -15038,6 +15050,8 @@ impl Document {
     ///   meaningful op).
     /// - [`DocumentError::AmbiguousInstanceScale`] — the instance's pose is
     ///   not a similarity (non-uniform scale).
+    /// - [`DocumentError::LockedNode`] — a lock freezes the placement, the
+    ///   shape, or the sketch (a drawing on a locked member's face; OW-1).
     /// - [`DocumentError::Sketch`] — the region handle is stale.
     /// - [`DocumentError::Extrude`] — the profile fails to extrude (see
     ///   [`Object::from_extrusion`]).
@@ -15070,6 +15084,9 @@ impl Document {
         if self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
+        // The region's edges leave the sketch (OW-1): a drawing on a locked
+        // member's face is frozen with it.
+        self.refuse_frozen_sketch(sketch)?;
         let s = self
             .sketches
             .get(sketch)
@@ -15489,6 +15506,9 @@ impl Document {
     ///   definition, or has no such face.
     /// - [`DocumentError::AmbiguousInstanceScale`] — `stop_len` is given and
     ///   the instance's pose is not a similarity.
+    /// - [`DocumentError::LockedNode`] — a lock freezes the placement, the
+    ///   shape, or the profile sketch (a drawing on a locked member's face;
+    ///   OW-1).
     /// - [`DocumentError::Sketch`] / [`DocumentError::FollowMe`] — as
     ///   [`Document::follow_me`].
     ///
@@ -15538,6 +15558,9 @@ impl Document {
         if self.sketch_owner_component(sketch) != Some(component) {
             return Err(DocumentError::UnknownSketch);
         }
+        // The profile's edges leave the sketch (OW-1): a drawing on a
+        // locked member's face is frozen with it.
+        self.refuse_frozen_sketch(sketch)?;
         let s = self
             .sketches
             .get(sketch)
@@ -15564,6 +15587,12 @@ impl Document {
     /// — refuses [`DocumentError::UnknownObject`]. ONE undo step: the
     /// profile region's scaffolding, the consumed base member, and the
     /// merged result all restore together.
+    ///
+    /// # Errors
+    /// As [`Document::follow_me_in_instance`], and
+    /// [`DocumentError::LockedNode`] when the consumed base member carries
+    /// its own lock (OW-1); a [`DocumentError::Boolean`] when the merge
+    /// refuses.
     pub fn follow_me_merged_in_instance(
         &mut self,
         instance: InstanceId,
@@ -15583,7 +15612,8 @@ impl Document {
     }
 
     /// [`Document::follow_me_merged_in_instance`] with twist and end scale,
-    /// mapped as [`Document::follow_me_in_instance_with`] maps them.
+    /// mapped as [`Document::follow_me_in_instance_with`] maps them. Same
+    /// errors, [`DocumentError::LockedNode`] included.
     pub fn follow_me_merged_in_instance_with(
         &mut self,
         instance: InstanceId,
@@ -15612,6 +15642,9 @@ impl Document {
         if self.sketch_owner_component(sketch) != Some(component) {
             return Err(DocumentError::UnknownSketch);
         }
+        // The profile's edges leave the sketch (OW-1): a drawing on a
+        // locked member's face is frozen with it.
+        self.refuse_frozen_sketch(sketch)?;
         let s = self
             .sketches
             .get(sketch)
@@ -15633,6 +15666,8 @@ impl Document {
                     && matches!(r.owner, ObjectOwner::Definition { def: d, .. } if d == component)
             })
             .ok_or(DocumentError::UnknownObject)?;
+        // The base member is consumed by the merge (OW-1).
+        self.refuse_frozen_object(base_id)?;
         let base = &base_rec.object;
         let mut result =
             merge_sweep(base, &swept, &mut self.boolean_tidy).map_err(DocumentError::Boolean)?;
@@ -15664,7 +15699,9 @@ impl Document {
     ///
     /// # Errors
     /// Mirrors [`Document::follow_me_in_instance`]'s, with `object`/`face`
-    /// in place of `sketch`/`region`.
+    /// in place of `sketch`/`region`: [`DocumentError::LockedNode`] for a
+    /// frozen placement or shape, and, when the sweep merges, for an
+    /// `object` that carries its own lock (OW-1).
     pub fn follow_me_face_in_instance(
         &mut self,
         instance: InstanceId,
@@ -15684,7 +15721,8 @@ impl Document {
     }
 
     /// [`Document::follow_me_face_in_instance`] with twist and end scale,
-    /// mapped as [`Document::follow_me_in_instance_with`] maps them.
+    /// mapped as [`Document::follow_me_in_instance_with`] maps them. Same
+    /// errors, [`DocumentError::LockedNode`] included.
     pub fn follow_me_face_in_instance_with(
         &mut self,
         instance: InstanceId,
@@ -15719,6 +15757,11 @@ impl Document {
                 .map_err(DocumentError::FollowMe)?;
 
         let merges = matches!(path, FollowMePath::FaceLoop { object: po, .. } if *po == object);
+        // A sweep that merges consumes the profile member (OW-1); one that
+        // only reads its face does not.
+        if merges {
+            self.refuse_frozen_object(object)?;
+        }
         if !merges {
             let id = self.insert_object_record(ObjectRecord {
                 object: swept,
@@ -17257,6 +17300,8 @@ impl Document {
     ///   [`Document::begin_sketch_on_plane_in_instance`]'s matching note).
     /// - [`DocumentError::UnknownObject`] — `object` is stale, hidden, or
     ///   not a member of `instance`'s own definition.
+    /// - [`DocumentError::LockedNode`] — a lock freezes the placement, the
+    ///   shape, or `object` itself (OW-1).
     /// - [`DocumentError::Slice`] — the cut is degenerate or misses the
     ///   solid (mapped to local space).
     ///
@@ -17302,6 +17347,9 @@ impl Document {
                     && matches!(r.owner, ObjectOwner::Definition { def: d, .. } if d == component)
             })
             .ok_or(DocumentError::UnknownObject)?;
+        // The source member is consumed (OW-1): a lock on the member itself
+        // freezes it even when its definition and placement are free.
+        self.refuse_frozen_object(object)?;
         let mut tidy = BooleanTidy::default();
         let (positive, negative) = rec
             .object

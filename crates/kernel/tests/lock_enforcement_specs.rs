@@ -364,6 +364,127 @@ fn a_rebase_is_refused_when_a_member_carries_its_own_lock() {
     });
 }
 
+/// Two boxes made a component, the second member locked on its own: the
+/// document, the placement, the free member and the locked one. The shape
+/// itself is not frozen, so only the member's own lock can refuse an edit.
+fn component_with_a_locked_member() -> (Document, InstanceId, ObjectId, ObjectId) {
+    let mut doc = Document::new();
+    let a = board(&mut doc, 0.0);
+    let b = board(&mut doc, 2.0);
+    let (def, inst, _) = doc.make_component(&[obj(a), obj(b)]).unwrap();
+    doc.set_nodes_locked(&[obj(b)], true).unwrap();
+    assert!(doc.def_frozen(def).is_none(), "the shape is not locked");
+    (doc, inst, a, b)
+}
+
+/// A slice of a definition member consumes it, so a member that carries
+/// its own lock refuses the slice, by placement and by path, though its
+/// shape and placement are free (found by the document fuzz: the commit
+/// audit caught `slice_def_member` cutting the locked member).
+#[test]
+fn a_locked_definition_member_refuses_a_slice() {
+    let (mut doc, inst, a, b) = component_with_a_locked_member();
+    let before = points(&doc, obj(b));
+    let cut =
+        Plane::from_point_normal(Point3::new(2.5, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)).unwrap();
+    refused(&mut doc, obj(b), false, |d| {
+        d.slice_def_member(inst, b, &cut)
+    });
+    refused(&mut doc, obj(b), false, |d| {
+        d.slice_through_placement(&[inst], b, &cut)
+    });
+    assert_eq!(
+        points(&doc, obj(b)),
+        before,
+        "the locked member is unchanged"
+    );
+    // The free member beside it still slices.
+    let free_cut =
+        Plane::from_point_normal(Point3::new(0.5, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)).unwrap();
+    doc.slice_def_member(inst, a, &free_cut)
+        .expect("a free member slices");
+}
+
+/// A subtract through a placement consumes its host member, so a host that
+/// carries its own lock refuses it, with a world tool and with a transient
+/// cutter alike.
+#[test]
+fn a_locked_definition_member_refuses_a_cut_through_its_placement() {
+    let (mut doc, inst, _, b) = component_with_a_locked_member();
+    let tool = board(&mut doc, 2.5);
+    let cutter = doc.object(tool).unwrap().clone();
+    let before = points(&doc, obj(b));
+    refused(&mut doc, obj(b), false, |d| {
+        d.boolean_through_placement(&[inst], b, tool, BooleanOp::Subtract)
+    });
+    refused(&mut doc, obj(b), false, |d| {
+        d.subtract_solid_through_placement(&[inst], b, &cutter)
+    });
+    assert_eq!(
+        points(&doc, obj(b)),
+        before,
+        "the locked member is unchanged"
+    );
+    doc.set_nodes_locked(&[obj(b)], false).unwrap();
+    doc.boolean_through_placement(&[inst], b, tool, BooleanOp::Subtract)
+        .expect("unlocked, the cut goes through");
+}
+
+/// An Object that is not a member of the addressed definition answers
+/// `UnknownObject`, as the docs promise, even when it is locked: the
+/// membership test comes before the member's own lock check.
+#[test]
+fn a_locked_non_member_is_unknown_not_locked() {
+    let (mut doc, inst, _, _) = component_with_a_locked_member();
+    let stranger = board(&mut doc, 6.0);
+    doc.set_nodes_locked(&[obj(stranger)], true).unwrap();
+    let cut =
+        Plane::from_point_normal(Point3::new(6.5, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)).unwrap();
+    assert!(matches!(
+        doc.slice_def_member(inst, stranger, &cut),
+        Err(DocumentError::UnknownObject)
+    ));
+    assert!(matches!(
+        doc.slice_through_placement(&[inst], stranger, &cut),
+        Err(DocumentError::UnknownObject)
+    ));
+    let cutter = doc.object(stranger).unwrap().clone();
+    assert!(matches!(
+        doc.subtract_solid_through_placement(&[inst], stranger, &cutter),
+        Err(DocumentError::UnknownObject)
+    ));
+}
+
+/// Painting a whole definition repaints every member Object, so a member
+/// that carries its own lock, or sits in a locked member group, refuses
+/// it though the shape itself is free (found by review: the commit audit
+/// caught `set_definition_material` repainting the locked member).
+#[test]
+fn a_definition_paint_is_refused_by_a_locked_member_or_member_group() {
+    let (mut doc, _, _, b) = component_with_a_locked_member();
+    let def = doc.object_owner_component(b).unwrap();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 0, 0)));
+    refused(&mut doc, obj(b), false, |d| {
+        d.set_definition_material(def, Some(red))
+    });
+    doc.set_nodes_locked(&[obj(b)], false).unwrap();
+    doc.set_definition_material(def, Some(red))
+        .expect("unlocked, the shape repaints");
+
+    let mut doc = Document::new();
+    let a = board(&mut doc, 0.0);
+    let c = board(&mut doc, 2.0);
+    let (g, _) = doc.group_nodes(&[obj(c)]).unwrap();
+    let group = NodeId::Group(g);
+    let (def, _, _) = doc.make_component(&[obj(a), group]).unwrap();
+    doc.set_nodes_locked(&[group], true).unwrap();
+    assert!(doc.def_frozen(def).is_none(), "the shape is not locked");
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 0, 0)));
+    refused(&mut doc, group, false, |d| {
+        d.set_definition_material(def, Some(red))
+    });
+}
+
 // --------------------------------------------- refused: paint, names, tags, attributes
 
 #[test]
