@@ -408,6 +408,7 @@ describe('IndexStore: follow columns and row lifetime (follow-a-report §5.2)', 
       adminViewedAt: null,
       parentId: null,
       bundleDeleted: false,
+      threadActivityAt: null,
     })
     // A second instance over the same storage finds nothing to add.
     await new IndexStore(storage).listReports()

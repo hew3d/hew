@@ -11,6 +11,7 @@
 import type {
   ThreadView,
   ThreadAdminView,
+  ThreadMessage,
   ThreadStatus,
   PostReporterResult,
   AppendResult,
@@ -184,6 +185,7 @@ export interface ThreadCachePatch {
   status?: string
   statusVersion?: string | null
   reporterActivityAt?: number
+  threadActivityAt?: number
 }
 
 /** One row of the admin list / detail metadata. `sizeBytes` is the raw
@@ -211,6 +213,9 @@ export interface ReportEntry {
   adminViewedAt: number | null
   parentId: string | null
   bundleDeleted: boolean
+  /** The thread's last index-side activity (`indexStore.ts`'s `ReportRow`).
+   *  Read by the list's `lastActivity`; the admin pages do not read it. */
+  threadActivityAt: number | null
 }
 
 /** What `reserveReport` needs at reservation time — before a byte of the
@@ -235,6 +240,8 @@ export interface ReportThreadStub {
   setStatus(status: ThreadStatus, version: string | null, note: string | null, now: number): Promise<AppendResult>
   appendAttachment(childId: string, text: string, now: number): Promise<AppendAttachmentResult>
   adminView(now: number): Promise<ThreadAdminView | null>
+  /** Every message in `seq` order. Writes nothing; no schema means none. */
+  peek(): Promise<ThreadMessage[]>
   destroy(): Promise<void>
 }
 

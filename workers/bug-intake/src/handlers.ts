@@ -58,8 +58,8 @@ import {
   type BatchNotice,
 } from './adminPages.ts'
 import { tarStream, type TarSource, type TarSkip } from './tar.ts'
-import { isThreadStatus } from './threadStore.ts'
-import type { BugIntakeEnv } from './types.ts'
+import { isThreadStatus, type ThreadMessage } from './threadStore.ts'
+import type { BugIntakeEnv, ReportEntry } from './types.ts'
 
 function jsonResponse(status: number, body: unknown, extraHeaders?: Record<string, string>): Response {
   return new Response(JSON.stringify(body), {
@@ -859,6 +859,14 @@ async function handleAdminReply(request: Request, env: BugIntakeEnv, id: string)
   const posted = await thread.postMaintainer(text, now)
   if (!posted.ok && posted.reason === 'not-found') return notFound()
   if (!posted.ok) return adminHtml(409, renderFormError(id, 'This thread is full.'))
+  // The reply is already stored; a failed cache copy only leaves the API's
+  // `lastActivity` stale. Answering 5xx here would invite a retry that posts
+  // the same reply twice.
+  try {
+    await indexStub(env).setThreadCache(id, { threadActivityAt: now })
+  } catch (err) {
+    console.error(`bug-intake: setThreadCache failed for ${id}:`, err)
+  }
   return redirectNoStore(`${ADMIN_ORIGIN}/report/admin/${id}`, 303)
 }
 
@@ -882,7 +890,7 @@ async function handleAdminStatus(request: Request, env: BugIntakeEnv, id: string
   // leaves the list's badge stale. Answering 5xx here would invite a retry
   // that writes a second status message.
   try {
-    await indexStub(env).setThreadCache(id, { status: set.status, statusVersion: set.statusVersion })
+    await indexStub(env).setThreadCache(id, { status: set.status, statusVersion: set.statusVersion, threadActivityAt: now })
   } catch (err) {
     console.error(`bug-intake: setThreadCache failed for ${id}:`, err)
   }
@@ -1138,6 +1146,101 @@ async function handleBatchDownload(request: Request, env: BugIntakeEnv): Promise
   })
 }
 
+/** The read-only JSON API a monitoring client calls with the admin
+ *  service token. Every response here is JSON, including the 404s. */
+function apiNotFound(): Response {
+  return jsonResponse(404, { error: 'not-found' })
+}
+
+/** One row of the API's report list, built from exactly these keys so a
+ *  column added to the index later does not reach the client by default.
+ *  `lastActivity` is the newest of the times the report has seen; it is not
+ *  the stored `lastActivity` column. */
+function apiRow(entry: ReportEntry) {
+  const times = [entry.receivedAt, entry.reporterActivityAt, entry.threadActivityAt].filter(
+    (t): t is number => t !== null,
+  )
+  return {
+    id: entry.id,
+    receivedAt: entry.receivedAt,
+    appVersion: entry.appVersion,
+    platform: entry.platform,
+    descriptionPreview: entry.descriptionPreview,
+    sizeBytes: entry.sizeBytes,
+    triaged: entry.triaged,
+    committed: entry.committed,
+    following: entry.following,
+    status: entry.status,
+    statusVersion: entry.statusVersion,
+    reporterActivityAt: entry.reporterActivityAt,
+    adminViewedAt: entry.adminViewedAt,
+    parentId: entry.parentId,
+    bundleDeleted: entry.bundleDeleted,
+    lastActivity: Math.max(...times),
+  }
+}
+
+/** One thread message for the API, with exactly six keys. */
+function apiMessage(m: ThreadMessage) {
+  return {
+    seq: m.seq,
+    at: m.at,
+    author: m.author,
+    kind: m.kind,
+    text: m.text,
+    attachmentReportId: m.kind === 'attachment' ? (m.attachmentReportId ?? null) : null,
+  }
+}
+
+/** The report's description from its bundle head, or null. A deleted bundle
+ *  is not read at all, and a failed read is logged and answered as null so
+ *  the thread still shows. */
+async function apiDescription(env: BugIntakeEnv, id: string, bundleDeleted: boolean): Promise<string | null> {
+  if (bundleDeleted) return null
+  try {
+    const text = await readHeadForDisplay(env, id)
+    if (text === null) return null
+    return parseHeadForDisplay(text)?.description ?? null
+  } catch (err) {
+    console.error(`bug-intake: failed to read/decompress report ${id}'s head for the API detail:`, err)
+    return null
+  }
+}
+
+async function handleApiList(env: BugIntakeEnv): Promise<Response> {
+  const reports = await indexStub(env).listReports()
+  return jsonResponse(200, { generatedAt: Date.now(), reports: reports.map(apiRow) })
+}
+
+async function handleApiDetail(env: BugIntakeEnv, id: string): Promise<Response> {
+  const entry = await indexStub(env).getReport(id)
+  if (entry === null || !entry.committed) return apiNotFound()
+  const description = await apiDescription(env, id, entry.bundleDeleted)
+  // A thread that throws here is not caught: the request answers the plain
+  // 503, so an empty list is never mistaken for a thread with no replies.
+  const messages = await threadStub(env, id).peek()
+  return jsonResponse(200, {
+    generatedAt: Date.now(),
+    report: apiRow(entry),
+    description,
+    messages: messages.map(apiMessage),
+  })
+}
+
+/** Routes `/report/admin/api/...`. The shape is checked before the method,
+ *  and the method before the id, so a wrong method on a path that does not
+ *  exist is still the JSON 404. */
+async function routeApi(request: Request, env: BugIntakeEnv, segments: string[]): Promise<Response> {
+  const isList = segments.length === 2 && segments[1] === 'reports'
+  const isDetail = segments.length === 3 && segments[1] === 'reports' && segments[2] !== ''
+  if (!isList && !isDetail) return apiNotFound()
+  if (request.method !== 'GET') return methodNotAllowed()
+  if (isList) return handleApiList(env)
+  const rawId = segments[2]
+  if (!isValidReportId(rawId)) return apiNotFound()
+  return handleApiDetail(env, normalizeReportId(rawId))
+}
+
 async function routeAdmin(
   request: Request,
   env: BugIntakeEnv,
@@ -1160,6 +1263,7 @@ async function routeAdmin(
     if (action === 'download' && request.method === 'GET') return handleBatchDownload(request, env)
     return notFound()
   }
+  if (segments[0] === 'api') return routeApi(request, env, segments)
   const rawId = segments[0]
   if (!isValidReportId(rawId)) return notFound()
   const id = normalizeReportId(rawId)

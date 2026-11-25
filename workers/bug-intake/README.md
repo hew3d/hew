@@ -10,12 +10,15 @@ Cloudflare-Access-protected admin page. Nothing here is public: there is no
 way to read a report back by its own ID, and the admin routes answer 403 to
 anyone Access hasn't already let through. The admin pages live on their own
 host, `reports.hew3d.com`; on any other host `/report/admin/*` is a plain 404.
+The admin area also serves two read-only JSON routes, behind the same Access
+check, for a monitoring client that lists reports and reads their threads
+(see "Read-only JSON routes").
 
 **Why chunked, not one request**: a real 59 MiB SketchUp import produces a
-210.9 MB JSON bundle that gzips to 59.9 MB, and the compressed cap is 90
-MiB. The Workers **Free** plan — which this Worker deliberately stays on —
-caps CPU time at a hard, non-configurable **10 ms per request**; copying a
-60–90 MiB upload through a single request doesn't fit that budget no matter
+210.9 MB JSON bundle that gzips to 59.9 MB, and the compressed cap is 1
+GiB. The Workers **Free** plan — which this Worker deliberately stays on —
+caps CPU time at a hard, non-configurable **10 ms per request**; copying an
+upload of tens of megabytes through a single request doesn't fit that budget no matter
 how the copying is arranged (streamed or not — see "Chunked upload" below
 for the actual numbers). So the client splits the compressed bundle into
 pieces of at most 1.9 MB and uploads each in its own request instead.
@@ -54,6 +57,8 @@ first), then **COMMIT**.
 | `/report/<id>/thread` | `DELETE` | Forget: revoke the secret and destroy the thread | `204` / `403` (also the answer to a second call) / `5xx` |
 | `/report/admin/<id>/reply` | `POST` | form `text`, or `canned=ask-file` / `canned=ask-steps`; redirects to the detail page | |
 | `/report/admin/<id>/status` | `POST` | form `status` (`open`/`need-info`/`fixed`/`closed`), `version` (required for `fixed`), `note`; redirects to the detail page | |
+| `/report/admin/api/reports` | `GET` | every committed report as JSON, newest first, follow-up attachments included; no paging, no filter. Changes no stored data — see "Read-only JSON routes" | `200 {"generatedAt":<ms>,"reports":[<row>,…]}` / `403` / `404 {"error":"not-found"}` for any other path under `/report/admin/api`, a trailing slash included / `405` wrong method / `503` |
+| `/report/admin/api/reports/<id>` | `GET` | one committed report as JSON: its row, its full description, and every message of its thread. Never marks the report viewed and never moves a thread cursor | `200 {"generatedAt":<ms>,"report":<row>,"description":<string or null>,"messages":[…]}` / `403` / `404 {"error":"not-found"}` malformed, unknown, or uncommitted id / `405` wrong method / `503` |
 
 Every response carries `Cache-Control: no-store`; none carry CORS headers —
 the web build posts same-origin under `app.hew3d.com` (and under
@@ -207,6 +212,10 @@ bundle-less row is deleted and a live one just stops showing as followed.
 added to an existing table by `ALTER TABLE … ADD COLUMN` guarded by
 `PRAGMA table_info` (`ReportDrop`'s `meta` gains `followHash`/`parentId`
 the same way). They are display caches; the thread is the source of truth.
+`threadActivityAt` is added the same way: the time of the maintainer's last
+reply or status change, or of a thread's end resetting a status that was not
+`open`. Only the JSON routes read it, for `lastActivity`; it is not the
+upload-activity column `lastActivity`.
 
 **Admin.** The list gains Status and Following columns, a **new** marker
 (the reporter wrote or attached something since the maintainer last opened
@@ -238,15 +247,15 @@ the body).
 **The numbers.** The Workers Free plan caps CPU time at a hard,
 non-configurable **10 ms per request** — not wall-clock time (I/O waits on
 `fetch`/RPC calls don't count), but actual CPU execution does, and copying
-bytes around is real CPU work. A single request handling a 60–90 MiB
-upload — reading the body, decompressing or re-chunking it, issuing the
+bytes around is real CPU work. A single request handling an upload of
+tens of megabytes — reading the body, decompressing or re-chunking it, issuing the
 Durable Object writes — does easily tens of milliseconds of CPU work in the
 worst case; there is no way to arrange that copying (streamed or buffered)
 to fit under 10 ms. Splitting the upload into many small requests instead
 means each request only ever touches one piece — small enough to read,
 validate, and write in comfortably under a millisecond of CPU time — with
 the client, not this Worker, paying for the wall-clock time of issuing
-~50 requests for a 90 MiB report.
+~50 requests for a 90 MiB report, or about 565 for one at the 1 GiB cap.
 
 **The piece size**: `PIECE_BYTES` = 1,900,000 bytes (`src/constants.ts`).
 Chosen to sit comfortably under the 2 MB SQLite row/BLOB cap a Durable
@@ -254,7 +263,8 @@ Object's storage enforces, so every piece is written as **exactly one row**
 with no rechunking and no multi-piece batching on the write side — a piece
 arrives, gets read whole (`src/bytes.ts`'s `readBodyCapped`, trivially safe
 at this size), and is inserted as one `INSERT` with one bound BLOB
-parameter. A 90 MiB report is about 50 requests.
+parameter. A 90 MiB report is about 50 requests; one at the 1 GiB cap is
+about 565.
 
 **Head validation** happens exactly once, synchronously, inside the START
 handler, against ONLY the first piece — `src/headScan.ts`'s
@@ -336,8 +346,10 @@ delete a report sooner.
 
 **Ceiling**: 3 GiB (`STORE_CEILING_BYTES`) of the account's shared 5 GB
 free Durable Object storage — `share-relay`'s ten-minute drops use the
-rest. (That fits about 34 reports the size of the design's 59.9 MB worked
-example, or 32 at the 90 MiB cap.) The rate-limit check, the ceiling check,
+rest. (That fits about 53 reports the size of the design's 59.9 MB worked
+example, but only 3 at the 1 GiB cap: a few reports carrying huge files
+fill the store until the admin page deletes them or retention does.) The
+rate-limit check, the ceiling check,
 and reserving a report's DECLARED total are ONE fused Durable Object call,
 `ReportIndex.reserveReport` — not a read-only check followed by a later
 write, and made against the declared `Hew-Upload-Length` at START, before
@@ -383,7 +395,7 @@ Two independent mechanisms, deliberately overlapping:
   any one drop's alarm — it exists for whatever that alarm somehow missed
   (a crash between the alarm firing and its own cleanup completing, for
   instance). It's keyed on `lastActivity`, **not** age since the upload
-  started: a legitimate, still-progressing 90 MiB upload can genuinely
+  started: a legitimate, still-progressing large upload can genuinely
   take longer than 15 minutes end to end on a slow connection, but it
   keeps touching `lastActivity` on every piece the whole time, so it's
   never at risk of being pruned mid-upload — only an upload that has
@@ -391,13 +403,13 @@ Two independent mechanisms, deliberately overlapping:
   `ABANDON_TIMEOUT_MS` on purpose, since the per-drop alarm is meant to be
   the one that actually fires first in the normal case.
 
-- **An absolute lifetime** (`UPLOAD_LIFETIME_MS`, two hours since START),
+- **An absolute lifetime** (`UPLOAD_LIFETIME_MS`, eight hours since START),
   independent of activity, because both mechanisms above measure only
   silence while an uncommitted upload holds its whole declared size
   against the storage ceiling from the moment START accepts it. Without
-  it, a caller could hold a 90 MiB reservation open forever by sending
-  one trivial piece every nine minutes — and with 20 STARTs a day per
-  client hash, fill the 3 GiB ceiling for everyone in two days. Three
+  it, a caller could hold a reservation at the 1 GiB cap for days by
+  sending one piece every nine minutes (about 565 pieces), and three such
+  uploads fill the 3 GiB ceiling for everyone. Three
   places enforce it: the drop's alarm is never armed later than
   `receivedAt + UPLOAD_LIFETIME_MS`; `ReportStore.putPiece` refuses a
   piece after that instant as `expired` (a `400` that abandons); and the
@@ -405,9 +417,10 @@ Two independent mechanisms, deliberately overlapping:
   The companion rule that every piece but the last is exactly `pieceBytes`
   (`short-piece`, also a `400` that abandons) caps an upload at
   `ceil(declaredTotal / pieceBytes)` requests, so there is no cheap
-  keepalive to send in the first place. Two hours is far beyond the
-  slowest legitimate upload: 90 MiB in 1.9 MB pieces at the clients'
-  two-minute per-request timeout is about 100 minutes.
+  keepalive to send in the first place. Eight hours is far past the
+  slowest legitimate upload: 1 GiB takes about two and a half hours on a
+  1 Mbit/s uplink, and `ABANDON_TIMEOUT_MS` ends a stalled upload long
+  before the lifetime does.
 
 An explicit `400` on a piece or commit (oversized piece, bytes past the
 declared total, a short or late piece, an incomplete commit) doesn't wait
@@ -525,7 +538,8 @@ with a fake mailer, with zero risk of a stray import breaking `node --test`.
 ## Admin page
 
 Server-rendered HTML under `/report/admin/*`, no client-side JavaScript at
-all. Every request is verified against the `Cf-Access-Jwt-Assertion` header
+all; the two routes under `/report/admin/api/` answer JSON instead
+("Read-only JSON routes", below). Every request is verified against the `Cf-Access-Jwt-Assertion` header
 Cloudflare Access attaches (`src/adminAuth.ts`): RS256 over WebCrypto
 against the team's JWKS
 (`https://<ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs`, cached a few minutes
@@ -542,7 +556,7 @@ Every report-derived value that reaches an admin page — the description,
 `src/adminPages.ts`'s `escapeHtml` runs on every one of them before it
 reaches a template string; there is no exception. A strict
 `Content-Security-Policy` (`default-src 'none'; style-src 'unsafe-inline';
-form-action 'self'; frame-ancestors 'none'`) rides every admin response as a
+form-action 'self'; frame-ancestors 'none'`) rides every admin page as a
 second layer, not a substitute for escaping. Mutating routes (`delete`,
 `triage`, `reply`, `status`, `batch/triage`, `batch/delete`) also check the request's `Origin` header against
 `https://reports.hew3d.com` — the admin pages' own origin — before doing
@@ -557,8 +571,8 @@ simply absent from the list — it isn't a real report yet.
 Neither admin route reassembles a report's pieces into one buffer any
 more — the old approach (read every stored piece into an array, concatenate
 them, and for detail fully `gunzip` the result) cost up to roughly 2x the
-report's size in isolate memory (as much as ~180 MiB for a report near the
-90 MiB cap) and far more than the 10 ms/request CPU budget this Worker
+report's size in isolate memory (~180 MiB for a 90 MiB report, against an
+isolate's 128 MB) and far more than the 10 ms/request CPU budget this Worker
 otherwise stays under everywhere else:
 
 - The **detail** page reads and decompresses ONLY piece 0
@@ -631,6 +645,96 @@ changes nothing.
   and at `BATCH_DOWNLOAD_MAX_BYTES` (512 MiB) of stored size. Over a cap the
   request is refused with a page saying how many were selected and what the
   cap is.
+
+### Read-only JSON routes
+
+`GET /report/admin/api/reports` and `GET /report/admin/api/reports/<id>`
+give a monitoring client what the list and detail pages show, as JSON, and
+change no stored data. Opening the detail page records that the maintainer
+looked; calling these routes does not. They leave `adminViewedAt`, the
+thread's admin cursor, and the reporter's seen cursor and poll time where
+they were, and a request for a report with no thread creates none
+(`ThreadStore.peek` reads the messages and writes nothing). No row, alarm,
+or cursor changes. What either route can still cause is a store bringing
+an older table's columns up to date the first time it is used, as any
+other request would: the index adds its missing columns, and the detail's
+head read adds `followHash`/`parentId` to the `meta` table of a bundle
+stored before following existed.
+
+Both routes sit behind the same host rule and Access check as the pages. A
+person's Access session passes; an unattended client presents an Access
+service token (deploy checklist, steps 9–11), and whoever holds that token
+can read every report's description and thread. Neither route checks
+`Origin`, since neither changes anything. Only the two `200`s and the `404`
+are JSON: a wrong host is the plain `404`, a failed Access check the plain
+`403`, a method other than `GET` the bodiless `405`, and an unhandled error
+the plain `503`, exactly as on the pages. A client should treat anything
+that is not `200 application/json` as a failure. Within
+`/report/admin/api`, the path's shape is checked first, then the method,
+then the id. `api` in any other letter case is not these routes.
+
+**The row.** Each element of `reports`, and the detail's `report`, has
+exactly these sixteen keys, built by name so that a column added to the
+index later does not appear by default:
+
+`id`, `receivedAt`, `appVersion`, `platform`, `descriptionPreview`,
+`sizeBytes`, `triaged`, `committed`, `following`, `status`, `statusVersion`,
+`reporterActivityAt`, `adminViewedAt`, `parentId`, `bundleDeleted`,
+`lastActivity`.
+
+All times, `generatedAt` included, are epoch milliseconds. The list is one
+query over the index and calls no thread.
+
+**`lastActivity`** is the largest of `receivedAt`, `reporterActivityAt`, and
+the index's `threadActivityAt`, ignoring nulls. It advances on every
+message, attachment, and status change: a reporter message, a committed
+follow-up attachment (on the parent's row), a maintainer reply, a
+maintainer status change, and a reset of a status that was not `open` back
+to `open`. That reset happens when a thread ends (Forget or its retention
+alarm), and when a batch delete destroys a report's thread but cannot
+remove one of its attachments, so the row is kept.
+It does not advance when the reporter polls or marks messages seen, when
+the maintainer opens the report or toggles `triaged`, or when the bundle
+expires; `adminViewedAt`, `triaged`, and `bundleDeleted` are in the row for
+those.
+
+`lastActivity` is a cache in the index, written after the thread, and has
+three limits. The detail's `messages` are complete in all three.
+
+- Activity from before the `threadActivityAt` column existed is not
+  backfilled.
+- The index update that follows a thread write can fail; the failure is
+  logged and never fails the request. That holds for a maintainer's reply
+  or status change, a reporter message, and a follow-up attachment's
+  commit (a retried COMMIT answers as already committed and does not
+  repeat the update). `lastActivity` is then stale until the report's next
+  activity.
+- A maintainer's reply or status change is stamped with the time its
+  request began. If a reporter message or attachment with a later time
+  lands while that request is in flight, `lastActivity` already holds the
+  later time and the reply does not move it. A reply changes no other key
+  of the row, so a client that listed the report between the two writes
+  sees an identical row afterward. A client that compares rows to decide
+  what to refetch should also refetch details on a schedule of its own.
+
+**The detail.** The id is normalized, so a lower-case id finds its report.
+`description` is the head's `description` field and nothing else from the
+head: `contact` is never returned, and neither are `expected`, the `system`
+block, or `crash`. It is `null` when the bundle is gone, when the head
+cannot be read or parsed, and when the field is absent, so a missing
+bundle never hides the thread. `messages` is the whole thread in `seq`
+order, each message with exactly six keys: `seq`, `at`, `author`
+(`reporter`/`maintainer`/`system`), `kind` (`text`/`status`/`attachment`),
+`text`, and `attachmentReportId`, which is `null` unless the kind is
+`attachment`. Nothing from the thread's own bookkeeping (the secret's
+hash, the cursors) is returned. A follow-up attachment has a detail like
+any report; its own thread is normally empty. If the thread cannot be
+read, the answer is the `503`, not an empty `messages`, which would say
+that nobody has replied.
+
+Withholding `contact` covers that field only. Contact details a reporter
+types into the description or a message are part of the text these routes
+return.
 
 ## Testing
 
@@ -714,7 +818,7 @@ runner and native TypeScript stripping, `.node-version` pins 26.13.1);
   a signature from the wrong key, a tampered payload, a non-RS256 `alg`,
   and the JWKS cache's fetch/expiry behavior.
 - `src/reportStore.test.ts` covers the per-upload state machine directly:
-  a multi-piece upload round-tripped exactly at the 90 MiB boundary
+  a 90 MiB multi-piece upload round-tripped exactly
   (piece by piece, proving one row per piece with no rechunking), reads
   being non-destructive, every `putPiece`/`commit` outcome (stored,
   idempotent retry, retry with a mismatched length rejected, skip-ahead
@@ -750,6 +854,14 @@ runner and native TypeScript stripping, `.node-version` pins 26.13.1);
   (parsed with a reference reader: checksums, sizes, padding, closing
   blocks, bytes equal to what was stored, lazy streaming) and the tar writer
   on its own (name safety, short and long sources).
+- `src/api.test.ts` covers the two JSON routes: the list's rows and order,
+  the exact key sets of a row and a message, that neither route changes the
+  index row or the thread's cursors or creates a thread, that `contact` and
+  the follow secret's hash appear nowhere in a body, a `null` description
+  with the thread intact, the `404`/`405`/`403`/`503` answers, what does
+  and does not advance `lastActivity`, and the `threadActivityAt` column:
+  added to an older table, never lowered, and a failed cache write leaving
+  the reply or status change itself intact.
 - `src/adminPages.test.ts` (HTML-escaping/XSS, "unknown" for an absent
   `system`, the downloaded-bundle note replacing the old included/not-
   included claims) and `src/email.test.ts` (header-injection stripping,
@@ -777,6 +889,12 @@ index and drop columns are added in place on first use. Then check each
 new route from a real client (a report sent with following on, a reply
 from the admin page, the client's next check, an attachment, a status
 change, Forget).
+
+**Upgrading an existing deployment to the read-only JSON routes**: a plain
+`npx wrangler deploy`. No migration and no new secrets; the index's
+`threadActivityAt` column is added in place on first use. A client that
+calls the routes unattended needs steps 9–11 below, which can be done
+before the deploy.
 
 Manual, one-time-per-environment, same posture as `share-relay`'s checklist
 (that Worker's `README.md` has the fuller version of steps 1–3 below). This
@@ -822,7 +940,8 @@ so there is no Paid-plan requirement anywhere in this checklist.
 7. **Create a Cloudflare Access application** for
    `reports.hew3d.com/report/admin/*` (Zero Trust dashboard → **Access** →
    **Applications** → **Add an application** → **Self-hosted**), with the
-   maintainer as the only allowed identity and the cookie's SameSite
+   maintainer as the only allowed person (a monitoring client gets in by
+   service token, steps 9–10) and the cookie's SameSite
    attribute set to **Lax** (Strict makes the sign-in redirect loop: the
    browser withholds the cookie on the way back from the sign-in page).
    Note its **Application Audience (AUD)
@@ -871,6 +990,46 @@ so there is no Paid-plan requirement anywhere in this checklist.
    before calling `commit` — exactly what the real client does. Delete the
    smoke-test reports from the admin page afterward.
 
+Steps 9–11 are needed only when a monitoring client reads the JSON routes
+unattended. They change nothing in the Worker, which verifies a service
+token's Access JWT like any other.
+
+9. **Create an Access service token** for the client (Zero Trust dashboard
+   → **Access controls** → **Service credentials** → **Service Tokens** →
+   **Create Service Token**). Copy the Client ID and Client Secret when the
+   token is generated: the secret is shown once. Store both in the
+   client's secret store, never in this repository. The token stops
+   working when its duration ends, so ask for a warning (main dashboard →
+   **Notifications** → **Add** → **Expiring Access Service Token**); the
+   token's **Refresh** action extends it and keeps the same ID and secret.
+10. **Add a Service Auth policy and attach it to the application from
+    step 7.** Create a policy (**Access controls** → **Policies** → **Add a
+    policy**) whose action is **Service Auth** and whose **Include** rule
+    is the selector **Service Token** with the token from step 9. The
+    action must be Service Auth: under an Allow policy, Access sends the
+    client to the sign-in page. Then edit the application and add the
+    policy beside the maintainer's Allow policy, which stays as it is.
+    Order does not matter; Access evaluates Service Auth policies before
+    Allow policies.
+11. **Verify the token**:
+    ```sh
+    curl -s -o /dev/null -w '%{http_code} %{content_type}\n' \
+      -H 'CF-Access-Client-Id: <client id>' \
+      -H 'CF-Access-Client-Secret: <client secret>' \
+      https://reports.hew3d.com/report/admin/api/reports
+    # 200 application/json
+    ```
+    `302`: Access asked for a sign-in, so no Service Auth policy is attached
+    to the application. `403` with an HTML body: Access refused the token;
+    check that the policy names it and that the ID and secret are the ones
+    from step 9. `403` with the plain body `Forbidden`: Access admitted the
+    token and the Worker refused its JWT (`ACCESS_AUD` or
+    `ACCESS_TEAM_DOMAIN`). The same request to `/report/admin/` answers
+    `200 text/html` and marks nothing viewed, which tests the token on a
+    deployment that does not have the JSON routes yet. Pasting the secret
+    into a command puts it in shell history; read it from the secret store
+    in a subshell instead.
+
 **Moving an existing deployment's admin pages to `reports.hew3d.com`** (the
 admin pages used to be served from `app.hew3d.com`). Order matters: bring
 the new host up and prove it before closing the old Access application, so
@@ -902,4 +1061,5 @@ redeploy the previous commit.
 `share-relay`'s `DASHBOARD-SETUP.md` items (the zone's one free Rate
 Limiting Rule, the billing tripwire) are already spent by that Worker;
 this one adds no dashboard-only configuration beyond the Access
-application in step 7 and the `reports` DNS record in step 6.
+application in step 7, the `reports` DNS record in step 6, and, for a
+monitoring client, the service token and policy in steps 9 and 10.

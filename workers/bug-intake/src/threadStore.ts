@@ -562,6 +562,15 @@ export class ThreadStore {
     }
   }
 
+  /** Every message of the thread, in `seq` order, for the API's detail
+   *  route (`ReportThread.peek`). Like `adminView`, a dying thread still
+   *  shows its messages. Writes nothing and does not migrate: a thread with
+   *  no schema has no messages. */
+  async peek(): Promise<ThreadMessage[]> {
+    if (!this.hasSchema()) return []
+    return this.messagesAfter(0)
+  }
+
   /** Wipes storage and cancels the alarm — idempotent, and does NOT tell
    *  the index (admin delete removes the row itself). */
   async destroy(): Promise<void> {

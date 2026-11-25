@@ -19,6 +19,7 @@ import {
   ThreadStore,
   type ThreadView,
   type ThreadAdminView,
+  type ThreadMessage,
   type ThreadStatus,
   type PostReporterResult,
   type AppendResult,
@@ -86,6 +87,11 @@ export class ReportThread extends DurableObject<BugIntakeEnv> {
   /** RPC — admin detail page. */
   adminView(now: number): Promise<ThreadAdminView | null> {
     return this.store_.adminView(now)
+  }
+
+  /** RPC — every message, in `seq` order (see `ThreadStore.peek`). */
+  peek(): Promise<ThreadMessage[]> {
+    return this.store_.peek()
   }
 
   /** RPC — admin delete. */

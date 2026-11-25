@@ -54,7 +54,7 @@ export const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000
  *  (and reserved-but-uncommitted) reports' `sizeBytes` would pass this
  *  ceiling (507) — the account's 5 GB of free Durable Object storage is
  *  shared with share-relay's ten-minute drops, so this Worker claims a
- *  fixed slice rather than the whole thing. 3 GiB fits about 34 reports the
+ *  fixed slice rather than the whole thing. 3 GiB fits about 53 reports the
  *  size of the design's 59.9 MB worked example, but only 3 at the 1 GiB
  *  `MAX_UPLOAD_BYTES` cap: a run of reports carrying huge files, or a
  *  deliberate one, fills the store until the admin page deletes them or

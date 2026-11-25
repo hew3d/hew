@@ -75,6 +75,13 @@ export interface ReportRow {
    *  stays (metadata and thread, `sizeBytes = 0`) but there is nothing to
    *  download. */
   bundleDeleted: boolean
+  /** When the report's thread last had a message, a status change, or an
+   *  end, as far as the index knows (`setThreadCache` and the thread
+   *  endings in `threadEnded`/`markDestroyed`). Never lowered. Null for a
+   *  row written before the column existed and for a thread that has not
+   *  changed. Only the list's `lastActivity` reads it; the admin pages do
+   *  not. */
+  threadActivityAt: number | null
 }
 
 /** What `reserveReport` is called with — everything about the report
@@ -97,6 +104,9 @@ export interface ThreadCachePatch {
   status?: string
   statusVersion?: string | null
   reporterActivityAt?: number
+  /** Raised to this value if it is larger than the stored one; never lowers
+   *  the column (`setThreadCache`). */
+  threadActivityAt?: number
 }
 
 export type ReserveResult =
@@ -127,6 +137,7 @@ interface RawReportRow {
   adminViewedAt: number | null
   parentId: string | null
   bundleDeleted: number
+  threadActivityAt: number | null
 }
 
 function rowToReportRow(r: RawReportRow): ReportRow {
@@ -142,7 +153,7 @@ function rowToReportRow(r: RawReportRow): ReportRow {
 
 const REPORT_COLUMNS =
   'id, receivedAt, appVersion, platform, descriptionPreview, sizeBytes, triaged, committed, ' +
-  'following, status, statusVersion, reporterActivityAt, adminViewedAt, parentId, bundleDeleted'
+  'following, status, statusVersion, reporterActivityAt, adminViewedAt, parentId, bundleDeleted, threadActivityAt'
 
 /** Durable Object SQLite allows at most 100 bound parameters per statement;
  *  a multi-id statement binds at most this many ids (plus its extras). */
@@ -165,6 +176,7 @@ const ADDED_REPORT_COLUMNS: ReadonlyArray<[string, string]> = [
   ['adminViewedAt', 'INTEGER'],
   ['parentId', 'TEXT'],
   ['bundleDeleted', 'INTEGER NOT NULL DEFAULT 0'],
+  ['threadActivityAt', 'INTEGER'],
 ]
 
 export class IndexStore {
@@ -511,7 +523,8 @@ export class IndexStore {
     for (const chunk of chunked(ids, SQL_IN_CHUNK)) {
       const marks = chunk.map(() => '?').join(', ')
       this.storage.sql.exec(
-        `UPDATE reports SET bundleDeleted = 1, following = 0, sizeBytes = 0, status = 'open', statusVersion = NULL WHERE id IN (${marks})`,
+        `UPDATE reports SET bundleDeleted = 1, following = 0, sizeBytes = 0, threadActivityAt = CASE WHEN status <> 'open' THEN ? ELSE threadActivityAt END, status = 'open', statusVersion = NULL WHERE id IN (${marks})`,
+        Date.now(),
         ...chunk,
       )
     }
@@ -547,7 +560,14 @@ export class IndexStore {
   async threadEnded(id: string): Promise<void> {
     this.migrate()
     this.storage.sql.exec('DELETE FROM reports WHERE id = ? AND bundleDeleted = 1', id)
-    this.storage.sql.exec("UPDATE reports SET following = 0, status = 'open', statusVersion = NULL WHERE id = ?", id)
+    // An ending stamps `threadActivityAt` only when it changes a status the
+    // reader can see (not one already `open`). The CASE reads the status as
+    // it was before this statement.
+    this.storage.sql.exec(
+      "UPDATE reports SET following = 0, threadActivityAt = CASE WHEN status <> 'open' THEN ? ELSE threadActivityAt END, status = 'open', statusVersion = NULL WHERE id = ?",
+      Date.now(),
+      id,
+    )
   }
 
   /** Copies a thread change into the row's display caches. */
@@ -563,6 +583,16 @@ export class IndexStore {
     }
     if (patch.reporterActivityAt !== undefined) {
       this.storage.sql.exec('UPDATE reports SET reporterActivityAt = ? WHERE id = ?', patch.reporterActivityAt, id)
+    }
+    // COALESCE, because MAX with a NULL argument is NULL: a row with no
+    // value yet takes the patch's.
+    if (patch.threadActivityAt !== undefined) {
+      this.storage.sql.exec(
+        'UPDATE reports SET threadActivityAt = MAX(COALESCE(threadActivityAt, ?), ?) WHERE id = ?',
+        patch.threadActivityAt,
+        patch.threadActivityAt,
+        id,
+      )
     }
   }
 
