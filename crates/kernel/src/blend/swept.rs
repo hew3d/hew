@@ -41,6 +41,250 @@ thread_local! {
     static AVOID: std::cell::RefCell<Vec<Point3>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    /// Where the facet walk's stations are checked (test support): what
+    /// the current attempt's strips recorded (`pending`, a strip that fails
+    /// to build taking its records back out), and the last attempt that
+    /// built (`committed`), the one [`with_station_record`] answers.
+    static RECORDER: std::cell::RefCell<Option<(StationRecord, StationRecord)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Adds to the current attempt's record, where one is kept.
+fn record(f: impl FnOnce(&mut StationRecord)) {
+    RECORDER.with(|c| {
+        if let Some((pending, _)) = c.borrow_mut().as_mut() {
+            f(pending);
+        }
+    });
+}
+
+/// How long each of the current attempt's records is, where one is kept.
+fn record_mark() -> Option<[usize; 4]> {
+    RECORDER.with(|c| {
+        c.borrow().as_ref().map(|(p, _)| {
+            [
+                p.found.len(),
+                p.balls.len(),
+                p.bridges.len(),
+                p.slides.len(),
+            ]
+        })
+    })
+}
+
+/// Takes back what the current attempt recorded since `mark`.
+fn record_rollback(mark: Option<[usize; 4]>) {
+    let Some([a, b, c, d]) = mark else {
+        return;
+    };
+    record(|p| {
+        p.found.truncate(a);
+        p.balls.truncate(b);
+        p.bridges.truncate(c);
+        p.slides.truncate(d);
+    });
+}
+
+/// Starts a blend attempt's record afresh (test support).
+pub(crate) fn record_attempt_begin() {
+    record(|p| *p = StationRecord::default());
+}
+
+/// The attempt that just built is the one the record describes (test
+/// support): its record replaces the last.
+pub(crate) fn record_attempt_commit() {
+    RECORDER.with(|c| {
+        if let Some((pending, committed)) = c.borrow_mut().as_mut() {
+            *committed = pending.clone();
+        }
+    });
+}
+
+/// A station whose ball bridges a valley seam without reaching it, its rail
+/// the seam point nearest its center: that rail point, and how far past the
+/// ball it lies, over the ball's radius.
+#[doc(hidden)]
+pub type Bridge = (Point3, f64);
+
+/// What the station check found in one call: the rails off their balls,
+/// their own contacts or their feet (`found`, what [`with_rail_check`]
+/// answers), the balls, the bridges, and how far each rail slid along its
+/// foot once the fans had moved it (`slides`).
+#[doc(hidden)]
+#[derive(Debug, Clone, Default)]
+pub struct StationRecord {
+    pub found: Vec<String>,
+    pub balls: Vec<Vec<BallAt>>,
+    pub bridges: Vec<Bridge>,
+    pub slides: Vec<f64>,
+}
+
+/// Runs `f` with every facet-walk round's stations checked as the strip is
+/// built from them ([`station_check`]: each rail its own contact on its foot
+/// and on its ball, a bridge apart; once the fans have moved them, still on
+/// its foot and its ball); returns `f`'s result and what the check found.
+/// Test support only.
+pub(crate) fn with_rail_check<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let (out, record) = with_station_record(f);
+    (out, record.found)
+}
+
+/// A facet-walk round's ball at one station: its center, radius and the
+/// section's turn from one segment to the next (radians).
+#[doc(hidden)]
+pub type BallAt = (Point3, f64, f64);
+
+/// [`with_rail_check`], also returning every closed facet-walk round's
+/// balls, station by station, as the strip is built from them. The record
+/// is the last blend attempt that built's (the one a returned result came
+/// from; of a blend built in two passes, the second's), its strips that
+/// failed to build taken out. Test support only.
+pub(crate) fn with_station_record<T>(f: impl FnOnce() -> T) -> (T, StationRecord) {
+    let before = RECORDER.with(|c| c.replace(Some(Default::default())));
+    let out = f();
+    let (_, committed) = RECORDER.with(|c| c.replace(before)).unwrap_or_default();
+    (out, committed)
+}
+
+/// Whether seam `e` of `obj` is a valley seen from a ball on the outside of
+/// the solid (`outside`, a concave chain's) or the inside: its faces turn
+/// toward the ball. `None` where it is flat or not a seam.
+fn seam_is_valley(obj: &Object, e: EdgeId, outside: bool) -> Option<bool> {
+    let (f1, f2) = obj.edge_faces(e)?;
+    let p1 = obj.faces()[f1].plane;
+    let far = obj
+        .loop_positions(obj.faces()[f2].outer_loop)
+        .map(|x| p1.signed_distance(x))
+        .fold(0.0_f64, |m, d| if d.abs() > m.abs() { d } else { m });
+    if far.abs() <= tol::SWEPT_SLACK {
+        return None;
+    }
+    // In front of the first face's plane: a concave edge of the solid.
+    Some((far > 0.0) == outside)
+}
+
+/// The farthest the fans may slide a rail along its foot off its own
+/// contact. Measured across the curves scoreboard and the swept shape
+/// specs: 61.1 µm at most (a seam turn along the faceted plinth's x = y
+/// seam), a tenth over that here.
+const FAN_SLIDE_MAX: f64 = 67.2e-6;
+
+/// What the station check finds: the rails off their balls, their own
+/// contacts or their feet (failures), the bridges, and how far each rail
+/// slid along its foot off its own contact.
+type Checked = (Vec<String>, Vec<Bridge>, Vec<f64>);
+
+/// Checks the stations' rails. Each must be on its ball (a radius from its
+/// center, to [`tol::SWEPT_SLACK`]) unless it is a bridge: a seam foot on a
+/// valley seam the ball does not reach, its rail the seam point nearest the
+/// center. As the walk solves them (`fanned` false) each must be its own
+/// contact on its foot, to [`tol::POINT_MERGE`]. Once the fans have moved
+/// them (`fanned`) a rail may slide along its foot (the slide is returned),
+/// by no more than [`FAN_SLIDE_MAX`], but must stay on it, to the slack: on
+/// the seam's line, in the facet, at the corner; slid `d`, it may lie off
+/// its ball by √(r² + d²) − r more.
+fn station_check(obj: &Object, stations: &[Station], outside: bool, fanned: bool) -> Checked {
+    let mut off = Vec::new();
+    let mut bridges = Vec::new();
+    let mut slides = Vec::new();
+    for (j, st) in stations.iter().enumerate() {
+        let (Some(ac), Some(r)) = (st.sec.arc_center, st.sec.radius) else {
+            continue;
+        };
+        let c = st.q + ac;
+        for x in 0..2 {
+            let Some(own) = own_contact(obj, st, x) else {
+                continue;
+            };
+            let p = rail_point(st, x);
+            let at = format!(
+                "{}station {j} side {x} {:?}: rail ({:.4}, {:.4}, {:.4}) mm",
+                if fanned { "after the fans, " } else { "" },
+                st.feet[x],
+                p.x * 1e3,
+                p.y * 1e3,
+                p.z * 1e3
+            );
+            let d = (p - own).length();
+            if fanned {
+                let on_foot = match st.feet[x] {
+                    Foot::Face(f) => {
+                        obj.faces()[f].plane.signed_distance(p).abs() <= tol::SWEPT_SLACK
+                            && in_face(obj, f, own_or(obj, f, p))
+                    }
+                    Foot::Seam(e) => obj.edge_endpoints(e).is_some_and(|(a, b)| {
+                        super::query::point_segment_distance(p, a, b) <= tol::SWEPT_SLACK
+                    }),
+                    Foot::Corner(v) => {
+                        (p - obj.vertices()[v].position).length() <= tol::SWEPT_SLACK
+                    }
+                };
+                if !on_foot {
+                    off.push(format!("{at} left its foot"));
+                    continue;
+                }
+                if d > FAN_SLIDE_MAX {
+                    off.push(format!("{at} slid {d:.3e} m along its foot"));
+                    continue;
+                }
+                slides.push(d);
+            } else if d > tol::POINT_MERGE {
+                off.push(format!("{at} is {d:.3e} m off its own contact"));
+                continue;
+            }
+            // A rail slid `d` along its foot off its own contact lies off the
+            // ball by at most √(r² + d²) − r; an unslid one by the slack.
+            let slid = if d > tol::POINT_MERGE {
+                (r * r + d * d).sqrt() - r
+            } else {
+                0.0
+            };
+            let gap = (p - c).length() - r;
+            if gap.abs() <= slid + tol::SWEPT_SLACK {
+                continue;
+            }
+            let bridge = match st.feet[x] {
+                Foot::Seam(e) => gap > 0.0 && seam_is_valley(obj, e, outside) == Some(true),
+                _ => false,
+            };
+            if bridge {
+                if !fanned {
+                    bridges.push((p, gap / r));
+                }
+            } else {
+                off.push(format!("{at} is {gap:.3e} m off its ball"));
+            }
+        }
+    }
+    (off, bridges, slides)
+}
+
+/// `p` taken onto the plane of face `f`.
+fn own_or(obj: &Object, f: FaceId, p: Point3) -> Point3 {
+    let pl = obj.faces()[f].plane;
+    p - pl.normal() * pl.signed_distance(p)
+}
+
+/// The point of side `x`'s foot of `st` nearest its ball's center: the
+/// ball's own contact there (on a facet's plane, a seam's line, a corner's
+/// point; a valley corner's seam station by construction the seam point
+/// nearest the center).
+fn own_contact(obj: &Object, st: &Station, x: usize) -> Option<Point3> {
+    let c = st.q + st.sec.arc_center?;
+    Some(match st.feet[x] {
+        Foot::Face(f) => {
+            let pl = obj.faces()[f].plane;
+            c - pl.normal() * pl.signed_distance(c)
+        }
+        Foot::Seam(e) => {
+            let (l0, l1) = obj.edge_endpoints(e)?;
+            nearest_on_line(c, l0, l1)
+        }
+        Foot::Corner(v) => obj.vertices()[v].position,
+    })
+}
+
 /// How many rounds [`plan_swept`] (and the blend's checks after it) take
 /// out stations near where a strip could not be built.
 pub(crate) const AVOID_ROUNDS: usize = 8;
@@ -268,6 +512,9 @@ struct Solver<'a> {
     /// has its tangent points a hair past the face; they are carried back
     /// into the plane along the chain afterwards).
     extend_past: std::cell::Cell<[Option<FaceId>; 2]>,
+    /// The chain's sides, for the facet walk to tell where a contact has
+    /// left a side ([`geo::Surface::leaves_side`]).
+    sides: Option<&'a geo::Surface>,
 }
 
 fn unsupported(at: Point3) -> PlanFail {
@@ -303,6 +550,11 @@ fn seg_dist(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     trig::hypot(p[0] - a[0] - ab[0] * t, p[1] - a[1] - ab[1] * t)
 }
 
+/// [`in_face`], for the blend's test hooks.
+pub(crate) fn in_face_for_test(obj: &Object, f: FaceId, p: Point3) -> bool {
+    in_face(obj, f, p)
+}
+
 /// Whether `p` (in `f`'s plane) lies in face `f`, its boundary counting.
 fn in_face(obj: &Object, f: FaceId, p: Point3) -> bool {
     let (plane, rings) = face_rings(obj, f);
@@ -311,11 +563,16 @@ fn in_face(obj: &Object, f: FaceId, p: Point3) -> bool {
 
 /// Whether `p` lies in the polygon `rings` (outer first, then holes) drawn
 /// in `plane`, its boundary counting.
+/// How near a polygon's boundary a point counts as on it ([`in_rings`]),
+/// and so how far past an edge a point must lie to be past it
+/// ([`edges_past`]).
+const IN_FACE_BOUNDARY: f64 = tol::PLANE_DIST;
+
 fn in_rings(plane: &Plane, rings: &[Vec<[f64; 2]>], p: Point3) -> bool {
     let q = to2(plane, p);
     let on_boundary = rings
         .iter()
-        .any(|r| (0..r.len()).any(|i| seg_dist(q, r[i], r[(i + 1) % r.len()]) <= tol::PLANE_DIST));
+        .any(|r| (0..r.len()).any(|i| seg_dist(q, r[i], r[(i + 1) % r.len()]) <= IN_FACE_BOUNDARY));
     if on_boundary {
         return true;
     }
@@ -332,6 +589,97 @@ fn in_rings(plane: &Plane, rings: &[Vec<[f64; 2]>], p: Point3) -> bool {
         }
     }
     inside
+}
+
+/// The distance from `c` to face `f` as a polygon.
+fn facet_distance(obj: &Object, f: FaceId, c: Point3) -> f64 {
+    let plane = obj.faces()[f].plane;
+    let sd = plane.signed_distance(c);
+    if in_face(obj, f, c - plane.normal() * sd) {
+        return sd.abs();
+    }
+    obj.face_loops(f)
+        .into_iter()
+        .flat_map(|l| obj.loop_half_edges(l).collect::<Vec<_>>())
+        .filter_map(|h| obj.edge_endpoints(obj.half_edges()[h].edge))
+        .map(|(a, b)| super::query::point_segment_distance(c, a, b))
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// The point of the line through `l0` and `l1` nearest `c`.
+fn nearest_on_line(c: Point3, l0: Point3, l1: Point3) -> Point3 {
+    let d = l1 - l0;
+    let l2 = d.dot(d);
+    if l2 <= 0.0 {
+        return l0;
+    }
+    l0 + d * ((c - l0).dot(d) / l2)
+}
+
+/// The center of the ball of radius `r` touching the plane of facet `h`,
+/// the line of seam `e` and the plane of facet `g` (on the ball's side of
+/// each plane, `sigma` as the solver's): see `Solver::ridge_corner`. `None`
+/// where no root, or more than one, is admissible.
+fn ridge_corner_ball(
+    obj: &Object,
+    sigma: f64,
+    r: f64,
+    e: EdgeId,
+    g: FaceId,
+    h: FaceId,
+) -> Option<Point3> {
+    let (ph, pg) = (obj.faces()[h].plane, obj.faces()[g].plane);
+    let (nh, ng) = (ph.normal(), pg.normal());
+    // n·c = n·p − σ r for both planes: a line of centers.
+    let (dh, dg) = (
+        nh.dot(ph.point().to_vec()) - sigma * r,
+        ng.dot(pg.point().to_vec()) - sigma * r,
+    );
+    let d = nh.cross(ng);
+    let dd = d.dot(d);
+    if dd <= tol::NORMALIZE_MIN_LENGTH {
+        return None;
+    }
+    let c0 = (ng.cross(d) * dh + d.cross(nh) * dg) / dd;
+    let c0 = Point3::new(c0.x, c0.y, c0.z);
+    let u = d.normalized().ok()?;
+    let (l0, l1) = obj.edge_endpoints(e)?;
+    let ld = (l1 - l0).normalized().ok()?;
+    // |(c0 + u s − l0) across ld|² = r²: a s² + 2 b s + k = 0.
+    let a_v = u - ld * u.dot(ld);
+    let w = c0 - l0;
+    let b_v = w - ld * w.dot(ld);
+    let (a, b, k) = (a_v.dot(a_v), a_v.dot(b_v), b_v.dot(b_v) - r * r);
+    if a <= tol::NORMALIZE_MIN_LENGTH {
+        return None;
+    }
+    let disc = b * b - a * k;
+    if disc < 0.0 {
+        return None;
+    }
+    let root = disc.sqrt();
+    let mut roots = vec![(-b - root) / a];
+    if root / a > tol::POINT_MERGE {
+        roots.push((-b + root) / a);
+    }
+    let (fa, fb) = obj.edge_faces(e)?;
+    let admissible: Vec<Point3> = roots
+        .into_iter()
+        .map(|s| c0 + u * s)
+        .filter(|&c| {
+            let on_e = nearest_on_line(c, l0, l1);
+            super::query::point_segment_distance(on_e, l0, l1) <= tol::SWEPT_SLACK
+                && in_face(obj, g, c + ng * (sigma * r))
+                && in_face(obj, h, c + nh * (sigma * r))
+                && [fa, fb]
+                    .into_iter()
+                    .all(|f| facet_distance(obj, f, c) >= r - tol::SWEPT_PLANE_SLACK)
+        })
+        .collect();
+    match admissible[..] {
+        [c] => Some(c),
+        _ => None,
+    }
 }
 
 /// The boundary edge of `f` nearest `p` (in `f`'s plane, outside `f`) among
@@ -404,9 +752,72 @@ impl Solver<'_> {
                 // within reach of the seam segment.
                 let (p0, p1) = obj.edge_endpoints(e)?;
                 let near = super::query::point_segment_distance(c, p0, p1) <= 2.0 * r;
-                (clear < -tol::PLANE_DIST && near).then_some(g)
+                // And into g itself, not only its plane: the plane runs on
+                // past g's other edges (past a ridge beside it).
+                let into = facet_distance(obj, g, c) < r - tol::PLANE_DIST;
+                (clear < -tol::PLANE_DIST && near && into).then_some(g)
             })
         })
+    }
+
+    /// A facet across a valley seam of one of ridge `e`'s two facets (on
+    /// this side, not the other side's) that a ball of the profile's radius
+    /// about `c` dips into: nearer `c` than the radius as a polygon, not
+    /// merely as a plane (the plane of a facet runs on past the ridge).
+    fn ridge_dips(&self, e: EdgeId, c: Point3, other: &[FaceId], x: usize) -> Option<FaceId> {
+        let BlendProfile::Round { radius: r, .. } = *self.profile else {
+            return None;
+        };
+        let obj = self.obj;
+        let (fa, fb) = obj.edge_faces(e)?;
+        [fa, fb].into_iter().find_map(|f| {
+            obj.face_loops(f).into_iter().find_map(|l| {
+                obj.loop_half_edges(l).find_map(|h| {
+                    let s = obj.half_edges()[h].edge;
+                    let (a, b) = obj.edge_faces(s)?;
+                    let g = if a == f { b } else { a };
+                    (s != e
+                        && g != fa
+                        && g != fb
+                        && !other.contains(&g)
+                        && !self.other_side[x].contains(&g)
+                        && self.is_valley(s, f)
+                        && facet_distance(obj, g, c) < r - tol::PLANE_DIST)
+                        .then_some(g)
+                })
+            })
+        })
+    }
+
+    /// Whether a ball of the profile's radius about `c` clears both facets
+    /// of ridge `e` (as polygons, to [`tol::PLANE_DIST`]).
+    fn clears_ridge(&self, e: EdgeId, c: Point3) -> bool {
+        let BlendProfile::Round { radius: r, .. } = *self.profile else {
+            return false;
+        };
+        let obj = self.obj;
+        obj.edge_faces(e).is_some_and(|(fa, fb)| {
+            [fa, fb]
+                .into_iter()
+                .all(|f| facet_distance(obj, f, c) >= r - tol::PLANE_DIST)
+        })
+    }
+
+    /// The corner ball at station `q` where side `x` leaves ridge `e` for
+    /// facet `g` across a valley seam, the other side resting on facet `h`:
+    /// the center at the profile's radius from `h`'s plane and `g`'s plane
+    /// (on the ball's side of each) and from `e`'s line. The first two hold
+    /// on a line; it meets the cylinder about `e` in at most two points. A
+    /// root is admissible where the ball touches each of the three where
+    /// they are: its contact on `e` within the seam segment, on `g` and on
+    /// `h` within those facets, and it clears both of `e`'s facets as
+    /// polygons. Exactly one admissible root is the corner; none, or two,
+    /// fail the station as unsupported rather than pick one.
+    fn ridge_corner(&self, q: Point3, e: EdgeId, g: FaceId, h: FaceId) -> Result<Point3, PlanFail> {
+        let BlendProfile::Round { radius: r, .. } = *self.profile else {
+            return Err(unsupported(q));
+        };
+        ridge_corner_ball(self.obj, self.sigma, r, e, g, h).ok_or_else(|| unsupported(q))
     }
 
     /// Of the two facets of a valley, the one the ball rests on at this
@@ -694,6 +1105,34 @@ impl Solver<'_> {
                             > tol::SWEPT_PLANE_SLACK
                         {
                             return Err(unsupported(q));
+                        }
+                        // Riding the ridge, the ball must still clear the
+                        // facets across its two facets' valley seams. One it
+                        // dips into is where it leaves the ridge for that
+                        // facet, once the ball there rests on the facet and
+                        // clears the ridge; `refine` then puts in the corner
+                        // ball touching both (see `ridge_jump`). Until then
+                        // the ridge stands.
+                        let other = feet[1 - x].faces(obj);
+                        let Some(g) = sec
+                            .arc_center
+                            .and_then(|c| self.ridge_dips(e, q + c, &other, x))
+                        else {
+                            continue;
+                        };
+                        let mut on_g = feet;
+                        on_g[x] = Foot::Face(g);
+                        let clears = self.section(q, t, on_g).is_ok_and(|s| {
+                            let k = if x == 0 { 0 } else { s.offsets.len() - 1 };
+                            in_face(obj, g, q + s.offsets[k])
+                                && s.arc_center.is_some_and(|c| self.clears_ridge(e, q + c))
+                        });
+                        if clears {
+                            if !seen[x].insert(Foot::Face(g)) {
+                                return Err(unsupported(q));
+                            }
+                            feet[x] = Foot::Face(g);
+                            settled = false;
                         }
                         continue;
                     }
@@ -1153,6 +1592,16 @@ fn refine(
 ) -> Result<(), PlanFail> {
     let obj = sv.obj;
     let Some(x) = (0..2).find(|&x| !share(obj, sa.feet[x], sb.feet[x])) else {
+        // Where the ride ends, right after `sa` itself so the stations stay
+        // in order. Every station's rail is its own contact.
+        let ends = ridge_end(sv, at, la, sa, lb, sb)?;
+        if !ends.is_empty()
+            && out.last().is_some_and(|last| {
+                last.q == sa.q && last.feet == sa.feet && last.sec.offsets == sa.sec.offsets
+            })
+        {
+            out.extend(ends);
+        }
         return Ok(());
     };
     if depth > 64 {
@@ -1166,6 +1615,11 @@ fn refine(
         // `sb`'s foot, the other side solving freely from where it was;
         // then the rest is refined again.
         let (fa, fb) = (sa.feet[x].faces(obj), sb.feet[x].faces(obj));
+        if let Some(corner) = ridge_jump(sv, sa, sb, x)? {
+            let after = corner[1].clone();
+            out.extend(corner);
+            return refine(sv, at, la, &after, lb, sb, out, depth + 1);
+        }
         let path = fa
             .iter()
             .flat_map(|&f| fb.iter().filter_map(move |&g| fan_path(obj, sa.q, f, g)))
@@ -1182,7 +1636,7 @@ fn refine(
                 if before.sec.offsets != prev.sec.offsets {
                     out.push(before);
                 }
-                out.push(corner);
+                out.extend(corner);
                 out.push(after.clone());
                 prev = after;
                 continue;
@@ -1283,7 +1737,7 @@ fn refine(
         let (before, corner, after) = valley_cross(sv, at, lam, None, x, f, g, seam)?;
         refine(sv, at, la, sa, lam, &before, out, depth + 1)?;
         out.push(before);
-        out.push(corner);
+        out.extend(corner);
         out.push(after.clone());
         return refine(sv, at, lam, &after, lb, sb, out, depth + 1);
     }
@@ -1306,6 +1760,420 @@ fn refine(
     refine(sv, at, la, sa, lam, &st, out, depth + 1)?;
     out.push(st.clone());
     refine(sv, at, lam, &st, lb, sb, out, depth + 1)
+}
+
+/// The two seam stations between `sa` and `sb`, one chain point apart,
+/// where side `x` steps from riding ridge `e` to resting on facet `g`
+/// across a valley seam of one of `e`'s facets (or back): the ball in the
+/// corner between them (`Solver::ridge_corner`) touches both, and its rail
+/// steps from its contact on the ridge to its contact on `g` through the
+/// valley seam, as in a valley between two facets (see
+/// [`corner_station`]). `Ok(None)` where the two stations are not such a
+/// step; an error where they are, but the corner ball is not unique or the
+/// two stations are not at it.
+fn ridge_jump(
+    sv: &Solver,
+    sa: &Station,
+    sb: &Station,
+    x: usize,
+) -> Result<Option<[Station; 2]>, PlanFail> {
+    if sv.geo.is_some() || !sv.rolls() {
+        return Ok(None);
+    }
+    let obj = sv.obj;
+    let (e, g) = match (sa.feet[x], sb.feet[x]) {
+        (Foot::Seam(e), Foot::Face(g)) | (Foot::Face(g), Foot::Seam(e)) => (e, g),
+        _ => return Ok(None),
+    };
+    let Some(valley) = Foot::Seam(e)
+        .faces(obj)
+        .into_iter()
+        .find_map(|f| common_edge(obj, f, g).filter(|&s| sv.is_valley(s, f)))
+    else {
+        return Ok(None);
+    };
+    let (Foot::Face(h), Foot::Face(h2)) = (sa.feet[1 - x], sb.feet[1 - x]) else {
+        return Err(unsupported(sa.q));
+    };
+    if h != h2 {
+        return Err(unsupported(sa.q));
+    }
+    let c = sv.ridge_corner(sa.q, e, g, h)?;
+    for st in [sa, sb] {
+        let at = st.q + st.sec.arc_center.ok_or_else(|| unsupported(sa.q))?;
+        if (at - c).length() > tol::BLEND_CORNER_AGREE {
+            return Err(unsupported(sa.q));
+        }
+    }
+    corner_station(obj, sa, sb, x, valley).map(Some)
+}
+
+/// Where the ball, touching a seam at `sa` (at `la`) or at `sb` (at `lb`)
+/// on one side, rolls off it onto one of the seam's facets, on which it
+/// rests between them: the stations whose contact on that facet lies on the
+/// seam, in chain order (none, one or two). A ridge contact touches the
+/// seam line, its section tangent to neither facet. The bisection in
+/// [`refine`] puts a seam station where the facets change, so a ride
+/// normally ends at its seam station; where a chain vertex falls in the
+/// ride its station rides the seam too, and the rail from it straight to a
+/// contact inside the facet (or to the next seam of that facet, at the
+/// facet's other end) would leave the strip beside it on neither tangent
+/// and the ball off the facet in between. The station where the contact
+/// leaves (or reaches) the seam makes the ride's end a fan about its rail
+/// point, so the strip along the facet is built between true contacts on
+/// it. The facet walk's rounds only; none where no such station is needed
+/// or holds (the ridge contact as near the facet's tangent as the strip's
+/// facets are to each other, the contact never reaching the seam, a free
+/// solve there that does not rest on the facet, or the other side moving
+/// off its feet).
+fn ridge_end(
+    sv: &Solver,
+    at: &StationAt,
+    la: f64,
+    sa: &Station,
+    lb: f64,
+    sb: &Station,
+) -> Result<Vec<Station>, PlanFail> {
+    if sv.geo.is_some() || !sv.rolls() || lb - la <= SAME_POINT {
+        return Ok(Vec::new());
+    }
+    let obj = sv.obj;
+    let on = |e: EdgeId, g: FaceId| obj.edge_faces(e).is_some_and(|(a, b)| a == g || b == g);
+    for x in 0..2 {
+        // The facet the ball rests on between: the one `sb`'s foot is on,
+        // or the one two different seams share.
+        let g = match (sa.feet[x], sb.feet[x]) {
+            (Foot::Seam(e), Foot::Face(g)) | (Foot::Face(g), Foot::Seam(e)) if on(e, g) => g,
+            (Foot::Seam(e), Foot::Seam(e2)) if e != e2 => {
+                let Some((a, b)) = obj.edge_faces(e) else {
+                    continue;
+                };
+                if on(e2, a) {
+                    a
+                } else if on(e2, b) {
+                    b
+                } else {
+                    continue;
+                }
+            }
+            _ => continue,
+        };
+        let mut pin = [None, None];
+        pin[x] = Some(Foot::Face(g));
+        let inside = |lam: f64| -> Option<(bool, Station)> {
+            let st = at(lam, None, pin).ok()?;
+            Some((in_face(obj, g, rail_point(&st, x)), st))
+        };
+        // A chain point where the ball rests on `g`: `sb` or `sa` where its
+        // foot is `g`, else the middle of the span.
+        let rest = match (sa.feet[x], sb.feet[x]) {
+            (_, Foot::Face(_)) => lb,
+            (Foot::Face(_), _) => la,
+            _ => 0.5 * (la + lb),
+        };
+        match inside(rest) {
+            Some((true, _)) => {}
+            // Between two seams of one wall, a ball resting on the wall at
+            // mid-span with its contact past the wall's facet, where every
+            // edge of the facet it lies past leaves the side (onto a face that
+            // is not the side's own, as past its top), does not fit against
+            // the wall: the round is too large for it, as the hard-edge rule
+            // finds it, on a drawn object. Past an edge to another facet of
+            // the side, it goes on as before; a contact that reaches a
+            // leaving edge only through a further facet of the side is not
+            // caught here.
+            Some((false, st))
+                if matches!((sa.feet[x], sb.feet[x]), (Foot::Seam(_), Foot::Seam(_)))
+                    && obj.planarity_tol <= tol::PLANE_DIST
+                    && sv.sides.is_some_and(|side| {
+                        all_leave(&edges_past(obj, g, rail_point(&st, x)), |e| {
+                            side.leaves_side(sv, x, Foot::Seam(e))
+                        })
+                    }) =>
+            {
+                return Err(PlanFail::Size(super::LimitFeature::AdjacentFace));
+            }
+            _ => continue,
+        }
+        let ends: Vec<(f64, &Station)> = [(la, sa), (lb, sb)]
+            .into_iter()
+            .filter(|(_, st)| matches!(st.feet[x], Foot::Seam(_)))
+            .collect();
+        // A ride ending on `g` (the seam's own facet, `sb` resting on it)
+        // carries its rail along the seam to the contact on `g`; anywhere
+        // else the ball turns about the seam in place, and its contact on
+        // the seam must not move along it.
+        let ride = matches!((sa.feet[x], sb.feet[x]), (Foot::Seam(_), Foot::Face(_)));
+        let mut found = Vec::new();
+        for (l_seam, seam_st) in ends {
+            let Foot::Seam(e) = seam_st.feet[x] else {
+                continue;
+            };
+            if let Some(mut sts) =
+                seam_leaves(sv, at, &inside, x, g, e, seam_st, l_seam, rest, ride)?
+            {
+                if l_seam == lb {
+                    sts.reverse();
+                }
+                found.extend(sts);
+            }
+        }
+        if found.is_empty() {
+            continue;
+        }
+        // In chain order (`sa`'s end first), both feet sharing a facet with
+        // the stations either side. Where they do not, nothing goes in and
+        // the strip runs from `sa` to `sb` straight, as it did before these
+        // stations existed (the two share a facet on both sides). Across the
+        // curves scoreboard, every swept spec and every kernel test that
+        // return is never taken.
+        let mut prev = sa;
+        for st in &found {
+            if !(0..2).all(|y| share(obj, prev.feet[y], st.feet[y])) {
+                return Ok(Vec::new());
+            }
+            prev = st;
+        }
+        if !(0..2).all(|y| share(obj, prev.feet[y], sb.feet[y])) {
+            return Ok(Vec::new());
+        }
+        return Ok(found);
+    }
+    Ok(Vec::new())
+}
+
+/// The stations where the ball leaves seam `e` of side `x` for its facet
+/// `g` (or reaches it), between `seam_st` (at `l_seam`, its foot the seam)
+/// and the chain point `rest` where it rests on `g`, in order from the seam
+/// station: the ridge contacts on the seam as the ball turns about it, no
+/// two contact normals farther apart than the section turns from one facet
+/// of the strip to the next, then the contact on `g` at the seam. `inside`
+/// solves the ball with its foot pinned to `g` and says whether that
+/// contact lies in `g`. Each rail is its contact on the seam. `None` where
+/// no such station is needed or holds ([`ridge_end`]).
+///
+/// Where the ball turns about the seam in place (its contact on the seam
+/// where it reaches `g` is the seam station's, as on an upright wall) the
+/// turn is split as above. Where it rides the seam (`ride`: it ends the
+/// span resting on `g`), or its contact slides along the seam as it turns
+/// (a wall leaning over its foot), the one station ends the ride; a slide
+/// that turns back along the seam at the seam station is refused where the
+/// strip is built ([`folds_along_a_seam`]).
+#[allow(clippy::too_many_arguments)]
+fn seam_leaves(
+    sv: &Solver,
+    at: &StationAt,
+    inside: &dyn Fn(f64) -> Option<(bool, Station)>,
+    x: usize,
+    g: FaceId,
+    e: EdgeId,
+    seam_st: &Station,
+    l_seam: f64,
+    rest: f64,
+    ride: bool,
+) -> Result<Option<Vec<Station>>, PlanFail> {
+    let obj = sv.obj;
+    let Some(step) = section_step(seam_st) else {
+        return Ok(None);
+    };
+    // The unit normal of side `x`'s contact: from the rail to the center.
+    let normal = |st: &Station| -> Option<Vec3> {
+        let c = st.q + st.sec.arc_center?;
+        (c - rail_point(st, x)).normalized().ok()
+    };
+    // Only where the ridge contact's normal parts from `g`'s by more than
+    // the section turns from one facet of the strip to the next: nearer,
+    // the strip facet from it to a contact inside `g` is as near the
+    // tangent as the strip's own facets are to each other.
+    let Some(m) = normal(seam_st) else {
+        return Ok(None);
+    };
+    let tangent = obj.faces()[g].plane.normal() * (-sv.sigma);
+    if trig::acos(m.dot(tangent).clamp(-1.0, 1.0)) <= step {
+        return Ok(None);
+    }
+    // At the seam station the contact on `g` lies past the seam, where the
+    // ball rests inside `g`.
+    let (mut out_l, mut in_l) = (l_seam, rest);
+    match inside(out_l) {
+        Some((false, _)) => {}
+        _ => return Ok(None),
+    }
+    for _ in 0..SURFACE_BISECTIONS {
+        let mid = 0.5 * (out_l + in_l);
+        match inside(mid) {
+            Some((true, _)) => in_l = mid,
+            Some((false, _)) => out_l = mid,
+            None => return Ok(None),
+        }
+    }
+    let Some((_, pinned_st)) = inside(in_l) else {
+        return Ok(None);
+    };
+    // The free solve there must agree: the ball rests on `g` itself.
+    let Ok(mut st) = at(in_l, None, [None, None]) else {
+        return Ok(None);
+    };
+    if st.feet[x] != Foot::Face(g)
+        || (rail_point(&st, x) - rail_point(&pinned_st, x)).length() > tol::SWEPT_SLACK
+    {
+        return Ok(None);
+    }
+    // A ride that ends at the seam station (the bisection put it at the
+    // change) needs nothing more: the ball there is the seam station's.
+    if (0..2).all(|y| (rail_point(&st, y) - rail_point(seam_st, y)).length() <= tol::SWEPT_SLACK) {
+        return Ok(None);
+    }
+    let Some((p0, p1)) = obj.edge_endpoints(e) else {
+        return Ok(None);
+    };
+    if super::query::point_segment_distance(rail_point(&st, x), p0, p1) > tol::SWEPT_SLACK {
+        return Ok(None);
+    }
+    // Its contact on the seam: the seam point nearest its center (the
+    // contact on `g` lies on the seam to within the bisection).
+    let Some(c) = st.sec.arc_center.map(|a| st.q + a) else {
+        return Ok(None);
+    };
+    let k = if x == 0 { 0 } else { st.sec.offsets.len() - 1 };
+    st.sec.offsets[k] = nearest_on_line(c, p0, p1) - st.q;
+    // Where the contact moves along the seam (the ball rides it), the
+    // station ends the ride; only a turn in place is split. A ride either
+    // side of one seam station that turns back along the seam is refused
+    // where the strip is built ([`folds_along_a_seam`]).
+    if ride || (rail_point(&st, x) - rail_point(seam_st, x)).length() > tol::SWEPT_SLACK {
+        st.feet[x] = Foot::Seam(e);
+        return Ok(Some(vec![st]));
+    }
+    // The turn about the seam, split until no two neighboring contact
+    // normals part by more than a step of the section.
+    let mut pin = [None, None];
+    pin[x] = Some(Foot::Seam(e));
+    let mut turn = vec![(l_seam, seam_st.clone()), (in_l, st)];
+    let mut i = 0;
+    while i + 1 < turn.len() {
+        let (la, lb) = (turn[i].0, turn[i + 1].0);
+        let (Some(ma), Some(mb)) = (normal(&turn[i].1), normal(&turn[i + 1].1)) else {
+            return Ok(None);
+        };
+        if trig::acos(ma.dot(mb).clamp(-1.0, 1.0)) <= step || turn.len() > 64 {
+            i += 1;
+            continue;
+        }
+        let mid = 0.5 * (la + lb);
+        // Where the ball cannot be solved on the seam there (the solve
+        // refuses that point), the turn keeps the step it has.
+        let Ok(mut ms) = at(mid, Some(seam_st.feet), pin) else {
+            i += 1;
+            continue;
+        };
+        if ms.feet[x] != Foot::Seam(e) {
+            return Ok(None);
+        }
+        let Some(mc) = ms.sec.arc_center.map(|a| ms.q + a) else {
+            return Ok(None);
+        };
+        ms.sec.offsets[k] = nearest_on_line(mc, p0, p1) - ms.q;
+        turn.insert(i + 1, (mid, ms));
+    }
+    Ok(Some(turn.into_iter().skip(1).map(|(_, st)| st).collect()))
+}
+
+/// The chain point of a station where a rail runs along a seam and turns
+/// straight back along it: the station's rail on the seam, and the rails
+/// of the stations either side on the same seam, one way then the other.
+/// The ball touching a seam where its wall leans over its foot slides down
+/// the seam and back up as it turns about it; the strip either side would
+/// fold onto itself along the seam, which the cut does not build.
+fn folds_along_a_seam(obj: &Object, stations: &[Station], closed: bool) -> Option<Point3> {
+    let m = stations.len();
+    if m < 3 {
+        return None;
+    }
+    let range = if closed { 0..m } else { 1..m - 1 };
+    for j in range {
+        let (a, b, c) = (
+            &stations[(j + m - 1) % m],
+            &stations[j],
+            &stations[(j + 1) % m],
+        );
+        for x in 0..2 {
+            let Foot::Seam(e) = b.feet[x] else {
+                continue;
+            };
+            let Some((p0, p1)) = obj.edge_endpoints(e) else {
+                continue;
+            };
+            let on = |st: &Station| {
+                super::query::point_segment_distance(rail_point(st, x), p0, p1) <= tol::SWEPT_SLACK
+            };
+            if !(on(a) && on(c)) {
+                continue;
+            }
+            let (u, v) = (
+                rail_point(b, x) - rail_point(a, x),
+                rail_point(c, x) - rail_point(b, x),
+            );
+            if u.length() > tol::SWEPT_SLACK && v.length() > tol::SWEPT_SLACK && u.dot(v) < 0.0 {
+                return Some(b.q);
+            }
+        }
+    }
+    None
+}
+
+/// The edges of face `f`'s outer loop that `p`, a point of `f`'s plane
+/// outside `f` ([`in_face`] false), lies past: on the outward side of each
+/// by more than [`IN_FACE_BOUNDARY`], the margin [`in_face`] reads a
+/// boundary by; where the two disagree numerically and no edge is past by
+/// that much, the edges `p` lies farthest outside of (all within
+/// [`tol::POINT_MERGE`] of the farthest). In the loop's order.
+fn edges_past(obj: &Object, f: FaceId, p: Point3) -> Vec<EdgeId> {
+    let n = obj.faces()[f].plane.normal();
+    // Each edge with how far outside it `p` lies.
+    let outside: Vec<(EdgeId, f64)> = obj
+        .loop_half_edges(obj.faces()[f].outer_loop)
+        .filter_map(|h| {
+            let e = obj.half_edges()[h].edge;
+            let a = obj.vertices()[obj.half_edges()[h].origin].position;
+            let b = obj.vertices()[obj.half_edges()[obj.half_edges()[h].next].origin].position;
+            // The outer loop winds counterclockwise seen from the normal, so
+            // the face lies to the left of each edge.
+            let inward = n.cross(b - a).normalized().ok()?;
+            Some((e, -(p - a).dot(inward)))
+        })
+        .collect();
+    let past: Vec<EdgeId> = outside
+        .iter()
+        .filter(|&&(_, d)| d > IN_FACE_BOUNDARY)
+        .map(|&(e, _)| e)
+        .collect();
+    if !past.is_empty() {
+        return past;
+    }
+    let far = outside
+        .iter()
+        .map(|&(_, d)| d)
+        .fold(f64::NEG_INFINITY, f64::max);
+    outside
+        .iter()
+        .filter(|&&(_, d)| d >= far - tol::POINT_MERGE)
+        .map(|&(e, _)| e)
+        .collect()
+}
+
+/// Whether there are `edges` and every one of them `leaves`.
+fn all_leave(edges: &[EdgeId], leaves: impl Fn(EdgeId) -> bool) -> bool {
+    !edges.is_empty() && edges.iter().all(|&e| leaves(e))
+}
+
+/// The angle a station's round section turns from one segment to the next.
+fn section_step(st: &Station) -> Option<f64> {
+    let c = st.sec.arc_center?;
+    let n = st.sec.offsets.len() - 1;
+    let u0 = (st.sec.offsets[0] - c).normalized().ok()?;
+    let u1 = (st.sec.offsets[n] - c).normalized().ok()?;
+    Some(trig::acos(u0.dot(u1).clamp(-1.0, 1.0)) / n as f64)
 }
 
 /// [`refine`] against the side surfaces: the feet are the geometry's own,
@@ -1391,9 +2259,9 @@ const SAME_POINT: f64 = 1e-12;
 /// A guard on the foot changes [`refine_surface`] takes along one span.
 const MAX_SPAN_CHANGES: usize = 100_000;
 
-/// The three stations where side `x` crosses valley seam `seam` from `f`
-/// to `g` at parameter `lam`: on `f`, between, on `g`, about the exact
-/// corner ball.
+/// The stations where side `x` crosses valley seam `seam` from `f` to `g`
+/// at parameter `lam`: on `f`, the two on the seam between, on `g`, about
+/// the exact corner ball.
 #[allow(clippy::too_many_arguments)]
 fn valley_cross(
     sv: &Solver,
@@ -1404,7 +2272,7 @@ fn valley_cross(
     f: FaceId,
     g: FaceId,
     seam: EdgeId,
-) -> Result<(Station, Station, Station), PlanFail> {
+) -> Result<(Station, [Station; 2], Station), PlanFail> {
     let mut pin = [None, None];
     pin[x] = Some(Foot::Face(f));
     let before = at(lam, start, pin)?;
@@ -1630,23 +2498,24 @@ fn exact_corner(
     Ok((mk(before, n1)?, mk(after, n2)?))
 }
 
-/// The station between the two contacts of a ball in a valley corner:
-/// `before` and `after` share the center; side `x`'s rail point is the seam
-/// point nearest it, the other points lie on the ball halfway between the
-/// two sections.
+/// The stations between the two contacts of a ball in a valley corner:
+/// `before` and `after` share the center, and side `x`'s rail steps between
+/// the two contacts through the seam point nearest it. That seam point lies
+/// off the ball, so it takes two stations: one with `before`'s section and
+/// one with `after`'s, each with its rail on the seam point. The strip facet
+/// on the rail from a contact to the seam point then leaves the rail along
+/// the ball's section at that contact, tangent to the facet the ball
+/// touches there, and the turn between the two sections is a fan about the
+/// seam point.
 fn corner_station(
     obj: &Object,
     before: &Station,
     after: &Station,
     x: usize,
     seam: EdgeId,
-) -> Result<Station, PlanFail> {
+) -> Result<[Station; 2], PlanFail> {
     let q = before.q;
-    let (Some(ca), Some(cb), Some(r)) = (
-        before.sec.arc_center,
-        after.sec.arc_center,
-        before.sec.radius,
-    ) else {
+    let (Some(ca), Some(cb)) = (before.sec.arc_center, after.sec.arc_center) else {
         return Err(unsupported(q));
     };
     let c = before.q + (ca + (after.q + cb - before.q)) * 0.5;
@@ -1658,35 +2527,22 @@ fn corner_station(
     }
     let n = before.sec.offsets.len() - 1;
     let rail = if x == 0 { 0 } else { n };
-    let offsets = (0..=n)
-        .map(|k| {
-            let (pa, pb) = (
-                before.q + before.sec.offsets[k],
-                after.q + after.sec.offsets[k],
-            );
-            if k == rail {
-                Ok(s - q)
-            } else if k == n - rail {
-                Ok(pa - q)
-            } else {
-                let d = ((pa - c) + (pb - c))
-                    .normalized()
-                    .map_err(|_| unsupported(q))?;
-                Ok(c + d * r - q)
-            }
-        })
-        .collect::<Result<Vec<_>, PlanFail>>()?;
-    let mut feet = before.feet;
-    feet[x] = Foot::Seam(seam);
-    Ok(Station {
-        q,
-        sec: Section {
-            offsets,
-            arc_center: Some(c - q),
-            ..before.sec.clone()
-        },
-        feet,
-    })
+    let on_seam = |st: &Station| -> Station {
+        let mut offsets: Vec<Vec3> = st.sec.offsets.iter().map(|&o| st.q + o - q).collect();
+        offsets[rail] = s - q;
+        let mut feet = st.feet;
+        feet[x] = Foot::Seam(seam);
+        Station {
+            q,
+            sec: Section {
+                offsets,
+                arc_center: st.sec.arc_center.map(|a| st.q + a - q),
+                ..st.sec.clone()
+            },
+            feet,
+        }
+    };
+    Ok([on_seam(before), on_seam(after)])
 }
 
 /// The faces around the vertex at `q`, from `f` to `g`, each sharing an
@@ -2328,6 +3184,7 @@ pub(crate) fn plan_swept(
     } else {
         -1.0
     };
+    let sides = geo::Surface::new(chain);
     let walk = Solver {
         obj,
         profile,
@@ -2335,6 +3192,7 @@ pub(crate) fn plan_swept(
         other_side: other_side.clone(),
         geo: None,
         extend_past: std::cell::Cell::new([None, None]),
+        sides: Some(&sides),
     };
     // The facet walk first; where it refuses, the ball against the side
     // surfaces themselves (D-72). A chain the walk takes keeps its result.
@@ -2345,9 +3203,27 @@ pub(crate) fn plan_swept(
         other_side,
         geo: Some(geo::Surface::new(chain)),
         extend_past: std::cell::Cell::new([None, None]),
+        sides: None,
     };
     let refused = match chain_stations(&walk, chain, ends.as_ref()) {
         Ok(stations) => {
+            // On a drawn or generated object a side ends at its hard edges:
+            // a ball whose rail reaches one rides it, the round too large for
+            // the side (as the solve against the side surfaces finds it). A
+            // traced profile's rail ends on a facet's edge by construction.
+            let import = obj.planarity_tol > tol::PLANE_DIST;
+            let surf = surface_solver.geo.as_ref().expect("a surface");
+            let end_faces: Vec<FaceId> = ends.as_ref().map_or(Vec::new(), |e| e.faces.to_vec());
+            if !import
+                && walk.rolls()
+                && stations.iter().any(|st| {
+                    (0..2).any(|x| {
+                        surf.rail_on_hard_edge(&walk, x, st.feet[x], rail_point(st, x), &end_faces)
+                    })
+                })
+            {
+                return Err(PlanFail::Size(super::LimitFeature::AdjacentFace));
+            }
             let built = build_swept(
                 obj,
                 chain,
@@ -2396,9 +3272,14 @@ pub(crate) fn plan_swept(
     let rolled = match cached {
         Some(st) => st,
         None => {
+            // A ball too large for a side (it left the side for a hard edge
+            // of a drawn object) is refused as too large, naming the side.
             let st = chain_stations(&surface_solver, chain, None)
                 .and_then(|st| geo::fold_free(&surface_solver, surf, st, merge))
-                .map_err(|_| refused)?;
+                .map_err(|f| match f {
+                    PlanFail::Size(_) => f,
+                    _ => refused,
+                })?;
             ROLLED.with(|c| c.borrow_mut().push((key, st.clone())));
             st
         }
@@ -2429,12 +3310,39 @@ pub(crate) fn plan_swept(
     Err(refused)
 }
 
+/// [`build_swept_strip`], its station records (test support) taken back
+/// out where the strip fails to build.
+#[allow(clippy::too_many_arguments)]
+fn build_swept(
+    obj: &Object,
+    chain: &Chain,
+    convexity: Convexity,
+    blend: BlendId,
+    kind: BlendKind,
+    stations: Vec<Station>,
+    surface: bool,
+    ends: Option<&Ends>,
+    pts: &mut Pts,
+    out: &mut Out,
+    kept: &mut Vec<PatchFace>,
+    add: &mut Vec<PatchFace>,
+) -> Result<(), PlanFail> {
+    let mark = record_mark();
+    let built = build_swept_strip(
+        obj, chain, convexity, blend, kind, stations, surface, ends, pts, out, kept, add,
+    );
+    if built.is_err() {
+        record_rollback(mark);
+    }
+    built
+}
+
 /// Builds a swept chain's strip from its stations and cuts its side faces
 /// (see [`plan_swept`]); `surface` when the stations come from the solve
 /// against the side surfaces; `ends` for an open chain, whose end faces
 /// are cut along its end sections.
 #[allow(clippy::too_many_arguments)]
-fn build_swept(
+fn build_swept_strip(
     obj: &Object,
     chain: &Chain,
     convexity: Convexity,
@@ -2451,6 +3359,31 @@ fn build_swept(
     let m = chain.edges.len();
     let closed = ends.is_none();
     let pos = |i: usize| obj.vertices()[chain.verts[if closed { i % m } else { i }]].position;
+    if !surface && let Some(at) = folds_along_a_seam(obj, &stations, closed) {
+        return Err(unsupported(at));
+    }
+    // Test support: every facet-walk round's rail point is its own contact
+    // (an open chain's end sections are carried into their end faces).
+    if !surface
+        && closed
+        && matches!(stations.first(), Some(st) if st.sec.round)
+        && record_mark().is_some()
+    {
+        let balls: Vec<BallAt> = stations
+            .iter()
+            .filter_map(|st| {
+                let ac = st.sec.arc_center?;
+                Some((st.q + ac, st.sec.radius?, section_step(st)?))
+            })
+            .collect();
+        let (off, bridges, _) =
+            station_check(obj, &stations, convexity == Convexity::Concave, false);
+        record(|p| {
+            p.balls.push(balls);
+            p.found.extend(off);
+            p.bridges.extend(bridges);
+        });
+    }
     // A rail point on its foot facet's edge (a seam foot, or a contact that
     // lands on the facet's boundary) lies on that edge exactly: the solve
     // leaves it nanometers off, which would lift it off both facets and
@@ -2488,6 +3421,75 @@ fn build_swept(
         }
     }
     let n = stations[0].sec.offsets.len() - 1;
+    // A turn about a seam (see `seam_turn`) and a pivot (see `pivot`) are
+    // fans about one rail point. In each run of such steps every station
+    // takes the run's last rail point, where the ball leaves for what it
+    // rests on next (as the end of a ride does, see `ridge_end`); a pivot
+    // whose earlier station cannot take the later foot (the station before
+    // it shares no facet with that foot) keeps the earlier point instead,
+    // the later station taking it. Where every point of the two sections
+    // lies within the slack of the other's, the two stations are one: the
+    // earlier goes, so no facet between them is left without area.
+    let rail_k = |x: usize| if x == 0 { 0 } else { n };
+    let mut j = stations.len();
+    while j > 1 {
+        j -= 1;
+        let fans = [0, 1].map(|x| {
+            let (a, b) = (&stations[j - 1], &stations[j]);
+            (seam_turn(a, b, x), pivot(a, b, x))
+        });
+        let one_station = {
+            let (a, b) = (&stations[j - 1], &stations[j]);
+            a.sec
+                .offsets
+                .iter()
+                .zip(&b.sec.offsets)
+                .all(|(&oa, &ob)| (a.q + oa).approx_eq(b.q + ob, tol::SWEPT_SLACK))
+        };
+        if one_station
+            && fans.iter().all(|&(turn, pivots)| turn || pivots)
+            && fans.iter().any(|f| f.1)
+        {
+            if j >= 2 && !(0..2).all(|x| share(obj, stations[j - 2].feet[x], stations[j].feet[x])) {
+                return Err(unsupported(stations[j].q));
+            }
+            stations.remove(j - 1);
+            continue;
+        }
+        for (x, &(turn, pivots)) in fans.iter().enumerate() {
+            let k = rail_k(x);
+            let later_fits = j < 2 || share(obj, stations[j - 2].feet[x], stations[j].feet[x]);
+            if turn || (pivots && later_fits) {
+                let p = stations[j].q + stations[j].sec.offsets[k];
+                let q = stations[j - 1].q;
+                stations[j - 1].sec.offsets[k] = p - q;
+                if pivots {
+                    stations[j - 1].feet[x] = stations[j].feet[x];
+                }
+            } else if pivots
+                && stations
+                    .get(j + 1)
+                    .is_none_or(|next| share(obj, stations[j - 1].feet[x], next.feet[x]))
+            {
+                let p = stations[j - 1].q + stations[j - 1].sec.offsets[k];
+                let q = stations[j].q;
+                stations[j].sec.offsets[k] = p - q;
+                stations[j].feet[x] = stations[j - 1].feet[x];
+            }
+        }
+    }
+    // Test support: the rails once the fans have moved them.
+    if !surface
+        && closed
+        && matches!(stations.first(), Some(st) if st.sec.round)
+        && record_mark().is_some()
+    {
+        let (off, _, slides) = station_check(obj, &stations, convexity == Convexity::Concave, true);
+        record(|p| {
+            p.found.extend(off);
+            p.slides.extend(slides);
+        });
+    }
     // Points: every station's section points once; a point that coincides
     // with the previous station's on the same ruling is that point. On
     // imported (f32-noisy) facets coincidence is looser, well inside the
@@ -2924,6 +3926,74 @@ fn build_swept(
         });
     }
     Ok(())
+}
+
+/// Whether side `x`'s rail from station `a` to the next station `b` is too
+/// short for the strip to give the facet on it a direction: a pivot, the
+/// ball turning about a point of its side. Rail points are known only to
+/// [`tol::SWEPT_SLACK`] (the station solve leaves them that far off the
+/// edges they are snapped onto), so a rail edge of length `l` has a
+/// direction uncertain by about `SWEPT_SLACK / l` radians. The strip
+/// resolves directions only to its own turn from one facet to the next,
+/// `theta`, the section's arc over its segment count. Where
+/// `l · sin(theta) < SWEPT_SLACK` the rail edge's direction is less certain
+/// than one segment's turn, and the strip facet on it has no determined
+/// normal: it is built as a fan about one rail point. With `theta` near 0.2
+/// rad that is a rail edge under about 5 µm: across the curves scoreboard
+/// and the swept shape specs a pivot moves a rail point at most 4.5 µm. A
+/// ball of radius under the slack never pivots: its whole section lies
+/// within the slack of one point.
+fn pivot(a: &Station, b: &Station, x: usize) -> bool {
+    // A ball smaller than the slack has no rail direction to lose.
+    if [a, b]
+        .iter()
+        .any(|st| st.sec.radius.is_none_or(|r| r < tol::SWEPT_SLACK))
+    {
+        return false;
+    }
+    let theta = |st: &Station| {
+        let n = st.sec.offsets.len() - 1;
+        let c = st.sec.arc_center?;
+        let (u0, u1) = (
+            (st.sec.offsets[0] - c).normalized().ok()?,
+            (st.sec.offsets[n] - c).normalized().ok()?,
+        );
+        Some(trig::acos(u0.dot(u1).clamp(-1.0, 1.0)) / n as f64)
+    };
+    let (Some(ta), Some(tb)) = (theta(a), theta(b)) else {
+        return false;
+    };
+    let k = if x == 0 { 0 } else { a.sec.offsets.len() - 1 };
+    let l = (b.q + b.sec.offsets[k] - (a.q + a.sec.offsets[k])).length();
+    l > tol::POINT_MERGE && l * trig::sin(ta.max(tb)) < tol::SWEPT_SLACK
+}
+
+/// Whether side `x`'s rail from station `a` to the next station `b` is a
+/// turn about a seam rather than a roll along it: both stations' contacts
+/// lie on one seam of the side, and the chain point moves less between
+/// them than the strip's first facet at either is wide. A ball touching a
+/// seam touches a line, so its contact can run any distance along the seam
+/// for little chain travel; a rail edge along the seam there would carry a
+/// strip facet the strip cannot resolve (it advances along the chain less
+/// than one of the strip's own facets is wide, its normal set by the two
+/// sections' ends, tangent to neither facet of the seam). It is built as a
+/// fan about one rail point instead, the sections either side tangent to
+/// what the ball rests on. The fan slides the earlier station's rail point
+/// along the seam off its own contact: across the curves scoreboard and the
+/// swept shape specs by at most 61.1 µm, 13 of the strip's sagittas (0.1 at
+/// the 90th percentile). On the seam line but off the ball's own contact,
+/// such a rail lies off the ball by up to 1.035 µm (the faceted plinth's
+/// x = y seam), just past [`tol::SWEPT_SLACK`].
+fn seam_turn(a: &Station, b: &Station, x: usize) -> bool {
+    let (Foot::Seam(e), Foot::Seam(e0)) = (a.feet[x], b.feet[x]) else {
+        return false;
+    };
+    let first = |st: &Station| {
+        let n = st.sec.offsets.len() - 1;
+        let (k, inner) = if x == 0 { (0, 1) } else { (n, n - 1) };
+        (st.sec.offsets[k] - st.sec.offsets[inner]).length()
+    };
+    e == e0 && (b.q - a.q).length() <= first(a).min(first(b))
 }
 
 /// One side's cut: the rail segments by the face each lies in, and the set
@@ -3406,8 +4476,13 @@ fn cut_and_remove(
             };
             filled += 1;
             touched.push(at);
-            // Edges split at rail points keep the original edge's metadata.
+            // Edges split at rail points keep the original edge's metadata,
+            // but a rail does not: where it runs along a seam of its side,
+            // it is the strip's joint with the side, not that seam.
             for (a, b) in p.segments() {
+                if rail_segs.contains(&(a.min(b), a.max(b))) {
+                    continue;
+                }
                 if let Some(e) = original_edge(obj, *f, pts.pos(a), pts.pos(b)) {
                     let ed = &obj.edges()[e];
                     if ed.soft || ed.crease || ed.curve.is_some() {
@@ -3510,7 +4585,8 @@ fn region_point(plane: &Plane, outer: &[Point3], holes: &[Vec<Point3>]) -> Optio
 
 #[cfg(test)]
 mod tests {
-    use super::super::{BlendProfile, BlendSpec, classify};
+    use super::super::plan::PlanFail;
+    use super::super::{BlendProfile, BlendSpec, LimitFeature, classify};
     use crate::CurveGeom;
     use crate::loft::{LoftProfile, LoftSpec};
     use crate::math::Point3;
@@ -3581,6 +4657,35 @@ mod tests {
     }
 
     /// A straight prism of the `xy` loop from `z0` to `z1`.
+    #[test]
+    fn a_contact_lies_past_the_edges_it_is_outside_and_refuses_only_where_all_leave() {
+        // The top of a 10 mm square prism: a point past one side lies past
+        // that edge alone, one past a corner past both of the corner's
+        // edges.
+        let obj = prism(
+            &[(0.0, 0.0), (0.01, 0.0), (0.01, 0.01), (0.0, 0.01)],
+            0.0,
+            0.01,
+        );
+        let top = obj
+            .faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.5)
+            .map(|(id, _)| id)
+            .expect("the top");
+        let at = |x: f64, y: f64| Point3::new(x, y, 0.01);
+        assert_eq!(super::edges_past(&obj, top, at(0.005, -0.001)).len(), 1);
+        let corner = super::edges_past(&obj, top, at(0.011, -0.001));
+        assert_eq!(corner.len(), 2);
+        // Past one side by less than the margin a boundary is read by: the
+        // edge it lies farthest outside of.
+        assert_eq!(super::edges_past(&obj, top, at(0.005, -1e-10)).len(), 1);
+        // Refused only where there is an edge past and every one leaves.
+        assert!(!super::all_leave(&[], |_| true));
+        assert!(!super::all_leave(&corner, |e| e == corner[0]));
+        assert!(super::all_leave(&corner, |_| true));
+    }
+
     fn prism(pts: &[(f64, f64)], z0: f64, z1: f64) -> Object {
         let prof = |z: f64| LoftProfile {
             points: pts.iter().map(|&(x, y)| Point3::new(x, y, z)).collect(),
@@ -3648,6 +4753,253 @@ mod tests {
         let (after, _, _) = classify::with_forced_swept(|| joined.blend_once(&spec))
             .expect("the swept round closes the solid");
         after.validate().unwrap();
+    }
+
+    /// A 12-sided boss 40 mm across standing `h` above a 60 mm square
+    /// plate 4 mm thick, its walls a Loft's (smooth seams), and the seam
+    /// where its foot meets the plate.
+    fn short_boss(h: f64) -> (Object, Vec<crate::ids::EdgeId>) {
+        let n = 12;
+        let ring: Vec<(f64, f64)> = (0..n)
+            .map(|i| {
+                let a = TAU * i as f64 / n as f64;
+                (0.02 * trig::cos(a), 0.02 * trig::sin(a))
+            })
+            .collect();
+        let s = 0.03;
+        let plate = prism(&[(-s, -s), (s, -s), (s, s), (-s, s)], 0.0, 0.004);
+        let boss = prism(&ring, 0.002, 0.004 + h);
+        let joined = Object::boolean(
+            crate::BooleanOp::Union,
+            &plate,
+            &boss,
+            &crate::Transform::IDENTITY,
+        )
+        .unwrap();
+        let seam: Vec<_> = joined
+            .edges()
+            .keys()
+            .filter(|&e| {
+                let (p, q) = joined.edge_endpoints(e).unwrap();
+                [p, q]
+                    .iter()
+                    .all(|r| (r.z - 0.004).abs() < 1e-9 && trig::hypot(r.x, r.y) < 0.021)
+            })
+            .collect();
+        assert_eq!(seam.len(), n, "the seam is the boss's foot");
+        (joined, seam)
+    }
+
+    fn round(edges: Vec<crate::ids::EdgeId>, r: f64) -> BlendSpec {
+        BlendSpec {
+            edges,
+            profile: BlendProfile::Round {
+                radius: r,
+                segments: 4,
+            },
+            primary: None,
+            corners: Default::default(),
+            stops: None,
+            handles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_swept_round_too_large_for_a_drawn_wall_is_too_large_for_that_side() {
+        // The boss stands 1 mm above the plate and its walls stand square
+        // to it, so a ball touches a wall within its height up to 1 mm. A
+        // larger one rolled against the side surfaces would ride the boss's
+        // hard top rim, tangent to nothing: it is too large for the side.
+        let (obj, seam) = short_boss(0.001);
+        let swept = |o: &Object, r: f64| {
+            classify::with_forced_swept(|| o.blend_once(&round(seam.clone(), r))).map(|_| ())
+        };
+        assert!(swept(&obj, 0.0009).is_ok(), "a ball that fits rolls");
+        for r in [0.0012, 0.002] {
+            assert_eq!(
+                swept(&obj, r).err(),
+                Some(PlanFail::Size(LimitFeature::AdjacentFace)),
+                "{r}"
+            );
+        }
+    }
+
+    /// The refusal of a round the swept blend found too large for a side,
+    /// where the catalogue refused the chain outright.
+    fn size_refusal(obj: &Object, spec: &BlendSpec) -> crate::BlendError {
+        let at = obj.vertices().values().next().unwrap().position;
+        obj.swept_size_refusal(
+            spec,
+            PlanFail::Size(LimitFeature::AdjacentFace),
+            PlanFail::Hard(crate::BlendError::UnsupportedVertex { at }),
+            false,
+        )
+        .unwrap_or_else(|e| e)
+    }
+
+    #[test]
+    fn a_preview_on_an_imported_mesh_runs_no_size_search() {
+        // A preview asks on every pointer move, and an import's search takes
+        // minutes on a scan: the preview answers with the catalogue's
+        // refusal, as before the swept blend could name a size.
+        let (mut obj, seam) = short_boss(0.001);
+        obj.planarity_tol = crate::tol::IMPORT_PLANE_DIST;
+        let spec = round(seam, 0.0012);
+        let searches = crate::limit_searches_for_test();
+        let got = super::super::as_preview(|| size_refusal(&obj, &spec));
+        assert_eq!(crate::limit_searches_for_test(), searches);
+        assert!(
+            matches!(got, crate::BlendError::UnsupportedVertex { .. }),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn an_imported_meshs_size_refusal_names_a_size_that_fits() {
+        // On an import the search stops within 10% of the first size that
+        // fails: the size it names fits, and is not called the limit.
+        let (mut obj, seam) = short_boss(0.001);
+        obj.planarity_tol = crate::tol::IMPORT_PLANE_DIST;
+        let got = size_refusal(&obj, &round(seam, 0.0012));
+        assert!(
+            matches!(
+                got,
+                crate::BlendError::RadiusTooLarge {
+                    limited_by: LimitFeature::KnownFit,
+                    ..
+                }
+            ),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn an_imported_mesh_ball_rides_its_facet_edges() {
+        // The same shape as an import: its edges are no edges anyone drew,
+        // so the ball rides them and the round builds.
+        let (mut obj, seam) = short_boss(0.001);
+        obj.planarity_tol = crate::tol::IMPORT_PLANE_DIST;
+        for r in [0.0012, 0.002] {
+            let built =
+                classify::with_forced_swept(|| obj.blend_once(&round(seam.clone(), r))).map(|_| ());
+            assert!(built.is_ok(), "{r}: {:?}", built.err());
+        }
+    }
+
+    /// A boss of the `xy` loop (millimeters) standing `h` above a 60 mm
+    /// square plate 4 mm thick, its walls a Loft's, and the seam where its
+    /// foot meets the plate.
+    fn boss_on_plate(loop_mm: &[(f64, f64)], h: f64) -> (Object, Vec<crate::ids::EdgeId>) {
+        let ring: Vec<(f64, f64)> = loop_mm.iter().map(|&(x, y)| (x * 1e-3, y * 1e-3)).collect();
+        let s = 0.03;
+        let plate = prism(&[(-s, -s), (s, -s), (s, s), (-s, s)], 0.0, 0.004);
+        let boss = prism(&ring, 0.002, 0.004 + h);
+        let joined = Object::boolean(
+            crate::BooleanOp::Union,
+            &plate,
+            &boss,
+            &crate::Transform::IDENTITY,
+        )
+        .unwrap();
+        let seam: Vec<_> = joined
+            .edges()
+            .keys()
+            .filter(|&e| {
+                let (p, q) = joined.edge_endpoints(e).unwrap();
+                [p, q]
+                    .iter()
+                    .all(|r| (r.z - 0.004).abs() < 1e-9 && r.x.abs() < 0.0299 && r.y.abs() < 0.0299)
+            })
+            .collect();
+        assert_eq!(seam.len(), loop_mm.len(), "the seam is the boss's foot");
+        (joined, seam)
+    }
+
+    /// A boss with a notch in one side: a convex corner at (0, 12) mm, a
+    /// short wall to a valley at (-0.3, 11.6) mm, and the next wall on. A
+    /// ball rolling round the corner reaches the wall past the valley
+    /// before it rests on the short one between.
+    const NOTCH: [(f64, f64); 6] = [
+        (-10.0, -10.0),
+        (10.0, -10.0),
+        (10.0, 10.0),
+        (0.0, 12.0),
+        (-0.3, 11.6),
+        (-10.0, 12.0),
+    ];
+
+    #[test]
+    fn a_ridge_corner_ball_touches_the_plate_the_ridge_and_the_wall_past_the_valley() {
+        let (obj, _) = boss_on_plate(&NOTCH, 0.005);
+        let r = 0.001;
+        let mm = |x: f64, y: f64, z: f64| Point3::new(x * 1e-3, y * 1e-3, z * 1e-3);
+        // The ridge: the boss's edge up from the corner.
+        let ridge = obj
+            .edges()
+            .keys()
+            .find(|&e| {
+                let (p, q) = obj.edge_endpoints(e).unwrap();
+                let up = |a: Point3| a.approx_eq(mm(0.0, 12.0, a.z * 1e3), 1e-9);
+                up(p) && up(q) && (p.z - q.z).abs() > 1e-3
+            })
+            .unwrap();
+        let face_through = |a: Point3, b: Point3| {
+            obj.faces()
+                .iter()
+                .find(|(_, f)| {
+                    f.plane.signed_distance(a).abs() < 1e-9
+                        && f.plane.signed_distance(b).abs() < 1e-9
+                })
+                .map(|(id, _)| id)
+                .unwrap()
+        };
+        // The wall past the valley, and the plate's top round the boss.
+        let wall = face_through(mm(-5.15, 11.8, 6.0), mm(-5.15, 11.8, 8.0));
+        let plate = face_through(mm(25.0, 25.0, 4.0), mm(-25.0, 25.0, 4.0));
+        // A concave seam: the ball lies in front of both planes.
+        let c =
+            super::ridge_corner_ball(&obj, -1.0, r, ridge, wall, plate).expect("one corner ball");
+        let on_plane = |f: crate::ids::FaceId| obj.faces()[f].plane.signed_distance(c);
+        let (l0, l1) = obj.edge_endpoints(ridge).unwrap();
+        let to_ridge = (c - super::nearest_on_line(c, l0, l1)).length();
+        for (what, d) in [
+            ("plate", on_plane(plate)),
+            ("wall", on_plane(wall)),
+            ("ridge", to_ridge),
+        ] {
+            assert!((d - r).abs() <= crate::tol::PLANE_DIST, "{what}: {d}");
+        }
+        // Its contacts lie where the three are: on the ridge's segment, in
+        // the wall, in the plate's top.
+        let n = |f: crate::ids::FaceId| obj.faces()[f].plane.normal();
+        assert!(super::in_face(&obj, wall, c - n(wall) * r));
+        assert!(super::in_face(&obj, plate, c - n(plate) * r));
+        let on_ridge = super::nearest_on_line(c, l0, l1);
+        assert!(
+            super::super::query::point_segment_distance(on_ridge, l0, l1)
+                <= crate::tol::POINT_MERGE
+        );
+        // A ball too small to reach the wall from the ridge has no corner
+        // (the wall's plane passes 0.41 mm from the ridge).
+        assert_eq!(
+            super::ridge_corner_ball(&obj, -1.0, 0.0001, ridge, wall, plate),
+            None
+        );
+    }
+
+    #[test]
+    fn a_ridge_meeting_a_wall_past_a_valley_at_one_point_rolls_in_the_facet_walk() {
+        // Round the notch's corner the ball leaves the ridge for the wall
+        // past the valley at one chain point: the walk steps across the
+        // valley through the corner ball touching both, and builds.
+        let (obj, seam) = boss_on_plate(&NOTCH, 0.005);
+        for r in [0.001, 0.0015] {
+            let built = super::without_surface_fallback(|| {
+                classify::with_forced_swept(|| obj.blend_once(&round(seam.clone(), r)))
+            });
+            let (after, _, _) = built.unwrap_or_else(|f| panic!("{r}: {f:?}"));
+            after.validate().unwrap();
+        }
     }
 
     #[test]

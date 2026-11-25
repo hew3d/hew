@@ -326,6 +326,32 @@ pub(crate) fn validate_face_claim(
     }
 }
 
+/// A swept strip's rail against its strip's own turn
+/// ([`Object::swept_rail_gap`]).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RailGap {
+    /// How far the strip facet's normal parts from the wall's (a chord, the
+    /// larger at the rail's two ends).
+    pub lean: f64,
+    /// How far the strip turns from that facet to the next one in from the
+    /// rail (a chord).
+    pub turn: f64,
+    /// Whether the turn was read one facet further in (a triangle on the
+    /// rail).
+    pub hop: bool,
+    /// The plane normal of the facet the turn was read to.
+    pub next: Vec3,
+}
+
+impl RailGap {
+    /// Whether the rail reads as tangent: it leans off the wall by no more
+    /// than the strip turns from one facet to the next.
+    pub fn tangent(&self) -> bool {
+        self.lean <= self.turn
+    }
+}
+
 /// How an edge reads visually and to the Fillet tool (true-curves.md §3.3
 /// rule 3). The one smoothness predicate: the tessellator, line drawings,
 /// `.skp` export and edge picking all classify through
@@ -363,7 +389,11 @@ impl crate::topo::Object {
     /// 7. one face is a strip of a rolling-ball fillet (`BlendKind::Fillet`,
     ///    `BlendRole::Strip`) and the other belongs to no blend, and at both
     ///    endpoints: for an unclaimed (swept) strip facet, the oriented
-    ///    normals differ by at most [`tol::BLEND_RAIL_NORMAL`]; for a claimed
+    ///    normals differ by at most [`tol::BLEND_RAIL_NORMAL`] and, where
+    ///    the other face has no surface claim and the strip's own turn can be
+    ///    read ([`Object::swept_rail_gap`]), the facet leans off the face by
+    ///    no more than the strip turns from one facet to the next; for a
+    ///    claimed
     ///    strip, its normal and the other face's plane normal, each without
     ///    its component along the edge, differ by at most
     ///    [`tol::BLEND_CLAIMED_RAIL_NORMAL`] → `Tangent` (a fillet's rail,
@@ -441,7 +471,25 @@ impl crate::topo::Object {
         let tangent = match rail_strip {
             _ if agree(tol::NORMAL_DIRECTION) => true,
             None => false,
-            Some(s) if s.surface.is_none() => agree(tol::BLEND_RAIL_NORMAL),
+            Some(s) if s.surface.is_none() => {
+                let (sh, wh) = if std::ptr::eq(s, fa) {
+                    (e.half_edge, twin)
+                } else {
+                    (twin, e.half_edge)
+                };
+                let face_id =
+                    |h: crate::ids::HalfEdgeId| self.loops()[self.half_edges()[h].loop_id].face;
+                // A rail that leans off its faceted wall by more than the
+                // strip turns from one facet to the next is a crease the ball
+                // rode along a seam, not a tangency the facets approximate.
+                // A wall with a surface claim is smooth: it has no seam to
+                // ride, and its rail keeps the wide allowance.
+                let creased = face_of(wh).surface.is_none()
+                    && self
+                        .swept_rail_gap(face_id(sh), s.plane.normal(), edge, face_id(wh))
+                        .is_some_and(|g| !g.tangent());
+                !creased && agree(tol::BLEND_RAIL_NORMAL)
+            }
             Some(s) => {
                 // Across the edge: the claimed strip against the neighbor's
                 // facet plane, each normal with its along-edge part removed.
@@ -463,6 +511,109 @@ impl crate::topo::Object {
         } else {
             EdgeSmoothness::Hard
         }
+    }
+
+    /// How a swept strip's rail `rail`, between its facet `f` (taken with
+    /// normal `n`) and `wall`, leans against the strip's own turn: the
+    /// reading the kernel's smoothness and the curves scoreboard both judge
+    /// a swept rail by, so the two cannot disagree on where tangency ends.
+    ///
+    /// The turn is the smallest gap (a chord) between `n` and the plane
+    /// normal of a facet of the same strip across an edge of `f` that
+    /// touches neither end of `rail`; where `f` has none (a triangle, every
+    /// edge of which touches the rail), the same taken one facet on, through
+    /// each facet of the strip beside `f` that has no rail of its own. The
+    /// lean is the larger gap (a chord), at the rail's two ends, between `n`
+    /// and `wall`'s oriented normal. `None` when no turn can be read: a strip
+    /// of one segment, or no strip at all.
+    ///
+    /// The kernel reads a rail Hard by lean against turn only on a wall
+    /// without a surface claim; a rail on a claimed wall keeps the
+    /// [`tol::BLEND_RAIL_NORMAL`] rule. The curves scoreboard judges every
+    /// rail by lean against turn, so on a claimed wall the two disagree where
+    /// the lean lies past the turn but within `BLEND_RAIL_NORMAL` (the kernel
+    /// reads it tangent, the scoreboard wrong), and where it lies within the
+    /// turn but past `BLEND_RAIL_NORMAL` (the kernel hard, the scoreboard
+    /// tangent).
+    #[doc(hidden)]
+    pub fn swept_rail_gap(
+        &self,
+        f: crate::ids::FaceId,
+        n: Vec3,
+        rail: crate::ids::EdgeId,
+        wall: crate::ids::FaceId,
+    ) -> Option<RailGap> {
+        let hes = self.half_edges();
+        let dest = |h: crate::ids::HalfEdgeId| hes[hes[h].next].origin;
+        let rh = self.edges().get(rail)?.half_edge;
+        let ends = [hes[rh].origin, dest(rh)];
+        let tag = self.faces().get(f)?.blend?;
+        let face_of = |h: crate::ids::HalfEdgeId| self.loops()[hes[h].loop_id].face;
+        let strip = |g: crate::ids::FaceId| {
+            self.faces()[g]
+                .blend
+                .is_some_and(|b| b.id == tag.id && b.role == crate::topo::BlendRole::Strip)
+        };
+        // The faces across each edge of `g`, with whether the edge touches
+        // the rail's ends.
+        let across = |g: crate::ids::FaceId| -> Vec<(crate::ids::FaceId, bool)> {
+            self.loop_half_edges(self.faces()[g].outer_loop)
+                .filter_map(|h| {
+                    let twin = hes[h].twin?;
+                    let touches = [hes[h].origin, dest(h)].iter().any(|v| ends.contains(v));
+                    Some((face_of(twin), touches))
+                })
+                .collect()
+        };
+        let smallest = |c: &mut dyn Iterator<Item = crate::ids::FaceId>| {
+            c.map(|g| {
+                let m = self.faces()[g].plane.normal();
+                ((m - n).length(), m)
+            })
+            .reduce(|a, b| if b.0 < a.0 { b } else { a })
+        };
+        let direct = smallest(
+            &mut across(f)
+                .into_iter()
+                .filter(|&(g, touches)| !touches && strip(g))
+                .map(|(g, _)| g),
+        );
+        let (turn, hop, next) = match direct {
+            Some((t, m)) => (t, false, m),
+            None => {
+                let mut hop = Vec::new();
+                for (g, _) in across(f) {
+                    if !strip(g)
+                        || across(g)
+                            .iter()
+                            .any(|&(w, _)| self.faces()[w].blend.is_none())
+                    {
+                        continue;
+                    }
+                    hop.extend(
+                        across(g)
+                            .into_iter()
+                            .filter(|&(h, touches)| !touches && h != f && strip(h))
+                            .map(|(h, _)| h),
+                    );
+                }
+                let (t, m) = smallest(&mut hop.into_iter())?;
+                (t, true, m)
+            }
+        };
+        let lean = ends
+            .into_iter()
+            .filter_map(|v| {
+                let x = self.vertices().get(v)?.position;
+                Some((self.oriented_normal(wall, x)? - n).length())
+            })
+            .fold(0.0, f64::max);
+        Some(RailGap {
+            lean,
+            turn,
+            hop,
+            next,
+        })
     }
 
     /// The shading normal of `face` at point `p` of its own boundary: its

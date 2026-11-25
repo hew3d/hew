@@ -218,14 +218,22 @@ fn a_round_too_large_for_a_scan_names_one_that_fits() {
 fn every_limit_a_scan_seam_names_is_a_size_that_rounds() {
     // The size a refusal names is one the commit builds, on seams and rims
     // of several noise levels: a limit below what rolls is a nuisance, one
-    // that does not build is a wrong answer.
+    // that does not build is a wrong answer. It is named as a size that
+    // fits (`KnownFit`), not as the limit.
     for (amp, union) in [(0.003, true), (0.008, true), (0.008, false)] {
         let (o, seam) = scan_at(amp, -0.012, union);
         let err = o.blend_edges(&round(seam.clone(), 0.02)).unwrap_err();
-        let BlendError::RadiusTooLarge { max, .. } = err else {
+        let BlendError::RadiusTooLarge { max, limited_by } = err else {
             panic!("noise {amp}, union {union}: a size, not {err:?}");
         };
         assert!(max > 0.0 && max < 0.02, "noise {amp}, union {union}: {max}");
+        // The search tries a few sizes and stops within 10% of the first
+        // that fails: it names a size that fits, not the limit.
+        assert_eq!(
+            limited_by,
+            kernel::LimitFeature::KnownFit,
+            "noise {amp}, union {union}"
+        );
         let (after, _) = o
             .blend_edges(&round(seam, max))
             .unwrap_or_else(|e| panic!("noise {amp}, union {union}: {max} refused: {e:?}"));

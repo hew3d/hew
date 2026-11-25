@@ -557,6 +557,27 @@ fn swept_blend_rails_are_tangent_edges() {
 }
 
 #[test]
+fn a_swept_rail_is_no_seam_of_its_side() {
+    // Where a rail runs along a facet seam of a pipe, it is the strip's
+    // joint with the pipe, not that seam: it carries no soft mark, so it
+    // reads as its geometry says.
+    let (tee, edges) = pipe_tee();
+    for r in [0.01, 0.03] {
+        let (after, report) = tee.blend_edges(&swept_round(edges.clone(), r)).unwrap();
+        let new: BTreeSet<_> = report.new_faces.iter().copied().collect();
+        let mut rails = 0;
+        for e in after.edges().keys() {
+            let (x, y) = after.edge_faces_for_test(e).unwrap();
+            if new.contains(&x) != new.contains(&y) {
+                rails += 1;
+                assert!(!after.edges()[e].soft, "{r}: rail {e:?} is soft");
+            }
+        }
+        assert!(rails > 0);
+    }
+}
+
+#[test]
 fn a_cut_through_a_fillet_keeps_its_crease() {
     // A later cut meeting a claimed fillet is a real crease, drawn and
     // pickable, even a shallow one: about 26 and 9.5 degrees here.

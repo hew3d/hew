@@ -82,7 +82,9 @@ impl Object {
     /// commit builds where a round rolls across the facets as a swept blend
     /// (an imported mesh or a generated wall, D-74, D-119): the largest
     /// size that rolls, found by [`Object::largest_that_rolls`], where it
-    /// is larger, named as limited by the shape of the model (`Unknown`).
+    /// is larger, named as limited by the shape of the model (`Unknown`), or
+    /// on an imported mesh, whose search names what fits rather than a
+    /// maximum, as [`LimitFeature::KnownFit`].
     /// A preview on an imported mesh does not search (minutes on a scan;
     /// it is asked again on every pointer move); on a generated wall it
     /// does, so it names what the commit names.
@@ -112,7 +114,11 @@ impl Object {
             Some(m) if limit.as_ref().map_or(true, |l| m > l.max) => (
                 Ok(BlendLimit {
                     max: m,
-                    limited_by: LimitFeature::Unknown,
+                    limited_by: if import {
+                        LimitFeature::KnownFit
+                    } else {
+                        LimitFeature::Unknown
+                    },
                 }),
                 true,
             ),
@@ -128,11 +134,12 @@ impl Object {
     /// from the asked size, [`ROLL_SCAN_PER_OCTAVE`] sizes in each of the
     /// [`ROLL_SCAN_OCTAVES`] octaves below it, stops at the first that rolls
     /// (the largest found), and bisects the gap to the failing size above it
-    /// to within [`super::SWEPT_LIMIT_PRECISION`] of the size: it never
-    /// names a size below one it found to roll. At most 16 sizes scanned
-    /// and two bisections, each a facet attempt and at most one swept one;
-    /// on an imported mesh, whose attempts take seconds, one size per
-    /// octave (the halving of D-74).
+    /// to within [`super::DRAWN_LIMIT_PRECISION`] of the size (on an
+    /// imported mesh [`super::SWEPT_LIMIT_PRECISION`]): it never names a size
+    /// below one it found to roll. At most 16 sizes scanned and five
+    /// bisections, each a facet attempt and at most one swept one; on an
+    /// imported mesh, whose attempts take seconds, one size per octave (the
+    /// halving of D-74) and two bisections.
     pub(crate) fn largest_that_rolls(&self, spec: &BlendSpec, asked_fails: bool) -> Option<f64> {
         let s0 = spec.profile.size()?;
         let rolls = |s: f64| {
@@ -174,7 +181,12 @@ impl Object {
         }
         let mut lo = lo?;
         let mut hi = above;
-        while hi - lo > super::SWEPT_LIMIT_PRECISION * hi {
+        let precision = if self.planarity_tol > crate::tol::PLANE_DIST {
+            super::SWEPT_LIMIT_PRECISION
+        } else {
+            super::DRAWN_LIMIT_PRECISION
+        };
+        while hi - lo > precision * hi {
             let mid = 0.5 * (lo + hi);
             if rolls(mid) {
                 lo = mid;
@@ -338,7 +350,7 @@ impl Object {
     /// of sizes from the asked one down (see [`scan_limit`]) and
     /// bisects up from the largest that builds. With `swept` (a spec with a
     /// swept chain, no window) the search is [`swept_limit`]'s.
-    fn max_size_by(
+    pub(crate) fn max_size_by(
         &self,
         spec: &BlendSpec,
         window: Option<&[f64]>,

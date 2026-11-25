@@ -37,6 +37,24 @@ pub use edit::{
 };
 pub use error::{BlendError, LimitFeature};
 pub use limit::{limit_attempts_for_test, limit_probes_for_test, limit_searches_for_test};
+pub use swept::{BallAt, Bridge, StationRecord};
+
+/// Runs `f` with every facet-walk round's stations checked, as its strip is
+/// built, for a rail point that is not the station's own contact on its
+/// foot (to `tol::POINT_MERGE`), and returns what the check found. Test
+/// support only.
+#[doc(hidden)]
+pub fn swept_rail_check_for_test<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    swept::with_rail_check(f)
+}
+
+/// [`swept_rail_check_for_test`], also returning every closed facet-walk
+/// round's balls (center, radius, the section's turn per segment), station
+/// by station. Test support only.
+#[doc(hidden)]
+pub fn swept_balls_for_test<T>(f: impl FnOnce() -> T) -> (T, swept::StationRecord) {
+    swept::with_station_record(f)
+}
 pub use profile::{ProfileSample, bundled};
 pub use query::{adjacency_builds_for_test, chain_query_work_for_test};
 pub use record::{BlendRecord, LoopEdit, StoredFace, StoredMark, StoredSpec};
@@ -168,6 +186,29 @@ fn as_preview_with_rounds<T>(rounds: usize, f: impl FnOnce() -> T) -> T {
 /// under a refusal on an imported mesh, bring their limit, as a fraction of
 /// the size.
 const SWEPT_LIMIT_PRECISION: f64 = 0.1;
+
+/// How close [`Object::largest_that_rolls`] brings its limit on a drawn or
+/// generated wall, as a fraction of the size. The bisection stops with a
+/// size `lo` that rolls and one `hi` that does not, `hi - lo <= p·hi`, so
+/// `lo >= (1 - p)·hi`. Then `lo·1.01 > hi` (the named size grown by 1% is
+/// past the first size that fails) needs `1 / (1 - p) < 1.01`, that is
+/// `p < 0.0099`; and where the sizes that roll run up to one boundary `b`
+/// (`lo <= b <= hi`), every ask names a size in `[(1 - p)·b, b]`, so any
+/// two agree within 1% for `p <= 0.01`. Half a percent meets both with
+/// room. Its attempts take milliseconds there, so the bisections this
+/// costs over [`SWEPT_LIMIT_PRECISION`] are cheap.
+const DRAWN_LIMIT_PRECISION: f64 = 0.005;
+
+/// The refusal a round just past a found largest size answers instead of
+/// naming that size: a hard one (a corner it cannot turn). A refusal for its
+/// size or an obstruction is the size limit the search found, and a round
+/// that builds there names it too.
+fn hard_past_the_limit(past: Result<(), plan::PlanFail>) -> Option<BlendError> {
+    match past {
+        Err(plan::PlanFail::Hard(e)) => Some(e),
+        _ => None,
+    }
+}
 
 /// One blend request: the edges and the profile. Ids are kernel handles
 /// valid against the object the spec is applied to.
@@ -589,13 +630,13 @@ impl Object {
     fn refuse(
         &self,
         spec: &BlendSpec,
-        (f, swept): (plan::PlanFail, bool),
+        (f, tried): (plan::PlanFail, Tried),
         corners: bool,
     ) -> BlendError {
-        let refusal = if swept {
-            self.swept_refusal(spec, f, corners)
-        } else {
-            self.refusal(spec, f, corners)
+        let refusal = match tried {
+            Tried::Plain => self.refusal(spec, f, corners),
+            Tried::Swept => self.swept_refusal(spec, f, corners),
+            Tried::SweptTooLarge(catalog) => self.swept_size_refusal(spec, f, catalog, corners),
         };
         refusal.unwrap_or_else(|e| e)
     }
@@ -607,19 +648,27 @@ impl Object {
     pub(crate) fn blend_attempt(
         &self,
         spec: &BlendSpec,
-    ) -> Result<(Object, BlendReport, Vec<FaceId>), (plan::PlanFail, bool)> {
+    ) -> Result<(Object, BlendReport, Vec<FaceId>), (plan::PlanFail, Tried)> {
         let catalog_only = CATALOG_ONLY.with(std::cell::Cell::get);
         match self.blend_once(spec) {
             Ok(r) => Ok(r),
-            Err(f) if catalog_only => Err((f, false)),
+            Err(f) if catalog_only => Err((f, Tried::Plain)),
             // Faceted chains the catalogue planners cannot turn (imported or
             // unstamped facets) retry as one swept blend; when that fails
-            // too, the catalogue's refusal stands (D-41).
+            // too, the catalogue's refusal stands (D-41), unless the swept
+            // blend found a round too large for a side: that is the answer,
+            // and names the side. (Any other profile keeps the catalogue's
+            // refusal, as it always has.)
             Err(
                 f @ plan::PlanFail::Hard(
                     BlendError::UnsupportedVertex { .. } | BlendError::UnsupportedEdge,
                 ),
-            ) => classify::with_forced_swept(|| self.blend_once(spec)).map_err(|_| (f, true)),
+            ) => classify::with_forced_swept(|| self.blend_once(spec)).map_err(|g| match g {
+                plan::PlanFail::Size(_) if matches!(spec.profile, BlendProfile::Round { .. }) => {
+                    (g, Tried::SweptTooLarge(f))
+                }
+                _ => (f, Tried::Swept),
+            }),
             // So do rounds the facets are too small for where the facets are
             // no edges anyone drew (D-119): an imported mesh, or a chain met
             // by smooth seams (a generated wall such as a Loft's), and a
@@ -627,10 +676,67 @@ impl Object {
             Err(f @ plan::PlanFail::Size(_))
                 if self.facets_roll(spec) && matches!(spec.profile, BlendProfile::Round { .. }) =>
             {
-                classify::with_forced_swept(|| self.blend_once(spec)).map_err(|_| (f, true))
+                classify::with_forced_swept(|| self.blend_once(spec)).map_err(|_| (f, Tried::Swept))
             }
-            Err(f) => Err((f, false)),
+            Err(f) => Err((f, Tried::Plain)),
         }
+    }
+
+    /// The refusal where the catalogue refused a chain outright
+    /// (`catalog`) and the swept blend found the round `f` too large for a
+    /// side: the largest size that builds as [`Object::blend_attempt`] makes
+    /// it, by the swept limit search, limited by what `f` names where the
+    /// search names nothing. On an imported mesh that size is one that
+    /// fits, not shown to be the largest ([`LimitFeature::KnownFit`]). As
+    /// [`Object::swept_refusal`] answers instead (the catalogue's refusal,
+    /// as before the swept blend could name a size): a preview on an
+    /// imported mesh (the search takes minutes on a scan, and a preview asks
+    /// on every pointer move), and a search where no size builds (as the
+    /// corner re-solve answers in [`Object::blend_edges`]).
+    fn swept_size_refusal(
+        &self,
+        spec: &BlendSpec,
+        f: plan::PlanFail,
+        catalog: plan::PlanFail,
+        corners: bool,
+    ) -> Result<BlendError, BlendError> {
+        let import = self.planarity_tol > crate::tol::PLANE_DIST;
+        let (plan::PlanFail::Size(feature), false) =
+            (f, PREVIEW.with(std::cell::Cell::get) && import)
+        else {
+            return self.swept_refusal(spec, catalog, corners);
+        };
+        let limit = self.max_size_by(spec, None, true, |probe| {
+            self.blend_attempt(probe).map(|_| ()).map_err(|(f, _)| f)
+        });
+        let limit = match limit {
+            Ok(l) if l.max > 0.0 => l,
+            _ => return self.swept_refusal(spec, catalog, corners),
+        };
+        // A largest size is a size limit only where the round just past it
+        // is refused as too large, or runs into other geometry (the search
+        // counts an obstruction as a size limit too); refused there for a
+        // hard reason (a corner it cannot turn), that refusal is the answer,
+        // and no size is named.
+        if !import
+            && let Some(e) = hard_past_the_limit(
+                self.blend_attempt(&spec.at_size(limit.max * (1.0 + DRAWN_LIMIT_PRECISION)))
+                    .map(|_| ())
+                    .map_err(|(f, _)| f),
+            )
+        {
+            return Ok(e);
+        }
+        Ok(BlendError::RadiusTooLarge {
+            max: limit.max,
+            limited_by: if import {
+                LimitFeature::KnownFit
+            } else if limit.limited_by == LimitFeature::Unknown {
+                feature
+            } else {
+                limit.limited_by
+            },
+        })
     }
 
     /// Whether `spec`'s facets are no edges anyone drew, so a round the
@@ -702,6 +808,75 @@ impl Object {
         classify::with_forced_swept(|| self.blend_once(spec)).is_ok()
     }
 
+    /// The deepest any point of `after`'s strip facets (their corners, edge
+    /// midpoints and centroids) lies inside `self` (the solid before the
+    /// blend), measured against each face of `self` whose polygon the point
+    /// projects into and whose plane it lies behind by no more than
+    /// `reach`; with where. Zero or less where nothing lies inside. A
+    /// measure for a concave chain's round, whose strip adds material and
+    /// lies outside the solid it was cut from; a convex round's strip lies
+    /// inside that solid by design, so this reads it as deep as its radius.
+    /// Test support only.
+    #[doc(hidden)]
+    pub fn blend_strip_penetration_for_test(
+        &self,
+        after: &Object,
+        reach: f64,
+    ) -> (f64, crate::math::Point3) {
+        use crate::math::{Point3, Vec3};
+        let mut worst = (f64::NEG_INFINITY, Point3::new(0.0, 0.0, 0.0));
+        for (_, face) in after.faces() {
+            if !face
+                .blend
+                .is_some_and(|t| t.role == crate::topo::BlendRole::Strip)
+            {
+                continue;
+            }
+            let ring: Vec<Point3> = after.loop_positions(face.outer_loop).collect();
+            let k = ring.len();
+            if k < 3 {
+                continue;
+            }
+            let mut samples = ring.clone();
+            for i in 0..k {
+                samples.push(ring[i] + (ring[(i + 1) % k] - ring[i]) * 0.5);
+            }
+            let g = ring
+                .iter()
+                .fold(Vec3::new(0.0, 0.0, 0.0), |a, p| a + p.to_vec())
+                / k as f64;
+            samples.push(Point3::new(g.x, g.y, g.z));
+            for x in samples {
+                for (f, of) in self.faces() {
+                    let sd = of.plane.signed_distance(x);
+                    if sd < 0.0
+                        && -sd <= reach
+                        && swept::in_face_for_test(self, f, x - of.plane.normal() * sd)
+                        && -sd > worst.0
+                    {
+                        worst = (-sd, x);
+                    }
+                }
+            }
+        }
+        worst
+    }
+
+    /// Why one swept attempt refuses, `None` where it builds. Test support
+    /// only.
+    #[doc(hidden)]
+    pub fn blend_swept_refusal_for_test(&self, spec: &BlendSpec) -> Option<BlendError> {
+        match classify::with_forced_swept(|| self.blend_once(spec)) {
+            Ok(_) => None,
+            Err(plan::PlanFail::Hard(e)) => Some(e),
+            Err(plan::PlanFail::Size(limited_by)) => Some(BlendError::RadiusTooLarge {
+                max: 0.0,
+                limited_by,
+            }),
+            Err(plan::PlanFail::Obstructed(at)) => Some(BlendError::Obstructed { at }),
+        }
+    }
+
     /// The result of one swept attempt, `None` where it refuses. Test
     /// support only.
     #[doc(hidden)]
@@ -714,8 +889,10 @@ impl Object {
     /// The refusal for a round on an imported mesh or a generated wall that
     /// neither the catalog nor the swept blend makes: where a smaller ball
     /// rolls, the size is too large and the largest that rolls is the limit
-    /// ([`Object::largest_that_rolls`], to within [`SWEPT_LIMIT_PRECISION`]),
-    /// limited by the shape of the model; otherwise [`Object::refusal`]'s. A
+    /// ([`Object::largest_that_rolls`], to within [`DRAWN_LIMIT_PRECISION`]),
+    /// limited by the shape of the model, or on an imported mesh (to within
+    /// [`SWEPT_LIMIT_PRECISION`]) a size that fits
+    /// ([`LimitFeature::KnownFit`]); otherwise [`Object::refusal`]'s. A
     /// user reads a refusal with no size as the tool failing for no reason.
     fn swept_refusal(
         &self,
@@ -746,7 +923,11 @@ impl Object {
             (e @ BlendError::RadiusTooLarge { max, .. }, Some(m)) if max >= m => e,
             (_, Some(m)) => BlendError::RadiusTooLarge {
                 max: m,
-                limited_by: LimitFeature::Unknown,
+                limited_by: if self.planarity_tol > crate::tol::PLANE_DIST {
+                    LimitFeature::KnownFit
+                } else {
+                    LimitFeature::Unknown
+                },
             },
             (e, None) => e,
         })
@@ -798,7 +979,7 @@ impl Object {
                 if rolled {
                     return Ok(BlendError::RadiusTooLarge {
                         max: limit.max,
-                        limited_by: LimitFeature::Unknown,
+                        limited_by: limit.limited_by,
                     });
                 }
                 if let BlendProfile::Custom { width, .. } = spec.profile {
@@ -1009,9 +1190,28 @@ impl Object {
     }
 
     /// One plan, apply and guard. A swept chain's surface solve whose result
-    /// fails a check answers the walk's refusal and where it failed.
+    /// fails a check answers the walk's refusal and where it failed. The
+    /// swept station record (test support) describes the attempt that
+    /// built.
     #[allow(clippy::type_complexity)]
     fn blend_single_once(
+        &self,
+        spec: &BlendSpec,
+    ) -> Result<
+        Result<(Object, BlendReport, Vec<FaceId>), (plan::PlanFail, crate::math::Point3)>,
+        plan::PlanFail,
+    > {
+        swept::record_attempt_begin();
+        let built = self.blend_single_try(spec);
+        if matches!(built, Ok(Ok(_))) {
+            swept::record_attempt_commit();
+        }
+        built
+    }
+
+    /// [`Object::blend_single_once`], its record aside.
+    #[allow(clippy::type_complexity)]
+    fn blend_single_try(
         &self,
         spec: &BlendSpec,
     ) -> Result<
@@ -1172,8 +1372,41 @@ fn survivor(before: &Object, after: &Object, e: EdgeId) -> Option<EdgeId> {
     })
 }
 
+/// What [`Object::blend_attempt`] tried before it failed, which decides how
+/// its refusal is named.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Tried {
+    /// The planners alone.
+    Plain,
+    /// The swept blend too; the planners' refusal stands.
+    Swept,
+    /// The swept blend too, which found a round too large for a side; with
+    /// the catalogue's refusal, which stands where no size is searched.
+    SweptTooLarge(plan::PlanFail),
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_hard_refusal_past_a_found_limit_replaces_it() {
+        let at = Point3::new(0.0, 0.0, 0.0);
+        assert_eq!(
+            hard_past_the_limit(Err(plan::PlanFail::Hard(BlendError::UnsupportedVertex {
+                at
+            }))),
+            Some(BlendError::UnsupportedVertex { at })
+        );
+        assert_eq!(
+            hard_past_the_limit(Err(plan::PlanFail::Obstructed(at))),
+            None
+        );
+        assert_eq!(
+            hard_past_the_limit(Err(plan::PlanFail::Size(LimitFeature::AdjacentFace))),
+            None
+        );
+        assert_eq!(hard_past_the_limit(Ok(())), None);
+    }
+
     use super::*;
     use crate::SurfaceRef;
     use crate::loft::{LoftProfile, LoftSpec};

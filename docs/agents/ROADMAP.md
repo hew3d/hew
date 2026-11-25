@@ -1716,26 +1716,28 @@ below.
 
 - **Swept rounds on drawn faceted seams.** A round of the seam where
   softened drawn facets meet a plate (the curves scoreboard's faceted
-  plinth) builds a valid, watertight solid, with three things still open.
-  First, where the rail runs along a softened seam of its side, the walk
-  leaves sliver strip facets on it (on the plinth and on the pipe tee's
-  swept rim), and the rail inherits the seam's soft mark, which hides
-  them as facet seams; dropping the mark exposes the slivers as hard
-  creases, so it waits for the walk's sliver fix, with the tee's two rail
-  specs in `crates/kernel/tests/blend_ext_specs.rs`
-  (`swept_blend_rails_are_tangent_edges` and
-  `a_swept_strip_shades_one_normal_per_vertex_and_meets_its_rails_tangent`)
-  as its acceptance. Second, beside a vertex lifted a few microns off the
-  plate the rail rides a seam between a wall facet and a steep facet and
-  is tangent to neither: with the soft rails of the first item, 3 or 4
-  rail edges read wrong at each size up to 1.2 mm, 7 at 1.5 mm and 5 at
-  1.7 mm (one there parts from its side about 30° where the strip turns
-  18°). Third, a round too large for the wall (2.5 mm) is built by the
-  solve against the side surfaces riding the plinth's hard top rim,
-  tangent nowhere (187 rail edges read wrong), where it should refuse as
-  too large; that needs a policy for when the surface solve may ride a
-  hard edge of a drawn object, and the cause carried from the swept
-  attempt to the refusal so it names the wall
+  plinth) builds at every size the wall takes with every rail reading as
+  its geometry says, and one too large for the wall is refused naming the
+  wall and a largest size that itself builds and reads correct. Where the
+  ball rides a convex seam of the wall, the rail is a crease and reads as
+  a hard edge. A largest size is named only when size is what stops the
+  next size up; otherwise the refusal gives the other cause. On an upright
+  boss with a notch or a valley beside a corner, the ball rests on wall
+  and plate along every straight wall and every edge reads as its geometry
+  says at 0.5, 1 and 1.5 mm. Still open:
+  - a round at an inward-leaning corner is refused, because the ball's
+    contact slides along the corner edge and the cut cannot yet build the
+    crease that leaves; a boss whose walls lean more than about 0.28°
+    refuses its whole base loop at 0.5 mm
+  - where the ball pivots in place across a valley it cannot reach, the
+    strip covers the turn in one flat band (0.08 mm inside the ball on the
+    plinth at 1.5 mm, 0.18 mm on the valley boss)
+  - the surface-solve fallback accepts a strip without checking it against
+    the solid; on a leaning boss with a notch, two isolated sizes within
+    1 nm of 4.6035 mm and 6.3571 mm build a round that lies inside the solid
+  - one straight base edge of a boss is refused with a limit of zero, so
+    the corner refusal's advice to try the edges one at a time does not
+    work
 
 ### Longer-term
 

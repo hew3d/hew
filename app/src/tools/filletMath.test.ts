@@ -113,6 +113,10 @@ describe('limit copy', () => {
       'Radius limited to 200 mm by the shape of the model.',
     )
   })
+  it('names a size that fits, not called a limit', () => {
+    expect(limitedSentence('Radius', 0.002, 'known_fit', fmt)).toBe('Radius set to 2 mm, a size that fits here.')
+    expect(limitedSentence('Distance', 0.002, 'known_fit', fmt)).toBe('Distance set to 2 mm, a size that fits here.')
+  })
   it('says what a profile needs', () => {
     expect(profileTooWideSentence(0.04, 0.025, fmt)).toBe('This profile needs 40 mm; 25 mm is available.')
   })

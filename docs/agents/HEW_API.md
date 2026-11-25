@@ -1426,7 +1426,8 @@ Semantics notes, normative:
   `radius_too_large` with `detail: {max, limited_by}` (`limited_by` is
   one of `adjacent_face`, `neighbor_edge`, `hole`, `imprint`,
   `opposite_blend`, `short_edge`, `rim_radius`, `facet_width`,
-  `other_geometry`, `unknown`), a profile wider than the faces refuses
+  `other_geometry`, `known_fit`, `unknown`; `known_fit` names a size that
+  fits, not shown to be the largest), a profile wider than the faces refuses
   `profile_too_wide` with `detail: {needed, available}`, a corner too
   large refuses `corner_radius_too_large` with `detail: {max}`, and a
   vertex or an obstruction refuses `unsupported_vertex` / `obstructed`

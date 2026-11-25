@@ -26,6 +26,11 @@ pub enum LimitFeature {
     FacetWidth,
     /// "by other geometry" (the obstruction guard)
     OtherGeometry,
+    /// Not a limit: the size named is one that fits, which the search could
+    /// not show to be the largest ("Radius set to 2 mm, a size that fits
+    /// here"). An imported mesh's search tries a few sizes and stops within
+    /// 10% of the first that fails, so it names what fits, not a maximum.
+    KnownFit,
     /// never shown alone: "by the shape of the model"
     Unknown,
 }
@@ -43,6 +48,7 @@ impl LimitFeature {
             LimitFeature::RimRadius => "rim_radius",
             LimitFeature::FacetWidth => "facet_width",
             LimitFeature::OtherGeometry => "other_geometry",
+            LimitFeature::KnownFit => "known_fit",
             LimitFeature::Unknown => "unknown",
         }
     }

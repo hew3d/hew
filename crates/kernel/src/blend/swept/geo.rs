@@ -156,6 +156,8 @@ pub(super) struct Surface {
     recent: RefCell<VecDeque<(Point3, Point3)>>,
     /// The chain's faces on each side, to seed the gathering.
     seeds: [Vec<FaceId>; 2],
+    /// Each side's own faces, once asked for (see [`Surface::own_faces`]).
+    own: RefCell<Option<Rc<[BTreeSet<FaceId>; 2]>>>,
 }
 
 /// One side's facets near a point, nearest first by how close each could
@@ -200,7 +202,107 @@ impl Surface {
                 chain.edges.iter().map(|e| e.a).collect(),
                 chain.edges.iter().map(|e| e.b).collect(),
             ],
+            own: RefCell::new(None),
         }
+    }
+
+    /// Each side's own faces: the chain's faces on that side and every face
+    /// joined to them across an edge that is not hard (a facet seam, a
+    /// tangent joint), never across the chain. A drawn side softened into
+    /// one surface is all of its facets; a face past a hard edge of it (a
+    /// plinth's top past its rim) is not the side.
+    fn own_faces(&self, sv: &Solver) -> Rc<[BTreeSet<FaceId>; 2]> {
+        if let Some(own) = &*self.own.borrow() {
+            return own.clone();
+        }
+        let obj = sv.obj;
+        let side = |x: usize| {
+            let mut seen: BTreeSet<FaceId> = self.seeds[x].iter().copied().collect();
+            let mut queue: VecDeque<FaceId> = seen.iter().copied().collect();
+            while let Some(f) = queue.pop_front() {
+                for l in obj.face_loops(f) {
+                    for h in obj.loop_half_edges(l) {
+                        let e = obj.half_edges()[h].edge;
+                        if self.chain_edges.contains(&e)
+                            || obj.edge_smoothness(e) == crate::surface::EdgeSmoothness::Hard
+                        {
+                            continue;
+                        }
+                        let Some((a, b)) = obj.edge_faces(e) else {
+                            continue;
+                        };
+                        let g = if a == f { b } else { a };
+                        if !sv.other_side[x].contains(&g) && seen.insert(g) {
+                            queue.push_back(g);
+                        }
+                    }
+                }
+            }
+            seen
+        };
+        let own = Rc::new([side(0), side(1)]);
+        *self.own.borrow_mut() = Some(own.clone());
+        own
+    }
+
+    /// Whether side `x`'s contact `foot` has left the side for a hard edge
+    /// of it or a face past one: a seam or corner with a face that is not
+    /// the side's own, or such a face itself. The chain's own edges and
+    /// vertices are where the two sides meet, and stay.
+    pub(super) fn leaves_side(&self, sv: &Solver, x: usize, foot: Foot) -> bool {
+        let obj = sv.obj;
+        match foot {
+            Foot::Seam(e) if self.chain_edges.contains(&e) => return false,
+            Foot::Corner(v)
+                if self.chain_edges.iter().any(|&e| {
+                    obj.edge_vertex_ids(e)
+                        .is_some_and(|(a, b)| a == v || b == v)
+                }) =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+        let own = self.own_faces(sv);
+        foot.faces(obj).into_iter().any(|f| !own[x].contains(&f))
+    }
+
+    /// Whether side `x`'s rail point `rail`, on `foot`, lies on a hard edge
+    /// of that foot's facets that bounds the side (a face past it is not the
+    /// side's own, see [`Surface::own_faces`]) to [`tol::SWEPT_SLACK`], the
+    /// slack within which a rail point on its facet's edge is that edge's
+    /// point (`build_swept` snaps it onto the edge): the ball's contact has
+    /// reached the side's hard edge. The chain's own edges stay, and so do
+    /// the edges of `ends` (an open chain's end faces, where its end
+    /// sections' rails land by construction).
+    pub(super) fn rail_on_hard_edge(
+        &self,
+        sv: &Solver,
+        x: usize,
+        foot: Foot,
+        rail: Point3,
+        ends: &[FaceId],
+    ) -> bool {
+        let obj = sv.obj;
+        let own = self.own_faces(sv);
+        foot.faces(obj).into_iter().any(|f| {
+            obj.face_loops(f).into_iter().any(|l| {
+                obj.loop_half_edges(l).any(|h| {
+                    let e = obj.half_edges()[h].edge;
+                    !self.chain_edges.contains(&e)
+                        && obj.edge_smoothness(e) == crate::surface::EdgeSmoothness::Hard
+                        && obj.edge_faces(e).is_some_and(|(a, b)| {
+                            (!own[x].contains(&a) || !own[x].contains(&b))
+                                && !ends.contains(&a)
+                                && !ends.contains(&b)
+                        })
+                        && obj.edge_endpoints(e).is_some_and(|(a, b)| {
+                            super::super::query::point_segment_distance(rail, a, b)
+                                <= tol::SWEPT_SLACK
+                        })
+                })
+            })
+        })
     }
 
     fn facet(&self, obj: &Object, f: FaceId) -> Rc<Facet> {
@@ -414,6 +516,20 @@ pub(super) fn solve(
                 if !rests_on_side(sv, surf, &sides[x], *foot) {
                     return Err(unsupported(q));
                 }
+            }
+            // On a drawn or generated object a side ends at its hard edges:
+            // a ball that leaves its side to ride one (a plinth's top rim)
+            // is tangent to nothing there, and is too large for that side.
+            // An imported mesh's facet edges are no edges anyone drew, and
+            // its ball rides them.
+            let import = sv.obj.planarity_tol > tol::PLANE_DIST;
+            if !import
+                && feet
+                    .iter()
+                    .enumerate()
+                    .any(|(x, &foot)| surf.leaves_side(sv, x, foot))
+            {
+                return Err(PlanFail::Size(super::super::LimitFeature::AdjacentFace));
             }
             let mut recent = surf.recent.borrow_mut();
             recent.push_back((q, settled));

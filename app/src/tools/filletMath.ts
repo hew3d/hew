@@ -153,13 +153,16 @@ export function limitFeatureCopy(limitedBy: string): string {
   }
 }
 
-/** "Radius limited to 14 mm by the adjacent face." */
+/** "Radius limited to 14 mm by the adjacent face.", or for a size the
+ *  kernel knows fits but could not show to be the largest (`known_fit`),
+ *  "Radius set to 2 mm, a size that fits here." */
 export function limitedSentence(
   label: string,
   maxMeters: number,
   limitedBy: string,
   fmt: (m: number) => string,
 ): string {
+  if (limitedBy === 'known_fit') return `${label} set to ${fmt(maxMeters)}, a size that fits here.`
   return `${label} limited to ${fmt(maxMeters)} ${limitFeatureCopy(limitedBy)}.`
 }
 

@@ -72,12 +72,14 @@ pub mod unit_key;
 pub use annotation::{Anchor, Annotation, CapturedCurve, RadialKind};
 pub use attr::{AttrDict, AttrValue, AttrValueError};
 pub use axes::{AxesFrame, AxesFrameError};
+pub use blend::{BallAt, Bridge, StationRecord};
 pub use blend::{
     BlendError, BlendFeature, BlendLimit, BlendProfile, BlendReport, BlendSpec, BlendStops,
     Convexity, CornerStyle, LimitFeature, ProfileSample, ProfileSeg, ProfileShape, RadiusHandle,
     adjacency_builds_for_test, blend_feature_scans_for_test, blend_verifications_for_test,
     bundled as bundled_profiles, chain_query_work_for_test, limit_attempts_for_test,
     limit_probes_for_test, limit_searches_for_test, locate_work_for_test, same_geometry_for_test,
+    swept_balls_for_test, swept_rail_check_for_test,
 };
 pub use camera::{CameraProjection, CameraState};
 pub use changes::{
@@ -148,7 +150,7 @@ pub use sketch::{
 };
 pub use sketch_corner::{CornerBlendReport, CornerProfile};
 pub use style::{SectionLook, ViewStyle};
-pub use surface::EdgeSmoothness;
+pub use surface::{EdgeSmoothness, RailGap};
 pub use topo::{
     AnalyticRim, AttrSlot, BlendId, BlendKind, BlendRole, BlendTag, FaceAttrs, Object, SurfaceRef,
     WatertightState,
