@@ -4962,6 +4962,10 @@ msgstr "Hew kann diese nicht mit ebenen Flächen schließen. Die meisten sind ab
 msgid "Hew can't read that picture. Save it as a PNG or JPEG and place it again."
 msgstr "Hew kann dieses Bild nicht lesen. Speichern Sie es als PNG oder JPEG und platzieren Sie es erneut."
 
+#: src/App.tsx
+msgid "Hew can’t save over the original file after this recovery. Save will ask you where to put it."
+msgstr ""
+
 #: src/viewport/gpuCapability.ts
 msgid "Hew can't show the 3D view"
 msgstr "Hew kann die 3D-Ansicht nicht anzeigen"

@@ -43,6 +43,9 @@ export interface RecoverySnapshot {
   /** The `.skp` source stored beside the snapshot (see `writeSource`), or
    * null when none was stored. */
   source: Uint8Array | null
+  /** Desktop: the snapshot named an original file Hew may not write to, so
+   * `meta.path` is null and Save will ask for a location. */
+  pathWithheld?: boolean
 }
 
 /**

@@ -294,6 +294,7 @@ const recoveryState = vi.hoisted(() => ({
   write: vi.fn(async (_bytes: Uint8Array, _meta: unknown) => {}),
   clear: vi.fn(async () => {}),
   writeSource: vi.fn(async (_source: Uint8Array | null) => {}),
+  claim: vi.fn(async (_slot: string): Promise<unknown> => null),
 }))
 vi.mock('./io/recoveryStore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./io/recoveryStore')>()
@@ -302,7 +303,7 @@ vi.mock('./io/recoveryStore', async (importOriginal) => {
     makeRecoveryStore: () => ({
       write: recoveryState.write,
       list: async () => recoveryState.listings,
-      claim: async () => null,
+      claim: recoveryState.claim,
       clear: recoveryState.clear,
       discardAll: async () => {},
       writeSource: recoveryState.writeSource,
@@ -360,6 +361,7 @@ beforeEach(() => {
   // an unrelated later test).
   recoveryState.write.mockReset().mockResolvedValue(undefined)
   recoveryState.clear.mockReset().mockResolvedValue(undefined)
+  recoveryState.claim.mockReset().mockResolvedValue(null)
 })
 
 /**
@@ -3845,6 +3847,28 @@ describe('App — welcome screen', () => {
     await renderAndLoad()
     await screen.findByRole('dialog', { name: /recover unsaved document/i })
     expect(screen.queryByRole('dialog', { name: /welcome to hew/i })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    [true, 1],
+    [false, 0],
+  ])('says why Save will ask for a location (path withheld: %s)', async (pathWithheld, notes) => {
+    const meta = { version: 1 as const, savedAt: Date.now(), name: 'Crashed Doc', path: null }
+    recoveryState.listings = [{ slot: 'web', meta }]
+    recoveryState.claim.mockResolvedValue({
+      bytes: new Uint8Array([1]),
+      meta: { ...meta, format: 'hew' },
+      source: null,
+      pathWithheld,
+    })
+    await renderAndLoad()
+    const dialog = await screen.findByRole('dialog', { name: /recover unsaved document/i })
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: /^recover/i }))
+    })
+    await waitFor(() => expect(recoveryState.claim).toHaveBeenCalled())
+    await waitFor(() => expect(document.title).toContain('Crashed Doc'))
+    expect(screen.queryAllByText(/can’t save over the original file/)).toHaveLength(notes)
   })
 
   it('opens after the recovery prompt is discarded (KB-39: declining is a fresh launch)', async () => {
