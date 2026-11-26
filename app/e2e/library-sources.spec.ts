@@ -27,6 +27,14 @@ import {
  *
  * Driven with real clicks, typing and keys. Assertions go through roles,
  * labels and the components' data-testid attributes.
+ *
+ * Lines of that script with no test here (a skipped placeholder is not
+ * allowed: it reports green while asserting nothing, and
+ * scripts/check-e2e-skips.mjs rejects it): 9 (placement ghost followed with
+ * real pointer moves), 14 (needs a Library file with a chosen id prefix),
+ * 38 (the native folder picker), 43 (inserting by name from the command
+ * palette), 46 (needs a strict-CSP build), 49 (needs a build that withholds
+ * the Profiles preview with a source that lists Profiles).
  */
 
 declare global {
@@ -433,11 +441,6 @@ test.describe('Library sources (section 11 acceptance)', () => {
       .toEqual([2, 1, 3])
   })
 
-  test.fixme('9. Both. Insert a "Not in your Library" component from a source view: ghost follows, one instance on click', async () => {
-    // Needs the placement ghost followed over the viewport with real pointer moves
-    // (ghostBuilder.ts) and a canvas click. Not written in this pass; see the report.
-  })
-
   test('11. Both. From a catalog preview of a source not yet added, add one item: source in sidebar and item in Library', async ({ page }) => {
     const host = new FakeWeb()
     const a = sourceOf('Shop Hardware', SOURCE_A, 3)
@@ -491,13 +494,6 @@ test.describe('Library sources (section 11 acceptance)', () => {
     await page.getByRole('button', { name: 'Add to my Library' }).click()
 
     await expect(page.getByText('The source lists this item incorrectly. Hew did not add it.')).toBeVisible()
-  })
-
-  test.fixme('14. Both. Minted file name taken by a different item: the name-clash message, the existing item unchanged', async () => {
-    // Blocked: the minted file name is slug(name) plus the first six hex of the id
-    // (fileNaming.ts). Making a different item own that name needs a file with a chosen
-    // id prefix written into the Library folder, which the browser suite cannot do
-    // without reaching into app storage. See the report.
   })
 
   test('15. Both. Index with "hew": 2: "This source needs a newer version of Hew."', async ({ page }) => {
@@ -958,11 +954,6 @@ test.describe('Library sources (section 11 acceptance)', () => {
     await expect(sourceTile(page, 'Part 01')).toHaveAccessibleName(/Part 01 In your Library$/)
   })
 
-  test.fixme('38. Web. Choose a folder for a Library that has sources: the sources are still listed afterward', async () => {
-    // Skipped: choosing a Library folder needs the File System Access picker, which
-    // needs a real user gesture and a native folder dialog that Playwright cannot drive.
-  })
-
   test('40. Both. Open an added item as a document, Save to Library as a new item: no "From" line', async ({ page }) => {
     const host = new FakeWeb()
     const a = sourceOf('Shop Hardware', SOURCE_A, 2)
@@ -990,11 +981,6 @@ test.describe('Library sources (section 11 acceptance)', () => {
     await localView(dialog)
     await libraryTile(dialog, 'Part 01 copy').click()
     await expect(dialog.getByText(/^From /)).toHaveCount(0)
-  })
-
-  test.fixme('43. Both. Command palette: typing an added item\'s name inserts it through the Library entry', async () => {
-    // The palette's Library entry opens the dialog (library.spec.ts); the insert-by-name
-    // path is not wired through the palette in this build. See the report.
   })
 
   test('44. Web. Setting off: reopening the Library makes no outside request; Refresh on a source makes one check', async ({ page }) => {
@@ -1033,16 +1019,6 @@ test.describe('Library sources (section 11 acceptance)', () => {
     await expect(dialog.getByTestId('library-browse-catalog')).toBeVisible()
     await settle(page)
     expect(host.outside.slice(before)).toHaveLength(0)
-  })
-
-  test.fixme('46. Web, strict build: "Sources are turned off on this server."; From line still shows; no outside request', async () => {
-    // Needs a strict-CSP build (shells/csp/policies.json "web.strict"). The e2e run uses
-    // the production policy; a second build is not cheap enough for this run. See the report.
-  })
-
-  test.fixme('49. Both, profile preview off: a source with Profiles items shows none of them; Add all does not add them', async () => {
-    // Needs the Profiles preview to be withheld in the build under test; the production-shape
-    // build withholds it, and the preview build is not run here. See the report.
   })
 })
 

@@ -174,7 +174,10 @@ test.describe('view die', () => {
     await expect
       .poll(async () => (await page.evaluate(() => window.__hew_test!.getCameraState())).projection, { timeout: 3000 })
       .toBe('perspective')
-    expect((await page.evaluate(() => window.__hew_test!.getCameraState())).fovDeg).toBe(45)
+    // The field of view eases back after the projection switches.
+    await expect
+      .poll(async () => (await page.evaluate(() => window.__hew_test!.getCameraState())).fovDeg, { timeout: 3000 })
+      .toBe(45)
   })
 
   test('hovering names the target in a pill, neutrally highlighted', async ({ page }) => {
