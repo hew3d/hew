@@ -460,8 +460,9 @@ The recipe for an outliner panel:
 1. On a row's double click, call `hew.view.enter` with the row's id, or
    with its occurrence path when the row is a part inside an instance. The
    answer is `{}`; do not read the result for what opened. If the window
-   declines the entry, the answer is a refusal (`nested_component_in_context`
-   or `enter_refused`) and the window is where it was.
+   declines the entry, the answer is a refusal (`gesture_in_progress`,
+   `nested_component_in_context`, `locked_node`, or `enter_refused`) and the
+   window is where it was.
 2. Listen for `context_changed`. Its `stack` lists the open group and
    component frames, outermost first, and `fallback` lists the in-context
    entries (`{kind: "object" | "instance", id}`) inside the innermost frame.

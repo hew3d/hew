@@ -884,12 +884,19 @@ with no event.
 
 `hew.view.enter` answers after the window has acted on it, so an entry the
 window declines after the kernel accepted it is the call's own refusal, not
-`{}`:
+`{}`. The same holds when the call is the one command of a
+`hew.doc.transact`, which is the form `hew_transact` sends:
 
 - `nested_component_in_context`: the definition nests other groups or
   components and sits on an unevenly scaled or group-placed instance.
 - `gesture_in_progress`: a tool gesture was armed by the time the window
   acted.
+- `locked_node`: the node is locked, itself or through a group above it,
+  and the window does not open it for editing. The explanation is the
+  lock's own: "Locked. Unlock it to change it." When the lock is on a
+  group that holds a shape this node shares (`detail.indirect: true`), it
+  is "This shape is also used inside a locked group. Make this copy unique
+  to change it."
 - `enter_refused`: any other entry the window declines. `detail.code` is
   the kernel's code when the kernel refused to open a session, and one of
   the window's own codes otherwise: `window_not_ready` (no window to enter
@@ -2322,7 +2329,7 @@ transaction with another command.
 | `hew.view.isolate` | host | `{ids}`: 1 to 10 000 node ids or `{object, instance}` pairs | `{isolated}` | `unknown_entity`, `host_capability_missing` |
 | `hew.view.clear_isolation` | host | `{}` | `{}` | `host_capability_missing` |
 | `hew.view.zoom_to` | host | `{ids, padding?}`: `padding` from 0 to 2, default 0.1 | `{min, max}`: the framed box before padding | `unknown_entity`, `nothing_to_frame`, `host_capability_missing` |
-| `hew.view.enter` | host, solitary | `{id}` or `{path}`, exactly one: a world object, group, or instance, or an occurrence path of instances whose last element, an instance or a member object, is the node to enter | `{}`; the outcome arrives as `context_changed` | `unknown_entity`, `unknown_occurrence`, `gesture_in_progress`, `nested_component_in_context`, `enter_refused`, `host_capability_missing`; `-32602` for a sketch, guide, annotation, material, tag, or component target |
+| `hew.view.enter` | host, solitary | `{id}` or `{path}`, exactly one: a world object, group, or instance, or an occurrence path of instances whose last element, an instance or a member object, is the node to enter | `{}`; the outcome arrives as `context_changed` | `unknown_entity`, `unknown_occurrence`, `gesture_in_progress`, `nested_component_in_context`, `locked_node`, `enter_refused`, `host_capability_missing`; `-32602` for a sketch, guide, annotation, material, tag, or component target |
 | `hew.view.exit` | host, solitary | `{}` | `{}` | `gesture_in_progress`, `nothing_to_exit`, `host_capability_missing` |
 | `hew.view.exit_all` | host, solitary | `{}` | `{}` | `gesture_in_progress`, `host_capability_missing` |
 
@@ -2376,6 +2383,13 @@ line, a material, or a tag adds nothing), widened on every side by
 `padding` times the box's largest extent; a box with no extent (a lone
 guide point) frames as a cube 1 m wide around it, padded the same way.
 Nothing with a box refuses `nothing_to_frame`.
+
+**While a session is open.** The group or component the window is inside
+is hidden in the kernel, so its own id no longer names a live entity:
+`selection.set`, `hide`, `show`, `isolate`, and `zoom_to` each refuse it
+`unknown_entity`. The nodes the session opened up (a component's or
+group's member objects) and every other node still resolve; address those
+instead.
 
 **View state and transactions.** All ten are legal inside a transaction,
 read or write, and none adds an undo entry. An envelope that aborts takes

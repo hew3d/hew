@@ -64,7 +64,7 @@ import { ChangesPanel } from './panels/ChangesPanel'
 import { ModelHealthPanel, selectionObjectIds } from './panels/ModelHealthPanel'
 import { bakeSmooth, setSmoothLevel, smoothDenseToasts, smoothLevels, smoothRefusal } from './panels/smoothActions'
 import { ACTION_TOAST_MS, toastActionFor, type ToastAction } from './toastActions'
-import { anyLocked, allLockableNodes, isLocked, isLockToastCode, gateSelection, leftBehindMessage, lockHintFor, lockToastSteps } from './lock/lockModel'
+import { anyLocked, allLockableNodes, isLocked, isLockToastCode, gateSelection, leftBehindMessage, lockHintFor, parseLockedHintCode, lockToastSteps } from './lock/lockModel'
 import { lockedAmong, setNodesLocked, unlockedAmong } from './lock/lockActions'
 import { leaveBehind, refuseIfLocked, toastLocked } from './lock/lockGate'
 import { HISTORY_TRIM_NOTE_MS, HISTORY_TRIM_TOOLTIP, historyTrimNote, takeHistoryTrim } from './historyTrim'
@@ -2153,7 +2153,15 @@ export default function App() {
     const locked = lockHintFor(scene, target, { shape: true })
     if (locked !== null) {
       handleToastRef.current(locked.message, locked.code)
-      return { refused: { name: 'locked_node' } }
+      // `indirect` is set only when the lock is on a group that holds a shape
+      // this node shares; the explanation then says to make it unique. A lock
+      // on the node itself or a group above it is not indirect.
+      return {
+        refused: {
+          name: 'locked_node',
+          ...(parseLockedHintCode(locked.code)?.indirect === true ? { detail: { indirect: true } } : {}),
+        },
+      }
     }
 
     // Build the root→leaf container chain by walking node_parent upward,

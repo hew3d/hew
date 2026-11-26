@@ -468,6 +468,7 @@ fn enter_declares_the_refusals_the_window_answers_with() {
     for name in [
         "gesture_in_progress",
         "nested_component_in_context",
+        "locked_node",
         "enter_refused",
     ] {
         assert!(listed.iter().any(|r| r == name), "{name}");

@@ -1253,3 +1253,144 @@ fn the_selection_and_view_commands_are_read_only_view_commands() {
         assert_eq!(decl.permission, api::Permission::View, "{name}");
     }
 }
+
+/// While a component session is open the entered instance is baked into
+/// world nodes and hidden, so its id stops naming a live entity: framing it
+/// answers `unknown_entity`, while its member objects and every other
+/// placement still frame.
+#[test]
+fn zoom_to_names_the_session_world_not_the_entered_placement() {
+    let mut doc = Document::new();
+    let a = boxed(&mut doc, 0.0);
+    let b = boxed(&mut doc, 3.0);
+    let (_, ia, _) = doc
+        .make_component(&[NodeId::Object(a)])
+        .expect("component a");
+    let (_, ib, _) = doc
+        .make_component(&[NodeId::Object(b)])
+        .expect("component b");
+    let (ia_id, ib_id) = (
+        public(&doc, EntityRef::Instance(ia)),
+        public(&doc, EntityRef::Instance(ib)),
+    );
+    let mut host = FakeHost::default();
+    let mut conn = connect(&mut doc, &mut host);
+    ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        "hew.view.zoom_to",
+        json!({ "ids": [ia_id, ib_id] }),
+    );
+
+    doc.open_explode_session(ia).expect("session");
+    let member = doc.explode_session_objects().expect("session members")[0];
+    let member_id = public(&doc, EntityRef::Object(member));
+    ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        "hew.view.zoom_to",
+        json!({ "ids": [member_id] }),
+    );
+    ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        "hew.view.zoom_to",
+        json!({ "ids": [ib_id] }),
+    );
+    let r = call(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        "hew.view.zoom_to",
+        json!({ "ids": [ia_id] }),
+    );
+    let refusal = r
+        .error
+        .as_ref()
+        .and_then(|e| e.data.as_ref())
+        .map(|d| d["refusal"].clone());
+    assert_eq!(refusal, Some(json!("unknown_entity")), "{:?}", r.error);
+}
+
+fn refusal_of(r: &api::Response) -> Option<String> {
+    r.error
+        .as_ref()
+        .and_then(|e| e.data.as_ref())
+        .and_then(|d| d["refusal"].as_str().map(str::to_string))
+}
+
+/// While a component or a group session is open, the entered node is
+/// hidden in the kernel: its own id answers `unknown_entity` to every
+/// command that resolves ids, while what the session opened up (member
+/// objects) and everything else still resolves.
+#[test]
+fn the_entered_node_of_an_open_session_does_not_resolve_for_view_commands() {
+    let mut doc = Document::new();
+    let a = boxed(&mut doc, 0.0);
+    let b = boxed(&mut doc, 3.0);
+    let c = boxed(&mut doc, 6.0);
+    let (_, ia, _) = doc.make_component(&[NodeId::Object(a)]).unwrap();
+    let (g, _) = doc.group_nodes(&[NodeId::Object(c)]).unwrap();
+    let (ia_id, g_id, b_id, c_id) = (
+        public(&doc, EntityRef::Instance(ia)),
+        public(&doc, EntityRef::Group(g)),
+        public(&doc, EntityRef::Object(b)),
+        public(&doc, EntityRef::Object(c)),
+    );
+    let mut host = FakeHost::default();
+    let mut conn = connect(&mut doc, &mut host);
+    let commands = [
+        "hew.selection.set",
+        "hew.view.hide",
+        "hew.view.show",
+        "hew.view.isolate",
+        "hew.view.zoom_to",
+    ];
+    for (entered, other, label) in [(&ia_id, &b_id, "component"), (&g_id, &b_id, "group")] {
+        if label == "component" {
+            doc.open_explode_session(ia).unwrap();
+        } else {
+            doc.open_group_session(g).unwrap();
+        }
+        for m in commands {
+            let r = call(
+                &mut conn,
+                &mut doc,
+                &mut host,
+                m,
+                json!({ "ids": [entered] }),
+            );
+            assert_eq!(
+                refusal_of(&r).as_deref(),
+                Some("unknown_entity"),
+                "{label} {m}"
+            );
+            let r = call(&mut conn, &mut doc, &mut host, m, json!({ "ids": [other] }));
+            assert_eq!(refusal_of(&r), None, "{label} {m} on another node");
+        }
+        if label == "component" {
+            doc.close_explode_session().unwrap();
+        } else {
+            let member_id = {
+                let member = doc
+                    .live_object_ids()
+                    .into_iter()
+                    .find(|o| public(&doc, EntityRef::Object(*o)) == c_id)
+                    .unwrap();
+                public(&doc, EntityRef::Object(member))
+            };
+            let r = call(
+                &mut conn,
+                &mut doc,
+                &mut host,
+                "hew.view.zoom_to",
+                json!({ "ids": [member_id] }),
+            );
+            assert_eq!(refusal_of(&r), None, "group member");
+            doc.close_group_session().unwrap();
+        }
+    }
+}

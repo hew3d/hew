@@ -18377,7 +18377,7 @@ End the live viewport's isolation; a no-op when nothing is isolated.
 - **Served:** host
 - **Permission:** view
 
-Converge the user's window onto a node, opening group and component sessions level by level and falling back to the in-context entry for an instance a session cannot take (unevenly scaled, or placed in a group elsewhere; a mirrored instance opens a session like any other), then select it. Give exactly one of id (an object, group, or instance in the world) or path (instances outermost first, ending at the leaf). The call answers after the window has acted on it: an empty result when it entered (the outcome arrives as context_changed, and hew.query.context reports the stack and fallback afterward), or a refusal naming why when the window declined, with the window put back where it was. Acts on the user's window, so it is refused inside a transaction; distinct from hew.context.enter, which scopes a plugin's own edits.
+Converge the user's window onto a node, opening group and component sessions level by level and falling back to the in-context entry for an instance a session cannot take (unevenly scaled, or placed in a group elsewhere; a mirrored instance opens a session like any other), then select it. Give exactly one of id (an object, group, or instance in the world) or path (instances outermost first, ending at the leaf). The call answers after the window has acted on it: an empty result when it entered (the outcome arrives as context_changed, and hew.query.context reports the stack and fallback afterward), or a refusal naming why when the window declined, with the window put back where it was. Acts on the user's window, so it is solitary: it runs alone or as the only command of a transaction. Distinct from hew.context.enter, which scopes a plugin's own edits.
 
 **Params schema:**
 
@@ -18418,9 +18418,9 @@ Converge the user's window onto a node, opening group and component sessions lev
 - `unknown_occurrence`
 - `gesture_in_progress`
 - `nested_component_in_context` — This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts.
+- `locked_node` — Locked. Unlock it to change it.
 - `enter_refused` — Hew couldn't open that for editing.
 - `host_capability_missing`
-- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.view.exit`
 

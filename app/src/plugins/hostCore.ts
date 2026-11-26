@@ -58,6 +58,7 @@ import {
   afterAbort,
   afterDispatch,
   afterEnterDispatch,
+  isEnterFrame,
   beforeDispatch,
   enterRefusedReply,
   frameMethod,
@@ -906,7 +907,7 @@ export function createPluginHost(
     if (result.kind === 'reply') {
       const mutatedNow = (): boolean => result.dryRun !== true && refreshesAfter(scene, method, result.frame)
       const declined =
-        method === 'hew.view.enter' && replySucceeded(result.frame)
+        isEnterFrame(frame) && replySucceeded(result.frame)
           ? afterEnterDispatch(env.bridge, scene, result.frame, mutatedNow)
           : afterDispatch(env.bridge, scene, result.frame, mutatedNow())
       pumpEvents(scene)

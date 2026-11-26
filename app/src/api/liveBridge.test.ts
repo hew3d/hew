@@ -1302,6 +1302,7 @@ describe('installLiveBridge', () => {
         method: string,
         order: string[] = [],
         armAfterWarmup?: () => void,
+        params: unknown = {},
       ): Promise<void> => {
         installLiveBridge(deps)
         await flush()
@@ -1320,7 +1321,7 @@ describe('installLiveBridge', () => {
         scene.take_pending_view_directives.mockReturnValue(JSON.stringify(directives))
         fire('hew://api-frame', {
           connId: 3,
-          frame: `{"jsonrpc":"2.0","id":2,"method":"${method}","params":{}}`,
+          frame: JSON.stringify({ jsonrpc: '2.0', id: 2, method, params }),
         })
       }
       afterEach(() => {
@@ -1442,6 +1443,27 @@ describe('installLiveBridge', () => {
         await dispatchEnter([enterDirective], 'hew.view.enter')
         expect(replies()).toHaveLength(1)
         expect(replies()[0]).toMatchObject({ error: { data: { refusal: 'nested_component_in_context' } } })
+      })
+
+      it('an enter inside a one-command transaction is answered after the app acted, and told when declined', async () => {
+        deps.enterNode = vi.fn(() => ({ refused: { name: 'nested_component_in_context' } }))
+        await dispatchEnter([enterDirective], 'hew.doc.transact', [], undefined, {
+          commands: [{ method: 'hew.view.enter', params: { id: 'ins_1' } }],
+        })
+        expect(replies()).toHaveLength(1)
+        expect(replies()[0]).toMatchObject({
+          id: 2,
+          error: { data: { refusal: 'nested_component_in_context', failed_method: 'hew.view.enter' } },
+        })
+      })
+
+      it('an enter inside a one-command transaction that the app takes answers the transaction result', async () => {
+        deps.enterNode = vi.fn(() => ({ ok: true }) as const)
+        const order: string[] = []
+        await dispatchEnter([enterDirective], 'hew.doc.transact', order, undefined, {
+          commands: [{ method: 'hew.view.enter', params: { id: 'ins_1' } }],
+        })
+        expect(replies()).toEqual([{ jsonrpc: '2.0', id: 2, result: {} }])
       })
 
       it('a throw while reading whether the dispatch mutated is a refusal for an enter', async () => {
@@ -1886,10 +1908,21 @@ describe('dispatchFrameNow', () => {
 })
 
 describe('the explanations a refused entry carries', () => {
+  it('says the direct or the shared-shape wording for a locked node', async () => {
+    const { enterRefusedReply } = await import('./liveBridge')
+    const explanation = (refusal: { name: string; detail?: Record<string, unknown> }): string =>
+      (JSON.parse(enterRefusedReply('{"id":1}', refusal) as string) as { error: { data: { explanation: string } } }).error
+        .data.explanation
+    expect(explanation({ name: 'locked_node' })).toBe(ENTER_REFUSAL_COPY.locked_node)
+    expect(explanation({ name: 'locked_node', detail: { indirect: true } })).toBe(ENTER_REFUSAL_COPY.locked_node_indirect)
+  })
+
   it('say the same as the app\'s message table and the kernel command', async () => {
     const { kernelErrorMessage } = await import('../kernelErrors')
     expect(ENTER_REFUSAL_COPY.nested_component_in_context).toBe(kernelErrorMessage('NestedComponentInContext', ''))
     expect(ENTER_REFUSAL_COPY.enter_refused).toBe(kernelErrorMessage('EnterRefused', ''))
+    expect(ENTER_REFUSAL_COPY.locked_node).toBe(kernelErrorMessage('LockedNode', ''))
+    expect(ENTER_REFUSAL_COPY.locked_node_indirect).toBe(kernelErrorMessage('LockedNodeViaSharedShape', ''))
     const rust = readFileSync(resolve(process.cwd(), '../crates/api/src/commands/view.rs'), 'utf8')
     expect(rust).toContain(`"gesture_in_progress",\n            "${ENTER_REFUSAL_COPY.gesture_in_progress}"`)
   })

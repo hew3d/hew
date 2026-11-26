@@ -342,6 +342,28 @@ export function frameMethod(frame: string): string | undefined {
   }
 }
 
+/**
+ * Whether a request frame is a `hew.view.enter`: the bare call, or the
+ * one-command `hew.doc.transact` an MCP client wraps it in (the command is
+ * solitary, so it is the envelope's only one). Either is answered after the
+ * window has acted on it.
+ */
+export function isEnterFrame(frame: string): boolean {
+  try {
+    const request = JSON.parse(frame) as { method?: unknown; params?: { commands?: unknown } } | null
+    if (request?.method === 'hew.view.enter') return true
+    if (request?.method !== 'hew.doc.transact') return false
+    const commands = request.params?.commands
+    return (
+      Array.isArray(commands) &&
+      commands.length === 1 &&
+      (commands[0] as { method?: unknown } | null)?.method === 'hew.view.enter'
+    )
+  } catch {
+    return false
+  }
+}
+
 /** A selection entry as a `selection` directive carries it: the kernel
  * handle as a decimal string (`crates/wasm-api/src/live.rs`'s
  * `UiSelectionEntry`). */
@@ -723,7 +745,10 @@ export function afterDispatch(deps: LiveBridgeDeps, scene: Scene, reply: string,
  * answers it): only its id is read. Undefined for a notification.
  */
 export function enterRefusedReply(frame: string, refusal: EnterRefusal): string | undefined {
-  let explanation = ENTER_REFUSAL_COPY[refusal.name] ?? ENTER_REFUSAL_COPY.enter_refused
+  let explanation =
+    refusal.name === 'locked_node' && refusal.detail?.indirect === true
+      ? ENTER_REFUSAL_COPY.locked_node_indirect
+      : (ENTER_REFUSAL_COPY[refusal.name] ?? ENTER_REFUSAL_COPY.enter_refused)
   if (refusal.detail?.restored === false) explanation += NOT_RESTORED_COPY
   return refusedFrame(frame, 'hew.view.enter', refusal.name, explanation, refusal.detail ?? {})
 }
@@ -739,6 +764,8 @@ export const ENTER_REFUSAL_COPY: Record<string, string> = {
   gesture_in_progress: 'A tool gesture is in progress in the Hew window. Wait for it to finish, then try again.',
   nested_component_in_context:
     "This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts.",
+  locked_node: 'Locked. Unlock it to change it.',
+  locked_node_indirect: 'This shape is also used inside a locked group. Make this copy unique to change it.',
   enter_refused: "Hew couldn't open that for editing.",
 }
 const NOT_RESTORED_COPY = ' The window may not be where it was.'
@@ -850,7 +877,7 @@ export function dispatchFrameNow(
       : completeForward(scene, wasmId, result.token, result.forward.request_id)
   const mutatedNow = (): boolean =>
     result.kind === 'reply' && result.dryRun !== true && shouldRefreshAfterDispatch(scene, frame, reply)
-  const isEnter = result.kind === 'reply' && frameMethod(frame) === 'hew.view.enter' && replySucceeded(reply)
+  const isEnter = result.kind === 'reply' && isEnterFrame(frame) && replySucceeded(reply)
   const declined = isEnter
     ? afterEnterDispatch(deps, scene, reply, mutatedNow)
     : afterDispatch(deps, scene, reply, mutatedNow())
@@ -1291,7 +1318,7 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
       result.kind === 'pending'
         ? result.forward.mutating && replySucceeded(reply)
         : result.dryRun !== true && refreshesAfter(scene, method, reply)
-    if (result.kind === 'reply' && method === 'hew.view.enter' && replySucceeded(reply)) {
+    if (result.kind === 'reply' && isEnterFrame(frame) && replySucceeded(reply)) {
       // The one reply that waits for its directive: the window may decline
       // the entry, and the caller must hear that, not `{}`. Whatever throws
       // while applying it is the refusal; the reply goes out exactly once.

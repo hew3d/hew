@@ -150,6 +150,10 @@ function fakeScene() {
         return reply({ result: { format: 'hew' } })
       }
       if (req.method === 'hew.view.enter') return reply({ result: {} })
+      if (
+        req.method === 'hew.doc.transact' &&
+        (req.params as { commands?: { method?: string }[] } | undefined)?.commands?.[0]?.method === 'hew.view.enter'
+      ) return reply({ result: { results: [{}], label: 'hew.view.enter' } })
       if (req.method === 'hew.event.subscribe' || req.method === 'hew.event.unsubscribe') {
         const c = conns.get(conn)!
         const denied: string[] = []
@@ -1588,6 +1592,36 @@ describe('the plugin host, at the edges of a command', () => {
       JSON.stringify([{ kind: 'enter_context', path: [], leaf: { kind: 'instance', id: '9' } }]),
     )
     const reply = await call(h, 'hew.view.enter', { id: '9' })
+    expect(reply.result).toBeUndefined()
+    expect(reply.error).toMatchObject({ code: -32000, data: { refusal: 'enter_refused' } })
+  })
+
+  const enterTransaction = { commands: [{ method: 'hew.view.enter', params: { id: '9' } }] }
+
+  it('answers a window-declined hew.view.enter sent as a one-command transaction with the named refusal', async () => {
+    h = harness()
+    h.bridge.enterNode = vi.fn(() => ({ refused: { name: 'nested_component_in_context' } }))
+    h.scene.take_pending_view_directives.mockReturnValueOnce(
+      JSON.stringify([{ kind: 'enter_context', path: [], leaf: { kind: 'instance', id: '9' } }]),
+    )
+    const reply = await call(h, 'hew.doc.transact', enterTransaction)
+    expect(reply.result).toBeUndefined()
+    expect(reply.error).toMatchObject({
+      code: -32000,
+      data: { refusal: 'nested_component_in_context', failed_method: 'hew.view.enter' },
+    })
+  })
+
+  it('answers a refusal when applying a one-command transaction around hew.view.enter throws', async () => {
+    h = harness()
+    h.bridge.enterNode = vi.fn(() => ({ ok: true }) as const)
+    h.scene.api_method_mutates.mockImplementation(() => {
+      throw new Error('dead scene')
+    })
+    h.scene.take_pending_view_directives.mockReturnValueOnce(
+      JSON.stringify([{ kind: 'enter_context', path: [], leaf: { kind: 'instance', id: '9' } }]),
+    )
+    const reply = await call(h, 'hew.doc.transact', enterTransaction)
     expect(reply.result).toBeUndefined()
     expect(reply.error).toMatchObject({ code: -32000, data: { refusal: 'enter_refused' } })
   })
