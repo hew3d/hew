@@ -5032,6 +5032,13 @@ export default function App() {
     // refreshes it in place); arm the tick so it will actually fire if
     // nothing else changes.
     armAutosaveTick()
+    if (snapshot.pathWithheld === true) {
+      handleToastRef.current(
+        t`Hew can’t save over the original file after this recovery. Save will ask you where to put it.`,
+        undefined,
+        { persistent: true },
+      )
+    }
     return true
   }, [applyLoadedBytes, armAutosaveTick, bindLibraryItemForPath])
   const adoptSnapshotRef = useRef(adoptSnapshot)

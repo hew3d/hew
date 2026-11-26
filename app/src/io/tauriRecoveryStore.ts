@@ -26,6 +26,7 @@ interface RecoveryPayload {
   contents: number[]
   meta: string | null
   modified_ms: number
+  path_withheld: boolean
 }
 
 /**
@@ -87,6 +88,7 @@ export class TauriRecoveryStore implements RecoveryStore {
       bytes: new Uint8Array(result.contents),
       meta: parseMeta(result.meta, result.modified_ms),
       source,
+      pathWithheld: result.path_withheld,
     }
   }
 

@@ -1780,6 +1780,19 @@ fn recovery_meta_for_approved_paths(
     serde_json::to_string(&value).ok()
 }
 
+/// [`recovery_meta_for_approved_paths`], plus whether it took a path away.
+fn claimed_recovery_meta(meta: Option<String>, approved: &ApprovedPaths) -> (Option<String>, bool) {
+    let had_path = recovery_meta_has_path(meta.as_deref());
+    let meta = recovery_meta_for_approved_paths(meta, approved);
+    let withheld = had_path && !recovery_meta_has_path(meta.as_deref());
+    (meta, withheld)
+}
+
+fn recovery_meta_has_path(meta: Option<&str>) -> bool {
+    meta.and_then(|meta| serde_json::from_str::<serde_json::Value>(meta).ok())
+        .is_some_and(|value| value["path"].is_string())
+}
+
 /// The `.hew`/`.json` file pair backing a snapshot slot. Pure path mapping —
 /// no filesystem access (unit-tested below).
 fn slot_paths(config_dir: &Path, slot: &str) -> (PathBuf, PathBuf) {
@@ -1875,6 +1888,9 @@ struct RecoveryPayload {
     contents: Vec<u8>,
     meta: Option<String>,
     modified_ms: u64,
+    /// The snapshot named an original file that this session may not write,
+    /// so `meta` carries no path and the app has to say why.
+    path_withheld: bool,
 }
 
 /// Persist a recovery snapshot, overwriting any previous one from the same
@@ -2055,10 +2071,10 @@ fn recovery_claim(
     let contents = std::fs::read(&src_hew).ok()?;
     // The sidecar may be missing (torn write on an old build) — the
     // geometry alone is still worth recovering.
-    let meta = {
+    let (meta, path_withheld) = {
         let approved = app.state::<Mutex<ApprovedPaths>>();
         let approved = approved.lock().ok()?;
-        recovery_meta_for_approved_paths(std::fs::read_to_string(&src_json).ok(), &approved)
+        claimed_recovery_meta(std::fs::read_to_string(&src_json).ok(), &approved)
     };
     let mut own_slot_adopted = true;
     if src_hew != dst_hew {
@@ -2096,6 +2112,7 @@ fn recovery_claim(
         contents,
         meta,
         modified_ms,
+        path_withheld,
     })
 }
 
@@ -5907,6 +5924,17 @@ mod tests {
     }
 
     #[test]
+    fn a_claim_reports_only_a_path_it_took_away() {
+        let approved = ApprovedPaths::default();
+        let claim = |meta: &str| claimed_recovery_meta(Some(meta.into()), &approved).1;
+        assert!(claim(r#"{"path":"/nowhere/house.hew"}"#));
+        assert!(!claim(r#"{"path":null}"#));
+        assert!(!claim("{}"));
+        assert!(!claim("not json"));
+        assert!(!claimed_recovery_meta(None, &approved).1);
+    }
+
+    #[test]
     fn recovery_metadata_cannot_authorize_a_new_write_target() {
         let dir = library_scratch_dir("recovery-authorization");
         let path = dir.join("private.txt");
@@ -5935,6 +5963,7 @@ mod tests {
             .write_files
             .insert(std::fs::canonicalize(&path).unwrap());
         let meta = serde_json::json!({ "path": path, "name": "Model" }).to_string();
+        assert!(!claimed_recovery_meta(Some(meta.clone()), &approved).1);
         assert_eq!(
             recovery_meta_for_approved_paths(Some(meta.clone()), &approved),
             Some(meta)
