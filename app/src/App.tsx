@@ -9058,6 +9058,15 @@ export default function App() {
 
   // ---------------------------------------------------------------- Lock (OW-1)
 
+  /** A lock or unlock landed. Only the selection colors redraw, so no
+   *  viewport refresh reports the change: mark the document here, or the
+   *  lock gets no unsaved mark, autosave or close prompt. */
+  const handleLockChanged = () => {
+    viewportApi.current?.refreshSelectionColors?.()
+    // Through the ref: a lock toast keeps the closure from the render that
+    // raised it.
+    reconcileRef.current()
+  }
 
   /** Lock or unlock nodes: one undo step, a typed refusal is a toast. The
    *  selection stays; its edges change color when the lock lands. */
@@ -9072,8 +9081,7 @@ export default function App() {
       handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
       return false
     }
-    viewportApi.current?.refreshSelectionColors?.()
-    setDocRev((r) => r + 1)
+    handleLockChanged()
     return true
   }
 
@@ -9966,10 +9974,7 @@ export default function App() {
               onNameChanged={handleNameChanged}
               onGeometryChanged={refreshAfterPanelMutation}
               onTagsChanged={handleObjectInfoTagsChanged}
-              onLockChanged={() => {
-                viewportApi.current?.refreshSelectionColors?.()
-                setDocRev((r) => r + 1)
-              }}
+              onLockChanged={handleLockChanged}
               onSelectMany={handleReplaceSelection}
               onSelectTag={(path) => revealInTray('tags', path)}
               onSelectMaterial={(id) => revealInTray('materials', id)}

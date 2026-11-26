@@ -4231,6 +4231,42 @@ describe('App — Lane C: dirty is derived from the kernel saved mark', () => {
   })
 })
 
+describe('App — Lock and Unlock dirty the document', () => {
+  // A lock is a real, undoable kernel change that draws nothing new, so no
+  // viewport refresh reports it: the App has to mark the document itself.
+  const m = mockScene as Record<string, unknown>
+  const KEYS = ['object_ids', 'group_ids', 'instance_ids', 'node_locked', 'set_nodes_locked']
+  let prior: [string, unknown][] = []
+
+  beforeEach(() => {
+    prior = KEYS.map((k) => [k, m[k]])
+    m.object_ids = () => new BigUint64Array([1n])
+    m.group_ids = () => new BigUint64Array()
+    m.instance_ids = () => new BigUint64Array()
+    m.node_locked = () => true
+    m.set_nodes_locked = vi.fn()
+  })
+
+  afterEach(() => {
+    for (const [k, v] of prior) {
+      if (v === undefined) delete m[k]
+      else m[k] = v
+    }
+  })
+
+  it('Edit ▸ Unlock ▸ All marks the document unsaved', async () => {
+    await renderAndLoad()
+    expect(document.title.startsWith('•')).toBe(false)
+
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+    fireEvent.mouseEnter(menubar().getByText('Unlock'))
+    fireEvent.mouseDown(menubar().getByText('All'))
+
+    expect(m.set_nodes_locked).toHaveBeenCalledOnce()
+    expect(document.title.startsWith('•')).toBe(true)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // App — confirmDiscard's Save-then-continue path (adversarial review
 // finding): the in-app UnsavedChangesDialog's Save button runs the real
