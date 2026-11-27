@@ -84,6 +84,7 @@ const STICKY_KINDS = new Set([
   'intersection',
   'tangent',
   'on-edge',
+  'on-intersection-line',
   'on-guide',
   'on-axis',
 ])
@@ -102,8 +103,18 @@ function sameTarget(a: Snap, b: Snap): boolean {
     // analytic points carry no `element`, so without this the held snap on
     // one circle's center would be treated as still-current over a
     // neighbouring circle's.
-    a.sketchCurve === b.sketchCurve
+    a.sketchCurve === b.sketchCurve &&
+    // A face meets several others: the slab through a wall draws four lines
+    // on the wall's one face, and each names that face. The line's ends tell
+    // them apart — the kernel orders a pair of faces the same way at every
+    // cursor position, so one line's ends are the same numbers each query.
+    sameMeetingLine(a.meetingLine, b.meetingLine)
   )
+}
+
+function sameMeetingLine(a: Snap['meetingLine'], b: Snap['meetingLine']): boolean {
+  if (a === undefined || b === undefined) return a === b
+  return a.every((end, i) => end.every((c, j) => c === b[i][j]))
 }
 
 /**
@@ -114,6 +125,7 @@ function snapJsToSnap(s: SnapJs): Snap {
   try {
     const dir = s.direction()
     const from = s.projected_from()
+    const line = s.meeting_line()
     const elem = s.element()
     const elemKind = s.element_kind()
     return {
@@ -123,6 +135,14 @@ function snapJsToSnap(s: SnapJs): Snap {
       kind: s.kind(),
       direction: dir !== undefined ? [dir[0], dir[1], dir[2]] : undefined,
       projectedFrom: from !== undefined ? [from[0], from[1], from[2]] : undefined,
+      piercesFace: s.pierces_face(),
+      meetingLine:
+        line !== undefined
+          ? [
+              [line[0], line[1], line[2]],
+              [line[3], line[4], line[5]],
+            ]
+          : undefined,
       object: s.object(),
       instance: s.instance(),
       element: elem,
@@ -204,6 +224,7 @@ export class SnapService {
     basis: ApertureBasis,
     anchorArr: Float64Array | null,
     lockAxis: 0 | 1 | 2 | undefined,
+    lockDirection: Float64Array | null,
     constraintPlaneArr: Float64Array | null,
     offPlanePoints: boolean,
     softAxisApertureScale?: number,
@@ -228,6 +249,7 @@ export class SnapService {
         offPlanePoints,
         pick ?? false,
         seeThroughPoints ?? false,
+        lockDirection,
       )
       return result !== undefined ? snapJsToSnap(result) : null
     } catch (err) {
@@ -243,8 +265,9 @@ export class SnapService {
    * if neither produced a valid intersection.
    *
    * The returned Snap has kind "ground" when it's a pure fallback with no
-   * constraint plane, or "plane" when it's a pure fallback onto a supplied
-   * `constraintPlane` (no kernel snap available either way). All other kind
+   * constraint or fallback plane, or "plane" when it's a pure fallback onto a
+   * supplied `constraintPlane` or `fallbackPlane` (no kernel snap available
+   * either way). All other kind
    * strings come from the kernel.
    *
    * **Magnetic hysteresis:** discrete inference points (endpoint/midpoint/…,
@@ -264,6 +287,9 @@ export class SnapService {
     basis: ApertureBasis,
     anchor?: [number, number, number],
     lockAxis?: 0 | 1 | 2,
+    /** A direction lock through `anchor`; wins over `lockAxis` (the kernel
+     * normalizes it and ignores a zero or non-finite one). */
+    lockDirection?: [number, number, number] | null,
     constraintPlane?: { point: [number, number, number]; normal: [number, number, number] },
     offPlanePoints?: boolean,
     /**
@@ -313,8 +339,18 @@ export class SnapService {
      * `see_through_points`). Unset: the plain plane filter in every mode.
      */
     seeThroughPoints?: boolean,
+    /**
+     * A plane for step 4's ray∩plane fallback ONLY (`SnapConstraint.
+     * fallbackPlane`): never sent to the kernel, so geometry anywhere in
+     * the scene still snaps, but a miss lands on this plane (`kind:
+     * 'plane'`) rather than the ground. An idle draw tool passes the axis
+     * plane the view faces (view-plane design, picker step 7).
+     * `constraintPlane`, when also given, wins.
+     */
+    fallbackPlane?: { point: [number, number, number]; normal: [number, number, number] },
   ): { snap: Snap | null; fromKernel: boolean } {
     const anchorArr = anchor !== undefined ? new Float64Array(anchor) : null
+    const lockDirectionArr = lockDirection != null ? new Float64Array(lockDirection) : null
     const constraintPlaneArr =
       constraintPlane !== undefined
         ? new Float64Array([...constraintPlane.point, ...constraintPlane.normal])
@@ -329,7 +365,7 @@ export class SnapService {
     //    would let a corner/edge chip win the hover or get resurrected by
     //    the hysteresis step below.
     let acquired = this.query(
-      ray, SNAP_RADIUS_PX * apertureScale, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
+      ray, SNAP_RADIUS_PX * apertureScale, viewportHeightPx, basis, anchorArr, lockAxis, lockDirectionArr, constraintPlaneArr,
       offPlanePoints ?? false, undefined, pick, seeThroughPoints,
     )
     if (facesOnly && acquired !== null && acquired.kind !== 'on-face') {
@@ -352,7 +388,7 @@ export class SnapService {
     //    result while facesOnly is asked for.
     if (!facesOnly && this.lastSnap !== null && STICKY_KINDS.has(this.lastSnap.kind)) {
       const held = this.query(
-        ray, SNAP_BREAK_RADIUS_PX * apertureScale, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
+        ray, SNAP_BREAK_RADIUS_PX * apertureScale, viewportHeightPx, basis, anchorArr, lockAxis, lockDirectionArr, constraintPlaneArr,
         offPlanePoints ?? false,
         SOFT_AXIS_BREAK_APERTURE_SCALE,
         pick,
@@ -371,9 +407,12 @@ export class SnapService {
     }
 
     // 4. Fallback: ray∩constraintPlane when one was supplied (an anchored
-    //    non-ground gesture — sketches on any plane, Phase 1), else ray∩ground.
-    if (constraintPlane !== undefined) {
-      const p = rayPlaneIntersect(ray.origin, ray.direction, constraintPlane.point, constraintPlane.normal)
+    //    non-ground gesture — sketches on any plane, Phase 1), else
+    //    ray∩fallbackPlane (an idle draw tool's view-facing plane, which
+    //    the kernel never saw), else ray∩ground.
+    const plane = constraintPlane ?? fallbackPlane
+    if (plane !== undefined) {
+      const p = rayPlaneIntersect(ray.origin, ray.direction, plane.point, plane.normal)
       if (p !== null) {
         this.lastSnap = { x: p[0], y: p[1], z: p[2], kind: 'plane' }
         return { snap: this.lastSnap, fromKernel: false }

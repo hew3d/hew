@@ -54,7 +54,7 @@ export const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000
  *  (and reserved-but-uncommitted) reports' `sizeBytes` would pass this
  *  ceiling (507) — the account's 5 GB of free Durable Object storage is
  *  shared with share-relay's ten-minute drops, so this Worker claims a
- *  fixed slice rather than the whole thing. 3 GiB fits about 34 reports the
+ *  fixed slice rather than the whole thing. 3 GiB fits about 53 reports the
  *  size of the design's 59.9 MB worked example, but only 3 at the 1 GiB
  *  `MAX_UPLOAD_BYTES` cap: a run of reports carrying huge files, or a
  *  deliberate one, fills the store until the admin page deletes them or
@@ -114,6 +114,12 @@ export const RATE_LIMIT_DAY_MAX = 20
  *  in the admin list; only the email is skipped. */
 export const EMAIL_DAY_MAX = 50
 
+/** Of `EMAIL_DAY_MAX`, this many are kept for new-report emails: a thread
+ *  event (a reporter reply, a follow-up attachment) is refused an email once
+ *  the day's count reaches `EMAIL_DAY_MAX - EMAIL_THREAD_RESERVE`, so a
+ *  chatty thread can never starve the notification for a new report. */
+export const EMAIL_THREAD_RESERVE = 15
+
 /** `system.appVersion` / `system.platform` length bound. Both are stored
  *  verbatim in the `ReportIndex` row for every report (the admin list and
  *  the email subject), and that row's bytes are NOT what `STORE_CEILING_BYTES`
@@ -149,3 +155,92 @@ export const JWKS_CACHE_MS = 5 * 60 * 1000
  *  only its own upload's pieces and commit; the Worker never stores it
  *  directly, only its SHA-256 (`uploadToken.ts`). */
 export const UPLOAD_TOKEN_BYTES = 32
+
+// ---------------------------------------------------------------------------
+// Following a report (docs/design/follow-a-report.md §5.4)
+// ---------------------------------------------------------------------------
+
+/** A follow secret is this many random bytes, base64url (43 characters) —
+ *  the same shape and the same generator as an upload token. Minted at
+ *  START when the request carries `Hew-Follow: 1`; the Worker keeps only
+ *  its SHA-256 hex, first in the drop's meta row and then in the report's
+ *  `ReportThread`. */
+export const FOLLOW_SECRET_BYTES = 32
+
+/** A thread message (reporter, maintainer, or status note) is 1 to this
+ *  many characters, counted as Unicode code points. */
+export const THREAD_MESSAGE_MAX_CHARS = 4_000
+
+/** A thread holds at most this many messages of every kind together; a
+ *  reporter post past it is `409 full`. */
+export const THREAD_MAX_MESSAGES = 200
+
+/** The last this-many of `THREAD_MAX_MESSAGES` are the maintainer's: a
+ *  reporter text post (two slots when it reopens) or a follow-up
+ *  attachment message is `full` once it would take the thread past
+ *  `THREAD_MAX_MESSAGES - THREAD_MAINTAINER_RESERVE`, so a reporter can
+ *  never fill a thread so the maintainer cannot answer or close it.
+ *  Maintainer replies and status changes may use the whole cap. */
+export const THREAD_MAINTAINER_RESERVE = 10
+
+/** Reporter text posts per thread per UTC day (`429` past it). */
+export const THREAD_REPORTER_POSTS_DAY_MAX = 20
+
+/** Thread-route requests per client hash per `RATE_LIMIT_WINDOW_MS`, across
+ *  every thread — a quota guard, not what keeps secrets secret. Counted in
+ *  `ReportIndex`'s `rate_window` under a `thread:` key prefix, only after
+ *  the thread DO has accepted the secret. */
+export const THREAD_RATE_WINDOW_MAX = 60
+
+/** A thread nobody has read or written for this long is destroyed. */
+export const THREAD_IDLE_MS = 365 * 24 * 60 * 60 * 1000
+
+/** A thread is destroyed this long after the reporter's client acknowledged
+ *  a final (`fixed`/`closed`) status. */
+export const THREAD_FINAL_SEEN_GRACE_MS = 30 * 24 * 60 * 60 * 1000
+
+/** `GET /report/<id>/thread`'s payload version. */
+export const THREAD_FORMAT = 1
+
+/** A thread route's JSON body is read capped at this many bytes — far past
+ *  a `THREAD_MESSAGE_MAX_CHARS` message even with every character escaped. */
+export const THREAD_BODY_MAX_BYTES = 64 * 1024
+
+/** The admin status form's version field ("Fixed in 1.3.2"). */
+export const STATUS_VERSION_MAX_CHARS = 64
+
+// ---------------------------------------------------------------------------
+// The admin host and batch actions
+// ---------------------------------------------------------------------------
+
+/** The one host the admin pages answer on. Requests for `/report/admin/*` on
+ *  any other host (the public intake hosts included) are a plain 404 before
+ *  anything else is checked, so the pages exist only where the Access
+ *  application that fronts them does. */
+export const ADMIN_HOST = 'reports.hew3d.com'
+
+/** The admin pages' own origin: what a mutating form's `Origin` header must
+ *  equal, and the base of every redirect and email link to them. */
+export const ADMIN_ORIGIN = `https://${ADMIN_HOST}`
+
+/** Batch limits. The Workers FREE plan allows 50 subrequests per request and
+ *  every Durable Object call counts, so the delete and download caps are
+ *  sized by that, not by taste. Triage costs two index calls however many
+ *  ids it carries, so its cap only bounds the form body and the SQL. */
+export const BATCH_TRIAGE_MAX = 200
+
+/** Delete: reports PLUS their follow-up attachments, together. A report costs
+ *  two calls (its thread, its bundle) and an attachment one, plus three
+ *  index calls for the request: at most 20 * 2 + 3 = 43, under 50 with room
+ *  for the JWKS fetch. */
+export const BATCH_DELETE_MAX = 20
+
+/** Download: selected reports, and stored bundles (reports plus attachments,
+ *  expired ones not counted), each capped at this. A bundle costs two calls
+ *  (its head, its stream) plus two index calls: at most 20 * 2 + 2 = 42. */
+export const BATCH_DOWNLOAD_MAX = 20
+
+/** Download: the sum of the bundles' stored sizes. The archive is streamed,
+ *  never held in memory, so this bounds the length of one response rather
+ *  than the isolate's memory. */
+export const BATCH_DOWNLOAD_MAX_BYTES = 512 * 1024 * 1024

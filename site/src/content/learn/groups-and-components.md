@@ -18,7 +18,7 @@ Groups nest, and editing follows the nesting: double-click a member group to ope
 
 ![A group named "Enclosure" selected: Object Info shows its name, type, and tag; the contextual dock offers Edit, Move, Scale, Make Component, Ungroup, Erase](/docs/organization.webp)
 
-Moving, rotating, or scaling a group transforms everything inside it together, and Move with the copy modifier tapped (`Option` on Mac, `Ctrl` on Windows/Linux) copies the whole group — nested groups, names, tags, and materials included; component instances inside come along as new instances of the same definition ([Move](/learn/moving-and-transforming/)). Groups also work as boolean operands: Union, Subtract, and Intersect accept a group anywhere they accept a solid ([Combining solids](/learn/combining-solids/)). Hiding a group (the eye toggle in the Outliner) hides all of its contents. Groups are also handy purely as selection sets — a group's name in the Outliner and Object Info makes big models legible.
+Moving, rotating, or scaling a group transforms everything inside it together, and Move with the copy modifier tapped (`Option` on Mac, `Ctrl` on Windows/Linux) copies the whole group — nested groups, names, tags, and materials included — as a [linked copy](#linked-copies), or as a plain independent one on the second tap; component instances inside come along as new instances of the same definition ([Move](/learn/moving-and-transforming/)). Groups also work as boolean operands: Union, Subtract, and Intersect accept a group anywhere they accept a solid ([Combining solids](/learn/combining-solids/)). Hiding a group (the eye toggle in the Outliner) hides all of its contents. Groups are also handy purely as selection sets — a group's name in the Outliner and Object Info makes big models legible.
 
 Delete everything inside an open group and step out, and the group goes with it — undo brings it all back, same as a component left with nothing (below).
 
@@ -31,6 +31,31 @@ Two ways to move something into a group after the fact, without disturbing its g
 
 Either way it's pure reorganizing — the object itself, and everywhere else it might be referenced, is untouched.
 
+## Linked copies
+
+Copy a board with Move, Rotate, or Paste and the copy is **linked** to the original: they share one shape, so a change to one shows up on every copy. Push a leg's face and all four legs get longer. The other copies stay on screen the whole time and follow along as you work, and there is nothing to switch on first. You edit the copy you are looking at.
+
+![Four table legs, one selected: the Outliner shows the link icon and a ×4 count, and Object Info reads "Object (4 linked)"](/docs/linked-copies.webp)
+
+A linked copy keeps what makes it a copy: its own position, rotation, and name. It does not need a name of its own. A row in the [Outliner](#in-the-outliner) shows the copy's own name if you gave it one, otherwise the shared name, otherwise the name of the board itself. Select a copy and Object Info shows it as an ordinary Object (or Group) with **(4 linked)** beside the type; click the count to select every copy. It has the same rows an unlinked object has, Smooth and Soften included, and a change there applies to the shared shape, so every copy follows. The **Name** field names just this copy; leave it empty to show the shared name.
+
+What you can do with a linked copy, from the **Object** menu, the contextual dock, or the **Linked** menu on its Outliner row:
+
+- **Unlink** makes this one copy independent. It keeps its name, tags, and shape, and the others stay linked to each other.
+- **Unlink all** makes every copy independent at once. One undo puts the whole set back.
+- **Make component** turns the set into a named [component](#components): it asks for a name, the link icon goes away, and the other copies follow it as copies of the new component. Saving a linked copy to the Library does this first, because a Library item needs a name.
+- **Select all copies** selects every copy in the set, in the viewport and the Outliner together.
+
+Nothing splits behind your back. If a command can't keep copies linked, Hew tells you what it did: a [Union or Intersect](/learn/combining-solids/#cutting-a-linked-copy) with a linked copy unlinks it first and says "Unlinked 2 copies to join them".
+
+**How a linked copy differs from a component.** A component is a part you named and meant to reuse: it has a name, a place in the Components panel, and a Library entry. A linked copy is what you get when you copy something: no name required, no panel entry, and no new word to learn. If a set of linked copies turns out to be a part you want to keep, Make component promotes it. The reverse never happens; a component doesn't turn back into linked copies.
+
+### Link identical copies
+
+Boards you drew one at a time are separate objects even when they are the same shape. **Edit ▸ Link identical copies** finds loose objects that are the same shape, or mirror images of each other, and turns them into one set of linked copies. Select two or more objects to limit it to those; with nothing selected it looks at the whole model. A mirror image becomes a mirrored copy of the first board.
+
+Each copy keeps its own position, name, tags, and paint. The first board's shape is the one they all share, so if the others had paint on individual faces, Hew says so: "Linked 4 copies; paint on the faces of 2 copies was dropped". It also tells you when a copy's own axes were replaced by the first board's. One undo puts every board back. Hew never does this on its own; [Model Health](/learn/import-export/) shows a "look-alike objects can be linked" notice with a **Link identical copies** button when it finds some.
+
 ## Components
 
 A component is shared geometry: one **definition**, any number of placed **instances**. Every instance has its own position, rotation, scale, and mirroring, but they all reference the same shape. Model one screw, place it eight times; fix the thread once, all eight update.
@@ -38,10 +63,10 @@ A component is shared geometry: one **definition**, any number of placed **insta
 ![Four Shelf Bracket instances in a row with one selected: Object Info reads "Component (4 instances)" and the contextual dock offers Edit, Make Unique, and Explode](/docs/components-instances.webp)
 
 - **Create a definition:** select one or more objects, groups, or component instances and choose **Object ▸ Make Component**, or click **Make Component** on the contextual dock. The selection becomes the definition's members — a selected group stays whole, and a selected instance nests its definition inside the new one ([Nesting](#nesting)) — and what you had selected is replaced by the first instance.
-- **Place more instances:** select an instance and choose **Object ▸ Place Copy**; the new instance lands just beside the original, ready to Move into position. Or Move an instance with copy mode on (tap `Option` on Mac, `Ctrl` on Windows/Linux) to drop copies where you want them — and type `x5` right after a copy to place a whole row ([Move](/learn/moving-and-transforming/)).
-- **Edit the definition:** double-click any instance. Every other placement of the component disappears for the moment — there's only one copy of the shape, and it's yours to edit — while the members themselves behave exactly like ordinary top-level geometry. Every tool works on them, not just Push/Pull and Paint: draw new geometry (on a member's face, or on any plane — press an arrow key to lock it, exactly like drawing at the top level), Push/Pull, Follow Me, Union/Subtract/Intersect between two members, Slice, and Move/Rotate/Scale on an individual member. Anything you draw while you're in there becomes part of the component too. Step out (`Esc`, or double-click outside the component) and every placement reappears showing the change, wherever it's placed, however it's rotated, scaled, or mirrored — there's only one shape underneath.
+- **Place more instances:** select an instance and choose **Object ▸ Place Copy**; the new instance lands just beside the original, ready to Move into position. Or Move an instance with copy mode on (tap `Option` on Mac, `Ctrl` on Windows/Linux) to drop copies where you want them — and type `x5` right after a copy to place a whole row ([Move](/learn/moving-and-transforming/)). Copy and Paste (`⌘C`/`⌘V`, `Ctrl+C`/`Ctrl+V`, or Paste In Place) do the same thing within a model: the pasted instance is another placement of the same definition, so editing either one edits both. That holds for a cut-and-paste too, and for a selection that mixes instances with plain objects — the objects paste as independent copies, the instances stay linked. Pasting into a different model (another window) brings the definition along as a new one there; pasting the same copy into that model again reuses it rather than adding another. If you want a pasted copy to be its own thing, paste it and then use Make Unique ([Breaking the link](#breaking-the-link)).
+- **Edit the definition:** double-click any instance. The copy you opened is yours to edit, and every other placement of the component stays right where it is, faded like the rest of the model, showing each change as you make it — push a face and every copy's face moves, and while you're still dragging, the preview of the pull shows on every copy too, so you can watch the whole row take shape before you click. Move, Rotate, Scale, and Offset preview the same way. The members themselves behave exactly like ordinary top-level geometry. Every tool works on them, not just Push/Pull and Paint: draw new geometry (on a member's face, or on any plane — press an arrow key to lock it, exactly like drawing at the top level), Push/Pull, Follow Me, Union/Subtract/Intersect between two members, Slice, and Move/Rotate/Scale on an individual member. Anything you draw while you're in there becomes part of the component too. Afterward, clicking a line you drew in there selects the component, the same as clicking one of its faces, and the component's bounding box includes the line. Step out (`Esc`, or double-click outside the component) and every placement is back to full strength with the change in it, wherever it's placed, however it's rotated, scaled, or mirrored — there's only one shape underneath. The tools reach the open component's faces through whatever is in front of them, in Shaded or X-ray, so you can Push/Pull a face buried inside a box without moving the box out of the way. X-ray is not needed for this.
 
-An instance that's mirrored, scaled unevenly on one axis, or has a sibling placement kept inside some *other* group, edits a little differently: its siblings stay visible the whole time instead of stepping out of view, because that placement can't be lifted out to edit alone. Everything else — the tools, drawing, stepping out — works the same, with one exception: a definition edited this way always needs at least one member, so deleting its last one is refused rather than emptying the component.
+An instance that's scaled unevenly on one axis, or placed inside a group you haven't opened, edits a little differently, because that placement can't be lifted out to edit alone. Everything — the tools, drawing, stepping out, the other copies following along — works the same, with one exception: a definition edited this way always needs at least one member, so deleting its last one is refused rather than emptying the component.
 
 Deleting a member otherwise works the same way you'd delete anything else. Delete every member and step out, and the whole component — and every instance of it — disappears with it (undo brings it all back). The one exception is a component that sits inside another component: it stays, empty, because removing it would change the component around it.
 
@@ -62,9 +87,11 @@ Object Info also counts the siblings: a selected instance's Type reads "Componen
 
 ### Breaking the link
 
-Two commands take an instance out of the shared-definition world, both available on the contextual dock when an instance is selected:
+For a [linked copy](#linked-copies), **Unlink** and **Unlink all** do this job: Unlink makes the selected copy independent, and Unlink all makes every copy independent in one step.
 
-- **Make Unique** detaches this instance into its own new definition. Use it when one screw needs to be different from its siblings. The new component is named "Screw Copy" (then "Screw Copy 2", and so on) — unless the instance had its own name, which becomes the new definition's name.
+For a component, two commands take an instance out of the shared-definition world, both available on the contextual dock when an instance is selected:
+
+- **Make Unique** detaches this instance into its own new definition. Use it when one screw needs to be different from its siblings. The new component keeps the name "Screw", since it is still the same part until you rename it — unless the instance had its own name, which becomes the new definition's name. The pieces inside keep their names and tags, so a board you copied is still called "Leg" after Make Unique.
 - **Explode** bakes the instance down into ordinary, independent geometry in place. The definition (and other instances) are unaffected.
 
 ## Components panel
@@ -80,9 +107,24 @@ Expand **Components** in the right-hand tray (or View ▸ Components, `⇧⌘M` 
 
 ## In the Outliner
 
-Groups appear as folders you can expand; component instances get their own hexagon icon. Double-clicking a row in the Outliner opens every level between the top and that row in one step — group, nested group, instance, whatever the chain is — landing in the same state you'd reach clicking through the viewport one level at a time, with each level on the breadcrumb marked "editing". The breadcrumb at the top of the Outliner shows where you are and offers one-click exits.
+Groups appear as folders you can expand; component instances get their own hexagon icon. A [linked copy](#linked-copies) gets a link icon instead, and a **×4** badge showing how many copies share its shape (a set with only one copy left has no badge and reads as an ordinary board). Hover the badge to highlight the other copies. Hover the row and a small **Linked** menu offers Unlink, Unlink all, Make component, Select all copies, and Rename; renaming a row changes the copy's own name if it has one, and the shared name otherwise. Double-clicking a row in the Outliner opens every level between the top and that row in one step — group, nested group, instance, whatever the chain is — landing in the same state you'd reach clicking through the viewport one level at a time, with each level on the breadcrumb marked "editing". The breadcrumb at the top of the Outliner shows where you are and offers one-click exits.
 
 Hover a group row for its second eye button — a stacked-eye glyph — to hide or show every one of its members at once, nested groups included; the root Model row above the tree has the same button for the whole document. Typing into the filter field above the tree narrows the list to matching rows and the groups standing between them and the top.
+
+## Lock
+
+Lock a part you do not want to disturb while you work around it: an imported house, a reference part, a wall that is finished. Select it and choose **Edit ▸ Lock**, click **Lock** on the contextual dock, or tick **Locked** in Object Info. To undo it, use **Edit ▸ Unlock ▸ Selected** (or **All** for the whole model), click the padlock on its row in the Outliner, or click **Unlock** on the message Hew shows when something is refused. Lock and Unlock are each one undo step.
+
+A locked thing cannot be changed: not moved, rotated, scaled, pushed or pulled, painted, renamed, tagged, grouped, exploded, or deleted, and it cannot be opened for editing. Hover it with Push/Pull, Offset, Paint, Eraser, or Move and the cursor says "Locked. Unlock it to change it."; click and the same words appear in a message with an **Unlock** button. It still works as something to snap to. You can select it, measure it, dimension it, hide and show it, copy it, and draw on its faces (what you draw is a free drawing and does not cut the face). When it is selected its edges draw red instead of orange.
+
+- **A group's members are locked with the group.** Everything inside a locked group, and everything nested in it, is frozen. Its Outliner rows show a dimmed padlock, the way a row hidden by its parent shows a dimmed eye.
+- **A lock belongs to the shape, not to one copy.** Lock any copy of a component, or of a set of [linked copies](#linked-copies), and every copy is locked; unlock any one and all are unlocked. Hew says so: "All 4 copies are locked" (or "Both copies are locked" for two). To change just one copy, choose **Make Unique** (or **Unlink** for a linked copy). It works on a locked copy, and the copy that splits off stays locked with a lock of its own, so unlocking it later leaves the others alone. The message offers **Unlock** and **Make Unique** side by side, has a close button, and goes away when you click anywhere else or press `Esc`.
+- **A window used inside a locked house is frozen too.** If a component is also placed inside a locked group, editing its shape through any copy changes the locked house on screen, so Hew refuses: "This shape is also used inside a locked group. Make this copy unique to change it." The copy outside the house still moves and deletes freely; only editing its shape is refused. **Make Unique** on that copy is the way out, or unlock the house.
+- **A group holding a locked member cannot be moved.** Unlocked group, locked member: moving or deleting the group would move or delete the member, so Hew leaves the group alone and says which member is locked.
+
+**Selections: locked items are left behind.** When a command works on a selection, Hew does it for everything not locked and says so once: "1 locked item was left alone." This is what lets you Select All and Move around a locked background. If everything selected is locked, nothing happens and the message offers **Unlock**. Move, Rotate, Scale, Flip, Delete, Group, Cut, and tags and paint applied to a selection all work this way. Commands that need every piece (Union, Subtract, Intersect, Make Component, Explode, Ungroup, Link identical copies) are refused whole when any piece is locked.
+
+In the [Outliner](#in-the-outliner), a locked row cannot be dragged and nothing can be dropped into a locked group. Locks are saved in the file.
 
 ## What did I just click?
 
@@ -105,3 +147,5 @@ Editing drills down the same way it does for groups. Double-click a component to
 A definition can't contain itself, directly or through some chain of nested definitions, and nesting is bounded to 64 levels deep — both refused outright rather than silently truncated.
 
 Explode and Make Unique treat nesting differently. Exploding an assembly surfaces its nested components as ordinary instances in the right place, each sharing geometry with its own definition. Make Unique only copies one level: the copy's own nested instances share their inner definitions with the original, the same as SketchUp.
+
+To see which way a component is turned, switch on View ▸ Part Axes: a red, green, and blue triad marks the selected or open component's own axes.

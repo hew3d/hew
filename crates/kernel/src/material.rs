@@ -97,6 +97,84 @@ pub struct Material {
     pub color: Rgba8,
     /// Optional image texture (Stage B); `None` = flat color.
     pub texture: Option<Texture>,
+    /// Physically based surface properties; `None` = a plain, non-metallic,
+    /// fully rough surface (the canonical form of [`Pbr::PLAIN`]).
+    pub pbr: Option<Pbr>,
+}
+
+/// One physically based map: the authored encoded bytes of a metallic,
+/// roughness, normal or occlusion image, opaque to the kernel like a
+/// [`Texture`]'s. A map is addressed like the material's base texture (same
+/// planar projection and tile size), so it carries no mapping of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PbrMap {
+    /// Authored encoded image bytes (opaque to the kernel).
+    pub image: Vec<u8>,
+    /// Codec of `image`.
+    pub format: ImageFormat,
+}
+
+/// The physically based properties of a [`Material`]: metallic and roughness
+/// factors (0..=1), the strengths of the normal and occlusion maps, and up
+/// to four optional maps. A factor multiplies its map when there is one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pbr {
+    /// Metalness, 0 (dielectric) to 1 (metal).
+    pub metallic: f32,
+    /// Roughness, 0 (mirror) to 1 (fully diffuse).
+    pub roughness: f32,
+    /// How strongly the normal map bends the surface, 0 and up; 1 = as authored.
+    pub normal_scale: f32,
+    /// How strongly the occlusion map darkens crevices, 0..=1.
+    pub occlusion_strength: f32,
+    /// Per-texel metalness.
+    pub metallic_map: Option<PbrMap>,
+    /// Per-texel roughness.
+    pub roughness_map: Option<PbrMap>,
+    /// Tangent-space normal map.
+    pub normal_map: Option<PbrMap>,
+    /// Ambient-occlusion map.
+    pub occlusion_map: Option<PbrMap>,
+}
+
+impl Pbr {
+    /// The properties of a plain material: no metal, fully rough, no maps.
+    pub const PLAIN: Pbr = Pbr {
+        metallic: 0.0,
+        roughness: 1.0,
+        normal_scale: 1.0,
+        occlusion_strength: 1.0,
+        metallic_map: None,
+        roughness_map: None,
+        normal_map: None,
+        occlusion_map: None,
+    };
+
+    /// Whether these are the plain material's properties.
+    pub fn is_plain(&self) -> bool {
+        *self == Pbr::PLAIN
+    }
+
+    /// Whether the numbers are usable: both factors and the occlusion
+    /// strength finite in 0..=1, the normal scale finite and non-negative.
+    pub fn is_valid(&self) -> bool {
+        let unit = |v: f32| v.is_finite() && (0.0..=1.0).contains(&v);
+        unit(self.metallic)
+            && unit(self.roughness)
+            && unit(self.occlusion_strength)
+            && self.normal_scale.is_finite()
+            && self.normal_scale >= 0.0
+    }
+
+    /// The four maps in slot order (metallic, roughness, normal, occlusion).
+    pub fn maps(&self) -> [&Option<PbrMap>; 4] {
+        [
+            &self.metallic_map,
+            &self.roughness_map,
+            &self.normal_map,
+            &self.occlusion_map,
+        ]
+    }
 }
 
 /// A stable content fingerprint of a material — FNV-1a/64 over exactly the
@@ -128,6 +206,28 @@ pub fn material_content_hash(m: &Material) -> u64 {
             eat(&t.image);
         }
     }
+    // A plain material adds nothing, so its fingerprint is what it was
+    // before physically based properties existed.
+    if let Some(p) = &m.pbr {
+        eat(&[0xfe]);
+        for v in [
+            p.metallic,
+            p.roughness,
+            p.normal_scale,
+            p.occlusion_strength,
+        ] {
+            eat(&v.to_bits().to_le_bytes());
+        }
+        for map in p.maps() {
+            match map {
+                None => eat(&[0]),
+                Some(m) => {
+                    eat(&[1, if m.format == ImageFormat::Jpeg { 1 } else { 0 }]);
+                    eat(&m.image);
+                }
+            }
+        }
+    }
     h
 }
 
@@ -138,6 +238,7 @@ impl Material {
             name: name.into(),
             color,
             texture: None,
+            pbr: None,
         }
     }
 
@@ -147,6 +248,7 @@ impl Material {
             name: name.into(),
             color,
             texture: Some(texture),
+            pbr: None,
         }
     }
 

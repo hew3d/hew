@@ -61,6 +61,9 @@ export interface SelectionPathInput {
   memberName: (objectId: bigint) => string | undefined
   /** The object or free sketch a drawn selection lives on, if any. */
   draftOwner: (ref: NodeRef) => NodeRef | null
+  /** True for a linked copy: it reads as the Object or Group it is, so its
+   *  shared shape is never named as a part of a component. */
+  isLinkedCopy?: (instanceId: bigint) => boolean
 }
 
 const WALK_LIMIT = 256
@@ -237,7 +240,9 @@ function belowCrumbs(
 
   if (hit.instance !== undefined && hit.object !== undefined) {
     const instanceNode: NodeRef = { kind: 'instance', id: hit.instance }
-    if (frameOf(instanceNode) === undefined) {
+    if (input.isLinkedCopy?.(hit.instance) === true) {
+      // A linked copy is the leaf: nothing below it is named.
+    } else if (frameOf(instanceNode) === undefined) {
       // The component is not open: the part is a definition member.
       out.push({
         key: `member:${hit.object}`,
@@ -259,7 +264,8 @@ function belowCrumbs(
  * The hover tip's second line: the hit label, then `· in <direct parent>`.
  * A definition member (the snap names an instance) reads
  * `<member> · in <instance label>`; when that instance is open the part
- * reads by its own label. `null` when the snap names nothing.
+ * reads by its own label. An instance with no object (a line drawn inside
+ * a component) reads as the instance. `null` when the hit names nothing.
  */
 export function hoverLine(
   hit: HitLeaf,
@@ -267,7 +273,12 @@ export function hoverLine(
   labelFor: (n: NodeRef) => string,
   memberName: (objectId: bigint) => string | undefined,
   isOpenInstance: (instanceId: bigint) => boolean = () => false,
+  isLinkedCopy: (instanceId: bigint) => boolean = () => false,
 ): string | null {
+  // A linked copy reads as the Object or Group it is: the hit is the copy.
+  if (hit.instance !== undefined && isLinkedCopy(hit.instance) && !isOpenInstance(hit.instance)) {
+    hit = { instance: hit.instance }
+  }
   if (hit.instance !== undefined && hit.object !== undefined) {
     const inst: NodeRef = { kind: 'instance', id: hit.instance }
     // Inside an open component the part is an ordinary object: name it by its
@@ -281,8 +292,12 @@ export function hoverLine(
     const parentLabel = labelFor(inst)
     return t({ comment: 'Hover tip: a thing and the container it sits in', message: `${partLabel} · in ${parentLabel}` })
   }
-  if (hit.object === undefined) return null
-  const leaf: NodeRef = { kind: 'object', id: hit.object }
+  // An instance alone: a line drawn inside a component is under the cursor,
+  // and the component itself is what a click on it selects.
+  const leaf: NodeRef | null = hit.object !== undefined
+    ? { kind: 'object', id: hit.object }
+    : hit.instance !== undefined ? { kind: 'instance', id: hit.instance } : null
+  if (leaf === null) return null
   const parent = parentOf(leaf)
   const name = labelFor(leaf)
   if (parent === undefined) return name

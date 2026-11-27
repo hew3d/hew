@@ -4,10 +4,15 @@
 //! chaining shape, and the one-envelope-one-undo/byte-identical-undo
 //! property for every mutating envelope.
 
-use api::{Connection, DispatchOutcome, NoHost, Profile, Request, RequestId, Response, codes};
+use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, Response, codes};
 use kernel::Document;
+use kernel::trig;
 use serde_json::{Value, json};
 use std::f64::consts::{PI, TAU};
+
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
 
 // ----------------------------------------------------------------- fixtures
 
@@ -23,6 +28,7 @@ fn req(id: i64, method: &str, params: Value) -> Request {
 
 fn hello(conn: &mut Connection, doc: &mut Document) {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(0, "hew.meta.hello", json!({ "protocol": 1 })),
@@ -34,9 +40,12 @@ fn hello(conn: &mut Connection, doc: &mut Document) {
 
 fn hello_attach(conn: &mut Connection, doc: &mut Document) {
     hello(conn, doc);
-    let DispatchOutcome::Reply(r) =
-        conn.dispatch(doc, &mut NoHost, req(1, "hew.doc.attach", json!({})))
-    else {
+    let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
+        doc,
+        &mut NoHost,
+        req(1, "hew.doc.attach", json!({})),
+    ) else {
         panic!("attach replies")
     };
     assert!(r.error.is_none(), "attach failed: {:?}", r.error);
@@ -49,7 +58,9 @@ fn call(
     method: &str,
     params: Value,
 ) -> Response {
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, &mut NoHost, req(id, method, params)) else {
+    let DispatchOutcome::Reply(r) =
+        conn.dispatch(&REGISTRY, doc, &mut NoHost, req(id, method, params))
+    else {
         panic!("{method} replies")
     };
     r
@@ -166,7 +177,7 @@ fn build_box(
 
 #[test]
 fn draw_rect_then_extrude_chains_through_ref_like_the_spec_6_1_example() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
 
@@ -205,7 +216,7 @@ fn draw_rect_then_extrude_chains_through_ref_like_the_spec_6_1_example() {
 
 #[test]
 fn draw_rect_off_plane_corner_refuses_point_off_plane() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let before = doc.save();
@@ -227,7 +238,7 @@ fn draw_rect_off_plane_corner_refuses_point_off_plane() {
 
 #[test]
 fn draw_circle_extrudes_into_a_cylinder_and_carries_a_curve_id() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
 
@@ -263,7 +274,7 @@ fn draw_circle_extrudes_into_a_cylinder_and_carries_a_curve_id() {
 
 #[test]
 fn draw_circle_segments_below_floor_refuses_typed() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let data = call_err(
@@ -278,7 +289,7 @@ fn draw_circle_segments_below_floor_refuses_typed() {
 
 #[test]
 fn draw_circle_segments_above_cap_refuses_typed() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let data = call_err(
@@ -293,7 +304,7 @@ fn draw_circle_segments_above_cap_refuses_typed() {
 
 #[test]
 fn draw_polygon_creates_exactly_one_region_and_a_curve() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
 
@@ -311,7 +322,7 @@ fn draw_polygon_creates_exactly_one_region_and_a_curve() {
 
 #[test]
 fn draw_polygon_needs_at_least_3_sides() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let r = call(
@@ -326,7 +337,7 @@ fn draw_polygon_needs_at_least_3_sides() {
 
 #[test]
 fn draw_arc_creates_an_open_chain_with_no_region() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
 
@@ -353,12 +364,12 @@ fn draw_arc_creates_an_open_chain_with_no_region() {
 /// (rather than the analytic one loosened by some chord-count-dependent
 /// tolerance) is what lets the assertion below use a tight epsilon.
 fn wedge_area(radius: f64, sweep: f64, n: usize) -> f64 {
-    n as f64 * 0.5 * radius * radius * (sweep / n as f64).sin()
+    n as f64 * 0.5 * radius * radius * trig::sin(sweep / n as f64)
 }
 
 #[test]
 fn draw_arc_pie_closes_exactly_one_region_with_the_chorded_wedge_area() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
 
@@ -401,7 +412,7 @@ fn draw_arc_pie_closes_exactly_one_region_with_the_chorded_wedge_area() {
 
 #[test]
 fn draw_arc_segment_closes_exactly_one_region() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
 
@@ -432,7 +443,7 @@ fn draw_arc_segment_closes_exactly_one_region() {
 /// geometry of the request, no document state needed).
 #[test]
 fn draw_arc_pie_with_a_single_chord_and_a_half_turn_sweep_refuses_too_few_segments() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let before = doc.save();
@@ -464,7 +475,7 @@ fn draw_arc_pie_with_a_single_chord_and_a_half_turn_sweep_refuses_too_few_segmen
 /// case above), so any sweep demonstrates it.
 #[test]
 fn draw_arc_segment_with_a_single_chord_refuses_too_few_segments() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let before = doc.save();
@@ -496,7 +507,7 @@ fn draw_arc_segment_with_a_single_chord_refuses_too_few_segments() {
 /// closes a real region.
 #[test]
 fn draw_arc_segment_default_density_under_the_closed_floor_still_closes_a_region() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
 
@@ -532,7 +543,7 @@ fn draw_arc_segment_default_density_under_the_closed_floor_still_closes_a_region
 /// loses a valid closure).
 #[test]
 fn draw_arc_pie_with_a_negative_sweep_closes_one_region_with_the_same_wedge_area() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
 
@@ -582,7 +593,7 @@ fn draw_arc_pie_with_a_negative_sweep_closes_one_region_with_the_same_wedge_area
 /// of a full turn, which is refused separately as a param conflict).
 #[test]
 fn draw_arc_segment_past_a_half_turn_still_closes_a_simple_region() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
 
@@ -610,7 +621,7 @@ fn draw_arc_segment_past_a_half_turn_still_closes_a_simple_region() {
 /// uses.
 #[test]
 fn draw_arc_pie_with_sweep_almost_a_full_turn_still_closes_a_valid_thin_wedge() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
 
@@ -654,7 +665,7 @@ fn draw_arc_pie_with_sweep_almost_a_full_turn_still_closes_a_valid_thin_wedge() 
 
 #[test]
 fn draw_arc_full_turn_with_a_close_refuses_static_param_conflict() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let before = doc.save();
@@ -685,7 +696,7 @@ fn draw_arc_full_turn_with_a_close_refuses_static_param_conflict() {
 
 #[test]
 fn draw_arc_unknown_close_value_refuses_static_param_conflict() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let r = call(
@@ -703,7 +714,7 @@ fn draw_arc_unknown_close_value_refuses_static_param_conflict() {
 
 #[test]
 fn draw_line_needs_at_least_2_points() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let r = call(
@@ -718,7 +729,7 @@ fn draw_line_needs_at_least_2_points() {
 
 #[test]
 fn draw_line_closing_a_triangle_creates_one_region() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let result = single(call_ok_one_undo(
@@ -736,7 +747,7 @@ fn draw_line_closing_a_triangle_creates_one_region() {
 
 #[test]
 fn offset_grows_a_region_boundary_into_a_new_region() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let drawn = single(call_ok(
@@ -761,7 +772,7 @@ fn offset_grows_a_region_boundary_into_a_new_region() {
 
 #[test]
 fn offset_unknown_region_refuses_unknown_entity() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let data = call_err(
@@ -784,7 +795,7 @@ fn offset_unknown_region_refuses_unknown_entity() {
 
 #[test]
 fn extrude_mints_base_top_and_side_face_tokens_usable_by_a_later_push_pull() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
 
@@ -815,7 +826,7 @@ fn extrude_mints_base_top_and_side_face_tokens_usable_by_a_later_push_pull() {
 
 #[test]
 fn push_pull_a_side_face_by_point_locator_moves_the_object_in_place() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -840,9 +851,92 @@ fn push_pull_a_side_face_by_point_locator_moves_the_object_in_place() {
     assert_eq!(result["object_id"].as_str().unwrap(), object_id);
 }
 
+/// A through pull is a boolean, so its result carries `tidied` when the
+/// boolean merged slivers of its cut: a U slab's short arm pulled across
+/// the gap, through the long arm and 30 nm past its outer face, leaves a
+/// rim 30 nm proud that is merged flush. A pull that stops in the gap is
+/// no boolean and has no block.
+#[test]
+fn a_through_push_pull_that_merges_slivers_says_so_in_tidied() {
+    let mut conn = Connection::new(Grant::core(), "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    let mm = 1e-3;
+    let outline: Vec<[f64; 3]> = [
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 10.0),
+        (8.0, 10.0),
+        (8.0, 2.0),
+        (2.0, 2.0),
+        (2.0, 6.0),
+        (0.0, 6.0),
+        (0.0, 0.0),
+    ]
+    .iter()
+    .map(|&(x, y)| [x * mm, y * mm, 0.0])
+    .collect();
+    let result = call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.doc.transact",
+        json!({
+            "commands": [
+                { "method": "hew.sketch.draw_line", "as": "u", "params": {
+                    "plane": { "ground": true }, "points": outline
+                }},
+                { "method": "hew.solid.extrude", "params": {
+                    "region": { "$ref": "u#/region_ids/0" }, "distance": 2.0 * mm
+                }}
+            ]
+        }),
+    );
+    let object_id = result["results"][1]["object_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let inner_face = json!({ "object": object_id, "at": [2.0 * mm, 4.0 * mm, mm] });
+
+    // In the gap: an in-place push/pull, no boolean.
+    let short = single(call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.solid.push_pull",
+        json!({ "face": inner_face.clone(), "distance": 2.0 * mm }),
+    ));
+    assert!(short.get("tidied").is_none(), "{short}");
+    doc.undo().unwrap();
+
+    let through = single(call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.solid.push_pull",
+        json!({ "face": inner_face, "distance": 8.0 * mm + 3e-8 }),
+    ));
+    assert_eq!(
+        through["object_ids"].as_array().unwrap().len(),
+        1,
+        "{through}"
+    );
+    let t = &through["tidied"];
+    assert!(t["slivers_merged"].as_u64().unwrap() > 0, "{through}");
+    assert_eq!(t["slivers_kept"], 0, "{through}");
+    let max_move = t["max_move"].as_f64().unwrap();
+    assert!(max_move > 0.0 && max_move <= 2e-7, "{through}");
+    for p in t["sites"].as_array().unwrap() {
+        assert!(
+            (p[0].as_f64().unwrap() - (10.0 * mm + 3e-8)).abs() < 1e-12,
+            "{through}"
+        );
+    }
+}
+
 #[test]
 fn push_pull_zero_distance_refuses_distance_too_small() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -871,7 +965,7 @@ fn push_pull_zero_distance_refuses_distance_too_small() {
 
 #[test]
 fn push_pull_face_locator_unknown_object_refuses() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let data = call_err(
@@ -886,7 +980,7 @@ fn push_pull_face_locator_unknown_object_refuses() {
 
 #[test]
 fn extrude_unknown_region_refuses_unknown_entity() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let data = call_err(
@@ -901,7 +995,7 @@ fn extrude_unknown_region_refuses_unknown_entity() {
 
 #[test]
 fn extrude_distance_too_small_refuses_typed() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let drawn = single(call_ok(
@@ -930,7 +1024,7 @@ fn two_overlapping_boxes(conn: &mut Connection, doc: &mut Document) -> (String, 
 
 #[test]
 fn union_combines_two_overlapping_boxes() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let (a, b) = two_overlapping_boxes(&mut conn, &mut doc);
@@ -947,7 +1041,7 @@ fn union_combines_two_overlapping_boxes() {
 
 #[test]
 fn subtract_combines_two_overlapping_boxes() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let (a, b) = two_overlapping_boxes(&mut conn, &mut doc);
@@ -964,7 +1058,7 @@ fn subtract_combines_two_overlapping_boxes() {
 
 #[test]
 fn intersect_combines_two_overlapping_boxes() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let (a, b) = two_overlapping_boxes(&mut conn, &mut doc);
@@ -980,8 +1074,238 @@ fn intersect_combines_two_overlapping_boxes() {
 }
 
 #[test]
+fn union_of_boxes_that_only_touch_reports_the_pieces() {
+    let mut conn = Connection::new(Grant::core(), "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    // Apart: nothing to combine, so the union keeps both as pieces of a
+    // group (a shared edge or corner would be a grazing refusal instead).
+    let a = build_box(
+        &mut conn,
+        &mut doc,
+        2,
+        [0.0, 0.0, 0.0],
+        [0.2, 0.2, 0.0],
+        0.2,
+    );
+    let b = build_box(
+        &mut conn,
+        &mut doc,
+        3,
+        [0.3, 0.3, 0.0],
+        [0.5, 0.5, 0.0],
+        0.2,
+    );
+    let result = single(call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.solid.union",
+        json!({ "a": a, "b": b }),
+    ));
+    assert!(result["result"].as_str().unwrap().starts_with("grp_"));
+    assert_eq!(result["pieces"], json!(2));
+    assert!(result["note"].as_str().unwrap().contains("don't overlap"));
+}
+
+#[test]
+fn subtract_that_severs_reports_the_pieces_in_its_own_words() {
+    let mut conn = Connection::new(Grant::core(), "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    // A bar cut through its middle by a taller, wider slab: two pieces.
+    let bar = build_box(
+        &mut conn,
+        &mut doc,
+        2,
+        [0.0, 0.0, 0.0],
+        [0.6, 0.2, 0.0],
+        0.2,
+    );
+    let cutter = build_box(
+        &mut conn,
+        &mut doc,
+        3,
+        [0.25, -0.1, 0.0],
+        [0.35, 0.3, 0.0],
+        0.4,
+    );
+    let result = single(call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.solid.subtract",
+        json!({ "a": bar, "b": cutter }),
+    ));
+    assert!(result["result"].as_str().unwrap().starts_with("grp_"));
+    assert_eq!(result["pieces"], json!(2));
+    assert_eq!(
+        result["note"],
+        json!("The cut left 2 separate pieces, kept as a group.")
+    );
+}
+
+#[test]
+fn union_takes_any_number_of_operands_as_one_undo_step() {
+    let mut conn = Connection::new(Grant::core(), "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    let a = build_box(
+        &mut conn,
+        &mut doc,
+        2,
+        [0.0, 0.0, 0.0],
+        [0.2, 0.2, 0.0],
+        0.2,
+    );
+    let b = build_box(
+        &mut conn,
+        &mut doc,
+        3,
+        [0.1, 0.0, 0.0],
+        [0.3, 0.2, 0.0],
+        0.2,
+    );
+    let c = build_box(
+        &mut conn,
+        &mut doc,
+        4,
+        [0.2, 0.0, 0.0],
+        [0.4, 0.2, 0.0],
+        0.2,
+    );
+    let result = single(call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.solid.union",
+        json!({ "operands": [a, b, c] }),
+    ));
+    let result_id = result["result"].as_str().unwrap();
+    assert!(result_id.starts_with("obj_"), "{result}");
+    assert_eq!(doc.visible_object_ids().len(), 1);
+}
+
+/// Two operands given as `operands` are the `a` and `b` call, and `unlink`
+/// with three or more plain solids is ignored, as it is with two.
+#[test]
+fn operands_of_two_are_a_and_b_and_unlink_is_ignored_for_plain_solids() {
+    let mut conn = Connection::new(Grant::core(), "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    let mut boxes = Vec::new();
+    for (i, x) in [0.0, 0.1, 0.2, 0.3, 0.4].into_iter().enumerate() {
+        boxes.push(build_box(
+            &mut conn,
+            &mut doc,
+            2 + i as i64,
+            [x, 0.0, 0.0],
+            [x + 0.2, 0.2, 0.0],
+            0.2,
+        ));
+    }
+    let two = single(call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        10,
+        "hew.solid.union",
+        json!({ "operands": [boxes[0], boxes[1]] }),
+    ));
+    assert!(two["result"].as_str().unwrap().starts_with("obj_"), "{two}");
+    let three = single(call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        11,
+        "hew.solid.union",
+        json!({ "operands": [boxes[2], boxes[3], boxes[4]], "unlink": true }),
+    ));
+    assert!(
+        three["result"].as_str().unwrap().starts_with("obj_"),
+        "{three}"
+    );
+    assert_eq!(doc.visible_object_ids().len(), 2);
+}
+
+#[test]
+fn subtract_with_operands_takes_the_rest_off_the_first() {
+    let mut conn = Connection::new(Grant::core(), "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    let bar = build_box(
+        &mut conn,
+        &mut doc,
+        2,
+        [0.0, 0.0, 0.0],
+        [0.6, 0.2, 0.0],
+        0.2,
+    );
+    let k1 = build_box(
+        &mut conn,
+        &mut doc,
+        3,
+        [0.18, -0.1, 0.0],
+        [0.22, 0.3, 0.0],
+        0.4,
+    );
+    let k2 = build_box(
+        &mut conn,
+        &mut doc,
+        4,
+        [0.38, -0.1, 0.0],
+        [0.42, 0.3, 0.0],
+        0.4,
+    );
+    let result = single(call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.solid.subtract",
+        json!({ "operands": [bar, k1, k2] }),
+    ));
+    assert_eq!(result["pieces"], json!(3), "{result}");
+    assert_eq!(
+        result["note"],
+        json!("The cut left 3 separate pieces, kept as a group.")
+    );
+    // Both cutters sever the bar: three pieces, kept together in a group.
+    assert!(
+        result["result"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("grp_")),
+        "{result}"
+    );
+    assert_eq!(doc.visible_object_ids().len(), 3, "{result}");
+}
+
+#[test]
+fn boolean_operands_need_two_and_exclude_a_and_b() {
+    let mut conn = Connection::new(Grant::core(), "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    let (a, b) = two_overlapping_boxes(&mut conn, &mut doc);
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.solid.union",
+        json!({ "operands": [a.clone()] }),
+    );
+    assert_eq!(data["refusal"], "boolean_needs_two");
+    // Both spellings at once is a malformed request, not a refusal.
+    let r = call(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.solid.union",
+        json!({ "a": a, "b": b.clone(), "operands": [b] }),
+    );
+    let err = r.error.expect("a and b beside operands is malformed");
+    assert_ne!(err.code, codes::REFUSED);
+}
+
+#[test]
 fn boolean_same_operand_twice_refuses_degenerate_contact() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -1004,7 +1328,7 @@ fn boolean_same_operand_twice_refuses_degenerate_contact() {
 
 #[test]
 fn slice_cuts_a_box_into_two_solids() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -1035,7 +1359,7 @@ fn slice_cuts_a_box_into_two_solids() {
 
 #[test]
 fn slice_plane_missing_the_solid_refuses_typed() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -1061,7 +1385,7 @@ fn slice_plane_missing_the_solid_refuses_typed() {
 
 #[test]
 fn follow_me_edges_path_is_unimplemented_at_v0() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let drawn = single(call_ok(
@@ -1087,7 +1411,7 @@ fn follow_me_edges_path_is_unimplemented_at_v0() {
 
 #[test]
 fn follow_me_sweeps_a_square_profile_around_a_circular_path() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
 
@@ -1141,7 +1465,7 @@ fn follow_me_sweeps_a_square_profile_around_a_circular_path() {
 
 #[test]
 fn a_refused_mid_transaction_envelope_leaves_the_document_byte_identical() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let before = doc.save();

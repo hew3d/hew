@@ -45,7 +45,7 @@ describe('isFreePick', () => {
 
   it.each([
     'endpoint', 'center', 'quadrant', 'midpoint', 'intersection', 'tangent',
-    'on-edge', 'on-guide', 'from-point', 'face', 'something-new', '',
+    'on-edge', 'on-intersection-line', 'on-guide', 'from-point', 'face', 'something-new', '',
   ])('%s is a hard pick', (k) => {
     expect(isFreePick(snap(k))).toBe(false)
   })

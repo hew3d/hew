@@ -2,7 +2,7 @@
 
 [package]
 name = "hew"
-version = "1.3.1"
+version = "1.4.0"
 edition = "2021"
 # edition 2024 is not yet supported by tauri-build; 2021 is current Tauri v2 default.
 # Not a workspace member, so the license is stated directly (see LICENSE and
@@ -23,6 +23,14 @@ tauri-build = { version = "2.6.2", features = [] }
 # (+ its own `kernel`/`serde_json`/`sha2`), never the wasm boundary or
 # anything UI-facing.
 library = { path = "../../../crates/library" }
+# The plugin install store (src/preview_only/plugins.rs): reading packages,
+# the consent text, and the on-disk store under the app's data folder.
+# Plugins are a Preview feature and this crate compiles to nothing in a
+# production build, so a production shell carries none of it; the shell
+# uses it only under `cfg(hew_preview)`. `plugin-manifest` supplies the
+# plugin id grammar every command checks first.
+plugin-host = { path = "../../../crates/plugin-host", features = ["fs"] }
+plugin-manifest = { path = "../../../crates/plugin-manifest" }
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-dialog = "2.7.1"
 tauri-plugin-clipboard-manager = "2"
@@ -30,8 +38,8 @@ tauri-plugin-clipboard-manager = "2"
 # running instance: per-window-label autosave/recovery namespacing and
 # window-state.json assume one process owns the config dir.
 tauri-plugin-single-instance = "2"
-# In-app auto-updater (see the `updater` feature below). Optional so
-# package-manager builds can compile it out — they must own updates.
+# In-app updater (see the `updater` feature below). Optional so a build can
+# compile it out entirely; none of the shipped packages does.
 #
 # Without the plugin's default `zip` feature: that feature only unpacks
 # zipped Windows installers and gzipped AppImages, and Hew publishes neither
@@ -69,7 +77,7 @@ fontdb = "0.24.0"
 # (app/src/io/shareCrypto.ts) — this crate no longer needs its own random
 # token generation for this feature, so the `getrandom` direct dependency
 # that used to back it (LAN-server session tokens) is gone too.
-qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+qrcode = { version = "0.15.0", default-features = false, features = ["svg"] }
 
 # Windows named-pipe transport for `--live` (docs/agents/HEW_API.md §11.2):
 # CreateNamedPipeW/ConnectNamedPipe/ReadFile/WriteFile, a per-user security
@@ -87,7 +95,7 @@ qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSGeometry", "NSObject", "NSURL", "NSDictionary", "NSValue", "NSArray"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPrintInfo", "NSPrintOperation", "NSWindow", "NSView", "NSResponder", "NSApplication", "NSScreen", "NSGraphics", "NSCursor", "NSSavePanel", "NSPanel", "NSPopUpButton", "NSButton", "NSControl", "NSTextField", "NSGridView", "NSCell", "NSLayoutConstraint"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPrintInfo", "NSPrintOperation", "NSWindow", "NSView", "NSResponder", "NSApplication", "NSMenu", "NSMenuItem", "NSScreen", "NSGraphics", "NSCursor", "NSSavePanel", "NSPanel", "NSPopUpButton", "NSButton", "NSControl", "NSTextField", "NSGridView", "NSCell", "NSLayoutConstraint"] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-app-kit", "WKWebView"] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
@@ -99,36 +107,52 @@ webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 # IFileSaveDialog + IFileDialogCustomize + its event sink. Already in the
 # tree through tauri/wry at this version; listing it makes the shell API
 # callable from this crate.
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
-webview2-com = "0.38.2"
-windows-core = "0.61"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
+webview2-com = "0.39.1"
+windows-core = "0.62"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    # hew --version/--help print to the parent console (AttachConsole).
+    "Win32_System_Console",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Printing",
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
-    # Not used directly (no overlapped I/O here — every pipe handle is
-    # blocking), but `ConnectNamedPipe`/`ReadFile`/`WriteFile` all take an
-    # `OVERLAPPED` parameter (always null in this transport) in their
-    # signatures, so windows-sys gates those functions' very existence
-    # behind this feature.
+    # The live API's overlapped named-pipe I/O (src/live.rs): `OVERLAPPED`,
+    # `GetOverlappedResult`, `CancelIoEx`.
     "Win32_System_IO",
     "Win32_System_Threading",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Cryptography",
+    # The plugin commands' native confirmation (src/preview_only/confirm.rs):
+    # `TaskDialogIndirect` with Cancel as the default button.
+    "Win32_UI_Controls",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
+[dev-dependencies]
+# Test-only: mints the throwaway CA and the 30-day loopback leaf for the
+# https tests in src/remote_fetch.rs, so no openssl binary is needed. `ring`
+# is the provider rustls already uses here; never a runtime dependency.
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+# Already in the tree through tauri; named here for the leaf validity dates.
+time = "0.3"
+
 [features]
-# The in-app auto-updater: a check on launch plus a manual "Check for
-# Updates" menu item, talking to the signed `latest.json` published on
-# GitHub Releases. On by default, so the builds we ship directly (the
-# notarized .dmg, the NSIS installer, the AppImage) can update themselves
-# in place. Package-manager builds (Flathub, winget, AUR) own their own
-# updates, so they build with `--no-default-features` and the updater —
-# plugin, menu item, and launch check — compiles out entirely. The Homebrew
-# cask is not one of them: it installs the notarized .dmg unchanged and
-# declares `auto_updates`, leaving updates to this updater.
+# The in-app updater: a check on launch plus a manual "Check for Updates"
+# menu item, talking to the signed `latest.json` published on GitHub
+# Releases. On by default and in every package we ship. What it does with a
+# newer release depends on how the copy was installed (src/install_channel.rs):
+# the macOS app, Windows installer, and AppImage install it themselves, a
+# native .deb or .rpm installs the package after a password prompt, and
+# Flatpak, pacman, Gentoo, and other package-manager copies only announce it
+# and show the command that updates them. The Homebrew cask installs the
+# notarized .dmg unchanged and declares `auto_updates`, leaving updates to
+# this updater. Building with `--no-default-features` compiles the plugin,
+# menu item, and launch check out entirely; no shipped recipe does that. A
+# preview build (`HEW_PREVIEW=1`) leaves the update check out as well
+# (build.rs): a preview install never takes a production update, and the
+# production feed never offers a preview build.
 default = ["updater"]
 updater = ["dep:tauri-plugin-updater"]

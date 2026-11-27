@@ -13,6 +13,16 @@ export interface Vec3 {
   z: number
 }
 
+/** The same pointer ray, by value (the Viewport re-sends its cached ray
+ *  after a key to re-resolve the snap; a tool must not read that as a move). */
+export function sameRay(a: Ray | null, b: Ray): boolean {
+  if (a === null) return false
+  for (let i = 0; i < 3; i++) {
+    if (a.origin[i] !== b.origin[i] || a.direction[i] !== b.direction[i]) return false
+  }
+  return true
+}
+
 /**
  * Convert a pixel snap radius and camera field-of-view (vertical, radians)
  * to a ray cone half-angle aperture (radians).

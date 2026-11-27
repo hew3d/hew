@@ -1,7 +1,9 @@
 //! Structure-and-session fuzz harness (DEVELOPMENT.md rule 3): random
 //! sequences of the tree-shaping ops — make component, group, ungroup,
-//! reparent, explode, place, make unique, duplicate, delete, delete
-//! definition — interleaved with component and group EDITING SESSIONS
+//! reparent, explode, place, make unique (one instance, and by occurrence
+//! path), duplicate, delete, delete definition, transform and copy
+//! definition members in place, linked copies (wrap, copy linked, delete a
+//! linked placement, unlink one) — interleaved with component and group EDITING SESSIONS
 //! (opened, stacked, closed innermost-first) and undo/redo, over a document
 //! of plain boxes.
 //!
@@ -17,36 +19,267 @@
 //!   do not fire;
 //! - `load(save_for_persistence())` succeeds — the autosave path, which
 //!   serializes as if every open session were closed;
-//! - with no session open, `load(save())` succeeds too.
+//! - with no session open, `load(save())` succeeds too;
+//! - a make-unique-by-path fork keeps the occurrence walk's instance row
+//!   count, and undo then redo of it reproduces the state hash both ways
+//!   (a refused one leaves the document unchanged);
+//! - a wrap renders exactly what it rendered before, a linked copy adds one
+//!   world placement per copy (and one for the wrap, whose new set takes in
+//!   any world placements inside the wrapped group), and undo then redo of
+//!   either reproduces the state hash both ways;
+//! - deleting a linked set's last live placement takes the set with it.
+//!
+//! Drawing joins in too (wireframe faces §11): lines in 3D between lattice
+//! points (the boxes' corners and points above them), each drafted on a
+//! plane through it as Line re-homes a slanted segment, Detached or not,
+//! and moves and copies of free sketches — the edits that run the close
+//! pass — at the top level and inside open editing sessions alike (a loose
+//! line on an outside object's face drawn while a component is open once
+//! left the autosave unable to reopen, KB-44). Drafts take their
+//! participants from `Document::draft_participants`, which an open session
+//! narrows to its own objects (v1.5 decisions D1); `OutsideParticipant`
+//! names an object outside the session and expects the typed refusal with
+//! the document untouched. For each,
+//! one undo restores the document exactly and one redo returns the edit's
+//! state. Whole axis-aligned rectangles between lattice points, and Make
+//! Solid on a free sketch's faces, drive the cell search (§5): closed faces
+//! become solids or grow the boxes, in the same step.
+//!
+//! Construction guides and annotations join in as well: guide points and
+//! lines through lattice points, leader texts anchored to a live node (or to
+//! nothing), and a mixed Delete that takes nodes, guides, and annotations in
+//! one call. A mixed Delete is one undo step that undo then redo reproduce
+//! exactly; salted with a stale guide handle it refuses with the document
+//! and its history untouched.
+//!
+//! Locks join in too (OW-1): Lock and Unlock any live node (definition
+//! members included), Unlock All, linked copies and joins over locked
+//! operands, and face drafts on frozen Objects (opened detached). Besides the kernel's own commit audit (debug builds), the
+//! harness holds an oracle of its own: a node frozen before a forward step
+//! is still there after it, still frozen unless the step unlocked, and
+//! keeps its geometry where it stands, its name and its tags
+//! (`lock_oracle`). Opening and closing a component session re-owns its
+//! members (world-baked for the session), so those steps are left out, as
+//! undo and redo are.
 //!
 //! Failures shrink to a short op list. Run deeper than the default 256
-//! cases with `PROPTEST_CASES=20000 cargo test -p kernel --test
-//! session_fuzz`.
+//! cases with `PROPTEST_CASES=20000 cargo test -p kernel --test all
+//! session_fuzz::`.
 
-use kernel::{Document, NodeId, ObjectId, Plane, Point3, Transform, Vec3};
+use kernel::{
+    Anchor, Document, EntityRef, GuideId, InstanceId, KernelOp, LibraryProvenance, LibraryUpdate,
+    NodeId, ObjectId, Plane, Point3, Transform, Vec3,
+};
 use proptest::prelude::*;
+
+use crate::lock_oracle;
 
 /// Abstract op; selectors resolve against live ids at apply time, so a
 /// shrunk sequence stays meaningful.
 #[derive(Debug, Clone)]
 enum Op {
-    MakeComponent { sel: usize },
-    MakeComponentPair { a: usize, b: usize },
-    Group { a: usize, b: usize },
-    Ungroup { sel: usize },
-    Reparent { sel: usize, parent: usize },
-    Explode { sel: usize },
-    Place { comp: usize },
-    MakeUnique { sel: usize },
-    Duplicate { sel: usize },
-    Delete { sel: usize },
-    DeleteSelection { sel: usize },
-    DeleteDefinition { comp: usize },
-    OpenComponentSession { sel: usize },
-    OpenGroupSession { sel: usize },
+    MakeComponent {
+        sel: usize,
+    },
+    MakeComponentPair {
+        a: usize,
+        b: usize,
+    },
+    Group {
+        a: usize,
+        b: usize,
+    },
+    Ungroup {
+        sel: usize,
+    },
+    Reparent {
+        sel: usize,
+        parent: usize,
+    },
+    Explode {
+        sel: usize,
+    },
+    Place {
+        comp: usize,
+    },
+    MakeUnique {
+        sel: usize,
+    },
+    /// Fork one placement by its occurrence path (any depth).
+    MakeUniqueByPath {
+        sel: usize,
+        cascade: bool,
+        deep: bool,
+    },
+    Duplicate {
+        sel: usize,
+    },
+    Delete {
+        sel: usize,
+    },
+    DeleteSelection {
+        sel: usize,
+    },
+    DeleteDefinition {
+        comp: usize,
+    },
+    OpenComponentSession {
+        sel: usize,
+    },
+    OpenGroupSession {
+        sel: usize,
+    },
+    /// Move a member of a definition in the definition's frame
+    /// (`transform_def_members`).
+    TransformDefMember {
+        comp: usize,
+        sel: usize,
+    },
+    /// KB-25: a definition member shrunk to sub-micron size (`shrink`), or
+    /// moved a fraction of a micron, so faces under the old 1e-12 m² area
+    /// floor (kept now when at least 10 nm wide) go through sessions,
+    /// structure ops, undo and the reopen check.
+    MicroTransformDefMember {
+        comp: usize,
+        sel: usize,
+        shrink: bool,
+    },
+    /// Copy a member of a definition into the same definition, twice
+    /// (`duplicate_def_members_array`).
+    DuplicateDefMembers {
+        comp: usize,
+        sel: usize,
+    },
+    /// Delete every object inside the open component session, so the close
+    /// empties the definition (the grouped-sibling emptied-close defect).
+    DeleteSessionMembers,
+    /// Wrap a node as a linked set (`wrap_linked`).
+    WrapLinked {
+        sel: usize,
+    },
+    /// Copy a node with `LinkPolicy::Linked`.
+    DuplicateLinked {
+        sel: usize,
+    },
+    /// Delete a world placement of a linked set.
+    DeleteLinkedPlacement {
+        sel: usize,
+    },
+    /// Unlink a placement of a linked set (make unique by path, cascade).
+    UnlinkPlacement {
+        sel: usize,
+    },
+    /// Wrap a copy of a node's content as an unplaced definition
+    /// (`insert_as_definition`); `key` picks one of three provenances so
+    /// repeats reuse.
+    InsertAsDefinition {
+        sel: usize,
+        key: u8,
+    },
+    /// Update from Library (OW-2): a definition with a world placement is
+    /// saved as an item, linked to it, the item edited (a member's face
+    /// pushed), and the definition updated from it: a refusal changes
+    /// nothing, an update undoes and redoes exactly.
+    UpdateFromItem {
+        comp: usize,
+        face: usize,
+    },
     CloseSession,
     Undo,
     Redo,
+    /// A line between two lattice points, drafted at the top level on a
+    /// plane through it (`tilt` picks which), Detached or not (a detached
+    /// line closes against a box's edges ending on its shape, §16 R8).
+    Line3D {
+        a: usize,
+        b: usize,
+        tilt: u8,
+        detached: bool,
+    },
+    /// A translation of a whole free sketch by a lattice step.
+    MoveSketch {
+        sel: usize,
+        step: u8,
+    },
+    /// A copy of every island of a free sketch, a lattice step away.
+    CopySketch {
+        sel: usize,
+        step: u8,
+    },
+    /// An axis-aligned rectangle with opposite corners at two lattice
+    /// points, drafted at the top level on its plane (`flip`: facing the
+    /// other way).
+    Rect3D {
+        a: usize,
+        b: usize,
+        flip: bool,
+    },
+    /// Make Solid on every face of a free sketch ([`Document::close_cells`]).
+    CloseCells {
+        sel: usize,
+    },
+    /// A half-metre box drawn as faces, one draft per face (its bottom
+    /// only on the ground): on the ground, or on a box's top (where the
+    /// faces close against it and grow it), Detached or not.
+    FaceBox {
+        at: u8,
+        detached: bool,
+    },
+    /// A line drafted on the face of a box OUTSIDE the open session, naming
+    /// that box as a participant: refused `ExplodeSessionScope`, nothing
+    /// changed (v1.5 decisions D1). With no session open, or no outside box
+    /// with a face on the plane, it does nothing.
+    OutsideParticipant {
+        sel: usize,
+    },
+    /// A construction guide through a lattice point: a point, or a line
+    /// along a lattice step.
+    AddGuide {
+        at: usize,
+        line: bool,
+        dir: u8,
+    },
+    /// A leader text at a lattice point, anchored to a live node (`sel`
+    /// past the nodes: to nothing).
+    AddNote {
+        sel: usize,
+        at: usize,
+    },
+    /// One `delete_selection` over up to two nodes, a guide, and an
+    /// annotation (`mask` picks which), salted with a stale guide handle
+    /// when `stale`.
+    DeleteMixed {
+        a: usize,
+        b: usize,
+        guide: usize,
+        note: usize,
+        mask: u8,
+        stale: bool,
+    },
+    /// A face draft on a frozen Object, as the app opens one (OW-1, v1.5
+    /// owner's items D1): a rectangle on the `face`-th face of the
+    /// `sel`-th live Object that `face_draw_detaches`, drawn as a NEW
+    /// detached shape in the Object's own frame. It never changes an
+    /// Object; a frozen frame (a member of a frozen shape) refuses
+    /// `LockedNode` and changes nothing. A no-op while nothing is frozen.
+    FrozenFaceDraft {
+        sel: usize,
+        face: usize,
+    },
+    /// Lock (or unlock) any live node, a definition member included.
+    Lock {
+        sel: usize,
+        locked: bool,
+    },
+    /// Edit ▸ Unlock ▸ All.
+    UnlockAll,
+    /// "Link identical copies": a separate copy of a world Object, then
+    /// joined to the linked set of a placement (refused unless it is one,
+    /// and whenever a lock is involved).
+    JoinLinked {
+        set: usize,
+        sel: usize,
+    },
 }
 
 fn arb_op() -> impl Strategy<Value = Op> {
@@ -60,16 +293,107 @@ fn arb_op() -> impl Strategy<Value = Op> {
         1 => sel().prop_map(|sel| Op::Explode { sel }),
         2 => sel().prop_map(|comp| Op::Place { comp }),
         1 => sel().prop_map(|sel| Op::MakeUnique { sel }),
+        2 => (sel(), any::<bool>(), any::<bool>())
+            .prop_map(|(sel, cascade, deep)| Op::MakeUniqueByPath { sel, cascade, deep }),
         1 => sel().prop_map(|sel| Op::Duplicate { sel }),
         2 => sel().prop_map(|sel| Op::Delete { sel }),
         1 => sel().prop_map(|sel| Op::DeleteSelection { sel }),
         1 => sel().prop_map(|comp| Op::DeleteDefinition { comp }),
+        2 => (sel(), sel()).prop_map(|(comp, sel)| Op::TransformDefMember { comp, sel }),
+        1 => (sel(), sel(), any::<bool>())
+            .prop_map(|(comp, sel, shrink)| Op::MicroTransformDefMember { comp, sel, shrink }),
+        1 => (sel(), sel()).prop_map(|(comp, sel)| Op::DuplicateDefMembers { comp, sel }),
         3 => sel().prop_map(|sel| Op::OpenComponentSession { sel }),
         3 => sel().prop_map(|sel| Op::OpenGroupSession { sel }),
+        2 => Just(Op::DeleteSessionMembers),
+        2 => sel().prop_map(|sel| Op::WrapLinked { sel }),
+        2 => sel().prop_map(|sel| Op::DuplicateLinked { sel }),
+        1 => sel().prop_map(|sel| Op::DeleteLinkedPlacement { sel }),
+        1 => sel().prop_map(|sel| Op::UnlinkPlacement { sel }),
+        2 => (sel(), 0u8..3).prop_map(|(sel, key)| Op::InsertAsDefinition { sel, key }),
+        2 => (sel(), sel()).prop_map(|(comp, face)| Op::UpdateFromItem { comp, face }),
         3 => Just(Op::CloseSession),
         2 => Just(Op::Undo),
         2 => Just(Op::Redo),
+        6 => (sel(), sel(), 0u8..3, any::<bool>())
+            .prop_map(|(a, b, tilt, detached)| Op::Line3D { a, b, tilt, detached }),
+        2 => (sel(), 0u8..6).prop_map(|(sel, step)| Op::MoveSketch { sel, step }),
+        1 => (sel(), 0u8..6).prop_map(|(sel, step)| Op::CopySketch { sel, step }),
+        4 => (sel(), sel(), any::<bool>()).prop_map(|(a, b, flip)| Op::Rect3D { a, b, flip }),
+        1 => sel().prop_map(|sel| Op::CloseCells { sel }),
+        3 => (any::<u8>(), any::<bool>()).prop_map(|(at, detached)| Op::FaceBox { at, detached }),
+        1 => sel().prop_map(|sel| Op::OutsideParticipant { sel }),
+        3 => (sel(), any::<bool>(), 0u8..6)
+            .prop_map(|(at, line, dir)| Op::AddGuide { at, line, dir }),
+        2 => (sel(), sel()).prop_map(|(sel, at)| Op::AddNote { sel, at }),
+        3 => (sel(), sel(), sel(), sel(), 1u8..16, proptest::bool::weighted(0.15)).prop_map(
+            |(a, b, guide, note, mask, stale)| Op::DeleteMixed {
+                a,
+                b,
+                guide,
+                note,
+                mask,
+                stale,
+            }
+        ),
+        4 => (sel(), any::<bool>()).prop_map(|(sel, locked)| Op::Lock { sel, locked }),
+        2 => (sel(), sel()).prop_map(|(sel, face)| Op::FrozenFaceDraft { sel, face }),
+        1 => Just(Op::UnlockAll),
+        1 => (sel(), sel()).prop_map(|(set, sel)| Op::JoinLinked { set, sel }),
     ]
+}
+
+/// The drawing lattice: the boxes' corners (x = 3i, 3i + 1; y = 0, 1;
+/// z = 0, 1) and the points 1 m above their tops and halfway across.
+fn lattice() -> Vec<Point3> {
+    let mut v = Vec::new();
+    for x in [0.0, 0.5, 1.0, 3.0, 3.5, 4.0] {
+        for y in [0.0, 0.5, 1.0] {
+            for z in [0.0, 1.0, 2.0] {
+                v.push(Point3::new(x, y, z));
+            }
+        }
+    }
+    v
+}
+
+/// A lattice step: one unit along an axis, either way.
+fn step_of(step: u8) -> Vec3 {
+    match step % 6 {
+        0 => Vec3::new(1.0, 0.0, 0.0),
+        1 => Vec3::new(-1.0, 0.0, 0.0),
+        2 => Vec3::new(0.0, 1.0, 0.0),
+        3 => Vec3::new(0.0, -1.0, 0.0),
+        4 => Vec3::new(0.0, 0.0, 1.0),
+        _ => Vec3::new(0.0, 0.0, -1.0),
+    }
+}
+
+/// A plane through `a–b`: the vertical one (`tilt` 0), the one holding the
+/// x axis direction (1), or the y axis direction (2); for a line along that
+/// direction, the plane facing +x through it.
+fn home_plane(a: Point3, b: Point3, tilt: u8) -> Option<Plane> {
+    let d = b - a;
+    let other = match tilt % 3 {
+        0 => Vec3::new(0.0, 0.0, 1.0),
+        1 => Vec3::new(1.0, 0.0, 0.0),
+        _ => Vec3::new(0.0, 1.0, 0.0),
+    };
+    let n = d.cross(other);
+    let n = if n.length() > 1e-6 {
+        n
+    } else {
+        d.cross(Vec3::new(1.0, 1.0, 0.0))
+    };
+    Plane::from_point_normal(a, n).ok()
+}
+
+/// The free world sketches a move or copy picks from.
+fn free_sketches(doc: &Document) -> Vec<kernel::SketchId> {
+    doc.sketch_ids()
+        .into_iter()
+        .filter(|&s| doc.sketch_owner_object(s).is_none())
+        .collect()
 }
 
 fn add_box(doc: &mut Document, x: f64) -> ObjectId {
@@ -107,10 +431,198 @@ fn pick<T: Copy>(items: &[T], sel: usize) -> Option<T> {
     (!items.is_empty()).then(|| items[sel % items.len()])
 }
 
+/// Every visible instance placement as its occurrence path (instance ids
+/// from the world down, the placement itself last).
+fn instance_paths(doc: &Document) -> Vec<Vec<InstanceId>> {
+    doc.occurrences(None, false)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|o| match o.node {
+            NodeId::Instance(i) => {
+                let mut path = o.path;
+                path.push(i);
+                Some(path)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn instance_rows(doc: &Document) -> usize {
+    doc.occurrences(None, true)
+        .unwrap_or_default()
+        .iter()
+        .filter(|o| matches!(o.node, NodeId::Instance(_)))
+        .count()
+}
+
+/// `make_unique_by_path` on the path `sel` picks. A refusal is legal; a
+/// fork must keep the placement count and undo then redo exactly.
+fn make_unique_by_path(
+    doc: &mut Document,
+    sel: usize,
+    cascade: bool,
+    deep: bool,
+) -> Result<(), String> {
+    let paths = instance_paths(doc);
+    let Some(path) = (!paths.is_empty()).then(|| paths[sel % paths.len()].clone()) else {
+        return Ok(());
+    };
+    let rows = instance_rows(doc);
+    let before = doc.state_hash();
+    if doc.make_unique_by_path(&path, cascade, deep).is_err() {
+        if doc.state_hash() != before {
+            return Err("a refused fork changed the document".to_string());
+        }
+        return Ok(());
+    }
+    if instance_rows(doc) != rows {
+        return Err(format!(
+            "the fork changed the placement count from {rows} to {}",
+            instance_rows(doc)
+        ));
+    }
+    let after = doc.state_hash();
+    doc.undo()
+        .map_err(|e| format!("undo of the fork refused: {e}"))?;
+    if doc.state_hash() != before {
+        return Err("undo of the fork did not restore the document".to_string());
+    }
+    doc.redo()
+        .map_err(|e| format!("redo of the fork refused: {e}"))?;
+    if doc.state_hash() != after {
+        return Err("redo of the fork did not reproduce it".to_string());
+    }
+    Ok(())
+}
+
+/// What renders right now: visible world objects plus every expanded
+/// placement.
+fn rendered(doc: &Document) -> usize {
+    doc.visible_object_ids().len() + doc.expanded_placements().len()
+}
+
+/// A stand-in for the API layer's SHA-256: the kernel's content print
+/// needs some digest, and these specs only compare prints.
+fn fuzz_digest(bytes: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for lane in 0..4u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ lane.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        out[lane as usize * 8..lane as usize * 8 + 8].copy_from_slice(&h.to_le_bytes());
+    }
+    out
+}
+
+/// [`Op::UpdateFromItem`].
+fn update_from_item(doc: &mut Document, comp: usize, face: usize) -> Result<(), String> {
+    let defs = doc.component_ids();
+    let Some(def) = pick(&defs, comp) else {
+        return Ok(());
+    };
+    let Some(inst) = doc
+        .instance_ids()
+        .into_iter()
+        .find(|&i| doc.instance_def(i) == Some(def) && doc.instance_is_world(i))
+    else {
+        return Ok(());
+    };
+    let Ok(mut item) = doc.extract_item(&[NodeId::Instance(inst)], true) else {
+        return Ok(());
+    };
+    let Some(NodeId::Instance(top)) = item.top_level_nodes().first().copied() else {
+        return Ok(());
+    };
+    let Some(item_def) = item.instance_def(top) else {
+        return Ok(());
+    };
+    let Some(sid) = item.sid_of(&EntityRef::Component(item_def)) else {
+        return Ok(());
+    };
+    // Link the definition to the item as saved, then edit the item.
+    let saved = LibraryProvenance {
+        source_id: "fuzz-item".to_string(),
+        content_hash: "v1".to_string(),
+        prints: item.content_prints_by_sid(fuzz_digest),
+    };
+    doc.stamp_library_source(&[NodeId::Instance(inst)], &saved, Some(sid));
+    if let Some(o) = item.def_members(item_def).and_then(|m| m.first().copied()) {
+        let faces: Vec<kernel::FaceId> = item
+            .object(o)
+            .map(|obj| obj.faces().keys().collect())
+            .unwrap_or_default();
+        if let Some(&f) = faces.get(face % faces.len().max(1)) {
+            let _ = item.apply_def_op(
+                item_def,
+                o,
+                KernelOp::PushPull {
+                    face: f,
+                    distance: 0.25,
+                },
+            );
+        }
+    }
+    let edited = LibraryProvenance {
+        source_id: "fuzz-item".to_string(),
+        content_hash: "v2".to_string(),
+        prints: item.content_prints_by_sid(fuzz_digest),
+    };
+    let before = doc.state_hash();
+    let (report, _) = doc
+        .update_definitions_from_items(
+            &[LibraryUpdate {
+                definition: def,
+                item: &item,
+                provenance: edited,
+            }],
+            fuzz_digest,
+        )
+        .map_err(|e| format!("the update refused whole: {e}"))?;
+    if report.updated.is_empty() {
+        if doc.state_hash() != before {
+            return Err(format!(
+                "an update that changed nothing changed the document: {report:?}"
+            ));
+        }
+        return Ok(());
+    }
+    if doc.content_print(def, fuzz_digest) != item.content_print(item_def, fuzz_digest) {
+        return Err("the updated definition does not hold the item's content".to_string());
+    }
+    undo_redo_exact(doc, before, "update from library")
+}
+
+/// Undo then redo of the op just committed must land on `before` and then
+/// `after` exactly.
+fn undo_redo_exact(doc: &mut Document, before: u64, what: &str) -> Result<(), String> {
+    let after = doc.state_hash();
+    doc.undo()
+        .map_err(|e| format!("undo of the {what} refused: {e}"))?;
+    if doc.state_hash() != before {
+        return Err(format!("undo of the {what} did not restore the document"));
+    }
+    doc.redo()
+        .map_err(|e| format!("redo of the {what} refused: {e}"))?;
+    if doc.state_hash() != after {
+        return Err(format!("redo of the {what} did not reproduce it"));
+    }
+    Ok(())
+}
+
+thread_local! {
+    /// The state hash before the last undo step an op recorded, when the
+    /// op records several (a [`Op::FaceBox`] drafts one face at a time).
+    static LAST_STEP_BEFORE: std::cell::Cell<Option<(u64, u64)>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Applies one op. A typed refusal is a legal answer and is ignored; what
 /// must never happen is a panic or a document that no longer reopens, both
 /// checked by the caller.
-fn apply(doc: &mut Document, op: &Op) {
+fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
     let nodes = live_nodes(doc);
     let instances = doc.instance_ids();
     let groups = doc.group_ids();
@@ -159,9 +671,16 @@ fn apply(doc: &mut Document, op: &Op) {
                 let _ = doc.make_unique(i);
             }
         }
+        Op::MakeUniqueByPath { sel, cascade, deep } => {
+            return make_unique_by_path(doc, sel, cascade, deep);
+        }
         Op::Duplicate { sel } => {
             if let Some(n) = pick(&nodes, sel) {
-                let _ = doc.duplicate_node(n, &Transform::translation(Vec3::new(0.5, 0.5, 0.0)));
+                let _ = doc.duplicate_node(
+                    n,
+                    &Transform::translation(Vec3::new(0.5, 0.5, 0.0)),
+                    kernel::LinkPolicy::Independent,
+                );
             }
         }
         Op::Delete { sel } => {
@@ -171,12 +690,45 @@ fn apply(doc: &mut Document, op: &Op) {
         }
         Op::DeleteSelection { sel } => {
             if let Some(n) = pick(&nodes, sel) {
-                let _ = doc.delete_selection(&[n]);
+                let _ = doc.delete_selection(&[n], &[], &[]);
             }
         }
         Op::DeleteDefinition { comp } => {
             if let Some(c) = pick(&comps, comp) {
                 let _ = doc.delete_definition(c);
+            }
+        }
+        Op::TransformDefMember { comp, sel } => {
+            if let Some(c) = pick(&comps, comp)
+                && let Some(n) = pick(&doc.def_member_nodes(c).unwrap_or_default(), sel)
+            {
+                let t = Transform::rotation(Vec3::new(0.0, 0.0, 1.0), 0.25)
+                    .expect("rotation")
+                    .then(&Transform::translation(Vec3::new(0.3, -0.2, 0.1)));
+                let _ = doc.transform_def_members(c, &[n], &t);
+            }
+        }
+        Op::MicroTransformDefMember { comp, sel, shrink } => {
+            if let Some(c) = pick(&comps, comp)
+                && let Some(n) = pick(&doc.def_member_nodes(c).unwrap_or_default(), sel)
+            {
+                // A 1 m box at 3e-7 has 0.3 µm faces: twice their area is
+                // 9e-14 m², deep in the width band.
+                let t = if shrink {
+                    Transform::uniform_scale(3e-7)
+                } else {
+                    Transform::translation(Vec3::new(3e-7, -2e-7, 1e-7))
+                };
+                let _ = doc.transform_def_members(c, &[n], &t);
+            }
+        }
+        Op::DuplicateDefMembers { comp, sel } => {
+            if let Some(c) = pick(&comps, comp)
+                && let Some(n) = pick(&doc.def_member_nodes(c).unwrap_or_default(), sel)
+            {
+                let step = Transform::translation(Vec3::new(0.0, 1.5, 0.0));
+                let count = std::num::NonZeroU32::new(2).expect("nonzero");
+                let _ = doc.duplicate_def_members_array(c, &[n], &step, count);
             }
         }
         Op::OpenComponentSession { sel } => {
@@ -189,6 +741,133 @@ fn apply(doc: &mut Document, op: &Op) {
                 let _ = doc.open_group_session(g);
             }
         }
+        Op::DeleteSessionMembers => {
+            for o in doc.explode_session_objects().unwrap_or_default() {
+                let _ = doc.delete_node(NodeId::Object(o));
+            }
+        }
+        Op::WrapLinked { sel } => {
+            if let Some(n) = pick(&nodes, sel) {
+                let shown = rendered(doc);
+                let before = doc.state_hash();
+                match doc.wrap_linked(n) {
+                    Ok(_) => {
+                        if rendered(doc) != shown {
+                            return Err(format!(
+                                "a wrap changed what renders from {shown} to {}",
+                                rendered(doc)
+                            ));
+                        }
+                        return undo_redo_exact(doc, before, "wrap");
+                    }
+                    Err(_) if doc.state_hash() != before => {
+                        return Err("a refused wrap changed the document".to_string());
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        Op::DuplicateLinked { sel } => {
+            if let Some(n) = pick(&nodes, sel) {
+                let placements = doc.instance_ids().len();
+                // A wrapped group's own instances become members of the new
+                // set, so they stop being world placements.
+                let folded = match n {
+                    NodeId::Instance(_) => 0,
+                    _ => doc.leaf_instances_under(n).len(),
+                };
+                let before = doc.state_hash();
+                let t = Transform::translation(Vec3::new(0.5, 0.5, 0.0));
+                match doc.duplicate_node(n, &t, kernel::LinkPolicy::Linked) {
+                    Ok((_, change)) => {
+                        let want = placements + 1 + change.linked.len() - folded;
+                        if doc.instance_ids().len() != want {
+                            return Err(format!(
+                                "a linked copy left {} world placements, not {want}",
+                                doc.instance_ids().len()
+                            ));
+                        }
+                        return undo_redo_exact(doc, before, "linked copy");
+                    }
+                    Err(_) if doc.state_hash() != before => {
+                        return Err("a refused linked copy changed the document".to_string());
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        Op::DeleteLinkedPlacement { sel } => {
+            let linked: Vec<InstanceId> = instances
+                .iter()
+                .copied()
+                .filter(|&i| doc.instance_def(i).is_some_and(|d| doc.is_linked_set(d)))
+                .collect();
+            if let Some(i) = pick(&linked, sel) {
+                let def = doc.instance_def(i).expect("live");
+                let last = doc.definition_usage(def) == 1;
+                if doc.delete_node(NodeId::Instance(i)).is_ok()
+                    && last
+                    && doc.session_stack().is_empty()
+                    && doc.is_linked_set(def)
+                {
+                    return Err("a linked set outlived its last placement".to_string());
+                }
+            }
+        }
+        Op::UnlinkPlacement { sel } => {
+            let paths: Vec<Vec<InstanceId>> = instance_paths(doc)
+                .into_iter()
+                .filter(|p| {
+                    doc.instance_def(*p.last().expect("a path"))
+                        .is_some_and(|d| doc.is_linked_set(d))
+                })
+                .collect();
+            if paths.is_empty() {
+                return Ok(());
+            }
+            let path = paths[sel % paths.len()].clone();
+            let rows = instance_rows(doc);
+            let before = doc.state_hash();
+            if doc.make_unique_by_path(&path, true, false).is_err() {
+                if doc.state_hash() != before {
+                    return Err("a refused unlink changed the document".to_string());
+                }
+                return Ok(());
+            }
+            if instance_rows(doc) != rows {
+                return Err(format!(
+                    "the unlink changed the placement count from {rows} to {}",
+                    instance_rows(doc)
+                ));
+            }
+            return undo_redo_exact(doc, before, "unlink");
+        }
+        Op::InsertAsDefinition { sel, key } => {
+            let Some(n) = pick(&nodes, sel) else {
+                return Ok(());
+            };
+            let Ok(item) = doc.extract_item(&[n], false) else {
+                return Ok(());
+            };
+            let prov = LibraryProvenance {
+                source_id: "import:fuzz".to_string(),
+                content_hash: key.to_string(),
+                ..Default::default()
+            };
+            let before = doc.state_hash();
+            match doc.insert_as_definition(&item, Some("Wrapped"), prov) {
+                Err(_) if doc.state_hash() != before => {
+                    return Err("a refused insert_as_definition changed the document".to_string());
+                }
+                Err(_) => {}
+                Ok((_, true, _)) if doc.state_hash() != before => {
+                    return Err("a reused definition changed the document".to_string());
+                }
+                Ok((_, true, _)) => {}
+                Ok((_, false, _)) => return undo_redo_exact(doc, before, "definition insert"),
+            }
+        }
+        Op::UpdateFromItem { comp, face } => return update_from_item(doc, comp, face),
         Op::CloseSession => {
             let _ = doc.close_innermost_session();
         }
@@ -198,7 +877,435 @@ fn apply(doc: &mut Document, op: &Op) {
         Op::Redo => {
             let _ = doc.redo();
         }
+        Op::Line3D {
+            a,
+            b,
+            tilt,
+            detached,
+        } => {
+            let pts = lattice();
+            let (a, b) = (pts[a % pts.len()], pts[b % pts.len()]);
+            if a == b {
+                return Ok(());
+            }
+            let Some(h) = home_plane(a, b, tilt) else {
+                return Ok(());
+            };
+            let edit = |w: &mut kernel::Sketch| w.add_segment(a, b).map(|_| ());
+            let _ = if detached {
+                doc.draft_detached_new(h, None, "Line", edit)
+            } else {
+                let objects = doc.draft_participants(h, None);
+                doc.draft(h, None, &objects, "Line", edit)
+            };
+        }
+        Op::MoveSketch { sel, step } => {
+            if let Some(s) = pick(&free_sketches(doc), sel) {
+                let _ = doc.transform_sketch(s, &Transform::translation(step_of(step)));
+            }
+        }
+        Op::Rect3D { a, b, flip } => {
+            let pts = lattice();
+            let (a, b) = (pts[a % pts.len()], pts[b % pts.len()]);
+            let d = b - a;
+            let flat = [d.x, d.y, d.z].iter().filter(|c| c.abs() < 1e-12).count();
+            if flat != 1 {
+                return Ok(());
+            }
+            let n = if d.x.abs() < 1e-12 {
+                Vec3::new(1.0, 0.0, 0.0)
+            } else if d.y.abs() < 1e-12 {
+                Vec3::new(0.0, 1.0, 0.0)
+            } else {
+                Vec3::new(0.0, 0.0, 1.0)
+            };
+            let n = if flip { n * -1.0 } else { n };
+            let Ok(h) = Plane::from_point_normal(a, n) else {
+                return Ok(());
+            };
+            // The other two corners: each varies one of the two free axes.
+            let (c, e) = if d.x.abs() < 1e-12 {
+                (Point3::new(a.x, b.y, a.z), Point3::new(a.x, a.y, b.z))
+            } else if d.y.abs() < 1e-12 {
+                (Point3::new(b.x, a.y, a.z), Point3::new(a.x, a.y, b.z))
+            } else {
+                (Point3::new(b.x, a.y, a.z), Point3::new(a.x, b.y, a.z))
+            };
+            let objects = doc.draft_participants(h, None);
+            let _ = doc.draft(h, None, &objects, "Rectangle", |w| {
+                for (p, q) in [(a, c), (c, b), (b, e), (e, a)] {
+                    w.add_segment(p, q)?;
+                }
+                Ok(())
+            });
+        }
+        Op::FaceBox { at, detached } => {
+            let x0 = [0.0, 0.5, 3.0, 3.5][usize::from(at % 4)];
+            let y0 = [0.0, 0.5][usize::from(at / 4 % 2)];
+            let z0 = [0.0, 1.0][usize::from(at / 8 % 2)];
+            let c = [
+                Point3::new(x0, y0, z0),
+                Point3::new(x0 + 0.5, y0, z0),
+                Point3::new(x0 + 0.5, y0 + 0.5, z0),
+                Point3::new(x0, y0 + 0.5, z0),
+            ];
+            let up = |q: Point3| Point3::new(q.x, q.y, z0 + 0.5);
+            let mut faces: Vec<(Vec3, [Point3; 4])> = Vec::new();
+            if z0 == 0.0 {
+                faces.push((Vec3::new(0.0, 0.0, 1.0), c));
+            }
+            for i in 0..4 {
+                let (u, v) = (c[i], c[(i + 1) % 4]);
+                faces.push((
+                    (v - u).cross(Vec3::new(0.0, 0.0, 1.0)),
+                    [u, v, up(v), up(u)],
+                ));
+            }
+            // The order the faces go down in follows `at` too.
+            let k = usize::from(at / 16) % faces.len();
+            faces.rotate_left(k);
+            for (n, q) in faces {
+                let Ok(h) = Plane::from_point_normal(q[0], n) else {
+                    return Ok(());
+                };
+                LAST_STEP_BEFORE.set(Some((doc.state_hash(), doc.history_generation())));
+                let edit = |w: &mut kernel::Sketch| {
+                    for i in 0..4 {
+                        w.add_segment(q[i], q[(i + 1) % 4])?;
+                    }
+                    Ok(())
+                };
+                let _ = if detached {
+                    doc.draft_detached_new(h, None, "Rectangle", edit)
+                } else {
+                    let objects = doc.draft_participants(h, None);
+                    doc.draft(h, None, &objects, "Rectangle", edit)
+                };
+            }
+        }
+        Op::CloseCells { sel } => {
+            if let Some(s) = pick(&free_sketches(doc), sel) {
+                let scope = kernel::CellScope::default();
+                let out = doc.close_cells(&[kernel::CellSeed::Sketch(s)], &scope);
+                // Every solid made validates.
+                for o in out {
+                    if let kernel::CellOutcome::Created(id)
+                    | kernel::CellOutcome::Grew { to: id, .. }
+                    | kernel::CellOutcome::Unjoined { object: id, .. } = o
+                    {
+                        let obj = doc.object(id).expect("a made solid is visible");
+                        assert_eq!(obj.watertight(), kernel::WatertightState::Watertight);
+                        obj.validate().expect("a made solid validates");
+                    }
+                }
+            }
+        }
+        Op::OutsideParticipant { sel } => {
+            if doc.session_stack().is_empty() {
+                return Ok(());
+            }
+            let top =
+                Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0))
+                    .expect("plane");
+            let outside: Vec<ObjectId> = doc
+                .drawable_objects_on_plane(top, None)
+                .into_iter()
+                .filter(|&o| !doc.draft_scope_holds_object(o))
+                .collect();
+            let Some(o) = pick(&outside, sel) else {
+                return Ok(());
+            };
+            let mut objects = doc.draft_participants(top, None);
+            assert!(
+                !objects.contains(&o),
+                "an outside object is never a participant"
+            );
+            objects.push(o);
+            let before = (doc.state_hash(), doc.history_generation());
+            let at = doc
+                .object(o)
+                .and_then(|obj| {
+                    obj.vertices()
+                        .values()
+                        .map(|v| v.position)
+                        .find(|q| q.z > 0.5)
+                })
+                .expect("a box has a top corner");
+            let refused = doc.draft(top, None, &objects, "Line", |w| {
+                w.add_segment(at, at + Vec3::new(0.25, 0.25, 0.0))
+                    .map(|_| ())
+            });
+            assert_eq!(
+                refused.err(),
+                Some(kernel::DocumentError::ExplodeSessionScope),
+                "an outside participant is refused"
+            );
+            assert_eq!(
+                (doc.state_hash(), doc.history_generation()),
+                before,
+                "a refused draft changes nothing"
+            );
+        }
+        Op::AddGuide { at, line, dir } => {
+            let p = lattice()[at % lattice().len()];
+            let _ = if line {
+                doc.add_guide_line(p, step_of(dir))
+            } else {
+                doc.add_guide_point(p)
+            };
+        }
+        Op::AddNote { sel, at } => {
+            // One slot past the nodes anchors to nothing.
+            let node = nodes.get(sel % (nodes.len() + 1)).copied();
+            let point = lattice()[at % lattice().len()];
+            let _ = doc.add_leader_text(Anchor { node, point }, Vec3::ZERO, "n".to_string());
+        }
+        Op::DeleteMixed {
+            a,
+            b,
+            guide,
+            note,
+            mask,
+            stale,
+        } => {
+            let guides = doc.guide_ids();
+            let notes = doc.annotation_ids();
+            let mut sel_nodes = Vec::new();
+            let mut sel_guides = Vec::new();
+            let mut sel_notes = Vec::new();
+            // A definition member is not a world node and is refused; the
+            // batch lists only nodes the document calls live.
+            let world: Vec<NodeId> = nodes
+                .iter()
+                .copied()
+                .filter(|&n| doc.node_is_live(n))
+                .collect();
+            if mask & 1 != 0 {
+                sel_nodes.extend(pick(&world, a));
+            }
+            if mask & 2 != 0 {
+                sel_nodes.extend(pick(&world, b));
+            }
+            if mask & 4 != 0 {
+                sel_guides.extend(pick(&guides, guide));
+            }
+            if mask & 8 != 0 {
+                sel_notes.extend(pick(&notes, note));
+            }
+            if stale {
+                // The null key: never a live guide.
+                sel_guides.push(GuideId::default());
+            }
+            if sel_nodes.is_empty() && sel_guides.is_empty() && sel_notes.is_empty() {
+                return Ok(());
+            }
+            let before = (doc.state_hash(), doc.history_generation());
+            match doc.delete_selection(&sel_nodes, &sel_guides, &sel_notes) {
+                Ok(_) if stale => {
+                    return Err("a batch with a stale guide was not refused".to_string());
+                }
+                Ok(_) => {
+                    if doc.history_generation() == before.1 {
+                        return Err("a mixed delete recorded no undo step".to_string());
+                    }
+                    for &g in &sel_guides {
+                        if doc.guide(g).is_some() {
+                            return Err(format!("listed guide {g:?} survived the delete"));
+                        }
+                    }
+                    for &n in &sel_notes {
+                        if doc.annotation(n).is_some() {
+                            return Err(format!("listed annotation {n:?} survived the delete"));
+                        }
+                    }
+                    return undo_redo_exact(doc, before.0, "mixed delete");
+                }
+                Err(_) if (doc.state_hash(), doc.history_generation()) != before => {
+                    return Err("a refused mixed delete changed the document".to_string());
+                }
+                Err(kernel::DocumentError::LockedNode { .. }) => {
+                    // A lock on a listed node (or on what holds it) refuses
+                    // the whole batch, and it changed nothing (checked
+                    // above).
+                }
+                Err(e) => {
+                    // Every handle here is live (a stale guide is the only
+                    // deliberate bad one), so any other refusal is a defect.
+                    if !stale {
+                        return Err(format!("a batch of live items was refused: {e:?}"));
+                    }
+                }
+            }
+        }
+        Op::FrozenFaceDraft { sel, face } => {
+            let frozen: Vec<ObjectId> = doc
+                .live_object_ids()
+                .into_iter()
+                .filter(|&o| doc.face_draw_detaches(o))
+                .collect();
+            let Some(o) = pick(&frozen, sel) else {
+                return Ok(());
+            };
+            if doc.node_frozen(NodeId::Object(o)).is_none() {
+                return Err("face_draw_detaches on an Object that is not frozen".to_string());
+            }
+            let obj = doc.object(o).expect("live");
+            let f = obj
+                .faces()
+                .keys()
+                .nth(face % obj.faces().len())
+                .expect("a solid has faces");
+            let plane = obj.faces()[f].plane;
+            let ring: Vec<Point3> = obj.loop_positions(obj.faces()[f].outer_loop).collect();
+            let Ok(u) = (ring[1] - ring[0]).normalized() else {
+                return Ok(());
+            };
+            let v = plane.normal().cross(u);
+            let at = |x: f64, y: f64| ring[0] + u * x + v * y;
+            let c = [at(0.1, 0.1), at(0.3, 0.1), at(0.3, 0.3), at(0.1, 0.3)];
+            let frame = doc.object_owner_component(o);
+            let before = (doc.state_hash(), doc.history_generation());
+            let drawn = doc.draft_detached_new(plane, frame, "Rectangle", |w| {
+                for i in 0..4 {
+                    w.add_segment(c[i], c[(i + 1) % 4])?;
+                }
+                Ok(())
+            });
+            match drawn {
+                Ok((report, _)) if !report.objects.is_empty() => {
+                    return Err(format!(
+                        "a face draft on a frozen Object changed an Object: {report:?}"
+                    ));
+                }
+                Ok((report, _)) if report.sketches.len() != 1 => {
+                    return Err(format!(
+                        "a face draft on a frozen Object made no one sketch: {report:?}"
+                    ));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    if (doc.state_hash(), doc.history_generation()) != before {
+                        return Err(format!("a refused face draft changed the document: {e:?}"));
+                    }
+                    let frame_frozen = frame.is_some_and(|d| doc.def_frozen(d).is_some());
+                    let expected = match e {
+                        kernel::DocumentError::LockedNode { .. } => frame_frozen,
+                        kernel::DocumentError::ExplodeSessionScope
+                        | kernel::DocumentError::UnknownComponent => true,
+                        _ => false,
+                    };
+                    if !expected {
+                        return Err(format!("a face draft on a frozen Object refused: {e:?}"));
+                    }
+                }
+            }
+        }
+        Op::Lock { sel, locked } => {
+            let all = lock_oracle::all_live_nodes(doc);
+            if let Some(n) = pick(&all, sel) {
+                let before = doc.state_hash();
+                if doc.set_nodes_locked(&[n], locked).is_err() && doc.state_hash() != before {
+                    return Err("a refused lock changed the document".to_string());
+                }
+            }
+        }
+        Op::UnlockAll => {
+            let _ = doc.unlock_all();
+        }
+        Op::JoinLinked { set, sel } => {
+            let linked: Vec<InstanceId> = instances
+                .iter()
+                .copied()
+                .filter(|&i| doc.instance_def(i).is_some_and(|d| doc.is_linked_set(d)))
+                .collect();
+            let (Some(set), Some(NodeId::Object(joiner))) = (pick(&linked, set), pick(&nodes, sel))
+            else {
+                return Ok(());
+            };
+            // The pose that lands the set's solid on the joiner when both
+            // are the same unrotated box: the step between their corners.
+            let min = |o: ObjectId| {
+                doc.object(o).map(|obj| {
+                    obj.vertices().values().fold(
+                        Point3::new(f64::MAX, f64::MAX, f64::MAX),
+                        |m, v| {
+                            Point3::new(
+                                m.x.min(v.position.x),
+                                m.y.min(v.position.y),
+                                m.z.min(v.position.z),
+                            )
+                        },
+                    )
+                })
+            };
+            let def = doc.instance_def(set).expect("live");
+            let member = doc.def_members(def).unwrap_or_default().first().copied();
+            let (Some(m), Some(w)) = (member.and_then(min), min(joiner)) else {
+                return Ok(());
+            };
+            let pose = Transform::translation(w - m);
+            let before = doc.state_hash();
+            if doc.join_linked(set, joiner, pose).is_err() && doc.state_hash() != before {
+                return Err("a refused join changed the document".to_string());
+            }
+        }
+        Op::CopySketch { sel, step } => {
+            if let Some(s) = pick(&free_sketches(doc), sel) {
+                let islands: Vec<_> = doc
+                    .sketch(s)
+                    .map(|sk| sk.islands().keys().collect())
+                    .unwrap_or_default();
+                let _ =
+                    doc.copy_sketch_islands(s, &islands, &Transform::translation(step_of(step)));
+            }
+        }
     }
+    Ok(())
+}
+
+/// For a drawing op that recorded a step (lens 2 of the design's review):
+/// one undo restores the document exactly, one redo returns the edit's
+/// state.
+fn check_one_step(
+    doc: &mut Document,
+    before: (u64, u64),
+    step: usize,
+    op: &Op,
+) -> Result<(), TestCaseError> {
+    if !matches!(
+        op,
+        Op::Line3D { .. }
+            | Op::MoveSketch { .. }
+            | Op::CopySketch { .. }
+            | Op::Rect3D { .. }
+            | Op::CloseCells { .. }
+            | Op::FaceBox { .. }
+    ) || doc.history_generation() == before.1
+    {
+        return Ok(());
+    }
+    let after = doc.state_hash();
+    if let Err(e) = doc.undo() {
+        return Err(TestCaseError::fail(format!(
+            "step {step} ({op:?}): undo refused: {e}"
+        )));
+    }
+    if doc.state_hash() != before.0 {
+        return Err(TestCaseError::fail(format!(
+            "step {step} ({op:?}): one undo does not restore the document"
+        )));
+    }
+    if let Err(e) = doc.redo() {
+        return Err(TestCaseError::fail(format!(
+            "step {step} ({op:?}): redo refused: {e}"
+        )));
+    }
+    if doc.state_hash() != after {
+        return Err(TestCaseError::fail(format!(
+            "step {step} ({op:?}): redo does not return the edit's state"
+        )));
+    }
+    Ok(())
 }
 
 fn check_reopens(doc: &Document, step: usize, op: &Op) -> Result<(), TestCaseError> {
@@ -207,14 +1314,167 @@ fn check_reopens(doc: &Document, step: usize, op: &Op) -> Result<(), TestCaseErr
             "step {step} ({op:?}): the autosave bytes do not reopen: {e}"
         )));
     }
-    let closed = doc
-        .session_stack()
-        .is_empty()
-        .then(|| Document::load(&doc.save()));
-    if let Some(Err(e)) = closed {
-        return Err(TestCaseError::fail(format!(
+    if !doc.session_stack().is_empty() {
+        return Ok(());
+    }
+    let saved = doc.save();
+    match Document::load(&saved) {
+        Err(e) => Err(TestCaseError::fail(format!(
             "step {step} ({op:?}): the saved bytes do not reopen: {e}"
-        )));
+        ))),
+        // The file stores every plane the reader would not refit bit for
+        // bit, so the reopened document saves the same bytes: every face
+        // came back on the plane it was validated against.
+        Ok(back) if back.save() != saved => Err(TestCaseError::fail(format!(
+            "step {step} ({op:?}): the reopened document saves other bytes"
+        ))),
+        Ok(_) => Ok(()),
+    }
+}
+
+/// Live sibling placements (ARCHITECTURE.md 2.11): with a component frame
+/// open, every placement a renderer would draw — `expanded_placements` —
+/// is a LIVE, WORLD-owned object (a sibling renders the frame's world
+/// geometry, never a tombstoned or still-definition-owned record), its
+/// placing instance is live, and every `session_placements` entry is a
+/// live world instance. With nothing open, `session_placements` is empty.
+fn check_sibling_render(doc: &Document, step: usize, op: &Op) -> Result<(), TestCaseError> {
+    let fail = |what: String| TestCaseError::fail(format!("step {step} ({op:?}): {what}"));
+    let live_instances = doc.instance_ids();
+    let live_objects = doc.live_object_ids();
+    for (o, _, i) in doc.expanded_placements() {
+        if !live_instances.contains(&i) {
+            return Err(fail(format!("placement by a non-live instance {i:?}")));
+        }
+        if !live_objects.contains(&o) {
+            return Err(fail(format!(
+                "a placement renders a non-live object {o:?} through {i:?}"
+            )));
+        }
+    }
+    let placements = doc.session_placements();
+    if doc.session_stack().is_empty() && !placements.is_empty() {
+        return Err(fail("session placements with no session open".to_string()));
+    }
+    for &i in &placements {
+        if !live_instances.contains(&i) {
+            return Err(fail(format!(
+                "session placement {i:?} is not a live instance"
+            )));
+        }
+    }
+    // The innermost component frame's definition renders, on every live
+    // sibling, exactly the session's live world objects (not a stale
+    // def-local member, not a tombstone): the live-sibling contract itself.
+    if let Some(def) = doc.explode_session_component() {
+        // `explode_session_objects` lists what the frame's actions created,
+        // liveness-filtered only — a creation that a deeper frame has since
+        // folded into ITS definition is def-owned now and renders as a
+        // member of that nested placement, so compare world objects only.
+        let mut expected: Vec<ObjectId> = doc
+            .explode_session_objects()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|&o| doc.is_world_object(o))
+            .collect();
+        // A nested instance the frame surfaced or placed renders ITS
+        // definition; when that definition is on loan to an OUTER frame
+        // (a component holding a copy of the component being edited two
+        // frames up), it renders that frame's in-progress world geometry
+        // through its own pose: the on-loan rule one level down. Those
+        // world objects are expected too, reached the same way a renderer
+        // reaches them. The frame's direct members are its top-level
+        // nodes; a surfaced member group is descended, because the open
+        // surfaces the instances inside it as well.
+        let mut pending = doc.session_direct_members().unwrap_or_default();
+        while let Some(node) = pending.pop() {
+            match node {
+                NodeId::Group(g) => pending.extend(doc.group_members(g).unwrap_or_default()),
+                NodeId::Instance(i) => {
+                    let Some(nested) = doc.instance_def(i) else {
+                        continue;
+                    };
+                    expected.extend(
+                        doc.expanded_def_placements(nested)
+                            .iter()
+                            .map(|(o, _)| *o)
+                            .filter(|&o| doc.is_world_object(o)),
+                    );
+                }
+                NodeId::Object(_) => {}
+            }
+        }
+        expected.sort();
+        expected.dedup();
+        // A nested member instance surfaced by the frame expands to ITS
+        // definition's def-owned members through its pose, so the world
+        // objects among the rendered set are exactly the session's, and
+        // every other rendered object is a live definition member.
+        let rendered: Vec<ObjectId> = doc
+            .expanded_def_placements(def)
+            .iter()
+            .map(|(o, _)| *o)
+            .collect();
+        for &o in &rendered {
+            if !live_objects.contains(&o) {
+                return Err(fail(format!(
+                    "a sibling of the open definition renders non-live object {o:?}"
+                )));
+            }
+        }
+        let mut rendered_world: Vec<ObjectId> = rendered
+            .iter()
+            .copied()
+            .filter(|&o| doc.is_world_object(o))
+            .collect();
+        rendered_world.sort();
+        rendered_world.dedup();
+        if rendered_world != expected {
+            return Err(fail(format!(
+                "siblings render world objects {rendered_world:?} but the session holds {expected:?}"
+            )));
+        }
+        // World placements only: a def-owned placement of the open
+        // definition inside another definition renders through THAT
+        // definition's world instances, which `placing_instances` lists.
+        for i in doc.instances_of(def) {
+            if !doc.instance_is_world(i) {
+                continue;
+            }
+            if !placements.contains(&i) {
+                return Err(fail(format!(
+                    "live sibling {i:?} missing from session_placements"
+                )));
+            }
+        }
+    }
+    // A linked set goes with its last live placement, transitively: no
+    // live linked set is left placed by nothing. Checked with nothing
+    // open only, since a definition on loan has its entered instance
+    // hidden by the bake.
+    if doc.session_stack().is_empty() {
+        for c in doc.component_ids() {
+            if doc.is_linked_set(c) && doc.definition_usage(c) == 0 {
+                return Err(fail(format!(
+                    "linked set {c:?} is live with no live placement"
+                )));
+            }
+        }
+    }
+    // Every live group lists only live members (the invariant an emptied
+    // close with a grouped sibling once broke).
+    let groups = doc.group_ids();
+    for &g in &groups {
+        for m in doc.group_members(g).unwrap_or_default() {
+            let live = match m {
+                NodeId::Object(o) => live_objects.contains(&o),
+                NodeId::Group(gg) => groups.contains(&gg),
+                NodeId::Instance(i) => live_instances.contains(&i),
+            };
+            if !live {
+                return Err(fail(format!("group {g:?} lists non-live member {m:?}")));
+            }
+        }
     }
     Ok(())
 }
@@ -226,8 +1486,32 @@ fn run_case(boxes: usize, ops: Vec<Op>) -> Result<(), TestCaseError> {
         add_box(&mut doc, 3.0 * i as f64);
     }
     for (step, op) in ops.iter().enumerate() {
-        apply(&mut doc, op);
+        let mut before = (doc.state_hash(), doc.history_generation());
+        LAST_STEP_BEFORE.set(None);
+        let frozen = lock_oracle::frozen_snapshot(&doc);
+        apply(&mut doc, op)
+            .map_err(|e| TestCaseError::fail(format!("step {step} ({op:?}): {e}")))?;
+        // The lock oracle, for forward steps (see the module comment).
+        if !matches!(
+            op,
+            Op::Undo | Op::Redo | Op::OpenComponentSession { .. } | Op::CloseSession
+        ) {
+            let kind = match op {
+                Op::MakeUnique { .. }
+                | Op::MakeUniqueByPath { .. }
+                | Op::UnlinkPlacement { .. } => lock_oracle::StepKind::MakeUnique,
+                Op::Lock { locked: false, .. } | Op::UnlockAll => lock_oracle::StepKind::Unlock,
+                _ => lock_oracle::StepKind::Edit,
+            };
+            lock_oracle::check_frozen_kept(&doc, &frozen, kind)
+                .map_err(|e| TestCaseError::fail(format!("step {step} ({op:?}): {e}")))?;
+        }
+        if let Some(last) = LAST_STEP_BEFORE.take() {
+            before = last;
+        }
+        check_one_step(&mut doc, before, step, op)?;
         check_reopens(&doc, step, op)?;
+        check_sibling_render(&doc, step, op)?;
     }
     // Close whatever is still open: the close itself is an op that can
     // corrupt the tree, and the result must reopen too.
@@ -252,4 +1536,206 @@ proptest! {
     ) {
         run_case(boxes, ops)?;
     }
+}
+
+/// KB-41 (nightly fuzz): with a component, a group inside it, and a
+/// component inside that group all open, the
+/// innermost component's siblings render the OUTER frame's world objects through
+/// the nested copy it holds, which the check did not expect.
+#[test]
+fn nested_component_group_component_renders_the_outer_frame_through_the_nested_copy() {
+    let ops = vec![
+        Op::Duplicate { sel: 0 },
+        Op::Group {
+            a: 772239617138806239,
+            b: 9941832662847844180,
+        },
+        Op::MakeComponent {
+            sel: 15742533718512779,
+        },
+        Op::MakeComponent {
+            sel: 6736377549977266289,
+        },
+        Op::Explode { sel: 0 },
+        Op::Undo,
+        Op::Place {
+            comp: 6095189737473883388,
+        },
+        Op::OpenComponentSession {
+            sel: 2515554890444926613,
+        },
+        Op::OpenGroupSession { sel: 0 },
+        Op::OpenComponentSession { sel: 0 },
+    ];
+    run_case(4, ops).unwrap();
+}
+
+/// KB-41's first sighting (nightly fuzz): the same shape with a group
+/// session closed earlier in the sequence.
+#[test]
+fn nested_component_group_component_after_a_closed_group_session() {
+    let ops = vec![
+        Op::Group {
+            a: 26031354693265861,
+            b: 5039752818948471677,
+        },
+        Op::OpenGroupSession { sel: 0 },
+        Op::Delete { sel: 0 },
+        Op::CloseSession,
+        Op::MakeComponent {
+            sel: 3669795555711896687,
+        },
+        Op::Place { comp: 0 },
+        Op::MakeComponent {
+            sel: 5298141792758286970,
+        },
+        Op::OpenComponentSession {
+            sel: 589821356543176086,
+        },
+        Op::OpenGroupSession { sel: 0 },
+        Op::OpenComponentSession { sel: 0 },
+    ];
+    run_case(3, ops).unwrap();
+}
+
+/// The nested copy sits INSIDE a surfaced member group of the innermost
+/// component: the copy is not a top-level session node, but a sibling of
+/// the inner component still renders the outer frame through it.
+#[test]
+fn nested_copy_inside_a_surfaced_group_renders_the_outer_frame() {
+    let mut doc = Document::new();
+    doc.set_torture_mode(true);
+    let b1 = add_box(&mut doc, 0.0);
+    let b2 = add_box(&mut doc, 3.0);
+    let b3 = add_box(&mut doc, 6.0);
+    // A = { G1 { b1, b2 } }, placed as a1.
+    let (g1, _) = doc
+        .group_nodes(&[NodeId::Object(b1), NodeId::Object(b2)])
+        .expect("group");
+    let (comp_a, a1, _) = doc
+        .make_component(&[NodeId::Group(g1)])
+        .expect("component A");
+    // B = { G2 { a1, b3 } }, placed as b_inst.
+    let (g2, _) = doc
+        .group_nodes(&[NodeId::Instance(a1), NodeId::Object(b3)])
+        .expect("group 2");
+    let (_comp_b, b_inst, _) = doc
+        .make_component(&[NodeId::Group(g2)])
+        .expect("component B");
+    // A second copy of A to edit; the check compares B's definition
+    // rendering against the session, so B needs no sibling of its own.
+    let (a2, _) = doc
+        .place_instance(comp_a, Transform::translation(Vec3::new(0.0, 10.0, 0.0)))
+        .expect("place A");
+    doc.open_explode_session(a2).expect("open A");
+    doc.open_group_session(g1).expect("open G1");
+    doc.open_explode_session(b_inst).expect("open B");
+    check_reopens(&doc, 0, &Op::CloseSession).unwrap();
+    check_sibling_render(&doc, 0, &Op::CloseSession).unwrap();
+}
+
+/// A diagonal drawn across a box's side passes a corner of a face box
+/// drawn against that side, so it lands as two collinear edges meeting at
+/// that corner; a rectangle drawn later on the same side runs one edge from
+/// that joint up to the box's top. One undo of the rectangle gives the
+/// diagonal back as the two edges it was (the joint is not healed away),
+/// and one redo draws the rectangle again. (The group session opens on
+/// nothing, and the explode only adds an object; both are kept as found.)
+#[test]
+fn a_rectangle_from_the_joint_of_a_split_diagonal_undoes_exactly() {
+    let ops = vec![
+        Op::MakeComponent {
+            sel: 78530323837611835,
+        },
+        Op::OpenGroupSession { sel: 0 },
+        Op::FaceBox {
+            at: 180,
+            detached: true,
+        },
+        Op::Line3D {
+            a: 17466740122684460622,
+            b: 326555661605004685,
+            tilt: 2,
+            detached: false,
+        },
+        Op::Explode { sel: 195343 },
+        Op::FaceBox {
+            at: 108,
+            detached: true,
+        },
+        Op::Rect3D {
+            a: 7346897907336210354,
+            b: 16510158797029363534,
+            flip: true,
+        },
+    ];
+    run_case(3, ops).unwrap();
+}
+
+/// Fuzz find (OW-1): a plane draft rewrote the drawing a locked group holds
+/// (the group's own lines on the plane). A frozen sketch takes no part in a
+/// plane draft: the new drawing is separate from it, as from a frozen Object.
+#[test]
+fn a_plane_draft_leaves_a_locked_groups_drawing_alone() {
+    let ops = vec![
+        Op::Group {
+            a: 1908474449339777841,
+            b: 509374639357145375,
+        },
+        Op::Delete {
+            sel: 4918931407275104233,
+        },
+        Op::InsertAsDefinition { sel: 0, key: 0 },
+        Op::OpenGroupSession { sel: 0 },
+        Op::FaceBox {
+            at: 182,
+            detached: false,
+        },
+        Op::DuplicateLinked {
+            sel: 8090201386819040159,
+        },
+        Op::DeleteLinkedPlacement { sel: 0 },
+        Op::CloseSession,
+        Op::InsertAsDefinition {
+            sel: 245807946417544745,
+            key: 1,
+        },
+        Op::Lock {
+            sel: 13016010298318116339,
+            locked: true,
+        },
+        Op::Rect3D {
+            a: 1505235401332051149,
+            b: 6629831233827239613,
+            flip: false,
+        },
+    ];
+    run_case(3, ops).unwrap();
+}
+
+/// Fuzz find: a group holding a locked box is copied as a linked set, and
+/// one of the two copies is deleted. The copy left behind becomes a plain
+/// group again, so the locked box comes out of the shared shape as a new
+/// Object. It is still locked, with its name, tags and shape: the lock
+/// oracle reads that as the lock carried over, not as a frozen node deleted.
+#[test]
+fn a_locked_part_survives_its_set_turning_plain() {
+    let ops = vec![
+        Op::Duplicate { sel: 0 },
+        Op::Group {
+            a: 1092683716634947615,
+            b: 7404981378812678266,
+        },
+        Op::Lock {
+            sel: 4631545717330657277,
+            locked: true,
+        },
+        Op::DuplicateLinked {
+            sel: 5963565961606652284,
+        },
+        Op::Delete {
+            sel: 1439616416049823810,
+        },
+    ];
+    run_case(3, ops).unwrap();
 }

@@ -37,6 +37,11 @@ pub struct SkpSource {
     /// tag renames its layer in place, and a layer no tag stands for goes
     /// when nothing written uses it.
     pub layers: BTreeMap<u64, String>,
+    /// Scene stable id -> the index of the file scene it stands for: a
+    /// save back keeps that scene's page state for it, whatever either
+    /// is named now. A file scene some entry names is accounted for, and
+    /// no scene of another identity takes it by name.
+    pub scenes: BTreeMap<u64, usize>,
     /// Sketch stable id -> its drawing's hash, for the sketches read from
     /// the file's loose edges: kept as those edges while unchanged.
     pub loose_sketches: BTreeMap<u64, u64>,
@@ -172,6 +177,13 @@ impl SkpSource {
                 Some((doc.sid_of(&EntityRef::Tag(path.clone()))?, name.clone()))
             })
             .collect();
+        let scenes = provenance
+            .scenes
+            .iter()
+            .filter_map(|&(recipe, file)| {
+                Some((report.scenes.get(recipe).copied().flatten()?, file))
+            })
+            .collect();
         let loose_sketches = provenance
             .loose_sketches
             .iter()
@@ -189,6 +201,7 @@ impl SkpSource {
             annotations,
             unread: None,
             layers,
+            scenes,
             loose_sketches,
         }
     }
@@ -222,6 +235,11 @@ impl SkpSource {
             .iter()
             .map(|(sid, name)| serde_json::json!([sid, name]))
             .collect();
+        let scenes: Vec<serde_json::Value> = self
+            .scenes
+            .iter()
+            .map(|(sid, file)| serde_json::json!([sid, file]))
+            .collect();
         let loose_sketches: Vec<serde_json::Value> = self
             .loose_sketches
             .iter()
@@ -234,6 +252,7 @@ impl SkpSource {
             "annotations": annotations,
             "unread": self.unread,
             "layers": layers,
+            "scenes": scenes,
             "loose_sketches": loose_sketches,
         })
         .to_string();
@@ -315,6 +334,17 @@ impl SkpSource {
             let l = l.as_array()?;
             layers.insert(num(l.first()?)?, l.get(1)?.as_str()?.to_string());
         }
+        let mut scenes = BTreeMap::new();
+        // Absent from a blob written before scenes were tracked by identity.
+        for l in v
+            .get("scenes")
+            .and_then(|a| a.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let l = l.as_array()?;
+            scenes.insert(num(l.first()?)?, usize::try_from(num(l.get(1)?)?).ok()?);
+        }
         let mut loose_sketches = BTreeMap::new();
         for l in v
             .get("loose_sketches")
@@ -341,6 +371,7 @@ impl SkpSource {
                 _ => None,
             },
             layers,
+            scenes,
             loose_sketches,
         })
     }
@@ -431,8 +462,23 @@ impl Fnv {
 /// recolored material is not a change to the geometry painted with it.
 fn material_hash(doc: &Document, m: Option<kernel::MaterialId>) -> u64 {
     let mut h = Fnv::new();
-    match m.and_then(|id| doc.materials().get(id)) {
-        Some(mat) => h.str(&mat.name),
+    match m.and_then(|id| doc.materials().get(id).map(|mat| (id, mat))) {
+        Some((id, mat)) => {
+            h.str(&mat.name);
+            // Same-named materials are told apart by their order among
+            // those.
+            let ordinal = doc
+                .materials()
+                .iter()
+                .take_while(|(other, _)| *other != id)
+                .filter(|(_, o)| o.name == mat.name)
+                .count();
+            // The first of a name hashes as it always has, so hashes
+            // stored in existing files stay valid.
+            if ordinal > 0 {
+                h.u64(ordinal as u64);
+            }
+        }
         None => h.u64(0),
     }
     h.0
@@ -499,6 +545,45 @@ pub fn geometry_hash(doc: &Document, obj: &Object) -> u64 {
                     h.f(c);
                 }
             }
+            // The other classes (never in a source file, so never part of a
+            // pre-existing hash) still distinguish an edited face: a kind
+            // marker, then the payload in the geometry buffer's order.
+            let other: Option<(u64, Vec<f64>)> = match f.surface {
+                Some(kernel::SurfaceRef::Sphere { center, radius }) => {
+                    Some((2, vec![center.x, center.y, center.z, radius]))
+                }
+                Some(kernel::SurfaceRef::Torus {
+                    center,
+                    axis,
+                    major_radius,
+                    minor_radius,
+                }) => Some((
+                    3,
+                    vec![
+                        center.x,
+                        center.y,
+                        center.z,
+                        axis.x,
+                        axis.y,
+                        axis.z,
+                        major_radius,
+                        minor_radius,
+                    ],
+                )),
+                Some(kernel::SurfaceRef::Cone {
+                    apex,
+                    axis,
+                    half_angle,
+                }) => Some((
+                    4,
+                    vec![apex.x, apex.y, apex.z, axis.x, axis.y, axis.z, half_angle],
+                )),
+                Some(kernel::SurfaceRef::Cylinder { .. }) | None => None,
+            };
+            if let Some((kind, payload)) = other {
+                h.u64(u64::MAX - kind);
+                payload.into_iter().for_each(|c| h.f(c));
+            }
             h.0
         })
         .collect();
@@ -515,6 +600,9 @@ pub fn geometry_hash(doc: &Document, obj: &Object) -> u64 {
             ends.sort();
             ends.iter().flatten().for_each(|&c| h.u64(c));
             h.u64(u64::from(e.soft));
+            if e.crease {
+                h.u64(u64::MAX);
+            }
             if let Some(g) = e.curve {
                 for c in [g.center.x, g.center.y, g.center.z, g.radius] {
                     h.f(c);
@@ -560,7 +648,7 @@ pub fn node_hash(doc: &Document, node: NodeId) -> u64 {
                 .group_members(id)
                 .unwrap_or_default()
                 .into_iter()
-                .map(|m| node_hash(doc, m))
+                .map(|m| member_hash(doc, m))
                 .collect();
             members.sort_unstable();
             members.iter().for_each(|&m| h.u64(m));
@@ -582,13 +670,35 @@ pub fn node_hash(doc: &Document, node: NodeId) -> u64 {
             if let Some(p) = doc.instance_pose(id) {
                 p.to_affine().iter().for_each(|&c| h.f(c));
             }
+            // The placement's own paint: repainting a placement (its
+            // member faces take it where they have none of their own) is a
+            // change to the node.
+            h.u64(u64::MAX - 1);
+            h.u64(material_hash(doc, doc.instance_material(id).flatten()));
         }
     }
     h.0
 }
 
-/// A definition: its name, attributes, members (each a whole node) and
-/// drawn sketches.
+/// A member of a group or definition: the whole node, and its lock (its
+/// own, or its definition's for an instance). A member's placement is
+/// written by its container, so a group or definition whose member was
+/// locked or unlocked counts as changed, and a save back rewrites it with
+/// the document's locks instead of keeping the file's (OW-1). The lock is
+/// mixed in only when set, so the hash of anything unlocked is what it
+/// always was.
+fn member_hash(doc: &Document, node: NodeId) -> u64 {
+    let h = node_hash(doc, node);
+    if doc.node_locked(node) {
+        let mut l = Fnv::new();
+        l.u64(h);
+        l.str("locked");
+        l.0
+    } else {
+        h
+    }
+}
+
 /// An annotation's content and tags: any edit reads as a change. 0 for a
 /// stale handle.
 pub fn annotation_hash(doc: &Document, id: AnnotationId) -> u64 {
@@ -607,6 +717,8 @@ pub fn annotation_hash(doc: &Document, id: AnnotationId) -> u64 {
     h.0
 }
 
+/// A definition: its name, attributes, members (each a whole node, with
+/// its lock) and drawn sketches.
 pub fn def_hash(doc: &Document, def: ComponentId) -> u64 {
     let mut h = Fnv::new();
     h.str(doc.component_name(def).unwrap_or(""));
@@ -615,7 +727,7 @@ pub fn def_hash(doc: &Document, def: ComponentId) -> u64 {
         .def_member_nodes(def)
         .unwrap_or_default()
         .into_iter()
-        .map(|m| node_hash(doc, m))
+        .map(|m| member_hash(doc, m))
         .collect();
     members.sort_unstable();
     members.iter().for_each(|&m| h.u64(m));
@@ -683,6 +795,66 @@ pub fn sketch_hash(doc: &Document, id: SketchId) -> Option<u64> {
 mod tests {
     use super::*;
 
+    /// A repaint of a placement changes its hash (and so the hash of a
+    /// group holding it); a repaint of a definition changes the members'
+    /// objects, which were already hashed.
+    #[test]
+    fn repainting_a_placement_changes_its_hash() {
+        use kernel::{Material, Plane, Point3, Rgba8};
+        let mut doc = Document::new();
+        let ground = Plane::from_polygon(&[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ])
+        .unwrap();
+        let s = doc.add_sketch(ground);
+        let c = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+        for i in 0..4 {
+            doc.sketch_mut(s)
+                .unwrap()
+                .add_segment(c[i], c[(i + 1) % 4])
+                .unwrap();
+        }
+        let region = doc.extrudable_regions(s).unwrap()[0];
+        doc.extrude_region(s, region, 1.0).unwrap();
+        let object = *doc.live_object_ids().last().unwrap();
+        let (_, instance, _) = doc.make_component(&[NodeId::Object(object)]).unwrap();
+        let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 0, 0)));
+        let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(0, 0, 200)));
+        let node = NodeId::Instance(instance);
+
+        let plain = node_hash(&doc, node);
+        doc.set_instance_material(instance, Some(red)).unwrap();
+        let painted_red = node_hash(&doc, node);
+        assert_ne!(plain, painted_red, "painting a placement is a change");
+        doc.set_instance_material(instance, Some(blue)).unwrap();
+        assert_ne!(painted_red, node_hash(&doc, node), "so is repainting it");
+        doc.set_instance_material(instance, None).unwrap();
+        assert_eq!(
+            plain,
+            node_hash(&doc, node),
+            "clearing it restores the hash"
+        );
+    }
+
+    /// Two palette materials with one name are different materials: a
+    /// repaint from one to the other is a change.
+    #[test]
+    fn same_named_materials_hash_apart() {
+        use kernel::{Material, Rgba8};
+        let mut doc = Document::new();
+        let a = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 0, 0)));
+        let b = doc.add_material(Material::solid("Red", Rgba8::rgb(120, 0, 0)));
+        assert_ne!(material_hash(&doc, Some(a)), material_hash(&doc, Some(b)));
+        assert_ne!(material_hash(&doc, Some(a)), material_hash(&doc, None));
+    }
+
     #[test]
     fn a_blob_reads_back() {
         let mut nodes = BTreeMap::new();
@@ -730,6 +902,7 @@ mod tests {
             annotations,
             unread: Some([4807, 52_979].into()),
             layers: [(7u64, "Walls".to_string())].into(),
+            scenes: [(11u64, 2usize), (12, 0)].into(),
             loose_sketches: [(9u64, 77u64)].into(),
         };
         let back = SkpSource::from_blob(&s.to_blob()).expect("reads");
@@ -737,6 +910,7 @@ mod tests {
         assert_eq!(back.nodes, s.nodes);
         assert_eq!(back.defs, s.defs);
         assert_eq!(back.layers, s.layers);
+        assert_eq!(back.scenes, s.scenes);
         assert_eq!(back.loose_sketches, s.loose_sketches);
         assert_eq!(back.annotations, s.annotations);
         assert_eq!(back.unread, s.unread);

@@ -5,8 +5,10 @@
 //! `retrace_face(face, insert, remove)` inserts and/or removes several
 //! paths in one face at once and re-traces the face's loops by rotational
 //! order at every vertex — the half-edge form of the ground's region
-//! tracer. Its inverse is itself with the arguments swapped, recorded in
-//! the history as one [`KernelOp::RetraceFace`] with an exact undo. A path
+//! tracer. With the arguments swapped it is its own inverse (except that a
+//! plain swapped call heals away an inserted end that met the joint of a
+//! straight run already there), recorded in the history as one
+//! [`KernelOp::RetraceFace`] with an exact undo that keeps such joints. A path
 //! may join two different boundary loops of the face (a BRIDGE) as long as
 //! the paths inserted together leave no bridge behind: every committed loop
 //! stays simple, and loops of one face share at most isolated vertices,
@@ -44,7 +46,7 @@ use kernel::{
 };
 use proptest::prelude::*;
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::*;
 
 // --------------------------------------------------------------- helpers
@@ -67,11 +69,13 @@ fn strip_bridges(w: &Wall) -> Vec<RetracePath> {
             path: vec![mm(w, 7.0, 4.0), mm(w, 8.0, 4.5), mm(w, 9.0, 4.0)],
             curves: Vec::new(),
             polygons: Vec::new(),
+            soft: Vec::new(),
         },
         RetracePath {
             path: vec![mm(w, 9.0, 3.0), mm(w, 8.0, 2.5), mm(w, 7.0, 3.0)],
             curves: Vec::new(),
             polygons: Vec::new(),
+            soft: Vec::new(),
         },
     ]
 }
@@ -166,7 +170,13 @@ fn edge_between(obj: &Object, a: Point3, b: Point3) -> EdgeId {
 fn merge_runs_and_check(w: &mut Wall, edge: EdgeId) -> kernel::FaceMergeReport {
     let before = w.obj().clone();
     let runs = run_segments(&before, edge);
-    let report = apply_and_check(w, KernelOp::MergeFaces { edge });
+    let report = apply_and_check(
+        w,
+        KernelOp::MergeFaces {
+            edge,
+            keep_vertices: Vec::new(),
+        },
+    );
     let n = w.plane.normal();
     let ground = straightened(
         &ground_regions(&ground_edit(w.plane, &before, &[], &runs)),
@@ -215,7 +225,8 @@ fn retracing_two_bridges_cuts_the_strip_between_two_imprints() {
         .expect("the face with the hole");
     assert_eq!(o.faces()[wall_now].inner_loops.len(), 1, "two holes merged");
     assert!(o.faces().contains_key(a) && o.faces().contains_key(b));
-    // The inverse is the same primitive with the arguments swapped.
+    // Here, with no inserted end on a straight joint, the same primitive
+    // with the arguments swapped is the inverse.
     let removed: Vec<Vec<Point3>> = r.inserted.iter().map(|p| p.path.clone()).collect();
     let back = o
         .retrace_face(r.faces[0], &[], &removed)
@@ -240,12 +251,43 @@ fn retracing_through_the_history_undoes_and_redoes_exactly() {
             insert,
             remove: Vec::new(),
             restore: Vec::new(),
+            keep_vertices: Vec::new(),
         },
     );
     assert!(matches!(report, KernelOpReport::FaceRetrace(_)));
     assert_eq!(group_faces(w.obj(), &w.plane).len(), 4);
     let before = Document::load(&w.doc.save()).expect("reopens");
     assert_eq!(before.save(), w.doc.save());
+}
+
+/// A removed soft edge is reported with its soft mark, and the swapped call
+/// (the undo) gives it back soft: drafting removes a soft seam left
+/// hanging, and its undo restores the smoothing exactly.
+#[test]
+fn a_removed_soft_edge_comes_back_soft() {
+    let mut w = front_wall();
+    let p = w.face;
+    let (a, b) = (mm(&w, 0.0, 0.0), mm(&w, 20.0, 10.0));
+    retrace_and_check(&mut w, p, vec![vec![a, b]], Vec::new());
+    let mut o = w.obj().clone();
+    let e = edge_between(&o, a, b);
+    o.set_edge_soft_for_test(e, true);
+    let face = group_faces(&o, &w.plane)[0];
+    let removal = o
+        .retrace_face(face, &[], &[vec![a, b]])
+        .expect("the soft edge removes");
+    assert_eq!(removal.removed.len(), 1);
+    assert_eq!(removal.removed[0].soft, vec![true]);
+    o.retrace_face(removal.faces[0], &removal.removed, &[])
+        .expect("the undo re-inserts it");
+    assert!(o.edges()[edge_between(&o, a, b)].soft, "back soft");
+    // A hard edge removed records no mark at all.
+    let mut hard = w.obj().clone();
+    let face = group_faces(&hard, &w.plane)[0];
+    let removal = hard
+        .retrace_face(face, &[], &[vec![a, b]])
+        .expect("the hard edge removes");
+    assert!(removal.removed[0].soft.is_empty());
 }
 
 #[test]
@@ -268,6 +310,7 @@ fn a_lone_bridge_refuses_untouched() {
             insert: one,
             remove: Vec::new(),
             restore: Vec::new(),
+            keep_vertices: Vec::new(),
         },
         StickyError::PathNotSimple,
     );
@@ -284,11 +327,13 @@ fn retrace_refuses_crossing_or_off_boundary_paths_untouched() {
             path: vec![mm(&w, 7.0, 4.0), mm(&w, 9.0, 3.0)],
             curves: Vec::new(),
             polygons: Vec::new(),
+            soft: Vec::new(),
         },
         RetracePath {
             path: vec![mm(&w, 9.0, 4.0), mm(&w, 7.0, 3.0)],
             curves: Vec::new(),
             polygons: Vec::new(),
+            soft: Vec::new(),
         },
     ];
     assert_eq!(
@@ -300,6 +345,7 @@ fn retrace_refuses_crossing_or_off_boundary_paths_untouched() {
         path: vec![mm(&w, 7.0, 4.0), mm(&w, 8.0, 4.5)],
         curves: Vec::new(),
         polygons: Vec::new(),
+        soft: Vec::new(),
     }];
     assert_eq!(
         o.retrace_face(p, &loose, &[]).map(|_| ()),
@@ -344,11 +390,13 @@ proptest! {
                 path: vec![mm(&w, 7.0, at), mm(&w, 8.0, mid_t), mm(&w, 9.0, bt)],
                 curves: Vec::new(),
                 polygons: Vec::new(),
+                soft: Vec::new(),
             },
             RetracePath {
                 path: vec![mm(&w, 9.0, bb), mm(&w, 8.0, mid_b), mm(&w, 7.0, ab)],
                 curves: Vec::new(),
                 polygons: Vec::new(),
+                soft: Vec::new(),
             },
         ];
         let original = w.obj().clone();
@@ -367,7 +415,7 @@ proptest! {
         w.doc
             .apply_object_op(
                 w.id,
-                KernelOp::RetraceFace { face: p, insert, remove: Vec::new(), restore: Vec::new() },
+                KernelOp::RetraceFace { face: p, insert, remove: Vec::new(), restore: Vec::new(), keep_vertices: Vec::new() },
             )
             .expect("through the history");
         let after = w.obj().clone();
@@ -772,11 +820,18 @@ fn circles_over_two_imprints_on_a_lattice_match_the_ground() {
 // ------------------------------------ transforms that cannot be reopened
 
 #[test]
-fn a_near_singular_scale_whose_plane_cannot_map_refuses_typed() {
-    // A 1 km cube squashed by (1e6, 1e-7, 1e-6): invertible (det 1e-7) and
-    // every face's ring keeps a reopenable area, but a unit triangle on an
-    // x-facing plane maps to twice-area 1e-13 — its plane has no direction.
-    // Refused before any vertex moves, never a panic.
+fn a_near_singular_squash_maps_the_solid_and_refuses_the_sketch_typed() {
+    // A 1 km cube squashed by (1e6, 1e-9, 1e-8): invertible (det 1e-11)
+    // and every face's ring keeps a reopenable area, but the inverse-
+    // transpose map of an x-facing normal comes out 1e-17 long — that
+    // plane has no direction. Each face takes the refit of its mapped ring
+    // instead, which exists and holds its points: the squash is accepted
+    // and valid. Only a face that neither plane fits is refused typed,
+    // before any vertex moves, never a panic (`face_plane_specs::
+    // a_plane_the_map_squashes_to_no_direction_falls_back_to_the_refit`).
+    // (The squash (1e6, 1e-7, 1e-6) is kept either way.) A sketch on an
+    // x-facing plane has no ring to fall back to, and the same squash
+    // refuses it `Singular`, leaving it untouched.
     let mut doc = Document::new();
     let s = doc.add_sketch(ground());
     {
@@ -793,10 +848,20 @@ fn a_near_singular_scale_whose_plane_cannot_map_refuses_typed() {
     }
     let region = doc.extrudable_regions(s).expect("regions")[0];
     let (id, _) = doc.extrude_region(s, region, 1000.0).expect("extrude");
-    let xf = Transform::scale(Vec3::new(1e6, 1e-7, 1e-6));
-    let mut obj = doc.object(id).expect("object").clone();
-    assert_eq!(obj.apply_transform(&xf), Err(TransformError::Singular));
-    assert!(objects_equivalent(&obj, doc.object(id).expect("object")));
+    let xf = Transform::scale(Vec3::new(1e6, 1e-9, 1e-8));
+    let obj = doc.object(id).expect("object").clone();
+    let mut mapped = obj.clone();
+    mapped
+        .apply_transform(&xf)
+        .expect("derived planes map through their rings");
+    mapped.validate().expect("valid");
+    let kept = Transform::scale(Vec3::new(1e6, 1e-7, 1e-6));
+    let mut squashed = obj.clone();
+    squashed.apply_transform(&kept).expect("kept now");
+    squashed.validate().expect("valid");
+    let bytes = squashed.encode(&|_| 0);
+    let back = Object::decode(&bytes, &|_| None).expect("reopens");
+    assert_eq!(back.encode(&|_| 0), bytes, "reopens identically");
     let mut sk = Sketch::on_plane(
         Plane::from_polygon(&[
             Point3::new(0.0, 0.0, 0.0),
@@ -808,8 +873,10 @@ fn a_near_singular_scale_whose_plane_cannot_map_refuses_typed() {
     sk.add_segment(Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 1000.0, 0.0))
         .expect("segment");
     let plane = sk.plane();
+    let mut sk_kept = sk.clone();
     assert_eq!(sk.apply_transform(&xf), Err(TransformError::Singular));
     assert_eq!(sk.plane(), plane, "the sketch is untouched");
+    sk_kept.apply_transform(&kept).expect("kept now");
 }
 
 /// A document with one 10 mm cube.
@@ -941,4 +1008,245 @@ fn closing_a_session_whose_unbake_would_vanish_a_face_refuses_typed() {
     // A save mid-session serializes the "as if closed" view without
     // panicking.
     assert!(!doc.save_for_persistence().is_empty());
+}
+
+/// A plain path for a re-trace.
+fn plain(path: Vec<Point3>) -> RetracePath {
+    RetracePath {
+        path,
+        curves: Vec::new(),
+        polygons: Vec::new(),
+        soft: Vec::new(),
+    }
+}
+
+/// One re-trace through the history, checked as [`apply_and_check`] does
+/// (undo and redo exact, three rounds).
+fn retrace_and_check(
+    w: &mut Wall,
+    face: FaceId,
+    insert: Vec<Vec<Point3>>,
+    remove: Vec<Vec<Point3>>,
+) {
+    apply_and_check(
+        w,
+        KernelOp::RetraceFace {
+            face,
+            insert: insert.into_iter().map(plain).collect(),
+            remove,
+            restore: Vec::new(),
+            keep_vertices: Vec::new(),
+        },
+    );
+}
+
+/// The wall's diagonal from `(0, 0)` to `(20, 10)` mm drawn as two
+/// collinear edges meeting at the point `t` of the way along it; the
+/// joint.
+fn diagonal_with_joint(w: &mut Wall, t: f64) -> Point3 {
+    let p = w.face;
+    let (a, b) = (mm(w, 0.0, 0.0), mm(w, 20.0, 10.0));
+    let joint = mm(w, 20.0 * t, 10.0 * t);
+    retrace_and_check(w, p, vec![vec![a, joint, b]], Vec::new());
+    joint
+}
+
+/// `path` drawn on `face`: a re-trace, or with `split` a face split.
+fn draw_line(w: &mut Wall, face: FaceId, path: Vec<Point3>, split: bool) {
+    if split {
+        apply_and_check(w, split_op(face, path));
+    } else {
+        retrace_and_check(w, face, vec![path], Vec::new());
+    }
+}
+
+/// The front wall's diagonal with a joint `t` of the way along it, then a
+/// line from that joint to the top edge at `x` mm, splitting it: a
+/// re-trace, or with `split` a face split. Each through the history, undo
+/// and redo exact (I5).
+fn line_from_a_collinear_joint(t: f64, x: f64, split: bool) {
+    line_from_a_collinear_joint_on(front_wall(), t, x, split);
+}
+
+fn line_from_a_collinear_joint_on(mut w: Wall, t: f64, x: f64, split: bool) {
+    let joint = diagonal_with_joint(&mut w, t);
+    assert_eq!(group_faces(w.obj(), &w.plane).len(), 2);
+    let upper = face_at(&w, 1.0 * MM, 9.0 * MM);
+    let top = mm(&w, x, 10.0);
+    draw_line(&mut w, upper, vec![joint, top], split);
+    assert_eq!(group_faces(w.obj(), &w.plane).len(), 3);
+}
+
+/// The wall carries an imprint (a hole with a face in it) below the
+/// diagonal; the line runs from the diagonal's joint down to the bottom
+/// edge, in the face holding the hole.
+fn joint_on_a_holed_face(split: bool) {
+    let mut w = front_wall();
+    let wall = w.face;
+    imprint_mm(&mut w, wall, 14.0, 1.0, 4.0, 2.0);
+    let joint = diagonal_with_joint(&mut w, 0.5);
+    let lower = face_at(&w, 19.0 * MM, 1.0 * MM);
+    assert_eq!(
+        w.obj().faces()[lower].inner_loops.len(),
+        1,
+        "it holds the hole"
+    );
+    let bottom = mm(&w, 10.0, 0.0);
+    draw_line(&mut w, lower, vec![joint, bottom], split);
+}
+
+#[test]
+fn undoing_a_line_from_a_joint_on_a_holed_face_keeps_the_joint() {
+    joint_on_a_holed_face(false);
+}
+
+#[test]
+fn undoing_a_split_from_a_joint_on_a_holed_face_keeps_the_joint() {
+    joint_on_a_holed_face(true);
+}
+
+/// An imprint whose bottom edge runs as two collinear edges meeting at
+/// `(6, 2)` mm: the joint lies on the hole's own boundary.
+fn wall_with_a_jointed_hole() -> (Wall, Point3) {
+    let mut w = front_wall();
+    let wall = w.face;
+    let ring = vec![
+        mm(&w, 4.0, 2.0),
+        mm(&w, 6.0, 2.0),
+        mm(&w, 8.0, 2.0),
+        mm(&w, 8.0, 5.0),
+        mm(&w, 4.0, 5.0),
+    ];
+    apply_and_check(
+        &mut w,
+        KernelOp::SplitFaceInner {
+            face: wall,
+            loop_path: ring,
+            restore: None,
+            curves: Vec::new(),
+            edge_attrs: Vec::new(),
+        },
+    );
+    let joint = mm(&w, 6.0, 2.0);
+    (w, joint)
+}
+
+/// Two lines from the hole's boundary down to the outer edge, one from the
+/// joint, cutting off the strip between them in one re-trace: undo keeps
+/// the joint on the hole.
+#[test]
+fn undoing_lines_from_a_joint_on_a_hole_keeps_the_joint() {
+    let (mut w, joint) = wall_with_a_jointed_hole();
+    let wall = w.face;
+    let paths = vec![
+        vec![joint, mm(&w, 6.0, 0.0)],
+        vec![mm(&w, 8.0, 3.0), mm(&w, 10.0, 0.0)],
+    ];
+    retrace_and_check(&mut w, wall, paths, Vec::new());
+}
+
+/// A cut from the joint on the hole back to the same hole, around the
+/// outside of it (a hole-anchored split): its undo merge keeps the joint.
+#[test]
+fn undoing_a_split_from_a_joint_on_a_hole_keeps_the_joint() {
+    let (mut w, joint) = wall_with_a_jointed_hole();
+    let wall = w.face;
+    let path = vec![
+        joint,
+        mm(&w, 6.0, 1.0),
+        mm(&w, 9.0, 1.0),
+        mm(&w, 9.0, 3.0),
+        mm(&w, 8.0, 3.0),
+    ];
+    draw_line(&mut w, wall, path, true);
+}
+
+/// The same line on a wall tilted about two axes, where no coordinate is
+/// exact.
+#[test]
+fn undoing_a_line_from_a_joint_on_a_tilted_wall_keeps_the_joint() {
+    line_from_a_collinear_joint_on(tilted_wall(), 0.5, 10.0, false);
+    line_from_a_collinear_joint_on(tilted_wall(), 0.3, 7.0, true);
+}
+
+/// Both ends on vertices already there: the joint, and the wall's top-left
+/// corner. Undo keeps both.
+fn joint_to_a_corner(split: bool) {
+    let mut w = front_wall();
+    let joint = diagonal_with_joint(&mut w, 0.5);
+    let upper = face_at(&w, 1.0 * MM, 9.0 * MM);
+    let corner = mm(&w, 0.0, 10.0);
+    draw_line(&mut w, upper, vec![joint, corner], split);
+}
+
+#[test]
+fn undoing_a_line_from_a_joint_to_a_corner_keeps_both() {
+    joint_to_a_corner(false);
+}
+
+#[test]
+fn undoing_a_split_from_a_joint_to_a_corner_keeps_both() {
+    joint_to_a_corner(true);
+}
+
+/// One re-trace that removes a line ending at the joint and inserts
+/// another from the same joint: undo puts the first line back and keeps
+/// the joint.
+#[test]
+fn undoing_a_retrace_that_swaps_lines_at_a_joint_keeps_it() {
+    let mut w = front_wall();
+    let joint = diagonal_with_joint(&mut w, 0.5);
+    let upper = face_at(&w, 1.0 * MM, 9.0 * MM);
+    let top = mm(&w, 10.0, 10.0);
+    draw_line(&mut w, upper, vec![joint, top], false);
+    let left = face_at(&w, 1.0 * MM, 9.0 * MM);
+    let corner = mm(&w, 0.0, 10.0);
+    retrace_and_check(
+        &mut w,
+        left,
+        vec![vec![joint, corner]],
+        vec![vec![joint, top]],
+    );
+}
+
+/// A line drawn from a vertex that already sat mid-way along a straight
+/// run of two collinear edges (a diagonal split at a point other geometry
+/// met) undoes exactly: the removal heals away only the point the line's
+/// other end split into the boundary, never the vertex it started from,
+/// so the diagonal comes back as the two edges it was. Redo draws it again.
+#[test]
+fn undoing_a_line_from_a_collinear_vertex_keeps_that_vertex() {
+    line_from_a_collinear_joint(0.5, 10.0, false);
+}
+
+/// The same line drawn as a face split: its undo merge keeps the joint the
+/// cut started from, and only heals the point the cut split into the top
+/// edge.
+#[test]
+fn undoing_a_split_from_a_collinear_vertex_keeps_that_vertex() {
+    line_from_a_collinear_joint(0.5, 10.0, true);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(40))]
+
+    /// Rule 3 for the same: wherever the joint sits on the diagonal and
+    /// wherever the line meets the top edge, undo gives the joint back.
+    #[test]
+    fn undoing_a_line_from_any_collinear_joint_keeps_it(
+        t in 0.1f64..0.9,
+        x in 1.0f64..19.0,
+    ) {
+        line_from_a_collinear_joint(t, x, false);
+    }
+
+    /// Rule 3 for the face split: wherever the joint and the far end sit,
+    /// the undo merge gives the joint back.
+    #[test]
+    fn undoing_a_split_from_any_collinear_joint_keeps_it(
+        t in 0.1f64..0.9,
+        x in 1.0f64..19.0,
+    ) {
+        line_from_a_collinear_joint(t, x, true);
+    }
 }

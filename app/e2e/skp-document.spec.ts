@@ -17,6 +17,13 @@ import { resolve } from 'node:path'
  * Everything else — menus, dialogs, tools, keyboard shortcuts — is real UI.
  */
 
+// The stream releases, newest to oldest (src/io/docFormat.ts; not imported
+// here because that module needs the lingui macro transform).
+const SKP_STREAM_FORMATS = [
+  'skp2020', 'skp2019', 'skp2018', 'skp2017', 'skp2016', 'skp2015', 'skp2014',
+  'skp2013', 'skp8', 'skp7', 'skp6', 'skp5', 'skp4', 'skp3',
+] as const
+
 declare global {
   interface Window {
     __hew_test?: import('../src/test/harness').HewTestHarness
@@ -45,6 +52,7 @@ const fixture = (relPath: string): number[] =>
   Array.from(readFileSync(resolve(process.cwd(), relPath)))
 
 const BOX_2017 = 'e2e/fixtures/skp/box.skp'
+const BOX_2013 = 'e2e/fixtures/skp/box-v2013.skp'
 const BOX_2026 = 'e2e/fixtures/skp/2026/box.skp'
 
 /** UTF-16LE "SketchUp Model" header every `.skp` (both containers) begins with. */
@@ -192,6 +200,7 @@ async function drawAndPush(page: Page): Promise<void> {
 }
 
 for (const [label, path, expected] of [
+  ['2013 container', BOX_2013, 'skp2013'],
   ['2017 container', BOX_2017, 'skp2017'],
   ['2026 container', BOX_2026, 'skp2026'],
 ] as const) {
@@ -235,15 +244,18 @@ test('a .skp the reader refuses leaves the open document as it was', async ({ pa
   await boot(page)
   await openViaMenu(page, 'box.skp', fixture(BOX_2017))
   expect(await objectCount(page)).toBe(1)
-  // The same file, stamped as written by SketchUp 2015 ("{17." -> "{15."
-  // in the UTF-16 version record), which the reader refuses by version.
-  const old = fixture(BOX_2017)
+  // The same file cut short and stamped as written by a release Skpwright does
+  // not list ("{17." -> "{25." in the UTF-16 version record): the body is a
+  // stream container, so Skpwright is asked, and it refuses what it cannot
+  // read (a whole stamped file would open, with a warning).
+  const old = fixture(BOX_2017).slice(0, 80)
   expect(old.slice(36, 44)).toEqual([0x7b, 0, 0x31, 0, 0x37, 0, 0x2e, 0])
+  old[38] = 0x32
   old[40] = 0x35
   await serve(page, 'old.skp', old)
   await page.getByTestId('menu-bar').getByRole('button', { name: 'File' }).click()
   await page.getByText('Open…', { exact: true }).click()
-  await expect(page.getByText(/unsupported SketchUp version \{15\./)).toBeVisible({ timeout: 20_000 })
+  await expect(page.getByText(/unsupported SketchUp version \{25\./)).toBeVisible({ timeout: 20_000 })
   await expect(page.getByRole('dialog', { name: /open report/i })).toHaveCount(0)
   expect(await objectCount(page)).toBe(1)
   await expect(page).toHaveTitle(/^box\.skp/)
@@ -266,13 +278,14 @@ test('Save As: the format dialog defaults to the document format; each choice wr
   await boot(page)
   await openViaMenu(page, 'box.skp', fixture(BOX_2017))
 
-  const choose = async (optionName: RegExp, saveName: string) => {
+  const choose = async (optionName: RegExp, saveName: string, release?: string) => {
     await page.evaluate((n) => { window.__skp!.saveName = n }, saveName)
     await page.getByTestId('menu-bar').getByRole('button', { name: 'File' }).click()
     await page.getByText('Save As…', { exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Save As' })
     await expect(dialog).toBeVisible()
     await dialog.getByRole('radio', { name: optionName }).check()
+    if (release !== undefined) await dialog.getByTestId('save-older-release').selectOption(release)
     await dialog.getByRole('button', { name: 'Continue' }).click()
     await expect(dialog).toHaveCount(0)
   }
@@ -281,15 +294,17 @@ test('Save As: the format dialog defaults to the document format; each choice wr
   await page.getByTestId('menu-bar').getByRole('button', { name: 'File' }).click()
   await page.getByText('Save As…', { exact: true }).click()
   const dialog = page.getByRole('dialog', { name: 'Save As' })
-  await expect(dialog.getByRole('radio', { name: /SketchUp 2017/ })).toBeChecked()
-  await expect(dialog.getByText('Opens in SketchUp Make 2017 and later.')).toBeVisible()
+  // The older releases share one entry, its list on the file's own release.
+  await expect(dialog.getByRole('radio', { name: /Older SketchUp versions/ })).toBeChecked()
+  await expect(dialog.getByTestId('save-older-release')).toHaveValue('skp2017')
+  await expect(dialog.getByRole('radio', { name: /^SketchUp 2021 and later/ })).not.toBeChecked()
   // Escape cancels with no picker.
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
   expect(await page.evaluate(() => window.__skp!.saveCalls.length)).toBe(0)
 
   // SketchUp (2026 container)
-  await choose(/^SketchUp \(\.skp\)/, 'As2026.skp')
+  await choose(/^SketchUp 2021 and later/, 'As2026.skp')
   await expect(page).toHaveTitle(/^As2026\.skp — Hew$/)
   let files = await written(page)
   expect(files).toHaveLength(1)
@@ -299,7 +314,7 @@ test('Save As: the format dialog defaults to the document format; each choice wr
   expect(calls[0]!.extensions).toEqual(['.skp'])
 
   // SketchUp 2017
-  await choose(/SketchUp 2017/, 'As2017.skp')
+  await choose(/Older SketchUp versions/, 'As2017.skp', 'skp2017')
   await expect(page).toHaveTitle(/^As2017\.skp — Hew$/)
   files = await written(page)
   expect(files).toHaveLength(2)
@@ -340,13 +355,14 @@ test('Save As of a new document defaults to Hew and writes .hew', async ({ page 
   expect(isHew(files[0]!.bytes)).toBe(true)
 })
 
-test('Export writes both SketchUp flavors as copies and leaves the document bound to its file', async ({ page }) => {
+test('Export writes every SketchUp flavor as a copy and leaves the document bound to its file', async ({ page }) => {
   await boot(page)
   await openViaMenu(page, 'box.skp', fixture(BOX_2026))
 
   for (const [option, saveName, container] of [
     ['skp', 'Out2026.skp', 'skp2026'],
-    ['skp2017', 'Out2017.skp', 'skp2017'],
+    // Every stream release, newest to oldest: the picker's order.
+    ...SKP_STREAM_FORMATS.map((f) => [f, `Out-${f}.skp`, f] as const),
   ] as const) {
     await page.evaluate((n) => { window.__skp!.saveName = n }, saveName)
     await page.getByTestId('menu-bar').getByRole('button', { name: 'File' }).click()
@@ -362,7 +378,7 @@ test('Export writes both SketchUp flavors as copies and leaves the document boun
   }
 
   const calls = await page.evaluate(() => window.__skp!.saveCalls)
-  expect(calls.map((c) => c.suggestedName)).toEqual(['box.skp', 'box.skp'])
+  expect(calls.map((c) => c.suggestedName)).toEqual(Array(1 + SKP_STREAM_FORMATS.length).fill('box.skp'))
   // An export is a copy: still bound to box.skp, still clean.
   await expect(page).toHaveTitle(/^box\.skp — Hew$/)
 })

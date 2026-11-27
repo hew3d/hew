@@ -1,0 +1,56 @@
+{
+  "title": "A regular hexagon prism, 1 in circumradius, 1 in tall",
+  "from": "The hexagon prism dimensioned in inches, swept in fractions of an inch.",
+  "build": [
+    {
+      "method": "hew.sketch.draw_polygon",
+      "as": "base",
+      "params": {"plane": {"ground": true}, "center": [0, 0, 0], "radius": "1in", "sides": 6}
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "hex",
+      "params": {"region": {"$ref": "base#/region_id"}, "distance": "1in"}
+    }
+  ],
+  "cases": [
+    {
+      "id": "top-loop-round",
+      "note": "Hexagon, 1 in circumradius, 1 in tall. Cap inradius 0.866 in vanishes first (height 1 in is larger); corner setbacks 1.155 x size need 1 in edges, same 0.866 in. 7/8 in is past it.",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, "1in"]}}]},
+      "sizes": ["0.1mm", "1/16in", "1/8in", "1/4in", "3/8in", "1/2in", "3/4in", "7/8in", "1in"],
+      "fits_to": "3/4in",
+      "never_above": "0.87in",
+      "volume": "less"
+    },
+    {
+      "id": "top-loop-chamfer",
+      "note": "Hexagon, 1 in circumradius, 1 in tall. Cap inradius 0.866 in vanishes first (height 1 in is larger); corner setbacks 1.155 x size need 1 in edges, same 0.866 in. 7/8 in is past it.",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, "1in"]}}]},
+      "sizes": ["0.1mm", "1/16in", "1/8in", "1/4in", "3/8in", "1/2in", "3/4in", "7/8in", "1in"],
+      "fits_to": "3/4in",
+      "never_above": "0.87in",
+      "volume": "less"
+    },
+    {
+      "id": "bottom-loop-round",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, 0]}}]},
+      "sizes": ["0.1mm", "1/16in", "1/8in", "1/4in", "3/8in", "1/2in", "3/4in", "7/8in", "1in"],
+      "fits_to": "3/4in",
+      "never_above": "0.87in",
+      "volume": "less"
+    },
+    {
+      "id": "bottom-loop-chamfer",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, 0]}}]},
+      "sizes": ["0.1mm", "1/16in", "1/8in", "1/4in", "3/8in", "1/2in", "3/4in", "7/8in", "1in"],
+      "fits_to": "3/4in",
+      "never_above": "0.87in",
+      "volume": "less"
+    }
+  ]
+}

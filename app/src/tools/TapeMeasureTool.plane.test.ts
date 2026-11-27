@@ -11,6 +11,7 @@ import { TapeMeasureTool } from './TapeMeasureTool'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
+import { bumpPickScopeGeneration } from './pickPolicy'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
@@ -1571,5 +1572,21 @@ describe('TapeMeasureTool — locked-axis reading decoupled from the kernel snap
     const [ox, oy, oz, dx, dy, dz] = (scene.add_guide_line as unknown as { mock: { calls: number[][] } }).mock.calls[0]
     expect([ox, oy, oz]).toEqual([1, 1, 1])
     expect([dx, dy, dz]).toEqual([1, 0, 0])
+  })
+})
+
+describe('TapeMeasureTool — face-pick memo and the pick-scope generation', () => {
+  it('re-picks for the SAME Ray object after an editing-scope push', () => {
+    const { scene } = makeWasmScene({ facePick: makeFacePick(7n, 3n) })
+    const { tool } = makeTool(scene)
+    const pickFaceFor = (r: Ray) =>
+      (tool as unknown as { _pickFaceFor(r: Ray): unknown })._pickFaceFor(r)
+    const ray = freshRay()
+    pickFaceFor(ray)
+    pickFaceFor(ray)
+    expect(scene.pick_face).toHaveBeenCalledTimes(1)
+    bumpPickScopeGeneration()
+    pickFaceFor(ray)
+    expect(scene.pick_face).toHaveBeenCalledTimes(2)
   })
 })

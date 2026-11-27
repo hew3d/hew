@@ -624,9 +624,9 @@ fn straddling_shell_in_curved_container_is_not_merged() {
 fn near_degenerate_sliver_does_not_skip_the_whole_object() {
     let bytes = fixture("sliver_degenerate.stl");
 
-    // The sliver really IS kernel-degenerate at the mm import scale — proving
-    // the fixture exercises the exact gate (a `Plane::from_polygon` rejection),
-    // not some other filter.
+    // The sliver really IS under the import boundary's floor at the mm import
+    // scale — proving the fixture exercises the exact gate the healer drops
+    // with (a `Plane::from_polygon_import` rejection), not some other filter.
     let (raw, _w) = stl_import::parse::parse(&bytes).expect("parse");
     let kernel_degenerate = raw
         .faces
@@ -639,7 +639,7 @@ fn near_degenerate_sliver_does_not_skip_the_whole_object() {
                     Point3::new(p.x * 0.001, p.y * 0.001, p.z * 0.001)
                 })
                 .collect();
-            kernel::Plane::from_polygon(&pts).is_err()
+            kernel::Plane::from_polygon_import(&pts).is_err()
         })
         .count();
     assert_eq!(

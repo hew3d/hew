@@ -25,8 +25,9 @@ here.
   - No Hostname clause: this single rule now covers both
     `share.hew3d.com/drop*` (the legacy hostname) and
     `app.hew3d.com/relay/drop*` (the same-origin route added below) —
-    "contains", not "starts with", since the second form has `/relay`
-    ahead of `/drop`.
+    "contains", not "starts with", since the second form has `/relay` ahead of
+    `/drop`. Because the rule matches on URI path alone,
+    `beta.hew3d.com/relay/drop*` is covered by the same rule with no change.
 - [ ] **When rate exceeds**: pick a threshold above normal usage but well
       below anything that could stress the DO free tier from one IP — e.g.
       **> 15 requests per 10 seconds**.
@@ -138,6 +139,16 @@ interoperate without a migration step.
       against both live origins every 30 minutes (identity plus a real
       upload and one-shot download), so a missing route fails a run
       instead of waiting for a user report.
+- [ ] The two beta routes (`beta.hew3d.com/relay/*` and
+      `beta.hew3d.com/relay`) are declared in `wrangler.toml`, so `npx
+      wrangler deploy` from this directory registers them; confirm they appear
+      under **Settings** → **Domains & Routes** afterward.
+- [ ] Verify: `curl -s https://beta.hew3d.com/relay/` returns the
+      identity JSON, not the Pages app's HTML (same precedence check as the
+      app host).
+- [ ] Run the conformance suite against it: `cd workers/share-relay &&
+      HEW_RELAY_URL=https://beta.hew3d.com HEW_RELAY_PREFIX_ONLY=1
+      HEW_RELAY_BUFFERS_BODY=1 npm run test:contract`.
 
 ## Optional: allow a self-hosted HTTPS test origin
 

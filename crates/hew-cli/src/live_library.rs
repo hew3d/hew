@@ -10,9 +10,9 @@
 //!
 //! - `list`/`describe`/`remove`/`update_meta` never touch the live
 //!   document at all — [`dispatch_local`] answers them ENTIRELY on this
-//!   side, through the exact `api::commands::library` handlers headless
-//!   dispatch uses (same code, same [`CliHost`]), never touching the
-//!   socket.
+//!   side, through the exact handlers headless dispatch uses, resolved the
+//!   way it resolves them (`api::commands::resolve`; same code, same
+//!   [`CliHost`]), never touching the socket.
 //! - `insert {item}` DOES need the remote (only it can mutate the live
 //!   document) — [`resolve_insert_item`] rewrites `item` to
 //!   `bytes_base64`/`content_hash` first, so the remote's `insert` command
@@ -113,17 +113,32 @@ pub(crate) fn dispatch_local(method: &str, params: &Value) -> Response {
     } else {
         params.clone()
     };
-    let handler = commands::library::handler(&inner_method).expect("checked against LOCAL_ONLY");
+    let id = Some(RequestId::Text("live-library".to_string()));
+    // The dispatcher's own choke point (the Preview wall included), not a
+    // handler looked up around it.
+    let handler = match commands::resolve(&inner_method, &inner_params) {
+        Ok(handler) => handler,
+        Err(refusal) => {
+            return Response::err_with(
+                id,
+                codes::REFUSED,
+                "refused",
+                refusal.into_data(0, &inner_method),
+            );
+        }
+    };
     let mut doc = kernel::Document::new();
     let mut host = CliHost::new();
     let mut face_tokens = FaceTokens::new();
+    // hew-cli is a first-party client: the embedded dispatcher's grant.
+    let grant = api::Grant::core();
     let mut ctx = Ctx {
         doc: &mut doc,
         host: &mut host,
         face_tokens: &mut face_tokens,
         current_label: None,
+        grant: &grant,
     };
-    let id = Some(RequestId::Text("live-library".to_string()));
     match handler(&mut ctx, &inner_params) {
         Ok(result) => {
             let result = if method == "hew.doc.transact" {
@@ -138,7 +153,7 @@ pub(crate) fn dispatch_local(method: &str, params: &Value) -> Response {
             id,
             codes::REFUSED,
             "refused",
-            refusal.into_data(0, &inner_method),
+            refusal.with_document(ctx.doc).into_data(0, &inner_method),
         ),
         Err(CmdError::Internal(msg)) => Response::err(id, codes::INTERNAL_FAULT, &msg),
     }
@@ -399,6 +414,18 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// The commands this side answers without the app go through the
+    /// dispatcher's choke point, so a preview parameter or command among
+    /// them would refuse here as it does there; today none is one.
+    #[test]
+    fn local_only_commands_resolve_through_the_preview_wall() {
+        for m in LOCAL_ONLY {
+            assert!(api::preview::feature_of_command(m).is_none(), "{m}");
+            assert!(api::preview::gated_params(m).is_empty(), "{m}");
+            assert!(commands::resolve(m, &json!({})).is_ok(), "{m}");
+        }
     }
 
     #[test]

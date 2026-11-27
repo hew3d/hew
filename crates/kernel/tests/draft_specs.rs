@@ -20,6 +20,7 @@
 //! The scene specs follow `docs/design/unified-drafting/draft_scenes.py`
 //! (scene numbers in the doc comments), drawn on a 10 x 6 box top.
 
+use kernel::trig;
 use std::f64::consts::TAU;
 
 use kernel::{
@@ -28,7 +29,7 @@ use kernel::{
 };
 use proptest::prelude::*;
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::{
     MM, Rings, Wall, face_rings, ground_regions, ground_with, group_faces, imprint_mm,
     multiset_match, no_pinch, rings_match, signed_area, straightened, top_of_box,
@@ -121,7 +122,7 @@ fn circle_ring(cx: f64, cy: f64, r: f64, n: usize) -> Vec<Point3> {
     (0..n)
         .map(|i| {
             let a = TAU * i as f64 / n as f64;
-            z3(cx + r * a.cos(), cy + r * a.sin())
+            z3(cx + r * trig::cos(a), cy + r * trig::sin(a))
         })
         .collect()
 }
@@ -507,6 +508,464 @@ fn deleting_a_line_merges_faces() {
     .unwrap();
     assert_eq!(tops(&doc, o), 1);
     undo_redo_exact(&mut doc, &before);
+}
+
+/// A 4..6 x 2..4 rectangle on the box top and two lines tying it to the
+/// top's left and right sides at y = 3, made soft (a triangulated face's
+/// seams): the lines split the ring around the rectangle into two faces.
+fn rectangle_tied_by_soft_seams() -> (Document, ObjectId, Vec<kernel::EdgeId>) {
+    let (mut doc, o) = boxdoc();
+    doc.draft(top(), None, &[o], "Seams", |w| {
+        rect(w, 4., 2., 6., 4.)?;
+        w.add_segment(z3(0., 3.), z3(4., 3.))?;
+        w.add_segment(z3(6., 3.), z3(10., 3.))?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(tops(&doc, o), 3, "the rectangle, and the ring split in two");
+    let obj = doc.object(o).unwrap();
+    let seams: Vec<kernel::EdgeId> = obj
+        .edges()
+        .keys()
+        .filter(|&e| {
+            let (a, b) = obj.edge_endpoints(e).unwrap();
+            [(0., 4.), (6., 10.)].iter().any(|&(x0, x1)| {
+                on_segment(a, z3(x0, 3.), z3(x1, 3.)) && on_segment(b, z3(x0, 3.), z3(x1, 3.))
+            })
+        })
+        .collect();
+    assert_eq!(seams.len(), 2);
+    for &e in &seams {
+        doc.set_edge_soft_for_test(o, e, true);
+    }
+    doc.object(o).unwrap().validate().expect("valid");
+    (doc, o, seams)
+}
+
+/// Erasing the rectangle leaves the soft seams tied to it hanging inside
+/// the merged top: they carry no geometry (the top is planar), so they go
+/// with it, and the top is one face again. Undo gives them back, soft.
+#[test]
+fn erasing_a_shape_takes_the_soft_seams_left_hanging() {
+    let (mut doc, o, _) = rectangle_tied_by_soft_seams();
+    draft_top(&mut doc, o, "Erase", |w| {
+        for e in edges_along(w, &rect_sides(4., 2., 6., 4.)) {
+            w.remove_edge(e)?;
+        }
+        Ok(())
+    });
+    assert_sound(&doc, o);
+    assert_faces(&doc, o, &[rg(rect_ring(0., 0., 10., 6.), Vec::new())]);
+    assert!(doc.object(o).unwrap().edges().values().all(|e| !e.soft));
+    doc.undo().unwrap();
+    let soft = doc
+        .object(o)
+        .unwrap()
+        .edges()
+        .values()
+        .filter(|e| e.soft)
+        .count();
+    assert_eq!(soft, 2, "undo gives the seams back soft");
+}
+
+/// A hanging seam that carries an attribute dictionary is the user's
+/// content: the erase refuses typed and changes nothing.
+#[test]
+fn a_hanging_soft_seam_with_attributes_refuses_the_erase() {
+    let (mut doc, o, seams) = rectangle_tied_by_soft_seams();
+    doc.edge_attr_set(o, seams[0], "spec", "k", kernel::AttrValue::Int(1))
+        .unwrap();
+    let before = doc.save();
+    let depth = doc.undo_depth();
+    let r = doc.draft(top(), None, &[o], "Erase", |w| {
+        for e in edges_along(w, &rect_sides(4., 2., 6., 4.)) {
+            w.remove_edge(e)?;
+        }
+        Ok(())
+    });
+    assert_eq!(r.err(), Some(DocumentError::DraftBoundaryEdgeTouched));
+    assert_eq!(doc.save(), before, "untouched");
+    assert_eq!(doc.undo_depth(), depth);
+}
+
+/// The soft marks of `o`'s edges as sorted (endpoints, soft) rows.
+fn soft_marks(doc: &Document, o: ObjectId) -> Vec<String> {
+    let obj = doc.object(o).unwrap();
+    let mut rows: Vec<String> = obj
+        .edges()
+        .iter()
+        .map(|(e, edge)| {
+            let (a, b) = obj.edge_endpoints(e).unwrap();
+            let mut ends = [
+                format!("({:.3},{:.3},{:.3})", a.x, a.y, a.z),
+                format!("({:.3},{:.3},{:.3})", b.x, b.y, b.z),
+            ];
+            ends.sort();
+            format!("{}-{} soft={}", ends[0], ends[1], edge.soft)
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// A mark one half of a line can carry that the other half may lack.
+#[derive(Clone, Copy, Debug)]
+enum Mark {
+    Soft,
+    Crease,
+    Attrs,
+}
+
+fn put_mark(doc: &mut Document, o: ObjectId, e: kernel::EdgeId, mark: Mark) {
+    match mark {
+        Mark::Soft => doc.set_edge_soft_for_test(o, e, true),
+        Mark::Crease => doc.set_edge_crease_for_test(o, e, true),
+        Mark::Attrs => {
+            doc.edge_attr_set(o, e, "spec", "k", kernel::AttrValue::Int(1))
+                .unwrap();
+        }
+    }
+}
+
+/// The edges of `o` lying along `a`-`b`.
+fn object_edges_along(doc: &Document, o: ObjectId, a: Point3, b: Point3) -> Vec<kernel::EdgeId> {
+    let obj = doc.object(o).unwrap();
+    obj.edges()
+        .keys()
+        .filter(|&e| {
+            let (p, q) = obj.edge_endpoints(e).unwrap();
+            on_segment(p, a, b) && on_segment(q, a, b)
+        })
+        .collect()
+}
+
+/// Every mark of `o`'s edges along `a`-`b` (all edges when `None`) as
+/// sorted (endpoints, soft, crease, polygon, dictionary) rows.
+fn edge_marks(doc: &Document, o: ObjectId, along: Option<(Point3, Point3)>) -> Vec<String> {
+    let obj = doc.object(o).unwrap();
+    let mut rows: Vec<String> = obj
+        .edges()
+        .iter()
+        .filter_map(|(e, edge)| {
+            let (a, b) = obj.edge_endpoints(e).unwrap();
+            if let Some((s, t)) = along
+                && !(on_segment(a, s, t) && on_segment(b, s, t))
+            {
+                return None;
+            }
+            let mut ends = [
+                format!("({:.3},{:.3},{:.3})", a.x, a.y, a.z),
+                format!("({:.3},{:.3},{:.3})", b.x, b.y, b.z),
+            ];
+            ends.sort();
+            Some(format!(
+                "{}-{} soft={} crease={} polygon={:?} attrs={:?}",
+                ends[0],
+                ends[1],
+                edge.soft,
+                edge.crease,
+                edge.polygon,
+                obj.edge_attrs(e)
+            ))
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+const LINE: (Point3, Point3) = (
+    Point3 {
+        x: 0.,
+        y: 3.,
+        z: 3.,
+    },
+    Point3 {
+        x: 10.,
+        y: 3.,
+        z: 3.,
+    },
+);
+const STEM: (Point3, Point3) = (
+    Point3 {
+        x: 5.,
+        y: 3.,
+        z: 3.,
+    },
+    Point3 {
+        x: 5.,
+        y: 6.,
+        z: 3.,
+    },
+);
+
+fn erase_stem(doc: &mut Document, o: ObjectId) {
+    draft_top(doc, o, "Erase", |w| {
+        for e in edges_along(w, &[STEM]) {
+            w.remove_edge(e)?;
+        }
+        Ok(())
+    });
+    assert_sound(doc, o);
+}
+
+/// A line across the top at y = 3 with a stem from (5,3) up to (5,6), and
+/// `mark` on the half of the line left of x = 5 (`left`) or right of it.
+/// Erasing the stem leaves (5,3) a straight two-edge scar between a marked
+/// and an unmarked edge. Healing it would keep one half's mark for the
+/// whole line (a soft half could swallow a visible hard one, and which
+/// survives would depend on loop direction), so the scar stays: the line
+/// keeps both halves, each with its own mark. Undo puts the stem back
+/// byte for byte.
+fn erasing_a_stem_keeps_mixed_marks_apart(mark: Mark, left: bool) {
+    let (mut doc, o) = boxdoc();
+    doc.draft(top(), None, &[o], "Lines", |w| {
+        w.add_segment(LINE.0, LINE.1)?;
+        w.add_segment(STEM.0, STEM.1)?;
+        Ok(())
+    })
+    .unwrap();
+    let half = if left {
+        (LINE.0, STEM.0)
+    } else {
+        (STEM.0, LINE.1)
+    };
+    let marked = object_edges_along(&doc, o, half.0, half.1);
+    assert_eq!(marked.len(), 1);
+    put_mark(&mut doc, o, marked[0], mark);
+    doc.object(o).unwrap().validate().expect("valid");
+    let hash0 = doc.state_hash();
+    let marks0 = edge_marks(&doc, o, None);
+    let line0 = edge_marks(&doc, o, Some(LINE));
+    assert_eq!(
+        line0.len(),
+        2,
+        "{mark:?} left={left}: the stem splits the line"
+    );
+    erase_stem(&mut doc, o);
+    assert_eq!(
+        edge_marks(&doc, o, Some(LINE)),
+        line0,
+        "{mark:?} left={left}: both halves stay, each with its own mark"
+    );
+    doc.undo().unwrap();
+    assert_eq!(
+        edge_marks(&doc, o, None),
+        marks0,
+        "{mark:?} left={left}: undo restores every mark"
+    );
+    assert_eq!(
+        doc.state_hash(),
+        hash0,
+        "{mark:?} left={left}: undo restores the state hash"
+    );
+}
+
+/// A line across the top at y = 3 carrying `mark` along its whole length;
+/// a stem drawn from (5,3) up to (5,6) splits it into two halves that both
+/// keep the mark, and erasing the stem heals them back into the one marked
+/// line. Undo puts the stem back byte for byte.
+fn erasing_a_stem_heals_a_uniformly_marked_line(mark: Mark) {
+    let (mut doc, o) = boxdoc();
+    doc.draft(top(), None, &[o], "Line", |w| {
+        w.add_segment(LINE.0, LINE.1)?;
+        Ok(())
+    })
+    .unwrap();
+    let line = object_edges_along(&doc, o, LINE.0, LINE.1);
+    assert_eq!(line.len(), 1);
+    put_mark(&mut doc, o, line[0], mark);
+    let whole = edge_marks(&doc, o, Some(LINE));
+    draft_top(&mut doc, o, "Stem", |w| {
+        w.add_segment(STEM.0, STEM.1)?;
+        Ok(())
+    });
+    let halves = edge_marks(&doc, o, Some(LINE));
+    assert_eq!(halves.len(), 2, "{mark:?}: the stem splits the line");
+    let hash0 = doc.state_hash();
+    erase_stem(&mut doc, o);
+    assert_eq!(
+        edge_marks(&doc, o, Some(LINE)),
+        whole,
+        "{mark:?}: the halves heal into the one marked line"
+    );
+    doc.undo().unwrap();
+    assert_eq!(
+        edge_marks(&doc, o, Some(LINE)),
+        halves,
+        "{mark:?}: undo splits it again"
+    );
+    assert_eq!(
+        doc.state_hash(),
+        hash0,
+        "{mark:?}: undo restores the state hash"
+    );
+}
+
+#[test]
+fn erasing_a_stem_between_soft_and_hard_halves_keeps_both() {
+    erasing_a_stem_keeps_mixed_marks_apart(Mark::Soft, true);
+    erasing_a_stem_keeps_mixed_marks_apart(Mark::Soft, false);
+}
+
+#[test]
+fn erasing_a_stem_between_creased_and_plain_halves_keeps_both() {
+    erasing_a_stem_keeps_mixed_marks_apart(Mark::Crease, true);
+    erasing_a_stem_keeps_mixed_marks_apart(Mark::Crease, false);
+}
+
+#[test]
+fn erasing_a_stem_between_halves_with_different_dictionaries_keeps_both() {
+    erasing_a_stem_keeps_mixed_marks_apart(Mark::Attrs, true);
+    erasing_a_stem_keeps_mixed_marks_apart(Mark::Attrs, false);
+}
+
+/// A polygon side lying along y = 3 left of x = 5 meets a plain line
+/// running on to the right, with a stem from (5,3) up to (5,6), all drawn
+/// in one draft. Erasing the stem leaves (5,3) a straight scar between a
+/// polygon side and a plain edge; healing it would hand one side's polygon
+/// claim to the whole line or drop it, so both edges stay, each with its
+/// own claim, and undo restores them exactly.
+#[test]
+fn erasing_a_stem_between_a_polygon_side_and_a_plain_line_keeps_both() {
+    let (mut doc, o) = boxdoc();
+    doc.draft(top(), None, &[o], "Lines", |w| {
+        w.begin_curve_with_kind(
+            CurveGeom {
+                center: z3(2.5, 3. - 2.5),
+                radius: 2.5 * std::f64::consts::SQRT_2,
+            },
+            kernel::SketchCurveKind::Polygon,
+        )?;
+        let r = w.add_segment(LINE.0, STEM.0);
+        w.end_curve();
+        r?;
+        w.add_segment(STEM.0, LINE.1)?;
+        w.add_segment(STEM.0, STEM.1)?;
+        Ok(())
+    })
+    .unwrap();
+    doc.object(o).unwrap().validate().expect("valid");
+    let line0 = edge_marks(&doc, o, Some(LINE));
+    assert_eq!(line0.len(), 2, "the stem splits the line");
+    assert_eq!(
+        line0.iter().filter(|r| r.contains("polygon=Some")).count(),
+        1,
+        "only the left half is a polygon side: {line0:?}"
+    );
+    let hash0 = doc.state_hash();
+    let marks0 = edge_marks(&doc, o, None);
+    erase_stem(&mut doc, o);
+    assert_eq!(
+        edge_marks(&doc, o, Some(LINE)),
+        line0,
+        "both edges stay, each with its own claim"
+    );
+    doc.undo().unwrap();
+    assert_eq!(
+        edge_marks(&doc, o, None),
+        marks0,
+        "undo restores every mark"
+    );
+    assert_eq!(doc.state_hash(), hash0, "undo restores the state hash");
+}
+
+#[test]
+fn erasing_a_stem_heals_a_soft_line() {
+    erasing_a_stem_heals_a_uniformly_marked_line(Mark::Soft);
+}
+
+#[test]
+fn erasing_a_stem_heals_a_creased_line() {
+    erasing_a_stem_heals_a_uniformly_marked_line(Mark::Crease);
+}
+
+#[test]
+fn erasing_a_stem_heals_a_line_with_one_dictionary() {
+    erasing_a_stem_heals_a_uniformly_marked_line(Mark::Attrs);
+}
+
+/// A triangle drawn on the top beside a rectangle, its sides soft (a
+/// triangulated face's seams closing on themselves), and soft seams along
+/// y = 3 tying the top's left side to the triangle, the triangle to the
+/// rectangle, and the rectangle to the top's right side.
+/// Erasing the rectangle leaves the seams hanging, so they go with it; the
+/// triangle is a closed cycle with a face on each side of every edge, so
+/// it stays, soft, holding its own sub-face. Prune means bridges only;
+/// islands are valid topology and match the state before the shape was
+/// drawn. Undo gives everything back exactly.
+#[test]
+fn erasing_a_shape_keeps_a_closed_soft_island() {
+    let (mut doc, o) = boxdoc();
+    let tri = vec![z3(1., 3.), z3(2., 1.5), z3(3., 3.)];
+    doc.draft(top(), None, &[o], "Seams", |w| {
+        draw_ring(w, &tri)?;
+        rect(w, 4., 2., 6., 4.)?;
+        w.add_segment(z3(0., 3.), z3(1., 3.))?;
+        w.add_segment(z3(3., 3.), z3(4., 3.))?;
+        w.add_segment(z3(6., 3.), z3(10., 3.))?;
+        Ok(())
+    })
+    .unwrap();
+    let obj = doc.object(o).unwrap();
+    let soft_segs = [
+        (z3(1., 3.), z3(2., 1.5)),
+        (z3(2., 1.5), z3(3., 3.)),
+        (z3(3., 3.), z3(1., 3.)),
+        (z3(0., 3.), z3(1., 3.)),
+        (z3(3., 3.), z3(4., 3.)),
+        (z3(6., 3.), z3(10., 3.)),
+    ];
+    let softs: Vec<kernel::EdgeId> = obj
+        .edges()
+        .keys()
+        .filter(|&e| {
+            let (a, b) = obj.edge_endpoints(e).unwrap();
+            soft_segs
+                .iter()
+                .any(|&(s, t)| on_segment(a, s, t) && on_segment(b, s, t))
+        })
+        .collect();
+    assert_eq!(softs.len(), 6);
+    for &e in &softs {
+        doc.set_edge_soft_for_test(o, e, true);
+    }
+    doc.object(o).unwrap().validate().expect("valid");
+    let hash0 = doc.state_hash();
+    let marks0 = soft_marks(&doc, o);
+    draft_top(&mut doc, o, "Erase", |w| {
+        for e in edges_along(w, &rect_sides(4., 2., 6., 4.)) {
+            w.remove_edge(e)?;
+        }
+        Ok(())
+    });
+    assert_sound(&doc, o);
+    assert_faces(
+        &doc,
+        o,
+        &[
+            rg(tri.clone(), Vec::new()),
+            rg(rect_ring(0., 0., 10., 6.), vec![tri.clone()]),
+        ],
+    );
+    let obj = doc.object(o).unwrap();
+    let soft_left: Vec<(Point3, Point3)> = obj
+        .edges()
+        .iter()
+        .filter(|(_, e)| e.soft)
+        .map(|(e, _)| obj.edge_endpoints(e).unwrap())
+        .collect();
+    assert_eq!(soft_left.len(), 3, "the triangle's sides, still soft");
+    for (a, b) in soft_left {
+        assert!(
+            soft_segs[..3]
+                .iter()
+                .any(|&(s, t)| on_segment(a, s, t) && on_segment(b, s, t)),
+            "only the island stays soft"
+        );
+    }
+    doc.undo().unwrap();
+    assert_eq!(soft_marks(&doc, o), marks0, "undo restores every soft mark");
+    assert_eq!(doc.state_hash(), hash0, "undo restores the state hash");
 }
 
 #[test]
@@ -1503,6 +1962,64 @@ fn paint_survives_a_line_drawn_across_the_painted_imprint() {
     assert_eq!(painted, 2, "the faces outside the imprint stay unpainted");
 }
 
+/// A seam between two faces carrying different attribute dictionaries is
+/// the solid's content, like a paint boundary: the draft lifts it as the
+/// solid's own edge, so erasing it refuses rather than merging the faces
+/// and dropping one dictionary, and the face it lies on offers no drawing
+/// plane for it. With equal dictionaries the same seam is ordinary drawing
+/// again.
+#[test]
+fn a_seam_between_different_dictionaries_is_not_drawing() {
+    for (left_value, right_value, drawing) in [(1, 2, false), (1, 1, true)] {
+        let (mut doc, o) = boxdoc();
+        draft_top(&mut doc, o, "Line", |w| {
+            w.add_segment(z3(4., 0.), z3(4., 6.)).map(|_| ())
+        });
+        assert_eq!(tops(&doc, o), 2);
+        for f in top_face_ids(&doc, o) {
+            let left = doc
+                .object(o)
+                .unwrap()
+                .loop_positions(doc.object(o).unwrap().faces()[f].outer_loop)
+                .all(|q| q.x <= 4.0 + 1e-9);
+            let v = if left { left_value } else { right_value };
+            doc.face_attr_set(o, f, "com.example.t", "k", kernel::AttrValue::Int(v))
+                .unwrap();
+        }
+        let planes = doc.object_drawing_planes(o);
+        assert_eq!(
+            planes.iter().any(|q| (q.point().z - 3.0).abs() < 1e-9),
+            drawing,
+            "the top offers a drawing plane only for a drawn seam"
+        );
+        // Erasing the seam: drawing goes, and the faces merge; a
+        // dictionary boundary is the solid's own edge and refuses, the
+        // document untouched.
+        let before = doc.save();
+        doc.begin_draft(top(), None, &[o], "Erase").unwrap();
+        {
+            let w = doc.draft_sketch_mut().unwrap();
+            let e = w
+                .edge_at_positions(z3(4., 0.), z3(4., 6.))
+                .expect("the seam is in the working sketch");
+            w.remove_edge(e).unwrap();
+        }
+        let erased = doc.end_draft();
+        assert_eq!(
+            erased.is_ok(),
+            drawing,
+            "values {left_value} and {right_value}: {erased:?}"
+        );
+        if drawing {
+            assert_eq!(tops(&doc, o), 1, "the halves merged");
+        } else {
+            doc.cancel_draft();
+            assert_eq!(doc.save(), before, "a refused erase changes nothing");
+            assert_eq!(tops(&doc, o), 2);
+        }
+    }
+}
+
 // ============================================================= refusals
 
 /// A draft that removes a solid's own edge is refused with the document
@@ -1885,6 +2402,7 @@ fn coincident_objects_keep_their_own_imprints() {
             ],
             restore: None,
             curves: Vec::new(),
+            edge_attrs: Vec::new(),
         },
     )
     .unwrap();
@@ -2190,7 +2708,7 @@ fn units_list_curve_runs_a_click_selects() {
             let ring: Vec<Point3> = (0..6)
                 .map(|i| {
                     let a = TAU * i as f64 / 6.;
-                    p(a.cos(), a.sin(), 0.)
+                    p(trig::cos(a), trig::sin(a), 0.)
                 })
                 .collect();
             let r = draw_ring(w, &ring);
@@ -2276,7 +2794,7 @@ fn a_polygon_on_a_face_stays_a_polygon() {
     let ring: Vec<Point3> = (0..6)
         .map(|i| {
             let a = TAU * i as f64 / 6.;
-            z3(5. + a.cos(), 3. + a.sin())
+            z3(5. + trig::cos(a), 3. + trig::sin(a))
         })
         .collect();
     draft_top(&mut doc, o, "Polygon", |w| {
@@ -2349,7 +2867,7 @@ fn draw_polygon_on_top(doc: &mut Document, o: ObjectId, n: usize, phase: f64) {
     let ring: Vec<Point3> = (0..n)
         .map(|i| {
             let a = phase + TAU * i as f64 / n as f64;
-            z3(5. + a.cos(), 3. + a.sin())
+            z3(5. + trig::cos(a), 3. + trig::sin(a))
         })
         .collect();
     draft_top(doc, o, "Polygon", |w| {
@@ -2434,7 +2952,7 @@ fn a_star_drawn_off_grid_stays_two_polygons() {
         let ring: Vec<Point3> = (0..3)
             .map(|i| {
                 let a = phase + TAU * i as f64 / 3.0;
-                z3(cx + r * a.cos(), cy + r * a.sin())
+                z3(cx + r * trig::cos(a), cy + r * trig::sin(a))
             })
             .collect();
         draft_top(doc, o, "Polygon", |w| {
@@ -2523,7 +3041,7 @@ fn lines_to_a_circles_quadrants_close_regions() {
             (0..32)
                 .map(|i| {
                     let a = -0.0103 + TAU * i as f64 / 32.0;
-                    at(cx + 0.5 * a.cos(), cy + 0.5 * a.sin())
+                    at(cx + 0.5 * trig::cos(a), cy + 0.5 * trig::sin(a))
                 })
                 .collect()
         };
@@ -2804,9 +3322,10 @@ fn the_free_planes_listed_at_once_match_the_listing_plane_by_plane() {
 
     let all = doc.free_plane_units(None, &std::collections::BTreeSet::new());
     assert_eq!(all.len(), 3, "three planes carry free drawing");
-    for (plane, units) in &all {
-        let objects = doc.drawable_objects_on_plane(*plane, None);
-        let one = doc.plane_units(*plane, None, &objects).unwrap();
+    for (listing, units) in &all {
+        let plane = listing.plane();
+        let objects = doc.drawable_objects_on_plane(plane, None);
+        let one = doc.plane_units(plane, None, &objects).unwrap();
         assert_eq!(units.units.len(), one.units.len(), "units on {plane:?}");
         assert_eq!(
             units.units.iter().map(|u| u.key).collect::<Vec<_>>(),
@@ -2823,6 +3342,7 @@ fn the_free_planes_listed_at_once_match_the_listing_plane_by_plane() {
     let top_units = all
         .iter()
         .find(|(pl, _)| {
+            let pl = pl.plane();
             (pl.normal() - up()).length() < 1e-9
                 && pl.signed_distance(p(0.0, 0.0, 3.0)).abs() < 1e-9
         })
@@ -2839,6 +3359,7 @@ fn the_free_planes_listed_at_once_match_the_listing_plane_by_plane() {
     let top_without = without
         .iter()
         .find(|(pl, _)| {
+            let pl = pl.plane();
             (pl.normal() - up()).length() < 1e-9
                 && pl.signed_distance(p(0.0, 0.0, 3.0)).abs() < 1e-9
         })
@@ -2885,10 +3406,11 @@ fn the_one_pass_listing_finds_an_object_across_a_bucket_edge() {
         }
     }
     let all = doc.free_plane_units(None, &std::collections::BTreeSet::new());
-    let (listed_plane, units) = all
+    let (listed, units) = all
         .iter()
-        .find(|(pl, _)| pl.signed_distance(p(0.0, 0.0, height)).abs() < 1e-6)
+        .find(|(pl, _)| pl.plane().signed_distance(p(0.0, 0.0, height)).abs() < 1e-6)
         .expect("the top plane");
+    let listed_plane = &listed.plane();
     let objects = doc.drawable_objects_on_plane(*listed_plane, None);
     assert_eq!(objects, vec![b], "the box has a face on the plane");
     let one = doc.plane_units(*listed_plane, None, &objects).unwrap();
@@ -2903,4 +3425,206 @@ fn the_one_pass_listing_finds_an_object_across_a_bucket_edge() {
             .iter()
             .any(|r| r.over.is_some_and(|(o, _)| o == b))
     );
+}
+
+/// A plane rebuilt from its numbers rounded to 1e-12 — the closest point to
+/// the origin and the unit normal — as a caller that names planes by
+/// rounded numbers (the app's context string) rebuilds it: on an oblique
+/// plane it differs from the original in the last bits.
+fn rounded_rebuild(plane: Plane) -> Plane {
+    let r = |x: f64| (x * 1e12).round() / 1e12 + 0.0;
+    let n = plane.normal();
+    let (nx, ny, nz) = (r(n.x), r(n.y), r(n.z));
+    let o = Point3::ORIGIN + n * (-plane.signed_distance(Point3::ORIGIN));
+    let d = o.x * nx + o.y * ny + o.z * nz;
+    Plane::from_point_normal(p(r(nx * d), r(ny * d), r(nz * d)), Vec3::new(nx, ny, nz))
+        .expect("a rounded unit normal is not degenerate")
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// #103: `free_plane_units_on` lists each plane's drawing lifted on the
+    /// plane its caller will open the edit on, so every key it lists — edge,
+    /// unit, and region — is the key a draft on that plane holds, on oblique
+    /// planes too. (Listed on the sketch's own plane instead, the keys of an
+    /// oblique plane's drawing could miss a draft opened on the rounded
+    /// rebuild: the Outliner's "That edge is no longer there".)
+    #[test]
+    fn listing_keys_on_a_rebuilt_plane_name_the_edges_of_a_draft_on_it(
+        nx in -1.0f64..1.0, ny in -1.0f64..1.0, nz in -1.0f64..1.0,
+        ox in -5.0f64..5.0, oy in -5.0f64..5.0, oz in -5.0f64..5.0,
+    ) {
+        let n = Vec3::new(nx, ny, nz);
+        prop_assume!(n.length() > 0.2);
+        let n = n * (1.0 / n.length());
+        let o = p(ox, oy, oz);
+        let plane = Plane::from_point_normal(o, n).unwrap();
+        let helper = if n.x.abs() < 0.9 { Vec3::new(1.0, 0.0, 0.0) } else { Vec3::new(0.0, 1.0, 0.0) };
+        let u = n.cross(helper);
+        let u = u * (1.0 / u.length());
+        let v = n.cross(u);
+        let at = |a: f64, b: f64| o + u * a + v * b;
+
+        let mut doc = Document::new();
+        let s = doc.add_sketch(plane);
+        let sk = doc.sketch_mut(s).unwrap();
+        // A loose line, and a triangle (a region) crossing it.
+        sk.add_segment(at(-1.0, 0.3), at(1.7, 0.9)).unwrap();
+        for (a, b) in [((0.0, 0.0), (1.0, 0.0)), ((1.0, 0.0), (0.2, 1.3)), ((0.2, 1.3), (0.0, 0.0))] {
+            sk.add_segment(at(a.0, a.1), at(b.0, b.1)).unwrap();
+        }
+
+        let all = doc.free_plane_units_on(None, &std::collections::BTreeSet::new(), rounded_rebuild);
+        prop_assert_eq!(all.len(), 1);
+        let (listing, units) = &all[0];
+        prop_assert_eq!(listing.plane(), doc.sketch(s).unwrap().plane(), "the entry names the sketch's own plane");
+        let on = rounded_rebuild(listing.plane());
+
+        let one = doc.plane_units(on, None, &[]).unwrap();
+        prop_assert_eq!(
+            units.units.iter().map(|u| u.key).collect::<Vec<_>>(),
+            one.units.iter().map(|u| u.key).collect::<Vec<_>>()
+        );
+        prop_assert_eq!(
+            units.regions.iter().map(|r| r.key).collect::<Vec<_>>(),
+            one.regions.iter().map(|r| r.key).collect::<Vec<_>>()
+        );
+
+        let keys: Vec<u64> = units.units.iter().flat_map(|u| u.edges.iter().map(|e| e.key)).collect();
+        prop_assert!(!keys.is_empty());
+        doc.begin_draft(on, None, &[], "Erase").unwrap();
+        let (_, missing) = doc.draft_edges_for_keys(&keys);
+        prop_assert!(missing.is_empty(), "keys the draft does not hold: {:?}", missing);
+        doc.cancel_draft();
+    }
+}
+
+/// Every edge of `sketch` as an exact segment key (smaller end first) and
+/// its regions' face states — the whole content a lowering may change.
+fn sketch_content(doc: &Document, sketch: SketchId) -> (Vec<[u64; 6]>, Vec<bool>) {
+    let sk = doc.sketch(sketch).expect("live sketch");
+    let bits = |q: Point3| [q.x.to_bits(), q.y.to_bits(), q.z.to_bits()];
+    let mut edges: Vec<[u64; 6]> = sk
+        .edges()
+        .values()
+        .map(|e| {
+            let (a, b) = (
+                bits(sk.vertices()[e.from].position),
+                bits(sk.vertices()[e.to].position),
+            );
+            let (a, b) = if a <= b { (a, b) } else { (b, a) };
+            [a[0], a[1], a[2], b[0], b[1], b[2]]
+        })
+        .collect();
+    edges.sort_unstable();
+    let mut faces: Vec<bool> = sk.regions().values().map(|r| r.faceless).collect();
+    faces.sort_unstable();
+    (edges, faces)
+}
+
+/// KB-2 (an imported plane a hair below the ground): a `.skp` brings its
+/// ground drawing in as several free sketches on one plane that were
+/// never arranged together, so their lines cross without meeting, and
+/// its loops have no face (sketch rule 6). A shape drawn on the ground
+/// well away from them lowers into the plane's drawing without touching
+/// theirs: no line of theirs is split, moved to another sketch, or
+/// dropped, no sketch of theirs is emptied, and no loop the crossing
+/// lines would close gains a face. Only an edit that reaches their
+/// drawing re-arranges it.
+#[test]
+fn drawing_away_from_imported_drawing_leaves_it_as_it_was() {
+    // The plane the file holds, 1.848e-13 m below the ground.
+    let z = -1.848_093_234_002_59e-13;
+    let below = Plane::from_point_normal(p(0.0, 0.0, z), up()).unwrap();
+    let mut doc = Document::new();
+    // A faceless square, as an import brings a loop in.
+    let square = doc.add_sketch(below);
+    {
+        let sk = doc.sketch_mut(square).unwrap();
+        for (a, b) in [
+            (p(0.0, 0.0, z), p(4.0, 0.0, z)),
+            (p(4.0, 0.0, z), p(4.0, 4.0, z)),
+            (p(4.0, 4.0, z), p(0.0, 4.0, z)),
+            (p(0.0, 4.0, z), p(0.0, 0.0, z)),
+        ] {
+            sk.add_segment(a, b).unwrap();
+        }
+        sk.make_regions_faceless();
+    }
+    // A loose line of another sketch on the same plane, crossing the square
+    // without meeting it.
+    let cross = doc.add_sketch(below);
+    doc.sketch_mut(cross)
+        .unwrap()
+        .add_segment(p(2.0, -1.0, z), p(2.0, 5.0, z))
+        .unwrap();
+    let before = [
+        (square, sketch_content(&doc, square)),
+        (cross, sketch_content(&doc, cross)),
+    ];
+
+    // A circle drawn on the ground (z = 0) well away from both.
+    let report = doc
+        .draft(ground_plane(), None, &[], "Circle", |w| {
+            let c = p(20.0, 20.0, 0.0);
+            w.begin_curve_with(CurveGeom {
+                center: c,
+                radius: 1.0,
+            })?;
+            let n = 24;
+            for i in 0..n {
+                let (t0, t1) = (TAU * f64::from(i) / 24.0, TAU * f64::from(i + 1) / 24.0);
+                w.add_segment(
+                    p(c.x + trig::cos(t0), c.y + trig::sin(t0), 0.0),
+                    p(c.x + trig::cos(t1), c.y + trig::sin(t1), 0.0),
+                )?;
+            }
+            w.end_curve();
+            Ok(())
+        })
+        .unwrap()
+        .0;
+
+    // Exactly one filled region came of it: the circle's.
+    let filled: Vec<(SketchId, f64)> = doc
+        .sketch_ids()
+        .into_iter()
+        .flat_map(|s| {
+            let sk = doc.sketch(s).unwrap();
+            sk.regions()
+                .iter()
+                .filter(|(_, r)| !r.faceless)
+                .map(|(r, _)| (s, sk.region_area(r).unwrap()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(filled.len(), 1, "only the circle fills: {filled:?}");
+    assert!(
+        (filled[0].1 - std::f64::consts::PI).abs() < 0.1,
+        "the filled region is the circle: {filled:?}"
+    );
+    // The imported drawing is exactly as it was: its lines, unsplit, in
+    // the sketches that held them, its loop still without a face.
+    for (s, content) in &before {
+        let now = doc.sketch(*s).map(|_| sketch_content(&doc, *s));
+        let mut now = now.expect("an imported sketch is not emptied");
+        if *s == filled[0].0 {
+            // The circle lowered into this sketch: set its lines aside.
+            let circle: Vec<[u64; 6]> = now
+                .0
+                .iter()
+                .copied()
+                .filter(|k| f64::from_bits(k[0]) > 10.0)
+                .collect();
+            now.0.retain(|k| !circle.contains(k));
+            now.1.retain(|&faceless| faceless);
+        }
+        assert_eq!(&now, content, "sketch {s:?} changed (report {report:?})");
+    }
+    // One undo step restores the document.
+    assert!(doc.undo().is_ok());
+    for (s, content) in &before {
+        assert_eq!(&sketch_content(&doc, *s), content);
+    }
 }

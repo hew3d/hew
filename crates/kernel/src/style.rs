@@ -22,4 +22,36 @@ pub struct ViewStyle {
     pub ground: Option<[u8; 3]>,
     /// Whether the model axes are shown.
     pub axes: bool,
+    /// The section cut's look and the guides' (a `.skp` style's own).
+    /// Every one is `None` for a style Hew makes; a value is carried and
+    /// saved, and the viewport draws the cut's color and width.
+    pub section: SectionLook,
+    /// The guides' color, sRGB; `None` is Hew's own.
+    pub guides_color: Option<[u8; 3]>,
+    /// Whether the style hides guides (View > Guides off); `None` is not
+    /// said. The editor's own guides toggle is not driven by it.
+    pub guides_hidden: Option<bool>,
+}
+
+/// How a section cut is drawn, as a style states it. All optional: `None`
+/// leaves Hew's own look (a black cut outline, no fill).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SectionLook {
+    /// The outline where a plane cuts a solid, sRGB.
+    pub cut_color: Option<[u8; 3]>,
+    /// The cut outline's width in pixels.
+    pub cut_width: Option<u32>,
+    /// Whether a cut face is filled; carried, not drawn.
+    pub fill: Option<bool>,
+    /// The fill's color, sRGB; carried, not drawn.
+    pub fill_color: Option<[u8; 3]>,
+    /// The color of the plane that is cutting, sRGB; carried, not drawn.
+    pub active_color: Option<[u8; 3]>,
+}
+
+impl SectionLook {
+    /// Whether nothing is said (Hew's own look).
+    pub fn is_unset(&self) -> bool {
+        *self == SectionLook::default()
+    }
 }

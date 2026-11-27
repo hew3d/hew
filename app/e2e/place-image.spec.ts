@@ -142,9 +142,9 @@ test('Place Image: drop a picture, place it with two clicks, resize it with the 
   expect(hit?.instance).not.toBeNull()
   // One undo step takes the whole placement away (material, definition,
   // instance), and redo puts it back.
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await expect.poll(() => page.evaluate(pictures)).toEqual([])
-  await page.keyboard.press('Control+Shift+z')
+  await page.keyboard.press('ControlOrMeta+Shift+z')
   await expect.poll(() => page.evaluate(pictures)).toEqual(['Columns'])
   // Back to Select with the picture selected.
   await expect(page.locator('text=Click the first corner of "Columns"')).toHaveCount(0)

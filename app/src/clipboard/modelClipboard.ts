@@ -1,8 +1,10 @@
 /**
  * modelClipboard — in-memory clipboard for Copy/Cut/Paste/Paste In Place of
- * structural selections (docs/design/v1.1-cycle.md Lane D).
+ * structural selections (docs/design/v1.1-cycle.md Lane D) and drawing
+ * (v1.5 decisions D3: the copied drawing rides as the item's world
+ * sketches, and a paste draws it at the destination — drawingClipboard.ts).
  *
- * Content is `Scene::extract_item` bytes of the copied selection —
+ * Content is `Scene::extract_clipboard` bytes of the copied selection —
  * `wrap_as_component: false`, deliberately NOT Save to Library's wrap, so a
  * pasted plain box stays a plain box rather than becoming an instance of a
  * freshly-minted one-off component. `insert_item` (the paste side) is the
@@ -11,9 +13,19 @@
  * pastes of the SAME copy reuse whatever definitions the first paste
  * created rather than minting duplicates.
  *
+ * Component instances stay LINKED within a document: Copy passes the
+ * window's nonce as `extract_item`'s `origin`, which stamps each carried
+ * definition with the definition it was copied from; Paste passes the same
+ * nonce to `insert_item`, and the kernel places the ORIGINAL definition
+ * when the stamp matches (SketchUp's copy/paste — editing the paste edits
+ * the original, Make Unique breaks the link). The scene folds its document
+ * epoch into the origin, so bytes copied before File ▸ Open/New in this
+ * window, or in another window, paste as an ordinary copy: a new
+ * definition the first time, reused by provenance on repeat pastes.
+ *
  * Held at module scope (survives tool switches/re-renders within one tab).
  * Under Tauri, also mirrored into the Rust app-state clipboard
- * (`clipboard_set`/`clipboard_get`, shared across every open document
+ * (`clipboard_set`/`clipboard_get`, raw IPC bodies like the file saves, shared across every open document
  * window) so a copy in one window pastes in another — `refreshFromShell`
  * pulls the shared state in whenever this window regains focus, treating
  * the shell as the cross-window source of truth at that moment while
@@ -28,13 +40,18 @@ import { sha256Hex } from '../library/itemFiles'
 
 export interface ClipboardContent {
   bytes: Uint8Array
-  /** How many structural nodes were copied — informational (the "Copied N
-   *  objects" toast); `-1` when reconstructed from the shared shell state
-   *  with no local record of the original selection (cross-window paste). */
+  /** How many items were copied (structural nodes plus drawn shapes) —
+   *  informational (the "Copied N" toast); `-1` when reconstructed from the
+   *  shared shell state with no local record of the original selection
+   *  (cross-window paste). */
   count: number
-  /** Node kinds present in the copy (e.g. `['object']`, `['object','group']`) —
-   *  informational only, same caveat as `count`. */
+  /** Node kinds present in the copy (e.g. `['object']`, `['object','group']`,
+   *  with `'drawing'` when drawn shapes were copied) — informational only,
+   *  same caveat as `count`. */
   kinds: string[]
+  /** How many drawn shapes (and whole sketches) the copy holds; `-1` when
+   *  unknown (cross-window paste), same caveat as `count`. */
+  drawingCount: number
   /** Best-effort origin tag for the copy — informational; unused by
    *  `insert_item` itself, which works from `bytes` alone. */
   sourceDocId: string
@@ -65,6 +82,31 @@ export interface ClipboardContent {
    * reproduce the original position in NEITHER case.
    */
   placementAffine: number[] | null
+  /**
+   * Where the copy came from, so a paste back into the same document can
+   * make a linked copy: the document, the window nonce `extract_item` was
+   * given, and the copied nodes. `null` when unknown (a copy reconstructed
+   * from the shared shell state, or one with nothing linkable). A paste
+   * links only while the document, the nonce, and every node still match;
+   * otherwise it is an independent copy.
+   */
+  linkSource: LinkSource | null
+}
+
+export interface LinkSource {
+  /** `Scene.ensure_document_id()` at copy time. */
+  documentId: string
+  /** The window nonce already passed as `extract_item`'s origin. */
+  nonce: string
+  /** The app's document generation at copy time (bumped on every File ▸
+   *  New / Open / Revert), so a copy never links across a reload of the
+   *  same document. */
+  generation: number
+  nodes: { kind: 'object' | 'group' | 'instance'; id: bigint }[]
+  /** The placements that stand for `nodes` after a linked paste wrapped a
+   *  loose source. Kept beside `nodes`, not instead of them: undoing that
+   *  paste unwraps the source, and then `nodes` are the live ones again. */
+  repointed?: { kind: 'object' | 'group' | 'instance'; id: bigint }[]
 }
 
 let current: ClipboardContent | null = null
@@ -85,9 +127,21 @@ async function withProvenance(
   kinds: string[],
   sourceDocId: string,
   placementAffine: number[] | null,
+  linkSource: LinkSource | null,
+  drawingCount: number,
 ): Promise<ClipboardContent> {
   const contentHash = await sha256Hex(bytes)
-  return { bytes, count, kinds, sourceDocId, contentHash, sourceId: `clipboard:${contentHash}`, placementAffine }
+  return {
+    bytes,
+    count,
+    kinds,
+    sourceDocId,
+    contentHash,
+    sourceId: `clipboard:${contentHash}`,
+    placementAffine,
+    linkSource,
+    drawingCount,
+  }
 }
 
 /** Copy: build clipboard content from freshly-extracted bytes and a known
@@ -99,8 +153,10 @@ export async function setClipboardBytes(
   kinds: string[],
   sourceDocId: string,
   placementAffine: number[] | null,
+  linkSource: LinkSource | null = null,
+  drawingCount = 0,
 ): Promise<ClipboardContent> {
-  const content = await withProvenance(bytes, count, kinds, sourceDocId, placementAffine)
+  const content = await withProvenance(bytes, count, kinds, sourceDocId, placementAffine, linkSource, drawingCount)
   current = content
   await pushToShell(bytes)
   return content
@@ -111,6 +167,14 @@ export async function setClipboardBytes(
  *  `refreshFromShell` — see the module doc). */
 export function getClipboard(): ClipboardContent | null {
   return current
+}
+
+/** After a linked paste wrapped a loose source as a set, the copied node is
+ *  also reachable as that set's placement. Recorded on the clipboard the
+ *  paste was armed from (which may no longer be the current one). */
+export function repointLinkSource(content: ClipboardContent, nodes: LinkSource['nodes']): void {
+  if (content.linkSource === null) return
+  content.linkSource = { ...content.linkSource, repointed: nodes }
 }
 
 export function hasClipboardContent(): boolean {
@@ -127,7 +191,7 @@ async function pushToShell(bytes: Uint8Array): Promise<void> {
   if (!isTauri) return
   try {
     const { invoke } = await import('@tauri-apps/api/core')
-    await invoke('clipboard_set', { bytes: Array.from(bytes) })
+    await invoke('clipboard_set', bytes as never)
   } catch {
     /* shell without the command (older build) — the local copy still works */
   }
@@ -145,14 +209,15 @@ export async function refreshClipboardFromShell(): Promise<void> {
   if (!isTauri) return
   try {
     const { invoke } = await import('@tauri-apps/api/core')
-    const raw = await invoke<number[] | null>('clipboard_get')
-    if (raw === null || raw.length === 0) {
+    // A raw IPC response resolves to an ArrayBuffer; empty means nothing copied.
+    const raw = await invoke<ArrayBuffer | null>('clipboard_get')
+    if (raw === null || raw === undefined || raw.byteLength === 0) {
       current = null
       return
     }
     const bytes = new Uint8Array(raw)
     if (current !== null && bytesEqual(current.bytes, bytes)) return
-    current = await withProvenance(bytes, -1, [], '', null)
+    current = await withProvenance(bytes, -1, [], '', null, null, -1)
   } catch {
     /* shell without the command — leave whatever's local alone */
   }

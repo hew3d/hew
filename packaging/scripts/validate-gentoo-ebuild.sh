@@ -28,4 +28,9 @@ if command -v pkgcheck >/dev/null; then
 fi
 
 ebuild "$ebuild_file" clean unpack install
+
+# The app reads this marker to learn Portage owns it (install_channel.rs);
+# without it a Deb-marked binary would try to run dpkg.
+marker="$(ls /var/tmp/portage/media-gfx/hew-bin-*/image/usr/share/hew/install-channel 2>/dev/null | head -1 || true)"
+[ -n "$marker" ] && [ "$(head -n1 "$marker")" = "gentoo" ] || { echo "ebuild did not install the gentoo install-channel marker" >&2; exit 1; }
 echo "gentoo ebuild validated: $ebuild_file"

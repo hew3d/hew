@@ -12,19 +12,24 @@ import type { MessageDescriptor } from '@lingui/core'
 import { msg } from '@lingui/core/macro'
 import { useLingui } from '@lingui/react/macro'
 import { useEffect, useState } from 'react'
-import { inferenceAxisName, inferenceCssColor } from './inferenceColor'
+import lockSvg from '@material-symbols/svg-400/outlined/lock.svg?raw'
+import { inferenceAxisName, inferenceCssColor, planePipCssColor } from './inferenceColor'
 import type { InferenceInfo } from './Viewport'
+import { InlineIcon } from '../panels/InlineIcon'
 import { getShowToolHints, subscribeShowToolHints } from '../settings/view'
 import { useViewSetting } from '../settings/useViewSetting'
 
 const KIND_LABEL: Record<string, MessageDescriptor> = {
   endpoint: msg`Endpoint`,
-  center: msg`Center`,
+  center: msg({ context: 'snap point', comment: 'Snap tooltip: the center of a circle or arc', message: 'Center' }),
   quadrant: msg`Quadrant`,
   tangent: msg`Tangent`,
   midpoint: msg`Midpoint`,
   intersection: msg`Intersection`,
   'on-edge': msg`On Edge`,
+  /** The line where a face of one object meets a face of another — no
+   *  stored edge, since objects never merge, but a line a person sees. */
+  'on-intersection-line': msg`On Intersection Line`,
   'on-face': msg`On Face`,
   'on-guide': msg`On Guide`,
   'on-axis': msg`On Axis`,
@@ -51,6 +56,16 @@ export function inferenceKindLabel(kind: string): string {
   return label === undefined ? kind : i18n._(label)
 }
 
+/** The drawing plane's word on the chip (view-die design §4), appended
+ *  after the snap's own text: the plane's axis color, or "face plane" for a
+ *  custom plane. */
+const PLANE_WORD: Record<'red' | 'green' | 'blue' | 'custom', MessageDescriptor> = {
+  red: msg({ comment: 'Snap tooltip suffix naming the drawing plane by its axis color, as in "Endpoint · red"', message: '· red' }),
+  green: msg({ comment: 'Snap tooltip suffix naming the drawing plane by its axis color, as in "Endpoint · green"', message: '· green' }),
+  blue: msg({ comment: 'Snap tooltip suffix naming the drawing plane by its axis color, as in "Endpoint · blue"', message: '· blue' }),
+  custom: msg({ comment: 'Snap tooltip suffix for a drawing plane that lies along no axis (a tilted face\'s plane), as in "Endpoint · face plane"', message: '· face plane' }),
+}
+
 /** How long the same object must sit under the cursor before the tip's
  *  second line (what it is, and what it is in) appears. */
 export const HOVER_DETAIL_DWELL_MS = 400
@@ -63,7 +78,11 @@ export const HOVER_DETAIL_DWELL_MS = 400
  * restarts the dwell. The first line is never delayed.
  */
 export function InferenceTooltip({ info, detail = null }: { info: InferenceInfo | null; detail?: string | null }) {
-  const subject = info !== null && info.object !== undefined ? `${info.object}/${info.instance ?? ''}` : null
+  // The thing under the cursor: an object (and the instance carrying it), or
+  // an instance alone when a line drawn inside a component is under it.
+  const subject = info !== null && (info.object !== undefined || info.instance !== undefined)
+    ? `${info.object ?? ''}/${info.instance ?? ''}`
+    : null
   const { t } = useLingui()
   const [settled, setSettled] = useState<string | null>(null)
   const showHints = useViewSetting(getShowToolHints, subscribeShowToolHints)
@@ -117,10 +136,35 @@ export function InferenceTooltip({ info, detail = null }: { info: InferenceInfo 
         {axisName !== null && info.kind !== 'on-axis' && (
           <span style={{ color: `var(--axis-${axisName})` }}>{t({ comment: 'Snap tooltip; the placeholder is the axis letter x, y, or z', message: `on ${axisName} axis` })}</span>
         )}
+        {/* The drawing plane, tinted, with a padlock when a lock or a Shift
+            pin holds it (view-die design §4). */}
+        {info.plane !== undefined && (
+          <span
+            data-testid="inference-tip-plane"
+            style={{ color: planePipCssColor(info.plane.pip), display: 'inline-flex', alignItems: 'center', gap: '3px' }}
+          >
+            {i18n._(PLANE_WORD[info.plane.pip])}
+            {(info.plane.hold === 'locked' || info.plane.hold === 'pinned') && (
+              <span data-testid="inference-tip-padlock" style={{ display: 'inline-flex' }}>
+                <InlineIcon svg={lockSvg} size={12} />
+              </span>
+            )}
+          </span>
+        )}
       </div>
       {showDetail && (
         <div data-testid="inference-tip-detail" style={{ color: 'var(--text-secondary)' }}>
           {detail}
+        </div>
+      )}
+      {/* The tool's own guidance for a face it cannot act on
+          (`InferenceInfo.hint`): shown at once, never behind the dwell —
+          the whole point is to say "double-click it to edit the component"
+          BEFORE the click is refused. Accent-colored so it reads as
+          guidance, not as another snap label. */}
+      {info.hint !== undefined && (
+        <div data-testid="inference-tip-hint" style={{ color: 'var(--accent-text-on-tint)', fontWeight: 600 }}>
+          {info.hint}
         </div>
       )}
     </div>

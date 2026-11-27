@@ -287,7 +287,13 @@ test('component-edit parity: draw, idle-lock draw, and Follow Me inside a compon
   // expand to (drawing tools may bracket a multi-segment commit into more
   // than one undo step): undoing back to THIS hash is undoing back to
   // exactly this state, full stop, regardless of that internal granularity.
-  const hashBeforeContext = await page.evaluate(() => window.__hew_test!.getStateHash())
+  // The MODEL hash, with the saved view pinned: the autosave tick (armed by
+  // the setup's first edit, due a few seconds into this journey on a busy
+  // machine) writes the live camera into the document, which is session
+  // view state no Undo takes back — a raw `state_hash` read before that tick
+  // can never be matched after it, and the loop would undo straight past
+  // the starting state looking for it.
+  const hashBeforeContext = await page.evaluate(() => window.__hew_test!.getModelStateHash())
 
   // ---- 1. Double-click into instance A's own editing context ------------
   // A point on the box's top face at its Y CENTER (y=0.5) — the one point
@@ -394,7 +400,7 @@ test('component-edit parity: draw, idle-lock draw, and Follow Me inside a compon
   // only a solid-FACE profile on the SAME object auto-merges). Before this
   // phase Follow Me refused every face interaction inside a component's
   // definition wholesale.
-  const hashBeforeFollowMe = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashBeforeFollowMe = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   await page.getByRole('radio', { name: 'Follow Me' }).click()
   await expect(page.getByText('Click the path to follow')).toBeVisible()
   // Path: click the top face (z=1) — a face-loop path around its boundary.
@@ -409,7 +415,7 @@ test('component-edit parity: draw, idle-lock draw, and Follow Me inside a compon
       lastError: window.__hew_test!.getLastError(),
       members: window.__hew_test!.getComponentMemberObjects(c),
       instances: window.__hew_test!.getInstancesOf(c),
-      stateHash: window.__hew_test!.getStateHash(),
+      stateHash: window.__hew_test!.getModelStateHash(),
     }),
     component,
   )
@@ -432,12 +438,12 @@ test('component-edit parity: draw, idle-lock draw, and Follow Me inside a compon
   // — the least ambiguous ground truth for "is this really the same state" —
   // bounded so a genuine regression fails loudly instead of hanging.
   let undoIterations = 0
-  let currentHash = await page.evaluate(() => window.__hew_test!.getStateHash())
+  let currentHash = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   while (currentHash !== hashBeforeContext) {
     if (undoIterations >= 30 || !(await page.evaluate(() => window.__hew_test!.canUndo()))) break
     await page.evaluate(() => window.__hew_test!.undo())
     undoIterations++
-    currentHash = await page.evaluate(() => window.__hew_test!.getStateHash())
+    currentHash = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   }
   expect(currentHash).toBe(hashBeforeContext)
 
@@ -592,26 +598,26 @@ test('component-edit parity: selected members rotate and scale through real tool
     () => window.__hew_test!.getSelection().map((n) => n.kind),
   )).toEqual(['object'])
 
-  const beforeRotate = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const beforeRotate = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   await page.keyboard.press('q')
   await page.keyboard.press('ArrowUp')
   await clickWorld(page, ctx, 1, 0.5, 1)
   await clickWorld(page, ctx, 2, 0.5, 1)
   await page.keyboard.type('30')
   await page.keyboard.press('Enter')
-  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getStateHash()))
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getModelStateHash()))
     .not.toBe(beforeRotate)
   expect(await page.evaluate(() => window.__hew_test!.getLastError())).toBeNull()
   await expect.poll(async () => page.evaluate(
     () => window.__hew_test!.getSelection().map((n) => n.kind),
   )).toEqual(['object'])
 
-  const beforeScale = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const beforeScale = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   await page.keyboard.press('s')
   await page.waitForTimeout(120)
   await clickWorld(page, ctx, 1, 0.5, 1)
   await clickWorld(page, ctx, 1, 0.5, 1.5)
-  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getStateHash()))
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getModelStateHash()))
     .not.toBe(beforeScale)
   expect(await page.evaluate(() => window.__hew_test!.getLastError())).toBeNull()
   expect(await page.evaluate(
@@ -650,7 +656,8 @@ test('component-edit parity: Shift-selected members boolean through the Object m
   // Scoped + exact: a bare page-level 'Object' would also match the
   // tray's 'Object Info' section header.
   await page.getByTestId('menu-bar').getByRole('button', { name: 'Object', exact: true }).click()
-  await page.getByText('Union', { exact: true }).click()
+  // Scoped to the menu bar: the multi-selection dock has a Union chip too.
+  await page.getByTestId('menu-bar').getByText('Union', { exact: true }).click()
   await expect.poll(async () => page.evaluate(
     (id) => window.__hew_test!.getComponentMemberObjects(id).length,
     component,
@@ -687,24 +694,24 @@ test('component-edit parity: definition-sketch inference feeds selection, Rotate
     () => window.__hew_test!.getSelection().map((n) => n.kind),
   )).toEqual(['draft-island'])
 
-  const beforeScale = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const beforeScale = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   await page.keyboard.press('s')
   await page.waitForTimeout(120)
   await clickWorld(page, ctx, 4, 1, 0)
   await page.keyboard.type('1.2')
   await page.keyboard.press('Enter')
-  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getStateHash()))
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getModelStateHash()))
     .not.toBe(beforeScale)
   expect(await page.evaluate(() => window.__hew_test!.getLastError())).toBeNull()
 
-  const beforeRotate = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const beforeRotate = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   await page.keyboard.press('q')
   await page.keyboard.press('ArrowUp')
   await clickWorld(page, ctx, 3.5, 0.5, 0)
   await clickWorld(page, ctx, 4, 0.5, 0)
   await page.keyboard.type('30')
   await page.keyboard.press('Enter')
-  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getStateHash()))
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getModelStateHash()))
     .not.toBe(beforeRotate)
   expect(await page.evaluate(() => window.__hew_test!.getLastError())).toBeNull()
   await expect.poll(async () => page.evaluate(

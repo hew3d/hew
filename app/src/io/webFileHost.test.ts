@@ -28,17 +28,13 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebFileHost, anchorDownload } from './webFileHost'
-import { FileReadError } from './fileHost'
+import { FileReadError, UnsupportedFileError } from './fileHost'
 
-// jsdom doesn't implement the Blob URL APIs — stub them so anchorDownload's
-// tests below can run without a real browser, mirroring LibraryDialog.test.tsx's
-// identical guard.
-if (typeof URL.createObjectURL !== 'function') {
-  URL.createObjectURL = () => 'blob:mock'
-}
-if (typeof URL.revokeObjectURL !== 'function') {
-  URL.revokeObjectURL = () => { /* no-op */ }
-}
+// Stub the Blob URL APIs so anchorDownload's tests below run without a real
+// browser. Always stub, even where jsdom has them: jsdom 30.1.3 implements
+// createObjectURL but rejects the Node Blob these tests build.
+URL.createObjectURL = () => 'blob:mock'
+URL.revokeObjectURL = () => { /* no-op */ }
 
 /** Mock `window.matchMedia` to report `(pointer: coarse)` as matching (or not). */
 function mockPointer(coarse: boolean): void {
@@ -180,6 +176,47 @@ describe('anchorDownload', () => {
   })
 })
 
+describe('WebFileHost saveAs with the File System Access API', () => {
+  afterEach(() => {
+    delete (window as { showSaveFilePicker?: unknown }).showSaveFilePicker
+  })
+
+  function pickerReturning(name: string, move?: (n: string) => Promise<void>) {
+    const written: Uint8Array[] = []
+    const handle = {
+      name,
+      move,
+      createWritable: async () => ({
+        write: async (b: Uint8Array) => { written.push(b) },
+        close: async () => {},
+      }),
+    }
+    ;(window as unknown as { showSaveFilePicker: unknown }).showSaveFilePicker = async () => handle
+    return { handle, written }
+  }
+
+  it('refuses a name the picker left without the format extension, writing nothing', async () => {
+    const { written } = pickerReturning('Model.hew')
+    await expect(new WebFileHost().saveAs(new Uint8Array([1]), 'Model', 'skp2017')).rejects.toThrow()
+    expect(written).toEqual([])
+  })
+
+  it('asks the picker handle to rename it when it can', async () => {
+    const renamed: string[] = []
+    const { written } = pickerReturning('Model.hew', async (n) => { renamed.push(n) })
+    await new WebFileHost().saveAs(new Uint8Array([1]), 'Model', 'skp2017')
+    expect(renamed).toEqual(['Model.skp'])
+    expect(written.length).toBe(1)
+  })
+
+  it('leaves a correctly named file alone', async () => {
+    const { written } = pickerReturning('Model.skp')
+    const ref = await new WebFileHost().saveAs(new Uint8Array([1]), 'Model', 'skp2026')
+    expect(ref?.name).toBe('Model.skp')
+    expect(written.length).toBe(1)
+  })
+})
+
 describe('WebFileHost save/saveAs without the File System Access API (format-aware fallback)', () => {
   const captured: Array<{ download: string }> = []
 
@@ -215,4 +252,55 @@ describe('WebFileHost save/saveAs without the File System Access API (format-awa
     expect(captured.map((c) => c.download)).toEqual(['Model.skp'])
     expect(out).toBe(ref)
   })
+})
+
+/** Drive `openForImport()` or `openAny()` through the fallback <input>, picking `name`. */
+async function pickThrough(method: 'openForImport' | 'openAny', name: string): Promise<unknown> {
+  const opened = new WebFileHost()[method]()
+  const input = document.querySelector('input[type=file]') as HTMLInputElement
+  const bytes = new Uint8Array([1, 2, 3])
+  Object.defineProperty(input, 'files', {
+    value: [{ name, arrayBuffer: () => Promise.resolve(bytes.buffer) }],
+  })
+  input.dispatchEvent(new Event('change'))
+  return opened
+}
+
+describe('WebFileHost unrecognized extensions', () => {
+  for (const method of ['openForImport', 'openAny'] as const) {
+    for (const name of ['notes.txt', 'tool.hewplugin', 'README', 'archive.dae.zip']) {
+      it(`${method}(): refuses ${name} as an unsupported kind`, async () => {
+        const err = await pickThrough(method, name).catch((e: unknown) => e)
+        expect(err).toBeInstanceOf(UnsupportedFileError)
+        expect((err as UnsupportedFileError).fileName).toBe(name)
+      })
+    }
+
+    it(`${method}(): offers the texture directory picker for a .dae and never for an unrecognized file`, async () => {
+      // With the File System Access API present the COLLADA branch asks for
+      // a texture folder; the control pick below proves that branch is live.
+      const w = window as unknown as Record<string, unknown>
+      const picker = vi.fn(() => Promise.reject(new DOMException('cancelled', 'AbortError')))
+      const pickFile = (name: string) => () =>
+        Promise.resolve([{ name, getFile: () => Promise.resolve({ name, arrayBuffer: () => Promise.resolve(new Uint8Array([1]).buffer) }) }])
+      w.showSaveFilePicker = vi.fn()
+      w.showDirectoryPicker = picker
+      try {
+        w.showOpenFilePicker = pickFile('notes.txt')
+        await expect(new WebFileHost()[method]()).rejects.toBeInstanceOf(UnsupportedFileError)
+        expect(picker).not.toHaveBeenCalled()
+        w.showOpenFilePicker = pickFile('model.dae')
+        expect(await new WebFileHost()[method]()).toMatchObject({ kind: 'dae' })
+        expect(picker).toHaveBeenCalledTimes(1)
+      } finally {
+        delete w.showSaveFilePicker
+        delete w.showDirectoryPicker
+        delete w.showOpenFilePicker
+      }
+    })
+
+    it(`${method}(): an upper-case .DAE is still COLLADA`, async () => {
+      expect(await pickThrough(method, 'MODEL.DAE')).toMatchObject({ kind: 'dae', name: 'MODEL.DAE' })
+    })
+  }
 })

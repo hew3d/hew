@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "update",
+  "description": "The update window: events from the shell, closing itself, and opening links. The update_* commands are not scoped here; each checks its calling window.",
+  "windows": [
+    "update"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-set-title",
+    "opener:allow-open-url",
+    "opener:allow-default-urls"
+  ]
+}

@@ -18,7 +18,7 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
 import init, { Scene } from '../wasm/pkg/wasm_api.js'
-import { runBooleanCore } from './Viewport'
+import { runBooleanCore, unionPiecesNote } from './Viewport'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
@@ -49,6 +49,27 @@ function makeBox(scene: Scene, x0: number, x1: number, y0: number, y1: number, h
   const regions = Array.from(scene.sketch_regions(sketch))
   expect(regions.length).toBe(1)
   return scene.extrude_region(sketch, regions[0], height)
+}
+
+/** Row-major 3x4 affine: scale X by 2 (a NON-similarity pose), then translate. */
+const nonUniformPose = (tx: number) =>
+  new Float64Array([2, 0, 0, tx, 0, 1, 0, 0, 0, 0, 1, 0])
+
+/** A component instance whose definition holds a LIVE def-owned sketch (one
+ *  segment drawn on the instance's own ground plane via the real
+ *  `begin_sketch_on_plane_in_instance`), then posed with a non-uniform X
+ *  scale. `explode_instance` refuses such an instance typed
+ *  (`CannotExplodeNonUniformScale`: the sketch's curve identity cannot map
+ *  through a non-similarity) — and `make_unique`, which runs first, still
+ *  succeeds. A mirror no longer refuses (reflections are baked). */
+function makeNonUniformSketchInstance(scene: Scene, x0: number, x1: number): { instance: bigint; def: bigint } {
+  const box = makeBox(scene, x0, x1, -1, 1, 1)
+  const instance = scene.make_component(new Uint8Array([0]), new BigUint64Array([box]))
+  const def = scene.instance_def(instance)!
+  const sketch = scene.begin_sketch_on_plane_in_instance(instance, 0, 0, 0, 0, 0, 1)
+  scene.sketch_add_segment(sketch, 0, 0, 0, 1, 0, 0)
+  scene.transform_instance(instance, nonUniformPose(0))
+  return { instance, def }
 }
 
 describe('boolean auto-explode through the real wasm module', () => {
@@ -94,7 +115,7 @@ describe('boolean auto-explode through the real wasm module', () => {
     expect(Array.from(scene.object_ids())).toContain(otherBox)
   })
 
-  it('a multi-solid exploded set (the 3D Text shape: several disjoint solids under one instance) groups the exploded pieces and booleans the composite — matching the existing multi-select semantics, which already require grouping before a boolean of more than two solids', () => {
+  it('a multi-solid exploded set (the 3D Text shape: several disjoint solids under one instance) groups the exploded pieces and booleans the composite, so the exploded component stays one operand of the selection', () => {
     const scene = new Scene()
 
     const glyphA = makeBox(scene, -3, -1, -1, 1, 1)
@@ -117,13 +138,11 @@ describe('boolean auto-explode through the real wasm module', () => {
     const exploded = Array.from(scene.explode_instance(instance))
     expect(exploded.length).toBe(2)
 
-    // >1 exploded solid: existing multi-select boolean semantics
-    // (`canBoolean`/`boolean_nodes`) require exactly two top-level
-    // operands, so combining more than one piece against the other
-    // operand means grouping them first — the same thing a user would
-    // have to do by hand for any other >2-solid boolean. group_nodes
-    // internally unions a group operand's leaves before applying `op`
-    // between the two composites (Document::compose_operand_union).
+    // >1 exploded solid: the pieces are grouped first so the exploded
+    // component stays ONE operand in the user's selection (a hub minus
+    // its lettering is one subtract, not one per glyph). The kernel unions
+    // a group operand's leaves before applying `op` between the
+    // composites (Document::compose_operand_union).
     const groupId = scene.group_nodes(
       new Uint8Array([0, 0]),
       new BigUint64Array(exploded),
@@ -222,27 +241,16 @@ describe('runBooleanCore — the mutated-failed accounting itself (delta-review 
   // mounting the (WebGL-backed) component.
   const UNION = 0
 
-  it('a MIRRORED instance operand (legal via import/load — place_instance accepts a reflected affine): make_unique commits, then explode_instance refuses CannotExplodeReflected — reported as mutated-failed with exactly one committed step, not a bare no-op', () => {
+  it('a non-uniformly scaled instance whose definition holds a live def-owned sketch: make_unique commits, then explode_instance refuses CannotExplodeNonUniformScale — reported as mutated-failed with exactly one committed step, not a bare no-op', () => {
     const scene = new Scene()
 
-    const glyphBox = makeBox(scene, -1, 1, -1, 1, 1)
-    const instance = scene.make_component(new Uint8Array([0]), new BigUint64Array([glyphBox]))
-    const def = scene.instance_def(instance)
-
-    // A second instance of the SAME definition, placed with a
-    // determinant-negative (mirrored) pose — row-major 3x4, X axis flipped.
-    const mirrored = scene.place_instance(
-      def!,
-      new Float64Array([-1, 0, 0, 6, 0, 1, 0, 0, 0, 0, 1, 0]),
-    )
+    const { instance: scaled, def } = makeNonUniformSketchInstance(scene, -1, 1)
     const otherBox = makeBox(scene, 8, 10, -1, 1, 1)
 
-    const outcome = runBooleanCore(
-      scene,
-      UNION,
-      { kind: 'instance', id: mirrored },
+    const outcome = runBooleanCore(scene, UNION, [
+      { kind: 'instance', id: scaled },
       { kind: 'object', id: otherBox },
-    )
+    ])
 
     expect(outcome.kind).toBe('mutated-failed')
     if (outcome.kind !== 'mutated-failed') throw new Error('unreachable')
@@ -252,17 +260,17 @@ describe('runBooleanCore — the mutated-failed accounting itself (delta-review 
     // reported as a no-op.
     expect(outcome.committedSteps).toBe(1)
     expect(outcome.retryFailed).toBe(false)
-    expect(outcome.code).toBe('CannotExplodeReflected')
+    expect(outcome.code).toBe('CannotExplodeNonUniformScale')
     // The instance is still what's rendered in its place (now on a private,
     // no-longer-shared definition) — exactly what a "docRev" refresh must
     // pick back up, and exactly what `onSelectMany` gets pushed.
-    expect(outcome.settledNodes).toEqual([{ kind: 'instance', id: mirrored }])
+    expect(outcome.settledNodes).toEqual([{ kind: 'instance', id: scaled }])
 
     // The document genuinely changed — the caller's docRev-equivalent
     // "treat this as a committed mutation" signal is `kind === 'mutated-failed'`
     // together with `committedSteps > 0`, both true here.
-    expect(scene.instance_def(mirrored)).not.toBe(def)
-    expect(Array.from(scene.instance_ids())).toContain(mirrored)
+    expect(scene.instance_def(scaled)).not.toBe(def)
+    expect(Array.from(scene.instance_ids())).toContain(scaled)
 
     // Undoing exactly the reported step count restores the original shared
     // definition on the exact same instance handle (earlier undo history
@@ -270,57 +278,82 @@ describe('runBooleanCore — the mutated-failed accounting itself (delta-review 
     // below these, so `can_scene_undo` staying true afterward is expected).
     expect(scene.can_scene_undo()).toBe(true)
     for (let i = 0; i < outcome.committedSteps; i++) scene.scene_undo() // reverses make_unique
-    expect(Array.from(scene.instance_ids())).toContain(mirrored)
-    expect(scene.instance_def(mirrored)).toBe(def)
+    expect(Array.from(scene.instance_ids())).toContain(scaled)
+    expect(scene.instance_def(scaled)).toBe(def)
   })
 
-  it('both operands are instances: the first fully explodes (committed for real), then the second (mirrored) fails — mutated-failed accumulates BOTH operands\' committed steps, keeps the first operand\'s exploded piece in settledNodes, and undoing every reported step restores both original instances exactly', () => {
+  it('a MIRRORED instance operand now explodes (reflections are baked): auto-explode succeeds and the boolean returns a positive-volume result', () => {
+    const scene = new Scene()
+
+    const glyphBox = makeBox(scene, -1, 3, -1, 1, 1)
+    const instance = scene.make_component(new Uint8Array([0]), new BigUint64Array([glyphBox]))
+    const def = scene.instance_def(instance)!
+    // Determinant-negative pose, X axis flipped (row-major 3x4). The box is
+    // deliberately off-center in x ([-1, 3]), so the mirror is visible: it
+    // lands at x in [3, 7] (an unmirrored shift by 6 would give [5, 9]),
+    // overlapping the other operand below.
+    const mirrored = scene.place_instance(def, new Float64Array([-1, 0, 0, 6, 0, 1, 0, 0, 0, 0, 1, 0]))
+    const otherBox = makeBox(scene, 6, 9, -1, 1, 1)
+
+    const outcome = runBooleanCore(scene, UNION, [
+      { kind: 'instance', id: mirrored },
+      { kind: 'object', id: otherBox },
+    ])
+
+    expect(outcome.kind).toBe('ok')
+    if (outcome.kind !== 'ok') throw new Error('unreachable')
+    expect(scene.instance_ids()).not.toContain(mirrored)
+    // The union of the mirrored box (x 3..7) and the other (x 6..9) is one
+    // watertight solid spanning x 3..9 — which an unmirrored placement
+    // (5..9) could not produce.
+    const results = Array.from(scene.object_ids())
+    expect(results.length).toBe(1)
+    expect(scene.object_watertight(results[0])).toBe(true)
+    const b = Array.from(scene.object_bounds(results[0], undefined))
+    expect(b[0]).toBeCloseTo(3)
+    expect(b[3]).toBeCloseTo(9)
+    expect(b[5] - b[2]).toBeCloseTo(1)
+  })
+
+  it('both operands are instances: the first fully explodes (committed for real), then the second (non-uniformly scaled, with a def-owned sketch) fails — mutated-failed accumulates BOTH operands\' committed steps, keeps the first operand\'s exploded piece in settledNodes, and undoing every reported step restores both original instances exactly', () => {
     const scene = new Scene()
 
     const boxA = makeBox(scene, -3, -1, -1, 1, 1)
     const instanceA = scene.make_component(new Uint8Array([0]), new BigUint64Array([boxA]))
     const defA = scene.instance_def(instanceA)
 
-    const boxB = makeBox(scene, 1, 3, -1, 1, 1)
-    const instanceB = scene.make_component(new Uint8Array([0]), new BigUint64Array([boxB]))
-    const defB = scene.instance_def(instanceB)
-    // A mirrored second instance of B's definition — this is the operand
-    // that will fail auto-explode, AFTER instanceA has already fully
-    // exploded for real (delta-review finding 1c: the worst case).
-    const mirroredB = scene.place_instance(
-      defB!,
-      new Float64Array([-1, 0, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0]),
-    )
+    // B is a non-uniformly scaled instance with a live def-owned sketch —
+    // the operand that will fail auto-explode, AFTER instanceA has already
+    // fully exploded for real (delta-review finding 1c: the worst case).
+    const { instance: scaledB, def: defB } = makeNonUniformSketchInstance(scene, 1, 3)
 
-    const outcome = runBooleanCore(
-      scene,
-      UNION,
+    const outcome = runBooleanCore(scene, UNION, [
       { kind: 'instance', id: instanceA },
-      { kind: 'instance', id: mirroredB },
-    )
+      { kind: 'instance', id: scaledB },
+    ])
 
     expect(outcome.kind).toBe('mutated-failed')
     if (outcome.kind !== 'mutated-failed') throw new Error('unreachable')
     // instanceA: make_unique + explode_instance (2) fully committed and
-    // succeeded; mirroredB: make_unique alone (1) committed before
+    // succeeded; scaledB: make_unique alone (1) committed before
     // explode_instance refused. Total = 3, not "nothing happened".
     expect(outcome.committedSteps).toBe(3)
     expect(outcome.retryFailed).toBe(false)
     expect(outcome.otherOperandExploded).toBe(true)
-    expect(outcome.code).toBe('CannotExplodeReflected')
+    expect(outcome.code).toBe('CannotExplodeNonUniformScale')
     // Both settled nodes are present: instanceA's exploded plain object AND
-    // mirroredB's own (now-unique) instance ref — nothing here is silently
+    // scaledB's own (now-unique) instance ref — nothing here is silently
     // dropped, so the caller can select the full, honest post-failure state.
     expect(outcome.settledNodes).toHaveLength(2)
-    expect(outcome.settledNodes).toContainEqual({ kind: 'instance', id: mirroredB })
+    expect(outcome.settledNodes).toContainEqual({ kind: 'instance', id: scaledB })
     expect(outcome.settledNodes.some((n) => n.kind === 'object')).toBe(true)
 
     // The document genuinely holds instanceA's exploded piece, not
-    // instanceA itself, while mirroredB survives as an instance (now
+    // instanceA itself, while scaledB survives as an instance (now
     // uniquely defined) — never silently reverted.
     expect(Array.from(scene.instance_ids())).not.toContain(instanceA)
-    expect(Array.from(scene.instance_ids())).toContain(mirroredB)
-    expect(scene.instance_def(mirroredB)).not.toBe(defB)
+    expect(Array.from(scene.instance_ids())).toContain(scaledB)
+    expect(scene.instance_def(scaledB)).not.toBe(defB)
 
     // Undoing every one of the reported committed steps restores BOTH
     // original instances exactly, on their original shared definitions
@@ -328,7 +361,93 @@ describe('runBooleanCore — the mutated-failed accounting itself (delta-review 
     for (let i = 0; i < outcome.committedSteps; i++) scene.scene_undo()
     expect(Array.from(scene.instance_ids())).toContain(instanceA)
     expect(scene.instance_def(instanceA)).toBe(defA)
-    expect(Array.from(scene.instance_ids())).toContain(mirroredB)
-    expect(scene.instance_def(mirroredB)).toBe(defB)
+    expect(Array.from(scene.instance_ids())).toContain(scaledB)
+    expect(scene.instance_def(scaledB)).toBe(defB)
+  })
+
+  it('an instance cutter that never reaches the target (3D text beside a plate, subtracted): the auto-explode commits, the retried boolean refuses NothingRemoved, and the explode is rolled back — a plain refusal with the instance still in place and no undo step left behind', () => {
+    const SUBTRACT = 1
+    const scene = new Scene()
+
+    const plate = makeBox(scene, -1, 1, -1, 1, 1)
+    const glyphBox = makeBox(scene, 3, 5, -1, 1, 1) // two units clear of the plate
+    const glyph = scene.make_component(new Uint8Array([0]), new BigUint64Array([glyphBox]))
+    const def = scene.instance_def(glyph)
+    const undoDepth = scene.undo_depth()
+    const objectsBefore = Array.from(scene.object_ids())
+
+    const outcome = runBooleanCore(scene, SUBTRACT, [
+      { kind: 'object', id: plate },
+      { kind: 'instance', id: glyph },
+    ])
+
+    expect(outcome.kind).toBe('refused')
+    if (outcome.kind !== 'refused') throw new Error('unreachable')
+    expect(outcome.code).toBe('NothingRemoved')
+
+    // The document reads as untouched: the instance is back on its shared
+    // definition, the exploded piece is gone, and the make_unique /
+    // explode_instance steps committed for the boolean's sake were undone
+    // rather than left for the person to find.
+    expect(Array.from(scene.instance_ids())).toContain(glyph)
+    expect(scene.instance_def(glyph)).toBe(def)
+    expect(Array.from(scene.object_ids())).toEqual(objectsBefore)
+    expect(scene.undo_depth()).toBe(undoDepth)
+  })
+
+  it('a Union of solids that do not overlap leaves a group of pieces, and the note says why', () => {
+    const scene = new Scene()
+    const a = makeBox(scene, 0, 1, 0, 1, 1)
+    const b = makeBox(scene, 2, 3, 0, 1, 1)
+    const outcome = runBooleanCore(scene, UNION, [{ kind: 'object', id: a }, { kind: 'object', id: b }])
+    expect(outcome.kind).toBe('ok')
+    if (outcome.kind !== 'ok') return
+    expect(outcome.node.kind).toBe('group')
+    expect(scene.group_members(outcome.node.id)).toHaveLength(2)
+    expect(unionPiecesNote(2)).toBe(
+      "They don't overlap, so Union kept them as 2 separate pieces in a group. Undo, move one a little into the other, and Union again.",
+    )
+    expect(unionPiecesNote(3)).toMatch(/don't all overlap/)
+  })
+
+  it('three overlapping solids union into one object in one undo step, and a subtract keeps the first', () => {
+    const scene = new Scene()
+    const a = makeBox(scene, 0, 1, 0, 1, 1)
+    const b = makeBox(scene, 0.5, 1.5, 0, 1, 1)
+    const c = makeBox(scene, 1, 2, 0, 1, 1)
+    const depth = scene.undo_depth()
+    const outcome = runBooleanCore(scene, UNION, [
+      { kind: 'object', id: a },
+      { kind: 'object', id: b },
+      { kind: 'object', id: c },
+    ])
+    expect(outcome.kind).toBe('ok')
+    if (outcome.kind !== 'ok') return
+    expect(outcome.node.kind).toBe('object')
+    expect(Array.from(scene.object_ids())).toHaveLength(1)
+    expect(scene.undo_depth()).toBe(depth + 1)
+    scene.scene_undo()
+    expect(Array.from(scene.object_ids())).toHaveLength(3)
+    // Subtract keeps the first operand given, wherever it sits in the
+    // row and whichever order the rest come in: what is left is the part
+    // of that box no other box covers.
+    const cases: Array<{ order: bigint[]; x: [number, number] }> = [
+      { order: [a, b, c], x: [0, 0.5] },
+      { order: [a, c, b], x: [0, 0.5] },
+      { order: [c, a, b], x: [1.5, 2] },
+      { order: [c, b, a], x: [1.5, 2] },
+    ]
+    for (const { order, x } of cases) {
+      const cut = runBooleanCore(scene, 1, order.map((id) => ({ kind: 'object' as const, id })))
+      expect(cut.kind).toBe('ok')
+      if (cut.kind !== 'ok') return
+      expect(cut.node.kind).toBe('object')
+      expect(scene.object_ids()).toHaveLength(1)
+      const bounds = scene.object_bounds(cut.node.id, undefined)
+      expect(bounds[0]).toBeCloseTo(x[0], 9)
+      expect(bounds[3]).toBeCloseTo(x[1], 9)
+      scene.scene_undo()
+      expect(Array.from(scene.object_ids())).toHaveLength(3)
+    }
   })
 })

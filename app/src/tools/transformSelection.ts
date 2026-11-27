@@ -54,25 +54,31 @@ import {
   buildInstancePreviewClone,
   buildInstanceMemberPreviewClone,
   buildSketchPreviewClone,
+  markSessionGhost,
 } from './transformPreview'
 import {
   allFree,
   ctxOfObjectPlane,
-  ctxOfSketch,
+  ctxOfSketchOnly,
+  ctxOfSketchUnits,
   ctxThroughAffine,
   draftRef,
   isDraftRef,
   keysToArray,
   planeOfCtx,
+  planeOfCtxIn,
   readPlaneUnits,
+  detachedSketchIds,
+  sketchOfCtx,
   resolveDraft,
   segmentsOf,
   storesOf,
   unitsAtSegments,
   type PlaneEdge,
 } from './planeUnits'
-import { runDraft } from './draftCommit'
+import { runDraft, noteSketchTransformReport, resetSketchTransformReports, type DraftReport } from './draftCommit'
 import { applyAffine3x4, invertAffine3x4 } from '../viewport/geoHelpers'
+import { planDimensionCarry, applyDimensionCarry } from './carryDimensions'
 import { t } from '@lingui/core/macro'
 
 type V3 = [number, number, number]
@@ -135,6 +141,9 @@ export interface DraftGroup {
   /** True when some of a shape's edges ride with a selected owner: only the
    *  rest is drafted: erased and drawn again around the owners' move. */
   mixed: boolean
+  /** The plane of a detached shape's own (sketch-only) context, which has no
+   *  plane string; null for an ordinary plane context. */
+  sketchPlane: { point: V3; normal: V3 } | null
 }
 
 /** The owners a selection carries drawing along with: objects selected
@@ -247,7 +256,11 @@ export function planDraftTransforms(wasmScene: WasmScene, selection: readonly No
     if (own.length === 0) continue
     let g = groups.get(node.ctx)
     if (g === undefined) {
-      g = { ctx: node.ctx, nodes: [], unitKeys: [], edges: [], mixed: false }
+      const own = planeOfCtx(node.ctx) === null ? planeOfCtxIn(wasmScene, node.ctx) : null
+      g = {
+        ctx: node.ctx, nodes: [], unitKeys: [], edges: [], mixed: false,
+        sketchPlane: own === null ? null : { point: own.point, normal: own.normal },
+      }
       groups.set(node.ctx, g)
     }
     g.nodes.push(node)
@@ -262,7 +275,7 @@ export function planDraftTransforms(wasmScene: WasmScene, selection: readonly No
 /** Largest distance any of the group's endpoints (and circle centers) lands
  *  from its plane under `affine` — an in-plane transform keeps this ~0. */
 function offPlaneAfter(group: DraftGroup, affine: Float64Array): number {
-  const pl = planeOfCtx(group.ctx)
+  const pl = planeOfCtx(group.ctx) ?? group.sketchPlane
   if (pl === null) return 0
   let worst = 0
   const check = (p: V3) => {
@@ -420,9 +433,10 @@ function redrawCaptured(
   affines: readonly Float64Array[],
   label: string,
 ): void {
-  runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, label, (d) => {
+  const { report } = runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, label, (d) => {
     for (const affine of affines) drawCaptured(wasmScene, d, g.ctx, cap, affine)
   })
+  noteSketchTransformReport(report)
 }
 
 /** The free islands a pure-void group detaches, per store sketch, found by
@@ -471,6 +485,23 @@ function refsAtAnchors(wasmScene: WasmScene, ctx: string | null, anchors: readon
   return unitsAtSegments(pu, anchors).map((u) => draftRef('draft-island', ctx, u.key))
 }
 
+/** The refs of a pure-void shape that left its plane, found again by
+ *  geometry. A plain shape is listed on its moved plane. A detached shape
+ *  has no plane string: it stays the sketch it was (a whole-sketch move) or
+ *  becomes a new detached sketch (a subset detached), so the moved anchors
+ *  are looked for in its own context, then in every detached sketch. */
+function refsAfterLeavingPlane(wasmScene: WasmScene, g: DraftGroup, affine: Float64Array): NodeRef[] {
+  const anchors = movedAnchors(g, affine)
+  if (sketchOfCtx(g.ctx) === null) return refsAtAnchors(wasmScene, ctxThroughAffine(g.ctx, affine), anchors)
+  const own = refsAtAnchors(wasmScene, g.ctx, anchors)
+  if (own.length > 0) return own
+  for (const sketch of detachedSketchIds(wasmScene)) {
+    const refs = refsAtAnchors(wasmScene, ctxOfSketchOnly(sketch), anchors)
+    if (refs.length > 0) return refs
+  }
+  return []
+}
+
 /** Replace each group's nodes in `committed` with the refs found at its
  *  moved anchors (in the position of the group's first node), dropping a
  *  group that cannot be re-found. Duplicate refs collapse. */
@@ -498,6 +529,40 @@ function repointGroups(
     }
   }
   committed.splice(0, committed.length, ...out)
+}
+
+/** The segments of exactly the islands `group` moves. */
+function islandSegments(wasmScene: WasmScene, group: SketchIslandGroup): [V3, V3][] {
+  const out: [V3, V3][] = []
+  for (const island of group.islands) {
+    let edges: Iterable<bigint>
+    try {
+      edges = wasmScene.sketch_island_edges(group.sketch, island)
+    } catch {
+      continue
+    }
+    for (const edge of edges) {
+      const e = wasmScene.sketch_edge_endpoints(group.sketch, edge)
+      if (e === undefined) continue
+      out.push([[e[0], e[1], e[2]], [e[3], e[4], e[5]]])
+    }
+  }
+  return out
+}
+
+/** A whole sketch's segments (the kernel lists them as f32 pairs). */
+function sketchSegments(wasmScene: WasmScene, sketch: bigint): [V3, V3][] {
+  let lines: ArrayLike<number>
+  try {
+    lines = wasmScene.sketch_lines(sketch)
+  } catch {
+    return []
+  }
+  const out: [V3, V3][] = []
+  for (let i = 0; i + 5 < lines.length; i += 6) {
+    out.push([[lines[i], lines[i + 1], lines[i + 2]], [lines[i + 3], lines[i + 4], lines[i + 5]]])
+  }
+  return out
 }
 
 /**
@@ -536,6 +601,23 @@ export function commitSelectionTransform(
   activeInstance?: bigint | null,
   label = t({ context: 'tool', message: 'Move' }),
 ): NodeRef[] {
+  try {
+    return commitSelectionTransformInner(wasmScene, selection, affineF64, activeInstance, label)
+  } catch (err) {
+    // A failed commit rolled back: its held reports name nothing that exists.
+    resetSketchTransformReports()
+    throw err
+  }
+}
+
+function commitSelectionTransformInner(
+  wasmScene: WasmScene,
+  selection: readonly NodeRef[],
+  affineF64: Float64Array,
+  activeInstance: bigint | null | undefined,
+  label: string,
+): NodeRef[] {
+  resetSketchTransformReports()
   const committed: NodeRef[] = [...selection]
   const groups = planDraftTransforms(wasmScene, selection)
   // Classify and validate EVERY group before anything lands: in-plane groups
@@ -594,6 +676,17 @@ export function commitSelectionTransform(
     .filter((n) => isDraftRef(n) && !planned.has(n))
     .map((n) => ({ node: n, segs: segmentsOf(wasmScene, n) }))
   const ridingFound = new Map<NodeRef, NodeRef[]>()
+  // Dimensions measuring the moving drawing follow it (#98), in the same
+  // history step; read from the pre-move positions.
+  const moving: [V3, V3][] = [
+    ...groups.flatMap((g) => g.edges.map((e) => [e.a, e.b] as [V3, V3])),
+    ...riding.flatMap((r) => r.segs),
+    // Whole sketches move whole; a detached island moves ONLY its own edges
+    // — the sketch's stationary islands must not drag their dimensions along.
+    ...[...sketches, ...post.sketches].flatMap((sk) => sketchSegments(wasmScene, sk)),
+    ...[...islands, ...post.islands].flatMap((g) => islandSegments(wasmScene, g)),
+  ]
+  const dimensionCarry = planDimensionCarry(wasmScene, moving, affineF64)
   inHistoryBracket(
     wasmScene,
     label,
@@ -605,9 +698,10 @@ export function commitSelectionTransform(
         })
       }
       for (const g of pureDrafts) {
-        runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, label, (d) => {
+        const { report } = runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, label, (d) => {
           wasmScene.draft_transform_edges(d, keysToArray(g.edges.map((e) => e.key)), affineF64)
         })
+        noteSketchTransformReport(report)
       }
       // (b) The owners (and detaching shapes) transform.
       if (activeInstance != null) {
@@ -624,7 +718,9 @@ export function commitSelectionTransform(
         if (ids.length > 0 || sketches.length > 0 || islands.length > 0) defMove(ids, sketches, islands)
       } else {
         for (const group of islands) {
-          wasmScene.transform_sketch_islands(group.sketch, new BigUint64Array(group.islands), affineF64)
+          noteSketchTransformReport(
+            wasmScene.transform_sketch_islands(group.sketch, new BigUint64Array(group.islands), affineF64),
+          )
         }
         if (kinds.length > 0 || sketches.length > 0) {
           wasmScene.transform_selection(
@@ -650,7 +746,9 @@ export function commitSelectionTransform(
         }
       } else {
         for (const group of post.islands) {
-          wasmScene.transform_sketch_islands(group.sketch, new BigUint64Array(group.islands), affineF64)
+          noteSketchTransformReport(
+            wasmScene.transform_sketch_islands(group.sketch, new BigUint64Array(group.islands), affineF64),
+          )
         }
         if (post.sketches.length > 0) {
           wasmScene.transform_selection(new Uint8Array(0), new BigUint64Array(0), new BigUint64Array(post.sketches), affineF64)
@@ -661,15 +759,16 @@ export function commitSelectionTransform(
         found.set(g, refsAtAnchors(wasmScene, g.ctx, movedAnchors(g, affineF64)))
       }
       for (const g of detaching) {
-        found.set(g, refsAtAnchors(wasmScene, ctxThroughAffine(g.ctx, affineF64), movedAnchors(g, affineF64)))
+        found.set(g, refsAfterLeavingPlane(wasmScene, g, affineF64))
       }
+      applyDimensionCarry(wasmScene, dimensionCarry, affineF64)
       for (const { node, segs } of riding) {
         if (!isDraftRef(node) || segs.length === 0) continue
         const anchors = segs.map(([a, b]) => [applyAffineToPoint(affineF64, a), applyAffineToPoint(affineF64, b)] as [V3, V3])
         ridingFound.set(node, refsAtAnchors(wasmScene, ridingCtx(node.ctx, affineF64), anchors))
       }
     },
-    steps > 1,
+    steps + (dimensionCarry.length > 0 ? 1 : 0) > 1,
   )
   repointGroups(committed, groups, found)
   if (ridingFound.size > 0) {
@@ -718,7 +817,7 @@ function ridingCtx(ctx: string, affine: Float64Array): string | null {
  *  how a copy made through the sketch machinery is handed back as a drawn
  *  shape. `null` when it cannot be found. */
 function draftRefOfSketchIsland(wasmScene: WasmScene, sketch: bigint, island: bigint): NodeRef | null {
-  const ctx = ctxOfSketch(wasmScene, sketch)
+  const ctx = ctxOfSketchUnits(wasmScene, sketch)
   if (ctx === null) return null
   const anchors: [V3, V3][] = []
   for (const edge of wasmScene.sketch_island_edges(sketch, island)) {
@@ -749,6 +848,22 @@ export function copyOwnersAndDrawing(
   affines: readonly Float64Array[],
   copyOwners: () => NodeRef[],
 ): NodeRef[] {
+  try {
+    return copyOwnersAndDrawingInner(wasmScene, owners, drawn, affines, copyOwners)
+  } catch (err) {
+    resetSketchTransformReports() // the failed copy rolled back
+    throw err
+  }
+}
+
+function copyOwnersAndDrawingInner(
+  wasmScene: WasmScene,
+  owners: readonly NodeRef[],
+  drawn: readonly NodeRef[],
+  affines: readonly Float64Array[],
+  copyOwners: () => NodeRef[],
+): NodeRef[] {
+  resetSketchTransformReports()
   if (drawn.length === 0) return owners.length > 0 ? copyOwners() : []
   if (owners.length === 0) return duplicateSketchSelectionByAffineArray(wasmScene, drawn, affines)
   return inHistoryBracket(wasmScene, t`Copy`, () => {
@@ -757,6 +872,13 @@ export function copyOwnersAndDrawing(
     const ownerCopies = copyOwners()
     return [...whole, ...copyMixedDrawing(wasmScene, plan, affines), ...ownerCopies]
   })
+}
+
+/** The new sketch a `copy_sketch_islands` report names (its `sketches[0]`). */
+function copiedSketchOf(report: DraftReport): bigint {
+  const copy = report.sketches[0]
+  if (copy === undefined) throw new Error('StaleReference: the copy made no sketch; nothing was changed')
+  return copy
 }
 
 /** What a copy of a selection's drawing does, decided before anything lands. */
@@ -768,6 +890,10 @@ interface CopyPlan {
   /** Free islands of shapes that leave their plane: detach-copied. */
   detachIslands: SketchIslandGroup[]
   wholeSketchSources: NodeRef[]
+  /** Detached shapes (each wholly one detached sketch): copied through
+   *  `copy_sketch_islands` whether or not the copy leaves the plane — a copy
+   *  landing in the source sketch would arrange with the original (D7). */
+  detached: DraftGroup[]
 }
 
 function planCopy(wasmScene: WasmScene, selection: readonly NodeRef[], affines: readonly Float64Array[]): CopyPlan {
@@ -776,9 +902,12 @@ function planCopy(wasmScene: WasmScene, selection: readonly NodeRef[], affines: 
     mixed: new Map(),
     detachIslands: [],
     wholeSketchSources: selection.filter((n) => n.kind === 'sketch'),
+    detached: [],
   }
   for (const g of planDraftTransforms(wasmScene, selection)) {
-    if (affines.every((a) => inPlane(g, a))) {
+    if (detachedSketchOfGroup(g) !== null) {
+      plan.detached.push(g)
+    } else if (affines.every((a) => inPlane(g, a))) {
       if (g.mixed) plan.mixed.set(g, captureDrawing(wasmScene, g))
       else plan.pure.push(g)
     } else if (g.edges.every((e) => e.store.kind === 'free')) {
@@ -790,10 +919,43 @@ function planCopy(wasmScene: WasmScene, selection: readonly NodeRef[], affines: 
   return plan
 }
 
+/** The detached sketch a group's shapes are wholly in (a world sketch), or
+ *  null for any other group. */
+function detachedSketchOfGroup(g: DraftGroup): bigint | null {
+  const of = sketchOfCtx(g.ctx)
+  if (of === null || of.instance !== null || g.edges.length === 0) return null
+  return g.edges.every((e) => e.store.kind === 'free' && e.store.detached === true && e.store.sketch === of.sketch)
+    ? of.sketch
+    : null
+}
+
+/** Copy a detached shape at every affine: each copy is a NEW detached sketch
+ *  made by `copy_sketch_islands` (the unit keys are mapped to the sketch's
+ *  island handles through `sketch_unit_keys`). */
+function copyDetachedShapes(wasmScene: WasmScene, g: DraftGroup, affines: readonly Float64Array[]): NodeRef[] {
+  const sketch = detachedSketchOfGroup(g)
+  if (sketch === null) return []
+  const keys = JSON.parse(wasmScene.sketch_unit_keys(sketch)) as { islands: [number, string][] }
+  const islands = keys.islands.filter(([, key]) => g.unitKeys.includes(key)).map(([id]) => BigInt(id))
+  if (islands.length === 0) {
+    throw new Error('StaleReference: could not find the shape to copy; nothing was changed')
+  }
+  const out: NodeRef[] = []
+  for (const affine of affines) {
+    const copy = copiedSketchOf(
+      noteSketchTransformReport(wasmScene.copy_sketch_islands(sketch, new BigUint64Array(islands), affine)),
+    )
+    const ctx = ctxOfSketchOnly(copy)
+    for (const u of readPlaneUnits(wasmScene, ctx)?.units ?? []) out.push(draftRef('draft-island', ctx, u.key))
+  }
+  return out
+}
+
 /** The shapes of a plane context copied by `draft_copy_edges`, and the whole
  *  sketches / detaching islands. */
 function copyWholeDrawing(wasmScene: WasmScene, plan: CopyPlan, affines: readonly Float64Array[]): NodeRef[] {
   const committed: NodeRef[] = []
+  for (const g of plan.detached) committed.push(...copyDetachedShapes(wasmScene, g, affines))
   for (const g of plan.pure) {
     const seen = new Set<string>()
     const addRefs = (affine: Float64Array) => {
@@ -811,9 +973,10 @@ function copyWholeDrawing(wasmScene: WasmScene, plan: CopyPlan, affines: readonl
     // each, re-finding the originals by geometry between reps.
     const original = g.edges.map((e) => e.key)
     try {
-      runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, t`Copy`, (d) => {
+      const { report } = runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, t`Copy`, (d) => {
         for (const affine of affines) wasmScene.draft_copy_edges(d, keysToArray(original), affine)
       })
+      noteSketchTransformReport(report)
       for (const affine of affines) addRefs(affine)
       continue
     } catch (err) {
@@ -825,9 +988,10 @@ function copyWholeDrawing(wasmScene: WasmScene, plan: CopyPlan, affines: readonl
       const anchors = g.edges.map((e) => [e.a, e.b] as [V3, V3])
       const keys = unitsAtSegments(pu, anchors).flatMap((u) => u.edges.map((e) => e.key))
       if (keys.length === 0) continue
-      runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, t`Copy`, (d) => {
+      const { report } = runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, t`Copy`, (d) => {
         wasmScene.draft_copy_edges(d, keysToArray(keys), affine)
       })
+      noteSketchTransformReport(report)
       addRefs(affine)
     }
   }
@@ -1063,9 +1227,25 @@ export function duplicateSketchSelectionByAffineArray(
   selection: readonly NodeRef[],
   affines: readonly Float64Array[],
 ): NodeRef[] {
+  try {
+    return duplicateSketchSelectionByAffineArrayInner(wasmScene, selection, affines)
+  } catch (err) {
+    resetSketchTransformReports() // the failed copy rolled back
+    throw err
+  }
+}
+
+function duplicateSketchSelectionByAffineArrayInner(
+  wasmScene: WasmScene,
+  selection: readonly NodeRef[],
+  affines: readonly Float64Array[],
+): NodeRef[] {
+  resetSketchTransformReports()
   const plan = planCopy(wasmScene, selection, affines)
   const sketchPart = plan.wholeSketchSources.length > 0 || plan.detachIslands.length > 0
-  const steps = plan.pure.length + plan.mixed.size + (affines.length > 1 && plan.pure.length > 0 ? 1 : 0)
+  const steps =
+    plan.pure.length + plan.mixed.size + (affines.length > 1 && plan.pure.length > 0 ? 1 : 0) +
+    plan.detached.length * affines.length
   return inHistoryBracket(
     wasmScene,
     t`Copy`,
@@ -1348,10 +1528,10 @@ function duplicateWholeSketchesByAffineArray(
   for (const [sketch, islandIds] of copyBySketch) {
     if (islandIds.length === 0) continue
     for (const affineF64 of affines) {
-      const copySketch = wasmScene.copy_sketch_islands(
-        sketch,
-        new BigUint64Array(islandIds),
-        affineF64,
+      const copySketch = copiedSketchOf(
+        noteSketchTransformReport(
+          wasmScene.copy_sketch_islands(sketch, new BigUint64Array(islandIds), affineF64),
+        ),
       )
       for (const copyIsland of wasmScene.sketch_island_ids(copySketch)) {
         const ref = draftRefOfSketchIsland(wasmScene, copySketch, copyIsland)
@@ -1383,9 +1563,11 @@ export function buildNodePreview(
       0, 0, 0, 1,
     )
     posed.add(preview)
+    // The wrapper is what the tool drives, so it is the ghost's root for
+    // the sibling preview mirror (markSessionGhost), not the posed leaf.
     const wrapper = new THREE.Group()
     wrapper.add(posed)
-    return wrapper
+    return markSessionGhost(wrapper)
   }
   if (node.kind === 'group') {
     // A group's renderable leaves are its world objects AND its instances;
@@ -1456,5 +1638,7 @@ export function buildSelectionPreview(
     )
     if (child !== null) group.add(child)
   }
-  return group.children.length > 0 ? group : null
+  // The shared group is the one object the tool drives — the ghost root
+  // the sibling preview mirror clones and follows (markSessionGhost).
+  return group.children.length > 0 ? markSessionGhost(group) : null
 }

@@ -11,7 +11,7 @@ use kernel::{
     Point3, SketchId, Transform, Vec3, tol,
 };
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::{draw_loop, draw_path};
 
 // ----------------------------------------------------------------- helpers
@@ -303,7 +303,7 @@ fn owner_object_round_trips_through_save_and_load() {
     let bytes = doc.save();
 
     let manifest = manifest_of(&bytes);
-    assert_eq!(manifest["format_version"], serde_json::json!(22));
+    assert_eq!(manifest["format_version"], serde_json::json!(33));
     let sk = &manifest["sketches"][0];
     assert!(sk["owner_object"].is_number(), "owner_object is written");
     assert!(sk.get("owner").is_none());
@@ -851,7 +851,9 @@ fn a_duplicate_owns_a_placed_copy_of_the_drawing() {
     let before = doc.save();
 
     let place = Transform::translation(Vec3::new(5.0, 2.0, 0.0));
-    let (node, _) = doc.duplicate_node(NodeId::Object(a), &place).expect("copy");
+    let (node, _) = doc
+        .duplicate_node(NodeId::Object(a), &place, kernel::LinkPolicy::Independent)
+        .expect("copy");
     let NodeId::Object(copy) = node else {
         panic!("an object duplicates to an object");
     };
@@ -938,7 +940,11 @@ fn a_member_duplicated_in_a_session_folds_its_sketch_in_at_close() {
     doc.open_explode_session(inst).expect("open session");
     let place = Transform::translation(Vec3::new(3.0, 0.0, 0.0));
     let (node, _) = doc
-        .duplicate_node(NodeId::Object(member), &place)
+        .duplicate_node(
+            NodeId::Object(member),
+            &place,
+            kernel::LinkPolicy::Independent,
+        )
         .expect("duplicate in session");
     let NodeId::Object(copy) = node else {
         panic!("an object duplicates to an object");
@@ -1066,6 +1072,9 @@ fn library_extract_and_insert_carry_the_owned_sketch_with_its_object() {
             &InsertOptions {
                 pose: place,
                 provenance: None,
+                origin: None,
+                drawing: kernel::DrawingInsert::Skip,
+                hidden_objects: Default::default(),
             },
         )
         .expect("insert");
@@ -1109,6 +1118,9 @@ fn a_free_world_sketch_is_still_skipped_by_insert_but_an_owned_one_is_not() {
             &InsertOptions {
                 pose: Transform::IDENTITY,
                 provenance: None,
+                origin: None,
+                drawing: kernel::DrawingInsert::Skip,
+                hidden_objects: Default::default(),
             },
         )
         .expect("insert");
@@ -1152,6 +1164,9 @@ fn assert_component_item_lands_owned(item: &Document, original: &[Point3], _shif
             &InsertOptions {
                 pose: Transform::IDENTITY,
                 provenance: None,
+                origin: None,
+                drawing: kernel::DrawingInsert::Skip,
+                hidden_objects: Default::default(),
             },
         )
         .expect("insert component item");

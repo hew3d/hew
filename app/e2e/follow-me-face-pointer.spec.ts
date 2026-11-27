@@ -158,7 +158,7 @@ test('Follow Me: a face too narrow for the folded profile is refused with face-s
   // (design §2c) this refused outright as [ProfileNotPerpendicular]; the
   // kernel now folds the profile upright and retries — but the folded
   // profile is wider than the tabletop's 0.2 m front-face rim is thin, so
-  // the retried sweep still refuses, now as [PathTooTight] (confirmed
+  // the retried sweep still refuses, now as a refusal (confirmed
   // against the real kernel, not assumed).
   await clickAt(page, ctx, 1, 0, 0.1)
   await expect(page.getByText('Click the profile to sweep along')).toBeVisible()
@@ -166,7 +166,6 @@ test('Follow Me: a face too narrow for the folded profile is refused with face-s
 
   // Face-context copy, not the generic drawn-path wording.
   await expect(page.getByText('That face is thinner than the profile is deep', { exact: false })).toBeVisible()
-  await expect(page.getByText('[PathTooTight]')).toBeVisible()
   // Refused → the tabletop stands alone, untouched.
   expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(1)
 })
@@ -212,7 +211,7 @@ test('Follow Me: an INSTANCED face is now a legal PATH (design §2e), swept with
   // top face) actually is — proof the pose mapping landed it in the right
   // place, not at the definition-local origin or some other frame.
   expect(after.bounds[3]).toBeGreaterThan(1.8) // maxX
-  await expect(page.getByText('[ProfileNotPerpendicular]')).toHaveCount(0)
+  await expect(page.getByText("couldn't square it to the path", { exact: false })).toHaveCount(0)
 })
 
 test('Follow Me: hovering then clicking the top face molds a watertight solid around it', async ({
@@ -241,5 +240,5 @@ test('Follow Me: hovering then clicking the top face molds a watertight solid ar
   })
   expect(after.solids).toEqual([true, true])
   // No refusal toast on the successful path.
-  await expect(page.getByText('[ProfileNotPerpendicular]')).toHaveCount(0)
+  await expect(page.getByText("couldn't square it to the path", { exact: false })).toHaveCount(0)
 })

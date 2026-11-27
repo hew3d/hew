@@ -28,9 +28,12 @@
  */
 
 import { i18n, type MessageDescriptor } from '@lingui/core'
+import { curveActionPaletteEntries, deformPaletteEntries, skinPaletteEntry } from './curveEntries'
 import { msg, t } from '@lingui/core/macro'
 import { MENU } from '../health/healthCopy'
-import { TOOL_REGISTRY, shortcutFor, type ToolName } from '../tools/toolRegistry'
+import { actionOffered } from '../curveActions'
+import { TOOL_REGISTRY, type ToolName } from '../tools/toolRegistry'
+import { shortcutLabel } from '../keymap/keymap'
 
 /** 'Model' entries are dynamic (built per-document by App.tsx from the
  * scene's object/group/component/tag names) and passed to the palette as
@@ -54,7 +57,24 @@ export type PaletteGate =
   | 'canPlaceCopy'
   | 'canExplode'
   | 'canMakeUnique'
+  /** One placement of a linked set selected (Unlink). */
+  | 'canUnlink'
+  | 'canUnlinkAll'
+  | 'canLinkSimilar'
+  | 'canPromote'
+  /** Something that can be mirrored is selected (Flip Along). */
+  | 'canFlip'
+  /** Something unlocked is selected (Lock). */
+  | 'canLock'
+  /** Something locked is selected (Unlock ▸ Selected). */
+  | 'canUnlock'
+  /** Anything in the document is locked (Unlock ▸ All). */
+  | 'canUnlockAll'
+  /** Paste linked is the explicit form only while copies default to independent. */
+  | 'canPasteLinked'
   | 'canBoolean'
+  /** A solid Object is selected directly — Soften Edges… lives in its Object Info section. */
+  | 'canSoften'
   /** One object, group, or instance selected, with a library backend. */
   | 'canSaveSelectionToLibrary'
   | 'canImport'
@@ -87,53 +107,32 @@ export interface PaletteEntry {
   toolName?: ToolName
 }
 
-const TOOL_ACTION_ID: Record<ToolName, string> = {
-  'Select': 'tool-select',
-  'Line': 'tool-line',
-  'Rectangle': 'tool-rectangle',
-  'Circle': 'tool-circle',
-  'Polygon': 'tool-polygon',
-  'Arc': 'tool-arc',
-  'Push/Pull': 'tool-pushpull',
-  'Follow Me': 'tool-follow-me',
-  'Offset': 'tool-offset',
-  'Paint': 'tool-paint',
-  'Position Texture': 'tool-position-texture',
-  'Move': 'tool-move',
-  'Rotate': 'tool-rotate',
-  'Scale': 'tool-scale',
-  'Tape Measure': 'tool-tape-measure',
-  'Dimension': 'tool-dimension',
-  'Protractor': 'tool-protractor',
-  'Slice': 'tool-slice',
-  'Section Plane': 'tool-section-plane',
-  'Edit Vertex': 'tool-edit-vertex',
-  'Drawing Axes': 'tool-axes',
-  'Text': 'tool-text',
-  'Orbit': 'tool-orbit',
-  'Pan': 'tool-pan',
-  'Zoom': 'tool-zoom',
-  'Position Camera': 'tool-position-camera',
-  'Walk': 'tool-walk',
-  'Look Around': 'tool-look-around',
-  'Zoom Window': 'tool-zoom-window',
-}
+const TOOL_ACTION_ID = Object.fromEntries(TOOL_REGISTRY.map((t) => [t.name, t.actionId])) as Record<ToolName, string>
 
 const TOOL_DESCRIPTIONS: Record<ToolName, MessageDescriptor> = {
   'Select': msg`Pick faces, edges, and objects in the model.`,
-  'Line': msg`Draw a straight edge between two points.`,
-  'Rectangle': msg`Draw a rectangular face on the ground or a face.`,
-  'Circle': msg`Draw a faceted circular face.`,
-  'Polygon': msg`Draw a regular N-sided polygon from a center point.`,
-  'Arc': msg`Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment.`,
+  'Line': msg`Draw a straight edge between two points. Ctrl detaches the shape from the face.`,
+  'Rectangle': msg`Draw a rectangular face on the ground or a face. Ctrl detaches the shape from the face.`,
+  'Circle': msg`Draw a faceted circular face. Ctrl detaches the shape from the face.`,
+  'Polygon': msg`Draw a regular N-sided polygon from a center point. Ctrl detaches the shape from the face.`,
+  'Arc': msg`Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment. Ctrl detaches the shape from the face.`,
   'Push/Pull': msg`Extrude a face into a solid, or reshape one.`,
   'Follow Me': msg`Sweep a profile along a path into a solid.`,
+  'Revolve': msg`Spin a shape around an axis into a solid.`,
+  'Loft': msg`Blend a solid through two or more shapes, in order.`,
+  'Deform': msg`Twist, bend, or taper a whole solid.`,
   'Offset': msg`Copy a face or profile's boundary inward or outward at a set distance.`,
+  'Shell': msg`Hollow out a solid to a wall thickness, leaving the faces you click open.`,
+  'Project': msg`Draw a closed shape onto a curved or flat solid, then engrave or emboss it.`,
+  'Eraser': msg`Erase drawn lines. Click one, or drag across several.`,
+  'Fillet': msg`Round or bevel the edges of a solid, or round a drawn corner.`,
+  'Array along Path': msg`Place evenly spaced copies of the selection along a line, curve, or face edge, optionally shrinking or growing.`,
   'Paint': msg`Apply the current material to a face or object.`,
   'Position Texture': msg`Move, scale, and rotate a textured face's texture about a fixed pin.`,
   'Move': msg`Translate the selection, with inference snapping.`,
   'Rotate': msg`Rotate the selection around an inferred axis.`,
   'Scale': msg`Resize the selection uniformly about its center.`,
+  'Flip': msg`Mirror the selection across a plane through its center or across a face, in place or as a copy.`,
   'Tape Measure': msg`Measure a distance, or create a parallel guide line.`,
   'Dimension': msg`Place a linear or radius/diameter dimension between snap points.`,
   'Protractor': msg`Measure an angle, or create an angular guide line.`,
@@ -170,7 +169,14 @@ export function toolActionId(name: string): string | undefined {
 function toolSynonyms(): Partial<Record<ToolName, string[]>> {
   return {
     'Push/Pull': [t`extrude`, t`pull`, t`push`],
-    'Follow Me': [t`sweep`, t`pipe`, t`molding`, t`lathe`, t`revolve`],
+    'Follow Me': [t`sweep`, t`pipe`, t`molding`],
+    'Revolve': [t`lathe`, t`turn`],
+    'Loft': [t`curviloft`, t`sweep sections`, t`blend`, t`transition`],
+    'Fillet': [t`roundover`, t`round over`, t`round`, t`ease edges`, t`cove`, t`bullnose`, t`ogee`, t`router`, t`round corner`, t`roundcorner`, t`fredocorner`],
+    'Array along Path': [t`path array`, t`copies along path`, t`follow path copies`],
+    'Shell': [t`hollow`, t`thicken`, t`wall`],
+    'Project': [t`drape`, t`project`, t`emboss`, t`engrave`],
+    'Eraser': [t`erase`, t`delete edge`],
     'Offset': [t`inset`, t`outset`, t`concentric`],
     'Rectangle': [t`rect`, t`box`],
     'Polygon': [t`polygon`, t`hexagon`, t`hex`, t`pentagon`, t`n-gon`, t`nut`, t`bolt`],
@@ -189,15 +195,19 @@ function toolSynonyms(): Partial<Record<ToolName, string[]>> {
 
 function toolEntries(): PaletteEntry[] {
   const synonyms = toolSynonyms()
-  return TOOL_REGISTRY.map((spec) => ({
-    id: TOOL_ACTION_ID[spec.name],
-    toolName: spec.name,
-    label: i18n._(spec.label),
-    description: i18n._(TOOL_DESCRIPTIONS[spec.name]),
-    // oxlint-disable-next-line lingui/no-unlocalized-strings -- group ID
-    group: 'Tools',
-    synonyms: synonyms[spec.name],
-  }))
+  return TOOL_REGISTRY.flatMap((spec): PaletteEntry[] => {
+    if (spec.name === 'Deform') return deformPaletteEntries()
+    const entry: PaletteEntry = {
+      id: TOOL_ACTION_ID[spec.name],
+      toolName: spec.name,
+      label: i18n._(spec.label),
+      description: i18n._(TOOL_DESCRIPTIONS[spec.name]),
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- group ID
+      group: 'Tools',
+      synonyms: synonyms[spec.name],
+    }
+    return spec.name === 'Loft' ? [entry, skinPaletteEntry()] : [entry]
+  })
 }
 
 /** Hand-authored: everything reachable via menuActionRef that isn't a tool.
@@ -206,6 +216,7 @@ function toolEntries(): PaletteEntry[] {
 // oxlint-disable lingui/no-unlocalized-strings -- group and gate values are identifiers; every label, description, and synonym is wrapped in t``
 function actionEntries(): PaletteEntry[] {
   return [
+    ...curveActionPaletteEntries(),
     { id: 'new', label: t`New`, description: t`Start a new, blank document.`, group: 'Actions' },
     { id: 'open', label: t`Open…`, description: t`Open a .hew file from disk.`, group: 'Actions' },
     { id: 'import', label: t`Import…`, description: t`Import a COLLADA (.dae), SketchUp (.skp), glTF, or STL model.`, group: 'Actions', gate: 'canImport' },
@@ -233,10 +244,23 @@ function actionEntries(): PaletteEntry[] {
     { id: 'edit-place-copy', label: t`Place Copy`, description: t`Place another instance of the selected component.`, group: 'Actions', synonyms: [t`duplicate`, t`instance`, t`copy component`], gate: 'canPlaceCopy' },
     { id: 'edit-explode', label: t`Explode`, description: t`Break the selected component instance into plain objects.`, group: 'Actions', synonyms: [t`explode instance`, t`break component`], gate: 'canExplode' },
     { id: 'edit-make-unique', label: t`Make Unique`, description: t`Give the selected instance its own definition, detached from its siblings.`, group: 'Actions', synonyms: [t`unique component`], gate: 'canMakeUnique' },
-    { id: 'edit-union', label: t`Union`, description: t`Merge two selected solids into one (boolean add).`, group: 'Actions', synonyms: [t`boolean`, t`merge`, t`combine`, t`add`, t`join`], gate: 'canBoolean' },
-    { id: 'edit-subtract', label: t`Subtract`, description: t`Cut the second selected solid out of the first (boolean difference).`, group: 'Actions', synonyms: [t`boolean`, t`difference`, t`cut`, t`carve`], gate: 'canBoolean' },
-    { id: 'edit-intersect', label: t`Intersect`, description: t`Keep only the volume the two selected solids share (boolean intersection).`, group: 'Actions', synonyms: [t`boolean`, t`common`, t`overlap`], gate: 'canBoolean' },
+    { id: 'edit-unlink', label: t`Unlink`, description: t`Make the selected copy independent. The other copies stay linked.`, group: 'Actions', synonyms: [t`independent`, t`detach copy`], gate: 'canUnlink' },
+    { id: 'edit-unlink-all', label: t`Unlink all`, description: t`Make every copy of the selected linked copy independent.`, group: 'Actions', synonyms: [t`independent copies`], gate: 'canUnlinkAll' },
+    { id: 'edit-link-identical-copies', label: t`Link identical copies`, description: t`Turn objects that are the same shape into linked copies, so editing one changes them all.`, group: 'Actions', synonyms: [t`link similar`, t`same shape`, t`look-alike`], gate: 'canLinkSimilar' },
+    { id: 'edit-select-all-copies', label: t`Select all copies`, description: t`Select every copy linked to the selected one.`, group: 'Actions', synonyms: [t`linked copies`], gate: 'canUnlinkAll' },
+    { id: 'edit-lock', label: t`Lock`, description: t`Lock the selection so nothing can change it until it is unlocked. Locking one copy of a shared shape locks every copy.`, group: 'Actions', synonyms: [t`freeze`, t`protect`, t`pin`], gate: 'canLock' },
+    { id: 'edit-unlock-selected', label: t`Unlock Selected`, description: t`Unlock the selected locked objects, groups, and components.`, group: 'Actions', synonyms: [t`unfreeze`], gate: 'canUnlock' },
+    { id: 'edit-unlock-all', label: t`Unlock All`, description: t`Unlock everything in the model.`, group: 'Actions', synonyms: [t`unfreeze all`], gate: 'canUnlockAll' },
+    { id: 'edit-flip-red', label: t`Flip Along Red`, description: t`Mirror the selection across the plane through its center, across the red axis.`, group: 'Actions', synonyms: [t`mirror`, t`flip x`], gate: 'canFlip' },
+    { id: 'edit-flip-green', label: t`Flip Along Green`, description: t`Mirror the selection across the plane through its center, across the green axis.`, group: 'Actions', synonyms: [t`mirror`, t`flip y`], gate: 'canFlip' },
+    { id: 'edit-flip-blue', label: t`Flip Along Blue`, description: t`Mirror the selection across the plane through its center, across the blue axis.`, group: 'Actions', synonyms: [t`mirror`, t`flip z`], gate: 'canFlip' },
+    { id: 'edit-paste-independent', label: t`Paste independent`, description: t`Place a plain copy of the clipboard that is not linked to the original.`, group: 'Actions', synonyms: [t`paste new`, t`paste unlinked`], gate: 'clipboardHasContent' },
+    { id: 'edit-paste-linked', label: t`Paste linked`, description: t`Place a copy of the clipboard that stays linked to the original.`, group: 'Actions', synonyms: [t`paste link`], gate: 'canPasteLinked' },
+    { id: 'edit-union', label: t`Union`, description: t`Merge the selected solids into one (boolean add).`, group: 'Actions', synonyms: [t`boolean`, t`merge`, t`combine`, t`add`, t`join`], gate: 'canBoolean' },
+    { id: 'edit-subtract', label: t`Subtract`, description: t`Cut every later selected solid out of the first (boolean difference).`, group: 'Actions', synonyms: [t`boolean`, t`difference`, t`cut`, t`carve`], gate: 'canBoolean' },
+    { id: 'edit-intersect', label: t`Intersect`, description: t`Keep only the volume all the selected solids share (boolean intersection).`, group: 'Actions', synonyms: [t`boolean`, t`common`, t`overlap`], gate: 'canBoolean' },
     { id: 'toggle-axes', label: t`Toggle Axes`, description: t`Show or hide the world axes.`, group: 'Actions' },
+    { id: 'toggle-part-axes', label: t`Toggle Part Axes`, description: t`Show or hide the axes of the selected components and parts.`, group: 'Actions' },
     { id: 'reset-axes', label: t`Reset Drawing Axes`, description: t`Reset the movable drawing axes back to world identity.`, group: 'Actions', synonyms: [t`drawing axes`, t`origin`, t`reset axes`] },
     { id: 'toggle-grid', label: t`Toggle Grid`, description: t`Show or hide the ground grid.`, group: 'Actions' },
     { id: 'toggle-guides', label: t`Toggle Guides`, description: t`Show or hide construction guides.`, group: 'Actions' },
@@ -253,6 +277,7 @@ function actionEntries(): PaletteEntry[] {
     { id: 'view-left', label: t`Standard View: Left`, description: t`Look at the model from the left.`, group: 'Actions' },
     { id: 'view-right', label: t`Standard View: Right`, description: t`Look at the model from the right.`, group: 'Actions' },
     { id: 'view-iso', label: t`Standard View: Iso`, description: t`Switch to the standard isometric view.`, group: 'Actions' },
+    { id: 'view-home', label: t`Standard View: Home`, description: t`Reset the camera to the default 3/4 home view and frame the whole model.`, group: 'Actions' },
     { id: 'toggle-tray', label: t`Toggle Tray`, description: t`Show or hide the right-hand tray and all its panels.`, group: 'Actions', synonyms: [t`hide tray`, t`show tray`, t`panels`, t`sidebar`, t`inspector`, t`more room`, t`hide panels`] },
     { id: 'toggle-dock', label: t`Toggle Contextual Dock`, description: t`Show or hide the floating action dock at the bottom of the viewport.`, group: 'Actions', synonyms: [t`dock`, t`action bar`, t`floating toolbar`, t`hide dock`, t`show dock`] },
     { id: 'toggle-compact-rail', label: t`Compact Tool Rail`, description: t`Shrink the tool rail to icons only, or bring the tool names back.`, group: 'Actions', synonyms: [t`tool rail`, t`toolbar`, t`icons only`, t`tool names`, t`collapse`, t`expand`, t`sidebar`] },
@@ -277,6 +302,7 @@ function actionEntries(): PaletteEntry[] {
     { id: 'purge-unused', label: t`Purge Unused…`, description: t`Delete every unused palette material and component definition.`, group: 'Actions', synonyms: [t`cleanup`, t`clean up`, t`materials`, t`components`] },
     { id: 'open-settings', label: t`Settings…`, description: t`Open Hew Settings.`, group: 'Actions', synonyms: [t`preferences`] },
     { id: 'report-bug', label: t`Report Bug…`, description: t`Review and send a bug report, or save it to a file.`, group: 'Actions' },
+    { id: 'sent-reports', label: t`Sent Reports…`, description: t`See replies and the status of bug reports you sent from this computer.`, group: 'Actions', synonyms: [t`bug`, t`report`, t`reply`, t`feedback`] },
     { id: 'open-guide', label: t`Hew Help`, description: t`Open the online user guide in your browser.`, group: 'Actions', synonyms: [t`help`, t`guide`, t`documentation`, t`docs`, t`manual`, t`learn`, t`user guide`] },
   ]
 }
@@ -306,12 +332,12 @@ export const PALETTE_EXCLUDED_ACTION_IDS: Record<string, string> = {
 /** The full palette registry — tools first (spec ranks Tools above Actions
  * absent other signals), then hand-authored actions. */
 export function paletteEntries(): PaletteEntry[] {
-  return [...toolEntries(), ...actionEntries()]
+  // The Preview wall: nothing the build withholds is searchable.
+  return [...toolEntries(), ...actionEntries()].filter((e) => actionOffered(e.id))
 }
 
-/** Convenience for callers (e.g. the palette UI) that also want the
- * platform-correct shortcut string to display next to a tool result. */
-export function paletteShortcut(entry: PaletteEntry, isMac: boolean): string {
-  const tool = TOOL_REGISTRY.find((t) => TOOL_ACTION_ID[t.name] === entry.id)
-  return tool === undefined ? '' : shortcutFor(tool.name, isMac)
+/** The shortcut to display next to a palette result — the first key of its
+ * command in the keymap, for tools and actions alike; '' when it has none. */
+export function paletteShortcut(entry: PaletteEntry): string {
+  return shortcutLabel(entry.id)
 }

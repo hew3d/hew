@@ -8,13 +8,14 @@
  * report JSON naming what a draft of that kind changes (a face draft
  * changes its object's topology; a plane/sketch draft touches a sketch),
  * and `draft_cancel` closes the open draft. Only one draft may be open —
- * a second begin throws `DraftAlreadyOpen`, like the kernel.
+ * a second begin throws `DraftAlreadyOpen`, like the kernel. It also
+ * stubs the sketch-region fill pick as a miss (see the members' tail).
  */
 import { vi } from 'vitest'
 
 export interface DraftLog {
   /** Every begin call, in order, with its kind and raw args. */
-  begins: Array<{ kind: 'plane' | 'plane_in_instance' | 'face' | 'face_in_instance' | 'sketch' | 'ctx'; args: unknown[] }>
+  begins: Array<{ kind: 'plane' | 'plane_in_instance' | 'face' | 'face_in_instance' | 'sketch' | 'ctx' | 'detached'; args: unknown[] }>
   /** Every segment: [ax, ay, az, bx, by, bz]. */
   segments: Array<[number, number, number, number, number, number]>
   /** Curve brackets, in order: 'circle' | 'polygon' (begin) and 'end'. */
@@ -38,6 +39,8 @@ export interface DraftMockOpts {
   ctxObjects?: bigint[]
   /** Plane-membership check: throw `PointOffPlane` for off-plane segments. */
   enforcePlane?: boolean
+  /** Extra report fields (`faces_closed`, `cells`) merged into the nth `draft_end` report. */
+  reportExtras?: (n: number) => Record<string, unknown>
 }
 
 export function draftMock(opts: DraftMockOpts = {}) {
@@ -74,6 +77,8 @@ export function draftMock(opts: DraftMockOpts = {}) {
       begin('sketch', [sketch, ...rest], [], null)),
     draft_begin_ctx: vi.fn((ctx: string, ...rest: unknown[]) =>
       begin('ctx', [ctx, ...rest], opts.ctxObjects ?? [], null)),
+    draft_begin_detached: vi.fn((ctx: string, ...rest: unknown[]) =>
+      begin('detached', [ctx, ...rest], [], null)),
     draft_offset_region: vi.fn((d: bigint, key: bigint, distance: number) => {
       if (open === null || open.handle !== d) throw new Error('StaleDraft: no such draft')
       log.offsets.push([key, distance])
@@ -124,6 +129,7 @@ export function draftMock(opts: DraftMockOpts = {}) {
         objects: open.objects.map((o) => Number(o)),
         sketches: open.sketches.map((s) => Number(s)),
         kept_as_sketch: [],
+        ...(opts.reportExtras?.(log.ended) ?? {}),
       }
       open = null
       log.ended += 1
@@ -135,6 +141,11 @@ export function draftMock(opts: DraftMockOpts = {}) {
       log.cancelled += 1
       return true
     }),
+    // Not part of the draft surface, but every draw tool's idle hover asks
+    // it (`resolveIdleDrawTarget`'s fill pick, view-plane design §2 step
+    // 4b): no filled region under the ray unless a test overrides these.
+    pick_sketch_region: vi.fn(() => undefined),
+    pick_sketch_region_in_instance: vi.fn(() => undefined),
   }
   return { members, log, isOpen: () => open !== null }
 }

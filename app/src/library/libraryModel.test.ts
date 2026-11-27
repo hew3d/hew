@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildLibraryItem,
+  builtInProfileItem,
   categoryTypeLabel,
   collectionMatchesSubtree,
   collectionsOf,
@@ -9,9 +10,13 @@ import {
   erroredItem,
   filterItems,
   formatBytes,
+  isBuiltInItem,
   materialSubline,
   metadataLine,
+  metaForEditSave,
+  metaForLibrarySave,
   normalizeCollectionPath,
+  parseLibraryMeta,
   savedLine,
   sortListItems,
 } from './libraryModel'
@@ -41,6 +46,7 @@ function summary(overrides: Partial<LibraryItemSummary> = {}): LibraryItemSummar
     first_root_name: null,
     doc_attrs: {},
     material_entries: [],
+    profile_chain_only: false,
     ...overrides,
   }
 }
@@ -609,6 +615,12 @@ describe('sortListItems', () => {
     expect(sortListItems(items, 'size', 'desc').map((i) => i.displayName)).toEqual(['apple bin', 'Banana Crate', 'Cherry Jar'])
   })
 
+  it('sorts a built-in profile after every real file by size, either way', () => {
+    const mixed = [builtInProfileItem('builtin:ogee', 'Ogee'), ...items]
+    expect(sortListItems(mixed, 'size', 'asc').map((i) => i.displayName)).toEqual(['Cherry Jar', 'Banana Crate', 'apple bin', 'Ogee'])
+    expect(sortListItems(mixed, 'size', 'desc').map((i) => i.displayName)).toEqual(['apple bin', 'Banana Crate', 'Cherry Jar', 'Ogee'])
+  })
+
   it('breaks ties by display name so equal values never jitter', () => {
     const tied = [listItem('Zed', 'component', 100), listItem('Alpha', 'component', 100)]
     expect(sortListItems(tied, 'size', 'asc').map((i) => i.displayName)).toEqual(['Alpha', 'Zed'])
@@ -918,5 +930,156 @@ describe('savedLine', () => {
   it('reports an unknown date when neither savedAt nor mtimeMs is usable', () => {
     const i = { ...item, file: file('x.hew', { mtimeMs: 0 }), meta: {} }
     expect(savedLine(i, NOW)).toBe('Saved date unknown')
+  })
+})
+
+describe('profile items', () => {
+  it('derives the profile category from one open drawn chain and nothing else', () => {
+    const chain = buildLibraryItem(file('Profiles/ogee-000000.hew'), summary({ profile_chain_only: true }), 'h')
+    expect(chain.category).toBe('profile')
+    // The chain flag alone is not enough: any object, component or material
+    // makes it an ordinary file again.
+    for (const extra of [{ objects: 1 }, { components: 1 }, { materials: 1 }]) {
+      const item = buildLibraryItem(file('a.hew'), summary({ profile_chain_only: true, ...extra }), 'h')
+      expect(item.category).not.toBe('profile')
+    }
+    // An old reader's view (no flag): a bare file is a model.
+    expect(buildLibraryItem(file('a.hew'), summary(), 'h').category).toBe('model')
+  })
+
+  it('honors the profile category in the metadata and labels it', () => {
+    const item = buildLibraryItem(
+      file('Profiles/x.hew'),
+      summary({ doc_attrs: withLibraryMeta({ category: 'profile', name: 'Edge' }) }),
+      'h',
+    )
+    expect(item.category).toBe('profile')
+    expect(categoryTypeLabel('profile')).toBe('Profile')
+  })
+
+  it('recognizes built-in rows', () => {
+    const b = builtInProfileItem('builtin:ogee', 'Ogee')
+    expect(isBuiltInItem(b)).toBe(true)
+    expect(b.category).toBe('profile')
+    expect(isBuiltInItem(buildLibraryItem(file('Profiles/x.hew'), summary(), 'h'))).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The remote note (docs/design/shared-library-sources.md 5.2, 6.5, 7.2)
+// ---------------------------------------------------------------------------
+
+const NOTE = {
+  source: 'github:hew3d/example',
+  name: 'Example',
+  path: 'Components/chair.hew',
+  sha256: 'ab'.repeat(32),
+  commit: 'c0ffee',
+  license: 'CC0-1.0',
+  fetchedAt: '2026-11-01T00:00:00.000Z',
+  edited: false,
+}
+
+describe('parseLibraryMeta — remote', () => {
+  it('reads the note with its typed fields', () => {
+    const meta = parseLibraryMeta({ id: 'a', remote: NOTE })
+    expect(meta.remote).toEqual(NOTE)
+  })
+
+  it('defaults edited to false when the note omits it, and keeps commit optional', () => {
+    const { edited: _edited, commit: _commit, ...bare } = NOTE
+    const meta = parseLibraryMeta({ remote: bare })
+    expect(meta.remote?.edited).toBe(false)
+    expect(meta.remote?.commit).toBeUndefined()
+    expect(meta.remote?.source).toBe(NOTE.source)
+    expect(meta.remote?.sha256).toBe(NOTE.sha256)
+  })
+
+  it('reads edited: true', () => {
+    expect(parseLibraryMeta({ remote: { ...NOTE, edited: true } }).remote?.edited).toBe(true)
+  })
+
+  it('has no note for an item without one or with a non-object one', () => {
+    expect(parseLibraryMeta({ id: 'a' }).remote).toBeUndefined()
+    expect(parseLibraryMeta({ remote: 'x' }).remote).toBeUndefined()
+    expect(parseLibraryMeta({ remote: ['x'] }).remote).toBeUndefined()
+    expect(parseLibraryMeta({ remote: null }).remote).toBeUndefined()
+  })
+})
+
+describe('metaForEditSave — the edit-in-place Save keeps the note and sets edited', () => {
+  it('keeps the Library note and marks it edited', () => {
+    const out = metaForEditSave({ id: 'a', name: 'Chair', remote: NOTE }, '2026-11-02T00:00:00.000Z')
+    expect(out.remote).toEqual({ ...NOTE, edited: true })
+    expect(out.id).toBe('a')
+    expect(out.savedAt).toBe('2026-11-02T00:00:00.000Z')
+  })
+
+  it('does not invent a note for an item that has none', () => {
+    const out = metaForEditSave({ id: 'a', name: 'Chair' }, '2026-11-02T00:00:00.000Z')
+    expect('remote' in out).toBe(false)
+  })
+
+  it('does not mutate the raw attrs it was given', () => {
+    const raw = { id: 'a', remote: { ...NOTE } }
+    metaForEditSave(raw, 'now')
+    expect(raw.remote.edited).toBe(false)
+  })
+})
+
+// REQUEST: extract from handleSaveToLibraryCommit (App.tsx) into
+// libraryModel.ts:
+//   metaForLibrarySave(
+//     fresh: Record<string, unknown>,        // id, name, category, savedAt, sourceDoc
+//     updating?: Record<string, unknown>,    // the Library's current meta of the item being written over (LibraryItemMeta or raw attrs); absent for a new item
+//   ): Record<string, unknown>
+// Result: {...updating, ...fresh}, plus `remote` = updating.remote with
+// edited: true when updating carries a note; otherwise NO `remote` key, even
+// if `fresh` or the document carried one. Used by the selection/document
+// branch (update mode keeps the note, new-item modes drop it) AND by the
+// profile branch (replacing passes the replaced item's meta as `updating`).
+describe('metaForLibrarySave — update keeps the note and sets edited, new items drop it', () => {
+  const fresh = { id: 'a', name: 'Chair', category: 'component', savedAt: '2026-11-02T00:00:00.000Z', sourceDoc: 'house' }
+
+  it('update mode keeps the note, sets edited, and keeps the other Library keys', () => {
+    const out = metaForLibrarySave(fresh, { id: 'a', name: 'Old', keywords: ['oak'], collection: 'Furniture', remote: NOTE })
+    expect(out.remote).toEqual({ ...NOTE, edited: true })
+    expect(out.keywords).toEqual(['oak'])
+    expect(out.collection).toBe('Furniture')
+    expect(out.name).toBe('Chair')
+    expect(out.savedAt).toBe(fresh.savedAt)
+  })
+
+  it('update mode of an item without a note writes none', () => {
+    const out = metaForLibrarySave(fresh, { id: 'a', keywords: ['oak'] })
+    expect('remote' in out).toBe(false)
+  })
+
+  it('a new item (no updating meta) has no note', () => {
+    expect('remote' in metaForLibrarySave(fresh)).toBe(false)
+  })
+
+  it('a new item drops a note that rode in on the fresh keys', () => {
+    expect('remote' in metaForLibrarySave({ ...fresh, remote: NOTE })).toBe(false)
+  })
+
+  it('the profile branch: replacing a profile keeps its note and sets edited', () => {
+    const out = metaForLibrarySave(
+      { id: 'p', name: 'Cove', category: 'profile', savedAt: 'now', sourceDoc: 'house' },
+      { id: 'p', remote: NOTE },
+    )
+    expect(out.category).toBe('profile')
+    expect(out.remote).toEqual({ ...NOTE, edited: true })
+  })
+
+  it('the profile branch: a new profile copy has no note', () => {
+    const out = metaForLibrarySave({ id: 'p2', name: 'Cove', category: 'profile', savedAt: 'now', sourceDoc: 'house' })
+    expect('remote' in out).toBe(false)
+  })
+
+  it('does not mutate the updating meta', () => {
+    const updating = { id: 'a', remote: { ...NOTE } }
+    metaForLibrarySave(fresh, updating)
+    expect(updating.remote.edited).toBe(false)
   })
 })

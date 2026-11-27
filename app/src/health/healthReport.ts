@@ -11,9 +11,12 @@
  */
 import { plural, t } from '@lingui/core/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { KIND_NAME, PANEL, rowDetail, type KindKey, type OpenReason } from './healthCopy'
+import { behaviorEnabled } from '../preview'
+import { KIND_NAME, PANEL, ZERO_AREA, rowDetail, type KindKey, type OpenReason } from './healthCopy'
 
 export type VerdictKind =
+  /** A closed object. Only listed when it has zero-area faces to remove. */
+  | 'solid'
   | 'flat_sheet'
   | 'bent_sheet'
   | 'cappable'
@@ -66,6 +69,8 @@ export interface HealthRow {
   islands: number
   /** How many faces the object has. */
   faces: number
+  /** Faces with no area that "Remove degenerate faces" would clear. */
+  degenerateFaces: number
 }
 
 export interface HealthFamily {
@@ -109,7 +114,13 @@ export const EMPTY_REPORT: HealthReport = { rows: [], families: [], counts: EMPT
 /** Parse `Scene.health_report_json`. Handles arrive as decimal strings. */
 export function parseHealthReport(json: string): HealthReport {
   const raw = JSON.parse(json) as any
-  const rows: HealthRow[] = (raw.rows ?? []).map((r: any): HealthRow => ({
+  // Zero-area faces are a Preview feature's concern (the Preview wall,
+  // `health-remove-degenerate`): without it a closed object the kernel lists
+  // only for them is left out, and no row reports a count.
+  const degenerate = behaviorEnabled('health-remove-degenerate')
+  const rows: HealthRow[] = (raw.rows ?? [])
+    .filter((r: any) => degenerate || r.verdict?.kind !== 'solid')
+    .map((r: any): HealthRow => ({
     object: BigInt(r.object),
     name: r.name ?? null,
     definition: r.definition == null ? null : BigInt(r.definition),
@@ -135,6 +146,7 @@ export function parseHealthReport(json: string): HealthReport {
     branchingVertices: r.branching_vertices ?? 0,
     islands: r.islands ?? 1,
     faces: r.faces ?? 0,
+    degenerateFaces: degenerate ? (r.degenerate_faces ?? 0) : 0,
   }))
   const families: HealthFamily[] = (raw.families ?? []).map((f: any): HealthFamily => ({
     members: (f.members ?? []).map((m: string) => BigInt(m)),
@@ -173,11 +185,14 @@ export function verdictClass(kind: VerdictKind, accepted = false): HealthClass {
   return kind === 'flat_sheet' || kind === 'bent_sheet' ? 'surface' : 'open'
 }
 
-/** Stage 2 repairs: rows whose flat openings can take a face. Non-manifold
+/** Stage 2 repairs: rows with an opening that can take a face. Non-manifold
  *  rows are refused by the kernel and surfaces are Stage 3, so neither offers it. */
 export function canCloseRow(row: HealthRow): boolean {
   const v = row.verdict
-  return v.kind === 'cappable' || v.kind === 'mixed' || (v.kind === 'holes' && (v.planar ?? 0) > 0)
+  const flatKind = v.kind === 'cappable' || v.kind === 'mixed' || (v.kind === 'holes' && (v.planar ?? 0) > 0)
+  // A flat kind with no rim the kernel can cap (every opening warped) has
+  // nothing for Close to do. An empty list means the report left rims out.
+  return flatKind && (row.rims.length === 0 || row.rims.some((r) => r.cappable))
 }
 
 export function rowClass(row: HealthRow): HealthClass {
@@ -326,8 +341,14 @@ export function openReason(row: HealthRow): OpenReason {
 }
 /* oxlint-enable lingui/no-unlocalized-strings */
 
+/** A closed object listed only because it has zero-area faces. */
+export function isSolidRow(row: HealthRow): boolean {
+  return row.verdict.kind === 'solid'
+}
+
 /** One-line detail under a row's name ("2 openings", "Flat panel", "Open edges branch"). */
 export function rowDetailText(row: HealthRow, inSplit?: boolean): string {
+  if (isSolidRow(row)) return ZERO_AREA.detail(row.degenerateFaces)
   return rowDetail(classifyRow(row, inSplit), row.rims.length, row.accepted, openReason(row))
 }
 
@@ -355,7 +376,7 @@ export function filterRows(rows: readonly HealthRow[], filter: HealthFilter): He
     if (row.accepted && !filter.showAccepted && filter.object == null) return false
     if (q === '') return true
     const hay = `${row.name ?? ''} ${row.definitionName ?? ''} ${rowDetailText(row)} ${
-      KIND_NAME[classifyRow(row)]
+      isSolidRow(row) ? ZERO_AREA.group : KIND_NAME[classifyRow(row)]
     }`.toLowerCase()
     return hay.includes(q)
   })
@@ -381,6 +402,8 @@ export interface GroupedHealth {
   groups: HealthGroup[]
   /** Split shapes, one group per family. */
   families: HealthFamilyGroup[]
+  /** Closed objects that have zero-area faces (listed after the kinds). */
+  zeroArea: HealthRow[]
 }
 
 /** Display order of the kinds (`KIND_NAME`'s order). */
@@ -390,7 +413,9 @@ export const KIND_ORDER = Object.keys(KIND_NAME) as KindKey[]
  * Group listed rows by kind (empty groups dropped), split shapes by family.
  * Every row is listed once.
  */
-export function groupRows(report: HealthReport, rows: readonly HealthRow[]): GroupedHealth {
+export function groupRows(report: HealthReport, listedRows: readonly HealthRow[]): GroupedHealth {
+  const zeroArea = listedRows.filter(isSolidRow)
+  const rows = listedRows.filter((r) => !isSolidRow(r))
   const splits = splitFamilySet(report.rows)
   const inSplit = (r: HealthRow): boolean => r.family !== null && splits.has(r.family)
   const groups: HealthGroup[] = []
@@ -417,12 +442,16 @@ export function groupRows(report: HealthReport, rows: readonly HealthRow[]): Gro
         rows: members,
       }
     })
-  return { groups, families }
+  return { groups, families, zeroArea }
 }
 
 /** Number of rows a grouping lists. */
 export function groupedRowCount(g: GroupedHealth): number {
-  return g.groups.reduce((n, x) => n + x.rows.length, 0) + g.families.reduce((n, x) => n + x.rows.length, 0)
+  return (
+    g.groups.reduce((n, x) => n + x.rows.length, 0) +
+    g.families.reduce((n, x) => n + x.rows.length, 0) +
+    g.zeroArea.length
+  )
 }
 
 /** Every listed row, in display order (the overlay and keyboard stepping). */
@@ -432,6 +461,7 @@ export function groupedRows(g: GroupedHealth): HealthRow[] {
     if (key === 'split') for (const f of g.families) out.push(...f.rows)
     else for (const x of g.groups) if (x.key === key) out.push(...x.rows)
   }
+  out.push(...g.zeroArea)
   return out
 }
 
@@ -440,6 +470,11 @@ export function groupedRows(g: GroupedHealth): HealthRow[] {
 // ---------------------------------------------------------------------------
 
 let wholeCache: { scene: WasmScene; docRev: number; report: HealthReport } | null = null
+
+/** Test hook: forget the whole-model report read for a shared test scene. */
+export function resetHealthReportCache(): void {
+  wholeCache = null
+}
 
 /**
  * Read a report from the scene. The whole-document read (the panel's Whole
@@ -499,6 +534,15 @@ export interface HealthOverlay {
   /** While the pointer / focus is on a Close button: the rims it WILL cap,
    *  drawn in the solid color over the usual ones (design §5.3). */
   capPreview: { id: bigint; rim: number }[] | null
+  /** Loose line segments to draw (six floats each, `ax ay az bx by bz`,
+   *  world space), for drawing that has no Object to key them to: the open
+   *  edges of faces Make Solid could not close (rim color) and the edges of
+   *  closed loops that lie on no one plane (warn color). Wireframe faces §6. */
+  segments?: { open: Float32Array; warn: Float32Array }
+  /** While the pointer / focus is on a Mend button: the points it would
+   *  merge and split (world `[x, y, z, …]`); the rims it would fill ride in
+   *  `capPreview`. */
+  mendPoints?: { merge: Float32Array; split: Float32Array } | null
 }
 
 /** The rims a Close on `rows` would cap: those the kernel flags `cappable`

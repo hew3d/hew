@@ -202,7 +202,7 @@ test('X-ray and Wireframe are one mode, and picking follows it', async ({ page }
   // the top face snaps, and a line drawn from it to the hidden ceiling
   // corner lands exactly on both.
   expect(await hoverChip(page, HIDDEN_MID_TOP, 'Line')).toContain('Midpoint')
-  const before = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const before = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   await page.getByRole('radio', { name: 'Line' }).click()
   await hover(page, HIDDEN_MID_TOP)
   expect(await chip(page)).toContain('Midpoint')
@@ -216,7 +216,7 @@ test('X-ray and Wireframe are one mode, and picking follows it', async ({ page }
   await page.waitForTimeout(150)
   await page.keyboard.press('Escape')
   expect(await page.evaluate(() => window.__hew_test!.getLastError())).toBeNull()
-  expect(await page.evaluate(() => window.__hew_test!.getStateHash())).not.toBe(before)
+  expect(await page.evaluate(() => window.__hew_test!.getModelStateHash())).not.toBe(before)
   const drawn = await page.evaluate(() => {
     const t = window.__hew_test!
     const sketched = t.getSketchIds().flatMap((id) => t.getSketchSegmentsExact(id))
@@ -277,7 +277,7 @@ test('the orbit pivot lands on the model in Wireframe: it is a camera question, 
   expect(Math.abs(got - axial), `pivot at the top face's depth (${axial.toFixed(3)} m), not the ground's`).toBeLessThan(0.01)
 })
 
-test('Wireframe adopts no face: a rectangle started on an edge lands on the ground plane', async ({ page }) => {
+test('Wireframe adopts no face: a rectangle started on an edge point is drawn on the plane through that point', async ({ page }) => {
   await page.goto('/')
   await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, { timeout: 15_000 })
   const block = await page.evaluate(() => {
@@ -303,17 +303,27 @@ test('Wireframe adopts no face: a rectangle started on an edge lands on the grou
   await page.mouse.up()
   await page.waitForTimeout(150)
   await page.keyboard.press('Escape')
+  // Design wireframe-faces-and-solids §2.1 / D2: the click is a named point
+  // (the edge midpoint) off the picked ground plane and nearer the eye, so
+  // the plane becomes the camera-facing axis plane THROUGH the point, z = 1.
+  // That is not a face adoption (no face input, no projection, no error):
+  // the rectangle starts at (1, 0, 1) on z = 1, and because the box's top
+  // face is coplanar the kernel's ordinary arrangement imprints it there.
   const result = await page.evaluate(({ before, block }) => {
     const t = window.__hew_test!
     const fresh = t.getSketchIds().filter((id) => !before.includes(id))
     return {
-      zs: fresh.flatMap((id) => t.getSketchSegmentsExact(id)).flatMap((s) => [s[2], s[5]]),
-      imprints: t.getImprints(block).length,
+      fresh: fresh.length,
+      imprints: t.getImprints(block).map((i) => i.loop),
+      error: t.getLastError(),
     }
   }, { before, block })
-  expect(result.zs.length, 'a rectangle was drawn').toBeGreaterThan(0)
-  for (const z of result.zs) expect(Math.abs(z), 'on the ground plane').toBeLessThan(1e-9)
-  expect(result.imprints, 'nothing drawn on the block\'s faces').toBe(0)
+  expect(result.error, 'no error').toBeFalsy()
+  expect(result.fresh, 'no free sketch on the ground').toBe(0)
+  expect(result.imprints.length, 'one rectangle, arranged on the top face').toBe(1)
+  const loop = result.imprints[0]
+  for (const v of loop) expect(Math.abs(v[2] - 1), 'on the plane through the point, z = 1').toBeLessThan(1e-9)
+  expect(loop.some((v) => Math.abs(v[0] - 1) < 1e-9 && Math.abs(v[1]) < 1e-9), 'starts at the clicked edge point').toBe(true)
 })
 
 test('the orbit pivot finds a drawn, not extruded shape in Wireframe too', async ({ page }) => {
@@ -364,7 +374,7 @@ test('switching the mode with the pointer parked re-resolves the cue there, both
   expect(await chip(page)).toContain('On Face')
   // Through the command palette, by keyboard only: the mouse never moves.
   const viaPalette = async (): Promise<void> => {
-    await page.keyboard.press('Control+/')
+    await page.keyboard.press('ControlOrMeta+/')
     // Type only once the palette has reset and focused its search field:
     // the reset runs on open and the focus a frame later, so keys sent
     // straight after the shortcut land on the previous run's text.

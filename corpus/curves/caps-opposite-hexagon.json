@@ -1,0 +1,132 @@
+{
+  "title": "Opposite cap loops on a hexagon prism",
+  "from": "Sequences: one loop blended first, then the other swept.",
+  "build": [
+    {
+      "method": "hew.sketch.draw_polygon",
+      "as": "base",
+      "params": {"plane": {"ground": true}, "center": [0, 0, 0], "radius": "30mm", "sides": 6}
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "hex",
+      "params": {"region": {"$ref": "base#/region_id"}, "distance": "25mm"}
+    }
+  ],
+  "cases": [
+    {
+      "id": "hex-top10-then-bottom-round",
+      "note": "Hexagon prism 30 mm circumradius, 25 mm tall. Top loop at 10 mm first, then sweep the bottom loop: 10 + size under 25 mm, limit 15 mm.",
+      "before": [
+        {
+          "method": "hew.solid.fillet",
+          "params": {
+            "edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, "25mm"]}}],
+            "radius": "10mm"
+          }
+        }
+      ],
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, 0]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "14mm", "15mm", "16mm", "20mm"],
+      "volume": "less",
+      "fits_to": "14mm",
+      "never_above": "15mm"
+    },
+    {
+      "id": "hex-bottom10-then-top-round",
+      "note": "Reverse order, same limit 15 mm.",
+      "before": [
+        {
+          "method": "hew.solid.fillet",
+          "params": {
+            "edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, 0]}}],
+            "radius": "10mm"
+          }
+        }
+      ],
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, "25mm"]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "14mm", "15mm", "16mm", "20mm"],
+      "volume": "less",
+      "fits_to": "14mm",
+      "never_above": "15mm"
+    },
+    {
+      "id": "hex-top10-then-bottom-chamfer",
+      "note": "Hexagon prism 30 mm circumradius, 25 mm tall. Top loop at 10 mm first, then sweep the bottom loop: 10 + size under 25 mm, limit 15 mm.",
+      "before": [
+        {
+          "method": "hew.solid.chamfer",
+          "params": {
+            "edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, "25mm"]}}],
+            "distance": "10mm"
+          }
+        }
+      ],
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, 0]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "14mm", "15mm", "16mm", "20mm"],
+      "volume": "less",
+      "fits_to": "14mm",
+      "never_above": "15mm"
+    },
+    {
+      "id": "hex-bottom10-then-top-chamfer",
+      "note": "Reverse order, same limit 15 mm.",
+      "before": [
+        {
+          "method": "hew.solid.chamfer",
+          "params": {
+            "edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, 0]}}],
+            "distance": "10mm"
+          }
+        }
+      ],
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, "25mm"]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "14mm", "15mm", "16mm", "20mm"],
+      "volume": "less",
+      "fits_to": "14mm",
+      "never_above": "15mm"
+    },
+    {
+      "id": "hex-top20-then-bottom-round",
+      "note": "Top loop at 20 mm first leaves a 5 mm wall; bottom limit 5 mm (6 and 10 mm make them meet).",
+      "before": [
+        {
+          "method": "hew.solid.fillet",
+          "params": {
+            "edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, "25mm"]}}],
+            "radius": "20mm"
+          }
+        }
+      ],
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, 0]}}]},
+      "sizes": ["0.1mm", "1mm", "3mm", "4mm", "5mm", "6mm", "10mm"],
+      "volume": "less",
+      "fits_to": "4mm",
+      "never_above": "5mm"
+    },
+    {
+      "id": "hex-bottom20-then-top-round",
+      "note": "Reverse of the above.",
+      "before": [
+        {
+          "method": "hew.solid.fillet",
+          "params": {
+            "edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, 0]}}],
+            "radius": "20mm"
+          }
+        }
+      ],
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "hex#/object_id"}, "at": [0, 0, "25mm"]}}]},
+      "sizes": ["0.1mm", "1mm", "3mm", "4mm", "5mm", "6mm", "10mm"],
+      "volume": "less",
+      "fits_to": "4mm",
+      "never_above": "5mm"
+    }
+  ]
+}

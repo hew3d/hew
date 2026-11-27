@@ -37,11 +37,12 @@ function makeFacePick(object: bigint, face: bigint, instance?: bigint, depth = 1
 
 /** A fake `SketchRegionPickJs` returning the seeded handles, `depth` in ray
  *  parameter units (RAY's direction is unit, so metres too). */
-function makeRegionPick(sketch: bigint, region: bigint, depth = 1) {
+function makeRegionPick(sketch: bigint, region: bigint, depth = 1, detached = false) {
   return {
     sketch: () => sketch,
     region: () => region,
     depth: () => depth,
+    detached: () => detached,
     free: vi.fn(),
   }
 }
@@ -67,6 +68,8 @@ function makeWasmScene(opts: {
    *  the active component (component-edit-parity.md phase A2). */
   memberSketches?: bigint[]
   componentThroughResults?: bigint[]
+  /** A component/group editing session is open (`session_stack` non-empty). */
+  sessionOpen?: boolean
   /** Plane listings by context (the face / sketch plane's `plane_units_json`).
    *  Absent: the scene lists nothing and the struck face stands. */
   listings?: Record<string, MockListing>
@@ -78,6 +81,7 @@ function makeWasmScene(opts: {
     ...(opts.listings !== undefined ? planeUnitsMock(opts.listings) : {}),
     history_generation: vi.fn(() => 1n),
     pick_face: vi.fn(() => opts.facePick),
+    session_stack: vi.fn(() => (opts.sessionOpen === true ? [{ kind: 'instance', id: 77n }] : [])),
     // `pick_sketch_region` only ever walks WORLD-tree sketches — Path B calls
     // its `_in_instance` sibling instead while inside an instance context, so
     // the two are seeded independently (`regionPick` covers whichever one the
@@ -210,6 +214,80 @@ describe('PushPullTool — Path A (object face)', () => {
     expect(scene.extrude_region).not.toHaveBeenCalled()
     expect(tool.capturingInput()).toBe(false)
     expect(String((onToast as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain('component')
+    // The refusal is GUIDANCE, tagged so the app emphasizes the toast
+    // rather than filing it as an ordinary warning (bug report: the plain
+    // bottom toast was easy to miss).
+    expect((onToast as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe('EditContextHint')
+  })
+
+  // Part A of the live-siblings bug report: a person coming from SketchUp
+  // pushes on a copied component, sees nothing happen, and reads the
+  // viewport as broken. The way in now shows BEFORE the click: hovering a
+  // component face outside its edit session puts the same hint beside the
+  // cursor (Tool.hoverHint) and in the status bar (statusHint).
+  it('hovering a component face outside its edit session explains itself before any click', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) })
+    const { tool, onToast } = makeTool(scene)
+
+    expect(tool.hoverHint()).toBeNull()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+
+    expect(tool.hoverHint()).toContain('double-click it to edit the component')
+    expect(tool.statusHint()).toContain('double-click it to edit the component')
+    expect(onToast).not.toHaveBeenCalled() // a hover never toasts
+  })
+
+  it('with a session open, the hint names Esc as the way out instead of a dead-end double-click', () => {
+    // Double-clicking another copy while a component is open for editing
+    // is ignored by the viewport (outside the session scope), so the hover
+    // and the refused click must not promise it.
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n), sessionOpen: true })
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).toContain('press Esc to finish editing the open component first')
+    expect(tool.hoverHint()).not.toContain('double-click it to edit')
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    expect(String((onToast as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain('press Esc')
+  })
+
+  it('the hover hint is dropped on cancel, on a context change, and when the pointer leaves the canvas', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).not.toBeNull()
+    tool.onPointerLeave()
+    expect(tool.hoverHint()).toBeNull()
+    expect(tool.statusHint()).toContain('Click a face')
+
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).not.toBeNull()
+    tool.cancel()
+    expect(tool.hoverHint()).toBeNull()
+
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).not.toBeNull()
+    tool.setEditContext({ kind: 'instance', id: 12n, component: 100n })
+    expect(tool.hoverHint()).toBeNull()
+  })
+
+  it('the hover hint clears over a pushable face and over nothing', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).not.toBeNull()
+
+    // A fresh ray object: the per-ray pick cache must not serve the old
+    // instanced pick for a ray that now hits a plain face.
+    const plain = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool: tool2 } = makeTool(plain)
+    tool2.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool2.hoverHint()).toBeNull()
+    expect(tool2.statusHint()).toContain('Click a face')
+
+    const empty = makeWasmScene({})
+    const { tool: tool3 } = makeTool(empty)
+    tool3.onPointerMove(null, RAY)
+    expect(tool3.hoverHint()).toBeNull()
   })
 
   it('free drawing lying ON an ineligible face (drawn on a component from outside) takes the click and extrudes', () => {
@@ -1201,6 +1279,22 @@ describe('PushPullTool — hard snaps that are not a depth (inference-permissive
     const { tool, scene } = armDrag()
     expect(commitAt(tool, scene, makeSnap({ x: 2, y: 2, z: 0.75, kind: 'on-guide' }), freeDragRay(0.9))).toBeCloseTo(0.75)
   })
+
+  it('the line where two objects\' faces meet is a depth reference, like a real edge', () => {
+    const { tool, scene } = armDrag()
+    const meetingLine: Snap['meetingLine'] = [
+      [2, 1, 0.5],
+      [2, 3, 0.5],
+    ]
+    expect(
+      commitAt(tool, scene, makeSnap({ x: 2, y: 2, z: 0.5, kind: 'on-intersection-line', meetingLine }), freeDragRay(0.9)),
+    ).toBe(0.5)
+  })
+
+  it('a face under the cursor is not: the drag follows the cursor past it', () => {
+    const { tool, scene } = armDrag()
+    expect(commitAt(tool, scene, makeSnap({ x: 2, y: 2, z: 0.5, kind: 'on-face' }), freeDragRay(0.9))).toBeCloseTo(0.9)
+  })
 })
 
 describe('PushPullTool — a drawn region in front of an object face wins the pick (GitHub issue 13)', () => {
@@ -1247,6 +1341,33 @@ describe('PushPullTool — a drawn region in front of an object face wins the pi
       expect(scene.push_pull).toHaveBeenCalledTimes(1)
       expect(scene.extrude_region).not.toHaveBeenCalled()
     }
+  })
+
+  it('a DETACHED shape lying on an ELIGIBLE face wins the tie and extrudes into a new object (separate-shapes D8)', () => {
+    // Same depth: the disk was drawn on the face to stay apart from it.
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, undefined, 2.0),
+      facePlane: [1, 2, 3, 0, 0, 1],
+      regionPick: makeRegionPick(99n, 7n, 2.0, true),
+    })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 3, kind: 'on-face' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 4, kind: 'endpoint' }), RAY)
+    expect(scene.extrude_region).toHaveBeenCalledTimes(1)
+    expect(scene.push_pull).not.toHaveBeenCalled()
+  })
+
+  it('an ORDINARY region lying on an eligible face still yields to the face (the tie-break is detached-only)', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, undefined, 2.0),
+      facePlane: [1, 2, 3, 0, 0, 1],
+      regionPick: makeRegionPick(99n, 7n, 2.0, false),
+    })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 3, kind: 'on-face' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 4, kind: 'endpoint' }), RAY)
+    expect(scene.push_pull).toHaveBeenCalledTimes(1)
+    expect(scene.extrude_region).not.toHaveBeenCalled()
   })
 
   it('a region in front of an INELIGIBLE (grouped) face wins too — the fail-closed rule only guards regions behind the face', () => {
@@ -1552,6 +1673,42 @@ describe('PushPullTool — preview tint per mode (#41)', () => {
     expect(ghostColor(true, -1)).toBe(asNew) // pulling the other way is still "new"
   })
 
+  it('a free-sketch region ghost is the new-object blue on both signs, never the red cut', () => {
+    const regionGhost = (z: number): number => {
+      const scene = makeWasmScene({ regionPick: makeRegionPick(50n, 51n) })
+      ;(scene.region_boundary as ReturnType<typeof vi.fn>).mockReturnValue(SQUARE)
+      const { tool, preview } = makeTool(scene)
+      tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+      tool.onPointerMove(makeSnap({ x: 0, y: 0, z, kind: 'endpoint' }), RAY)
+      const mesh = preview.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
+      return (mesh.material as THREE.MeshBasicMaterial).color.getHex()
+    }
+    const asNew = ghostColor(true)
+    expect(regionGhost(1)).toBe(asNew)
+    expect(regionGhost(-1)).toBe(asNew)
+    // A face pushed in stays the default cut look (not the new-object blue).
+    expect(ghostColor(false, -1)).not.toBe(asNew)
+  })
+
+  it('inside a component edit the extrude-as-new toggle leaves the ghost on the push colors (the commit falls back to an ordinary push)', () => {
+    const INSTANCE = 42n
+    const inEdit = (extrudeAsNew: boolean): number => {
+      const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, INSTANCE) })
+      ;(scene.face_boundary as ReturnType<typeof vi.fn>).mockReturnValue(SQUARE)
+      const { tool, preview } = makeTool(scene)
+      tool.setEditContext({ kind: 'instance', id: INSTANCE, component: 5n })
+      tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
+      if (extrudeAsNew) tool.toggleExtrudeAsNew()
+      tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+      tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'endpoint' }), RAY)
+      const mesh = preview.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
+      expect(mesh).toBeDefined()
+      return (mesh.material as THREE.MeshBasicMaterial).color.getHex()
+    }
+    expect(inEdit(true)).toBe(inEdit(false))
+    expect(inEdit(true)).not.toBe(ghostColor(true))
+  })
+
   it('the arrow/cross fallback (no swept prism) follows the mode too', () => {
     const arrowColors = (extrudeAsNew: boolean): number[] => {
       const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
@@ -1596,5 +1753,278 @@ describe('PushPullTool — preview tint per mode (#41)', () => {
       expect(block).toMatch(/--preview-pushpull:\s*#[0-9a-f]{6}/i)
       expect(block).toMatch(/--preview-extrude-new:\s*#[0-9a-f]{6}/i)
     }
+  })
+})
+
+describe('PushPullTool — the face cue names what the click commits to (OW-14)', () => {
+  const CTX = ctxOfPlane([0, 0, 0], [0, 0, 1]) as string
+  const sq = (x0: number, y0: number, x1: number, y1: number): [number, number, number][] => [[x0, y0, 0], [x1, y0, 0], [x1, y1, 0], [x0, y1, 0]]
+  const faceRay = (x: number, y: number): Ray => ({ origin: [x, y, 5], direction: [0, 0, -1] })
+  const SNAP = makeSnap({ x: 1, y: 1, z: 0, kind: 'on-face' })
+  const calls = (fn: unknown): unknown[][] => (fn as ReturnType<typeof vi.fn>).mock.calls
+
+  /** Hover `ray`, read the cue, then click the same ray and read what the
+   *  tool actually committed to (the second click commits at 2 m). */
+  function hoverThenCommit(scene: WasmScene, ray: Ray, setup?: (tool: PushPullTool) => void) {
+    const { tool, onToast } = makeTool(scene)
+    setup?.(tool)
+    tool.onPointerMove(SNAP, ray)
+    const cue = tool.hoverFace()
+    const hint = tool.hoverHint()
+    tool.onPointerDown(SNAP, ray)
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 2, kind: 'endpoint' }), ray)
+    return { tool, cue, hint, onToast }
+  }
+
+  it('a box face: the cue is the face the click pushes, orange', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { cue, hint } = hoverThenCommit(scene, faceRay(1, 1))
+    expect(cue).toEqual({ target: { kind: 'face', object: 3n, face: 4n, instance: null }, colorToken: '--preview-pushpull' })
+    expect(hint).toBeNull()
+    expect(calls(scene.push_pull)[0].slice(0, 2)).toEqual([3n, 4n])
+  })
+
+  it('a rectangle imprinted on a face: the cue is the rectangle, not the whole face under it', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n),
+      listings: { [CTX]: { regions: [{ key: 1, outer: sq(0, 0, 2, 2), over: { object: 3, face: 11 } }] } },
+    })
+    const { cue } = hoverThenCommit(scene, faceRay(1, 1))
+    expect(cue?.target).toEqual({ kind: 'face', object: 3n, face: 11n, instance: null })
+    expect(calls(scene.push_pull)[0].slice(0, 2)).toEqual([3n, 11n])
+  })
+
+  it('a free sketch region in front of a face: the cue is the region, blue', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, undefined, 2.0),
+      regionPick: makeRegionPick(9n, 7n, 1.0),
+    })
+    const { cue } = hoverThenCommit(scene, faceRay(1, 1))
+    expect(cue).toEqual({ target: { kind: 'region', sketch: 9n, region: 7n, instance: null }, colorToken: '--preview-extrude-new' })
+    expect(calls(scene.extrude_region)[0].slice(0, 2)).toEqual([9n, 7n])
+    expect(scene.push_pull).not.toHaveBeenCalled()
+  })
+
+  it('a free region with no face behind it: the cue is the region', () => {
+    const scene = makeWasmScene({ regionPick: makeRegionPick(9n, 7n) })
+    const { cue } = hoverThenCommit(scene, faceRay(1, 1))
+    expect(cue?.target).toEqual({ kind: 'region', sketch: 9n, region: 7n, instance: null })
+    expect(calls(scene.extrude_region)[0].slice(0, 2)).toEqual([9n, 7n])
+  })
+
+  it('a detached shape on a face: the cue is the shape, blue, as the click extrudes it', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, undefined, 2.0),
+      regionPick: makeRegionPick(99n, 7n, 2.0, true),
+    })
+    const { cue } = hoverThenCommit(scene, faceRay(1, 1))
+    expect(cue).toEqual({ target: { kind: 'region', sketch: 99n, region: 7n, instance: null }, colorToken: '--preview-extrude-new' })
+    expect(calls(scene.extrude_region)).toHaveLength(1)
+  })
+
+  it('a grouped face: no cue, the hint says why, and the click is refused', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n), parents: new Map([[3n, 9n]]) })
+    const { cue, hint, onToast } = hoverThenCommit(scene, faceRay(1, 1))
+    expect(cue).toBeNull()
+    expect(hint).toContain('group')
+    expect(onToast).toHaveBeenCalled()
+    expect(scene.push_pull).not.toHaveBeenCalled()
+  })
+
+  it('a component face outside its session: no cue, the hint names the way in', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) })
+    const { cue, hint, onToast } = hoverThenCommit(scene, faceRay(1, 1))
+    expect(cue).toBeNull()
+    expect(hint).toContain('double-click it to edit the component')
+    expect(onToast).toHaveBeenCalled()
+  })
+
+  it('a component face inside its session: the cue is the face, through its instance', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 42n) })
+    const { cue, hint } = hoverThenCommit(scene, faceRay(1, 1), (tool) => {
+      tool.setEditContext({ kind: 'instance', id: 42n, component: 5n })
+      tool.setFaceEligibility((_o, instance) => instance === 42n)
+    })
+    expect(cue).toEqual({ target: { kind: 'face', object: 3n, face: 4n, instance: 42n }, colorToken: '--preview-pushpull' })
+    expect(hint).toBeNull()
+    expect(calls(scene.push_pull_in_component)[0].slice(0, 3)).toEqual([42n, 3n, 4n])
+  })
+
+  it('a def-owned region inside its session: the cue is the region, through its instance', () => {
+    const scene = makeWasmScene({ regionPick: makeRegionPick(9n, 7n) })
+    const { cue } = hoverThenCommit(scene, faceRay(1, 1), (tool) => {
+      tool.setEditContext({ kind: 'instance', id: 42n, component: 5n })
+    })
+    expect(cue?.target).toEqual({ kind: 'region', sketch: 9n, region: 7n, instance: 42n })
+    expect(calls(scene.extrude_region_in_instance)[0].slice(0, 3)).toEqual([42n, 9n, 7n])
+  })
+
+  it('a face-less region over the object (a sliver): no cue, the hint is the click\'s refusal', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n),
+      listings: {
+        [CTX]: {
+          regions: [
+            { key: 1, outer: sq(0, 0, 2, 2), over: { object: 3, face: 4 }, holes: [sq(0.5, 0.5, 1.5, 1.5)] },
+            { key: 2, outer: sq(0.5, 0.5, 1.5, 1.5), over: { object: 3, face: null, why: 'sliver' } },
+          ],
+        },
+      },
+    })
+    const { cue, hint, onToast } = hoverThenCommit(scene, faceRay(1, 1))
+    expect(cue).toBeNull()
+    expect(hint).toContain('too thin')
+    expect(onToast.mock.calls[0][0]).toBe(hint)
+  })
+
+  it('over nothing there is no cue', () => {
+    const { tool } = makeTool(makeWasmScene({}))
+    tool.onPointerMove(null, faceRay(1, 1))
+    expect(tool.hoverFace()).toBeNull()
+  })
+
+  it('the extrude-as-new tap recolors the cue at once; inside a component edit it stays orange', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerMove(SNAP, faceRay(1, 1))
+    expect(tool.hoverFace()?.colorToken).toBe('--preview-pushpull')
+    tool.toggleExtrudeAsNew()
+    expect(tool.hoverFace()?.colorToken).toBe('--preview-extrude-new')
+    expect(tool.hoverFace()?.target).toEqual({ kind: 'face', object: 3n, face: 4n, instance: null })
+    tool.toggleExtrudeAsNew()
+    expect(tool.hoverFace()?.colorToken).toBe('--preview-pushpull')
+
+    const inst = makeWasmScene({ facePick: makeFacePick(3n, 4n, 42n) })
+    const { tool: inside } = makeTool(inst)
+    inside.setEditContext({ kind: 'instance', id: 42n, component: 5n })
+    inside.setFaceEligibility((_o, i) => i === 42n)
+    inside.toggleExtrudeAsNew()
+    inside.onPointerMove(SNAP, faceRay(1, 1))
+    expect(inside.hoverFace()?.colorToken).toBe('--preview-pushpull')
+  })
+
+  it('lifetime: gone while dragging, on pointer leave, on cancel, on a context change, and after a commit', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool } = makeTool(scene)
+    const ray = faceRay(1, 1)
+
+    tool.onPointerMove(SNAP, ray)
+    expect(tool.hoverFace()).not.toBeNull()
+    tool.onPointerDown(SNAP, ray) // the pull begins: the ghost takes over
+    expect(tool.hoverFace()).toBeNull()
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 2, kind: 'endpoint' }), ray) // commits
+    expect(tool.hoverFace()).toBeNull() // idle again, nothing hovered until the next move
+
+    tool.onPointerMove(SNAP, faceRay(1, 1))
+    expect(tool.hoverFace()).not.toBeNull()
+    tool.onPointerLeave()
+    expect(tool.hoverFace()).toBeNull()
+
+    tool.onPointerMove(SNAP, faceRay(1, 1))
+    tool.cancel()
+    expect(tool.hoverFace()).toBeNull()
+
+    tool.onPointerMove(SNAP, faceRay(1, 1))
+    tool.setEditContext({ kind: 'instance', id: 12n, component: 100n })
+    expect(tool.hoverFace()).toBeNull()
+  })
+
+  it('after a commit the cue is lit again for the retype window: the held-pointer replay re-resolves it and typing keeps it', () => {
+    const base = makeWasmScene({ facePick: makeFacePick(3n, 4n) }) as unknown as Record<string, unknown>
+    let gen = 1n
+    const scene = {
+      ...base,
+      history_generation: vi.fn(() => gen),
+      push_pull: vi.fn(() => { gen += 1n; return { is_through: () => false, result_objects: () => new BigUint64Array([]), free: vi.fn() } }),
+      scene_undo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+      scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+    } as unknown as WasmScene
+    const { tool } = makeTool(scene)
+    const ray = faceRay(1, 1)
+    tool.onPointerMove(SNAP, ray)
+    tool.onPointerDown(SNAP, ray)
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 2, kind: 'endpoint' }), ray) // commits; the window opens
+    expect(tool.capturesKey('3')).toBe(true)
+    // The viewport replays the held pointer after the mutation.
+    tool.onPointerMove(SNAP, ray)
+    expect(tool.hoverFace()?.target).toEqual({ kind: 'face', object: 3n, face: 4n, instance: null })
+    // Typing the distance does not take the cue away.
+    tool.onKey({ key: '3' } as KeyboardEvent)
+    expect(tool.capturesKey('4')).toBe(true)
+    expect(tool.hoverFace()).not.toBeNull()
+  })
+
+  it('a camera move re-aims the cue at the held ray, or drops it with none', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerMove(SNAP, faceRay(1, 1))
+    expect(tool.hoverFace()).not.toBeNull()
+    tool.onViewChanged(undefined)
+    expect(tool.hoverFace()).toBeNull()
+    tool.onViewChanged(faceRay(1, 1))
+    expect(tool.hoverFace()?.target).toEqual({ kind: 'face', object: 3n, face: 4n, instance: null })
+  })
+
+  it('the cue, the plane constraint and the click cost one resolve per ray: one pick_face, one region pick, one listing', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n),
+      regionPick: makeRegionPick(9n, 7n, 5),
+      listings: { [CTX]: { regions: [{ key: 1, outer: sq(0, 0, 2, 2), over: { object: 3, face: 4 } }] } },
+    })
+    const { tool } = makeTool(scene)
+    const ray = faceRay(1, 1)
+    tool.snapConstraint(ray)
+    tool.onPointerMove(SNAP, ray)
+    tool.hoverFace()
+    tool.onPointerDown(SNAP, ray)
+    expect(scene.pick_face).toHaveBeenCalledTimes(1)
+    expect(scene.pick_sketch_region).toHaveBeenCalledTimes(1)
+    expect(scene.plane_units_json).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ── Lock (OW-1): a locked thing says so before the click and refuses it ──
+describe('PushPullTool — a locked thing refuses with the Unlock toast', () => {
+  /** `scene` plus a lock model: nodes in `locked` (`kind:id`) are frozen by themselves. */
+  function withLocks(scene: WasmScene, locked: string[], copies?: { def: bigint; usage: number }) {
+    return {
+      ...scene,
+      node_frozen: vi.fn((kind: number, id: bigint) => (locked.includes(`${kind}:${id}`) ? { kind: kind === 2 ? 'instance' : 'object', id } : undefined)),
+      node_locked: vi.fn((kind: number, id: bigint) => locked.includes(`${kind}:${id}`)),
+      instance_def: vi.fn(() => copies?.def),
+      definition_usage: vi.fn(() => copies?.usage ?? 1),
+      instances_of: vi.fn(() => BigUint64Array.from([])),
+    } as unknown as WasmScene
+  }
+
+  it('hovering a locked box says "Locked" beside the cursor; the click toasts it with its target', () => {
+    const scene = withLocks(makeWasmScene({ facePick: makeFacePick(3n, 4n) }), ['0:3'])
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).toBe('Locked')
+    expect(onToast).not.toHaveBeenCalled() // a hover never toasts
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    expect(onToast).toHaveBeenCalledWith('Locked', 'LockedHint:object:3')
+    // Nothing starts: no drag, no kernel call.
+    expect(tool.capturingInput()).toBe(false)
+    expect(scene.push_pull).not.toHaveBeenCalled()
+  })
+
+  it('a locked copy of a set says how many others share it', () => {
+    const scene = withLocks(makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) }), ['2:12'], { def: 5n, usage: 4 })
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).toBe('All 4 copies are locked')
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    expect(onToast).toHaveBeenCalledWith('All 4 copies are locked', 'LockedHint:instance:12')
+  })
+
+  it('a free box still pushes and pulls', () => {
+    const scene = withLocks(makeWasmScene({ facePick: makeFacePick(3n, 4n) }), ['0:99'])
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+    expect(scene.push_pull).toHaveBeenCalledTimes(1)
+    expect(onToast).not.toHaveBeenCalled()
   })
 })

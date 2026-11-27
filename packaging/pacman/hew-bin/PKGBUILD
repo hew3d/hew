@@ -26,4 +26,10 @@ package() {
   # /usr/bin/hew-cli, the desktop entry and hicolor icons).
   bsdtar -xf data.tar.gz -C "${pkgdir}"
   chmod 755 "${pkgdir}/usr/bin/hew" "${pkgdir}/usr/bin/hew-cli"
+  # Tell the app how it was installed (shells/tauri/src-tauri/src/
+  # install_channel.rs). The .deb's binary carries the Deb marker, which
+  # would otherwise send it to `dpkg`; pacman owns this copy, so the app only
+  # announces updates and shows the pacman command.
+  install -d "${pkgdir}/usr/share/hew"
+  printf 'pacman\n' > "${pkgdir}/usr/share/hew/install-channel"
 }

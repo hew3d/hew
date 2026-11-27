@@ -136,3 +136,38 @@ export function stretchToUse(t0: number, t1: number, lo: number, hi: number): [n
   if (Number.isFinite(lo) && Number.isFinite(hi)) return [lo, hi]
   return clampToSpan(t0, t1, lo, hi)
 }
+
+/** Half-length (meters) of a line guide's highlight-style overlay — the
+ *  selected guide's highlight and the Move tool's guide ghost. Drawn with the
+ *  depth test off, so unlike the guide itself its length cannot misplace it. */
+export const GUIDE_OVERLAY_HALF_LENGTH = 50
+/** Half-size (meters) of a point guide's cross marker. */
+export const GUIDE_POINT_MARKER_HALF_SIZE = 0.05
+
+/**
+ * Segment endpoints (`LineSegments` positions, xyz per vertex) for a solid
+ * overlay of a guide read from `guide_kind` / `guide_geometry`: a line over
+ * its span, or `GUIDE_OVERLAY_HALF_LENGTH` either side of its origin where
+ * the span runs on; a point as a small 3-axis cross. Null for a degenerate
+ * line, a span the stretch misses, or an unknown kind.
+ */
+export function guideOverlayPositions(kind: string, geometry: ArrayLike<number>): number[] | null {
+  if (kind === 'line') {
+    const ox = geometry[0], oy = geometry[1], oz = geometry[2]
+    const dx = geometry[3], dy = geometry[4], dz = geometry[5]
+    const len = Math.hypot(dx, dy, dz)
+    if (len < 1e-9) return null
+    const ux = dx / len, uy = dy / len, uz = dz / len
+    const { lo, hi } = guideSpanOf(geometry)
+    const span = stretchToUse(-GUIDE_OVERLAY_HALF_LENGTH, GUIDE_OVERLAY_HALF_LENGTH, lo, hi)
+    if (span === null) return null
+    const [s0, s1] = span
+    return [ox + ux * s0, oy + uy * s0, oz + uz * s0, ox + ux * s1, oy + uy * s1, oz + uz * s1]
+  }
+  if (kind === 'point') {
+    const x = geometry[0], y = geometry[1], z = geometry[2]
+    const k = GUIDE_POINT_MARKER_HALF_SIZE
+    return [x - k, y, z, x + k, y, z, x, y - k, z, x, y + k, z, x, y, z - k, x, y, z + k]
+  }
+  return null
+}

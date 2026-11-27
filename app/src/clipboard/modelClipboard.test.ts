@@ -51,6 +51,29 @@ describe('modelClipboard — web build (no shell)', () => {
     expect(content.contentHash).toMatch(/^[0-9a-f]{64}$/)
   })
 
+  it('copy_records_the_link_source_with_document_id_and_nonce', async () => {
+    const m = await loadWebModule()
+    const source = { documentId: 'doc-uuid', nonce: 'win-1', generation: 0, nodes: [{ kind: 'object' as const, id: 7n }] }
+    const content = await m.setClipboardBytes(new Uint8Array([1]), 1, ['object'], 'win-1', null, source)
+    expect(content.linkSource).toEqual(source)
+    expect(m.getClipboard()?.linkSource).toEqual(source)
+    // Without one (a cross-window reconstruction), nothing links.
+    const plain = await m.setClipboardBytes(new Uint8Array([2]), 1, ['object'], 'win-1', null)
+    expect(plain.linkSource).toBeNull()
+  })
+
+  it('repointLinkSource records the placement on the clipboard the paste came from, beside the originals', async () => {
+    const m = await loadWebModule()
+    const source = { documentId: 'doc-uuid', nonce: 'win-1', generation: 0, nodes: [{ kind: 'object' as const, id: 7n }] }
+    const content = await m.setClipboardBytes(new Uint8Array([1]), 1, ['object'], 'win-1', null, source)
+    // A later copy replaces the current clipboard; the earlier one is still repointed.
+    await m.setClipboardBytes(new Uint8Array([2]), 1, ['object'], 'win-1', null, null)
+    m.repointLinkSource(content, [{ kind: 'instance', id: 9n }])
+    expect(content.linkSource?.repointed).toEqual([{ kind: 'instance', id: 9n }])
+    expect(content.linkSource?.nodes).toEqual(source.nodes)
+    expect(m.getClipboard()?.linkSource).toBeNull()
+  })
+
   it('clearClipboard empties it', async () => {
     const m = await loadWebModule()
     await m.setClipboardBytes(new Uint8Array([1]), 1, ['object'], 'doc-1', null)
@@ -86,12 +109,12 @@ describe('modelClipboard — Tauri build (shared shell state)', () => {
     const m = await loadTauriModule()
     mockInvoke.mockResolvedValue(undefined)
     await m.setClipboardBytes(new Uint8Array([5, 6, 7]), 1, ['object'], 'doc-1', null)
-    expect(mockInvoke).toHaveBeenCalledWith('clipboard_set', { bytes: [5, 6, 7] })
+    expect(mockInvoke).toHaveBeenCalledWith('clipboard_set', new Uint8Array([5, 6, 7]))
   })
 
   it('refreshClipboardFromShell adopts the shell content when nothing is held locally', async () => {
     const m = await loadTauriModule()
-    mockInvoke.mockResolvedValue([9, 9, 9])
+    mockInvoke.mockResolvedValue(new Uint8Array([9, 9, 9]).buffer)
     await m.refreshClipboardFromShell()
     expect(mockInvoke).toHaveBeenCalledWith('clipboard_get')
     const content = m.getClipboard()
@@ -102,11 +125,29 @@ describe('modelClipboard — Tauri build (shared shell state)', () => {
     expect(content!.placementAffine).toBeNull()
   })
 
+  it('round-trips bytes through the raw shell channel unchanged', async () => {
+    const m = await loadTauriModule()
+    const payload = new Uint8Array(256).map((_, i) => i)
+    let stored: ArrayBuffer = new ArrayBuffer(0)
+    mockInvoke.mockImplementation(async (cmd: string, body?: unknown) => {
+      if (cmd === 'clipboard_set') {
+        expect(body).toBeInstanceOf(Uint8Array)
+        stored = (body as Uint8Array).slice().buffer
+        return undefined
+      }
+      return stored
+    })
+    await m.setClipboardBytes(payload, 1, ['object'], 'doc-1', null)
+    m.clearClipboard()
+    await m.refreshClipboardFromShell()
+    expect(Array.from(m.getClipboard()!.bytes)).toEqual(Array.from(payload))
+  })
+
   it('refreshClipboardFromShell clears local content when the shell reports empty', async () => {
     const m = await loadTauriModule()
     mockInvoke.mockResolvedValueOnce(undefined) // clipboard_set (from the copy below)
     await m.setClipboardBytes(new Uint8Array([1]), 1, ['object'], 'doc-1', null)
-    mockInvoke.mockResolvedValueOnce(null) // clipboard_get
+    mockInvoke.mockResolvedValueOnce(new ArrayBuffer(0)) // clipboard_get (empty = nothing copied)
     await m.refreshClipboardFromShell()
     expect(m.getClipboard()).toBeNull()
   })
@@ -115,7 +156,7 @@ describe('modelClipboard — Tauri build (shared shell state)', () => {
     const m = await loadTauriModule()
     mockInvoke.mockResolvedValueOnce(undefined) // clipboard_set
     const original = await m.setClipboardBytes(new Uint8Array([3, 3, 3]), 4, ['object', 'group'], 'doc-1', null)
-    mockInvoke.mockResolvedValueOnce([3, 3, 3]) // clipboard_get — same bytes
+    mockInvoke.mockResolvedValueOnce(new Uint8Array([3, 3, 3]).buffer) // clipboard_get — same bytes
     await m.refreshClipboardFromShell()
     // Still the SAME rich object (count/kinds preserved), not a -1 reconstruction.
     expect(m.getClipboard()).toBe(original)

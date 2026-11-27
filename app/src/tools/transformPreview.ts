@@ -14,6 +14,34 @@
 import * as THREE from 'three'
 
 /**
+ * `userData` key marking a preview object as a GHOST OF SESSION GEOMETRY: a
+ * stand-in, in world coordinates, for what the gesture will commit — a
+ * transform tool's faded clone of the selection, Push/Pull's swept prism,
+ * Offset's offset loops. Inside a component session, every other placement
+ * of the definition shows the committed edit through its own pose
+ * (ARCHITECTURE.md 2.11), so the viewport's sibling preview mirror draws
+ * exactly these objects through each sibling's frame while the gesture is
+ * in flight — and nothing else in the shared preview group (a rubber-band
+ * leader, a protractor disk, a station marker, an annotation being
+ * dragged), which belongs to the cursor, not to the geometry. Every builder
+ * here marks what it returns; a tool that hand-builds a geometry ghost
+ * marks it with `markSessionGhost`.
+ */
+export const SESSION_GHOST_KEY = 'sessionGhost'
+
+/** Mark `obj` (the ROOT of a ghost subtree) as session geometry — see
+ *  `SESSION_GHOST_KEY`. Returns `obj` for chaining. */
+export function markSessionGhost<T extends THREE.Object3D>(obj: T): T {
+  obj.userData[SESSION_GHOST_KEY] = true
+  return obj
+}
+
+/** Whether `obj` is the root of a marked ghost subtree (`markSessionGhost`). */
+export function isSessionGhost(obj: THREE.Object3D): boolean {
+  return obj.userData[SESSION_GHOST_KEY] === true
+}
+
+/**
  * Clone a mesh's material(s) and make the clone(s) semi-transparent. Face
  * meshes are multi-material (one entry per material group), so the
  * material may be an array; edge meshes are single-material. Returns the same
@@ -81,7 +109,8 @@ export function buildPreviewClone(
   objectId: bigint,
 ): THREE.Object3D | null {
   if (objectsGroup === null) return null
-  return cloneObjectMesh(objectsGroup, objectId)
+  const clone = cloneObjectMesh(objectsGroup, objectId)
+  return clone === null ? null : markSessionGhost(clone)
 }
 
 /**
@@ -115,7 +144,7 @@ export function buildInstancePreviewClone(
   const wrapper = new THREE.Group()
   wrapper.name = 'InstancePreview'
   wrapper.add(posed)
-  return wrapper
+  return markSessionGhost(wrapper)
 }
 
 /**
@@ -166,7 +195,7 @@ export function buildInstanceMemberPreviewClone(
   const wrapper = new THREE.Group()
   wrapper.name = 'InstanceMemberPreview'
   wrapper.add(posed)
-  return wrapper
+  return markSessionGhost(wrapper)
 }
 
 /**
@@ -227,7 +256,7 @@ export function buildSketchPreviewClone(
   const mat = fadePreviewMaterial(
     new THREE.LineBasicMaterial({ color: SKETCH_PREVIEW_LINE_COLOR, linewidth: 2 }),
   ) as THREE.LineBasicMaterial
-  return new THREE.LineSegments(geo, mat)
+  return markSessionGhost(new THREE.LineSegments(geo, mat))
 }
 
 /**
@@ -269,7 +298,7 @@ export function buildMultiPreviewClone(
     }
   }
   if (found === 0) return null
-  return container
+  return markSessionGhost(container)
 }
 
 /** Ghost tint for an additive push/pull drag (material being added) — matches
@@ -388,7 +417,7 @@ export function buildSweptPrismPreview(
 
   const mesh = new THREE.Mesh(geo, mat)
   mesh.renderOrder = 996
-  return mesh
+  return markSessionGhost(mesh)
 }
 
 /**

@@ -171,6 +171,7 @@ describe('SliceTool — commit routing', () => {
       pick_face: vi.fn(() => makeFacePick(3n, 4n, 99n)),
       slice_object: vi.fn(),
       slice_def_member: vi.fn(),
+      is_linked: vi.fn(() => false),
     } as unknown as WasmScene
     const tool = new SliceTool(wasmScene, preview, onSliceCommitted, onToast)
 
@@ -180,6 +181,45 @@ describe('SliceTool — commit routing', () => {
     expect(wasmScene.slice_def_member).not.toHaveBeenCalled()
     expect(onToast).toHaveBeenCalledTimes(1)
     expect(onSliceCommitted).not.toHaveBeenCalled()
+  })
+
+  it('slicing_a_placement_slices_the_definition (a linked copy, no context to enter)', () => {
+    const preview = new THREE.Group()
+    const onSliceCommitted = vi.fn()
+    const onToast = vi.fn()
+    const wasmScene = {
+      face_plane: vi.fn(() => { throw new Error('not a face') }),
+      pick_face: vi.fn(() => makeFacePick(3n, 4n, 99n)),
+      slice_object: vi.fn(),
+      slice_def_member: vi.fn(() => new BigUint64Array([55n, 56n])),
+      is_linked: vi.fn(() => true),
+      session_stack: vi.fn(() => []),
+    } as unknown as WasmScene
+    const tool = new SliceTool(wasmScene, preview, onSliceCommitted, onToast)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(wasmScene.slice_object).not.toHaveBeenCalled()
+    expect(wasmScene.slice_def_member).toHaveBeenCalledTimes(1)
+    expect((wasmScene.slice_def_member as ReturnType<typeof vi.fn>).mock.calls[0].slice(0, 2)).toEqual([99n, 3n])
+    // The copy that was picked is what gets selected, not the shared part.
+    expect(onSliceCommitted).toHaveBeenCalledWith(55n, 99n)
+  })
+
+  it('a linked copy is out of scope while a group or component is open for editing', () => {
+    const wasmScene = {
+      face_plane: vi.fn(() => { throw new Error('not a face') }),
+      pick_face: vi.fn(() => makeFacePick(3n, 4n, 99n)),
+      slice_object: vi.fn(),
+      slice_def_member: vi.fn(),
+      is_linked: vi.fn(() => true),
+      session_stack: vi.fn(() => [1n]),
+    } as unknown as WasmScene
+    const onToast = vi.fn()
+    const tool = new SliceTool(wasmScene, new THREE.Group(), vi.fn(), onToast)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    expect(wasmScene.slice_def_member).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(1)
   })
 
   // component-edit-parity.md phase A2.
@@ -269,9 +309,35 @@ describe('SliceTool — hasArmedGesture (distinct from the unconditional capturi
     return { tool }
   }
 
-  it('capturingInput() is unconditionally true even with no lock engaged', () => {
+  it('capturingInput() is false with nothing typed, so Space and the tool letters reach the shortcut table', () => {
     const { tool } = makeTool()
+    expect(tool.capturingInput()).toBe(false)
+    expect(tool.hasArmedGesture()).toBe(false)
+    for (const key of [' ', 'r', 'm', 'l', 'p', 'Enter', 'Backspace', '/', "'"]) {
+      expect(tool.capturesKey(key)).toBe(false)
+    }
+  })
+
+  it('only a digit, a dot or a minus opens the typed offset; then the full length grammar and Enter belong to Slice', () => {
+    const { tool } = makeTool()
+    for (const key of ['0', '5', '9', '.', '-']) expect(tool.capturesKey(key)).toBe(true)
+    tool.onKey(makeKeyEvent('1'))
     expect(tool.capturingInput()).toBe(true)
+    expect(tool.hasArmedGesture()).toBe(true)
+    for (const key of ['2', 'c', 'm', "'", '"', '/', ' ', 'Backspace', 'Enter']) {
+      expect(tool.capturesKey(key)).toBe(true)
+    }
+  })
+
+  it('Escape clears the typed buffer first, then the lock, then the tool', () => {
+    const { tool } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    tool.onKey(makeKeyEvent('Shift')) // lock
+    tool.onKey(makeKeyEvent('2'))
+    tool.onKey(makeKeyEvent('Escape'))
+    expect(tool.capturingInput()).toBe(false)
+    expect(tool.hasArmedGesture()).toBe(true) // lock still held
+    tool.onKey(makeKeyEvent('Escape'))
     expect(tool.hasArmedGesture()).toBe(false)
   })
 

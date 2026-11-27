@@ -3,7 +3,7 @@ question: "How is Hew different from SketchUp?"
 order: 3
 ---
 
-Hew intentionally feels a lot like SketchUp — the same push/pull workflow, generally the same tools, the same reliance on inference snapping, and typically the same keyboard shortcuts. An experienced SketchUp user should feel at home almost immediately.
+Hew intentionally feels a lot like SketchUp — the same push/pull workflow, generally the same tools, the same reliance on inference snapping, and typically the same keyboard shortcuts. An experienced SketchUp user should feel at home almost immediately, and their files come along: Hew opens and saves `.skp` files of every SketchUp version, from SketchUp 3 through 2027.
 
 The practical differences are cost and reach. SketchUp no longer has a free desktop app (Hew is a native desktop app on macOS, Windows, and Linux); SketchUp's free web tier is stripped down (Hew's web app is the full modeler); and the full SketchUp product is a subscription costing hundreds of dollars a year (Hew is free and open source).
 

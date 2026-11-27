@@ -214,7 +214,7 @@ test('double-click renames a material in place, undoably', async ({ page }) => {
   await expect(page.getByTitle('Oak')).toHaveCount(0)
 
   await page.locator('canvas').first().click({ position: { x: 5, y: 5 } })
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await expect(page.getByTitle('Oak')).toBeVisible()
   await expect(page.getByTitle('Walnut')).toHaveCount(0)
 })

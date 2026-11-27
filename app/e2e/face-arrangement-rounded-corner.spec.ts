@@ -224,18 +224,18 @@ test('deleting the corner leftovers’ rectangle edges rounds the corners, and u
 
   // Undo walks the three deletes back; redo walks them forward again.
   await page.keyboard.press('Escape')
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForTimeout(250)
   await expectBothRounded(page)
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForTimeout(250)
   await expectTopLeftRounded(page)
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForTimeout(250)
   await expectArranged(page, object)
   await shot('5-undone.png')
   for (let i = 0; i < 3; i++) {
-    await page.keyboard.press('Control+Shift+Z')
+    await page.keyboard.press('ControlOrMeta+Shift+Z')
     await page.waitForTimeout(250)
   }
   await expectRoundedShape(page, object)

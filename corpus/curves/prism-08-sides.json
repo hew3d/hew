@@ -1,0 +1,38 @@
+{
+  "title": "A prism with 8 sides, 20 mm circumradius, 30 mm tall",
+  "from": "The coarsest cap rims: side counts below what the circle tool draws, made with the polygon tool.",
+  "build": [
+    {
+      "method": "hew.sketch.draw_polygon",
+      "as": "base",
+      "params": {"plane": {"ground": true}, "center": [0, 0, 0], "radius": "20mm", "sides": 8}
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "cyl",
+      "params": {"region": {"$ref": "base#/region_id"}, "distance": "30mm"}
+    }
+  ],
+  "cases": [
+    {
+      "id": "top-rim-round",
+      "note": "20 mm circumradius, 30 mm tall, 8 sides. The cap vanishes at its inradius; 17 mm is below it (18.48 mm). 22 mm is past the circumradius.",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, "30mm"]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "15mm", "17mm", "19mm", "20mm", "22mm"],
+      "fits_to": "17mm",
+      "never_above": "18.48mm",
+      "volume": "less"
+    },
+    {
+      "id": "top-rim-chamfer",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, "30mm"]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "15mm", "17mm", "19mm", "20mm", "22mm"],
+      "fits_to": "17mm",
+      "never_above": "18.48mm",
+      "volume": "less",
+      "note": "20 mm circumradius, 30 mm tall, 8 sides. The cap vanishes at its inradius; 17 mm is below it (18.48 mm). 22 mm is past the circumradius."
+    }
+  ]
+}

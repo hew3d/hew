@@ -1,0 +1,25 @@
+{
+  "manifest": 1,
+  "id": "com.example.box-writer",
+  "name": "Box Writer",
+  "version": "0.1.0",
+  "description": "Draws a box in the model, and says what happened when it is not allowed to.",
+  "api": 1,
+  "main": "dist/background.js",
+  "permissions": ["model.read", "model.write"],
+  "activation": ["on_command"],
+  "contributes": {
+    "commands": [
+      {
+        "id": "box",
+        "class": "mutating",
+        "summary": "Draws a one meter box and says whether the model took it.",
+        "result": {
+          "type": "object",
+          "properties": { "ok": {}, "code": {}, "message": {}, "refusal": {} },
+          "additionalProperties": false
+        }
+      }
+    ]
+  }
+}

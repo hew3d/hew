@@ -1,3 +1,9 @@
+// Test-only, and outside the determinism-critical kernel scope (kernel /
+// inference / tessellate / mesh-heal): transcendentals here build the
+// inputs and expectations of a native test, never a document a user keeps.
+// Suppress the workspace clippy.toml ban for this integration-test crate.
+#![allow(clippy::disallowed_methods)]
+
 //! Property test (docs/design/printing.md §7b): random boxes and cylinders in
 //! random poses under random parallel and perspective views — every piece
 //! `line_drawing` calls VISIBLE must not be behind any triangle by more than
@@ -24,7 +30,9 @@ fn triangles(mesh: &tessellate::RenderMesh, pose: &Transform) -> Vec<[Point3; 3]
         ))
     };
     mesh.indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|t| [pos(t[0] as usize), pos(t[1] as usize), pos(t[2] as usize)])
         .collect()
 }

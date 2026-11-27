@@ -14,7 +14,7 @@
 
 import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
-import type { Tool, Snap, EditContext, SnapConstraint } from './types'
+import type { Tool, Snap, EditContext, SnapConstraint, HoverFace } from './types'
 import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -33,8 +33,10 @@ import {
   PREVIEW_PUSHPULL_FALLBACK,
   PREVIEW_PUSHPULL_TOKEN,
 } from './previewTint'
-import { defaultFaceEligible, ineligibleFaceHint, worldFaceNormal, FacePickCache, type FaceEligible, type RawFacePick } from './faceDraw'
-import { ctxOfFace, type PlaneUnitsScene } from './planeUnits'
+import { lockHintForPick } from '../lock/lockModel'
+import { defaultFaceEligible, ineligibleFaceHint, sessionIsOpen, worldFaceNormal, EDIT_CONTEXT_HINT_CODE, FacePickCache, type FaceEligible, type RawFacePick } from './faceDraw'
+import { ctxOfFace, ctxOfSketch, readPlaneUnits, type PlaneUnitsScene } from './planeUnits'
+import { pickPolicyGeneration, pickRenderMode } from './pickPolicy'
 import { regionUnderRay } from './regionPick'
 
 /** Snap kinds whose point is a deliberate depth reference for push/pull — the
@@ -55,6 +57,7 @@ const HARD_SNAP_KINDS = new Set([
   'midpoint',
   'intersection',
   'on-edge',
+  'on-intersection-line',
   'on-guide',
 ])
 
@@ -88,7 +91,14 @@ const MIN_INWARD_DRAG_M = 1e-9
 
 /** A `pick_sketch_region` hit: the region handles plus its ray depth in
  *  metres along the normalized ray (the scale `pick_face` reports in). */
-type RegionPick = { sketch: bigint; region: bigint; depth: number }
+type RegionPick = {
+  sketch: bigint
+  region: bigint
+  depth: number
+  /** The region's sketch is a detached shape (separate-shapes design D8):
+   *  drawn to stay apart from the face it lies on. */
+  detached: boolean
+}
 
 /**
  * Whether a picked sketch region sits IN FRONT of the object face picked on
@@ -102,13 +112,35 @@ type RegionPick = { sketch: bigint; region: bigint; depth: number }
  * extruding on the rest). No face on the ray at all also counts as "in
  * front"; no region never does.
  */
-function regionInFrontOfFace(region: RegionPick | null, face: RawFacePick | null, faceEligible = true): boolean {
+export function regionInFrontOfFace(
+  region: RegionPick | null,
+  face: RawFacePick | null,
+  faceEligible = true,
+  regionInScope: boolean | null = null,
+  faceLocked = false,
+): boolean {
   if (region === null) return false
   if (face === null) return true
-  // Free drawing lying ON a face that cannot be pushed from here (a group's
-  // or component's face, drawn on from outside) is what the cursor is on:
-  // a tie goes to the drawing, which pulls into a new object of its own.
-  if (!faceEligible) return region.depth <= face.depth + REGION_COPLANAR_EPS_M
+  // A locked face that the tool could otherwise act on: a drawn region wins
+  // only when it lies ON the face (or nearer than it), in an editing scope or
+  // not. A region behind it is not what the cursor is on, whoever is "in
+  // scope": the locked face takes the click and says Locked.
+  if (faceLocked) return region.depth <= face.depth + REGION_COPLANAR_EPS_M
+  // Shaded or X-ray with an editing scope: the kernel's picks landed on the nearest
+  // thing INSIDE the scope, falling back to the nearest of any owner when
+  // nothing in scope lay under the ray. When exactly one of the two is the
+  // in-scope one it wins, whatever the depth — depth only orders two
+  // candidates of the same standing.
+  if (regionInScope !== null) {
+    if (faceEligible && !regionInScope) return false
+    if (!faceEligible && regionInScope) return true
+  }
+  // A detached shape lying on a face is what the cursor is on: it was drawn
+  // to stay apart from the face, so a tie goes to it (D8). So does free
+  // drawing lying ON a face that cannot be pushed from here (a group's or
+  // component's face, drawn on from outside). Either pulls into a new object
+  // of its own.
+  if (region.detached || !faceEligible) return region.depth <= face.depth + REGION_COPLANAR_EPS_M
   return region.depth < face.depth - REGION_IN_FRONT_EPS_M
 }
 
@@ -143,7 +175,44 @@ export type PushPullTarget =
        *  member, exactly like `region_boundary` above, so the ghost preview
        *  maps it through this same pose. */
       instance: bigint | null
+      /** The face is locked, so the pull started as a new object (nothing
+       *  else is allowed there) and stays one until the gesture ends,
+       *  whatever Ctrl/Cmd does meanwhile. */
+      newObjectOnly?: boolean
     }
+
+/**
+ * What a click at the idle cursor would do — the one answer `snapConstraint`
+ * (the hover plane), `_updateHoverRefusal` (the cursor hint), `hoverFace`
+ * (the face cue) and `onPointerDown` (the commit) all read, so the cue can
+ * never light one thing while the click takes another.
+ */
+type IdleTarget =
+  | {
+      kind: 'face'
+      object: bigint
+      /** The face that would move, after routing through the plane's listing
+       *  (a rectangle drawn on a face is its own sub-face). */
+      face: bigint
+      instance: bigint | null
+      /** World-space unit normal of `face`. */
+      normal: [number, number, number]
+      /** The face is locked: only a new object may be pulled from it. */
+      locked: boolean
+    }
+  | {
+      kind: 'region'
+      sketch: bigint
+      region: bigint
+      instance: bigint | null
+      detached: boolean
+      /** The region's sketch plane exactly as `sketch_plane` answered it
+       *  (definition-local for a def-owned sketch). */
+      plane: ArrayLike<number>
+      /** The drag axis: the plane normal, pose-mapped for an instance. */
+      normal: [number, number, number]
+    }
+  | { kind: 'refused'; hint: string; code: string }
 
 export type OnPushPullCommit = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
@@ -188,12 +257,19 @@ export class PushPullTool implements Tool {
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (this.stage.kind === 'idle') {
+      // A face the tool cannot push explains itself while hovered — the
+      // same line the refused click toasts, shown BEFORE the click, in the
+      // status bar and (`hoverHint`) beside the cursor.
+      if (this._hoverRefusal !== null) return this._hoverRefusal
       if (this.retype.isOpen) {
         return t`Type an exact distance to redo the push/pull you just made — or click another face; double-click repeats the last distance.`
       }
       return this.extrudeAsNewMode
         ? t`Click a face to push or pull it — double-click repeats the last distance. Ctrl is on — extrudes a new object.`
         : t`Click a face to push or pull it — double-click repeats the last distance.`
+    }
+    if (this._latchedNewObject()) {
+      return t`This face is locked, so this makes a NEW object. Move to extrude, click to commit — or type an exact distance.`
     }
     return this.extrudeAsNewMode
       ? t`Move to extrude a NEW object, click to commit — or type an exact distance. Tap Ctrl to push/pull instead.`
@@ -317,6 +393,7 @@ export class PushPullTool implements Tool {
   onDoubleClick(_snap: Snap | null, _ray: Ray): boolean {
     const stage = this.stage
     this.stage = { kind: 'idle' }
+    this._hoverTarget = null
     this.typed = ''
     clearPreview(this.preview)
     this.onMeasurementCb('')
@@ -361,40 +438,24 @@ export class PushPullTool implements Tool {
    */
   snapConstraint(ray?: Ray): SnapConstraint | null {
     if (this.stage.kind !== 'idle' || ray === undefined) return null
-
-    // Path A: the same eligible-face pick `onPointerDown` would commit to.
-    const eligible = this._pickCache.pickFor(this.wasmScene, ray, (object, instance) =>
-      this._isEligible(object, instance))
-    const raw = this._pickCache.rawPickFor(ray)
-    // Path B's region, picked up front so the two paths can be ordered by
-    // DEPTH (`regionInFrontOfFace`): a region nearer the eye than the face
-    // on the same ray is what the cursor is on, whatever lies behind it —
-    // eligible face or not. Scoped exactly as `onPointerDown` scopes it:
-    // top-level (or the entered instance's own def-owned sketches) only,
-    // never inside an OBJECT editing context.
-    const activeInstance = this._activeInstance
-    const region = this._activeContext === null ? this._pickRegionFor(ray, activeInstance) : null
-    if (!regionInFrontOfFace(region, raw, eligible !== null)) {
-      if (eligible !== null) {
-        const a = this.wasmScene.face_plane(eligible.object, eligible.face)
-        return {
-          constraintPlane: { point: [a[0], a[1], a[2]], normal: [a[3], a[4], a[5]] },
-          facesOnly: true,
-        }
+    const target = this._resolveIdleTarget(ray)
+    // Nothing under the cursor, or a face the tool refuses: no constraint —
+    // never a sketch region BEHIND a refused face (fail closed, see above).
+    if (target === null || target.kind === 'refused') return null
+    if (target.kind === 'face') {
+      const a = this.wasmScene.face_plane(target.object, target.face)
+      return {
+        constraintPlane: { point: [a[0], a[1], a[2]], normal: [a[3], a[4], a[5]] },
+        facesOnly: true,
       }
-      // A face WAS hit but rejected by eligibility — fail closed exactly
-      // like onPointerDown's ineligible branch (toast, click consumed): no
-      // constraint, never Path B's sketch-region fallback BEHIND it.
-      return null
     }
 
-    // Path B: the hovered sketch region's own plane — in front of any face
-    // on the ray, or the only thing on it.
-    if (region === null) return null
-    const plane = this.wasmScene.sketch_plane(region.sketch)
-    if (plane === undefined) return null // stale handle — no constraint
+    // A hovered sketch region: its own plane — in front of any face on the
+    // ray, or the only thing on it.
+    const plane = target.plane
     let point: [number, number, number] = [plane[0], plane[1], plane[2]]
     let normal: [number, number, number] = [plane[3], plane[4], plane[5]]
+    const activeInstance = target.instance
     if (activeInstance !== null) {
       // A def-owned sketch's plane is DEFINITION-LOCAL (`sketch_plane` has
       // no `_in_instance` sibling) — map both the point (full affine) and
@@ -409,6 +470,180 @@ export class PushPullTool implements Tool {
       normal = mappedNormal
     }
     return { constraintPlane: { point, normal }, facesOnly: true }
+  }
+
+  /**
+   * The ONE decision about what a click at the idle cursor would act on,
+   * shared by `snapConstraint`, `_updateHoverRefusal`/`hoverFace` and
+   * `onPointerDown` so the hover and the click can never disagree (the
+   * fail-closed comments above are the history of when they did):
+   *
+   * - Path A: the nearest eligible object face, routed through the plane's
+   *   listing to the sub-face under the cursor (`_routeThroughListing`);
+   * - Path B: a sketch region in front of any face on the ray, or alone
+   *   (top level, or the entered instance's own def-owned sketches);
+   * - `refused`: a face was hit and the tool will not act on it (grouped,
+   *   component not open, out of scope, a sliver) — which CONSUMES the
+   *   click, never falling through to Path B behind it;
+   * - `null`: nothing under the cursor (or a stale handle).
+   *
+   * Memoized on the ray object, the editing scope and the pick policy, like
+   * the picks beneath it, so the several callers per pointer event cost one
+   * resolve.
+   */
+  private _resolveIdleTarget(ray: Ray): IdleTarget | null {
+    const cached = this._idleTargetCache
+    const activeInstance = this._activeInstance
+    const gen = pickPolicyGeneration()
+    // The Ctrl mode is part of the answer: a locked face refuses a push but
+    // gives a new object (`_computeIdleTarget`).
+    const asNew = this._makesNewObject()
+    if (cached !== null && cached.ray === ray && cached.instance === activeInstance && cached.gen === gen && cached.asNew === asNew) {
+      return cached.target
+    }
+    // A kernel throw propagates to the caller, as it did when each caller
+    // made this decision itself (the hover refresh catches it; a click does
+    // not).
+    const target = this._computeIdleTarget(ray, activeInstance)
+    this._idleTargetCache = { ray, instance: activeInstance, gen, asNew, target }
+    return target
+  }
+
+  private _idleTargetCache: {
+    ray: Ray
+    instance: bigint | null
+    gen: number
+    asNew: boolean
+    target: IdleTarget | null
+  } | null = null
+
+  /** Whether a face commit right now extrudes a NEW object (the Ctrl/Cmd
+   *  mode) rather than pushing the face: never inside a component edit,
+   *  where the commit falls back to an ordinary push (see `_commit`). */
+  /** A drag that started on a locked face: a new object until it ends. */
+  private _latchedNewObject(): boolean {
+    return (
+      this.stage.kind === 'dragging' &&
+      this.stage.target.kind === 'face' &&
+      this.stage.target.newObjectOnly === true &&
+      this._activeComponent === null
+    )
+  }
+
+  private _makesNewObject(): boolean {
+    return this.extrudeAsNewMode && this._activeComponent === null
+  }
+
+  private _computeIdleTarget(ray: Ray, activeInstance: bigint | null): IdleTarget | null {
+    // Path A's pick, memoized per ray by `FacePickCache` (faceDraw.ts, same
+    // pattern as the draw tools). `pick_face` bypasses the drawing snap bias
+    // toward vertices/edges, so it reliably returns the surface under the
+    // cursor even when snap prefers a nearby endpoint.
+    const eligible = this._pickCache.pickFor(this.wasmScene, ray, (object, instance) =>
+      this._isEligible(object, instance))
+    const raw = this._pickCache.rawPickFor(ray)
+    // The region pick runs FIRST so a drawn region nearer the eye than the
+    // face behind it takes the click (`regionInFrontOfFace`, GitHub issue
+    // 13). Region extrusion is a top-level (or instance-context) act;
+    // suppressed inside an OBJECT editing context (component-edit-parity.md
+    // phase A2). `pick_sketch_region` resolves the smallest containing region
+    // across ALL live sketches kernel-side; it only ever walks WORLD-tree
+    // sketches, so an instance context calls the `_in_instance` sibling.
+    const region = this._activeContext === null ? this._pickRegionFor(ray, activeInstance) : null
+    // A locked thing (or a shape also used inside a locked group): OW-1.
+    const locked = raw !== null ? lockHintForPick(this.wasmScene, raw.object, raw.instance, { shape: true }) : null
+    // A locked face cannot be pushed, so drawing lying ON it is what the
+    // cursor is on, as on a group's face: the free drawing a plane draft
+    // leaves there (the locked Object takes no part in it) pulls into a new
+    // Object of its own, whichever mode is on.
+    const regionWins = regionInFrontOfFace(
+      region,
+      raw,
+      eligible !== null && locked === null,
+      this._regionInScope(region, activeInstance),
+      eligible !== null && locked !== null,
+    )
+
+    if (raw !== null && !regionWins) {
+      // A locked thing refuses before anything else: the line beside the
+      // cursor and the click's toast both say "Locked", and the toast offers
+      // Unlock (OW-1). Except a new object (Ctrl/Cmd) from a face the tool
+      // could otherwise act on: it changes nothing that exists, as copying a
+      // locked thing does not.
+      if (locked !== null && !(this._makesNewObject() && eligible !== null)) {
+        return { kind: 'refused', hint: locked.message, code: locked.code }
+      }
+      // Same face-eligibility policy as the draw tools (faceDraw.ts): at the
+      // top level only PLAIN objects are directly push/pullable — faces
+      // inside a group or component instance keep their explicit editing
+      // step. Inside an editing context only that context's scope is
+      // editable, so isolated editing can't disturb neighbors.
+      if (eligible === null) {
+        // FAIL CLOSED: an ineligible face CONSUMES the click. Falling
+        // through to Path B would let a sketch region along the same ray (a
+        // ground sketch behind the group — ordinary mid-modeling state)
+        // silently start a drag and extrude geometry the user did not aim
+        // at. Refuse explicably instead.
+        return { kind: 'refused', hint: this._ineligibleFaceHint(raw.instance), code: EDIT_CONTEXT_HINT_CODE }
+      }
+      const object = eligible.object
+      const instance = raw.instance
+      // The face's plane lists what is drawn on it; the region under the
+      // cursor says which face to push — or that the solid cannot hold it (a
+      // pinch or sliver of an owned sketch).
+      const routed = this._routeThroughListing(object, eligible.face, instance, ray)
+      if (typeof routed === 'object') {
+        return { kind: 'refused', hint: kernelErrorMessage(routed.refuse, ''), code: routed.refuse }
+      }
+      // `face_normal` answers in `object`'s own LOCAL frame — the instance
+      // the face was actually picked THROUGH (`instance`, not necessarily
+      // `this._activeInstance`: an injected eligibility predicate could in
+      // principle allow a different one) carries the real, un-baked pose
+      // that maps it into world space. `null` means a stale instance or a
+      // degenerate mapped normal — treated exactly like a miss
+      // (component-edit-parity.md phase A2).
+      const normal = worldFaceNormal(this.wasmScene, object, routed, instance ?? null)
+      if (normal === null) return null
+      return { kind: 'face', object, face: routed, instance: instance ?? null, normal, locked: locked !== null }
+    }
+
+    // Path B: a sketch region — in front of any face on the ray, or the only
+    // thing on it (bare ground, or no objects yet).
+    if (region === null) return null
+    // The kernel extrudes along the profile plane's own normal, so the drag
+    // axis/ghost must match it (sketches on any plane — Phase 1). A stale
+    // handle between the region pick and this query is a miss, not a
+    // fallback to ground.
+    const plane = this.wasmScene.sketch_plane(region.sketch)
+    if (plane === undefined) return null
+    let normal: [number, number, number] = [plane[3], plane[4], plane[5]]
+    if (activeInstance !== null) {
+      // A def-owned sketch's plane is DEFINITION-LOCAL — `sketch_plane` has
+      // no `_in_instance` sibling, so the normal is pose-mapped here the same
+      // approximate way `sketchGesture.ts`'s `isStillOnPlane` does (linear
+      // part, re-normalized): exact for rotation/uniform-scale/mirror/
+      // translation, and even a non-uniform-scale pose can only skew the
+      // drag axis/preview, never the actual commit, which goes through the
+      // kernel's own exact pose⁻¹ regardless.
+      const pose = this.wasmScene.instance_pose(activeInstance)
+      if (pose === undefined) return null
+      const [nx, ny, nz] = normal
+      const rnx = pose[0] * nx + pose[1] * ny + pose[2] * nz
+      const rny = pose[4] * nx + pose[5] * ny + pose[6] * nz
+      const rnz = pose[8] * nx + pose[9] * ny + pose[10] * nz
+      const len = Math.hypot(rnx, rny, rnz)
+      if (len <= 1e-12) return null
+      normal = [rnx / len, rny / len, rnz / len]
+    }
+    return {
+      kind: 'region',
+      sketch: region.sketch,
+      region: region.region,
+      instance: activeInstance,
+      detached: region.detached,
+      plane,
+      normal,
+    }
   }
 
   /**
@@ -455,14 +690,46 @@ export class PushPullTool implements Tool {
   private _regionPickCache: {
     ray: Ray
     instance: bigint | null
+    /** `pickPolicyGeneration()` at pick time: a render-mode or editing-scope
+     *  change invalidates the memo even when the ray is the same object. */
+    gen: number
     region: RegionPick | null
   } | null = null
+
+  /**
+   * Whether the picked region is inside the editing scope, or null when the
+   * question does not apply (Wireframe, or nothing is open for editing) or
+   * cannot be answered (the region is not in its plane's listing — then the
+   * plain depth rule stands). Only a non-Wireframe mode with a scope makes the kernel's
+   * picks prefer in-scope candidates, so only there can a region and a face
+   * differ in standing. A region picked through the entered instance
+   * (`_in_instance`) is in scope by construction; a world region is in scope
+   * when it is drawn on an eligible object's face, or is a free sketch of
+   * the open session.
+   */
+  private _regionInScope(region: RegionPick | null, activeInstance: bigint | null): boolean | null {
+    if (region === null || pickRenderMode() === 'wireframe') return null
+    if (activeInstance !== null) return true
+    try {
+      if (!sessionIsOpen(this.wasmScene)) return null
+      const ctx = ctxOfSketch(this.wasmScene, region.sketch)
+      if (ctx === null) return null
+      const pu = readPlaneUnits(this.wasmScene as unknown as PlaneUnitsScene, ctx)
+      const hit = pu?.regions.find((r) => r.extrude?.sketch === region.sketch && r.extrude.region === region.region)
+      if (hit === undefined) return null
+      if (hit.over !== null) return this._isEligible(hit.over.object, undefined)
+      return Array.from(this.wasmScene.explode_session_sketches() ?? []).includes(region.sketch)
+    } catch {
+      return null
+    }
+  }
 
   private _pickRegionFor(ray: Ray, activeInstance: bigint | null): RegionPick | null {
     if (
       this._regionPickCache !== null &&
       this._regionPickCache.ray === ray &&
-      this._regionPickCache.instance === activeInstance
+      this._regionPickCache.instance === activeInstance &&
+      this._regionPickCache.gen === pickPolicyGeneration()
     ) {
       return this._regionPickCache.region
     }
@@ -488,12 +755,12 @@ export class PushPullTool implements Tool {
         // direction's length itself) — scaling it again would double-count
         // any non-unit direction.
         const dirLen = activeInstance !== null ? 1 : Math.hypot(ray.direction[0], ray.direction[1], ray.direction[2])
-        region = { sketch: regionPick.sketch(), region: regionPick.region(), depth: regionPick.depth() * dirLen }
+        region = { sketch: regionPick.sketch(), region: regionPick.region(), depth: regionPick.depth() * dirLen, detached: regionPick.detached() }
       } finally {
         regionPick.free()
       }
     }
-    this._regionPickCache = { ray, instance: activeInstance, region }
+    this._regionPickCache = { ray, instance: activeInstance, gen: pickPolicyGeneration(), region }
     return region
   }
 
@@ -506,155 +773,124 @@ export class PushPullTool implements Tool {
       this.stage = { ...this.stage, distance }
       this._drawGhostPreview(anchor, target.normal, distance)
       this._reportMeasurement(distance)
+    } else {
+      this._updateHover(ray)
     }
-    // Hover highlight is handled via CueLayer for on-face snaps (M1 shortcut
-    // per docs/dev/DEVELOPMENT.md: show snap marker at face location; per-face highlight
-    // requires face→triangle table in MeshJs which is a WASM_API addendum).
+    // The hovered face itself is lit by the viewport's FaceCueLayer from
+    // `hoverFace()`; the snap marker (CueLayer) still shows the on-face point.
+  }
+
+  /** What the cursor is over while idle (`_resolveIdleTarget`), or null when
+   *  nothing, or a gesture is in progress. */
+  private _hoverTarget: IdleTarget | null = null
+
+  /** The hovered face's refusal while idle (see `_updateHover`), or null
+   *  when the cursor is over something the tool can act on, nothing, or a
+   *  gesture is in progress. */
+  private get _hoverRefusal(): string | null {
+    return this._hoverTarget?.kind === 'refused' ? this._hoverTarget.hint : null
+  }
+
+  /** Cursor-side guidance (Tool.hoverHint): the same line the refused
+   *  click would toast, shown while the face is merely hovered. */
+  hoverHint(): string | null {
+    return this.stage.kind === 'idle' ? this._hoverRefusal : null
+  }
+
+  /**
+   * The face or region a click right now would act on (Tool.hoverFace), for
+   * the viewport's face cue. Exactly the target `onPointerDown` commits to
+   * (same `_resolveIdleTarget`), orange for a push/pull of the face's own
+   * solid and blue for a new object (a free or detached region, or
+   * extrude-as-new mode on a face). `null` while a gesture is in progress,
+   * over nothing, or over a face the tool refuses (the cursor hint says why).
+   */
+  hoverFace(): HoverFace | null {
+    if (this.stage.kind !== 'idle') return null
+    const t = this._hoverTarget
+    if (t === null || t.kind === 'refused') return null
+    if (t.kind === 'region') {
+      return {
+        target: { kind: 'region', sketch: t.sketch, region: t.region, instance: t.instance },
+        colorToken: PREVIEW_EXTRUDE_NEW_TOKEN,
+      }
+    }
+    return {
+      target: { kind: 'face', object: t.object, face: t.face, instance: t.instance },
+      colorToken: this._makesNewObject()
+        ? PREVIEW_EXTRUDE_NEW_TOKEN
+        : PREVIEW_PUSHPULL_TOKEN,
+    }
+  }
+
+  /**
+   * The camera moved under a resting pointer (Tool.onViewChanged): re-aim
+   * the hover at the ray now under it, or drop it when no ray can be aimed.
+   */
+  onViewChanged(ray: Ray | undefined): void {
+    if (this.stage.kind !== 'idle') return
+    if (ray === undefined) {
+      this._hoverTarget = null
+      this._lastHoverRay = null
+      return
+    }
+    this._updateHover(ray)
+  }
+
+  /**
+   * Resolves what the cursor is over, exactly as `onPointerDown` decides it
+   * (the shared `_resolveIdleTarget`) — the same memoized picks and the same
+   * region-in-front rule, so the hover never says one thing and the click
+   * another. A component face hovered outside its edit session (the common
+   * SketchUp-habit case: push on a copied component without entering it) is
+   * what the refusal line exists for; a grouped face, an out-of-scope face
+   * and a sliver get their own lines from the same resolver.
+   */
+  private _updateHover(ray: Ray): void {
+    this._lastHoverRay = ray
+    let next: IdleTarget | null
+    try {
+      next = this._resolveIdleTarget(ray)
+    } catch {
+      next = null
+    }
+    this._hoverTarget = next
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
     // Any pointer action ends the retype window — the next push/pull begins.
     this.disarmRetype()
+    // The click decides for itself (and re-toasts a refusal); a hover memo
+    // left standing here would survive a double-click that opens the very
+    // component it describes.
+    this._hoverTarget = null
+    this._lastHoverRay = null
     if (this.stage.kind === 'idle') {
-      let target: PushPullTarget | null = null
-      let anchor: [number, number, number] = [0, 0, 0]
-
-      // --- Path A: ray-cast for the nearest object face (ignores snap priority) ---
-      // pick_face bypasses the drawing snap bias toward vertices/edges, so it
-      // reliably returns the surface under the cursor even when snap prefers a
-      // nearby endpoint.  We call this FIRST; Path B only fires when no object
-      // face is hit (bare ground or no objects yet).
-      //
-      // Reuses `_pickCache` — the SAME memoized pick `snapConstraint(ray)`
-      // just computed for this exact `ray` object (the Viewport calls the
-      // two back-to-back with the identical `Ray`), so a click costs one
-      // `pick_face`, not two. A direct `onPointerDown` call with no prior
-      // `snapConstraint` for this ray (every existing unit test) is still
-      // correct: `pickFor`'s cache simply misses and it raycasts fresh.
-      const eligible = this._pickCache.pickFor(this.wasmScene, ray, (object, instance) =>
-        this._isEligible(object, instance))
-      const raw = this._pickCache.rawPickFor(ray)
-      // The region pick runs FIRST here too, so a drawn region nearer the
-      // eye than the face behind it takes the click (`regionInFrontOfFace`,
-      // GitHub issue 13) — Path A is skipped entirely in that case, exactly
-      // as `snapConstraint` skips it at hover time. The two must agree.
-      const activeInstance = this._activeInstance
-      const region = this._activeContext === null ? this._pickRegionFor(ray, activeInstance) : null
-      const regionWins = regionInFrontOfFace(region, raw, eligible !== null)
-      if (raw !== null && !regionWins) {
-        // Same face-eligibility policy as the draw tools (faceDraw.ts): at
-        // the top level only PLAIN objects are directly push/pullable —
-        // faces inside a group or component instance keep their explicit
-        // editing step. Inside an editing context only that context's
-        // scope is editable, so isolated editing can't disturb neighbors.
-        if (eligible !== null) {
-          const objectHandle = eligible.object
-          const instanceHandle = raw.instance
-          // The face's plane lists what is drawn on it; the region under the
-          // cursor says which face to push — or that the solid cannot hold
-          // it (a pinch or sliver of an owned sketch).
-          const routed = this._routeThroughListing(objectHandle, eligible.face, instanceHandle, ray)
-          if (typeof routed === 'object') {
-            this.onToast(kernelErrorMessage(routed.refuse, ''), routed.refuse)
-            return
-          }
-          const faceHandle = routed
-          // `face_normal` answers in `objectHandle`'s own LOCAL frame — the
-          // instance the face was actually picked THROUGH (`instanceHandle`,
-          // not necessarily `this._activeInstance`: an injected eligibility
-          // predicate could in principle allow a different one) carries the
-          // real, un-baked pose that maps it into world space. `null` means
-          // a stale instance or a degenerate mapped normal — treated exactly
-          // like a miss (component-edit-parity.md phase A2).
-          const normal = worldFaceNormal(this.wasmScene, objectHandle, faceHandle, instanceHandle ?? null)
-          if (normal === null) return
-          // The anchor is the (facesOnly) snap point — `snapConstraint`
-          // above constrains every idle hover to this same face's plane,
-          // so `snap` is always on it by construction, never a ground hit
-          // through the face. A null snap can no longer happen here in
-          // practice (the constraint plane's ray intersection always
-          // produces one); ray-origin is a defensive last resort only —
-          // see PushPullTool.test's "anchor lies on the face plane" spec.
-          anchor = snap !== null ? [snap.x, snap.y, snap.z] : [...ray.origin]
-          target = { kind: 'face', objectHandle, faceHandle, normal, instance: instanceHandle ?? null }
-        } else {
-          // FAIL CLOSED: an ineligible face CONSUMES the click. Falling
-          // through to Path B would let a sketch region along the same ray
-          // (a ground sketch behind the group — ordinary mid-modeling
-          // state) silently start a drag and extrude geometry the user
-          // did not aim at. Refuse explicably instead. `snapConstraint`
-          // fails closed the same way at hover time (see its own doc) —
-          // the two must never disagree.
-          this.onToast(this._ineligibleFaceHint(raw.instance))
-          return
-        }
+      // What the cursor is over — the SAME decision the hover made for this
+      // ray (`_resolveIdleTarget`; the Viewport calls `snapConstraint(ray)`
+      // and this back-to-back with the identical `Ray`, so a click costs the
+      // hover's picks and no more). A direct call with no prior hover for
+      // this ray (every unit test) simply resolves fresh.
+      const idle = this._resolveIdleTarget(ray)
+      if (idle === null) return
+      if (idle.kind === 'refused') {
+        // The click is consumed with the explanation the hover already
+        // showed. Nothing falls through to a sketch region behind it.
+        this.onToast(idle.hint, idle.code)
+        return
       }
-
-      // --- Path B: a sketch region — in front of any face on the ray, or
-      //     the only thing on it (bare ground click, or no objects yet) ---
-      // `pick_sketch_region` resolves the smallest
-      // containing region across ALL live sketches kernel-side (nested rings
-      // resolve to the innermost — the app no longer has to walk sketch_regions
-      // + region_boundary + point-in-polygon itself). `pick_sketch_region`
-      // only ever walks WORLD-tree sketches (`Document::sketch_ids()`
-      // deliberately excludes definition-owned ones) — it can NEVER find a
-      // region drawn inside a component's own definition, so an instance
-      // context calls the `_in_instance` sibling instead, which is scoped to
-      // (and pose-maps the ray for) exactly that definition's own sketches;
-      // there is nothing left to filter by membership afterward, unlike the
-      // stale approach this replaced.
-      // Region extrusion is a top-level (or instance-context) act; suppress
-      // it inside an OBJECT editing context (component-edit-parity.md phase
-      // A2 — an instance context now has its own def-owned regions too).
-      //
-      // Reuses `_pickRegionFor` — the SAME memoized pick `snapConstraint(ray)`
-      // just computed for this exact `ray` (mirrors Path A's `_pickCache`
-      // reuse above), so this costs one `pick_sketch_region` per ray too.
-      if (target === null && this._activeContext === null) {
-        if (region !== null) {
-          const sketchHandle = region.sketch
-          const regionHandle = region.region
-          // The kernel extrudes along the profile plane's own normal, so
-          // the drag axis/ghost must match it (sketches on any plane —
-          // Phase 1). A stale handle between the region pick and this
-          // query is a miss, not a fallback to ground.
-          const plane = this.wasmScene.sketch_plane(sketchHandle)
-          if (plane === undefined) return // stale handle — treat as a miss
-          let normal: [number, number, number] = [plane[3], plane[4], plane[5]]
-          if (activeInstance !== null) {
-            // A def-owned sketch's plane is DEFINITION-LOCAL — `sketch_plane`
-            // has no `_in_instance` sibling, so the normal is pose-mapped
-            // here the same approximate way `sketchGesture.ts`'s
-            // `isStillOnPlane` does (linear part, re-normalized): exact for
-            // rotation/uniform-scale/mirror/translation, and even a non-
-            // uniform-scale pose can only skew the drag axis/preview, never
-            // the actual commit, which goes through the kernel's own exact
-            // pose⁻¹ regardless.
-            const pose = this.wasmScene.instance_pose(activeInstance)
-            if (pose === undefined) return
-            const [nx, ny, nz] = normal
-            const rnx = pose[0] * nx + pose[1] * ny + pose[2] * nz
-            const rny = pose[4] * nx + pose[5] * ny + pose[6] * nz
-            const rnz = pose[8] * nx + pose[9] * ny + pose[10] * nz
-            const len = Math.hypot(rnx, rny, rnz)
-            if (len <= 1e-12) return
-            normal = [rnx / len, rny / len, rnz / len]
-          }
-          // The anchor is the (facesOnly) snap point — see the matching
-          // Path A comment above; `snapConstraint`'s region branch
-          // constrains every idle hover to this same region's plane.
-          anchor = snap !== null ? [snap.x, snap.y, snap.z] : [...ray.origin]
-          target = {
-            kind: 'region',
-            sketchHandle,
-            regionHandle,
-            normal,
-            instance: activeInstance,
-          }
-        }
-      }
-
-      if (target === null) return
+      // The anchor is the (facesOnly) snap point — `snapConstraint` above
+      // constrains every idle hover to this same face's (or region's) plane,
+      // so `snap` is always on it by construction, never a ground hit through
+      // the face. A null snap can no longer happen here in practice (the
+      // constraint plane's ray intersection always produces one); ray-origin
+      // is a defensive last resort only — see PushPullTool.test's "anchor
+      // lies on the face plane" spec.
+      const anchor: [number, number, number] = snap !== null ? [snap.x, snap.y, snap.z] : [...ray.origin]
+      const target: PushPullTarget =
+        idle.kind === 'face'
+          ? { kind: 'face', objectHandle: idle.object, faceHandle: idle.face, normal: idle.normal, instance: idle.instance, ...(idle.locked ? { newObjectOnly: true } : {}) }
+          : { kind: 'region', sketchHandle: idle.sketch, regionHandle: idle.region, normal: idle.normal, instance: idle.instance }
 
       this.typed = ''
       this.stage = { kind: 'dragging', target, anchor, distance: 0 }
@@ -748,9 +984,19 @@ export class PushPullTool implements Tool {
    * combo-vs-tap distinction are the Viewport listener's concern.
    */
   toggleExtrudeAsNew(): void {
+    // The flip still updates the mode (the indicator follows the key), but a
+    // pull that began on a locked face is a new object to the end
+    // regardless (`_latchedNewObject`): a push there would only be refused.
     this.extrudeAsNewMode = !this.extrudeAsNewMode
     this.onExtrudeAsNewModeChange(this.extrudeAsNewMode)
+    // What the cursor rests on may answer differently now (a locked face
+    // refuses a push but gives a new object): re-resolve it, so the hint
+    // and face cue the Viewport re-reads next are this mode's.
+    if (this.stage.kind === 'idle' && this._lastHoverRay !== null) this._updateHover(this._lastHoverRay)
   }
+
+  /** The ray of the last idle hover, re-resolved when the mode flips. */
+  private _lastHoverRay: Ray | null = null
 
   cancel(): void {
     this.retype.close()
@@ -759,6 +1005,18 @@ export class PushPullTool implements Tool {
     clearPreview(this.preview)
     this.onMeasurementCb('')
     this.lastSnap = null
+    this._idleTargetCache = null
+    // A context change or tool switch arrives without a pointer move; the
+    // hovered face's refusal would otherwise outlive the state it described
+    // (the chip still saying "double-click it" over a face just entered).
+    this._hoverTarget = null
+    this._lastHoverRay = null
+  }
+
+  /** The pointer left the canvas: nothing is hovered (Tool.onPointerLeave). */
+  onPointerLeave(): void {
+    this._hoverTarget = null
+    this._lastHoverRay = null
   }
 
   /**
@@ -799,6 +1057,7 @@ export class PushPullTool implements Tool {
     const signed = Math.abs(dist) * sign
 
     this.stage = { kind: 'idle' }
+    this._hoverTarget = null
     this.typed = ''
     clearPreview(this.preview)
     this.onMeasurementCb('')
@@ -837,6 +1096,7 @@ export class PushPullTool implements Tool {
   private _faceEligible: FaceEligible | null = null
   setFaceEligibility(pred: FaceEligible | null): void {
     this._faceEligible = pred
+    this._idleTargetCache = null
   }
 
   /** The draw tools' plain-object policy, applied to push/pull. The one
@@ -883,6 +1143,7 @@ export class PushPullTool implements Tool {
       t`Push/pull`,
       this._contextScoped || this._activeContext !== null || this._activeComponent !== null,
       instance,
+      sessionIsOpen(this.wasmScene),
     )
   }
 
@@ -1062,19 +1323,28 @@ export class PushPullTool implements Tool {
               distance,
             )
         this.onCommit(objectId)
-      } else if (this.extrudeAsNewMode && this._activeComponent === null) {
+      } else if (this._makesNewObject() || target.newObjectOnly === true) {
         // Ctrl/Cmd modifier (design tool-parity §2): extrude a NEW
         // coincident object from the clicked face instead of pushing/
         // pulling the source — SketchUp's "leave original face". Not
-        // offered inside a component editing context: the kernel op only
-        // reaches WORLD faces (a definition member has no face to extrude
-        // at world scale), so that combination silently falls back to the
-        // ordinary `push_pull_in_component` commit below.
-        const objectId = this.wasmScene.extrude_face_as_new_object(
-          target.objectHandle,
-          target.faceHandle,
-          distance,
-        )
+        // offered inside a component editing context: there the commit
+        // falls back to the ordinary `push_pull_in_component` below. A face
+        // picked through a placement (a linked copy at the top level) is a
+        // member of its definition, so the new object is extruded there and
+        // rides that placement's pose: it stands on the copy clicked, and
+        // the set is untouched.
+        const objectId = target.instance !== null
+          ? this.wasmScene.extrude_face_as_new_object_in_instance(
+              target.instance,
+              target.objectHandle,
+              target.faceHandle,
+              distance,
+            )
+          : this.wasmScene.extrude_face_as_new_object(
+              target.objectHandle,
+              target.faceHandle,
+              distance,
+            )
         this.onCommit(objectId)
       } else if (this._isFlatSheet(target.objectHandle)) {
         // A lone flat surface (Model Health verdict `flat_sheet`) has no
@@ -1152,6 +1422,15 @@ export class PushPullTool implements Tool {
     this.onMeasurementCb(formatLength(distance))
   }
 
+  /** The ghost is blue ("a new object appears, nothing existing changes")
+   *  in extrude-as-new mode and for every region target — a free sketch
+   *  region always extrudes into a new object, whichever way it is pushed.
+   *  Inside a component edit the Ctrl toggle's commit falls back to an
+   *  ordinary push (see `_commit`), so the ghost stays on the push colors. */
+  private _ghostMakesNewObject(): boolean {
+    return this._makesNewObject() || this._latchedNewObject() || (this.stage.kind === 'dragging' && this.stage.target.kind === 'region')
+  }
+
   private _drawGhostPreview(
     anchor: [number, number, number],
     normal: [number, number, number],
@@ -1182,13 +1461,15 @@ export class PushPullTool implements Tool {
         // mid-drag) degrades to the arrow rather than drawing a misplaced
         // ghost — `worldBoundary` is null exactly then.
         if (worldBoundary !== null) {
-          // Extrude-as-new mode tints the ghost blue (both signs); plain
-          // push/pull keeps its orange add / red cut look.
+          // A new object (extrude-as-new mode, or any free-sketch region,
+          // which always extrudes into a new object) tints the ghost blue
+          // on both signs; a face push/pull keeps its orange add / red cut
+          // look.
           const prism = buildSweptPrismPreview(
             worldBoundary,
             normal,
             distance,
-            this.extrudeAsNewMode
+            this._ghostMakesNewObject()
               ? readPreviewTint(PREVIEW_EXTRUDE_NEW_TOKEN, PREVIEW_EXTRUDE_NEW_FALLBACK)
               : distance > 0
                 ? readPreviewTint(PREVIEW_PUSHPULL_TOKEN, PREVIEW_PUSHPULL_FALLBACK)
@@ -1254,7 +1535,7 @@ export class PushPullTool implements Tool {
     const pts = new Float32Array([ax, ay, az, ...tip])
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(pts, 3))
-    const arrowColor = this.extrudeAsNewMode
+    const arrowColor = this._ghostMakesNewObject()
       ? readPreviewTint(PREVIEW_EXTRUDE_NEW_TOKEN, PREVIEW_EXTRUDE_NEW_FALLBACK)
       : readPreviewTint(PREVIEW_PUSHPULL_TOKEN, PREVIEW_PUSHPULL_FALLBACK)
     const mat = new THREE.LineBasicMaterial({

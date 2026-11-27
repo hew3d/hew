@@ -359,7 +359,7 @@ test('Stage 3: a split shape\'s Rejoin closes its pieces in one undo entry', asy
   await expect(family).toHaveCount(1)
   await expect(page.locator('[data-health-row]')).toHaveCount(2)
 
-  await family.getByRole('button', { name: 'Rejoin' }).click()
+  await family.getByRole('button', { name: 'Rejoin', exact: true }).click()
   await expect(page.locator('[data-health-row]')).toHaveCount(0)
   await expect(page.getByText('2 objects ✓ solid')).toBeVisible()
 

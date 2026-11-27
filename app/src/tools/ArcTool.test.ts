@@ -1207,6 +1207,7 @@ describe('ArcTool — see-through snapping on the frozen and hovered planes', ()
     expect(tool.snapConstraint(RAY)).toEqual({
       constraintPlane: { point: [1, 2, 0], normal: [1, 0, 0] },
       seeThroughPoints: true,
+      offPlanePoints: true,
     })
   })
 
@@ -1216,6 +1217,7 @@ describe('ArcTool — see-through snapping on the frozen and hovered planes', ()
     expect(tool.snapConstraint(RAY)).toEqual({
       constraintPlane: { point: [0, 0, 1], normal: [0, 0, 1] },
       seeThroughPoints: true,
+      offPlanePoints: true,
     })
 
     const { scene: bare } = makeWasmScene()

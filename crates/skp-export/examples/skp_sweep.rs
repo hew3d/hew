@@ -149,10 +149,7 @@ fn sweep(bytes: &[u8], path: &Path, keep: Option<&Path>) -> Result<Outcome, Vec<
         Ok(x) => x,
         Err(e) => return Ok(Outcome::NoImport(e)),
     };
-    let target = match openskp::detect_container(bytes) {
-        openskp::Container::Carchive2017 => Target::Skp2017,
-        _ => Target::Skp2026,
-    };
+    let target = skp_export::target_of(bytes);
     let want = Want::of(&doc);
     let mut problems = Vec::new();
     let mut note = format!("{target:?} warnings={warnings}");
@@ -204,10 +201,10 @@ fn sweep(bytes: &[u8], path: &Path, keep: Option<&Path>) -> Result<Outcome, Vec<
                         }
                     })
                     .collect();
-                let c = if target == Target::Skp2017 {
-                    "17"
-                } else {
-                    "26"
+                let c = match target {
+                    Target::Stream(r) => r.number().to_string(),
+                    Target::Skp2026 => "26".to_string(),
+                    Target::Skp2026Compat => "26c".to_string(),
                 };
                 std::fs::write(dir.join(format!("{stem}-{c}.skp")), &s.export.bytes).unwrap();
                 std::fs::write(
@@ -254,7 +251,7 @@ fn sweep(bytes: &[u8], path: &Path, keep: Option<&Path>) -> Result<Outcome, Vec<
     }
 
     // 5. Whole exports.
-    for t in [Target::Skp2017, Target::Skp2026] {
+    for t in [Target::Stream(skpwright::Release::R2017), Target::Skp2026] {
         match export(&doc, t, ENV) {
             Err(e) => problems.push(format!("export {t:?}: {e}")),
             Ok(x) => check(&format!("export {t:?}"), &x.bytes, t, &want, &mut problems),
@@ -289,7 +286,7 @@ impl Want {
 }
 
 fn check(what: &str, bytes: &[u8], target: Target, want: &Want, problems: &mut Vec<String>) {
-    match openskp::Model::parse(bytes) {
+    match skpwright::Model::parse(bytes) {
         Err(e) => {
             problems.push(format!("{what}: does not parse: {e:?}"));
             return;
@@ -306,10 +303,10 @@ fn check(what: &str, bytes: &[u8], target: Target, want: &Want, problems: &mut V
             }
         }
     }
-    if target == Target::Skp2017
-        && let Err(e) = openskp::verify(bytes)
+    if matches!(target, Target::Stream(_))
+        && let Err(e) = skpwright::verify(bytes)
     {
-        problems.push(format!("{what}: 2017 grammar: {e:?}"));
+        problems.push(format!("{what}: stream grammar: {e:?}"));
     }
     let back = match open(bytes) {
         Ok((d, _, _)) => d,
